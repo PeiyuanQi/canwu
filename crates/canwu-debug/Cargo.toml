@@ -1,0 +1,20 @@
+[package]
+name = "canwu-debug"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canwu-api = { path = "../canwu-api" }
+eframe.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+
+[lints]
+workspace = true

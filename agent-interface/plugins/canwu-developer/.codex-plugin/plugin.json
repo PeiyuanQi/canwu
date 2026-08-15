@@ -1,0 +1,26 @@
+{
+  "name": "canwu-developer",
+  "version": "0.1.0",
+  "description": "Contributor and maintainer workflows for Canwu",
+  "author": {
+    "name": "Canwu Project",
+    "url": "https://github.com/PeiyuanQi/canwu"
+  },
+  "repository": "https://github.com/PeiyuanQi/canwu",
+  "license": "Canwu License 1.0",
+  "keywords": ["canwu", "rust", "release", "contributors"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Canwu Developer",
+    "shortDescription": "Build, verify, and release Canwu safely.",
+    "longDescription": "Contributor workflows for Canwu architecture, verification, releases, licensing, and cross-platform packaging.",
+    "developerName": "Canwu Project",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Prepare a compliant Canwu release.",
+      "Check Canwu before packaging.",
+      "Review a Canwu dependency update."
+    ]
+  }
+}

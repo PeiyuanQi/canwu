@@ -1,0 +1,6 @@
+interface:
+  display_name: "Canwu Release"
+  short_description: "Prepare compliant cross-platform Canwu releases"
+  default_prompt: "Use $canwu-developer-release to prepare and verify a Canwu release."
+policy:
+  allow_implicit_invocation: true

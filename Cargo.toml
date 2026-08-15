@@ -1,0 +1,32 @@
+[workspace]
+members = [
+    "crates/canwu-api",
+    "crates/canwu-core",
+    "crates/canwu-debug",
+    "crates/canwu-event",
+    "crates/canwu-knowledge",
+    "crates/canwu-sim",
+    "crates/canwu-time",
+    "crates/canwu-world",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license-file = "LICENSE"
+repository = "https://github.com/PeiyuanQi/canwu"
+rust-version = "1.85"
+
+[workspace.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"

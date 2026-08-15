@@ -1,0 +1,6 @@
+interface:
+  display_name: "Use Canwu Engine"
+  short_description: "Use Canwu through actor-safe public APIs"
+  default_prompt: "Use $canwu-engine-usage to integrate a client or agent with Canwu."
+policy:
+  allow_implicit_invocation: true

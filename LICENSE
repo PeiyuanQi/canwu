@@ -1,0 +1,452 @@
+Canwu License 1.0
+
+Copyright (c) 2026-present. Copyright holder: TBD.
+Licensor: TBD.
+Notice and payment contact: repository owner through
+https://github.com/PeiyuanQi/canwu
+
+This Canwu License 1.0 (the "License") is a source-available license. It is not
+an OSI-approved open-source license. By exercising any right granted under this
+License, You accept and agree to its terms.
+
+1. Definitions
+
+1.1. "Software" means the Canwu software, source code, object code,
+documentation, and other materials distributed with this License, including
+modifications and derivative works of those materials to the extent they are
+derived from the Software.
+
+1.2. "Licensor" means the copyright owner identified above or any successor
+that lawfully owns the relevant rights in the Software.
+
+1.3. "You" or "Licensee" means the individual or legal entity exercising rights
+under this License.
+
+1.4. "Affiliate" means any entity that directly or indirectly controls, is
+controlled by, or is under common control with a party. "Control" means the
+direct or indirect power to direct management or policies, whether through
+ownership, voting rights, contract, or otherwise.
+
+1.5. "Product Family" means one product and all commercially related versions
+that are substantially the same product or share a common commercial identity,
+purpose, user experience, or monetization program. A Product Family includes,
+without limitation, its editions, platform releases, ports, downloadable
+content, expansions, subscriptions, season passes, in-app purchases, paid
+add-ons, and other monetization tied to substantially the same product.
+
+Materially distinct standalone products are normally separate Product Families.
+A different name, edition, publisher, storefront, platform, distribution
+method, subsidiary, or controlled entity does not by itself create a separate
+Product Family.
+
+1.6. "Independent Work" means code, content, data, or other material that is not
+copied or derived from the Software, even when it interoperates with, links to,
+embeds, or is distributed with the Software.
+
+1.7. "Commercial Product" means a Product Family that is sold, licensed,
+offered by subscription, supported by advertising or in-app purchases, used to
+provide a paid service, or otherwise offered or operated with the purpose of
+generating Product Revenue.
+
+1.8. "Product Revenue" has the meaning given in Section 7.
+
+1.9. "Product Revenue Year" means a consecutive twelve-month measurement
+period for a Product Family. The first Product Revenue Year begins on the first
+date the Product Family generates Product Revenue while incorporating or using
+the Software. Each following Product Revenue Year begins immediately after the
+previous one ends. If the Software is first added to an already commercialized
+Product Family, the first Product Revenue Year begins on the date that Product
+Family first commercially uses the Software.
+
+Each Product Revenue Year is divided into four consecutive three-month reporting
+quarters beginning on the first day of that Product Revenue Year. A transfer,
+restructuring, publisher change, creation or use of an Affiliate, or change in
+distribution method does not restart or shorten the Product Revenue Year for the
+purpose of avoiding royalties.
+
+1.10. "Third-Party Materials" means software, fonts, data, documentation, or
+other material owned by someone other than Licensor and distributed with,
+linked by, or used through the Software under a separate license or notice.
+Third-Party Materials are not part of the Software for purposes of this License.
+They remain governed by their own licenses, which control solely for those
+materials if their terms conflict with this License.
+
+2. License Grant
+
+Subject to this License, Licensor grants You a worldwide, non-exclusive license,
+for the duration of the applicable copyrights and patents, to:
+
+(a) use, run, and otherwise exercise the Software;
+
+(b) copy, modify, compile, and create derivative works of the Software;
+
+(c) reproduce and redistribute the Software or substantial modified portions of
+it in source or binary form;
+
+(d) integrate the Software into proprietary or other products and services;
+
+(e) use the Software for personal, community, research, educational, nonprofit,
+governmental, and commercial purposes; and
+
+(f) offer for sale, sell, license, subscribe, distribute, or otherwise
+commercially exploit products and services that use or incorporate the
+Software.
+
+The license is royalty-free except when royalties become due under Section 6.
+No additional permission is required merely because a use is commercial.
+The grants in this Section cover only rights that Licensor owns or controls and
+do not replace or restrict rights granted under a Third-Party Material's own
+license.
+
+3. Independent and Proprietary Works
+
+Independent Works may be licensed under any terms chosen by their owners,
+including proprietary terms. This License does not require You to disclose,
+publish, or license the source code of an Independent Work. Combining,
+interoperating, linking, embedding, or distributing an Independent Work with the
+Software does not, by itself, cause the Independent Work to become subject to
+this License.
+
+Modifications to the Software and portions copied or derived from the Software
+remain subject to this License when redistributed. This Section does not reduce
+any royalty obligation applicable to the Product Family as a whole.
+
+4. Redistribution, Notices, and Attribution
+
+If You redistribute the Software itself, or a substantial modified portion of
+the Software, in source or binary form, You must:
+
+(a) provide recipients with a copy of this License or a reasonably accessible
+electronic link to its complete text;
+
+(b) retain all copyright, license, and attribution notices included with the
+Software; and
+
+(c) identify material modifications You made to the Software in a reasonable
+manner.
+
+When You distribute Third-Party Materials with the Software or a Commercial
+Product, You must also preserve and provide every copyright notice, license
+text, attribution, source offer, or other condition required by the applicable
+third-party license. This License and a Canwu attribution do not replace those
+requirements. Canwu royalties and attribution requirements do not apply to use
+of Third-Party Materials independently of the Software.
+
+If You distribute, sell, license, or operate a Commercial Product that uses or
+incorporates the Software, the Commercial Product must display one of the
+official Canwu logos identified in `BRANDING.md` and distributed as
+`assets/branding/canwu-logo-en.png` and
+`assets/branding/canwu-logo-zh-cn.png`. It must also include a clear
+acknowledgement such as "Powered by Canwu" or "This product uses Canwu."
+
+For a Commercial Product with an interactive user interface, the logo and
+acknowledgement must appear in a reasonably visible user-facing location within
+the product, such as its credits, About screen, acknowledgements screen, or
+legal-notices screen. For a Commercial Product without an interactive user
+interface, they must appear in user-facing documentation, packaging, a store or
+distribution listing, or comparable materials supplied with the product. A
+source-code comment or notice available only in source code is not sufficient.
+
+You may choose the English or Chinese logo according to the intended audience,
+resize it proportionally, and convert its file format while preserving its
+appearance. You may not crop, distort, obscure, recolor, or modify the logo in a
+way that makes it unreadable, misleading, or materially different from an
+official logo.
+
+This commercial attribution requirement applies whether Product Revenue is
+above or below the royalty threshold. Displaying the logo does not imply
+Licensor endorsement and does not require an Independent Work to be licensed
+under this License or its source code to be disclosed.
+Downstream users are not required to acknowledge or display project sponsors.
+
+5. Free Uses and the Commercial-Success Threshold
+
+All permitted uses are free of royalties while a Product Family's Product
+Revenue for the applicable Product Revenue Year does not exceed US $10,000,000.
+This includes commercial and proprietary use. At exactly US $10,000,000, no
+royalty is owed and no revenue report is required.
+
+Personal, community, research, educational, and nonprofit uses that generate no
+Product Revenue remain free. The revenue of an unrelated product or the general
+revenue of a company does not count toward a Product Family's threshold.
+
+6. Progressive Commercial-Success Royalty
+
+When Product Revenue for a Product Family exceeds US $10,000,000 during a
+Product Revenue Year, Licensee owes a marginal royalty calculated separately for
+that Product Family as follows:
+
+Product Revenue bracket                              Marginal rate
+US $0 through US $10,000,000                         0%
+Above US $10,000,000 through US $25,000,000          0.5%
+Above US $25,000,000 through US $100,000,000         1.0%
+Above US $100,000,000                                2.0%
+
+These are progressive brackets. A higher rate applies only to Product Revenue
+within that higher bracket and does not apply retroactively to revenue in a
+lower bracket.
+
+For clarity, the cumulative royalty for a Product Revenue Year is:
+
+0.5% of Product Revenue above US $10,000,000 and up to US $25,000,000;
+plus
+1.0% of Product Revenue above US $25,000,000 and up to US $100,000,000;
+plus
+2.0% of Product Revenue above US $100,000,000.
+
+Example:
+
+Product Revenue: $50,000,000
+First $10,000,000:
+0% = $0
+Next $15,000,000:
+0.5% = $75,000
+Next $25,000,000:
+1.0% = $250,000
+Total royalty:
+$325,000
+
+Amounts are stated in United States dollars. Revenue denominated in another
+currency must be converted using a reasonable, consistently applied, publicly
+available exchange rate for the date or reporting period in question.
+
+7. Product Revenue
+
+7.1. Included Revenue. "Product Revenue" means the gross revenue earned,
+received, or receivable from commercial exploitation of the Product Family by
+Licensee, its Affiliates, or a publisher, distributor, storefront, or other
+party acting for or monetizing the Product Family on their behalf, less only the
+permitted deductions in Section 7.2. Product Revenue includes revenue
+attributable to:
+
+(a) product sales;
+
+(b) subscriptions;
+
+(c) downloadable content and expansions;
+
+(d) in-app purchases;
+
+(e) advertising;
+
+(f) licensing;
+
+(g) marketplace, access, participation, or service fees; and
+
+(h) any other commercial exploitation of the Product Family.
+
+7.2. Permitted Deductions. Product Revenue may be reduced by reasonable,
+documented amounts actually incurred for:
+
+(a) sales tax, value-added tax, goods and services tax, and similar transaction
+taxes collected from customers and remitted to a government;
+
+(b) refunds and credits actually issued to customers;
+
+(c) chargebacks;
+
+(d) mandatory commissions retained by an unaffiliated storefront or platform
+as a condition of distributing or selling the Product Family; and
+
+(e) payment-processing fees charged by an unaffiliated payment processor.
+
+7.3. Non-Deductible Expenses. Product Revenue may not be reduced by ordinary
+business expenses, including salaries, contractor costs, development costs,
+marketing, hosting, customer support, financing costs, interest, publisher
+revenue shares, other royalty obligations, overhead, or general operating
+expenses.
+
+7.4. Excluded Amounts. Product Revenue excludes unrelated company revenue,
+equity financing, investment proceeds, loans, unrelated grants, unrelated
+donations, and revenue from unrelated products.
+
+7.5. Aggregation and Anti-Splitting. Product Revenue from the same Product
+Family must be aggregated across Licensee and all Affiliates. Product Revenue
+may not be divided or recharacterized among subsidiaries, Affiliates,
+publishers, editions, platforms, ports, storefronts, controlled entities,
+agreements, or distribution channels to avoid a threshold or reduce a royalty.
+Revenue earned before and after a transfer, reorganization, publisher change,
+or similar transaction remains part of the same Product Revenue Year when the
+commercially continuous Product Family remains substantially the same.
+
+8. Notice, Statements, and Payment
+
+8.1. No Reporting Below the Threshold. If Product Revenue for a Product Family
+does not exceed US $10,000,000 in a Product Revenue Year, Licensee has no revenue
+reporting or royalty-payment obligation under this License for that Product
+Family and Product Revenue Year.
+
+8.2. Threshold Notice. Within thirty days after Product Revenue for a Product
+Family first exceeds US $10,000,000 in a Product Revenue Year, Licensee must
+notify Licensor at the notice contact identified above. The notice must identify
+the Licensee and Product Family and provide a business contact for reporting and
+payment.
+
+8.3. Quarterly Statements. After the threshold is exceeded, Licensee must
+provide a royalty statement for each remaining reporting quarter in that Product
+Revenue Year, including the reporting quarter in which the threshold was
+exceeded. Each statement is due within forty-five days after the reporting
+quarter ends and must contain enough information to calculate:
+
+(a) gross revenue included in Product Revenue;
+
+(b) each category of permitted deduction;
+
+(c) cumulative Product Revenue for the Product Revenue Year;
+
+(d) the applicable progressive brackets and rates;
+
+(e) the cumulative royalty owed for the Product Revenue Year; and
+
+(f) previous royalty payments credited for that Product Revenue Year.
+
+8.4. Payment. Royalties accrued through the end of a reporting quarter are due
+within forty-five days after that quarter ends, less royalty payments already
+made for the same Product Revenue Year. Licensee must provide a final
+reconciliation statement and any remaining payment within forty-five days after
+the Product Revenue Year ends.
+
+9. Records and Audit
+
+After a Product Family exceeds the threshold, Licensee must retain records
+reasonably necessary to verify Product Revenue, deductions, statements, and
+payments for four years after the applicable statement was due.
+
+No more than once in any twelve-month period for a Product Family, Licensor may,
+on reasonable advance written notice, have an independent licensed accountant
+or comparably qualified professional inspect those relevant records. The audit
+must occur during normal business hours, avoid unreasonable disruption, and be
+limited to compliance with this License.
+
+The auditor and Licensor must protect confidential commercial information and
+may use or disclose it only as necessary to verify and enforce this License or
+as required by law. Licensor normally pays the audit costs. If an audit finds
+that Licensee underpaid royalties for the audited period by more than five
+percent, Licensee must promptly pay the shortfall and reimburse Licensor for the
+reasonable audit costs.
+
+10. Alternative Commercial Agreements
+
+Licensee and Licensor may enter into a separate written commercial agreement.
+Possible terms may include fixed annual fees, royalty caps, lower negotiated
+rates, enterprise licensing, simplified reporting, or other custom terms. A
+separately signed agreement supersedes the royalty, reporting, or other
+provisions of this License only to the extent that agreement expressly says it
+does.
+
+11. Ownership, Trademarks, and Sponsorship
+
+Licensor and other contributors retain ownership of their respective rights in
+the Software. Except for the licenses expressly granted here, no ownership or
+other right is transferred.
+
+This License does not grant rights to use Licensor's names, trademarks, service
+marks, logos, or branding, except as reasonably necessary to identify the
+Software, make truthful statements about compatibility or origin, or comply with
+the attribution requirements of this License.
+
+Financial sponsorship or other support of the project, by itself, grants no
+ownership, copyright, patent, trademark, governance, control, exclusivity,
+endorsement, or special licensing rights. Any such rights must be stated in a
+separate written agreement signed by the relevant rights holder. No downstream
+user is required to acknowledge project sponsors.
+
+12. Patent License and Retaliation
+
+Subject to this License, Licensor grants You a worldwide, non-exclusive
+patent license under patent claims that the Licensor owns or controls and that
+are necessarily infringed by the Software as distributed by that Licensor, to
+make, have made, use, offer for sale, sell, import, and otherwise exercise the
+rights granted in Section 2.
+
+The patent license does not cover claims infringed only by Your additions or by
+a combination not supplied by the Licensor. If You or an Affiliate initiate or
+maintain a written patent claim alleging that the Software infringes a patent,
+the patent licenses granted to You under this Section terminate immediately as
+of the date the claim is filed. Other rights terminate only as provided in
+Section 14.
+
+13. Anti-Circumvention
+
+You may not structure transactions, entities, Product Families, revenue flows,
+distribution arrangements, or technical measures with the principal purpose of
+evading the thresholds, aggregation rules, reporting duties, or royalties in
+this License. You may not conceal, falsify, or materially mischaracterize
+Product Revenue or permitted deductions. Legitimate business structures and
+transactions are allowed when they are not used to avoid this License.
+
+14. Material Breach and Termination
+
+If Licensee materially breaches this License, Licensor may provide written
+notice describing the breach. Licensee has thirty days after receiving notice
+to cure the breach, including by stopping the violation, providing overdue
+statements, and paying overdue amounts as applicable. If Licensee does not fully
+cure within that period, the licenses granted under this License terminate at
+the end of the cure period upon written notice from Licensor.
+
+After termination, Licensee must stop exercising rights under this License,
+except as necessary to wind down distribution in an orderly manner or as
+otherwise agreed in writing. Termination does not revoke licenses already
+received directly under this License by compliant downstream recipients.
+
+Accrued reporting, audit, royalty, payment, confidentiality, ownership,
+disclaimer, limitation-of-liability, governing-law, and enforcement obligations
+survive termination. Termination does not excuse Product Revenue earned or
+royalties accrued before termination.
+
+15. Disclaimer of Warranty
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE SOFTWARE IS PROVIDED "AS IS" AND
+"AS AVAILABLE," WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, EXPRESS,
+IMPLIED, OR STATUTORY. LICENSOR DISCLAIMS WARRANTIES OF TITLE,
+NON-INFRINGEMENT, MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, ACCURACY,
+SECURITY, AND QUIET ENJOYMENT. YOU BEAR ALL RISK ARISING FROM USE OR
+DISTRIBUTION OF THE SOFTWARE.
+
+16. Limitation of Liability
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, LICENSOR AND CONTRIBUTORS WILL NOT BE
+LIABLE FOR ANY INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, PUNITIVE, OR
+CONSEQUENTIAL DAMAGES, OR FOR LOST PROFITS, REVENUE, DATA, GOODWILL, OR
+BUSINESS INTERRUPTION, ARISING FROM OR RELATED TO THE SOFTWARE OR THIS LICENSE,
+UNDER ANY LEGAL THEORY, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW, THE TOTAL AGGREGATE LIABILITY OF
+LICENSOR AND CONTRIBUTORS ARISING FROM OR RELATED TO THE SOFTWARE OR THIS
+LICENSE WILL NOT EXCEED THE GREATER OF US $100 OR THE AMOUNT PAID DIRECTLY BY
+LICENSEE TO LICENSOR UNDER THIS LICENSE DURING THE TWELVE MONTHS BEFORE THE
+EVENT GIVING RISE TO LIABILITY. THESE LIMITATIONS DO NOT LIMIT LICENSEE'S
+ROYALTY OR PAYMENT OBLIGATIONS.
+
+17. General Terms
+
+17.1. Severability. If a provision is held unenforceable, it will be enforced
+to the maximum extent permitted and the remaining provisions will remain in
+effect. A court may reform an unenforceable provision only as necessary to make
+it enforceable while preserving its intended economic effect.
+
+17.2. No Waiver. A failure or delay in enforcing a provision is not a waiver.
+A waiver must be in writing and applies only to the specific instance stated.
+
+17.3. Entire Agreement. This License is the complete agreement concerning the
+rights granted here, except for a separately signed agreement under Section 10.
+
+17.4. Assignment and Successors. Licensee may transfer a product or business
+that uses the Software only if the transferee accepts this License or enters a
+separate agreement with Licensor. A transfer does not erase or restart Product
+Revenue, reporting history, or accrued obligations for a substantially
+continuous Product Family. This License binds and benefits permitted successors
+and assigns.
+
+17.5. Governing Law. Governing-law jurisdiction: TBD. Once designated, that
+jurisdiction's laws govern this License without regard to conflict-of-laws
+rules.
+
+17.6. Jurisdiction and Venue. Exclusive court location: TBD. Once designated,
+the courts located there have exclusive jurisdiction over disputes arising from
+this License, and each party consents to their personal jurisdiction and venue,
+except that either party may seek temporary or emergency relief in any court
+with jurisdiction.
+
+17.7. Headings. Headings are for convenience only and do not affect
+interpretation.

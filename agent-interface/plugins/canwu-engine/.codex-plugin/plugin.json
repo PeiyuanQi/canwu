@@ -1,0 +1,26 @@
+{
+  "name": "canwu-engine",
+  "version": "0.1.0",
+  "description": "Public and semantic API guidance for Canwu users",
+  "author": {
+    "name": "Canwu Project",
+    "url": "https://github.com/PeiyuanQi/canwu"
+  },
+  "repository": "https://github.com/PeiyuanQi/canwu",
+  "license": "Canwu License 1.0",
+  "keywords": ["canwu", "simulation", "agents", "api"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Canwu Engine",
+    "shortDescription": "Use Canwu through its safe public interfaces.",
+    "longDescription": "Guidance for games, research tools, renderers, and AI agents that observe and act in Canwu worlds through public APIs.",
+    "developerName": "Canwu Project",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Use Canwu as an AI agent.",
+      "Integrate a client with Canwu.",
+      "Query a Canwu world safely."
+    ]
+  }
+}

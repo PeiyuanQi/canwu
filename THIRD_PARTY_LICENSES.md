@@ -1,0 +1,95 @@
+# Third-Party Licenses
+
+Canwu uses third-party Rust crates. Those crates are not covered by the Canwu
+License 1.0. Each dependency remains under the license chosen by its own
+authors.
+
+This file is a readable inventory and release checklist. It does not replace
+the copyright notices, license files, or attribution requirements supplied by
+the dependency authors.
+
+The generated [THIRD_PARTY_NOTICES.html](THIRD_PARTY_NOTICES.html) contains the
+full license texts and package attribution discovered by `cargo-about`.
+[THIRD_PARTY_NOTICES_EXTRA.md](THIRD_PARTY_NOTICES_EXTRA.md) preserves upstream
+notices that the generator does not collect.
+
+## Current dependency set
+
+The inventory was reviewed against the locked dependency graph on August 15,
+2026. `cargo metadata --locked --format-version 1` reports 312 external
+packages, and every package in that graph declares license metadata.
+
+The complete versioned package list is recorded in `Cargo.lock`. The external
+packages and bundled assets use one or more of these license families:
+
+- MIT
+- Apache License 2.0, sometimes with the LLVM exception
+- BSD Zero Clause, BSD 2-Clause, and BSD 3-Clause
+- Boost Software License 1.0
+- Creative Commons Zero 1.0
+- ISC
+- Unicode License 3.0
+- The Unlicense
+- zlib License
+- SIL Open Font License 1.1
+- Ubuntu Font License 1.0
+- Bitstream Vera Font License
+- LGPL 2.1-or-later as one optional choice for `r-efi`
+
+An `OR` in dependency metadata means the upstream package offers a choice of
+licenses. An `AND` means all listed terms apply to the relevant code or assets.
+
+## Direct dependencies
+
+| Package | Locked version | Declared license |
+| --- | ---: | --- |
+| `eframe` | 0.32.3 | MIT OR Apache-2.0 |
+| `image` | 0.25.10 | MIT OR Apache-2.0 |
+| `serde` | 1.0.229 | MIT OR Apache-2.0 |
+| `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
+
+The first-party `canwu-*` crates are not third-party dependencies. They use the
+root [Canwu License 1.0](LICENSE).
+
+## Bundled fonts
+
+The debug client enables the `default_fonts` feature in `eframe`. Its locked
+`epaint_default_fonts` 0.32.3 package declares:
+
+```text
+(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0
+```
+
+Binary releases of the debug client must preserve the applicable font license
+and attribution material as well as the Rust crate notices. Package-level SPDX
+metadata does not expose every embedded font notice: the emoji font has its own
+MIT copyright notice, and Hack includes Source Foundry, DejaVu, and Bitstream
+Vera terms. Those notices are preserved in `THIRD_PARTY_NOTICES_EXTRA.md`.
+
+## Release requirements
+
+Before publishing a source archive or compiled binary, release maintainers
+must:
+
+1. run `cargo metadata --locked --format-version 1` and review the licenses for
+   the dependency graph used by that release;
+2. install the pinned generator with
+   `cargo install cargo-about --version 0.8.4 --locked`;
+3. regenerate the notice file with
+   `cargo about generate --workspace --all-features --locked about.hbs
+   --output-file THIRD_PARTY_NOTICES.html`;
+4. update this file when `Cargo.lock` or enabled features change the inventory;
+5. preserve additional upstream NOTICE files in
+   `THIRD_PARTY_NOTICES_EXTRA.md`; and
+6. include `LICENSE`, this inventory, both notice files, and required branding
+   material in every compiled release package.
+
+Platform-specific dependencies differ across Windows, macOS, and Linux. A
+release for one platform only needs notices for material included in that
+release, but the repository inventory should continue to cover the complete
+locked cross-platform graph.
+
+`cargo-about` 0.8.4 warns that the first-party Canwu crates have no SPDX
+`license` field because they inherit a custom `license-file` from the workspace.
+Those warnings are expected. Warnings or failures for an external package are
+not expected and must be resolved before release.

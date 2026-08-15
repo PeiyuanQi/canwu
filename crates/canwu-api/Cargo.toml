@@ -1,0 +1,20 @@
+[package]
+name = "canwu-api"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canwu-core = { path = "../canwu-core" }
+canwu-event = { path = "../canwu-event" }
+canwu-knowledge = { path = "../canwu-knowledge" }
+canwu-sim = { path = "../canwu-sim" }
+canwu-time = { path = "../canwu-time" }
+canwu-world = { path = "../canwu-world" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

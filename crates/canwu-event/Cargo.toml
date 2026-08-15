@@ -1,0 +1,15 @@
+[package]
+name = "canwu-event"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+canwu-core = { path = "../canwu-core" }
+canwu-time = { path = "../canwu-time" }
+serde.workspace = true
+
+[lints]
+workspace = true
