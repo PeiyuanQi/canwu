@@ -2778,6 +2778,29 @@ fn ingress_record_slice_is_empty(value: &&[IngressRecord]) -> bool {
     value.is_empty()
 }
 
+const BOUNDARY_STATE_HASH_V1_PREFIX: &str = "v1:";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BoundaryStateHashFormat {
+    LegacyV0,
+    CommitmentsV1,
+}
+
+fn boundary_state_hash_format(value: Option<&str>) -> Result<BoundaryStateHashFormat, CanwuError> {
+    match value {
+        Some(value) if value.starts_with(BOUNDARY_STATE_HASH_V1_PREFIX) => {
+            let hash = &value[BOUNDARY_STATE_HASH_V1_PREFIX.len()..];
+            if !is_canonical_hash(hash) {
+                return invalid_snapshot("boundary state commitment v1 is not canonical");
+            }
+            Ok(BoundaryStateHashFormat::CommitmentsV1)
+        }
+        Some(value) if is_canonical_hash(value) => Ok(BoundaryStateHashFormat::LegacyV0),
+        Some(_) => invalid_snapshot("boundary state commitment format is unsupported"),
+        None => Ok(BoundaryStateHashFormat::LegacyV0),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
@@ -3304,6 +3327,19 @@ impl Simulation {
                 ),
             ));
         }
+        if journal.commitment_format_version == 0
+            && journal.boundaries.iter().any(|boundary| {
+                boundary
+                    .state_hash
+                    .as_deref()
+                    .is_some_and(|hash| hash.starts_with(BOUNDARY_STATE_HASH_V1_PREFIX))
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "legacy commitment journals cannot contain boundary state commitment v1",
+            ));
+        }
         if journal.revision_format_version != STATE_REVISION_FORMAT_VERSION {
             return Err(CanwuError::new(
                 ErrorCode::LegacyReplayUnavailable,
@@ -3449,10 +3485,13 @@ impl Simulation {
                 replay_command_record(&mut simulation, record, expected_boundary.at)?;
                 next_command += 1;
             }
-            let receipt = simulation.settle_boundary(BoundaryRequest {
-                at: expected_boundary.at,
-                cadences: expected_boundary.cadences.clone(),
-            })?;
+            let receipt = simulation.settle_boundary_with_state_hash_format(
+                BoundaryRequest {
+                    at: expected_boundary.at,
+                    cadences: expected_boundary.cadences.clone(),
+                },
+                boundary_state_hash_format(expected_boundary.state_hash.as_deref())?,
+            )?;
             let Some(actual_boundary) = simulation.boundaries().last() else {
                 return Err(CanwuError::new(
                     ErrorCode::ReplayMismatch,
@@ -3552,10 +3591,13 @@ impl Simulation {
                     "boundary replay accepted-command cut disagrees with admitted attempts",
                 ));
             }
-            let receipt = simulation.settle_boundary(BoundaryRequest {
-                at: expected_boundary.at,
-                cadences: expected_boundary.cadences.clone(),
-            })?;
+            let receipt = simulation.settle_boundary_with_state_hash_format(
+                BoundaryRequest {
+                    at: expected_boundary.at,
+                    cadences: expected_boundary.cadences.clone(),
+                },
+                boundary_state_hash_format(expected_boundary.state_hash.as_deref())?,
+            )?;
             let Some(actual_boundary) = simulation.boundaries().last() else {
                 return Err(CanwuError::new(
                     ErrorCode::ReplayMismatch,
@@ -4612,7 +4654,15 @@ impl Simulation {
 
     pub fn settle_boundary(
         &mut self,
+        request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.settle_boundary_with_state_hash_format(request, BoundaryStateHashFormat::CommitmentsV1)
+    }
+
+    fn settle_boundary_with_state_hash_format(
+        &mut self,
         mut request: BoundaryRequest,
+        state_hash_format: BoundaryStateHashFormat,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.ensure_runtime_ready()?;
         if request.at < self.state.scheduler.now {
@@ -4643,7 +4693,7 @@ impl Simulation {
         request.cadences.dedup();
 
         let transaction = BoundaryTransactionCheckpoint::capture(&self.state);
-        match self.settle_boundary_inner(request) {
+        match self.settle_boundary_inner(request, state_hash_format) {
             Ok(receipt) => Ok(receipt),
             Err(error) => {
                 transaction.restore(&mut self.state);
@@ -4655,6 +4705,7 @@ impl Simulation {
     fn settle_boundary_inner(
         &mut self,
         mut request: BoundaryRequest,
+        state_hash_format: BoundaryStateHashFormat,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.advance_to_before_boundary(request.at)?;
 
@@ -5039,7 +5090,7 @@ impl Simulation {
         let random_draws =
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
         self.state.metadata.plugin_registration_closed = true;
-        let state_hash = self.compute_boundary_state_hash()?;
+        let state_hash = self.compute_boundary_state_hash_for(state_hash_format)?;
         let previous_hash = self.state.evidence.boundaries.last().map_or_else(
             || GENESIS_BOUNDARY_HASH.to_owned(),
             |record| record.hash.clone(),
@@ -5090,6 +5141,19 @@ impl Simulation {
             record_change_count: record_changes.len(),
             allocations: allocation_records,
         })
+    }
+
+    fn compute_boundary_state_hash_for(
+        &mut self,
+        format: BoundaryStateHashFormat,
+    ) -> Result<String, CanwuError> {
+        match format {
+            BoundaryStateHashFormat::LegacyV0 => self.compute_boundary_state_hash(),
+            BoundaryStateHashFormat::CommitmentsV1 => {
+                let roots = self.refresh_runtime_commitment_roots()?;
+                boundary_state_hash_for_commitments(&roots)
+            }
+        }
     }
 
     fn compute_boundary_state_hash(&self) -> Result<String, CanwuError> {
@@ -5270,53 +5334,66 @@ impl Simulation {
         }
     }
 
-    fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
-        if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION {
-            let needs = {
-                let cache = if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
-                    cache
-                } else {
-                    self.state.metadata.commitment_cache =
-                        Some(RuntimeCommitmentCache::from_evidence(&self.state.evidence)?);
-                    self.state
-                        .metadata
-                        .commitment_cache
-                        .as_mut()
-                        .expect("the commitment cache was initialized")
-                };
-                cache.sync(&self.state.evidence)?;
-                cache.needs()
-            };
-            let updates = self.compute_commitment_root_updates(needs)?;
-            let boundary_head = self.boundary_head_hash().map(str::to_owned);
-            let control = ControlCommitmentMaterial {
-                plugin_registration_closed: self.state.metadata.plugin_registration_closed,
-                next_event_id: self.state.counters.next_event_id,
-                next_command_id: self.state.counters.next_command_id,
-                next_command_attempt_id: self.state.counters.next_command_attempt_id,
-                next_ingress_id: self.state.counters.next_ingress_id,
-                next_boundary_id: self.state.counters.next_boundary_id,
-                next_random_draw_id: self.state.counters.next_random_draw_id,
-                next_schedule_sequence: self.state.counters.next_schedule_sequence,
-                next_correlation_id: self.state.counters.next_correlation_id,
-            };
-            let (domain_roots, journal_roots) = {
-                let cache = self
-                    .state
+    fn refresh_runtime_commitment_roots(&mut self) -> Result<CommitmentRoots, CanwuError> {
+        if self.state.metadata.commitment_format_version != COMMITMENT_FORMAT_VERSION {
+            return Err(CanwuError::new(
+                ErrorCode::UnsupportedSnapshotVersion,
+                format!(
+                    "commitment format {} cannot produce boundary state commitment v1",
+                    self.state.metadata.commitment_format_version
+                ),
+            ));
+        }
+        let needs = {
+            let cache = if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
+                cache
+            } else {
+                self.state.metadata.commitment_cache =
+                    Some(RuntimeCommitmentCache::from_evidence(&self.state.evidence)?);
+                self.state
                     .metadata
                     .commitment_cache
                     .as_mut()
-                    .expect("the commitment cache was initialized");
-                cache.apply(updates);
-                (cache.domain_roots()?, cache.roots())
+                    .expect("the commitment cache was initialized")
             };
-            let roots = runtime_commitment_roots(
-                &domain_roots,
-                &journal_roots,
-                self.state.current.root_seed,
-                boundary_head.as_deref(),
-                &control,
-            )?;
+            cache.sync(&self.state.evidence)?;
+            cache.needs()
+        };
+        let updates = self.compute_commitment_root_updates(needs)?;
+        let boundary_head = self.boundary_head_hash().map(str::to_owned);
+        let control = ControlCommitmentMaterial {
+            plugin_registration_closed: self.state.metadata.plugin_registration_closed,
+            next_event_id: self.state.counters.next_event_id,
+            next_command_id: self.state.counters.next_command_id,
+            next_command_attempt_id: self.state.counters.next_command_attempt_id,
+            next_ingress_id: self.state.counters.next_ingress_id,
+            next_boundary_id: self.state.counters.next_boundary_id,
+            next_random_draw_id: self.state.counters.next_random_draw_id,
+            next_schedule_sequence: self.state.counters.next_schedule_sequence,
+            next_correlation_id: self.state.counters.next_correlation_id,
+        };
+        let (domain_roots, journal_roots) = {
+            let cache = self
+                .state
+                .metadata
+                .commitment_cache
+                .as_mut()
+                .expect("the commitment cache was initialized");
+            cache.apply(updates);
+            (cache.domain_roots()?, cache.roots())
+        };
+        runtime_commitment_roots(
+            &domain_roots,
+            &journal_roots,
+            self.state.current.root_seed,
+            boundary_head.as_deref(),
+            &control,
+        )
+    }
+
+    fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
+        if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION {
+            let roots = self.refresh_runtime_commitment_roots()?;
             self.state.metadata.checkpoint_hash = checkpoint_hash_for_commitments(
                 &roots,
                 &self.state.metadata.run_manifest_hash,
@@ -8398,7 +8475,6 @@ fn validate_snapshot(
         }
     }
     let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
-    let current_state_hash = snapshot_state_hash(snapshot)?;
     if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {
         let persisted_roots = snapshot.commitment_roots.as_ref().ok_or_else(|| {
             invalid_snapshot_error("current commitment snapshot is missing its domain roots")
@@ -8421,15 +8497,23 @@ fn validate_snapshot(
             "checkpoint hash does not bind the persisted state to its boundary head",
         );
     }
-    if matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }))
-        && snapshot_is_at_boundary_head(snapshot)
+    if snapshot_is_at_boundary_head(snapshot)
         && snapshot
             .boundaries
             .last()
-            .and_then(|record| record.state_hash.as_deref())
-            != Some(current_state_hash.as_str())
+            .is_some_and(|record| record.state_hash.is_some())
     {
-        return invalid_snapshot("boundary-head state commitment does not match persisted state");
+        let expected_state_hash = snapshot_boundary_head_state_hash(snapshot)?;
+        if snapshot
+            .boundaries
+            .last()
+            .and_then(|record| record.state_hash.as_deref())
+            != Some(expected_state_hash.as_str())
+        {
+            return invalid_snapshot(
+                "boundary-head state commitment does not match persisted state",
+            );
+        }
     }
     let mut component_keys = BTreeSet::new();
     let mut previous_component = None;
@@ -9366,13 +9450,12 @@ fn validate_boundary_records(
             &cuts,
             &mut emitted_events,
         )?;
+        if let Some(state_hash) = record.state_hash.as_deref() {
+            boundary_state_hash_format(Some(state_hash))?;
+        }
         if record.previous_hash != previous_hash
             || !is_canonical_hash(&record.hash)
             || (requires_state_hash && record.state_hash.is_none())
-            || record
-                .state_hash
-                .as_deref()
-                .is_some_and(|hash| !is_canonical_hash(hash))
             || compute_boundary_hash(record).map_err(|error| {
                 invalid_snapshot_error(format!("could not verify boundary hash: {error}"))
             })? != record.hash
@@ -11924,6 +12007,15 @@ fn runtime_commitment_roots(
     })
 }
 
+fn boundary_state_hash_for_commitments(
+    commitments: &CommitmentRoots,
+) -> Result<String, CanwuError> {
+    Ok(format!(
+        "{BOUNDARY_STATE_HASH_V1_PREFIX}{}",
+        canonical_hash("canwu.boundary-state.v1", commitments)?
+    ))
+}
+
 fn authoritative_run_identity(
     run_manifest: &RunManifest,
     run_manifest_hash: &str,
@@ -11999,6 +12091,33 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         next_schedule_sequence: snapshot.next_schedule_sequence,
         next_correlation_id: snapshot.next_correlation_id,
     })
+}
+
+fn snapshot_boundary_head_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
+    let boundary = snapshot
+        .boundaries
+        .last()
+        .ok_or_else(|| invalid_snapshot_error("snapshot has no boundary head commitment"))?;
+    match boundary_state_hash_format(boundary.state_hash.as_deref())? {
+        BoundaryStateHashFormat::LegacyV0 => snapshot_state_hash(snapshot),
+        BoundaryStateHashFormat::CommitmentsV1 => {
+            if snapshot.commitment_format_version != COMMITMENT_FORMAT_VERSION {
+                return invalid_snapshot(
+                    "boundary state commitment v1 requires current domain commitments",
+                );
+            }
+            let mut roots = snapshot.commitment_roots.clone().ok_or_else(|| {
+                invalid_snapshot_error(
+                    "boundary state commitment v1 is missing current domain commitments",
+                )
+            })?;
+            roots.boundary_chain = canonical_hash(
+                "canwu.commitment.boundary-chain.v1",
+                boundary.previous_hash.as_str(),
+            )?;
+            boundary_state_hash_for_commitments(&roots)
+        }
+    }
 }
 
 fn snapshot_commitment_roots(snapshot: &SimulationSnapshot) -> Result<CommitmentRoots, CanwuError> {
@@ -15858,6 +15977,129 @@ mod tests {
         assert_eq!(replayed.snapshot().commitment_format_version, 0);
         assert!(replayed.snapshot().commitment_roots.is_none());
         assert_eq!(replayed.checkpoint_hash(), legacy_journal.checkpoint_hash);
+    }
+
+    #[test]
+    fn boundary_state_commitments_are_incremental_versioned_and_legacy_replayable() {
+        let (scenario, _) = demo_scenario();
+        let configuration = RunConfiguration::read_only_observer();
+        let manifest = RunManifest::declared(
+            ArtifactManifest::for_scenario("canwu.test", "boundary-state-fixture", "1", &scenario)
+                .expect("the boundary-state scenario should hash"),
+            ArtifactManifest::for_run_configuration(
+                "canwu.test",
+                "boundary-state-run",
+                "1",
+                &configuration,
+            )
+            .expect("the boundary-state run configuration should hash"),
+        );
+
+        let mut current = Simulation::new_with_run_configuration(
+            211,
+            scenario.clone(),
+            manifest.clone(),
+            configuration.clone(),
+        )
+        .expect("the current boundary-state fixture should load");
+        current
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("a current boundary should settle");
+        let current_hash = current.boundaries()[0]
+            .state_hash
+            .as_deref()
+            .expect("current boundaries should commit their state");
+        let current_digest = current_hash
+            .strip_prefix(BOUNDARY_STATE_HASH_V1_PREFIX)
+            .expect("current boundaries should use the tagged commitment contract");
+        assert!(is_canonical_hash(current_digest));
+        let current_snapshot = current.snapshot();
+        assert_eq!(
+            current_snapshot.boundaries[0].state_hash.as_deref(),
+            Some(
+                snapshot_boundary_head_state_hash(&current_snapshot)
+                    .expect("the current boundary head should reproduce from persisted roots")
+                    .as_str()
+            )
+        );
+        let current_restored = Simulation::from_snapshot(current_snapshot.clone())
+            .expect("the current boundary commitment should load");
+        assert_eq!(current_restored.snapshot(), current_snapshot);
+        let current_replayed =
+            Simulation::replay_from_journal(scenario.clone(), &[], &current.replay_journal())
+                .expect("the current boundary commitment should replay exactly");
+        assert_eq!(current_replayed.snapshot(), current_snapshot);
+        let mut mislabeled_journal = current.replay_journal();
+        mislabeled_journal.commitment_format_version = 0;
+        let error = Simulation::replay_from_journal(scenario.clone(), &[], &mislabeled_journal)
+            .err()
+            .expect("a current boundary commitment cannot use a legacy journal contract");
+        assert_eq!(error.code, ErrorCode::ReplayEnvironmentMismatch);
+
+        let mut forged_state = current_snapshot.clone();
+        forged_state.world.armies[0].morale += 1;
+        refresh_snapshot_commitments_and_checkpoint(&mut forged_state);
+        let error = Simulation::from_snapshot(forged_state)
+            .err()
+            .expect("coherently rehashed current state must still match its boundary head");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("boundary-head state commitment"));
+
+        let mut unsupported = current_snapshot;
+        unsupported.boundaries[0].state_hash = Some(format!("v2:{}", "0".repeat(64)));
+        rehash_tampered_snapshot(&mut unsupported);
+        let error = Simulation::from_snapshot(unsupported)
+            .err()
+            .expect("unknown boundary state commitment tags must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("boundary state commitment"));
+
+        let mut legacy =
+            Simulation::new_with_run_configuration(223, scenario.clone(), manifest, configuration)
+                .expect("the legacy boundary-state fixture should load");
+        legacy
+            .settle_boundary_with_state_hash_format(
+                BoundaryRequest::at(SimTime::EPOCH),
+                BoundaryStateHashFormat::LegacyV0,
+            )
+            .expect("a legacy boundary should remain reproducible");
+        let legacy_hash = legacy.boundaries()[0]
+            .state_hash
+            .as_deref()
+            .expect("legacy declared boundaries should commit their state");
+        assert!(is_canonical_hash(legacy_hash));
+        let legacy_snapshot = legacy.snapshot();
+        let mut mixed = Simulation::from_snapshot(legacy_snapshot.clone())
+            .expect("an existing legacy boundary commitment should still load");
+        let legacy_replayed =
+            Simulation::replay_from_journal(scenario.clone(), &[], &legacy.replay_journal())
+                .expect("an existing legacy boundary commitment should replay exactly");
+        assert_eq!(legacy_replayed.snapshot(), legacy_snapshot);
+
+        mixed
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(1)))
+            .expect("continuation should append the current commitment contract");
+        assert!(is_canonical_hash(
+            mixed.boundaries()[0]
+                .state_hash
+                .as_deref()
+                .expect("the legacy boundary should retain its state commitment")
+        ));
+        assert!(
+            mixed.boundaries()[1]
+                .state_hash
+                .as_deref()
+                .expect("the continued boundary should commit its state")
+                .starts_with(BOUNDARY_STATE_HASH_V1_PREFIX)
+        );
+        let mixed_snapshot = mixed.snapshot();
+        let mixed_restored = Simulation::from_snapshot(mixed_snapshot.clone())
+            .expect("a mixed legacy/current boundary chain should load");
+        assert_eq!(mixed_restored.snapshot(), mixed_snapshot);
+        let mixed_replayed =
+            Simulation::replay_from_journal(scenario, &[], &mixed.replay_journal())
+                .expect("a mixed legacy/current boundary chain should replay exactly");
+        assert_eq!(mixed_replayed.snapshot(), mixed_snapshot);
     }
 
     #[test]

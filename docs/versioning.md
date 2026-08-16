@@ -126,6 +126,19 @@ recomputed and compared independently before the outer checkpoint is accepted.
 Replay journals persist their commitment format; format-0 journals reproduce
 checkpoint v3 exactly, while current journals reproduce checkpoint v4.
 
+Boundary state commitments have an independent in-field contract. Historical
+64-character hashes are legacy format 0 and retain their original full-state
+meaning. New boundaries use `v1:<64-character hash>`, derived from commitment
+format 1 roots after authoritative mutation and before the new boundary record
+enters the chain. The roots include current world, knowledge, plugin state,
+generic records, scheduler, command/attempt, event, ingress, random, identity,
+control, and the prior boundary-chain head. Existing hashes are never
+reinterpreted or rewritten. A loaded legacy chain may append tagged v1 records,
+and exact replay chooses the contract recorded on each boundary. Unknown tags
+are rejected. When a snapshot is at a boundary head and the record carries a
+state commitment, loading recomputes that commitment from validated state and
+requires an exact match.
+
 Checkpoint-journal format 1 is an additive persistence envelope separate from
 snapshot format 4. Its current-state checkpoint contains a current snapshot
 shell with empty event, command, command-attempt, ingress, boundary, and random-

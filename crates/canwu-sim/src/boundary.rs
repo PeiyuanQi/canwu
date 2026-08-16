@@ -270,6 +270,7 @@ pub struct BoundaryRecord {
     pub record_changes: Vec<DomainRecordChange>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
+    /// Untagged legacy full-state hash or a `v1:` incremental state commitment.
     pub state_hash: Option<String>,
     #[serde(default)]
     pub previous_hash: String,

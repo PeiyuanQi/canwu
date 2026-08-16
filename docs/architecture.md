@@ -325,10 +325,16 @@ checkpoint-v3 full-state commitment first, derives the current roots only from
 that verified state, and writes a checkpoint-v4 commitment; it cannot launder a
 tampered legacy snapshot. Exact replay journals record their commitment format,
 so historical journals can still reproduce checkpoint v3 while current journals
-reproduce checkpoint v4. Historical boundary state commitments remain on their
-existing contract and are reproduced by exact replay; when a snapshot is exactly
-at its boundary head, loading also recomputes and compares that boundary state
-commitment directly. Runtime checkpoint refresh keeps cloneable incremental hash
+reproduce checkpoint v4. Untagged historical boundary state commitments remain
+on their original full-state contract. New boundaries write a `v1:`-tagged
+commitment over the current canonical roots with the prior boundary-chain head,
+so settlement no longer serializes and hashes the complete retained journals.
+Exact replay selects the recorded contract independently for every boundary,
+which permits a legacy chain to continue with current commitments without
+reinterpreting its earlier hashes. When a snapshot is exactly at its boundary
+head, loading derives the expected contract from the tag and compares it with
+the independently validated current state; unknown tags are rejected. Runtime
+checkpoint refresh keeps cloneable incremental hash
 state for append-only commands, attempts, events, ingress, and random draws, and
 feeds only newly appended journal tails into those roots. It also retains the
 last canonical roots for world, knowledge, plugin components, domain records,

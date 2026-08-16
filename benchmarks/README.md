@@ -452,20 +452,49 @@ milestone makes no runtime-performance claim; it gives mutable state and its
 commitment cache a dedicated private ownership boundary without changing their
 contracts.
 
+## Incremental boundary-state commitment comparison
+
+The boundary-state commitment milestone is recorded in separate
+[`elapsed`](baselines/2026-08-16-incremental-boundary-state-elapsed.json) and
+[`allocation`](baselines/2026-08-16-incremental-boundary-state-allocations.json)
+reports, using the runtime-state module milestone as its before baseline. New
+boundaries replace the legacy full-state/history hash pass with an explicitly
+tagged `v1:` commitment over the already-maintained canonical domain roots and
+the prior boundary-chain head. Untagged historical hashes retain their original
+meaning, and exact replay selects the recorded contract per boundary, including
+mixed legacy/current chains.
+
+At scale 512, an empty boundary falls from 2.358 ms to 0.452 ms (-80.8%) and
+from 16,385 to 11,769 allocation operations (-28.2%); requested bytes fall
+78.2%. A populated boundary falls from 2.619 ms to 0.775 ms (-70.4%) and from
+22,665 to 18,045 operations (-20.4%); requested bytes fall 68.9%. End-to-end
+history construction falls from 1,046.898 ms to 514.303 ms (-50.9%), while
+exact replay falls from 1,038.483 ms to 526.397 ms (-49.3%). Their requested
+bytes fall 54.1% and 53.9%, respectively. Load and validation falls 12.5% in
+elapsed time and 16.0% in requested bytes because a current boundary head is
+verified from independently validated roots rather than a second full-state
+hash pass.
+
+The tagged state hash adds exactly three serialized bytes per boundary: the
+scale-512 snapshot grows by 1,536 bytes, from 3,139,624 to 3,141,160 bytes.
+Snapshot creation and serialization allocation-operation counts are otherwise
+unchanged. This milestone removes the repeated full-history boundary hash, but
+does not make the complete growth or replay path linear; other retained-state
+cloning and validation work remains measurable.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted commands, individual
   boundaries, snapshot creation, and snapshot loading request about four times
-  as many allocation operations. These operations are linear in retained
-  history in the current implementation. Rejected commands remain at 69
+  as many allocation operations. These operations remain linear in retained
+  current state or history in the current implementation. Rejected commands remain at 69
   allocation operations while requested bytes grow from 242,903 to 943,319,
   showing a separate retained-capacity cost rather than operation-count growth.
-- The same increase makes end-to-end history construction and exact replay
-  request about sixteen times as many allocation operations and take about
-  fifteen times as long. At scale 512, growth requested 11,755,813 allocation
-  operations and 2,351,954,381 bytes; replay requested 11,821,415 operations and
-  2,360,844,188 bytes. These paths still exhibit approximately
-  quadratic growth.
+- The same increase makes end-to-end history construction grow from 674,194 to
+  9,916,267 allocation operations (14.7x) and exact replay from 690,644 to
+  9,981,869 operations (14.5x). At scale 512, they request 1,078,885,750 and
+  1,087,775,557 bytes. These paths remain superlinear and close to quadratic
+  across this range despite the roughly halved elapsed time and allocated bytes.
 
 Those observations establish optimization targets; they do not change any
 runtime contract or claim that one subsystem alone is the cause.
