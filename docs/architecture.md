@@ -306,6 +306,10 @@ roots, and checkpoint hash.
 The six rollback checkpoint definitions and their exact capture/restore logic
 live in the dedicated `canwu-sim` transactions module; command, ingress,
 settlement, and scheduling orchestration call those shared private boundaries.
+The runtime partitions, evidence owner, and incremental commitment cache live in
+the dedicated private `canwu-sim` state module. This is an implementation
+ownership boundary only: public snapshots and replay journals remain flat and
+unchanged.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,

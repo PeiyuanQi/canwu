@@ -1,0 +1,2752 @@
+{
+  "benchmark": "canwu-architecture-baseline",
+  "engine_version": "0.4.0",
+  "environment": {
+    "arch": "x86_64",
+    "build_target": "",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "cargo_features": [
+      "allocation-counting"
+    ],
+    "encoded_rustflags": "",
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "rustflags": ""
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "thread-local allocator calls and requested bytes during the operation; setup and post-measurement drops are excluded",
+    "elapsed_scope": "not collected in the allocation-instrumented build",
+    "growth_samples": 3,
+    "operation_samples": 5,
+    "warmup_iterations": 1
+  },
+  "metric_mode": "allocations",
+  "recorded_on": "2026-08-16",
+  "scales": [
+    {
+      "cases": [
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 7184,
+              "allocated_bytes": 1475807,
+              "allocation_operations": 7824,
+              "dealloc_calls": 6500,
+              "deallocated_bytes": 1410465,
+              "realloc_calls": 640
+            },
+            {
+              "alloc_calls": 7184,
+              "allocated_bytes": 1475807,
+              "allocation_operations": 7824,
+              "dealloc_calls": 6500,
+              "deallocated_bytes": 1410465,
+              "realloc_calls": 640
+            },
+            {
+              "alloc_calls": 7184,
+              "allocated_bytes": 1475807,
+              "allocation_operations": 7824,
+              "dealloc_calls": 6500,
+              "deallocated_bytes": 1410465,
+              "realloc_calls": 640
+            }
+          ],
+          "name": "history_growth",
+          "summary": {
+            "alloc_calls_median": 7184,
+            "allocated_bytes_median": 1475807,
+            "allocation_operations_median": 7824,
+            "realloc_calls_median": 640
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 302,
+              "allocated_bytes": 56292,
+              "allocation_operations": 331,
+              "dealloc_calls": 295,
+              "deallocated_bytes": 45720,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 302,
+              "allocated_bytes": 56292,
+              "allocation_operations": 331,
+              "dealloc_calls": 295,
+              "deallocated_bytes": 45720,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 302,
+              "allocated_bytes": 56292,
+              "allocation_operations": 331,
+              "dealloc_calls": 295,
+              "deallocated_bytes": 45720,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 302,
+              "allocated_bytes": 56292,
+              "allocation_operations": 331,
+              "dealloc_calls": 295,
+              "deallocated_bytes": 45720,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 302,
+              "allocated_bytes": 56292,
+              "allocation_operations": 331,
+              "dealloc_calls": 295,
+              "deallocated_bytes": 45720,
+              "realloc_calls": 29
+            }
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "alloc_calls_median": 302,
+            "allocated_bytes_median": 56292,
+            "allocation_operations_median": 331,
+            "realloc_calls_median": 29
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 24023,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 16653,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 24023,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 16653,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 24023,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 16653,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 24023,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 16653,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 24023,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 16653,
+              "realloc_calls": 10
+            }
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "alloc_calls_median": 59,
+            "allocated_bytes_median": 24023,
+            "allocation_operations_median": 69,
+            "realloc_calls_median": 10
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 446,
+              "allocated_bytes": 118736,
+              "allocation_operations": 473,
+              "dealloc_calls": 441,
+              "deallocated_bytes": 115200,
+              "realloc_calls": 27
+            },
+            {
+              "alloc_calls": 446,
+              "allocated_bytes": 118736,
+              "allocation_operations": 473,
+              "dealloc_calls": 441,
+              "deallocated_bytes": 115200,
+              "realloc_calls": 27
+            },
+            {
+              "alloc_calls": 446,
+              "allocated_bytes": 118736,
+              "allocation_operations": 473,
+              "dealloc_calls": 441,
+              "deallocated_bytes": 115200,
+              "realloc_calls": 27
+            },
+            {
+              "alloc_calls": 446,
+              "allocated_bytes": 118736,
+              "allocation_operations": 473,
+              "dealloc_calls": 441,
+              "deallocated_bytes": 115200,
+              "realloc_calls": 27
+            },
+            {
+              "alloc_calls": 446,
+              "allocated_bytes": 118736,
+              "allocation_operations": 473,
+              "dealloc_calls": 441,
+              "deallocated_bytes": 115200,
+              "realloc_calls": 27
+            }
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "alloc_calls_median": 446,
+            "allocated_bytes_median": 118736,
+            "allocation_operations_median": 473,
+            "realloc_calls_median": 27
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 656,
+              "allocated_bytes": 154432,
+              "allocation_operations": 697,
+              "dealloc_calls": 614,
+              "deallocated_bytes": 147440,
+              "realloc_calls": 41
+            },
+            {
+              "alloc_calls": 656,
+              "allocated_bytes": 154432,
+              "allocation_operations": 697,
+              "dealloc_calls": 614,
+              "deallocated_bytes": 147440,
+              "realloc_calls": 41
+            },
+            {
+              "alloc_calls": 656,
+              "allocated_bytes": 154432,
+              "allocation_operations": 697,
+              "dealloc_calls": 614,
+              "deallocated_bytes": 147440,
+              "realloc_calls": 41
+            },
+            {
+              "alloc_calls": 656,
+              "allocated_bytes": 154432,
+              "allocation_operations": 697,
+              "dealloc_calls": 614,
+              "deallocated_bytes": 147440,
+              "realloc_calls": 41
+            },
+            {
+              "alloc_calls": 656,
+              "allocated_bytes": 154432,
+              "allocation_operations": 697,
+              "dealloc_calls": 614,
+              "deallocated_bytes": 147440,
+              "realloc_calls": 41
+            }
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "alloc_calls_median": 656,
+            "allocated_bytes_median": 154432,
+            "allocation_operations_median": 697,
+            "realloc_calls_median": 41
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 524,
+              "allocated_bytes": 43682,
+              "allocation_operations": 524,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 524,
+              "allocated_bytes": 43682,
+              "allocation_operations": 524,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 524,
+              "allocated_bytes": 43682,
+              "allocation_operations": 524,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 524,
+              "allocated_bytes": 43682,
+              "allocation_operations": 524,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 524,
+              "allocated_bytes": 43682,
+              "allocation_operations": 524,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "alloc_calls_median": 524,
+            "allocated_bytes_median": 43682,
+            "allocation_operations_median": 524,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            }
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 130944,
+            "allocation_operations_median": 10,
+            "realloc_calls_median": 9
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 199,
+              "allocated_bytes": 10898,
+              "allocation_operations": 199,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 199,
+              "allocated_bytes": 10898,
+              "allocation_operations": 199,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 199,
+              "allocated_bytes": 10898,
+              "allocation_operations": 199,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 199,
+              "allocated_bytes": 10898,
+              "allocation_operations": 199,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 199,
+              "allocated_bytes": 10898,
+              "allocation_operations": 199,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "alloc_calls_median": 199,
+            "allocated_bytes_median": 10898,
+            "allocation_operations_median": 199,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 65408,
+              "allocation_operations": 9,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 32640,
+              "realloc_calls": 8
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 65408,
+              "allocation_operations": 9,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 32640,
+              "realloc_calls": 8
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 65408,
+              "allocation_operations": 9,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 32640,
+              "realloc_calls": 8
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 65408,
+              "allocation_operations": 9,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 32640,
+              "realloc_calls": 8
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 65408,
+              "allocation_operations": 9,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 32640,
+              "realloc_calls": 8
+            }
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 65408,
+            "allocation_operations_median": 9,
+            "realloc_calls_median": 8
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 325,
+              "allocated_bytes": 32784,
+              "allocation_operations": 325,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 325,
+              "allocated_bytes": 32784,
+              "allocation_operations": 325,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 325,
+              "allocated_bytes": 32784,
+              "allocation_operations": 325,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 325,
+              "allocated_bytes": 32784,
+              "allocation_operations": 325,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 325,
+              "allocated_bytes": 32784,
+              "allocation_operations": 325,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "alloc_calls_median": 325,
+            "allocated_bytes_median": 32784,
+            "allocation_operations_median": 325,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "alloc_calls_median": 0,
+            "allocated_bytes_median": 0,
+            "allocation_operations_median": 0,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 2543,
+              "allocated_bytes": 523195,
+              "allocation_operations": 2817,
+              "dealloc_calls": 1949,
+              "deallocated_bytes": 448569,
+              "realloc_calls": 274
+            },
+            {
+              "alloc_calls": 2543,
+              "allocated_bytes": 523195,
+              "allocation_operations": 2817,
+              "dealloc_calls": 1949,
+              "deallocated_bytes": 448569,
+              "realloc_calls": 274
+            },
+            {
+              "alloc_calls": 2543,
+              "allocated_bytes": 523195,
+              "allocation_operations": 2817,
+              "dealloc_calls": 1949,
+              "deallocated_bytes": 448569,
+              "realloc_calls": 274
+            },
+            {
+              "alloc_calls": 2543,
+              "allocated_bytes": 523195,
+              "allocation_operations": 2817,
+              "dealloc_calls": 1949,
+              "deallocated_bytes": 448569,
+              "realloc_calls": 274
+            },
+            {
+              "alloc_calls": 2543,
+              "allocated_bytes": 523195,
+              "allocation_operations": 2817,
+              "dealloc_calls": 1949,
+              "deallocated_bytes": 448569,
+              "realloc_calls": 274
+            }
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "alloc_calls_median": 2543,
+            "allocated_bytes_median": 523195,
+            "allocation_operations_median": 2817,
+            "realloc_calls_median": 274
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 8160,
+              "allocated_bytes": 1625246,
+              "allocation_operations": 8914,
+              "dealloc_calls": 7521,
+              "deallocated_bytes": 1562794,
+              "realloc_calls": 754
+            },
+            {
+              "alloc_calls": 8160,
+              "allocated_bytes": 1625246,
+              "allocation_operations": 8914,
+              "dealloc_calls": 7521,
+              "deallocated_bytes": 1562794,
+              "realloc_calls": 754
+            },
+            {
+              "alloc_calls": 8160,
+              "allocated_bytes": 1625246,
+              "allocation_operations": 8914,
+              "dealloc_calls": 7521,
+              "deallocated_bytes": 1562794,
+              "realloc_calls": 754
+            },
+            {
+              "alloc_calls": 8160,
+              "allocated_bytes": 1625246,
+              "allocation_operations": 8914,
+              "dealloc_calls": 7521,
+              "deallocated_bytes": 1562794,
+              "realloc_calls": 754
+            },
+            {
+              "alloc_calls": 8160,
+              "allocated_bytes": 1625246,
+              "allocation_operations": 8914,
+              "dealloc_calls": 7521,
+              "deallocated_bytes": 1562794,
+              "realloc_calls": 754
+            }
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "alloc_calls_median": 8160,
+            "allocated_bytes_median": 1625246,
+            "allocation_operations_median": 8914,
+            "realloc_calls_median": 754
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "current_state_checkpoint_bytes": 18021,
+        "full_checkpoint_journal_bytes": 68564,
+        "full_journal_segment_bytes": 41691
+      },
+      "history": {
+        "boundaries": 8,
+        "checkpoint_hash": "403e51293896bb09b92e5d81e2ea1a14a8644770b896ff2a64fbe0120d003949",
+        "command_attempts": 16,
+        "commands": 8,
+        "domain_records": 0,
+        "events": 24,
+        "ingress": 0,
+        "plugin_components": 8,
+        "random_draws": 8,
+        "snapshot_size_bytes": 57761,
+        "world_entities": 25
+      },
+      "scale": 8
+    },
+    {
+      "cases": [
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 60751,
+              "allocated_bytes": 12614771,
+              "allocation_operations": 63507,
+              "dealloc_calls": 58542,
+              "deallocated_bytes": 12398431,
+              "realloc_calls": 2756
+            },
+            {
+              "alloc_calls": 60751,
+              "allocated_bytes": 12614771,
+              "allocation_operations": 63507,
+              "dealloc_calls": 58542,
+              "deallocated_bytes": 12398431,
+              "realloc_calls": 2756
+            },
+            {
+              "alloc_calls": 60751,
+              "allocated_bytes": 12614771,
+              "allocation_operations": 63507,
+              "dealloc_calls": 58542,
+              "deallocated_bytes": 12398431,
+              "realloc_calls": 2756
+            }
+          ],
+          "name": "history_growth",
+          "summary": {
+            "alloc_calls_median": 60751,
+            "allocated_bytes_median": 12614771,
+            "allocation_operations_median": 63507,
+            "realloc_calls_median": 2756
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 932,
+              "allocated_bytes": 188619,
+              "allocation_operations": 969,
+              "dealloc_calls": 925,
+              "deallocated_bytes": 146751,
+              "realloc_calls": 37
+            },
+            {
+              "alloc_calls": 932,
+              "allocated_bytes": 188619,
+              "allocation_operations": 969,
+              "dealloc_calls": 925,
+              "deallocated_bytes": 146751,
+              "realloc_calls": 37
+            },
+            {
+              "alloc_calls": 932,
+              "allocated_bytes": 188619,
+              "allocation_operations": 969,
+              "dealloc_calls": 925,
+              "deallocated_bytes": 146751,
+              "realloc_calls": 37
+            },
+            {
+              "alloc_calls": 932,
+              "allocated_bytes": 188619,
+              "allocation_operations": 969,
+              "dealloc_calls": 925,
+              "deallocated_bytes": 146751,
+              "realloc_calls": 37
+            },
+            {
+              "alloc_calls": 932,
+              "allocated_bytes": 188619,
+              "allocation_operations": 969,
+              "dealloc_calls": 925,
+              "deallocated_bytes": 146751,
+              "realloc_calls": 37
+            }
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "alloc_calls_median": 932,
+            "allocated_bytes_median": 188619,
+            "allocation_operations_median": 969,
+            "realloc_calls_median": 37
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 67799,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 38541,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 67799,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 38541,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 67799,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 38541,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 67799,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 38541,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 67799,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 38541,
+              "realloc_calls": 10
+            }
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "alloc_calls_median": 59,
+            "allocated_bytes_median": 67799,
+            "allocation_operations_median": 69,
+            "realloc_calls_median": 10
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1208,
+              "allocated_bytes": 396068,
+              "allocation_operations": 1237,
+              "dealloc_calls": 1203,
+              "deallocated_bytes": 382740,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 1208,
+              "allocated_bytes": 396068,
+              "allocation_operations": 1237,
+              "dealloc_calls": 1203,
+              "deallocated_bytes": 382740,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 1208,
+              "allocated_bytes": 396068,
+              "allocation_operations": 1237,
+              "dealloc_calls": 1203,
+              "deallocated_bytes": 382740,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 1208,
+              "allocated_bytes": 396068,
+              "allocation_operations": 1237,
+              "dealloc_calls": 1203,
+              "deallocated_bytes": 382740,
+              "realloc_calls": 29
+            },
+            {
+              "alloc_calls": 1208,
+              "allocated_bytes": 396068,
+              "allocation_operations": 1237,
+              "dealloc_calls": 1203,
+              "deallocated_bytes": 382740,
+              "realloc_calls": 29
+            }
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "alloc_calls_median": 1208,
+            "allocated_bytes_median": 396068,
+            "allocation_operations_median": 1237,
+            "realloc_calls_median": 29
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1706,
+              "allocated_bytes": 466726,
+              "allocation_operations": 1751,
+              "dealloc_calls": 1664,
+              "deallocated_bytes": 443983,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 1706,
+              "allocated_bytes": 466726,
+              "allocation_operations": 1751,
+              "dealloc_calls": 1664,
+              "deallocated_bytes": 443983,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 1706,
+              "allocated_bytes": 466726,
+              "allocation_operations": 1751,
+              "dealloc_calls": 1664,
+              "deallocated_bytes": 443983,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 1706,
+              "allocated_bytes": 466726,
+              "allocation_operations": 1751,
+              "dealloc_calls": 1664,
+              "deallocated_bytes": 443983,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 1706,
+              "allocated_bytes": 466726,
+              "allocation_operations": 1751,
+              "dealloc_calls": 1664,
+              "deallocated_bytes": 443983,
+              "realloc_calls": 45
+            }
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "alloc_calls_median": 1706,
+            "allocated_bytes_median": 466726,
+            "allocation_operations_median": 1751,
+            "realloc_calls_median": 45
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1700,
+              "allocated_bytes": 156348,
+              "allocation_operations": 1700,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1700,
+              "allocated_bytes": 156348,
+              "allocation_operations": 1700,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1700,
+              "allocated_bytes": 156348,
+              "allocation_operations": 1700,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1700,
+              "allocated_bytes": 156348,
+              "allocation_operations": 1700,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1700,
+              "allocated_bytes": 156348,
+              "allocation_operations": 1700,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "alloc_calls_median": 1700,
+            "allocated_bytes_median": 156348,
+            "allocation_operations_median": 1700,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            }
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 524160,
+            "allocation_operations_median": 12,
+            "realloc_calls_median": 11
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 415,
+              "allocated_bytes": 24982,
+              "allocation_operations": 415,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 415,
+              "allocated_bytes": 24982,
+              "allocation_operations": 415,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 415,
+              "allocated_bytes": 24982,
+              "allocation_operations": 415,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 415,
+              "allocated_bytes": 24982,
+              "allocation_operations": 415,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 415,
+              "allocated_bytes": 24982,
+              "allocation_operations": 415,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "alloc_calls_median": 415,
+            "allocated_bytes_median": 24982,
+            "allocation_operations_median": 415,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 130944,
+              "allocation_operations": 10,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 65408,
+              "realloc_calls": 9
+            }
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 130944,
+            "allocation_operations_median": 10,
+            "realloc_calls_median": 9
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1285,
+              "allocated_bytes": 131366,
+              "allocation_operations": 1285,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1285,
+              "allocated_bytes": 131366,
+              "allocation_operations": 1285,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1285,
+              "allocated_bytes": 131366,
+              "allocation_operations": 1285,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1285,
+              "allocated_bytes": 131366,
+              "allocation_operations": 1285,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1285,
+              "allocated_bytes": 131366,
+              "allocation_operations": 1285,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "alloc_calls_median": 1285,
+            "allocated_bytes_median": 131366,
+            "allocation_operations_median": 1285,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "alloc_calls_median": 0,
+            "allocated_bytes_median": 0,
+            "allocation_operations_median": 0,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 7317,
+              "allocated_bytes": 1769426,
+              "allocation_operations": 8053,
+              "dealloc_calls": 5439,
+              "deallocated_bytes": 1519783,
+              "realloc_calls": 736
+            },
+            {
+              "alloc_calls": 7317,
+              "allocated_bytes": 1769426,
+              "allocation_operations": 8053,
+              "dealloc_calls": 5439,
+              "deallocated_bytes": 1519783,
+              "realloc_calls": 736
+            },
+            {
+              "alloc_calls": 7317,
+              "allocated_bytes": 1769426,
+              "allocation_operations": 8053,
+              "dealloc_calls": 5439,
+              "deallocated_bytes": 1519783,
+              "realloc_calls": 736
+            },
+            {
+              "alloc_calls": 7317,
+              "allocated_bytes": 1769426,
+              "allocation_operations": 8053,
+              "dealloc_calls": 5439,
+              "deallocated_bytes": 1519783,
+              "realloc_calls": 736
+            },
+            {
+              "alloc_calls": 7317,
+              "allocated_bytes": 1769426,
+              "allocation_operations": 8053,
+              "dealloc_calls": 5439,
+              "deallocated_bytes": 1519783,
+              "realloc_calls": 736
+            }
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "alloc_calls_median": 7317,
+            "allocated_bytes_median": 1769426,
+            "allocation_operations_median": 8053,
+            "realloc_calls_median": 736
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 64463,
+              "allocated_bytes": 13180418,
+              "allocation_operations": 67669,
+              "dealloc_calls": 62419,
+              "deallocated_bytes": 12975464,
+              "realloc_calls": 3206
+            },
+            {
+              "alloc_calls": 64463,
+              "allocated_bytes": 13180418,
+              "allocation_operations": 67669,
+              "dealloc_calls": 62419,
+              "deallocated_bytes": 12975464,
+              "realloc_calls": 3206
+            },
+            {
+              "alloc_calls": 64463,
+              "allocated_bytes": 13180418,
+              "allocation_operations": 67669,
+              "dealloc_calls": 62419,
+              "deallocated_bytes": 12975464,
+              "realloc_calls": 3206
+            },
+            {
+              "alloc_calls": 64463,
+              "allocated_bytes": 13180418,
+              "allocation_operations": 67669,
+              "dealloc_calls": 62419,
+              "deallocated_bytes": 12975464,
+              "realloc_calls": 3206
+            },
+            {
+              "alloc_calls": 64463,
+              "allocated_bytes": 13180418,
+              "allocation_operations": 67669,
+              "dealloc_calls": 62419,
+              "deallocated_bytes": 12975464,
+              "realloc_calls": 3206
+            }
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "alloc_calls_median": 64463,
+            "allocated_bytes_median": 13180418,
+            "allocation_operations_median": 67669,
+            "realloc_calls_median": 3206
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "current_state_checkpoint_bytes": 40778,
+        "full_checkpoint_journal_bytes": 240064,
+        "full_journal_segment_bytes": 166290
+      },
+      "history": {
+        "boundaries": 32,
+        "checkpoint_hash": "1eaa38381ee457c22a3e188fd6fa52a28b741a52d50adb3802241281fed830bb",
+        "command_attempts": 64,
+        "commands": 32,
+        "domain_records": 0,
+        "events": 96,
+        "ingress": 0,
+        "plugin_components": 32,
+        "random_draws": 32,
+        "snapshot_size_bytes": 203143,
+        "world_entities": 97
+      },
+      "scale": 32
+    },
+    {
+      "cases": [
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 777464,
+              "allocated_bytes": 155608040,
+              "allocation_operations": 789765,
+              "dealloc_calls": 769168,
+              "deallocated_bytes": 154803760,
+              "realloc_calls": 12301
+            },
+            {
+              "alloc_calls": 777464,
+              "allocated_bytes": 155608040,
+              "allocation_operations": 789765,
+              "dealloc_calls": 769168,
+              "deallocated_bytes": 154803760,
+              "realloc_calls": 12301
+            },
+            {
+              "alloc_calls": 777464,
+              "allocated_bytes": 155608040,
+              "allocation_operations": 789765,
+              "dealloc_calls": 769168,
+              "deallocated_bytes": 154803760,
+              "realloc_calls": 12301
+            }
+          ],
+          "name": "history_growth",
+          "summary": {
+            "alloc_calls_median": 777464,
+            "allocated_bytes_median": 155608040,
+            "allocation_operations_median": 789765,
+            "realloc_calls_median": 12301
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 3444,
+              "allocated_bytes": 696207,
+              "allocation_operations": 3489,
+              "dealloc_calls": 3437,
+              "deallocated_bytes": 529155,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 3444,
+              "allocated_bytes": 696207,
+              "allocation_operations": 3489,
+              "dealloc_calls": 3437,
+              "deallocated_bytes": 529155,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 3444,
+              "allocated_bytes": 696207,
+              "allocation_operations": 3489,
+              "dealloc_calls": 3437,
+              "deallocated_bytes": 529155,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 3444,
+              "allocated_bytes": 696207,
+              "allocation_operations": 3489,
+              "dealloc_calls": 3437,
+              "deallocated_bytes": 529155,
+              "realloc_calls": 45
+            },
+            {
+              "alloc_calls": 3444,
+              "allocated_bytes": 696207,
+              "allocation_operations": 3489,
+              "dealloc_calls": 3437,
+              "deallocated_bytes": 529155,
+              "realloc_calls": 45
+            }
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "alloc_calls_median": 3444,
+            "allocated_bytes_median": 696207,
+            "allocation_operations_median": 3489,
+            "realloc_calls_median": 45
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 242903,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 126093,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 242903,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 126093,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 242903,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 126093,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 242903,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 126093,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 242903,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 126093,
+              "realloc_calls": 10
+            }
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "alloc_calls_median": 59,
+            "allocated_bytes_median": 242903,
+            "allocation_operations_median": 69,
+            "realloc_calls_median": 10
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 4232,
+              "allocated_bytes": 1454880,
+              "allocation_operations": 4263,
+              "dealloc_calls": 4227,
+              "deallocated_bytes": 1402384,
+              "realloc_calls": 31
+            },
+            {
+              "alloc_calls": 4232,
+              "allocated_bytes": 1454880,
+              "allocation_operations": 4263,
+              "dealloc_calls": 4227,
+              "deallocated_bytes": 1402384,
+              "realloc_calls": 31
+            },
+            {
+              "alloc_calls": 4232,
+              "allocated_bytes": 1454880,
+              "allocation_operations": 4263,
+              "dealloc_calls": 4227,
+              "deallocated_bytes": 1402384,
+              "realloc_calls": 31
+            },
+            {
+              "alloc_calls": 4232,
+              "allocated_bytes": 1454880,
+              "allocation_operations": 4263,
+              "dealloc_calls": 4227,
+              "deallocated_bytes": 1402384,
+              "realloc_calls": 31
+            },
+            {
+              "alloc_calls": 4232,
+              "allocated_bytes": 1454880,
+              "allocation_operations": 4263,
+              "dealloc_calls": 4227,
+              "deallocated_bytes": 1402384,
+              "realloc_calls": 31
+            }
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "alloc_calls_median": 4232,
+            "allocated_bytes_median": 1454880,
+            "allocation_operations_median": 4263,
+            "realloc_calls_median": 31
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 5883,
+              "allocated_bytes": 1669485,
+              "allocation_operations": 5932,
+              "dealloc_calls": 5840,
+              "deallocated_bytes": 1579695,
+              "realloc_calls": 49
+            },
+            {
+              "alloc_calls": 5883,
+              "allocated_bytes": 1669485,
+              "allocation_operations": 5932,
+              "dealloc_calls": 5840,
+              "deallocated_bytes": 1579695,
+              "realloc_calls": 49
+            },
+            {
+              "alloc_calls": 5883,
+              "allocated_bytes": 1669485,
+              "allocation_operations": 5932,
+              "dealloc_calls": 5840,
+              "deallocated_bytes": 1579695,
+              "realloc_calls": 49
+            },
+            {
+              "alloc_calls": 5883,
+              "allocated_bytes": 1669485,
+              "allocation_operations": 5932,
+              "dealloc_calls": 5840,
+              "deallocated_bytes": 1579695,
+              "realloc_calls": 49
+            },
+            {
+              "alloc_calls": 5883,
+              "allocated_bytes": 1669485,
+              "allocation_operations": 5932,
+              "dealloc_calls": 5840,
+              "deallocated_bytes": 1579695,
+              "realloc_calls": 49
+            }
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "alloc_calls_median": 5883,
+            "allocated_bytes_median": 1669485,
+            "allocation_operations_median": 5932,
+            "realloc_calls_median": 49
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 6404,
+              "allocated_bytes": 607340,
+              "allocation_operations": 6404,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 6404,
+              "allocated_bytes": 607340,
+              "allocation_operations": 6404,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 6404,
+              "allocated_bytes": 607340,
+              "allocation_operations": 6404,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 6404,
+              "allocated_bytes": 607340,
+              "allocation_operations": 6404,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 6404,
+              "allocated_bytes": 607340,
+              "allocation_operations": 6404,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "alloc_calls_median": 6404,
+            "allocated_bytes_median": 607340,
+            "allocation_operations_median": 6404,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 2097024,
+              "allocation_operations": 14,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 1048448,
+              "realloc_calls": 13
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 2097024,
+              "allocation_operations": 14,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 1048448,
+              "realloc_calls": 13
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 2097024,
+              "allocation_operations": 14,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 1048448,
+              "realloc_calls": 13
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 2097024,
+              "allocation_operations": 14,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 1048448,
+              "realloc_calls": 13
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 2097024,
+              "allocation_operations": 14,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 1048448,
+              "realloc_calls": 13
+            }
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 2097024,
+            "allocation_operations_median": 14,
+            "realloc_calls_median": 13
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1279,
+              "allocated_bytes": 81450,
+              "allocation_operations": 1279,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1279,
+              "allocated_bytes": 81450,
+              "allocation_operations": 1279,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1279,
+              "allocated_bytes": 81450,
+              "allocation_operations": 1279,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1279,
+              "allocated_bytes": 81450,
+              "allocation_operations": 1279,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 1279,
+              "allocated_bytes": 81450,
+              "allocation_operations": 1279,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "alloc_calls_median": 1279,
+            "allocated_bytes_median": 81450,
+            "allocation_operations_median": 1279,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 524160,
+              "allocation_operations": 12,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 262016,
+              "realloc_calls": 11
+            }
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 524160,
+            "allocation_operations_median": 12,
+            "realloc_calls_median": 11
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 5125,
+              "allocated_bytes": 525890,
+              "allocation_operations": 5125,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 5125,
+              "allocated_bytes": 525890,
+              "allocation_operations": 5125,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 5125,
+              "allocated_bytes": 525890,
+              "allocation_operations": 5125,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 5125,
+              "allocated_bytes": 525890,
+              "allocation_operations": 5125,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 5125,
+              "allocated_bytes": 525890,
+              "allocation_operations": 5125,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "alloc_calls_median": 5125,
+            "allocated_bytes_median": 525890,
+            "allocation_operations_median": 5125,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "alloc_calls_median": 0,
+            "allocated_bytes_median": 0,
+            "allocation_operations_median": 0,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 26373,
+              "allocated_bytes": 6632537,
+              "allocation_operations": 28795,
+              "dealloc_calls": 19375,
+              "deallocated_bytes": 5711361,
+              "realloc_calls": 2422
+            },
+            {
+              "alloc_calls": 26373,
+              "allocated_bytes": 6632537,
+              "allocation_operations": 28795,
+              "dealloc_calls": 19375,
+              "deallocated_bytes": 5711361,
+              "realloc_calls": 2422
+            },
+            {
+              "alloc_calls": 26373,
+              "allocated_bytes": 6632537,
+              "allocation_operations": 28795,
+              "dealloc_calls": 19375,
+              "deallocated_bytes": 5711361,
+              "realloc_calls": 2422
+            },
+            {
+              "alloc_calls": 26373,
+              "allocated_bytes": 6632537,
+              "allocation_operations": 28795,
+              "dealloc_calls": 19375,
+              "deallocated_bytes": 5711361,
+              "realloc_calls": 2422
+            },
+            {
+              "alloc_calls": 26373,
+              "allocated_bytes": 6632537,
+              "allocation_operations": 28795,
+              "dealloc_calls": 19375,
+              "deallocated_bytes": 5711361,
+              "realloc_calls": 2422
+            }
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "alloc_calls_median": 26373,
+            "allocated_bytes_median": 6632537,
+            "allocation_operations_median": 28795,
+            "realloc_calls_median": 2422
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 792120,
+              "allocated_bytes": 157838519,
+              "allocation_operations": 806215,
+              "dealloc_calls": 784469,
+              "deallocated_bytes": 157079609,
+              "realloc_calls": 14095
+            },
+            {
+              "alloc_calls": 792120,
+              "allocated_bytes": 157838519,
+              "allocation_operations": 806215,
+              "dealloc_calls": 784469,
+              "deallocated_bytes": 157079609,
+              "realloc_calls": 14095
+            },
+            {
+              "alloc_calls": 792120,
+              "allocated_bytes": 157838519,
+              "allocation_operations": 806215,
+              "dealloc_calls": 784469,
+              "deallocated_bytes": 157079609,
+              "realloc_calls": 14095
+            },
+            {
+              "alloc_calls": 792120,
+              "allocated_bytes": 157838519,
+              "allocation_operations": 806215,
+              "dealloc_calls": 784469,
+              "deallocated_bytes": 157079609,
+              "realloc_calls": 14095
+            },
+            {
+              "alloc_calls": 792120,
+              "allocated_bytes": 157838519,
+              "allocation_operations": 806215,
+              "dealloc_calls": 784469,
+              "deallocated_bytes": 157079609,
+              "realloc_calls": 14095
+            }
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "alloc_calls_median": 792120,
+            "allocated_bytes_median": 157838519,
+            "allocation_operations_median": 806215,
+            "realloc_calls_median": 14095
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "current_state_checkpoint_bytes": 132145,
+        "full_checkpoint_journal_bytes": 929336,
+        "full_journal_segment_bytes": 667619
+      },
+      "history": {
+        "boundaries": 128,
+        "checkpoint_hash": "82fc6d29bd35e0cadc7d2659c60972b228468fc603a038a8f7f2ef2cdc5e47cb",
+        "command_attempts": 256,
+        "commands": 128,
+        "domain_records": 0,
+        "events": 384,
+        "ingress": 0,
+        "plugin_components": 128,
+        "random_draws": 128,
+        "snapshot_size_bytes": 787957,
+        "world_entities": 385
+      },
+      "scale": 128
+    },
+    {
+      "cases": [
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 11700773,
+              "allocated_bytes": 2351954381,
+              "allocation_operations": 11755813,
+              "dealloc_calls": 11668117,
+              "deallocated_bytes": 2348782327,
+              "realloc_calls": 55040
+            },
+            {
+              "alloc_calls": 11700773,
+              "allocated_bytes": 2351954381,
+              "allocation_operations": 11755813,
+              "dealloc_calls": 11668117,
+              "deallocated_bytes": 2348782327,
+              "realloc_calls": 55040
+            },
+            {
+              "alloc_calls": 11700773,
+              "allocated_bytes": 2351954381,
+              "allocation_operations": 11755813,
+              "dealloc_calls": 11668117,
+              "deallocated_bytes": 2348782327,
+              "realloc_calls": 55040
+            }
+          ],
+          "name": "history_growth",
+          "summary": {
+            "alloc_calls_median": 11700773,
+            "allocated_bytes_median": 2351954381,
+            "allocation_operations_median": 11755813,
+            "realloc_calls_median": 55040
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 13500,
+              "allocated_bytes": 2750991,
+              "allocation_operations": 13553,
+              "dealloc_calls": 13493,
+              "deallocated_bytes": 2083203,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 13500,
+              "allocated_bytes": 2750991,
+              "allocation_operations": 13553,
+              "dealloc_calls": 13493,
+              "deallocated_bytes": 2083203,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 13500,
+              "allocated_bytes": 2750991,
+              "allocation_operations": 13553,
+              "dealloc_calls": 13493,
+              "deallocated_bytes": 2083203,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 13500,
+              "allocated_bytes": 2750991,
+              "allocation_operations": 13553,
+              "dealloc_calls": 13493,
+              "deallocated_bytes": 2083203,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 13500,
+              "allocated_bytes": 2750991,
+              "allocation_operations": 13553,
+              "dealloc_calls": 13493,
+              "deallocated_bytes": 2083203,
+              "realloc_calls": 53
+            }
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "alloc_calls_median": 13500,
+            "allocated_bytes_median": 2750991,
+            "allocation_operations_median": 13553,
+            "realloc_calls_median": 53
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 943319,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 476301,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 943319,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 476301,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 943319,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 476301,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 943319,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 476301,
+              "realloc_calls": 10
+            },
+            {
+              "alloc_calls": 59,
+              "allocated_bytes": 943319,
+              "allocation_operations": 69,
+              "dealloc_calls": 57,
+              "deallocated_bytes": 476301,
+              "realloc_calls": 10
+            }
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "alloc_calls_median": 59,
+            "allocated_bytes_median": 943319,
+            "allocation_operations_median": 69,
+            "realloc_calls_median": 10
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 16352,
+              "allocated_bytes": 5744256,
+              "allocation_operations": 16385,
+              "dealloc_calls": 16347,
+              "deallocated_bytes": 5535088,
+              "realloc_calls": 33
+            },
+            {
+              "alloc_calls": 16352,
+              "allocated_bytes": 5744256,
+              "allocation_operations": 16385,
+              "dealloc_calls": 16347,
+              "deallocated_bytes": 5535088,
+              "realloc_calls": 33
+            },
+            {
+              "alloc_calls": 16352,
+              "allocated_bytes": 5744256,
+              "allocation_operations": 16385,
+              "dealloc_calls": 16347,
+              "deallocated_bytes": 5535088,
+              "realloc_calls": 33
+            },
+            {
+              "alloc_calls": 16352,
+              "allocated_bytes": 5744256,
+              "allocation_operations": 16385,
+              "dealloc_calls": 16347,
+              "deallocated_bytes": 5535088,
+              "realloc_calls": 33
+            },
+            {
+              "alloc_calls": 16352,
+              "allocated_bytes": 5744256,
+              "allocation_operations": 16385,
+              "dealloc_calls": 16347,
+              "deallocated_bytes": 5535088,
+              "realloc_calls": 33
+            }
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "alloc_calls_median": 16352,
+            "allocated_bytes_median": 5744256,
+            "allocation_operations_median": 16385,
+            "realloc_calls_median": 33
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 22612,
+              "allocated_bytes": 6523221,
+              "allocation_operations": 22665,
+              "dealloc_calls": 22569,
+              "deallocated_bytes": 6181527,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 22612,
+              "allocated_bytes": 6523221,
+              "allocation_operations": 22665,
+              "dealloc_calls": 22569,
+              "deallocated_bytes": 6181527,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 22612,
+              "allocated_bytes": 6523221,
+              "allocation_operations": 22665,
+              "dealloc_calls": 22569,
+              "deallocated_bytes": 6181527,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 22612,
+              "allocated_bytes": 6523221,
+              "allocation_operations": 22665,
+              "dealloc_calls": 22569,
+              "deallocated_bytes": 6181527,
+              "realloc_calls": 53
+            },
+            {
+              "alloc_calls": 22612,
+              "allocated_bytes": 6523221,
+              "allocation_operations": 22665,
+              "dealloc_calls": 22569,
+              "deallocated_bytes": 6181527,
+              "realloc_calls": 53
+            }
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "alloc_calls_median": 22612,
+            "allocated_bytes_median": 6523221,
+            "allocation_operations_median": 22665,
+            "realloc_calls_median": 53
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 25220,
+              "allocated_bytes": 2413994,
+              "allocation_operations": 25220,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 25220,
+              "allocated_bytes": 2413994,
+              "allocation_operations": 25220,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 25220,
+              "allocated_bytes": 2413994,
+              "allocation_operations": 25220,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 25220,
+              "allocated_bytes": 2413994,
+              "allocation_operations": 25220,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 25220,
+              "allocated_bytes": 2413994,
+              "allocation_operations": 25220,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "alloc_calls_median": 25220,
+            "allocated_bytes_median": 2413994,
+            "allocation_operations_median": 25220,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 8388480,
+              "allocation_operations": 16,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 4194176,
+              "realloc_calls": 15
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 8388480,
+              "allocation_operations": 16,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 4194176,
+              "realloc_calls": 15
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 8388480,
+              "allocation_operations": 16,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 4194176,
+              "realloc_calls": 15
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 8388480,
+              "allocation_operations": 16,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 4194176,
+              "realloc_calls": 15
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 8388480,
+              "allocation_operations": 16,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 4194176,
+              "realloc_calls": 15
+            }
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 8388480,
+            "allocation_operations_median": 16,
+            "realloc_calls_median": 15
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 4735,
+              "allocated_bytes": 308394,
+              "allocation_operations": 4735,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 4735,
+              "allocated_bytes": 308394,
+              "allocation_operations": 4735,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 4735,
+              "allocated_bytes": 308394,
+              "allocation_operations": 4735,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 4735,
+              "allocated_bytes": 308394,
+              "allocation_operations": 4735,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 4735,
+              "allocated_bytes": 308394,
+              "allocation_operations": 4735,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "alloc_calls_median": 4735,
+            "allocated_bytes_median": 308394,
+            "allocation_operations_median": 4735,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 1048448,
+              "allocation_operations": 13,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 524160,
+              "realloc_calls": 12
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 1048448,
+              "allocation_operations": 13,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 524160,
+              "realloc_calls": 12
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 1048448,
+              "allocation_operations": 13,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 524160,
+              "realloc_calls": 12
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 1048448,
+              "allocation_operations": 13,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 524160,
+              "realloc_calls": 12
+            },
+            {
+              "alloc_calls": 1,
+              "allocated_bytes": 1048448,
+              "allocation_operations": 13,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 524160,
+              "realloc_calls": 12
+            }
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "alloc_calls_median": 1,
+            "allocated_bytes_median": 1048448,
+            "allocation_operations_median": 13,
+            "realloc_calls_median": 12
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 20485,
+              "allocated_bytes": 2105600,
+              "allocation_operations": 20485,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 20485,
+              "allocated_bytes": 2105600,
+              "allocation_operations": 20485,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 20485,
+              "allocated_bytes": 2105600,
+              "allocation_operations": 20485,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 20485,
+              "allocated_bytes": 2105600,
+              "allocation_operations": 20485,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 20485,
+              "allocated_bytes": 2105600,
+              "allocation_operations": 20485,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "alloc_calls_median": 20485,
+            "allocated_bytes_median": 2105600,
+            "allocation_operations_median": 20485,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            },
+            {
+              "alloc_calls": 0,
+              "allocated_bytes": 0,
+              "allocation_operations": 0,
+              "dealloc_calls": 0,
+              "deallocated_bytes": 0,
+              "realloc_calls": 0
+            }
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "alloc_calls_median": 0,
+            "allocated_bytes_median": 0,
+            "allocation_operations_median": 0,
+            "realloc_calls_median": 0
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 102618,
+              "allocated_bytes": 26246197,
+              "allocation_operations": 111622,
+              "dealloc_calls": 75124,
+              "deallocated_bytes": 22607039,
+              "realloc_calls": 9004
+            },
+            {
+              "alloc_calls": 102618,
+              "allocated_bytes": 26246197,
+              "allocation_operations": 111622,
+              "dealloc_calls": 75124,
+              "deallocated_bytes": 22607039,
+              "realloc_calls": 9004
+            },
+            {
+              "alloc_calls": 102618,
+              "allocated_bytes": 26246197,
+              "allocation_operations": 111622,
+              "dealloc_calls": 75124,
+              "deallocated_bytes": 22607039,
+              "realloc_calls": 9004
+            },
+            {
+              "alloc_calls": 102618,
+              "allocated_bytes": 26246197,
+              "allocation_operations": 111622,
+              "dealloc_calls": 75124,
+              "deallocated_bytes": 22607039,
+              "realloc_calls": 9004
+            },
+            {
+              "alloc_calls": 102618,
+              "allocated_bytes": 26246197,
+              "allocation_operations": 111622,
+              "dealloc_calls": 75124,
+              "deallocated_bytes": 22607039,
+              "realloc_calls": 9004
+            }
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "alloc_calls_median": 102618,
+            "allocated_bytes_median": 26246197,
+            "allocation_operations_median": 111622,
+            "realloc_calls_median": 9004
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 11759205,
+              "allocated_bytes": 2360844188,
+              "allocation_operations": 11821415,
+              "dealloc_calls": 11729114,
+              "deallocated_bytes": 2357853440,
+              "realloc_calls": 62210
+            },
+            {
+              "alloc_calls": 11759205,
+              "allocated_bytes": 2360844188,
+              "allocation_operations": 11821415,
+              "dealloc_calls": 11729114,
+              "deallocated_bytes": 2357853440,
+              "realloc_calls": 62210
+            },
+            {
+              "alloc_calls": 11759205,
+              "allocated_bytes": 2360844188,
+              "allocation_operations": 11821415,
+              "dealloc_calls": 11729114,
+              "deallocated_bytes": 2357853440,
+              "realloc_calls": 62210
+            },
+            {
+              "alloc_calls": 11759205,
+              "allocated_bytes": 2360844188,
+              "allocation_operations": 11821415,
+              "dealloc_calls": 11729114,
+              "deallocated_bytes": 2357853440,
+              "realloc_calls": 62210
+            },
+            {
+              "alloc_calls": 11759205,
+              "allocated_bytes": 2360844188,
+              "allocation_operations": 11821415,
+              "dealloc_calls": 11729114,
+              "deallocated_bytes": 2357853440,
+              "realloc_calls": 62210
+            }
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "alloc_calls_median": 11759205,
+            "allocated_bytes_median": 2360844188,
+            "allocation_operations_median": 11821415,
+            "realloc_calls_median": 62210
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "current_state_checkpoint_bytes": 500496,
+        "full_checkpoint_journal_bytes": 3698799,
+        "full_journal_segment_bytes": 2682427
+      },
+      "history": {
+        "boundaries": 512,
+        "checkpoint_hash": "2cff7dd66c89c93c6bfad0aa737621d9887914c3a26990d1139a4902b491f7ce",
+        "command_attempts": 1024,
+        "commands": 512,
+        "domain_records": 0,
+        "events": 1536,
+        "ingress": 0,
+        "plugin_components": 512,
+        "random_draws": 512,
+        "snapshot_size_bytes": 3139624,
+        "world_entities": 1537
+      },
+      "scale": 512
+    }
+  ],
+  "schema_version": 2,
+  "snapshot_format_version": 4,
+  "source": {
+    "commit": "348bb2c3325b5a1c8ea517886fa299ddfe1ca44b",
+    "engine_source_dirty": true,
+    "source_file_hashes": {
+      "Cargo.lock": "02b271a5ec41537069f158592f21f940f92e94b2",
+      "Cargo.toml": "9ac66cd32ab80c97d76516e370f851439b05b5b8",
+      "benchmarks/performance-harness/Cargo.lock": "e5d668dc9d1bec684b5120300cdd0981a35b2b75",
+      "benchmarks/performance-harness/Cargo.toml": "10dcc4d2dcffd4cb43cc78a840234d3f3dca8ea7",
+      "benchmarks/performance-harness/src/main.rs": "3f8671fa577e7115b0bdabf22df806c334e5f23d",
+      "crates/canwu-api/Cargo.toml": "a184bcd6eabd31d7c118acd673f3bac871c2e290",
+      "crates/canwu-api/examples/move_army.rs": "3fdc22f53e9b1fe13f0791eecea0a0149a81b5a6",
+      "crates/canwu-api/examples/phased_boundary.rs": "837dfae7dc332805929a76ec4f22a85ffc5b405c",
+      "crates/canwu-api/examples/plugin.rs": "9506dc78d6fb38a7817c06380bada1a123f2292b",
+      "crates/canwu-api/src/lib.rs": "e437a2f6f4da7ac4e0366b07d2d2c1959c8305b5",
+      "crates/canwu-core/Cargo.toml": "22d8a2b0ba8f31388c1b260b30c9ff87ac6678aa",
+      "crates/canwu-core/src/lib.rs": "8d656deb21d6e9ba77de6d98edfdfea99f776b8b",
+      "crates/canwu-debug/Cargo.toml": "526ff8aecf6c81b41f6a8605eff7ee995dd80506",
+      "crates/canwu-debug/src/main.rs": "a415bb3a0b5a75400ab863bb3bb1e3a994b06311",
+      "crates/canwu-event/Cargo.toml": "02d76b2bcbb48d60caa8513056568fc01731d14d",
+      "crates/canwu-event/src/lib.rs": "3f36952aa757cf84a63f0d375c134588b7220731",
+      "crates/canwu-knowledge/Cargo.toml": "f2c2ad8e67a8430a8d4476edc6497a9d90353df3",
+      "crates/canwu-knowledge/src/lib.rs": "e7ac804117ae5a232e7f82a1ad8649f00622325a",
+      "crates/canwu-sim/Cargo.toml": "b95365963611b5d32e370d8ad2fe3d50e4c45b86",
+      "crates/canwu-sim/src/boundary.rs": "5c47eae24bbfd765ea78404aa2f31498954562fc",
+      "crates/canwu-sim/src/ingress.rs": "670dff774973d4c1ebc3c6fec097fe40ee3817dc",
+      "crates/canwu-sim/src/lib.rs": "6f345404a51b14f4381be3e5f061bd66399d4966",
+      "crates/canwu-sim/src/manifest.rs": "6896d750d9ef33df11e01e842eb445f818ec5124",
+      "crates/canwu-sim/src/persistence.rs": "c5d83ddbe75f1cab8c6ebcb445b37380a0e296b0",
+      "crates/canwu-sim/src/policy.rs": "a2221c4ddb5ed3b626325351b70f65a2b8e97058",
+      "crates/canwu-sim/src/random.rs": "60182822f082f8f5aca2d8ebac5aa6951764318a",
+      "crates/canwu-sim/src/records.rs": "f86f9803d850d089b883144746d188126dcde28a",
+      "crates/canwu-sim/src/state.rs": "173dbc4827c64a2865f6becd0149d4e6073805d4",
+      "crates/canwu-sim/src/transactions.rs": "5de836e66ee7dd6026f0d6ae6dfaf8d5df5654f0",
+      "crates/canwu-time/Cargo.toml": "62afaf5f6b2e2087ba4dad1c6d830845dd42405d",
+      "crates/canwu-time/src/lib.rs": "f042bc7a79bc1583239756a9b2aac805fe4708c6",
+      "crates/canwu-world/Cargo.toml": "4a194aae6f3dc48ba8bbe9e0f9c2ba41555eb63e",
+      "crates/canwu-world/src/lib.rs": "9e261a63c5e043ad151bbba8b80fa4eb6abc9ded"
+    },
+    "working_tree_dirty": true
+  }
+}

@@ -431,6 +431,27 @@ sub-0.1-ms case. These are treated as local timing noise. The milestone makes no
 runtime-performance claim; it narrows rollback ownership without changing what
 any transaction captures or restores.
 
+## Runtime-state module extraction comparison
+
+The behavior-preserving runtime-state extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-runtime-state-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-runtime-state-module-allocations.json)
+reports, using the transaction-module milestone as its before baseline. It moves
+the private current-state, scheduler, counter, metadata, evidence, and
+incremental-commitment definitions and their exact method bodies into
+`canwu-sim/src/state.rs`. `canwu-sim/src/lib.rs` falls from 18,436 to 18,101
+lines, with 350 focused lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at scales 8, 32,
+128, and 512. At scale 512, history growth changes by -0.1%, empty boundaries
+-2.2%, populated boundaries +1.9%, snapshot creation +2.1%, load validation
++4.2%, and exact replay -1.7%. The rejected-command median moves from 0.075 ms
+to 0.017 ms on a sub-0.1-ms case. These are treated as local timing noise. The
+milestone makes no runtime-performance claim; it gives mutable state and its
+commitment cache a dedicated private ownership boundary without changing their
+contracts.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted commands, individual
