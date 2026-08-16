@@ -22,7 +22,6 @@ const c = isEnglish
       columns: ["Project", "Use", "License / type"],
       sourceTitle: "Website source", sourceCopy: "Website source, build scripts, bilingual page components, and the full tool inventory are maintained in website/ inside the main repository.",
       brandTitle: "Brand assets", brandCopy: "The site uses the official Canwu 35 mark documented in BRANDING.md. Page diagrams and code panels are implemented with semantic HTML and CSS.",
-      legalTitle: "Trademark references", legalCopy: "Godot and Bevy names belong to their respective projects and rights holders. References do not imply endorsement or affiliation.",
       links: [["Website source", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["Website notices", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["Brand guide", "https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md"]],
     }
   : {
@@ -41,7 +40,6 @@ const c = isEnglish
       columns: ["项目", "用途", "许可证 / 类型"],
       sourceTitle: "网站源码", sourceCopy: "网站源码、构建脚本、中英文页面组件与完整工具清单均维护在主仓库的 website/ 目录中。",
       brandTitle: "品牌资产", brandCopy: "网站使用 BRANDING.md 中记录的官方参伍 35 标志。页面图表与代码面板由语义化 HTML 和 CSS 实现。",
-      legalTitle: "商标引用", legalCopy: "Godot 与 Bevy 名称归各自项目及权利人所有。相关提及不表示背书或隶属关系。",
       links: [["网站源码", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["网站声明", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["品牌指南", "https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md"]],
     };
 ---
@@ -52,5 +50,5 @@ const c = isEnglish
   <section class="privacy-section page-width"><header><p>{c.privacyTitle}</p></header><ul class="technical-list">{c.privacy.map((item) => <li>{item}</li>)}</ul></section>
   <section class="stack-intro page-width"><p>{c.stackLabel}</p><h2>{c.stackTitle}</h2><span>{c.stackIntro}</span></section>
   <section class="credit-table page-width"><header><span>{c.columns[0]}</span><span>{c.columns[1]}</span><span>{c.columns[2]}</span><span></span></header>{c.rows.map(([name, role, license, url]) => <a href={url}><code>{name}</code><span>{role}</span><small>{license}</small><b>↗</b></a>)}</section>
-  <section class="implementation-grid page-width"><article><h2>{c.sourceTitle}</h2><p>{c.sourceCopy}</p><div class="reference-links">{c.links.map(([label, url]) => <a href={url}>{label} ↗</a>)}</div></article><article><h2>{c.brandTitle}</h2><p>{c.brandCopy}</p></article><article class="wide"><h2>{c.legalTitle}</h2><p>{c.legalCopy}</p></article></section>
+  <section class="implementation-grid page-width"><article><h2>{c.sourceTitle}</h2><p>{c.sourceCopy}</p><div class="reference-links">{c.links.map(([label, url]) => <a href={url}>{label} ↗</a>)}</div></article><article><h2>{c.brandTitle}</h2><p>{c.brandCopy}</p></article></section>
 </BaseLayout>
