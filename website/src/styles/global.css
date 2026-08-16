@@ -261,7 +261,7 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   .scope-strip, .status-columns { grid-template-columns: 1fr; }
   .arch-apps > div { grid-template-columns: repeat(2, 1fr); }.arch-layer { align-items: flex-start; flex-direction: column; }
   .project-section { grid-template-columns: 1fr; gap: 2rem; padding-block: 4rem; }
-  .site-footer { align-items: flex-start; flex-direction: column; justify-content: center; }.footer-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; width: 100%; max-width: none; }
+  .site-footer { align-items: flex-start; flex-direction: column; justify-content: center; font-size: .875rem; line-height: 1.5; }.footer-links { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; width: 100%; max-width: none; }
   .reference-hero { padding-block: 3.5rem 2.5rem; }.reference-hero nav { grid-template-columns: repeat(2, 1fr); }
   .integration-case { grid-template-columns: 1fr; gap: 2rem; }.responsibility-grid { grid-template-columns: 1fr; }.api-strip { grid-template-columns: 1fr; }
   .reference-footer, .privacy-section, .implementation-grid { grid-template-columns: 1fr; }.reference-footer > div:last-child { justify-content: flex-start; }.privacy-section .technical-list { grid-template-columns: 1fr; }
