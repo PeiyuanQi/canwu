@@ -6,111 +6,121 @@ const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const prefix = isEnglish ? "/en" : "";
 
-const rustExample = `use canwu_api::{
-    Canwu, Command, CommandEnvelope, Issuer, SimDuration,
-};
+const rustExample = `use canwu_api::{Canwu, ObserveRequest, SemanticAction, SimDuration};
 
-let mut canwu = Canwu::demo(35)?;
-let ids = Canwu::demo_ids();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut canwu = Canwu::demo(35)?;
+    let ids = Canwu::demo_ids();
 
-canwu.submit(CommandEnvelope::new(
-    Issuer::Actor(ids.commander),
-    Command::MoveArmy {
-        army: ids.army,
-        destination: ids.eastern_territory,
-    },
-))?;
+    canwu.act(
+        ids.commander,
+        SemanticAction::MoveArmy {
+            army: ids.army,
+            destination: ids.eastern_territory,
+        },
+    )?;
+    let arrival_events = canwu.advance(SimDuration::days(1))?;
 
-let events = canwu.advance(SimDuration::days(1)?)?;`;
+    let commander = canwu.observe(ids.commander, &ObserveRequest::default())?;
+    let observer = canwu.observe(ids.observer, &ObserveRequest::default())?;
+    println!("time: {}", canwu.time());
+    println!("arrival events: {}", arrival_events.len());
+    println!("commander: {:?}", commander.known_armies[0].known_location);
+    println!("observer: {:?}", observer.known_armies[0].known_location);
+    Ok(())
+}`;
 
 const cliExample = `git clone https://github.com/PeiyuanQi/canwu
 cd canwu
 cargo run -p canwu-api --example move_army`;
 
-const semanticExample = `> observe(actor="envoy.17")
-time         1898-09-21
-knowledge    partial
-confidence   740‰
-source_age   3 days
+const outputExample = `time: Day 1, 00:00
+arrival events: 3
+commander knows location: Some(TerritoryId(3))
+observer still believes location: Some(TerritoryId(2))
+observer after report: Some(TerritoryId(3))`;
 
-> available_actions()
-01  request_audience
-02  verify_report
-03  dispatch_message
-
-> explain(event="dispatch.204")
-verified report changed threat estimate`;
+const agentFlow = `observe(actor)
+  → available_actions(actor)
+  → act(actor, semantic_action)
+  → explain(event)`;
 
 const c = isEnglish
   ? {
-      title: "Canwu Engine — Headless historical simulation in Rust",
-      description: "Canwu is a deterministic, headless historical simulation engine with plugin boundaries and agent-facing APIs.",
-      status: "v0.4.0 · active development",
+      title: "Canwu Engine — Deterministic historical simulation core",
+      description: "A deterministic, replayable Rust core for historical, social, and strategy simulation across regions and eras.",
+      status: "v0.4.0 · under active development",
       name: "Canwu Engine", nativeName: "参伍引擎",
-      summary: "A headless historical simulation engine written in Rust.",
-      intro: "Canwu models time, commands, causal events, incomplete knowledge, snapshots, replay, and domain plugins. Rendering and production UI stay in external clients.",
-      getStarted: "Get started", repository: "GitHub repository", docs: "Architecture docs",
-      facts: [["Runtime", "Headless Rust"], ["State", "Deterministic"], ["Clients", "Renderer-agnostic"], ["Agents", "Semantic API"]],
-      example: "Minimal API example",
-      featuresLabel: "Engine features", featuresTitle: "Simulation infrastructure, not a rendering stack", featuresIntro: "The core stays generic. Period- and region-specific rules belong in plugins and external content.",
+      summary: "A deterministic Rust core for historical, social, and strategy simulation.",
+      intro: "Advance world state through commands, causal events, actor knowledge, and snapshots. Choose your own renderer, interface, and content stack—from ancient settings to the late twentieth century, across regions.",
+      getStarted: "Run the example", repository: "View source", docs: "Read the architecture",
+      facts: [["Language", "Rust"], ["Execution", "Replayable from identical inputs"], ["Rendering", "Bring your own client"], ["License", "Canwu License 1.0 · source-available"]],
+      example: "Real repository example", source: "Open move_army.rs",
+      featuresLabel: "Why Canwu", featuresTitle: "One world model, multiple kinds of client", featuresIntro: "Canwu owns simulation truth and exposes a narrow public boundary. Games, research tools, and agents can share the same deterministic world without sharing a renderer or interface.",
       features: [
-        ["time", "Deterministic time", "Scheduled work is ordered by simulation timestamp and insertion sequence, independent of rendering frames."],
-        ["knowledge", "Actor-relative knowledge", "Ground truth and what each actor knows are separate stores with source, confidence, and information age."],
-        ["events", "Causal event journal", "Commands and systems emit attributable events that retain links between causes and consequences."],
-        ["plugins", "Declared plugin boundaries", "Systems declare reads, writes, random streams, records, and execution phase before they run."],
-        ["replay", "Snapshots, forks, and replay", "Persist worlds, restore exact environments, fork counterfactuals, and compare deterministic state."],
-        ["api", "Replaceable clients", "Games, research tools, web apps, debug UIs, and agents consume the same public API boundary."],
+        ["replay", "Deterministic execution and replay", "Time, scheduled work, random streams, and boundary records are ordered so identical inputs can be inspected and replayed."],
+        ["knowledge", "Knowledge belongs to actors", "World truth and actor knowledge are separate. Observations retain source, confidence, and information age instead of leaking omniscient state."],
+        ["boundary", "Renderer-independent public API", "External clients change the world through validated commands and read detached snapshots, events, or actor-scoped observations."],
       ],
-      quickLabel: "Quick start", quickTitle: "Run the reference scenario", quickIntro: "Clone the repository and run the API-only movement example. It demonstrates validated commands, scheduled travel, causal events, and delayed knowledge.",
-      clone: "Clone and run", expected: "What the example covers", expectedItems: ["Validated army movement command", "Scheduled arrival independent of frame rate", "Commander update and delayed observer report", "Events linked to their initiating command"],
-      statusTitle: "Project status", statusCopy: "Canwu is an active v0.4 development engine. The current settlement boundary implements fourteen ordered phases and deterministic plugin contracts. It is meaningful progress toward the CM profile, not a claim of full conformance.", platforms: "CI targets Windows, macOS, and Linux.",
-      architectureLabel: "Architecture", architectureTitle: "A narrow public boundary", architectureIntro: "Applications never receive a mutable reference to live simulation state. All external changes enter through validated commands; reads use detached snapshots or actor-relative observations.",
-      apps: "Applications", appItems: ["Game / renderer", "Research tool", "Web or Python binding", "AI agent", "Debug client"],
+      scopeLabel: "Scope", scopeTitle: "Not tied to one dynasty, region, or renderer", scopeCopy: "The engine core stays generic. Scenario data and plugins define institutions, geography, population, trade, conflict, and other period-specific systems. The roadmap spans multiple regions and eras, from antiquity through the late twentieth century.",
+      quickLabel: "Five-minute proof", quickTitle: "Run the checked-in movement scenario", quickIntro: "The example uses the public semantic API, advances one simulated day, and shows that a commander and a distant observer can hold different knowledge about the same army.",
+      clone: "Clone and run", output: "Observed output",
+      statusTitle: "What v0.4 provides today", statusCopy: "Canwu v0.4 is a development line, not a stable 1.0 release. Public APIs may still change.",
+      availableTitle: "Implemented", availableItems: ["Validated commands and semantic actions", "Deterministic time, scheduling, and causal events", "Actor-relative observations and delayed information", "Snapshots, forks, diffs, replay, and plugin contracts"],
+      evolvingTitle: "Still evolving", evolvingItems: ["Stable 1.0 API and compatibility policy", "C, Python, TypeScript, and network bindings", "Published reproducible performance benchmarks", "Production renderer adapters and complete scenarios"],
+      platforms: "CI covers Windows, macOS, and Linux.",
+      architectureLabel: "Architecture", architectureTitle: "A narrow boundary around mutable state", architectureIntro: "Applications never receive a mutable reference to the live world. All changes enter through validated commands; reads return snapshots or observations scoped to an actor.",
+      apps: "Clients", appItems: ["Rust game client", "Research tool", "Autonomous agent", "Debug client", "Planned bindings"],
       publicApi: "canwu-api", publicDetails: "commands · queries · events · snapshots · semantic actions",
       sim: "canwu-sim", simDetails: "private mutable runtime · scheduling · plugins · settlement",
       foundation: "Foundation crates", foundationDetails: "core · time · event · world · knowledge", architectureLink: "Read the architecture →",
-      cratesLabel: "Workspace crates", cratesTitle: "Small crates with explicit responsibility",
+      archNotes: ["Command / query / event boundary", "Transactional mutation", "Ordered deterministic collections", "Actor-relative semantic reads", "Explicit plugin identities and contracts"],
+      cratesLabel: "Workspace crates", cratesTitle: "Each crate owns one core responsibility",
       crates: [["canwu-core", "Typed IDs, deterministic random utilities, schema metadata"], ["canwu-time", "Historical timestamps and checked durations"], ["canwu-event", "Stored events and causal relationships"], ["canwu-world", "Historical entities and read-only snapshots"], ["canwu-knowledge", "Actor knowledge, confidence, source, and age"], ["canwu-sim", "Private simulation state, scheduling, and plugins"], ["canwu-api", "Public programmatic and semantic interfaces"], ["canwu-debug", "Reference client using only the public API"]],
-      agentLabel: "Agent interface", agentTitle: "The same semantic loop across scenarios", agentCopy: "Agents discover capabilities and legal actions instead of learning a new editor workflow for every simulation. Observations remain scoped to the represented actor.",
+      agentLabel: "Agent-native API", agentTitle: "Semantic actions instead of another interface to master", agentCopy: "Agents discover what an actor can observe and do through stable methods. The same loop works across scenarios while authority and knowledge stay scoped to the represented actor.", agentFlowLabel: "Interaction model",
       agentMethods: ["describe_capabilities", "observe", "inspect", "query_as", "available_actions", "act", "explain", "wait"],
-      usesLabel: "Use cases", usesTitle: "Designed for several kinds of client", uses: [["Grand strategy games", "Authoritative simulation beneath any map or renderer."], ["Historical research", "Repeatable scenarios, forks, diffs, and inspectable evidence."], ["Agent environments", "Multiple actors with separate knowledge and authority."], ["Education and public history", "Interactive timelines, maps, exhibits, and classroom tools."]], allUses: "View use-case notes →",
-      projectLabel: "Project", projectTitle: "Read the boundaries before contributing", projectCopy: "Canwu keeps the core generic and deterministic. Start with the architecture, end-state design, and contribution guide before proposing new mechanics or public APIs.",
-      projectLinks: [["Architecture", "https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md"], ["End-state design", "https://github.com/PeiyuanQi/canwu/blob/main/docs/end-state.md"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]],
+      usesLabel: "Integration patterns", usesTitle: "Choose a client; keep one simulation model", uses: [["Grand strategy games", "Embed authoritative simulation beneath any map or renderer."], ["Historical research", "Run repeatable scenarios, counterfactual branches, and inspectable comparisons."], ["Agent environments", "Give multiple actors distinct knowledge, authority, and semantic actions."], ["Education and public history", "Build timelines, maps, exhibits, and classroom tools on replayable state."]], allUses: "Compare integration patterns →",
+      projectLabel: "Participate", projectTitle: "Help build the deterministic simulation stack", projectCopy: "Start with the architecture, inspect an issue, or propose a focused improvement to the public API, documentation, tests, or reference scenarios.",
+      licenseTitle: "License clarity", licenseCopy: "Canwu uses the source-available Canwu License 1.0; it is not an OSI-approved open-source license. Read the complete terms before distributing a product.",
+      projectLinks: [["Architecture", "https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md"], ["Open issues", "https://github.com/PeiyuanQi/canwu/issues"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]],
     }
   : {
-      title: "参伍引擎 — Rust 无头历史模拟引擎",
-      description: "参伍是具备确定性执行、插件边界与智能体接口的 Rust 无头历史模拟引擎。",
+      title: "参伍引擎 — 确定性历史模拟内核",
+      description: "用于跨地区、跨时代历史、社会与策略模拟的确定性、可重演 Rust 内核。",
       status: "v0.4.0 · 活跃开发中",
       name: "参伍引擎", nativeName: "Canwu Engine",
-      summary: "使用 Rust 编写的无头历史模拟引擎。",
-      intro: "参伍负责时间、命令、因果事件、不完整知识、快照、重演与领域插件。渲染和正式界面由外部客户端实现。",
-      getStarted: "快速开始", repository: "GitHub 仓库", docs: "架构文档",
-      facts: [["运行时", "无头 Rust"], ["状态", "确定性"], ["客户端", "不绑定渲染器"], ["智能体", "语义 API"]],
-      example: "最小 API 示例",
-      featuresLabel: "引擎功能", featuresTitle: "模拟基础设施，而不是渲染技术栈", featuresIntro: "内核保持通用；特定时代与地区的规则由插件和外部内容提供。",
+      summary: "用于历史、社会与策略模拟的确定性 Rust 内核。",
+      intro: "通过命令、因果事件、角色知识与快照推进世界状态；渲染、界面与内容技术栈由客户端选择。目标覆盖多个地区与时代，从古代延伸到二十世纪末。",
+      getStarted: "运行示例", repository: "查看源码", docs: "阅读架构",
+      facts: [["语言", "Rust"], ["执行", "同一输入可确定性重演"], ["渲染", "由客户端选择"], ["许可", "Canwu License 1.0 · 源码可用"]],
+      example: "仓库中的真实示例", source: "打开 move_army.rs",
+      featuresLabel: "为什么选择参伍", featuresTitle: "一套世界模型，接入多种客户端", featuresIntro: "参伍维护模拟真相，并通过窄而明确的公开边界提供能力。游戏、研究工具与智能体可以共享同一个确定性世界，而不必共享渲染器或交互界面。",
       features: [
-        ["time", "确定性时间", "计划任务按模拟时间与插入序号排序，不依赖渲染帧率。"],
-        ["knowledge", "角色视角知识", "世界真相与每个角色所知分开存储，并记录来源、可信度与信息时效。"],
-        ["events", "因果事件日志", "命令与系统产生可归因事件，并保留原因与后果之间的关系。"],
-        ["plugins", "声明式插件边界", "系统运行前声明读取、写入、随机流、记录类型与执行阶段。"],
-        ["replay", "快照、分支与重演", "保存世界、恢复完整环境、创建反事实分支并比较确定性状态。"],
-        ["api", "可替换客户端", "游戏、研究工具、网页应用、调试界面与智能体使用同一公开 API 边界。"],
+        ["replay", "确定性执行与重演", "时间、计划任务、随机流与结算记录都有稳定顺序，使相同输入能够被检查和重演。"],
+        ["knowledge", "知识属于具体角色", "世界真相与角色所知分开保存。观察结果记录来源、可信度与信息时效，不会泄露全知状态。"],
+        ["boundary", "不绑定渲染器的公开 API", "外部客户端通过经验证命令改变世界，并通过快照、事件或角色视角观察读取状态。"],
       ],
-      quickLabel: "快速开始", quickTitle: "运行参考场景", quickIntro: "克隆仓库并运行只依赖公开 API 的移动示例。它展示经验证命令、计划移动、因果事件与延迟知识。",
-      clone: "克隆并运行", expected: "示例涵盖内容", expectedItems: ["经验证的军队移动命令", "与帧率无关的计划到达", "指挥官即时更新与观察者延迟报告", "事件与发起命令之间的因果关系"],
-      statusTitle: "项目状态", statusCopy: "参伍目前处于 v0.4 活跃开发阶段。当前结算边界实现十四个有序阶段与确定性插件契约。这是朝 CM 配置推进的实质进展，并不表示已经完全符合该配置。", platforms: "持续集成覆盖 Windows、macOS 与 Linux。",
-      architectureLabel: "架构", architectureTitle: "窄而明确的公开边界", architectureIntro: "应用永远拿不到实时模拟状态的可变引用。所有外部变更必须通过经验证命令进入；读取使用分离快照或角色视角观察。",
-      apps: "应用", appItems: ["游戏 / 渲染器", "研究工具", "网页或 Python 绑定", "AI 智能体", "调试客户端"],
+      scopeLabel: "时空范围", scopeTitle: "不绑定朝代、地区或渲染器", scopeCopy: "引擎核心保持通用；制度、地理、人口、贸易、冲突等特定时代规则由场景数据与插件定义。路线图覆盖多个地区与时代，从古代世界延伸到二十世纪末。",
+      quickLabel: "五分钟验证", quickTitle: "运行仓库中的移动场景", quickIntro: "该示例只使用公开语义 API，推进一个模拟日，并展示指挥官与远方观察者如何对同一支军队持有不同信息。",
+      clone: "克隆并运行", output: "实际输出",
+      statusTitle: "v0.4 当前已经实现", statusCopy: "参伍 v0.4 仍处于开发阶段，并非稳定的 1.0 版本；公开 API 仍可能调整。",
+      availableTitle: "已经实现", availableItems: ["经验证命令与语义行动", "确定性时间、调度与因果事件", "角色视角观察与延迟信息", "快照、分支、差异、重演与插件契约"],
+      evolvingTitle: "仍在演进", evolvingItems: ["稳定的 1.0 API 与兼容政策", "C、Python、TypeScript 与网络绑定", "公开且可复现的性能基准", "正式渲染适配器与完整场景"],
+      platforms: "持续集成覆盖 Windows、macOS 与 Linux。",
+      architectureLabel: "架构", architectureTitle: "用窄边界保护可变状态", architectureIntro: "应用无法直接取得实时世界的可变引用。所有变更通过经验证命令进入；读取返回快照或限定到具体角色的观察结果。",
+      apps: "客户端", appItems: ["Rust 游戏客户端", "研究工具", "自主智能体", "调试客户端", "规划中的语言绑定"],
       publicApi: "canwu-api", publicDetails: "命令 · 查询 · 事件 · 快照 · 语义行动",
       sim: "canwu-sim", simDetails: "私有可变运行时 · 调度 · 插件 · 结算",
       foundation: "基础 crate", foundationDetails: "core · time · event · world · knowledge", architectureLink: "阅读架构文档 →",
-      cratesLabel: "工作区 crate", cratesTitle: "职责明确的小型 crate",
+      archNotes: ["命令 / 查询 / 事件边界", "事务式状态变更", "有序且确定的数据集合", "角色视角语义读取", "明确的插件身份与契约"],
+      cratesLabel: "工作区 crate", cratesTitle: "每个 crate 只承担一类核心职责",
       crates: [["canwu-core", "类型化 ID、确定性随机工具与模式元数据"], ["canwu-time", "历史时间戳与经过检查的时长"], ["canwu-event", "存储事件与因果关系"], ["canwu-world", "历史实体与只读快照"], ["canwu-knowledge", "角色知识、可信度、来源与时效"], ["canwu-sim", "私有模拟状态、调度与插件"], ["canwu-api", "公开程序接口与语义接口"], ["canwu-debug", "仅使用公开 API 的参考客户端"]],
-      agentLabel: "智能体接口", agentTitle: "跨场景复用同一语义循环", agentCopy: "智能体通过能力与合法行动发现使用模拟，无需为每个场景重新学习编辑器流程。观察结果始终受所代表角色的知识范围约束。",
+      agentLabel: "智能体原生 API", agentTitle: "提供语义行动，而不是另一套需要掌握的界面", agentCopy: "智能体通过稳定方法发现角色能够观察和执行的操作。同一套循环可跨场景复用，同时权限与知识始终限定在所代表的角色。", agentFlowLabel: "交互模型",
       agentMethods: ["describe_capabilities", "observe", "inspect", "query_as", "available_actions", "act", "explain", "wait"],
-      usesLabel: "应用方向", usesTitle: "面向多种客户端设计", uses: [["大战略游戏", "置于任意地图或渲染器之下的权威模拟。"], ["历史研究", "可重复场景、分支、差异与可检查证据。"], ["智能体环境", "拥有不同知识与权限的多个行动者。"], ["教育与公共史", "交互时间线、地图、展览与课堂工具。"]], allUses: "查看应用说明 →",
-      projectLabel: "项目", projectTitle: "贡献之前先理解边界", projectCopy: "参伍保持核心通用且确定。提出新机制或公开 API 之前，请先阅读架构、终态设计与贡献指南。",
-      projectLinks: [["架构", "https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md"], ["终态设计", "https://github.com/PeiyuanQi/canwu/blob/main/docs/end-state.md"], ["贡献指南", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["许可证", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]],
+      usesLabel: "集成模式", usesTitle: "选择客户端，共用一套模拟模型", uses: [["大战略游戏", "在任意地图或渲染器之下嵌入权威模拟。"], ["历史研究", "运行可重复场景、反事实分支与可检查比较。"], ["智能体环境", "为多个行动者提供不同的知识、权限与语义行动。"], ["教育与公共史", "在可重演状态之上构建时间线、地图、展览与课堂工具。"]], allUses: "比较集成模式 →",
+      projectLabel: "参与项目", projectTitle: "一起完善确定性模拟基础设施", projectCopy: "从架构说明、现有议题开始，或针对公开 API、文档、测试与参考场景提出范围明确的改进。",
+      licenseTitle: "许可说明", licenseCopy: "参伍采用源码可用的 Canwu License 1.0；它不是 OSI 认可的开源许可证。分发产品之前请阅读完整条款。",
+      projectLinks: [["架构", "https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md"], ["现有议题", "https://github.com/PeiyuanQi/canwu/issues"], ["贡献指南", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["许可证", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]],
     };
 ---
 
@@ -123,20 +133,20 @@ const c = isEnglish
       <div class="action-row"><a class="button primary" href="#quickstart">{c.getStarted}</a><a class="button" href="https://github.com/PeiyuanQi/canwu">{c.repository} ↗</a><a class="text-action" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.docs} ↗</a></div>
       <dl class="fact-row">{c.facts.map(([term, value]) => <div><dt>{term}</dt><dd>{value}</dd></div>)}</dl>
     </div>
-    <div class="code-panel hero-code"><div class="code-title"><span>{c.example}</span><code>move_army.rs</code></div><pre><code>{rustExample}</code></pre></div>
+    <div class="hero-evidence"><div class="code-panel hero-code"><div class="code-title"><span>{c.example}</span><code>move_army.rs</code></div><pre><code>{rustExample}</code></pre></div><a href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs">{c.source} ↗</a></div>
   </section>
 
-  <section class="tech-section page-width" id="features"><header class="section-heading"><p>{c.featuresLabel}</p><h2>{c.featuresTitle}</h2><span>{c.featuresIntro}</span></header><div class="feature-grid">{c.features.map(([key, title, copy]) => <article><code>{key}</code><h3>{title}</h3><p>{copy}</p></article>)}</div></section>
+  <section class="tech-section page-width" id="features"><header class="section-heading"><p>{c.featuresLabel}</p><h2>{c.featuresTitle}</h2><span>{c.featuresIntro}</span></header><div class="feature-grid focused">{c.features.map(([key, title, copy]) => <article><code>{key}</code><h3>{title}</h3><p>{copy}</p></article>)}</div><aside class="scope-strip"><p>{c.scopeLabel}</p><div><h3>{c.scopeTitle}</h3><span>{c.scopeCopy}</span></div></aside></section>
 
-  <section class="tech-section page-width" id="quickstart"><header class="section-heading"><p>{c.quickLabel}</p><h2>{c.quickTitle}</h2><span>{c.quickIntro}</span></header><div class="quick-grid"><div><h3>{c.clone}</h3><div class="code-panel command"><pre><code>{cliExample}</code></pre></div><h3>{c.expected}</h3><ul class="technical-list">{c.expectedItems.map((item) => <li>{item}</li>)}</ul></div><aside class="status-box"><span>{c.status}</span><h3>{c.statusTitle}</h3><p>{c.statusCopy}</p><p>{c.platforms}</p><a href="https://github.com/PeiyuanQi/canwu/blob/main/README.md">README ↗</a></aside></div></section>
+  <section class="tech-section page-width" id="quickstart"><header class="section-heading"><p>{c.quickLabel}</p><h2>{c.quickTitle}</h2><span>{c.quickIntro}</span></header><div class="quick-grid"><div><h3>{c.clone}</h3><div class="code-panel command"><pre><code>{cliExample}</code></pre></div><h3 class="output-heading">{c.output}</h3><div class="code-panel output"><pre><code>{outputExample}</code></pre></div></div><aside class="status-box"><span>{c.status}</span><h3>{c.statusTitle}</h3><p>{c.statusCopy}</p><div class="status-columns"><div><h4>{c.availableTitle}</h4><ul class="technical-list">{c.availableItems.map((item) => <li>{item}</li>)}</ul></div><div><h4>{c.evolvingTitle}</h4><ul class="technical-list">{c.evolvingItems.map((item) => <li>{item}</li>)}</ul></div></div><p>{c.platforms}</p><a href="https://github.com/PeiyuanQi/canwu/blob/main/README.md">README ↗</a></aside></div></section>
 
-  <section class="tech-section page-width" id="architecture"><header class="section-heading"><p>{c.architectureLabel}</p><h2>{c.architectureTitle}</h2><span>{c.architectureIntro}</span></header><div class="architecture-grid"><div class="architecture-diagram"><div class="arch-apps"><strong>{c.apps}</strong><div>{c.appItems.map((item) => <span>{item}</span>)}</div></div><div class="arch-arrow">↓</div><div class="arch-layer public"><code>{c.publicApi}</code><span>{c.publicDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer runtime"><code>{c.sim}</code><span>{c.simDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer foundation"><strong>{c.foundation}</strong><span>{c.foundationDetails}</span></div></div><div class="arch-notes"><ul class="technical-list"><li>Command / Query / Event boundary</li><li>Transactional mutation</li><li>Ordered deterministic collections</li><li>Actor-relative semantic reads</li><li>Explicit plugin identity and contracts</li></ul><a class="button" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.architectureLink}</a></div></div></section>
+  <section class="tech-section page-width" id="architecture"><header class="section-heading"><p>{c.architectureLabel}</p><h2>{c.architectureTitle}</h2><span>{c.architectureIntro}</span></header><div class="architecture-grid"><div class="architecture-diagram"><div class="arch-apps"><strong>{c.apps}</strong><div>{c.appItems.map((item) => <span>{item}</span>)}</div></div><div class="arch-arrow">↓</div><div class="arch-layer public"><code>{c.publicApi}</code><span>{c.publicDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer runtime"><code>{c.sim}</code><span>{c.simDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer foundation"><strong>{c.foundation}</strong><span>{c.foundationDetails}</span></div></div><div class="arch-notes"><ul class="technical-list">{c.archNotes.map((item) => <li>{item}</li>)}</ul><a class="button" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.architectureLink}</a></div></div></section>
 
   <section class="tech-section page-width"><header class="section-heading"><p>{c.cratesLabel}</p><h2>{c.cratesTitle}</h2></header><div class="crate-grid">{c.crates.map(([name, copy]) => <article><code>{name}</code><p>{copy}</p></article>)}</div></section>
 
-  <section class="tech-section page-width agent-api"><div><header class="section-heading"><p>{c.agentLabel}</p><h2>{c.agentTitle}</h2><span>{c.agentCopy}</span></header><div class="method-list">{c.agentMethods.map((method) => <code>{method}()</code>)}</div></div><div class="code-panel"><div class="code-title"><span>semantic API</span><code>actor-relative</code></div><pre><code>{semanticExample}</code></pre></div></section>
+  <section class="tech-section page-width agent-api"><div><header class="section-heading"><p>{c.agentLabel}</p><h2>{c.agentTitle}</h2><span>{c.agentCopy}</span></header><div class="method-list">{c.agentMethods.map((method) => <code>{method}()</code>)}</div></div><div class="code-panel"><div class="code-title"><span>{c.agentFlowLabel}</span><code>actor-scoped</code></div><pre><code>{agentFlow}</code></pre></div></section>
 
   <section class="tech-section page-width"><header class="section-heading inline"><div><p>{c.usesLabel}</p><h2>{c.usesTitle}</h2></div><a href={`${prefix}/showcase/`}>{c.allUses}</a></header><div class="use-grid">{c.uses.map(([title, copy]) => <article><h3>{title}</h3><p>{copy}</p></article>)}</div></section>
 
-  <section class="project-section page-width"><div><p>{c.projectLabel}</p><h2>{c.projectTitle}</h2><span>{c.projectCopy}</span></div><div class="project-links">{c.projectLinks.map(([label, url]) => <a href={url}>{label}<span>↗</span></a>)}</div></section>
+  <section class="project-section page-width"><div><p>{c.projectLabel}</p><h2>{c.projectTitle}</h2><span>{c.projectCopy}</span><aside class="license-note"><strong>{c.licenseTitle}</strong><span>{c.licenseCopy}</span></aside></div><div class="project-links">{c.projectLinks.map(([label, url]) => <a href={url}>{label}<span>↗</span></a>)}</div></section>
 </BaseLayout>

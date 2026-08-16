@@ -4,7 +4,7 @@ import "../styles/global.css";
 interface Props {
   title: string;
   description: string;
-  locale?: "zh-CN" | "en";
+  locale?: "zh-CN" | "en" | "auto";
   zhPath?: string;
   enPath?: string;
 }
@@ -18,50 +18,67 @@ const {
 } = Astro.props;
 const canonical = new URL(Astro.url.pathname, Astro.site);
 const currentPath = Astro.url.pathname;
-const isEnglish = locale === "en";
-const prefix = isEnglish ? "/en" : "";
+const isAuto = locale === "auto";
+const documentLocale = locale === "en" ? "en" : "zh-CN";
+const isEnglish = documentLocale === "en";
 
-const ui = isEnglish
-  ? {
-      skip: "Skip to content",
-      homeLabel: "Canwu home",
-      navLabel: "Primary navigation",
-      features: "Features",
-      quickstart: "Get Started",
-      architecture: "Architecture",
-      showcases: "Use Cases",
-      credits: "Credits",
-      menu: "Menu",
-      language: "中文",
-      footerLine: "A headless historical simulation engine.",
-      footerSub: "Rust · Deterministic · Agent-native · v0.4.0",
-    }
-  : {
-      skip: "跳到正文",
-      homeLabel: "参伍引擎首页",
-      navLabel: "主导航",
-      features: "功能",
-      quickstart: "快速开始",
-      architecture: "架构",
-      showcases: "应用",
-      credits: "鸣谢",
-      menu: "菜单",
-      language: "EN",
-      footerLine: "无头历史模拟引擎。",
-      footerSub: "Rust · 确定性 · 智能体原生 · v0.4.0",
-    };
+const ui = {
+  en: {
+    skip: "Skip to content",
+    homeLabel: "Canwu home",
+    navLabel: "Primary navigation",
+    docs: "Docs",
+    quickstart: "Get Started",
+    architecture: "Architecture",
+    integrations: "Integrations",
+    contribute: "Contribute",
+    credits: "Credits",
+    issues: "Issues",
+    examples: "Examples",
+    license: "License",
+    menu: "Menu",
+    language: "中文",
+    footerLine: "A deterministic historical simulation core written in Rust, embeddable in any client.",
+    footerSub: "Source-available · v0.4.0 · Windows / macOS / Linux",
+  },
+  zh: {
+    skip: "跳到正文",
+    homeLabel: "参伍引擎首页",
+    navLabel: "主导航",
+    docs: "文档",
+    quickstart: "快速开始",
+    architecture: "架构",
+    integrations: "集成",
+    contribute: "参与贡献",
+    credits: "鸣谢",
+    issues: "议题",
+    examples: "示例",
+    license: "许可证",
+    menu: "菜单",
+    language: "EN",
+    footerLine: "用 Rust 构建的确定性历史模拟内核，可嵌入任意客户端。",
+    footerSub: "源码可用 · v0.4.0 · Windows / macOS / Linux",
+  },
+};
 
-const navItems = [
-  { href: `${prefix}/#features` || "/#features", label: ui.features },
-  { href: `${prefix}/#quickstart` || "/#quickstart", label: ui.quickstart },
-  { href: `${prefix}/#architecture` || "/#architecture", label: ui.architecture },
-  { href: `${prefix}/showcase/`, label: ui.showcases },
-  { href: `${prefix}/credits/`, label: ui.credits },
+const variants = isAuto
+  ? [
+      { locale: "zh-CN" as const, ui: ui.zh, prefix: "", languageHref: "/en/" },
+      { locale: "en" as const, ui: ui.en, prefix: "/en", languageHref: "/" },
+    ]
+  : [{ locale: documentLocale, ui: isEnglish ? ui.en : ui.zh, prefix: isEnglish ? "/en" : "", languageHref: isEnglish ? zhPath : enPath }];
+
+const navItems = (variant: typeof variants[number]) => [
+  { href: "https://github.com/PeiyuanQi/canwu/tree/main/docs", label: variant.ui.docs },
+  { href: `${variant.prefix}/#quickstart`, label: variant.ui.quickstart },
+  { href: `${variant.prefix}/#architecture`, label: variant.ui.architecture },
+  { href: `${variant.prefix}/showcase/`, label: variant.ui.integrations },
+  { href: "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md", label: variant.ui.contribute },
 ];
 ---
 
 <!doctype html>
-<html lang={locale}>
+<html lang={documentLocale}>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width" />
@@ -85,45 +102,55 @@ const navItems = [
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
     <title>{title}</title>
+    {isAuto && <script is:inline>
+      const englishPath = location.pathname === "/en" || location.pathname.startsWith("/en/");
+      document.documentElement.dataset.locale = englishPath ? "en" : "zh-CN";
+      document.documentElement.lang = englishPath ? "en" : "zh-CN";
+    </script>}
   </head>
   <body>
-    <a class="skip-link" href="#content">{ui.skip}</a>
+    {variants.map((variant) => <a class="skip-link" data-locale-content={isAuto ? variant.locale : undefined} href="#content">{variant.ui.skip}</a>)}
     <header class="site-header">
-      <a class="brand" href={isEnglish ? "/en/" : "/"} aria-label={ui.homeLabel}>
+      <a class="brand" href={isEnglish && !isAuto ? "/en/" : "/"} aria-label={isEnglish && !isAuto ? ui.en.homeLabel : ui.zh.homeLabel}>
         <img src="/brand/canwu-mark.png" width="48" height="48" alt="" />
         <span><b>参伍引擎</b><small>Canwu Engine</small></span>
       </a>
-      <nav aria-label={ui.navLabel}>
-        {navItems.map((item) => (
-          <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>
-        ))}
-        <a class="language-switch" href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
-        <a class="nav-github" href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
-      </nav>
-      <details class="mobile-menu">
-        <summary>{ui.menu}</summary>
-        <div>
-          {navItems.map((item) => <a href={item.href}>{item.label}</a>)}
-          <a href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
-          <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
-        </div>
-      </details>
+      {variants.map((variant) => (
+        <nav data-locale-content={isAuto ? variant.locale : undefined} aria-label={variant.ui.navLabel}>
+          {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
+          <a class="language-switch" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
+          <a class="nav-github" href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+        </nav>
+      ))}
+      {variants.map((variant) => (
+        <details class="mobile-menu" data-locale-content={isAuto ? variant.locale : undefined}>
+          <summary>{variant.ui.menu}</summary>
+          <div>
+            {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
+            <a href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
+            <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+          </div>
+        </details>
+      ))}
     </header>
     <main id="content"><slot /></main>
-    <footer class="site-footer">
-      <div>
-        <p class="footer-mark"><span>参伍引擎</span> {ui.footerLine}</p>
-        <p>{ui.footerSub}</p>
-      </div>
-      <div class="footer-links">
-        <a href={`${prefix}/#quickstart` || "/#quickstart"}>{ui.quickstart}</a>
-        <a href="https://github.com/PeiyuanQi/canwu/tree/main/docs">Docs ↗</a>
-        <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">Contribute ↗</a>
-        <a href={`${prefix}/showcase/`}>{ui.showcases}</a>
-        <a href={`${prefix}/credits/`}>{ui.credits}</a>
-        <a href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
-        <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
-      </div>
-    </footer>
+    {variants.map((variant) => (
+      <footer class="site-footer" data-locale-content={isAuto ? variant.locale : undefined}>
+        <div>
+          <p class="footer-mark"><span>参伍引擎</span> {variant.ui.footerLine}</p>
+          <p>{variant.ui.footerSub}</p>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/PeiyuanQi/canwu/tree/main/docs">{variant.ui.docs} ↗</a>
+          <a href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples">{variant.ui.examples} ↗</a>
+          <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">{variant.ui.contribute} ↗</a>
+          <a href="https://github.com/PeiyuanQi/canwu/issues">{variant.ui.issues} ↗</a>
+          <a href="https://github.com/PeiyuanQi/canwu/blob/main/LICENSE">{variant.ui.license} ↗</a>
+          <a href={`${variant.prefix}/credits/`}>{variant.ui.credits}</a>
+          <a href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
+          <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+        </div>
+      </footer>
+    ))}
   </body>
 </html>
