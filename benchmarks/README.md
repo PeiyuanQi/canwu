@@ -250,6 +250,28 @@ domains. Snapshot size remains 3,139,624 bytes; snapshot construction and
 serialization allocations are unchanged, and load/validate remains intentionally
 uncached.
 
+## Staged rejection-transaction comparison
+
+The first rollback-clone replacement is recorded in separate
+[`elapsed`](baselines/2026-08-16-staged-rejection-transaction-elapsed.json) and
+[`allocation`](baselines/2026-08-16-staged-rejection-transaction-allocations.json)
+reports, using the mutable-domain commitment cache as its before baseline. A
+pre-application validation rejection now persists its evidence by checkpointing
+only the attempt tail, affected counter and revision fields, registration flag,
+commitment cache and roots, and checkpoint hash. Fatal failure restores that
+explicit set; mutable world, scheduler, and unrelated historical evidence are
+not cloned. Rejections discovered after mutable command application still pay
+for the accepted-command transaction clone that protects application rollback.
+
+The harness measures a pre-application invalid-payload rejection. At scale 512,
+that case falls from 1.140 ms to 0.063 ms (-94.5%), from 27,423 allocation
+operations to 69, and from 3,508,152 requested bytes to 943,319. History growth
+falls from 2,275.531 ms to 1,893.517 ms (-16.8%) and exact replay from 3,034.680
+ms to 2,572.965 ms (-15.2%). Each end-to-end path removes 9,013,714 allocation
+operations and 816,659,938 requested bytes. All accepted-command, boundary,
+snapshot, serialization, and load-validation allocation counts are unchanged,
+and snapshot size remains 3,139,624 bytes.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
@@ -258,9 +280,9 @@ The allocation evidence identifies two distinct growth classes:
   retained history in the current implementation.
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
-  fifteen to sixteen times as long. At scale 512, growth requested 42,649,838
-  allocation operations and 5,142,445,207 bytes; replay requested 60,739,793
-  operations and 6,784,028,414 bytes. These paths still exhibit approximately
+  fifteen times as long. At scale 512, growth requested 33,636,124 allocation
+  operations and 4,325,785,269 bytes; replay requested 51,726,079 operations and
+  5,967,368,476 bytes. These paths still exhibit approximately
   quadratic growth.
 
 Those observations establish optimization targets; they do not change any

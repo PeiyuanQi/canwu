@@ -267,8 +267,13 @@ authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns
 the initial scenario binding, run identity, plugin-registration state, replay
 revision provenance, and current checkpoint commitment. These owners are
 private implementation boundaries. Snapshot and replay formats remain flat,
-and a transaction clone still captures every partition together until staged
-transactions replace full-state rollback.
+and accepted-command and settlement transactions still clone every partition
+together until their staged replacements land. When an expected rejection is
+detected before mutable command application, its evidence transaction is already
+narrower: it preflights identifiers and revision, then checkpoints only the
+attempt tail, affected counters and registration flag, commitment cache and
+roots, and checkpoint hash. A fatal commitment failure restores those fields
+without cloning mutable world, scheduler, or unrelated evidence.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
@@ -357,11 +362,14 @@ replay independent.
 Command application, each same-timestamp scheduled batch, and each phased
 settlement are transactional. If fallible event or plugin processing fails,
 state, time, queues, events, boundary records, random state, and ID counters
-return to the last successful transaction or timestamp boundary. Plugin
-directives validate every referenced entity before mutation. Snapshot loading
-also proves that pending arrivals agree with army transit, move commands, order
-events, timestamps, and correlations, and that pending or completed report
-delivery agrees with its dispatch and arrival evidence.
+return to the last successful transaction or timestamp boundary. Once command
+application has begun, its full transaction clone still governs rollback; after
+that rollback, any persisted rejection evidence uses the explicit narrow
+checkpoint described above. Plugin directives validate every referenced entity
+before mutation. Snapshot loading also proves that pending arrivals agree with
+army transit, move commands, order events, timestamps, and correlations, and
+that pending or completed report delivery agrees with its dispatch and arrival
+evidence.
 
 Executable handlers are not serialized. A snapshot stores validated plugin and
 system descriptors together with author-declared package versions and semantic

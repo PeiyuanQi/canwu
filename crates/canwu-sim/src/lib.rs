@@ -3099,6 +3099,43 @@ struct RuntimeState {
     evidence: RuntimeEvidence,
 }
 
+struct RejectionTransactionCheckpoint {
+    next_command_attempt_id: u64,
+    state_revision: u64,
+    plugin_registration_closed: bool,
+    command_attempt_count: usize,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl RejectionTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            next_command_attempt_id: state.counters.next_command_attempt_id,
+            state_revision: state.counters.state_revision,
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            command_attempt_count: state.evidence.command_attempts.len(),
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState) {
+        state.counters.next_command_attempt_id = self.next_command_attempt_id;
+        state.counters.state_revision = self.state_revision;
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state
+            .evidence
+            .command_attempts
+            .truncate(self.command_attempt_count);
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
@@ -4690,7 +4727,6 @@ impl Simulation {
         envelope: CommandEnvelope,
         error: CanwuError,
     ) -> Result<CommandOutcome, CanwuError> {
-        let transaction_start = self.state.clone();
         let (claimed_id, next_attempt_id) = claim_counter(
             self.state.counters.next_command_attempt_id,
             "command attempt ID",
@@ -4701,32 +4737,26 @@ impl Simulation {
                 "command attempt allocation changed during rejection",
             ));
         }
-        self.state.counters.next_command_attempt_id = next_attempt_id;
-        self.state.metadata.plugin_registration_closed = true;
-        self.state
-            .evidence
-            .command_attempts
-            .push(CommandAttemptRecord {
-                id: attempt_id,
-                at: self.state.scheduler.now,
-                revision_before: admission.revision_before,
-                ingress: admission.ingress,
-                request_id: admission.request_id,
-                expected_revision: admission.expected_revision,
-                envelope,
-                outcome: CommandAttemptOutcome::Rejected {
-                    error: error.clone(),
-                },
-            });
-        let revision = match self.advance_state_revision() {
-            Ok(revision) => revision,
-            Err(revision_error) => {
-                self.state = transaction_start;
-                return Err(revision_error);
-            }
+        let revision = self.next_state_revision()?;
+        let attempt = CommandAttemptRecord {
+            id: attempt_id,
+            at: self.state.scheduler.now,
+            revision_before: admission.revision_before,
+            ingress: admission.ingress,
+            request_id: admission.request_id,
+            expected_revision: admission.expected_revision,
+            envelope,
+            outcome: CommandAttemptOutcome::Rejected {
+                error: error.clone(),
+            },
         };
+        let transaction = RejectionTransactionCheckpoint::capture(&self.state);
+        self.state.counters.next_command_attempt_id = next_attempt_id;
+        self.state.counters.state_revision = revision;
+        self.state.metadata.plugin_registration_closed = true;
+        self.state.evidence.command_attempts.push(attempt);
         if let Err(hash_error) = self.refresh_checkpoint_hash() {
-            self.state = transaction_start;
+            transaction.restore(&mut self.state);
             return Err(hash_error);
         }
         Ok(CommandOutcome::Rejected {
@@ -5658,13 +5688,21 @@ impl Simulation {
         Ok(())
     }
 
+    fn next_state_revision(&self) -> Result<u64, CanwuError> {
+        self.state
+            .counters
+            .state_revision
+            .checked_add(1)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "authoritative state revision space is exhausted",
+                )
+            })
+    }
+
     fn advance_state_revision(&mut self) -> Result<u64, CanwuError> {
-        let Some(next) = self.state.counters.state_revision.checked_add(1) else {
-            return Err(CanwuError::new(
-                ErrorCode::IdentifierExhausted,
-                "authoritative state revision space is exhausted",
-            ));
-        };
+        let next = self.next_state_revision()?;
         self.state.counters.state_revision = next;
         Ok(next)
     }
@@ -16199,6 +16237,75 @@ mod tests {
             .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
             .expect("record mutation boundary should commit");
         assert_exact(&records);
+    }
+
+    #[test]
+    fn rejection_transaction_restores_private_commitment_state_after_hash_failure() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(107, scenario).expect("rejection rollback fixture should load");
+        let before = simulation.snapshot();
+        simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_mut()
+            .expect("current runtimes should maintain a commitment cache")
+            .attempts
+            .len = 2;
+
+        let error = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale: 101,
+                    },
+                ),
+            ))
+            .expect_err("a fatal commitment-cache mismatch must abort the rejection transaction");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert_eq!(simulation.snapshot(), before);
+        let restored_cache = simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_ref()
+            .expect("rollback should restore the private cache");
+        assert_eq!(restored_cache.attempts.len, 2);
+        assert!(simulation.command_attempts().is_empty());
+        assert_eq!(simulation.state.counters.next_command_attempt_id, 1);
+        assert_eq!(simulation.revision(), 0);
+
+        simulation.state.metadata.commitment_cache = None;
+        simulation
+            .refresh_checkpoint_hash()
+            .expect("discarding the injected corrupt cache should rebuild it from evidence");
+        let outcome = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale: 101,
+                    },
+                ),
+            ))
+            .expect("the repaired runtime should persist the same expected rejection");
+        assert!(matches!(outcome, CommandOutcome::Rejected { .. }));
+        let snapshot = simulation.snapshot();
+        assert_eq!(
+            snapshot.commitment_roots,
+            Some(
+                snapshot_commitment_roots(&snapshot)
+                    .expect("the repaired rejection should independently reproduce its roots")
+            )
+        );
     }
 
     #[test]
