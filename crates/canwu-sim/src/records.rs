@@ -266,6 +266,7 @@ pub(crate) fn validate_initial_records(
         validate_reference_targets_basic(record, &store, core_exists)?;
         validate_successor(record, &store)?;
     }
+    validate_successor_graph(&store)?;
     Ok(())
 }
 
@@ -299,6 +300,7 @@ pub(crate) fn validate_record_store(
         validate_record_references(record, schema, records, core_exists)?;
         validate_successor(record, records)?;
     }
+    validate_successor_graph(records)?;
     Ok(())
 }
 
@@ -327,6 +329,7 @@ pub(crate) fn validate_records_for_owner(
         validate_record_references(record, schema, records, core_exists)?;
         validate_successor(record, records)?;
     }
+    validate_successor_graph(records)?;
     Ok(())
 }
 
@@ -737,6 +740,43 @@ fn validate_new_successor(
     };
     if !target.is_active() {
         return invalid_record("new domain record successors must be active when admitted");
+    }
+    Ok(())
+}
+
+fn validate_successor_graph(
+    records: &BTreeMap<DomainRecordRef, DomainRecord>,
+) -> Result<(), CanwuError> {
+    let mut complete = BTreeSet::new();
+    for start in records.keys() {
+        if complete.contains(start) {
+            continue;
+        }
+        let mut visited = BTreeSet::new();
+        let mut path = Vec::new();
+        let mut current = start;
+        loop {
+            if complete.contains(current) {
+                break;
+            }
+            if !visited.insert(current.clone()) {
+                return invalid_record("domain record successor chains cannot contain cycles");
+            }
+            path.push(current.clone());
+            let Some(DomainRecord {
+                lifecycle:
+                    DomainRecordLifecycle::Retired {
+                        successor: Some(successor),
+                        ..
+                    },
+                ..
+            }) = records.get(current)
+            else {
+                break;
+            };
+            current = successor;
+        }
+        complete.extend(path);
     }
     Ok(())
 }

@@ -85,7 +85,9 @@ state. A record change carries its plugin/system owner, operation, previous and
 current versioned values, visibility, and summary; its boundary emission points
 back to the exact change index. Loading validates schemas and live references,
 reverse-reconstructs the initial record store, reapplies lifecycle bundles in
-canonical commit-stage order, and compares the result with the persisted store.
+canonical commit-stage order, rejects successor cycles, validates entity-bearing
+evidence at both its proposal-visible and committed historical cuts, and compares
+the result with the persisted store.
 Format 2 and 3 inputs reject these fields rather than interpreting new lifecycle
 semantics under a legacy identity. Format-4 snapshots with declared domain
 record schemas also retain the canonical initial scenario and verify it against

@@ -248,7 +248,9 @@ and external dependencies block unsafe deletion; and current/proposed records
 are available through declared immutable reads. Boundary evidence records every
 lifecycle transition and its causal event. A CM-shaped office/obligation fixture
 proves atomic reference transfer, rejected referenced deletion with full
-rollback, canonical save/load, exact replay, provenance-tamper rejection, and
+rollback, cycle-free succession, canonical save/load, exact replay,
+provenance-tamper rejection, historical-cut rejection for pre-creation and
+post-deletion evidence, rejection of cross-system same-stage creation use, and
 manifest-bound protection against shifting created records into genesis state.
 Compatible handler-free format 2 and 3 saves migrate with explicit legacy
 provenance for continuation and explicitly reject unsupported exact replay.

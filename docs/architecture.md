@@ -158,8 +158,8 @@ identity cannot be silently reused. The kernel validates the complete mutation
 bundle, including cross-record references, schema ownership, successor state,
 and external live dependencies, before commit. A successor must be active when
 the retirement is admitted; later retirement of that successor can extend a
-stable succession chain without invalidating earlier links. Domain record
-collections are ordered and are queryable through both `Simulation` and
+stable, cycle-free succession chain without invalidating earlier links. Domain
+record collections are ordered and are queryable through both `Simulation` and
 `Canwu`. Scenarios that contain initial domain records must use a plugin-aware
 constructor such as `new_with_plugins`; ordinary constructors reject them
 instead of returning a half-configured runtime that could emit an unloadable
@@ -207,7 +207,13 @@ plugin/system provenance, a deterministic state hash, and the previous and
 current boundary hashes. Every committed domain record change has one indexed,
 causally linked evidence event. Snapshot loading reconstructs the initial record
 store from this history, deterministically reapplies each commit stage, and
-requires the result to equal the persisted ordered store.
+requires the result to equal the persisted ordered store. Reservations,
+component writes, command authority, and event entities are checked against the
+domain identities available to the originating proposal and after its atomic
+commit stage, so rehashed evidence cannot consume another system's invisible
+same-stage creation or refer to an entity before creation or after deletion.
+Declared seat institutions must exist both in manifest-bound genesis and in the
+persisted final state.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
 admission. Format 4 snapshots validate this evidence and require exact plugin
