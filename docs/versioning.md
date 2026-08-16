@@ -101,6 +101,17 @@ continue, but retains migration-only replay provenance because snapshot-only
 migration cannot reconstruct every historical boundary state commitment. Saves
 created under revision format 1 export current exact-replay journals normally.
 
+Format 4 also permits additive admission-cursor format 1. Snapshots persist the
+number of attempt, accepted-command, and event records consumed by completed
+boundaries. Runtime settlement uses those monotonic counts to read only the new
+journal tails. Loading still walks boundary evidence once to prove the global
+causal prefix and requires the persisted counts to match exactly; gaps,
+duplicates, backward cursors, and counts beyond the journals are rejected.
+Older format-4 snapshots default to cursor format 0 and derive current counts
+from their validated boundary lists. The cursors are redundant derived metadata
+and are deliberately excluded from authoritative state and boundary hashes, so
+this optimization does not reinterpret existing simulation-result commitments.
+
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,
 controller, seat, observation, interaction, and trace policy do not alter

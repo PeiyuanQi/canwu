@@ -110,6 +110,39 @@ time measurements. The unchanged allocation curves show that this correctness
 milestone neither resolves nor materially worsens the quadratic history-growth
 and replay bottlenecks established by the baseline.
 
+## Admission-cursor milestone comparison
+
+The persisted admission-cursor milestone is recorded in separate
+[`elapsed`](baselines/2026-08-16-admission-cursors-elapsed.json) and
+[`allocation`](baselines/2026-08-16-admission-cursors-allocations.json) reports.
+It replaces each settlement's reconstruction of three full historical sets with
+monotonic attempt, accepted-command, and event cursors, then reads only the new
+journal tails. The committed state-revision reports above are its before
+baseline.
+
+At scale 512, both empty and populated boundaries eliminate 312 allocation
+operations and 109,656 allocated bytes. Across 512 boundaries, history growth
+and exact replay each eliminate 86,358 allocation operations and 30,338,480
+allocated bytes. The persisted cursor fields add 139 bytes to the 3.14 MB
+snapshot (about 0.004%).
+
+| Case at scale 512 | Before median | Cursor median | Change | Before allocation ops | Cursor allocation ops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| History growth | 4,048.313 ms | 4,037.455 ms | -0.3% | 45,551,547 | 45,465,189 |
+| Accepted command | 3.113 ms | 3.074 ms | -1.3% | 32,032 | 32,032 |
+| Persisted rejection | 3.031 ms | 2.939 ms | -3.0% | 32,021 | 32,021 |
+| Empty boundary | 8.242 ms | 7.830 ms | -5.0% | 69,037 | 68,725 |
+| Populated boundary | 8.038 ms | 8.044 ms | +0.1% | 69,149 | 68,837 |
+| Snapshot creation | 0.701 ms | 0.691 ms | -1.4% | 25,208 | 25,208 |
+| Pretty serialization | 3.607 ms | 3.758 ms | +4.2% | 16 | 16 |
+| Load and validate | 17.313 ms | 17.480 ms | +1.0% | 97,442 | 97,442 |
+| Exact replay | 5,804.774 ms | 5,762.994 ms | -0.7% | 67,297,036 | 67,210,678 |
+
+The deterministic allocation reduction proves the removed scan. End-to-end
+wall time remains approximately quadratic because full-state transaction clones,
+checkpoint hashing, and retained-history serialization still dominate; those
+are separate planned milestones.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,

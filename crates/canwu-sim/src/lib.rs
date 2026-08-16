@@ -67,6 +67,8 @@ pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 /// Version of the independently migrated authoritative revision commitment.
 pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
+/// Version of persisted monotonic boundary-admission cursors.
+pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 1;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -2736,6 +2738,9 @@ struct RuntimeState {
     next_correlation_id: u64,
     state_revision: u64,
     replay_revision_format_version: u32,
+    admitted_attempt_count: u64,
+    admitted_command_count: u64,
+    admitted_event_count: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2759,6 +2764,18 @@ pub struct SimulationSnapshot {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     /// Revision-evidence format available to exact replay; zero is migration-only.
     pub replay_revision_format_version: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    /// Version of the persisted boundary-admission cursor contract.
+    pub admission_cursor_format_version: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// Number of command-attempt records consumed by completed boundaries.
+    pub admitted_attempt_count: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// Number of accepted-command records consumed by completed boundaries.
+    pub admitted_command_count: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// Number of event records consumed as boundary ingress.
+    pub admitted_event_count: u64,
     pub initial_time: SimTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_scenario: Option<Scenario>,
@@ -3091,6 +3108,9 @@ impl Simulation {
                 next_correlation_id: 1,
                 state_revision: 0,
                 replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
+                admitted_attempt_count: 0,
+                admitted_command_count: 0,
+                admitted_event_count: 0,
             },
             schema,
             plugins,
@@ -4545,44 +4565,56 @@ impl Simulation {
         request.cadences.sort();
         request.cadences.dedup();
 
-        let previously_admitted_attempts: BTreeSet<_> = self
-            .state
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_attempts.iter().copied())
-            .collect();
-        let previously_admitted_commands: BTreeSet<_> = self
-            .state
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_commands.iter().copied())
-            .collect();
-        let previously_admitted_events: BTreeSet<_> = self
-            .state
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_events.iter().copied())
-            .collect();
+        let admitted_attempt_count =
+            u64::try_from(self.state.command_attempts.len()).map_err(|_| {
+                invalid_snapshot_error("attempt journal exceeds admission cursor range")
+            })?;
+        let admitted_command_count = u64::try_from(self.state.commands.len()).map_err(|_| {
+            invalid_snapshot_error("command journal exceeds admission cursor range")
+        })?;
+        let admitted_event_count = u64::try_from(self.state.events.len())
+            .map_err(|_| invalid_snapshot_error("event journal exceeds admission cursor range"))?;
+        let admitted_attempt_start =
+            usize::try_from(self.state.admitted_attempt_count).map_err(|_| {
+                invalid_snapshot_error("runtime attempt admission cursor exceeds platform range")
+            })?;
+        let admitted_command_start =
+            usize::try_from(self.state.admitted_command_count).map_err(|_| {
+                invalid_snapshot_error("runtime command admission cursor exceeds platform range")
+            })?;
+        let admitted_event_start =
+            usize::try_from(self.state.admitted_event_count).map_err(|_| {
+                invalid_snapshot_error("runtime event admission cursor exceeds platform range")
+            })?;
         let admitted_attempts: Vec<_> = self
             .state
             .command_attempts
+            .get(admitted_attempt_start..)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime attempt admission cursor exceeds its journal")
+            })?
             .iter()
             .map(|record| record.id)
-            .filter(|id| !previously_admitted_attempts.contains(id))
             .collect();
         let admitted_commands: Vec<_> = self
             .state
             .commands
+            .get(admitted_command_start..)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime command admission cursor exceeds its journal")
+            })?
             .iter()
             .map(|record| record.id)
-            .filter(|id| !previously_admitted_commands.contains(id))
             .collect();
         let admitted_events: Vec<_> = self
             .state
             .events
+            .get(admitted_event_start..)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime event admission cursor exceeds its journal")
+            })?
             .iter()
             .map(|event| event.id)
-            .filter(|id| !previously_admitted_events.contains(id))
             .collect();
 
         let (boundary_id_value, next_boundary_id) =
@@ -4875,6 +4907,9 @@ impl Simulation {
         record.hash = compute_boundary_hash(&record)?;
         let boundary_hash = record.hash.clone();
         self.state.boundaries.push(record);
+        self.state.admitted_attempt_count = admitted_attempt_count;
+        self.state.admitted_command_count = admitted_command_count;
+        self.state.admitted_event_count = admitted_event_count;
         self.advance_state_revision()?;
         self.refresh_checkpoint_hash()?;
         Ok(BoundaryReceipt {
@@ -4988,6 +5023,10 @@ impl Simulation {
             revision_format_version: STATE_REVISION_FORMAT_VERSION,
             state_revision: self.state.state_revision,
             replay_revision_format_version: self.state.replay_revision_format_version,
+            admission_cursor_format_version: ADMISSION_CURSOR_FORMAT_VERSION,
+            admitted_attempt_count: self.state.admitted_attempt_count,
+            admitted_command_count: self.state.admitted_command_count,
+            admitted_event_count: self.state.admitted_event_count,
             initial_time: self.state.initial_time,
             initial_scenario: self.bound_initial_scenario().cloned(),
             now: self.state.now,
@@ -5167,6 +5206,9 @@ impl Simulation {
                 next_correlation_id: snapshot.next_correlation_id,
                 state_revision: snapshot.state_revision,
                 replay_revision_format_version: snapshot.replay_revision_format_version,
+                admitted_attempt_count: snapshot.admitted_attempt_count,
+                admitted_command_count: snapshot.admitted_command_count,
+                admitted_event_count: snapshot.admitted_event_count,
             },
             schema: snapshot.schema,
             plugins,
@@ -7543,6 +7585,9 @@ fn validate_snapshot(
     if snapshot.replay_revision_format_version > STATE_REVISION_FORMAT_VERSION {
         return invalid_snapshot("snapshot exact-replay revision format is unsupported");
     }
+    if snapshot.admission_cursor_format_version != ADMISSION_CURSOR_FORMAT_VERSION {
+        return invalid_snapshot("snapshot boundary-admission cursor format is not current");
+    }
     let Some(run_manifest) = &snapshot.run_manifest else {
         return Err(CanwuError::new(
             ErrorCode::InvalidRunManifest,
@@ -7667,12 +7712,21 @@ fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
-    let (max_boundary_id, max_boundary_correlation, domain_history) = validate_boundary_records(
-        snapshot,
-        plugins,
-        &domain_records,
-        initial_domain_records.as_ref(),
-    )?;
+    let (max_boundary_id, max_boundary_correlation, domain_history, admission_cursors) =
+        validate_boundary_records(
+            snapshot,
+            plugins,
+            &domain_records,
+            initial_domain_records.as_ref(),
+        )?;
+    if snapshot.admitted_attempt_count != admission_cursors.attempts
+        || snapshot.admitted_command_count != admission_cursors.commands
+        || snapshot.admitted_event_count != admission_cursors.events
+    {
+        return invalid_snapshot(
+            "persisted admission cursors do not match the globally admitted journal prefixes",
+        );
+    }
     let max_ingress_id = validate_ingress_records(snapshot, plugins, &domain_history)?;
     let boundaries_before_attempt =
         boundaries_before_attempts(snapshot.command_attempts.len(), &snapshot.boundaries)?;
@@ -8789,7 +8843,7 @@ fn validate_boundary_records(
     plugins: &PluginRegistry,
     final_domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
     initial_domain_records: Option<&BTreeMap<DomainRecordRef, DomainRecord>>,
-) -> Result<(u64, u64, DomainRecordHistory), CanwuError> {
+) -> Result<(u64, u64, DomainRecordHistory, PersistedAdmissionCursors), CanwuError> {
     let mut boundary_ids = BTreeSet::new();
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
@@ -8952,7 +9006,22 @@ fn validate_boundary_records(
             "boundary domain-record changes do not materialize the persisted record state",
         );
     }
-    Ok((max_boundary_id, max_correlation_id, history))
+    Ok((
+        max_boundary_id,
+        max_correlation_id,
+        history,
+        PersistedAdmissionCursors {
+            attempts: u64::try_from(next_attempt).map_err(|_| {
+                invalid_snapshot_error("admitted attempt cursor exceeds persisted range")
+            })?,
+            commands: u64::try_from(next_command).map_err(|_| {
+                invalid_snapshot_error("admitted command cursor exceeds persisted range")
+            })?,
+            events: u64::try_from(next_event).map_err(|_| {
+                invalid_snapshot_error("admitted event cursor exceeds persisted range")
+            })?,
+        },
+    ))
 }
 
 fn validate_boundary_admission(
@@ -10351,6 +10420,7 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             }
             hydrate_snapshot_run_configuration(&mut snapshot)?;
             migrate_snapshot_revision(&mut snapshot)?;
+            migrate_snapshot_admission_cursors(&mut snapshot)?;
             Ok(snapshot)
         }
         2 => {
@@ -10442,6 +10512,73 @@ fn migrate_snapshot_revision(snapshot: &mut SimulationSnapshot) -> Result<(), Ca
             ),
         )),
     }
+}
+
+fn migrate_snapshot_admission_cursors(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
+    match snapshot.admission_cursor_format_version {
+        ADMISSION_CURSOR_FORMAT_VERSION => Ok(()),
+        0 => {
+            if snapshot.admitted_attempt_count != 0
+                || snapshot.admitted_command_count != 0
+                || snapshot.admitted_event_count != 0
+            {
+                return invalid_snapshot(
+                    "legacy admission-cursor snapshots cannot contain current cursor values",
+                );
+            }
+            let cursors = admission_cursors_from_boundaries(&snapshot.boundaries)?;
+            snapshot.admitted_attempt_count = cursors.attempts;
+            snapshot.admitted_command_count = cursors.commands;
+            snapshot.admitted_event_count = cursors.events;
+            snapshot.admission_cursor_format_version = ADMISSION_CURSOR_FORMAT_VERSION;
+            Ok(())
+        }
+        version => Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "admission cursor format {version} is unsupported; this engine reads legacy format 0 and current format {ADMISSION_CURSOR_FORMAT_VERSION}"
+            ),
+        )),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PersistedAdmissionCursors {
+    attempts: u64,
+    commands: u64,
+    events: u64,
+}
+
+fn admission_cursors_from_boundaries(
+    boundaries: &[BoundaryRecord],
+) -> Result<PersistedAdmissionCursors, CanwuError> {
+    let mut cursors = PersistedAdmissionCursors::default();
+    for boundary in boundaries {
+        cursors.attempts = cursors
+            .attempts
+            .checked_add(
+                u64::try_from(boundary.admitted_attempts.len()).map_err(|_| {
+                    invalid_snapshot_error("admitted attempt count exceeds cursor range")
+                })?,
+            )
+            .ok_or_else(|| invalid_snapshot_error("admitted attempt cursor is exhausted"))?;
+        cursors.commands = cursors
+            .commands
+            .checked_add(
+                u64::try_from(boundary.admitted_commands.len()).map_err(|_| {
+                    invalid_snapshot_error("admitted command count exceeds cursor range")
+                })?,
+            )
+            .ok_or_else(|| invalid_snapshot_error("admitted command cursor is exhausted"))?;
+        cursors.events =
+            cursors
+                .events
+                .checked_add(u64::try_from(boundary.admitted_events.len()).map_err(|_| {
+                    invalid_snapshot_error("admitted event count exceeds cursor range")
+                })?)
+                .ok_or_else(|| invalid_snapshot_error("admitted event cursor is exhausted"))?;
+    }
+    Ok(cursors)
 }
 
 fn rehash_snapshot_boundaries(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
@@ -10697,6 +10834,10 @@ fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), Ca
     if snapshot.revision_format_version != 0
         || snapshot.state_revision != 0
         || snapshot.replay_revision_format_version != 0
+        || snapshot.admission_cursor_format_version != 0
+        || snapshot.admitted_attempt_count != 0
+        || snapshot.admitted_command_count != 0
+        || snapshot.admitted_event_count != 0
         || snapshot.run_configuration.is_some()
         || snapshot.initial_scenario.is_some()
         || !snapshot.command_attempts.is_empty()
@@ -10850,6 +10991,11 @@ fn migrate_format_3_snapshot(
         snapshot.boundaries.len(),
     )?;
     snapshot.revision_format_version = STATE_REVISION_FORMAT_VERSION;
+    let admission_cursors = admission_cursors_from_boundaries(&snapshot.boundaries)?;
+    snapshot.admitted_attempt_count = admission_cursors.attempts;
+    snapshot.admitted_command_count = admission_cursors.commands;
+    snapshot.admitted_event_count = admission_cursors.events;
+    snapshot.admission_cursor_format_version = ADMISSION_CURSOR_FORMAT_VERSION;
     ENGINE_VERSION.clone_into(&mut snapshot.engine_version);
     snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(&snapshot)?;
@@ -13843,6 +13989,10 @@ mod tests {
         legacy_object.remove("revision_format_version");
         legacy_object.remove("state_revision");
         legacy_object.remove("replay_revision_format_version");
+        legacy_object.remove("admission_cursor_format_version");
+        legacy_object.remove("admitted_attempt_count");
+        legacy_object.remove("admitted_command_count");
+        legacy_object.remove("admitted_event_count");
         let mut broken_chain = legacy_value.clone();
         broken_chain["boundaries"][0]["correlation_id"] = Value::from(999_u64);
         let error = Simulation::from_snapshot_json(
@@ -13971,6 +14121,10 @@ mod tests {
         legacy_object.remove("revision_format_version");
         legacy_object.remove("state_revision");
         legacy_object.remove("replay_revision_format_version");
+        legacy_object.remove("admission_cursor_format_version");
+        legacy_object.remove("admitted_attempt_count");
+        legacy_object.remove("admitted_command_count");
+        legacy_object.remove("admitted_event_count");
 
         let mut migrated = Simulation::from_snapshot_json(
             &serde_json::to_string(&legacy_value).expect("legacy ingress fixture should encode"),
@@ -14011,6 +14165,102 @@ mod tests {
                 .revision_before,
             4
         );
+    }
+
+    #[test]
+    fn admission_cursors_are_persisted_migrated_and_tamper_evident() {
+        let (scenario, ids) = demo_scenario();
+        let morale_request = |request_id, revision, morale| {
+            CommandRequest::new(
+                CommandRequestId::new(request_id),
+                revision,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale,
+                    },
+                ),
+            )
+        };
+        let mut simulation =
+            Simulation::new(59, scenario.clone()).expect("cursor fixture should load");
+        assert!(matches!(
+            simulation
+                .process_command(morale_request(1, 0, 80))
+                .expect("first command should be accepted"),
+            CommandOutcome::Accepted { .. }
+        ));
+        assert!(matches!(
+            simulation
+                .process_command(morale_request(2, 1, 101))
+                .expect("expected rejection should persist"),
+            CommandOutcome::Rejected { .. }
+        ));
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("first cursor boundary should settle");
+        let first_snapshot = simulation.snapshot();
+        assert_eq!(first_snapshot.admitted_attempt_count, 2);
+        assert_eq!(first_snapshot.admitted_command_count, 1);
+        assert_eq!(first_snapshot.admitted_event_count, 1);
+
+        assert!(matches!(
+            simulation
+                .process_command(morale_request(3, 3, 70))
+                .expect("second command should be accepted"),
+            CommandOutcome::Accepted { .. }
+        ));
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("second cursor boundary should settle");
+        let current_snapshot = simulation.snapshot();
+        assert_eq!(current_snapshot.admission_cursor_format_version, 1);
+        assert_eq!(current_snapshot.admitted_attempt_count, 3);
+        assert_eq!(current_snapshot.admitted_command_count, 2);
+        assert_eq!(current_snapshot.admitted_event_count, 2);
+
+        let restored = Simulation::from_snapshot(current_snapshot.clone())
+            .expect("persisted admission cursors should load");
+        assert_eq!(restored.snapshot(), current_snapshot);
+        let replayed = Simulation::replay_from_journal(scenario, &[], &simulation.replay_journal())
+            .expect("admission cursors should reproduce under exact replay");
+        assert_eq!(replayed.snapshot(), current_snapshot);
+
+        let mut legacy_value = serde_json::to_value(current_snapshot.clone())
+            .expect("cursor migration fixture should serialize");
+        let legacy_object = legacy_value
+            .as_object_mut()
+            .expect("cursor migration snapshot should be an object");
+        legacy_object.remove("admission_cursor_format_version");
+        legacy_object.remove("admitted_attempt_count");
+        legacy_object.remove("admitted_command_count");
+        legacy_object.remove("admitted_event_count");
+        let migrated = Simulation::from_snapshot_json(
+            &serde_json::to_string(&legacy_value).expect("cursor migration fixture should encode"),
+        )
+        .expect("legacy admission cursors should derive from boundary prefixes");
+        assert_eq!(migrated.snapshot(), current_snapshot);
+
+        let mut tampered_cursor = current_snapshot.clone();
+        tampered_cursor.admitted_attempt_count -= 1;
+        let error = Simulation::from_snapshot(tampered_cursor)
+            .err()
+            .expect("a cursor detached from boundary evidence must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("admission cursors"));
+
+        let mut migrated_gap = current_snapshot;
+        migrated_gap.boundaries[0].admitted_attempts.remove(0);
+        migrated_gap.admission_cursor_format_version = 0;
+        migrated_gap.admitted_attempt_count = 0;
+        migrated_gap.admitted_command_count = 0;
+        migrated_gap.admitted_event_count = 0;
+        rehash_tampered_snapshot(&mut migrated_gap);
+        let error = Simulation::from_snapshot(migrated_gap)
+            .err()
+            .expect("legacy cursor migration must reject a journal-prefix gap");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
     }
 
     #[test]
@@ -14379,6 +14629,10 @@ mod tests {
         legacy_object.remove("revision_format_version");
         legacy_object.remove("state_revision");
         legacy_object.remove("replay_revision_format_version");
+        legacy_object.remove("admission_cursor_format_version");
+        legacy_object.remove("admitted_attempt_count");
+        legacy_object.remove("admitted_command_count");
+        legacy_object.remove("admitted_event_count");
         legacy_object.remove("boundaries");
         legacy_object.remove("next_boundary_id");
         legacy_object.remove("root_seed");
@@ -14484,6 +14738,10 @@ mod tests {
         malformed_object.remove("revision_format_version");
         malformed_object.remove("state_revision");
         malformed_object.remove("replay_revision_format_version");
+        malformed_object.remove("admission_cursor_format_version");
+        malformed_object.remove("admitted_attempt_count");
+        malformed_object.remove("admitted_command_count");
+        malformed_object.remove("admitted_event_count");
         malformed_object.remove("root_seed");
         malformed_object.remove("random_streams");
         malformed_object.remove("random_draws");

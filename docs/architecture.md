@@ -242,6 +242,14 @@ Boundary-aware replay uses command admission lists to reconstruct operation
 order and rejects any regenerated boundary whose complete evidence differs from
 the journal.
 
+The hot runtime keeps monotonic attempt, accepted-command, and event admission
+cursors. Each settlement reads only the unadmitted journal tails and advances
+the cursors after the boundary record commits, so admission work is proportional
+to newly admitted evidence instead of all prior boundaries and journals. The
+cursors are persisted derived metadata: loading validates them against the
+global boundary-prefix proof, legacy snapshots derive them deterministically,
+and failed settlement restores them with the rest of the transaction.
+
 Every snapshot also stores a recomputed checkpoint hash over the complete
 current deterministic state plus the current boundary-chain head. Snapshot
 loading therefore rejects state, queue, knowledge, plugin-state, random, or
