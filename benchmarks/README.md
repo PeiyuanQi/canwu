@@ -591,3 +591,25 @@ sub-millisecond case. These are treated as local timing noise. The milestone
 makes no runtime-performance claim; it gives exact replay and fixture
 reconstruction a dedicated dependency surface while preserving deterministic
 regeneration and environment binding.
+
+## Validation-module extraction comparison
+
+The behavior-preserving validation extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-validation-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-validation-module-allocations.json) reports,
+using the replay-module milestone as its before baseline. It moves the complete
+snapshot/runtime validation graph, including causal-prefix, boundary,
+authority, scheduling, random-evidence, domain-record, and counter invariants,
+into `canwu-sim/src/validation.rs`. Migration and hashing remain separate
+follow-up surfaces. `canwu-sim/src/lib.rs` falls from 16,891 to 14,101 lines,
+with 2,831 focused lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by +1.8%, accepted commands +3.6%,
+empty boundaries -0.9%, populated boundaries -0.3%, snapshot creation -2.4%,
+load validation +5.1%, and exact replay -1.1%. The rejected-command median
+moves from 0.063 to 0.072 ms (+15.5%) on a sub-0.1-ms case. These are treated as
+local timing noise. The milestone makes no runtime-performance claim; it gives
+authoritative validation a dedicated dependency surface while preserving every
+persisted and replayed invariant.
