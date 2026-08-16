@@ -24,11 +24,37 @@ Engine SemVer and snapshot format versioning are separate. Every snapshot stores
 the producing engine version and an integer snapshot format version. Patch and
 minor releases may continue to read an older snapshot format. A format change
 increments the format number and should provide a migration path when practical.
+Format-4 state and boundary commitments include the producing engine version,
+so this runtime rejects a format-4 snapshot from any other engine version until
+an explicit migration rewrites the commitments. Format 2 and 3 migration records
+the source engine version, then emits a current-engine format-4 checkpoint.
 
 Executable plugin handlers are never serialized. Snapshots retain their plugin
-descriptors, block authoritative continuation while required handlers are
-inactive, and accept rehydration only when registration recreates the exact
-stored descriptor. Plugin command journals must use plugin-aware replay.
+descriptors and author-declared package versions and semantic hashes, block
+authoritative continuation while required handlers are inactive, and accept
+rehydration only when registration recreates that exact identity and contract.
+Plugin command journals must use plugin-aware replay.
+
+Snapshot format 4 replaces the single global RNG with owned, versioned random
+streams and a draw journal containing producer, purpose, cause, correlation,
+position, bound, and result. Every successful phased boundary records a
+deterministic state hash and a chained boundary hash. Snapshots also persist a
+hashed run manifest for scenario, rules, content, localization contracts, run
+configuration, and source identities. A recomputed checkpoint hash binds the
+complete current deterministic state to the boundary-chain head. Exact
+`ReplayJournal` replay verifies engine and format versions, root seed, run and
+plugin manifests, the plugin-registration lifecycle state, commands,
+boundaries, final time, and final checkpoint hash, including command-only and
+registration-closure-only runs. Each report dispatch must retain exactly one
+causally linked core random draw, and authoritative scheduling rejects
+unrepresentable time instead of saturating. Checked hour/day construction and
+checked time/duration arithmetic are available for data-dependent values;
+convenience constructors and operators never clamp. New runs require declared
+manifests; format 2 and 3 checkpoints without plugins migrate with explicit
+legacy provenance. They may continue, but exact replay returns
+`legacy_replay_unavailable`. Legacy snapshots containing executable plugin
+descriptors are rejected because their handler semantic identities cannot be
+recovered safely.
 
 Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
 emission provenance, command and event admission, reservation offers, requests,
@@ -48,9 +74,10 @@ system/action contracts. Component records use typed
 rejected; no released save depends on that initial development-only format.
 
 Every supported load validates canonical ordering, references, causes,
-transit/queue and report-delivery coherence, registration lifecycle,
-descriptors, ownership, boundary evidence, and counter continuity before
-constructing runtime maps.
+transit/queue and report-delivery coherence, registration lifecycle, run and
+plugin manifests, causally linked random evidence, descriptors, ownership,
+boundary hashes, the current checkpoint commitment, and counter continuity
+before constructing runtime maps.
 
 ## Supported operating systems
 

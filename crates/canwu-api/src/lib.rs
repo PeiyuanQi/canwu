@@ -3,24 +3,27 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 pub use canwu_core::{
-    ArmyId, BoundaryId, CommandId, EntityRef, EventId, GovernmentId, PersonId, RouteId,
-    SchemaRegistry, TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandId, EntityRef, EventId, GovernmentId, PersonId, RandomDrawId,
+    RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 pub use canwu_event::{CauseRef, EventKind, SimEvent};
 pub use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
 };
 pub use canwu_sim::{
-    BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
-    BoundarySystemContract, BoundarySystemHandler, CanwuError, Command, CommandContext,
-    CommandEnvelope, CommandReceipt, CommandRecord, DemoIds, ENGINE_VERSION, ErrorCode, Issuer,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
-    PluginDescriptor, PluginRegistrar, PluginRegistry, ReservationAllocation,
+    ArtifactManifest, BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission,
+    BoundaryEmissionKind, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
+    BoundaryRequest, BoundarySystemContract, BoundarySystemHandler, CanwuError, Command,
+    CommandContext, CommandEnvelope, CommandReceipt, CommandRecord, DemoIds, ENGINE_VERSION,
+    ErrorCode, Issuer, PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
+    PluginCommandHandler, PluginDescriptor, PluginRegistrar, PluginRegistry,
+    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer,
+    RandomDrawRecord, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
     ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, SNAPSHOT_FORMAT_VERSION,
-    Scenario, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView,
-    StateKey, StateVisibility, SystemCadence, SystemContract, SystemDirective,
+    ReservationRef, ReservationRequest, ReservationRequestRecord, RunManifest,
+    SNAPSHOT_FORMAT_VERSION, Scenario, SimulationPlugin, SimulationSnapshot,
+    SimulationSystemHandler, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemContract, SystemDirective,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -43,6 +46,22 @@ impl Canwu {
         ENGINE_VERSION
     }
 
+    pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new(seed, scenario)?,
+        })
+    }
+
+    pub fn new_with_manifest(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new_with_manifest(seed, scenario, run_manifest)?,
+        })
+    }
+
     pub fn demo(seed: u64) -> Result<Self, CanwuError> {
         let (simulation, _) = Simulation::demo(seed)?;
         Ok(Self { simulation })
@@ -57,6 +76,21 @@ impl Canwu {
     #[must_use]
     pub const fn time(&self) -> SimTime {
         self.simulation.time()
+    }
+
+    #[must_use]
+    pub const fn run_manifest(&self) -> &RunManifest {
+        self.simulation.run_manifest()
+    }
+
+    #[must_use]
+    pub fn run_manifest_hash(&self) -> &str {
+        self.simulation.run_manifest_hash()
+    }
+
+    #[must_use]
+    pub fn checkpoint_hash(&self) -> &str {
+        self.simulation.checkpoint_hash()
     }
 
     #[must_use]
@@ -80,12 +114,27 @@ impl Canwu {
     }
 
     #[must_use]
+    pub fn random_draws(&self) -> &[RandomDrawRecord] {
+        self.simulation.random_draws()
+    }
+
+    #[must_use]
+    pub fn boundary_head_hash(&self) -> Option<&str> {
+        self.simulation.boundary_head_hash()
+    }
+
+    #[must_use]
     pub const fn schema(&self) -> &SchemaRegistry {
         self.simulation.schema()
     }
 
     pub fn plugin_descriptors(&self) -> impl Iterator<Item = &PluginDescriptor> {
         self.simulation.plugin_descriptors()
+    }
+
+    #[must_use]
+    pub fn replay_journal(&self) -> ReplayJournal {
+        self.simulation.replay_journal()
     }
 
     pub fn register_plugin<P: SimulationPlugin + ?Sized>(
@@ -182,6 +231,38 @@ impl Canwu {
         })
     }
 
+    pub fn replay_with_run_manifest(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::replay_with_run_manifest(
+                seed,
+                scenario,
+                run_manifest,
+                plugins,
+                commands,
+                boundaries,
+                final_time,
+            )?,
+        })
+    }
+
+    pub fn replay_from_journal(
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::replay_from_journal(scenario, plugins, journal)?,
+        })
+    }
+
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
@@ -227,13 +308,14 @@ impl Canwu {
             )
         })?;
         let knowledge = self.knowledge().for_actor(actor);
-        let known_armies = knowledge.map_or_else(Vec::new, |records| {
-            records
+        let known_armies = match knowledge {
+            Some(records) => records
                 .armies
                 .values()
                 .map(|record| known_army_view(self.time(), record))
-                .collect()
-        });
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
         let changes_since = request.since.map_or_else(Vec::new, |since| {
             self.events()
                 .iter()
@@ -733,8 +815,14 @@ pub struct KnownArmyView {
     pub source: KnowledgeSource,
 }
 
-fn known_army_view(now: SimTime, record: &ArmyKnowledge) -> KnownArmyView {
-    KnownArmyView {
+fn known_army_view(now: SimTime, record: &ArmyKnowledge) -> Result<KnownArmyView, CanwuError> {
+    let information_age = now.checked_sub(record.observed_at).ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidDuration,
+            "knowledge age exceeds the supported simulation-duration range",
+        )
+    })?;
+    Ok(KnownArmyView {
         army: record.army,
         name: record
             .known_name
@@ -742,10 +830,10 @@ fn known_army_view(now: SimTime, record: &ArmyKnowledge) -> KnownArmyView {
             .unwrap_or_else(|| format!("Army {}", record.army)),
         known_location: record.known_location,
         estimated_strength: record.estimated_strength,
-        information_age_minutes: (now - record.observed_at).as_minutes(),
+        information_age_minutes: information_age.as_minutes(),
         confidence_per_mille: record.confidence_per_mille,
         source: record.source.clone(),
-    }
+    })
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

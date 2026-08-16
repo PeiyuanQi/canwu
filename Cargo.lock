@@ -83,6 +83,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrayref"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
+
+[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -134,6 +140,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake3"
+version = "1.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76ae7bad254120e9e4c63bafc385310756f90c484eac0e36b8317cf09cb92a77"
+dependencies = [
+ "arrayref",
+ "arrayvec",
+ "cc",
+ "cfg-if",
+ "constant_time_eq",
+ "cpufeatures",
 ]
 
 [[package]]
@@ -236,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "canwu-core",
  "canwu-event",
@@ -250,14 +270,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-debug"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "canwu-api",
  "eframe",
@@ -268,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-event"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -277,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -286,8 +306,9 @@ dependencies = [
 
 [[package]]
 name = "canwu-sim"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
+ "blake3",
  "canwu-core",
  "canwu-event",
  "canwu-knowledge",
@@ -299,14 +320,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-time"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-world"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -386,6 +407,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "constant_time_eq"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -422,6 +449,15 @@ checksum = "45390e6114f68f718cc7a830514a96f903cccd70d02a8f6d9f643ac4ba45afaf"
 dependencies = [
  "bitflags 1.3.2",
  "core-foundation",
+ "libc",
+]
+
+[[package]]
+name = "cpufeatures"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
+dependencies = [
  "libc",
 ]
 

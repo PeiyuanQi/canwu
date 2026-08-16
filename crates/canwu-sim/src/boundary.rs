@@ -1,5 +1,7 @@
-use crate::{CanwuError, SimulationView, StateKey, StateVisibility, SystemCadence};
-use canwu_core::{BoundaryId, CommandId, EntityRef, EventId};
+use crate::{
+    CanwuError, RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
+};
+use canwu_core::{BoundaryId, CommandId, EntityRef, EventId, RandomDrawId};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -125,6 +127,8 @@ pub struct BoundarySystemContract {
     pub reservation_offers: Vec<StateKey>,
     pub reservation_requests: Vec<StateKey>,
     pub reservation_reads: Vec<ReservationRef>,
+    #[serde(default)]
+    pub random_streams: Vec<RandomStreamKey>,
     pub visibility: StateVisibility,
 }
 
@@ -145,6 +149,7 @@ impl BoundarySystemContract {
             reservation_offers: Vec::new(),
             reservation_requests: Vec::new(),
             reservation_reads: Vec::new(),
+            random_streams: Vec::new(),
             visibility: StateVisibility::NextBoundary,
         }
     }
@@ -226,8 +231,16 @@ pub struct BoundaryRecord {
     pub reservation_offers: Vec<ReservationOfferRecord>,
     pub reservation_requests: Vec<ReservationRequestRecord>,
     pub allocations: Vec<ReservationAllocation>,
+    #[serde(default)]
+    pub random_draws: Vec<RandomDrawId>,
     pub changes: Vec<BoundaryChange>,
     pub emissions: Vec<BoundaryEmission>,
+    #[serde(default)]
+    pub state_hash: Option<String>,
+    #[serde(default)]
+    pub previous_hash: String,
+    #[serde(default)]
+    pub hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -235,6 +248,8 @@ pub struct BoundaryReceipt {
     pub boundary_id: BoundaryId,
     pub settled_at: SimTime,
     pub emitted_events: Vec<EventId>,
+    pub random_draws: Vec<RandomDrawId>,
+    pub boundary_hash: String,
     pub change_count: usize,
     pub allocations: Vec<ReservationAllocation>,
 }

@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+blake3.workspace = true
 canwu-core = { path = "../canwu-core" }
 canwu-event = { path = "../canwu-event" }
 canwu-knowledge = { path = "../canwu-knowledge" }

@@ -68,9 +68,14 @@ boundary a structural property instead of a UI convention.
 A validated command produces an event and optional scheduled work. Scheduled
 items are ordered by `(simulation timestamp, insertion sequence)`, so equal-time
 work is deterministic. New scheduled directives must target a strictly future
-simulation time; same-time consequences are emitted directly, so a completed
-boundary cannot retain due ingress. When work executes it may change state, emit a derived
-event with a causal reference, update knowledge, and schedule further work.
+and representable simulation time; checked time arithmetic rejects overflow
+instead of saturating into current or ambiguous work. Same-time consequences
+are emitted directly, so a completed boundary cannot retain due ingress. When
+work executes it may change state, emit a derived event with a causal reference,
+update knowledge, and schedule further work.
+`canwu-time` exposes checked hour/day construction and checked time/duration
+arithmetic for data-dependent values. Its convenience constructors and
+operators never clamp; an out-of-range convenience operation fails loudly.
 Initial `Scenario` values currently admit stationary armies only: in-flight
 state requires the command, event, correlation, and queue evidence carried by a
 runtime snapshot. Scenario admission also rejects non-finite map coordinates so
@@ -130,8 +135,10 @@ reservation offerer claims reject the complete plugin registration without
 changing the live registry. Immediate handlers use `SystemContract`;
 authoritative phased systems use `BoundarySystemContract`, which declares
 phase, cadence, reads, writes, reservation offers and requests, later allocation
-reads, emitted records, and visibility. Immediate and phased handlers cannot
-write the same `StateKey`.
+reads, owned random streams, emitted records, and visibility. Immediate and
+phased handlers cannot write the same `StateKey`. Every executable plugin also
+declares a package version and a 64-character semantic hash; either value or
+any serialized contract mismatch blocks snapshot rehydration and replay.
 
 The runtime enforces declared reads for core collections, plugin components,
 and reservation results. It rejects every component write that is undeclared or
@@ -169,20 +176,42 @@ queues, state, journals, random state, counters, and boundary records to their
 pre-boundary values.
 
 Each successful boundary persists its ID, time, correlation, cadence set,
-admitted commands and events, reservation evidence, allocations, field changes,
-and exact plugin/system event provenance. Boundary-caused events do not invoke
+admitted commands and events, reservation evidence, allocations, random draws,
+field changes, exact plugin/system provenance, a deterministic state hash, and
+the previous and current boundary hashes. Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
-admission. Format 3 snapshots validate this evidence and require exact plugin
-descriptor rehydration before continuation. Boundary-aware replay uses command
-admission lists to reconstruct operation order and rejects any regenerated
-boundary whose complete evidence differs from the journal.
+admission. Format 4 snapshots validate this evidence and require exact plugin
+identity and descriptor rehydration before continuation. Because format-4 state
+and boundary commitments include the producing engine version, a format-4 save
+from another engine version is rejected until an explicit migration exists.
+Boundary-aware replay uses command admission lists to reconstruct operation
+order and rejects any regenerated boundary whose complete evidence differs from
+the journal.
+
+Every snapshot also stores a recomputed checkpoint hash over the complete
+current deterministic state plus the current boundary-chain head. Snapshot
+loading therefore rejects state, queue, knowledge, plugin-state, random, or
+counter changes that retain an earlier checkpoint commitment. Historical
+boundary state commitments are reproduced by exact replay; when a snapshot is
+exactly at its boundary head, loading also recomputes and compares that
+boundary's state commitment directly. The current checkpoint commitment is
+verified for every snapshot.
+
+Randomness is available to phased systems only through declared
+`RandomStreamKey` values. The kernel derives each stream from the run root seed,
+keeps its position independent from unrelated domains, and records every draw
+automatically. Draws made by a boundary that later fails disappear with the
+rest of that transaction. Core report-delay draws additionally name the exact
+recipient, army, dispatch event, and arrival time they produced, and loading
+recomputes that time from the recorded value. Validation also requires every
+report-dispatch event to have exactly one such draw, so removing both draw and
+stream progress cannot preserve an apparently coherent report history.
 
 The legacy immediate command/event path remains for the movement slice and
 compatibility examples. It is transactional, but it is not a substitute for the
 fourteen-phase boundary and cannot own state also managed by phased systems.
 Automatic calendar policy, unified typed ingress classes, structured domain
-rejections, conservation bundles, scoped random streams, and boundary hashing
-remain later conformance work.
+rejections, and conservation bundles remain later conformance work.
 
 Command handlers receive an immutable `CommandContext` containing the issuer
 asserted by the trusted in-process host, proposed command ID, simulation time,
@@ -209,16 +238,27 @@ events, timestamps, and correlations, and that pending or completed report
 delivery agrees with its dispatch and arrival evidence.
 
 Executable handlers are not serialized. A snapshot stores validated plugin and
-system descriptors. Continuation is blocked until every required plugin is
-rehydrated, and registration must reproduce the exact stored descriptor before
-its handlers become active. Use the plugin-aware snapshot/replay constructors
-when executable packages are known at load time. Richer versioned package
-manifests and automatic environment discovery remain required by the CM
-conformance profile. New plugin registration closes after the first successful
-authoritative command, time advance, or phased settlement; exact snapshot rehydration remains
-allowed after that point. Snapshots retain the run's initial time and reject a
+system descriptors together with author-declared package versions and semantic
+hashes. Continuation is blocked until every required plugin is rehydrated, and
+registration must reproduce the exact stored identity and descriptor before
+its handlers become active. `RunManifest` separately binds scenario, rules,
+content, localization-sensitive contracts, run configuration, and source
+provenance; its hash participates in authoritative boundary state hashes. Use
+`ReplayJournal` and `replay_from_journal` for exact replay: the journal freezes
+engine and snapshot versions, root seed, run manifest, plugin descriptors,
+the plugin-registration lifecycle state, commands, boundaries, final time, and
+final checkpoint hash before executing anything. The older `replay*` helpers
+reconstruct caller-supplied fixtures but do not claim recorded-environment
+verification. Automatic package discovery remains later work. New plugin
+registration closes after the first successful authoritative command, time
+advance, or phased settlement; exact snapshot rehydration remains allowed after
+that point. Snapshots retain the run's initial time and reject a
 registration-open flag when commands, events, queued work, component state,
 counter movement, or elapsed simulation time proves execution already began.
+Format 2 and 3 checkpoints without plugins can continue after explicit
+migration with identity-unbound legacy provenance. Exact replay is rejected
+with `legacy_replay_unavailable`, because those formats did not retain enough
+environment identity or state commitments to make that claim safely.
 
 ## External renderer integration
 
@@ -247,6 +287,7 @@ is maintained in [`cm-engine-conformance.md`](cm-engine-conformance.md).
 That profile does not move Celestial Mandate rules into Canwu. Instead, it
 requires Canwu to provide the deterministic settlement, authority, ownership,
 transaction, knowledge, persistence, lineage, package, and publication
-contracts through public extension points. The current v0.3 boundary runtime is
-substantial evidence for CM-E04 through CM-E07, but it is still only a partial
-conformance result; the remaining gaps are tracked in the profile itself.
+contracts through public extension points. The current v0.4 runtime adds scoped
+randomness, run/plugin identity, and boundary hash evidence to the v0.3 phased
+settlement foundation, but it is still only a partial conformance result; the
+remaining gaps are tracked in the profile itself.

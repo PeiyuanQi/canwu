@@ -45,6 +45,14 @@ impl SimulationPlugin for StancePlugin {
         "example-stance"
     }
 
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26"
+    }
+
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         registrar.register_command(
             PluginActionDescriptor {

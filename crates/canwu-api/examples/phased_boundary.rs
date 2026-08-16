@@ -86,6 +86,14 @@ impl SimulationPlugin for SupplyPlugin {
         "example-supply"
     }
 
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "5fac3fb17e5f6fc4a3c85354908d84405bb569b5816631a91f70b759c156da07"
+    }
+
     fn register(&self, registrar: &mut canwu_api::PluginRegistrar<'_>) -> Result<(), CanwuError> {
         let mut contract = BoundarySystemContract::new(
             "offer",
@@ -102,6 +110,14 @@ struct DemandPlugin;
 impl SimulationPlugin for DemandPlugin {
     fn name(&self) -> &'static str {
         "example-demand"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "331b865359d4ac4a14c9bf90da665b82b4aa65ee63c195e331d8f1fa181e7029"
     }
 
     fn register(&self, registrar: &mut canwu_api::PluginRegistrar<'_>) -> Result<(), CanwuError> {

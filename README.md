@@ -13,14 +13,18 @@ Canwu does not render graphics, play audio, or provide a production user
 interface. Games, research tools, Python programs, web clients, and AI agents
 use Canwu through its public APIs.
 
-The current v0.3 development slice retains the small movement scenario and adds
+The current v0.4 development slice retains the small movement scenario and adds
 a deterministic fourteen-phase settlement boundary for Celestial Mandate-style
-domain plugins. Plugins can declare phased reads and writes, compete for
-reservations through stable allocation rules, stage same-boundary or
-next-boundary changes, and persist exact boundary evidence for replay. The
-movement scenario still demonstrates validated commands, scheduled travel,
-causal events, and actor-specific delayed knowledge. This is meaningful progress
-toward the CM profile, not a claim of full conformance.
+domain plugins. Plugins declare phased reads and writes, scoped random streams,
+and exact version/semantic identities. The kernel records causally linked random
+draws, stable resource allocation, run/content manifests, a chained hash for
+every successful boundary, and a checkpoint hash binding current state to that
+chain. Exact replay uses a self-contained recorded environment journal that
+also preserves whether authoritative execution has closed plugin registration.
+The movement scenario still demonstrates validated
+commands, scheduled travel, causal events, and actor-specific delayed
+knowledge. This is meaningful progress toward the CM profile, not a claim of
+full conformance.
 
 ## Workspace
 
@@ -39,7 +43,7 @@ compatibility rules are defined in [versioning](docs/versioning.md).
 
 ## Version and platforms
 
-Canwu uses Semantic Versioning, with all workspace crates currently at `0.3.0`
+Canwu uses Semantic Versioning, with all workspace crates currently at `0.4.0`
 and released in lockstep. The canonical version is in the root `Cargo.toml`.
 
 The supported operating systems are Windows, macOS, and Linux. The simulation

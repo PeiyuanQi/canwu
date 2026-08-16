@@ -49,6 +49,7 @@ define_id!(EventId);
 define_id!(GovernmentId);
 define_id!(OrganizationId);
 define_id!(PersonId);
+define_id!(RandomDrawId);
 define_id!(ResourceId);
 define_id!(RouteId);
 define_id!(TerritoryId);
@@ -88,6 +89,8 @@ pub struct DeterministicRng {
 }
 
 impl DeterministicRng {
+    const STEP: u64 = 0x9E37_79B9_7F4A_7C15;
+
     #[must_use]
     pub const fn from_seed(seed: u64) -> Self {
         Self { state: seed }
@@ -98,8 +101,18 @@ impl DeterministicRng {
         self.state
     }
 
+    #[must_use]
+    pub const fn state_after(seed: u64, draws: u64) -> u64 {
+        seed.wrapping_add(Self::STEP.wrapping_mul(draws))
+    }
+
+    #[must_use]
+    pub const fn seed_before(state: u64, draws: u64) -> u64 {
+        state.wrapping_sub(Self::STEP.wrapping_mul(draws))
+    }
+
     pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.state = self.state.wrapping_add(Self::STEP);
         let mut value = self.state;
         value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);

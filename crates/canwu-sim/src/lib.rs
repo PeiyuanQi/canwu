@@ -7,6 +7,8 @@
 )]
 
 mod boundary;
+mod manifest;
+mod random;
 
 pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
@@ -15,10 +17,15 @@ pub use boundary::{
     ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
     ReservationRequestRecord,
 };
+pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
+pub use random::{
+    RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
+    RandomStreamState,
+};
 
 use canwu_core::{
     ArmyId, BoundaryId, CommandId, DeterministicRng, EntityRef, EventId, FieldSchema, GovernmentId,
-    PersonId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -30,14 +37,17 @@ use canwu_world::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
+const GENESIS_BOUNDARY_HASH: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,8 +67,12 @@ pub enum ErrorCode {
     InvalidDuration,
     InvalidPayload,
     InvalidPluginRegistration,
+    InvalidRandomDraw,
+    InvalidRandomStream,
+    InvalidRunManifest,
     InvalidSnapshot,
     IdentifierExhausted,
+    LegacyReplayUnavailable,
     NoRoute,
     PluginCommandNotFound,
     PluginManifestMismatch,
@@ -66,7 +80,9 @@ pub enum ErrorCode {
     PluginPanicked,
     PluginRegistrationClosed,
     ReplayMismatch,
+    ReplayEnvironmentMismatch,
     SimulationTimeConflict,
+    UndeclaredRandomStream,
     UndeclaredStateRead,
     UndeclaredStateWrite,
     UnsupportedSnapshotVersion,
@@ -127,8 +143,12 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::InvalidDuration => "invalid_duration",
         ErrorCode::InvalidPayload => "invalid_payload",
         ErrorCode::InvalidPluginRegistration => "invalid_plugin_registration",
+        ErrorCode::InvalidRandomDraw => "invalid_random_draw",
+        ErrorCode::InvalidRandomStream => "invalid_random_stream",
+        ErrorCode::InvalidRunManifest => "invalid_run_manifest",
         ErrorCode::InvalidSnapshot => "invalid_snapshot",
         ErrorCode::IdentifierExhausted => "identifier_exhausted",
+        ErrorCode::LegacyReplayUnavailable => "legacy_replay_unavailable",
         ErrorCode::NoRoute => "no_route",
         ErrorCode::PluginCommandNotFound => "plugin_command_not_found",
         ErrorCode::PluginManifestMismatch => "plugin_manifest_mismatch",
@@ -136,7 +156,9 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::PluginPanicked => "plugin_panicked",
         ErrorCode::PluginRegistrationClosed => "plugin_registration_closed",
         ErrorCode::ReplayMismatch => "replay_mismatch",
+        ErrorCode::ReplayEnvironmentMismatch => "replay_environment_mismatch",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
+        ErrorCode::UndeclaredRandomStream => "undeclared_random_stream",
         ErrorCode::UndeclaredStateRead => "undeclared_state_read",
         ErrorCode::UndeclaredStateWrite => "undeclared_state_write",
         ErrorCode::UnsupportedSnapshotVersion => "unsupported_snapshot_version",
@@ -483,6 +505,10 @@ pub struct PluginActionDescriptor {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PluginDescriptor {
     pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub semantic_hash: String,
     pub systems: Vec<SystemContract>,
     #[serde(default)]
     pub boundary_systems: Vec<BoundarySystemContract>,
@@ -537,6 +563,7 @@ pub struct SimulationView<'a> {
     proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
     allowed_reservations: Option<&'a [ReservationRef]>,
+    random_session: Option<RefCell<random::RandomSession>>,
 }
 
 impl SimulationView<'_> {
@@ -605,6 +632,24 @@ impl SimulationView<'_> {
         Ok(self.allocations.and_then(|values| values.get(reservation)))
     }
 
+    pub fn random_range(
+        &self,
+        stream: &RandomStreamKey,
+        upper_exclusive: u64,
+        purpose: &str,
+    ) -> Result<u64, CanwuError> {
+        let Some(session) = &self.random_session else {
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredRandomStream,
+                format!(
+                    "system {} has no declared random streams",
+                    self.reader.unwrap_or("unscoped caller")
+                ),
+            ));
+        };
+        session.borrow_mut().range(stream, upper_exclusive, purpose)
+    }
+
     pub fn component(
         &self,
         state: &StateKey,
@@ -669,6 +714,12 @@ impl SimulationView<'_> {
         }
         Ok(())
     }
+
+    fn finish_random_session(self) -> Option<random::RandomExecution> {
+        self.random_session
+            .map(RefCell::into_inner)
+            .map(random::RandomSession::finish)
+    }
 }
 
 pub type SimulationSystemHandler =
@@ -677,8 +728,17 @@ pub type SimulationSystemHandler =
 pub type PluginCommandHandler =
     fn(&SimulationView<'_>, &CommandContext, &Value) -> Result<Vec<SystemDirective>, CanwuError>;
 
+/// A stateless executable package whose persisted identity must change whenever
+/// its authoritative behavior changes.
 pub trait SimulationPlugin {
     fn name(&self) -> &str;
+    /// Returns the package or rules release recorded in snapshots.
+    fn version(&self) -> &str;
+    /// Returns a lowercase 64-character author-controlled semantic hash.
+    ///
+    /// This must change when handler behavior changes even if the serialized
+    /// registration descriptor remains structurally identical.
+    fn semantic_hash(&self) -> &str;
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError>;
 }
 
@@ -693,6 +753,7 @@ pub struct PluginRegistry {
     immediate_write_states: BTreeMap<StateKey, String>,
     boundary_writers: BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
     reservation_offerers: BTreeMap<StateKey, (String, String)>,
+    random_stream_owners: BTreeMap<RandomStreamKey, (String, String)>,
 }
 
 #[derive(Clone)]
@@ -873,6 +934,12 @@ impl PluginRegistrar<'_> {
             &contract.name,
             &contract.reservation_offers,
         )?;
+        register_random_streams(
+            &mut candidate.random_stream_owners,
+            &self.plugin,
+            &contract.name,
+            &contract.random_streams,
+        )?;
         {
             let descriptor = candidate
                 .descriptors
@@ -971,6 +1038,7 @@ impl PluginRegistry {
                 format!("plugin {plugin_name} is already registered"),
             ));
         }
+        validate_plugin_identity(plugin_name, plugin.version(), plugin.semantic_hash())?;
 
         let expected_descriptor = self.descriptors.get(plugin_name).cloned();
         let mut candidate_registry = self.clone();
@@ -979,6 +1047,8 @@ impl PluginRegistry {
             plugin_name.to_owned(),
             PluginDescriptor {
                 name: plugin_name.to_owned(),
+                version: plugin.version().to_owned(),
+                semantic_hash: plugin.semantic_hash().to_owned(),
                 ..PluginDescriptor::default()
             },
         );
@@ -1025,12 +1095,16 @@ impl PluginRegistry {
             immediate_write_states: BTreeMap::new(),
             boundary_writers: BTreeMap::new(),
             reservation_offerers: BTreeMap::new(),
+            random_stream_owners: BTreeMap::new(),
         };
         let mut previous_plugin = None;
         for mut descriptor in descriptors {
             let plugin = descriptor.name.trim().to_owned();
             if plugin.is_empty()
                 || descriptor.name != plugin
+                || descriptor.version.trim().is_empty()
+                || descriptor.version != descriptor.version.trim()
+                || !is_canonical_hash(&descriptor.semantic_hash)
                 || registry.descriptors.contains_key(&plugin)
                 || previous_plugin
                     .as_ref()
@@ -1038,7 +1112,7 @@ impl PluginRegistry {
             {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidSnapshot,
-                    "snapshot contains an empty or duplicate plugin descriptor",
+                    "snapshot contains an invalid, unversioned, or duplicate plugin descriptor",
                 ));
             }
             if descriptor
@@ -1131,6 +1205,17 @@ impl PluginRegistry {
                 .map_err(|error| {
                     invalid_snapshot_error(format!(
                         "invalid reservation offerer descriptor: {error}"
+                    ))
+                })?;
+                register_random_streams(
+                    &mut registry.random_stream_owners,
+                    &plugin,
+                    &contract.name,
+                    &contract.random_streams,
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid random stream ownership descriptor: {error}"
                     ))
                 })?;
             }
@@ -1230,6 +1315,25 @@ fn validate_state_keys(keys: &mut Vec<StateKey>) -> Result<(), CanwuError> {
     Ok(())
 }
 
+fn validate_plugin_identity(
+    name: &str,
+    version: &str,
+    semantic_hash: &str,
+) -> Result<(), CanwuError> {
+    if name.trim().is_empty()
+        || name != name.trim()
+        || version.trim().is_empty()
+        || version != version.trim()
+        || !is_canonical_hash(semantic_hash)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugins require canonical names, versions, and 64-character semantic hashes",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_system_contract(
     _plugin: &str,
     contract: &mut SystemContract,
@@ -1314,6 +1418,7 @@ fn validate_boundary_system_contract(
     validate_state_keys(&mut contract.reservation_offers)?;
     validate_state_keys(&mut contract.reservation_requests)?;
     validate_reservation_refs(&mut contract.reservation_reads)?;
+    validate_random_stream_keys(&mut contract.random_streams)?;
     validate_canonical_names(&mut contract.emits, "boundary event type")?;
 
     let may_propose_changes = matches!(
@@ -1369,6 +1474,24 @@ fn validate_reservation_refs(values: &mut Vec<ReservationRef>) -> Result<(), Can
         return Err(CanwuError::new(
             ErrorCode::InvalidPluginRegistration,
             "reservation read declarations must be non-empty and canonical",
+        ));
+    }
+    let unique: BTreeSet<_> = values.drain(..).collect();
+    values.extend(unique);
+    Ok(())
+}
+
+fn validate_random_stream_keys(values: &mut Vec<RandomStreamKey>) -> Result<(), CanwuError> {
+    if values.iter().any(|stream| {
+        stream.namespace.trim().is_empty()
+            || stream.namespace != stream.namespace.trim()
+            || stream.name.trim().is_empty()
+            || stream.name != stream.name.trim()
+            || stream.version == 0
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "random stream declarations require canonical names and a nonzero version",
         ));
     }
     let unique: BTreeSet<_> = values.drain(..).collect();
@@ -1562,6 +1685,40 @@ fn register_reservation_offerers(
     Ok(())
 }
 
+fn register_random_streams(
+    owners: &mut BTreeMap<RandomStreamKey, (String, String)>,
+    plugin: &str,
+    system: &str,
+    streams: &[RandomStreamKey],
+) -> Result<(), CanwuError> {
+    for stream in streams {
+        if stream.namespace != plugin || stream.namespace == CORE_STATE_NAMESPACE {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "random stream {}.{}@{} must use its owning plugin namespace {plugin}",
+                    stream.namespace, stream.name, stream.version
+                ),
+            ));
+        }
+        if let Some((existing_plugin, existing_system)) = owners.get(stream)
+            && (existing_plugin != plugin || existing_system != system)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "random stream {}.{}@{} is owned by both {existing_plugin}.{existing_system} and {plugin}.{system}",
+                    stream.namespace, stream.name, stream.version
+                ),
+            ));
+        }
+    }
+    for stream in streams {
+        owners.insert(stream.clone(), (plugin.to_owned(), system.to_owned()));
+    }
+    Ok(())
+}
+
 fn validate_type_schema(schema: &TypeSchema) -> Result<(), CanwuError> {
     if schema.type_name.trim().is_empty() || schema.type_name != schema.type_name.trim() {
         return Err(CanwuError::new(
@@ -1632,6 +1789,9 @@ struct ScheduledRecord {
 struct RuntimeState {
     initial_time: SimTime,
     now: SimTime,
+    run_manifest: RunManifest,
+    run_manifest_hash: String,
+    checkpoint_hash: String,
     plugin_registration_closed: bool,
     people: BTreeMap<PersonId, Person>,
     governments: BTreeMap<GovernmentId, Government>,
@@ -1644,10 +1804,13 @@ struct RuntimeState {
     commands: Vec<CommandRecord>,
     boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    rng: DeterministicRng,
+    root_seed: u64,
+    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    random_draws: Vec<RandomDrawRecord>,
     next_event_id: u64,
     next_command_id: u64,
     next_boundary_id: u64,
+    next_random_draw_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
 }
@@ -1656,6 +1819,12 @@ struct RuntimeState {
 pub struct SimulationSnapshot {
     pub engine_version: String,
     pub snapshot_format_version: u32,
+    #[serde(default)]
+    pub run_manifest: Option<RunManifest>,
+    #[serde(default)]
+    pub run_manifest_hash: String,
+    #[serde(default)]
+    pub checkpoint_hash: String,
     pub initial_time: SimTime,
     pub now: SimTime,
     pub plugin_registration_closed: bool,
@@ -1668,14 +1837,39 @@ pub struct SimulationSnapshot {
     pub plugin_components: Vec<PluginComponentRecord>,
     pub plugin_descriptors: Vec<PluginDescriptor>,
     pub schema: SchemaRegistry,
+    #[serde(default)]
+    pub root_seed: u64,
+    #[serde(default)]
+    pub random_streams: Vec<RandomStreamState>,
+    #[serde(default)]
+    pub random_draws: Vec<RandomDrawRecord>,
     scheduled: Vec<ScheduledRecord>,
-    rng: DeterministicRng,
+    #[serde(default, rename = "rng", skip_serializing_if = "Option::is_none")]
+    legacy_rng: Option<DeterministicRng>,
     next_event_id: u64,
     next_command_id: u64,
     #[serde(default)]
     next_boundary_id: u64,
+    #[serde(default)]
+    next_random_draw_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+/// Complete recorded environment and input journal for exact replay.
+pub struct ReplayJournal {
+    pub engine_version: String,
+    pub snapshot_format_version: u32,
+    pub root_seed: u64,
+    pub run_manifest: RunManifest,
+    pub run_manifest_hash: String,
+    pub plugin_descriptors: Vec<PluginDescriptor>,
+    pub plugin_registration_closed: bool,
+    pub commands: Vec<CommandRecord>,
+    pub boundaries: Vec<BoundaryRecord>,
+    pub final_time: SimTime,
+    pub checkpoint_hash: String,
 }
 
 pub struct Simulation {
@@ -1687,7 +1881,20 @@ pub struct Simulation {
 impl Simulation {
     /// Creates a simulation after validating that scenario references are sound.
     pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
+        let run_manifest = RunManifest::for_scenario("canwu.inline", "scenario", "1", &scenario)?;
+        Self::new_with_manifest(seed, scenario, run_manifest)
+    }
+
+    /// Creates a simulation with an exact, persisted run environment identity.
+    pub fn new_with_manifest(
+        seed: u64,
+        scenario: Scenario,
+        mut run_manifest: RunManifest,
+    ) -> Result<Self, CanwuError> {
         validate_scenario(&scenario)?;
+        manifest::canonicalize(&mut run_manifest);
+        manifest::validate(&run_manifest, Some(&scenario), false)?;
+        let run_manifest_hash = manifest::hash(&run_manifest)?;
         if scenario
             .world
             .armies
@@ -1701,10 +1908,14 @@ impl Simulation {
         }
         let schema = base_schema();
         let plugins = PluginRegistry::default();
-        Ok(Self {
+        let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
+        let mut simulation = Self {
             state: RuntimeState {
                 initial_time: scenario.start_time,
                 now: scenario.start_time,
+                run_manifest,
+                run_manifest_hash,
+                checkpoint_hash: String::new(),
                 plugin_registration_closed: false,
                 people: scenario
                     .world
@@ -1742,16 +1953,21 @@ impl Simulation {
                 commands: Vec::new(),
                 boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
-                rng: DeterministicRng::from_seed(seed),
+                root_seed: seed,
+                random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
+                random_draws: Vec::new(),
                 next_event_id: 1,
                 next_command_id: 1,
                 next_boundary_id: 1,
+                next_random_draw_id: 1,
                 next_schedule_sequence: 1,
                 next_correlation_id: 1,
             },
             schema,
             plugins,
-        })
+        };
+        simulation.refresh_checkpoint_hash()?;
+        Ok(simulation)
     }
 
     pub fn demo(seed: u64) -> Result<(Self, DemoIds), CanwuError> {
@@ -1759,6 +1975,8 @@ impl Simulation {
         Self::new(seed, scenario).map(|simulation| (simulation, ids))
     }
 
+    /// Reconstructs caller-supplied core commands without proving a recorded
+    /// package environment. Use [`Self::replay_from_journal`] for exact replay.
     pub fn replay(
         seed: u64,
         scenario: Scenario,
@@ -1768,6 +1986,8 @@ impl Simulation {
         Self::replay_with_plugins(seed, scenario, &[], commands, final_time)
     }
 
+    /// Reconstructs caller-supplied inputs under caller-supplied plugins.
+    /// This is not an exact replay identity check.
     pub fn replay_with_plugins(
         seed: u64,
         scenario: Scenario,
@@ -1778,6 +1998,9 @@ impl Simulation {
         Self::replay_with_boundaries(seed, scenario, plugins, commands, &[], final_time)
     }
 
+    /// Reconstructs caller-supplied inputs and compares supplied boundaries.
+    /// Use [`Self::replay_from_journal`] when command-only runs must also bind
+    /// their recorded run and plugin identities.
     pub fn replay_with_boundaries(
         seed: u64,
         scenario: Scenario,
@@ -1786,10 +2009,111 @@ impl Simulation {
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
-        let mut simulation = Self::new(seed, scenario)?;
+        let run_manifest = RunManifest::for_scenario("canwu.inline", "scenario", "1", &scenario)?;
+        Self::replay_with_run_manifest(
+            seed,
+            scenario,
+            run_manifest,
+            plugins,
+            commands,
+            boundaries,
+            final_time,
+        )
+    }
+
+    /// Reconstructs caller-supplied inputs under a caller-supplied run manifest.
+    /// This is useful for fixtures; it does not establish recorded identity.
+    pub fn replay_with_run_manifest(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        let mut simulation = Self::new_with_manifest(seed, scenario, run_manifest)?;
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
+        Self::replay_records(simulation, commands, boundaries, final_time)
+    }
+
+    /// Replays only after the recorded engine, run, seed, and plugin manifests
+    /// match, then verifies the final checkpoint commitment.
+    pub fn replay_from_journal(
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+    ) -> Result<Self, CanwuError> {
+        if matches!(journal.run_manifest, RunManifest::MigratedLegacy { .. }) {
+            return Err(CanwuError::new(
+                ErrorCode::LegacyReplayUnavailable,
+                "legacy checkpoints can continue after migration but lack enough recorded identity for exact replay",
+            ));
+        }
+        manifest::validate(&journal.run_manifest, Some(&scenario), false)?;
+        if journal.engine_version != ENGINE_VERSION
+            || journal.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
+            || !is_canonical_hash(&journal.run_manifest_hash)
+            || manifest::hash(&journal.run_manifest)? != journal.run_manifest_hash
+            || !is_canonical_hash(&journal.checkpoint_hash)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "replay journal engine, format, or run identity does not match this runtime",
+            ));
+        }
+        PluginRegistry::from_descriptors(journal.plugin_descriptors.clone()).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                format!("replay journal plugin manifest is invalid: {error}"),
+            )
+        })?;
+
+        let mut simulation =
+            Self::new_with_manifest(journal.root_seed, scenario, journal.run_manifest.clone())?;
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
+        if actual_descriptors != journal.plugin_descriptors {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "active plugin identities and contracts do not match the replay journal",
+            ));
+        }
+
+        let mut simulation = Self::replay_records(
+            simulation,
+            &journal.commands,
+            &journal.boundaries,
+            journal.final_time,
+        )?;
+        if journal.plugin_registration_closed && !simulation.state.plugin_registration_closed {
+            simulation.advance(SimDuration::ZERO)?;
+        }
+        if simulation.state.plugin_registration_closed != journal.plugin_registration_closed {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "replayed plugin-registration lifecycle does not match the recorded journal",
+            ));
+        }
+        if simulation.checkpoint_hash() != journal.checkpoint_hash {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "replayed final checkpoint does not match the recorded journal",
+            ));
+        }
+        Ok(simulation)
+    }
+
+    fn replay_records(
+        mut simulation: Self,
+        commands: &[CommandRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
         let mut next_command = 0;
         for expected_boundary in boundaries {
             for admitted in &expected_boundary.admitted_commands {
@@ -1837,7 +2161,9 @@ impl Simulation {
                 "replay final time cannot precede the last command",
             ));
         }
-        simulation.advance(final_time - simulation.time())?;
+        if final_time > simulation.time() {
+            simulation.advance_to(final_time)?;
+        }
         Ok(simulation)
     }
 
@@ -1860,12 +2186,48 @@ impl Simulation {
                 "new plugins must be registered before authoritative execution begins",
             ));
         }
-        self.plugins.register(plugin, &mut self.schema)
+        let state_start = self.state.clone();
+        let schema_start = self.schema.clone();
+        let plugins_start = self.plugins.clone();
+        let result = (|| {
+            self.plugins.register(plugin, &mut self.schema)?;
+            for stream in self.plugins.random_stream_owners.keys() {
+                self.state
+                    .random_streams
+                    .entry(stream.clone())
+                    .or_insert_with(|| {
+                        RandomStreamState::initial(self.state.root_seed, stream.clone())
+                    });
+            }
+            self.refresh_checkpoint_hash()
+        })();
+        if let Err(error) = result {
+            self.state = state_start;
+            self.schema = schema_start;
+            self.plugins = plugins_start;
+            return Err(error);
+        }
+        Ok(())
     }
 
     #[must_use]
     pub const fn time(&self) -> SimTime {
         self.state.now
+    }
+
+    #[must_use]
+    pub const fn run_manifest(&self) -> &RunManifest {
+        &self.state.run_manifest
+    }
+
+    #[must_use]
+    pub fn run_manifest_hash(&self) -> &str {
+        &self.state.run_manifest_hash
+    }
+
+    #[must_use]
+    pub fn checkpoint_hash(&self) -> &str {
+        &self.state.checkpoint_hash
     }
 
     #[must_use]
@@ -1900,12 +2262,42 @@ impl Simulation {
     }
 
     #[must_use]
+    pub fn random_draws(&self) -> &[RandomDrawRecord] {
+        &self.state.random_draws
+    }
+
+    #[must_use]
+    pub fn boundary_head_hash(&self) -> Option<&str> {
+        self.state
+            .boundaries
+            .last()
+            .map(|record| record.hash.as_str())
+    }
+
+    #[must_use]
     pub const fn schema(&self) -> &SchemaRegistry {
         &self.schema
     }
 
     pub fn plugin_descriptors(&self) -> impl Iterator<Item = &PluginDescriptor> {
         self.plugins.descriptors()
+    }
+
+    #[must_use]
+    pub fn replay_journal(&self) -> ReplayJournal {
+        ReplayJournal {
+            engine_version: ENGINE_VERSION.to_owned(),
+            snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+            root_seed: self.state.root_seed,
+            run_manifest: self.state.run_manifest.clone(),
+            run_manifest_hash: self.state.run_manifest_hash.clone(),
+            plugin_descriptors: self.plugins.descriptors().cloned().collect(),
+            plugin_registration_closed: self.state.plugin_registration_closed,
+            commands: self.state.commands.clone(),
+            boundaries: self.state.boundaries.clone(),
+            final_time: self.state.now,
+            checkpoint_hash: self.state.checkpoint_hash.clone(),
+        }
     }
 
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
@@ -1949,6 +2341,10 @@ impl Simulation {
             accepted_at: self.state.now,
             envelope,
         });
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            self.state = transaction_start;
+            return Err(error);
+        }
 
         Ok(CommandReceipt {
             command_id,
@@ -1968,7 +2364,12 @@ impl Simulation {
                 "simulation time cannot advance by a negative duration",
             ));
         }
-        let target = self.state.now + duration;
+        let target = self.state.now.checked_add(duration).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "simulation target time exceeds the supported range",
+            )
+        })?;
         self.advance_to(target)
     }
 
@@ -1995,7 +2396,12 @@ impl Simulation {
                 "advance_until maximum cannot be negative",
             ));
         }
-        let target = self.state.now + maximum;
+        let target = self.state.now.checked_add(maximum).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "advance_until target time exceeds the supported range",
+            )
+        })?;
         let start = self.state.events.len();
         while self.state.now < target && !condition(self) {
             let next_time = self
@@ -2092,6 +2498,8 @@ impl Simulation {
         let mut reservation_request_records = Vec::new();
         let mut offers = Vec::new();
         let mut requests = Vec::new();
+        let mut random_overlay = boundary_snapshot.random_streams.clone();
+        let mut pending_random_draws = Vec::new();
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
         let mut ordinary = Vec::new();
@@ -2147,6 +2555,10 @@ impl Simulation {
                 } else {
                     &self.state
                 };
+                let random_session = random::RandomSession::new(
+                    &random_overlay,
+                    &registered.contract.random_streams,
+                )?;
                 let view = SimulationView {
                     state: view_state,
                     state_owners: &state_owners,
@@ -2157,6 +2569,7 @@ impl Simulation {
                         .then_some(&candidate_overlay),
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
+                    random_session: Some(RefCell::new(random_session)),
                 };
                 let context = BoundaryContext {
                     boundary_id,
@@ -2186,6 +2599,17 @@ impl Simulation {
                     &state_owners,
                     &proposal,
                 )?;
+                let random_execution = view
+                    .finish_random_session()
+                    .expect("boundary views always have a random session");
+                random_overlay.extend(random_execution.states);
+                pending_random_draws.extend(random_execution.draws.into_iter().map(|draw| {
+                    PendingBoundaryRandomDraw {
+                        plugin: registered.plugin.clone(),
+                        system: registered.contract.name.clone(),
+                        draw,
+                    }
+                }));
                 offers.extend(
                     proposal
                         .offers
@@ -2274,8 +2698,16 @@ impl Simulation {
             &mut changes,
             &mut emissions,
         )?;
+        self.state.random_streams = random_overlay;
+        let random_draws =
+            self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
         self.state.plugin_registration_closed = true;
-        self.state.boundaries.push(BoundaryRecord {
+        let state_hash = self.compute_boundary_state_hash()?;
+        let previous_hash = self.state.boundaries.last().map_or_else(
+            || GENESIS_BOUNDARY_HASH.to_owned(),
+            |record| record.hash.clone(),
+        );
+        let mut record = BoundaryRecord {
             id: boundary_id,
             at: request.at,
             correlation_id,
@@ -2285,9 +2717,17 @@ impl Simulation {
             reservation_offers: reservation_offer_records,
             reservation_requests: reservation_request_records,
             allocations: allocation_records.clone(),
+            random_draws: random_draws.clone(),
             changes: changes.clone(),
             emissions: emissions.clone(),
-        });
+            state_hash: Some(state_hash),
+            previous_hash,
+            hash: String::new(),
+        };
+        record.hash = compute_boundary_hash(&record)?;
+        let boundary_hash = record.hash.clone();
+        self.state.boundaries.push(record);
+        self.refresh_checkpoint_hash()?;
         Ok(BoundaryReceipt {
             boundary_id,
             settled_at: request.at,
@@ -2295,9 +2735,59 @@ impl Simulation {
                 .into_iter()
                 .map(|emission| emission.event)
                 .collect(),
+            random_draws,
+            boundary_hash,
             change_count: changes.len(),
             allocations: allocation_records,
         })
+    }
+
+    fn compute_boundary_state_hash(&self) -> Result<String, CanwuError> {
+        let world = self.world();
+        let plugin_components: Vec<_> = self.state.plugin_components.values().cloned().collect();
+        let plugin_descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
+        let scheduled: Vec<_> = self
+            .state
+            .scheduler
+            .iter()
+            .map(|(key, action)| ScheduledRecord {
+                key: key.clone(),
+                action: action.clone(),
+            })
+            .collect();
+        let random_streams: Vec<_> = self.state.random_streams.values().cloned().collect();
+        state_hash(&StateHashMaterial {
+            engine_version: ENGINE_VERSION,
+            snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+            run_manifest: &self.state.run_manifest,
+            run_manifest_hash: &self.state.run_manifest_hash,
+            initial_time: self.state.initial_time,
+            now: self.state.now,
+            plugin_registration_closed: self.state.plugin_registration_closed,
+            world: &world,
+            knowledge: &self.state.knowledge,
+            events: &self.state.events,
+            commands: &self.state.commands,
+            plugin_components: &plugin_components,
+            plugin_descriptors: &plugin_descriptors,
+            schema: &self.schema,
+            scheduled: &scheduled,
+            root_seed: self.state.root_seed,
+            random_streams: &random_streams,
+            random_draws: &self.state.random_draws,
+            next_event_id: self.state.next_event_id,
+            next_command_id: self.state.next_command_id,
+            next_boundary_id: self.state.next_boundary_id,
+            next_random_draw_id: self.state.next_random_draw_id,
+            next_schedule_sequence: self.state.next_schedule_sequence,
+            next_correlation_id: self.state.next_correlation_id,
+        })
+    }
+
+    fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
+        let state_hash = self.compute_boundary_state_hash()?;
+        self.state.checkpoint_hash = checkpoint_hash(&state_hash, self.boundary_head_hash())?;
+        Ok(())
     }
 
     #[must_use]
@@ -2305,6 +2795,9 @@ impl Simulation {
         SimulationSnapshot {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+            run_manifest: Some(self.state.run_manifest.clone()),
+            run_manifest_hash: self.state.run_manifest_hash.clone(),
+            checkpoint_hash: self.state.checkpoint_hash.clone(),
             initial_time: self.state.initial_time,
             now: self.state.now,
             plugin_registration_closed: self.state.plugin_registration_closed,
@@ -2316,6 +2809,9 @@ impl Simulation {
             plugin_components: self.state.plugin_components.values().cloned().collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
+            root_seed: self.state.root_seed,
+            random_streams: self.state.random_streams.values().cloned().collect(),
+            random_draws: self.state.random_draws.clone(),
             scheduled: self
                 .state
                 .scheduler
@@ -2325,10 +2821,11 @@ impl Simulation {
                     action: action.clone(),
                 })
                 .collect(),
-            rng: self.state.rng,
+            legacy_rng: None,
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
             next_boundary_id: self.state.next_boundary_id,
+            next_random_draw_id: self.state.next_random_draw_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
             next_correlation_id: self.state.next_correlation_id,
         }
@@ -2352,10 +2849,15 @@ impl Simulation {
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
         validate_snapshot(&snapshot, &plugins)?;
-        Ok(Self {
+        let mut simulation = Self {
             state: RuntimeState {
                 initial_time: snapshot.initial_time,
                 now: snapshot.now,
+                run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
+                    invalid_snapshot_error("snapshot is missing its run manifest")
+                })?,
+                run_manifest_hash: snapshot.run_manifest_hash.clone(),
+                checkpoint_hash: snapshot.checkpoint_hash.clone(),
                 plugin_registration_closed: snapshot.plugin_registration_closed,
                 people: snapshot
                     .world
@@ -2411,16 +2913,25 @@ impl Simulation {
                         )
                     })
                     .collect(),
-                rng: snapshot.rng,
+                root_seed: snapshot.root_seed,
+                random_streams: snapshot
+                    .random_streams
+                    .into_iter()
+                    .map(|state| (state.key.clone(), state))
+                    .collect(),
+                random_draws: snapshot.random_draws,
                 next_event_id: snapshot.next_event_id,
                 next_command_id: snapshot.next_command_id,
                 next_boundary_id: snapshot.next_boundary_id,
+                next_random_draw_id: snapshot.next_random_draw_id,
                 next_schedule_sequence: snapshot.next_schedule_sequence,
                 next_correlation_id: snapshot.next_correlation_id,
             },
             schema: snapshot.schema,
             plugins,
-        })
+        };
+        simulation.refresh_checkpoint_hash()?;
+        Ok(simulation)
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
@@ -2530,12 +3041,22 @@ impl Simulation {
                             ),
                         )
                     })?;
+                let arrival_at = self
+                    .state
+                    .now
+                    .checked_add(SimDuration::minutes(route.travel_minutes))
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDuration,
+                            "army arrival time exceeds the supported range",
+                        )
+                    })?;
                 Ok(PreparedCommand::MoveArmy {
                     army: *army,
                     actor,
                     from: army_state.location,
                     destination: *destination,
-                    arrival_at: self.state.now + SimDuration::minutes(route.travel_minutes),
+                    arrival_at,
                 })
             }
             Command::DebugSetArmyMorale { army, morale } => {
@@ -2732,9 +3253,18 @@ impl Simulation {
                 }
             }
             self.state.plugin_registration_closed = true;
+            if let Err(error) = self.refresh_checkpoint_hash() {
+                self.state = boundary_start;
+                return Err(error);
+            }
         }
+        let target_start = self.state.clone();
         self.state.now = target;
         self.state.plugin_registration_closed = true;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            self.state = target_start;
+            return Err(error);
+        }
         Ok(self.state.events[start..].to_vec())
     }
 
@@ -2853,10 +3383,29 @@ impl Simulation {
             .filter(|person| *person != commander)
             .collect();
         for recipient in recipients {
-            let jitter_minutes = i64::try_from(self.state.rng.range(12 * 60))
-                .expect("report jitter is bounded to a small integer");
-            let arrives_at =
-                self.state.now + SimDuration::hours(36) + SimDuration::minutes(jitter_minutes);
+            let (draw_id, jitter) = self.draw_random(
+                &random::core_report_delay_stream(),
+                12 * 60,
+                "knowledge report delivery jitter",
+                RandomDrawProducer::CoreSystem {
+                    system: "canwu.core.knowledge-report-delay".to_owned(),
+                },
+                CauseRef::Event(arrival_event),
+                correlation_id,
+            )?;
+            let jitter_minutes =
+                i64::try_from(jitter).expect("report jitter is bounded to a small integer");
+            let arrives_at = self
+                .state
+                .now
+                .checked_add(SimDuration::hours(36))
+                .and_then(|time| time.checked_add(SimDuration::minutes(jitter_minutes)))
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDuration,
+                        "knowledge report arrival time exceeds the supported range",
+                    )
+                })?;
             let dispatch_event = self.emit(
                 EventKind::ReportDispatched {
                     recipient,
@@ -2867,6 +3416,15 @@ impl Simulation {
                 format!("A report about army {army} was dispatched to person {recipient}"),
                 Some(CauseRef::Event(arrival_event)),
                 correlation_id,
+            )?;
+            self.record_random_outcome(
+                draw_id,
+                RandomDrawOutcome::KnowledgeReportDelivery {
+                    recipient,
+                    army,
+                    dispatch_event,
+                    arrives_at,
+                },
             )?;
             self.schedule_at(
                 arrives_at,
@@ -2992,6 +3550,124 @@ impl Simulation {
         };
         self.state.events.push(event.clone());
         Ok(event)
+    }
+
+    fn draw_random(
+        &mut self,
+        stream: &RandomStreamKey,
+        upper_exclusive: u64,
+        purpose: &str,
+        producer: RandomDrawProducer,
+        cause: CauseRef,
+        correlation_id: u64,
+    ) -> Result<(RandomDrawId, u64), CanwuError> {
+        if upper_exclusive == 0
+            || purpose.trim().is_empty()
+            || purpose != purpose.trim()
+            || correlation_id == 0
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomDraw,
+                "random draws require a positive bound, canonical purpose, and correlation",
+            ));
+        }
+        let (draw_id, next_random_draw_id) =
+            claim_counter(self.state.next_random_draw_id, "random draw ID")?;
+        let state = self.state.random_streams.get_mut(stream).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidRandomStream,
+                format!(
+                    "random stream {}.{}@{} is not initialized",
+                    stream.namespace, stream.name, stream.version
+                ),
+            )
+        })?;
+        let next_position = state.position.checked_add(1).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "random stream position is exhausted",
+            )
+        })?;
+        let position = state.position;
+        let mut generator = DeterministicRng::from_seed(state.generator_state);
+        let value = generator.range(upper_exclusive);
+        state.position = next_position;
+        state.generator_state = generator.state();
+        self.state.next_random_draw_id = next_random_draw_id;
+        let id = RandomDrawId::new(draw_id);
+        self.state.random_draws.push(RandomDrawRecord {
+            id,
+            at: self.state.now,
+            stream: stream.clone(),
+            position,
+            upper_exclusive,
+            value,
+            purpose: purpose.to_owned(),
+            producer,
+            outcome: None,
+            cause,
+            correlation_id,
+        });
+        Ok((id, value))
+    }
+
+    fn record_random_outcome(
+        &mut self,
+        id: RandomDrawId,
+        outcome: RandomDrawOutcome,
+    ) -> Result<(), CanwuError> {
+        let Some(draw) = self
+            .state
+            .random_draws
+            .last_mut()
+            .filter(|draw| draw.id == id)
+        else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomDraw,
+                "random draw outcome does not match the latest pending draw",
+            ));
+        };
+        if draw.outcome.replace(outcome).is_some() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomDraw,
+                "random draw outcome was already recorded",
+            ));
+        }
+        Ok(())
+    }
+
+    fn append_boundary_random_draws(
+        &mut self,
+        boundary: BoundaryId,
+        correlation_id: u64,
+        draws: Vec<PendingBoundaryRandomDraw>,
+    ) -> Result<Vec<RandomDrawId>, CanwuError> {
+        let mut ids = Vec::with_capacity(draws.len());
+        for pending in draws {
+            let (draw_id, next_random_draw_id) =
+                claim_counter(self.state.next_random_draw_id, "random draw ID")?;
+            let id = RandomDrawId::new(draw_id);
+            self.state.next_random_draw_id = next_random_draw_id;
+            self.state.random_draws.push(RandomDrawRecord {
+                id,
+                at: self.state.now,
+                stream: pending.draw.stream,
+                position: pending.draw.position,
+                upper_exclusive: pending.draw.upper_exclusive,
+                value: pending.draw.value,
+                purpose: pending.draw.purpose,
+                producer: RandomDrawProducer::BoundarySystem {
+                    boundary,
+                    plugin: pending.plugin,
+                    system: pending.system,
+                },
+                outcome: Some(RandomDrawOutcome::BoundarySystemDecision),
+                cause: CauseRef::Boundary(boundary),
+                correlation_id,
+            });
+            ids.push(id);
+        }
+        Ok(ids)
     }
 
     fn apply_boundary_stage(
@@ -3144,8 +3820,14 @@ impl Simulation {
                     )?;
                 }
                 SystemDirective::Schedule { after, directive } => {
+                    let at = self.state.now.checked_add(after).ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDuration,
+                            "plugin scheduled time exceeds the supported range",
+                        )
+                    })?;
                     self.schedule_at(
-                        self.state.now + after,
+                        at,
                         ScheduledAction::PluginDirective {
                             plugin: plugin.to_owned(),
                             directive: *directive,
@@ -3161,6 +3843,12 @@ impl Simulation {
     }
 
     fn schedule_at(&mut self, at: SimTime, action: ScheduledAction) -> Result<(), CanwuError> {
+        if at <= self.state.now {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "scheduled work must target a strictly future simulation time",
+            ));
+        }
         let (sequence, next_sequence) =
             claim_counter(self.state.next_schedule_sequence, "schedule sequence")?;
         let key = ScheduleKey { at, sequence };
@@ -3184,6 +3872,7 @@ impl Simulation {
             proposed_components: None,
             allocations: None,
             allowed_reservations: None,
+            random_session: None,
         }
     }
 }
@@ -3199,7 +3888,7 @@ fn replay_command_record(
             "replay command timestamps do not match authoritative operation order",
         ));
     }
-    simulation.advance(record.accepted_at - simulation.time())?;
+    simulation.advance_to(record.accepted_at)?;
     let receipt = simulation.submit(record.envelope.clone())?;
     if receipt.command_id != record.id {
         return Err(CanwuError::new(
@@ -3253,6 +3942,12 @@ struct StagedBoundaryDirective {
     system: String,
     visibility: StateVisibility,
     directive: BoundaryDirective,
+}
+
+struct PendingBoundaryRandomDraw {
+    plugin: String,
+    system: String,
+    draw: random::PendingRandomDraw,
 }
 
 fn boundary_system_due(
@@ -3687,6 +4382,21 @@ fn validate_snapshot(
     if snapshot.engine_version.trim().is_empty() {
         return invalid_snapshot("snapshot engine version cannot be empty");
     }
+    let Some(run_manifest) = &snapshot.run_manifest else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "snapshot is missing its run manifest",
+        ));
+    };
+    manifest::validate(run_manifest, None, true)?;
+    if !is_canonical_hash(&snapshot.run_manifest_hash)
+        || manifest::hash(run_manifest)? != snapshot.run_manifest_hash
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "snapshot run manifest hash is inconsistent",
+        ));
+    }
     if snapshot.initial_time > snapshot.now {
         return invalid_snapshot("snapshot initial time cannot follow its current time");
     }
@@ -3695,10 +4405,16 @@ fn validate_snapshot(
         || !snapshot.events.is_empty()
         || !snapshot.boundaries.is_empty()
         || !snapshot.plugin_components.is_empty()
+        || !snapshot.random_draws.is_empty()
+        || snapshot
+            .random_streams
+            .iter()
+            .any(|stream| stream.position != 0)
         || !snapshot.scheduled.is_empty()
         || snapshot.next_event_id != 1
         || snapshot.next_command_id != 1
         || snapshot.next_boundary_id != 1
+        || snapshot.next_random_draw_id != 1
         || snapshot.next_schedule_sequence != 1
         || snapshot.next_correlation_id != 1;
     if has_execution_evidence && !snapshot.plugin_registration_closed {
@@ -3766,6 +4482,32 @@ fn validate_snapshot(
         previous_event = Some((event.timestamp, event.id));
     }
     let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(snapshot, plugins)?;
+    let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
+    let current_state_hash = snapshot_state_hash(snapshot)?;
+    let expected_checkpoint_hash = checkpoint_hash(
+        &current_state_hash,
+        snapshot
+            .boundaries
+            .last()
+            .map(|record| record.hash.as_str()),
+    )?;
+    if !is_canonical_hash(&snapshot.checkpoint_hash)
+        || expected_checkpoint_hash != snapshot.checkpoint_hash
+    {
+        return invalid_snapshot(
+            "checkpoint hash does not bind the persisted state to its boundary head",
+        );
+    }
+    if matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }))
+        && snapshot_is_at_boundary_head(snapshot)
+        && snapshot
+            .boundaries
+            .last()
+            .and_then(|record| record.state_hash.as_deref())
+            != Some(current_state_hash.as_str())
+    {
+        return invalid_snapshot("boundary-head state commitment does not match persisted state");
+    }
     for event in &snapshot.events {
         match &event.cause {
             Some(CauseRef::Boundary(id)) => {
@@ -3870,7 +4612,8 @@ fn validate_snapshot(
         .map(|event| event.correlation_id)
         .max()
         .unwrap_or(0)
-        .max(max_boundary_correlation);
+        .max(max_boundary_correlation)
+        .max(max_random_correlation);
     for record in &snapshot.scheduled {
         if record.key.at <= snapshot.now
             || record.key.sequence == 0
@@ -4002,6 +4745,11 @@ fn validate_snapshot(
         "command",
     )?;
     validate_contiguous_next_counter(snapshot.next_boundary_id, max_boundary_id, "boundary")?;
+    validate_contiguous_or_exhausted_next_counter(
+        snapshot.next_random_draw_id,
+        max_random_draw_id,
+        "random draw",
+    )?;
     validate_next_counter(
         snapshot.next_schedule_sequence,
         max_schedule_sequence,
@@ -4015,6 +4763,228 @@ fn validate_snapshot(
     Ok(())
 }
 
+fn validate_random_evidence(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(u64, u64), CanwuError> {
+    if snapshot.legacy_rng.is_some() {
+        return invalid_snapshot("current snapshots cannot retain the legacy global RNG");
+    }
+    if snapshot
+        .random_streams
+        .windows(2)
+        .any(|pair| pair[0].key >= pair[1].key)
+    {
+        return invalid_snapshot("random streams are not in canonical order");
+    }
+    let expected_streams: BTreeSet<_> = std::iter::once(random::core_report_delay_stream())
+        .chain(plugins.random_stream_owners.keys().cloned())
+        .collect();
+    let actual_streams: BTreeSet<_> = snapshot
+        .random_streams
+        .iter()
+        .map(|state| state.key.clone())
+        .collect();
+    if actual_streams != expected_streams
+        || snapshot
+            .random_streams
+            .iter()
+            .any(|state| !state.is_coherent(snapshot.root_seed))
+    {
+        return invalid_snapshot("random stream state or ownership is inconsistent");
+    }
+
+    let mut boundary_draws = BTreeMap::new();
+    for boundary in &snapshot.boundaries {
+        if boundary
+            .random_draws
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
+            return invalid_snapshot("boundary random draw IDs are not canonical");
+        }
+        for id in &boundary.random_draws {
+            if boundary_draws.insert(*id, boundary.id).is_some()
+                || snapshot
+                    .random_draws
+                    .get(usize::try_from(id.get().saturating_sub(1)).unwrap_or(usize::MAX))
+                    .is_none_or(|draw| draw.id != *id)
+            {
+                return invalid_snapshot("boundary references an unknown or duplicate random draw");
+            }
+        }
+    }
+
+    let mut replayed: BTreeMap<_, _> = snapshot
+        .random_streams
+        .iter()
+        .map(|state| (state.key.clone(), (0_u64, state.seed)))
+        .collect();
+    let mut previous_draw = None;
+    let mut max_correlation_id = 0;
+    let core_stream = random::core_report_delay_stream();
+    let mut report_draws = BTreeMap::new();
+    for (index, draw) in snapshot.random_draws.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("random draw index exceeds identifier space"))?;
+        if draw.id.get() != expected_id
+            || draw.at < snapshot.initial_time
+            || draw.at > snapshot.now
+            || draw.correlation_id == 0
+            || draw.upper_exclusive == 0
+            || draw.value >= draw.upper_exclusive
+            || draw.purpose.trim().is_empty()
+            || draw.purpose != draw.purpose.trim()
+            || previous_draw.is_some_and(|(at, id)| (draw.at, draw.id) <= (at, id))
+        {
+            return invalid_snapshot("random draw journal is not canonical");
+        }
+        let Some((position, generator_state)) = replayed.get_mut(&draw.stream) else {
+            return invalid_snapshot("random draw references an unknown stream");
+        };
+        if draw.position != *position {
+            return invalid_snapshot("random draw positions are not contiguous per stream");
+        }
+        let mut generator = DeterministicRng::from_seed(*generator_state);
+        if generator.range(draw.upper_exclusive) != draw.value {
+            return invalid_snapshot("random draw value does not match its stream state");
+        }
+        *position = position.checked_add(1).ok_or_else(|| {
+            invalid_snapshot_error("random stream position exceeds identifier space")
+        })?;
+        *generator_state = generator.state();
+
+        match &draw.producer {
+            RandomDrawProducer::BoundarySystem {
+                boundary,
+                plugin,
+                system,
+            } => {
+                let Some(record) = snapshot
+                    .boundaries
+                    .iter()
+                    .find(|record| record.id == *boundary)
+                else {
+                    return invalid_snapshot("random draw references an unknown boundary");
+                };
+                let Some(contract) = snapshot_boundary_contract(plugins, plugin, system) else {
+                    return invalid_snapshot("random draw references an unknown boundary system");
+                };
+                if boundary_draws.get(&draw.id) != Some(boundary)
+                    || draw.at != record.at
+                    || draw.correlation_id != record.correlation_id
+                    || draw.cause != CauseRef::Boundary(*boundary)
+                    || draw.outcome != Some(RandomDrawOutcome::BoundarySystemDecision)
+                    || !contract.random_streams.contains(&draw.stream)
+                    || !boundary_system_due(
+                        contract,
+                        &record.cadences,
+                        !record.admitted_events.is_empty(),
+                    )
+                    || plugins.random_stream_owners.get(&draw.stream)
+                        != Some(&(plugin.clone(), system.clone()))
+                {
+                    return invalid_snapshot("boundary random draw provenance is inconsistent");
+                }
+            }
+            RandomDrawProducer::CoreSystem { system } => {
+                let CauseRef::Event(cause) = draw.cause else {
+                    return invalid_snapshot("core random draw lacks an event cause");
+                };
+                let Some(event) = snapshot.events.iter().find(|event| event.id == cause) else {
+                    return invalid_snapshot("core random draw references an unknown event");
+                };
+                let EventKind::ArmyArrived {
+                    army: arrived_army, ..
+                } = event.kind
+                else {
+                    return invalid_snapshot("core random draw cause is not an army arrival");
+                };
+                let Some(RandomDrawOutcome::KnowledgeReportDelivery {
+                    recipient,
+                    army,
+                    dispatch_event,
+                    arrives_at,
+                }) = &draw.outcome
+                else {
+                    return invalid_snapshot("core random draw lacks report-delivery evidence");
+                };
+                let Some(dispatch) = snapshot
+                    .events
+                    .iter()
+                    .find(|candidate| candidate.id == *dispatch_event)
+                else {
+                    return invalid_snapshot("core random draw outcome references a missing event");
+                };
+                let expected_arrives_at = draw
+                    .at
+                    .checked_add(SimDuration::hours(36))
+                    .and_then(|time| {
+                        i64::try_from(draw.value)
+                            .ok()
+                            .and_then(|value| time.checked_add(SimDuration::minutes(value)))
+                    })
+                    .ok_or_else(|| {
+                        invalid_snapshot_error("core random draw value exceeds time range")
+                    })?;
+                if boundary_draws.contains_key(&draw.id)
+                    || system != "canwu.core.knowledge-report-delay"
+                    || draw.stream != core_stream
+                    || draw.upper_exclusive != 12 * 60
+                    || draw.purpose != "knowledge report delivery jitter"
+                    || draw.at != event.timestamp
+                    || draw.correlation_id != event.correlation_id
+                    || *army != arrived_army
+                    || *arrives_at != expected_arrives_at
+                    || dispatch.timestamp != draw.at
+                    || dispatch.correlation_id != draw.correlation_id
+                    || dispatch.cause != Some(CauseRef::Event(cause))
+                    || !matches!(
+                        dispatch.kind,
+                        EventKind::ReportDispatched {
+                            recipient: dispatch_recipient,
+                            army: dispatch_army,
+                            arrives_at: dispatch_arrives,
+                        } if dispatch_recipient == *recipient
+                            && dispatch_army == *army
+                            && dispatch_arrives == *arrives_at
+                    )
+                {
+                    return invalid_snapshot("core random draw provenance is inconsistent");
+                }
+                if report_draws.insert(*dispatch_event, draw.id).is_some() {
+                    return invalid_snapshot(
+                        "report dispatch is backed by more than one core random draw",
+                    );
+                }
+            }
+        }
+        max_correlation_id = max_correlation_id.max(draw.correlation_id);
+        previous_draw = Some((draw.at, draw.id));
+    }
+
+    for state in &snapshot.random_streams {
+        if replayed.get(&state.key) != Some(&(state.position, state.generator_state)) {
+            return invalid_snapshot("random draw journal does not reproduce stream state");
+        }
+    }
+    for event in &snapshot.events {
+        if matches!(event.kind, EventKind::ReportDispatched { .. })
+            && !report_draws.contains_key(&event.id)
+        {
+            return invalid_snapshot(
+                "report dispatch must be backed by exactly one core random draw",
+            );
+        }
+    }
+    Ok((
+        snapshot.random_draws.last().map_or(0, |draw| draw.id.get()),
+        max_correlation_id,
+    ))
+}
+
 fn validate_boundary_records(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
@@ -4026,8 +4996,10 @@ fn validate_boundary_records(
     let mut next_command = 0;
     let mut next_event = 0;
     let mut previous_boundary = None;
+    let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
     let mut max_boundary_id = 0;
     let mut max_correlation_id = 0;
+    let requires_state_hash = matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }));
 
     for (index, record) in snapshot.boundaries.iter().enumerate() {
         let expected_id = u64::try_from(index)
@@ -4066,10 +5038,24 @@ fn validate_boundary_records(
             boundary_values.insert(key, change.value.clone());
         }
         validate_boundary_emissions(record, snapshot, plugins, &mut emitted_events)?;
+        if record.previous_hash != previous_hash
+            || !is_canonical_hash(&record.hash)
+            || (requires_state_hash && record.state_hash.is_none())
+            || record
+                .state_hash
+                .as_deref()
+                .is_some_and(|hash| !is_canonical_hash(hash))
+            || compute_boundary_hash(record).map_err(|error| {
+                invalid_snapshot_error(format!("could not verify boundary hash: {error}"))
+            })? != record.hash
+        {
+            return invalid_snapshot("boundary hash chain is inconsistent");
+        }
 
         max_boundary_id = record.id.get();
         max_correlation_id = max_correlation_id.max(record.correlation_id);
         previous_boundary = Some((record.at, record.id));
+        previous_hash.clone_from(&record.hash);
     }
     let boundary_states: BTreeSet<_> = plugins
         .boundary_writers
@@ -4836,24 +5822,365 @@ fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
 
 fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapshot, CanwuError> {
     match snapshot.snapshot_format_version {
-        SNAPSHOT_FORMAT_VERSION => Ok(snapshot),
+        SNAPSHOT_FORMAT_VERSION => {
+            if snapshot.engine_version != ENGINE_VERSION {
+                return Err(CanwuError::new(
+                    ErrorCode::UnsupportedSnapshotVersion,
+                    format!(
+                        "snapshot format {} from engine {} requires an explicit migration to engine {}",
+                        snapshot.snapshot_format_version, snapshot.engine_version, ENGINE_VERSION
+                    ),
+                ));
+            }
+            if snapshot.legacy_rng.is_some() {
+                return invalid_snapshot("format 4 snapshots cannot contain the legacy global RNG");
+            }
+            Ok(snapshot)
+        }
         2 => {
+            if snapshot.run_manifest.is_some()
+                || !snapshot.run_manifest_hash.is_empty()
+                || !snapshot.checkpoint_hash.is_empty()
+            {
+                return invalid_snapshot("format 2 snapshots cannot contain current manifest data");
+            }
+            let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
             if !snapshot.boundaries.is_empty() || !matches!(snapshot.next_boundary_id, 0 | 1) {
                 return invalid_snapshot("format 2 snapshots cannot contain phased-boundary state");
             }
             snapshot.boundaries.clear();
             snapshot.next_boundary_id = 1;
-            snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
-            Ok(snapshot)
+            migrate_format_3_snapshot(snapshot, 2, checkpoint_hash)
+        }
+        3 => {
+            if snapshot.run_manifest.is_some()
+                || !snapshot.run_manifest_hash.is_empty()
+                || !snapshot.checkpoint_hash.is_empty()
+            {
+                return invalid_snapshot("format 3 snapshots cannot contain current manifest data");
+            }
+            let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
+            migrate_format_3_snapshot(snapshot, 3, checkpoint_hash)
         }
         _ => Err(CanwuError::new(
             ErrorCode::UnsupportedSnapshotVersion,
             format!(
-                "snapshot format {} from engine {} is unsupported; this engine reads formats 2 and {}",
+                "snapshot format {} from engine {} is unsupported; this engine reads formats 2, 3, and {}",
                 snapshot.snapshot_format_version, snapshot.engine_version, SNAPSHOT_FORMAT_VERSION
             ),
         )),
     }
+}
+
+fn migrate_format_3_snapshot(
+    mut snapshot: SimulationSnapshot,
+    source_snapshot_format: u32,
+    checkpoint_hash: String,
+) -> Result<SimulationSnapshot, CanwuError> {
+    if !snapshot.plugin_descriptors.is_empty() {
+        return Err(CanwuError::new(
+            ErrorCode::PluginManifestMismatch,
+            "legacy plugin snapshots lack executable semantic identities and cannot be safely migrated",
+        ));
+    }
+    if !snapshot.random_streams.is_empty()
+        || !snapshot.random_draws.is_empty()
+        || snapshot.next_random_draw_id != 0
+    {
+        return invalid_snapshot("legacy snapshots cannot contain scoped random state");
+    }
+    let legacy_rng = snapshot
+        .legacy_rng
+        .take()
+        .ok_or_else(|| invalid_snapshot_error("legacy snapshot is missing its global RNG state"))?;
+    let dispatch_count = u64::try_from(
+        snapshot
+            .events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::ReportDispatched { .. }))
+            .count(),
+    )
+    .map_err(|_| invalid_snapshot_error("legacy random draw count exceeds identifier space"))?;
+    let root_seed = DeterministicRng::seed_before(legacy_rng.state(), dispatch_count);
+    let core_key = random::core_report_delay_stream();
+    let mut core_state = RandomStreamState::initial(root_seed, core_key.clone());
+    core_state.position = dispatch_count;
+    core_state.generator_state = legacy_rng.state();
+
+    let mut random_draws = Vec::new();
+    for event in &snapshot.events {
+        let EventKind::ReportDispatched {
+            recipient,
+            army,
+            arrives_at,
+        } = event.kind
+        else {
+            continue;
+        };
+        let jitter = arrives_at
+            .as_minutes()
+            .checked_sub(event.timestamp.as_minutes())
+            .and_then(|duration| duration.checked_sub(SimDuration::hours(36).as_minutes()))
+            .ok_or_else(|| {
+                invalid_snapshot_error("legacy report timing exceeds the supported range")
+            })?;
+        let Ok(value) = u64::try_from(jitter) else {
+            return invalid_snapshot("legacy report jitter is outside the scoped RNG contract");
+        };
+        let Some(CauseRef::Event(cause)) = &event.cause else {
+            return invalid_snapshot("legacy report dispatch lacks its arrival-event cause");
+        };
+        if value >= 12 * 60 {
+            return invalid_snapshot("legacy report jitter is outside the scoped RNG contract");
+        }
+        let id_value = u64::try_from(random_draws.len())
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("legacy random draw IDs are exhausted"))?;
+        random_draws.push(RandomDrawRecord {
+            id: RandomDrawId::new(id_value),
+            at: event.timestamp,
+            stream: core_key.clone(),
+            position: id_value - 1,
+            upper_exclusive: 12 * 60,
+            value,
+            purpose: "knowledge report delivery jitter".to_owned(),
+            producer: RandomDrawProducer::CoreSystem {
+                system: "canwu.core.knowledge-report-delay".to_owned(),
+            },
+            outcome: Some(RandomDrawOutcome::KnowledgeReportDelivery {
+                recipient,
+                army,
+                dispatch_event: event.id,
+                arrives_at,
+            }),
+            cause: CauseRef::Event(*cause),
+            correlation_id: event.correlation_id,
+        });
+    }
+
+    let mut streams = BTreeMap::from([(core_key, core_state)]);
+    for key in snapshot
+        .plugin_descriptors
+        .iter()
+        .flat_map(|descriptor| &descriptor.boundary_systems)
+        .flat_map(|contract| &contract.random_streams)
+    {
+        streams
+            .entry(key.clone())
+            .or_insert_with(|| RandomStreamState::initial(root_seed, key.clone()));
+    }
+    snapshot.root_seed = root_seed;
+    snapshot.random_streams = streams.into_values().collect();
+    snapshot.random_draws = random_draws;
+    snapshot.next_random_draw_id = dispatch_count.checked_add(1).ok_or_else(|| {
+        invalid_snapshot_error("legacy random draw counter exceeds identifier space")
+    })?;
+
+    let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
+    for boundary in &mut snapshot.boundaries {
+        boundary.random_draws.clear();
+        boundary.state_hash = None;
+        boundary.previous_hash.clone_from(&previous_hash);
+        boundary.hash = compute_boundary_hash(boundary)?;
+        previous_hash.clone_from(&boundary.hash);
+    }
+    let source_engine_version = snapshot.engine_version.clone();
+    let run_manifest = RunManifest::migrated_legacy(
+        source_engine_version,
+        source_snapshot_format,
+        checkpoint_hash,
+    );
+    snapshot.run_manifest_hash = manifest::hash(&run_manifest)?;
+    snapshot.run_manifest = Some(run_manifest);
+    ENGINE_VERSION.clone_into(&mut snapshot.engine_version);
+    snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
+    snapshot.checkpoint_hash = snapshot_checkpoint_hash(&snapshot)?;
+    Ok(snapshot)
+}
+
+#[derive(Serialize)]
+struct StateHashMaterial<'a> {
+    engine_version: &'a str,
+    snapshot_format_version: u32,
+    run_manifest: &'a RunManifest,
+    run_manifest_hash: &'a str,
+    initial_time: SimTime,
+    now: SimTime,
+    plugin_registration_closed: bool,
+    world: &'a WorldSnapshot,
+    knowledge: &'a KnowledgeSnapshot,
+    events: &'a [SimEvent],
+    commands: &'a [CommandRecord],
+    plugin_components: &'a [PluginComponentRecord],
+    plugin_descriptors: &'a [PluginDescriptor],
+    schema: &'a SchemaRegistry,
+    scheduled: &'a [ScheduledRecord],
+    root_seed: u64,
+    random_streams: &'a [RandomStreamState],
+    random_draws: &'a [RandomDrawRecord],
+    next_event_id: u64,
+    next_command_id: u64,
+    next_boundary_id: u64,
+    next_random_draw_id: u64,
+    next_schedule_sequence: u64,
+    next_correlation_id: u64,
+}
+
+fn state_hash(material: &StateHashMaterial<'_>) -> Result<String, CanwuError> {
+    canonical_hash("canwu.boundary-state.v1", material)
+}
+
+fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
+    let Some(run_manifest) = &snapshot.run_manifest else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "snapshot is missing its run manifest",
+        ));
+    };
+    state_hash(&StateHashMaterial {
+        engine_version: &snapshot.engine_version,
+        snapshot_format_version: snapshot.snapshot_format_version,
+        run_manifest,
+        run_manifest_hash: &snapshot.run_manifest_hash,
+        initial_time: snapshot.initial_time,
+        now: snapshot.now,
+        plugin_registration_closed: snapshot.plugin_registration_closed,
+        world: &snapshot.world,
+        knowledge: &snapshot.knowledge,
+        events: &snapshot.events,
+        commands: &snapshot.commands,
+        plugin_components: &snapshot.plugin_components,
+        plugin_descriptors: &snapshot.plugin_descriptors,
+        schema: &snapshot.schema,
+        scheduled: &snapshot.scheduled,
+        root_seed: snapshot.root_seed,
+        random_streams: &snapshot.random_streams,
+        random_draws: &snapshot.random_draws,
+        next_event_id: snapshot.next_event_id,
+        next_command_id: snapshot.next_command_id,
+        next_boundary_id: snapshot.next_boundary_id,
+        next_random_draw_id: snapshot.next_random_draw_id,
+        next_schedule_sequence: snapshot.next_schedule_sequence,
+        next_correlation_id: snapshot.next_correlation_id,
+    })
+}
+
+fn checkpoint_hash(state_hash: &str, boundary_head: Option<&str>) -> Result<String, CanwuError> {
+    #[derive(Serialize)]
+    struct CheckpointHashMaterial<'a> {
+        state_hash: &'a str,
+        boundary_head: Option<&'a str>,
+    }
+
+    canonical_hash(
+        "canwu.checkpoint.v1",
+        &CheckpointHashMaterial {
+            state_hash,
+            boundary_head,
+        },
+    )
+}
+
+fn snapshot_checkpoint_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
+    let state_hash = snapshot_state_hash(snapshot)?;
+    checkpoint_hash(
+        &state_hash,
+        snapshot
+            .boundaries
+            .last()
+            .map(|record| record.hash.as_str()),
+    )
+}
+
+fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> bool {
+    let Some(last) = snapshot.boundaries.last() else {
+        return false;
+    };
+    if last.at != snapshot.now {
+        return false;
+    }
+    let admitted_commands: BTreeSet<_> = snapshot
+        .boundaries
+        .iter()
+        .flat_map(|record| record.admitted_commands.iter().copied())
+        .collect();
+    if admitted_commands.len() != snapshot.commands.len() {
+        return false;
+    }
+    let accounted_events: BTreeSet<_> = snapshot
+        .boundaries
+        .iter()
+        .flat_map(|record| {
+            record
+                .admitted_events
+                .iter()
+                .copied()
+                .chain(record.emissions.iter().map(|emission| emission.event))
+        })
+        .collect();
+    accounted_events.len() == snapshot.events.len()
+}
+
+fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> {
+    #[derive(Serialize)]
+    struct BoundaryHashMaterial<'a> {
+        id: BoundaryId,
+        at: SimTime,
+        correlation_id: u64,
+        cadences: &'a [SystemCadence],
+        admitted_commands: &'a [CommandId],
+        admitted_events: &'a [EventId],
+        reservation_offers: &'a [ReservationOfferRecord],
+        reservation_requests: &'a [ReservationRequestRecord],
+        allocations: &'a [ReservationAllocation],
+        random_draws: &'a [RandomDrawId],
+        changes: &'a [BoundaryChange],
+        emissions: &'a [BoundaryEmission],
+        state_hash: &'a Option<String>,
+        previous_hash: &'a str,
+    }
+
+    canonical_hash(
+        "canwu.boundary-record.v1",
+        &BoundaryHashMaterial {
+            id: record.id,
+            at: record.at,
+            correlation_id: record.correlation_id,
+            cadences: &record.cadences,
+            admitted_commands: &record.admitted_commands,
+            admitted_events: &record.admitted_events,
+            reservation_offers: &record.reservation_offers,
+            reservation_requests: &record.reservation_requests,
+            allocations: &record.allocations,
+            random_draws: &record.random_draws,
+            changes: &record.changes,
+            emissions: &record.emissions,
+            state_hash: &record.state_hash,
+            previous_hash: &record.previous_hash,
+        },
+    )
+}
+
+fn canonical_hash<T: Serialize + ?Sized>(domain: &str, value: &T) -> Result<String, CanwuError> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            format!("could not encode deterministic hash material: {error}"),
+        )
+    })?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&encoded);
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+fn is_canonical_hash(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn invalid_snapshot_error(message: impl Into<String>) -> CanwuError {
@@ -5231,7 +6558,20 @@ mod tests {
 
     use super::*;
 
+    macro_rules! test_plugin_identity {
+        ($hash:literal) => {
+            fn version(&self) -> &'static str {
+                "test-v1"
+            }
+
+            fn semantic_hash(&self) -> &'static str {
+                $hash
+            }
+        };
+    }
+
     struct AuthorityPlugin;
+    struct ChangedAuthorityPlugin;
 
     fn authority_command(
         view: &SimulationView<'_>,
@@ -5261,22 +6601,40 @@ mod tests {
         }])
     }
 
+    fn register_authority(registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_command(
+            PluginActionDescriptor {
+                name: "set_stance".to_owned(),
+                description: "Set a test stance".to_owned(),
+                payload_schema: PayloadSchema::Null,
+                reads: vec![StateKey::core_armies()],
+                writes: vec![StateKey::new("military", "stance")],
+            },
+            authority_command,
+        )
+    }
+
     impl SimulationPlugin for AuthorityPlugin {
         fn name(&self) -> &'static str {
             "authority-test"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000001");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
-            registrar.register_command(
-                PluginActionDescriptor {
-                    name: "set_stance".to_owned(),
-                    description: "Set a test stance".to_owned(),
-                    payload_schema: PayloadSchema::Null,
-                    reads: vec![StateKey::core_armies()],
-                    writes: vec![StateKey::new("military", "stance")],
-                },
-                authority_command,
-            )
+            register_authority(registrar)
+        }
+    }
+
+    impl SimulationPlugin for ChangedAuthorityPlugin {
+        fn name(&self) -> &'static str {
+            "authority-test"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000013");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            register_authority(registrar)
         }
     }
 
@@ -5303,6 +6661,8 @@ mod tests {
         fn name(&self) -> &str {
             self.name
         }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000002");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut contract = SystemContract::event_driven(
@@ -5373,6 +6733,8 @@ mod tests {
             "failing-test"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000003");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_system(
                 SystemContract::event_driven(
@@ -5435,6 +6797,8 @@ mod tests {
             "journal-command"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000004");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
                 PluginActionDescriptor {
@@ -5455,6 +6819,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "boundary-ghost-test"
         }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000005");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
@@ -5495,6 +6861,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "ghost-test"
         }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000006");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let ignored = registrar.register_command(
@@ -5540,6 +6908,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "secret-owner"
         }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000007");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
@@ -5602,6 +6972,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "undeclared-access"
         }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000008");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
@@ -5674,6 +7046,8 @@ mod tests {
             "a"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000009");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
                 PluginActionDescriptor {
@@ -5692,6 +7066,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "a/person:1/b"
         }
+
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000a");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             registrar.register_command(
@@ -5713,6 +7089,100 @@ mod tests {
             EntityRef::Territory(TerritoryId::new(1)),
             "grain",
         )
+    }
+
+    fn primary_random_stream() -> RandomStreamKey {
+        RandomStreamKey::new("random-primary", "daily-roll", 1)
+    }
+
+    fn noise_random_stream() -> RandomStreamKey {
+        RandomStreamKey::new("random-noise", "daily-noise", 1)
+    }
+
+    fn failure_random_stream() -> RandomStreamKey {
+        RandomStreamKey::new("boundary-failure", "rollback-proof", 1)
+    }
+
+    fn roll_primary(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let roll = view.random_range(&primary_random_stream(), 100, "daily primary roll")?;
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::SetComponent {
+                state: StateKey::new("random-primary", "roll"),
+                entity: EntityRef::Territory(TerritoryId::new(1)),
+                component: "value".to_owned(),
+                value: Value::from(roll),
+                summary: format!("Primary random stream rolled {roll}"),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn draw_noise(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let _ = view.random_range(&noise_random_stream(), 10_000, "unrelated daily noise")?;
+        Ok(BoundaryProposal::default())
+    }
+
+    struct PrimaryRandomPlugin;
+    struct ChangedPrimaryRandomPlugin;
+    struct NoiseRandomPlugin;
+
+    fn register_primary_random(registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        let mut contract = BoundarySystemContract::new(
+            "roll",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        contract.writes = vec![StateKey::new("random-primary", "roll")];
+        contract.random_streams = vec![primary_random_stream()];
+        registrar.register_boundary_system(contract, roll_primary)
+    }
+
+    impl SimulationPlugin for PrimaryRandomPlugin {
+        fn name(&self) -> &'static str {
+            "random-primary"
+        }
+
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000b");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            register_primary_random(registrar)
+        }
+    }
+
+    impl SimulationPlugin for ChangedPrimaryRandomPlugin {
+        fn name(&self) -> &'static str {
+            "random-primary"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000012");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            register_primary_random(registrar)
+        }
+    }
+
+    impl SimulationPlugin for NoiseRandomPlugin {
+        fn name(&self) -> &'static str {
+            "random-noise"
+        }
+
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000c");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut contract = BoundarySystemContract::new(
+                "draw",
+                BoundaryPhase::DerivedFieldSolve,
+                SystemCadence::Daily,
+            );
+            contract.random_streams = vec![noise_random_stream()];
+            registrar.register_boundary_system(contract, draw_noise)
+        }
     }
 
     fn offer_grain(
@@ -5856,6 +7326,8 @@ mod tests {
             "grain-supply"
         }
 
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000d");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut contract = BoundarySystemContract::new(
                 "offer",
@@ -5871,6 +7343,8 @@ mod tests {
         fn name(&self) -> &'static str {
             "high-claim"
         }
+
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000e");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut request = BoundarySystemContract::new(
@@ -5897,6 +7371,8 @@ mod tests {
             "low-claim"
         }
 
+        test_plugin_identity!("000000000000000000000000000000000000000000000000000000000000000f");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut request = BoundarySystemContract::new(
                 "request",
@@ -5921,6 +7397,8 @@ mod tests {
             "visibility-validator"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000010");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut contract = BoundarySystemContract::new(
                 "validate",
@@ -5936,9 +7414,10 @@ mod tests {
     }
 
     fn staged_failure(
-        _view: &SimulationView<'_>,
+        view: &SimulationView<'_>,
         _context: &BoundaryContext,
     ) -> Result<BoundaryProposal, CanwuError> {
+        let _ = view.random_range(&failure_random_stream(), 100, "rollback proof")?;
         Ok(BoundaryProposal {
             directives: vec![BoundaryDirective::SetComponent {
                 state: StateKey::new("boundary-failure", "value"),
@@ -5968,6 +7447,8 @@ mod tests {
             "boundary-failure"
         }
 
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000011");
+
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
             let mut propose = BoundarySystemContract::new(
                 "propose",
@@ -5975,6 +7456,7 @@ mod tests {
                 SystemCadence::Daily,
             );
             propose.writes = vec![StateKey::new("boundary-failure", "value")];
+            propose.random_streams = vec![failure_random_stream()];
             propose.visibility = StateVisibility::SameBoundary;
             registrar.register_boundary_system(propose, staged_failure)?;
             registrar.register_boundary_system(
@@ -6092,14 +7574,35 @@ mod tests {
         };
         assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
 
+        let mut unmigrated_engine = simulation.snapshot();
+        unmigrated_engine.engine_version = "0.4.0-other".to_owned();
+        unmigrated_engine.checkpoint_hash = snapshot_checkpoint_hash(&unmigrated_engine)
+            .expect("the other-engine fixture should carry a coherent commitment");
+        let Err(error) = Simulation::from_snapshot(unmigrated_engine) else {
+            panic!("current-format snapshots from another engine must require migration");
+        };
+        assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
+
         let mut legacy_value = serde_json::to_value(simulation.snapshot())
             .expect("snapshot should convert to JSON value");
         let legacy_object = legacy_value
             .as_object_mut()
             .expect("snapshot JSON should be an object");
         legacy_object.insert("snapshot_format_version".to_owned(), Value::from(2));
+        legacy_object.remove("run_manifest");
+        legacy_object.remove("run_manifest_hash");
+        legacy_object.remove("checkpoint_hash");
         legacy_object.remove("boundaries");
         legacy_object.remove("next_boundary_id");
+        legacy_object.remove("root_seed");
+        legacy_object.remove("random_streams");
+        legacy_object.remove("random_draws");
+        legacy_object.remove("next_random_draw_id");
+        legacy_object.insert(
+            "rng".to_owned(),
+            serde_json::to_value(DeterministicRng::from_seed(35))
+                .expect("legacy RNG fixture should serialize"),
+        );
         let legacy_json =
             serde_json::to_string(&legacy_value).expect("legacy snapshot fixture should serialize");
         let migrated = Simulation::from_snapshot_json(&legacy_json)
@@ -6108,7 +7611,15 @@ mod tests {
             migrated.snapshot().snapshot_format_version,
             SNAPSHOT_FORMAT_VERSION
         );
+        assert_eq!(migrated.snapshot().engine_version, ENGINE_VERSION);
         assert!(migrated.boundaries().is_empty());
+        let legacy_journal = migrated.replay_journal();
+        let (initial_scenario, _) = demo_scenario();
+        let Err(error) = Simulation::replay_from_journal(initial_scenario, &[], &legacy_journal)
+        else {
+            panic!("identity-unbound legacy checkpoints must not claim exact replay");
+        };
+        assert_eq!(error.code, ErrorCode::LegacyReplayUnavailable);
 
         let mut restored = Simulation::from_snapshot_json(&json).expect("snapshot should restore");
         restored
@@ -6122,6 +7633,98 @@ mod tests {
                 .location,
             ids.eastern_territory
         );
+        let mut changed_delivery = restored.snapshot();
+        let mut changed_dispatch = None;
+        for event in &mut changed_delivery.events {
+            if let EventKind::ReportDispatched { arrives_at, .. } = &mut event.kind {
+                *arrives_at += SimDuration::minutes(1);
+                changed_dispatch = Some((event.id, *arrives_at));
+                break;
+            }
+        }
+        let (dispatch_event, changed_arrival) =
+            changed_dispatch.expect("arrival should dispatch an observer report");
+        let scheduled = changed_delivery
+            .scheduled
+            .iter_mut()
+            .find(|record| {
+                matches!(
+                    record.action,
+                    ScheduledAction::KnowledgeReport {
+                        dispatch_event: candidate,
+                        ..
+                    } if candidate == dispatch_event
+                )
+            })
+            .expect("the dispatched report should remain pending");
+        scheduled.key.at = changed_arrival;
+        changed_delivery.checkpoint_hash = snapshot_checkpoint_hash(&changed_delivery)
+            .expect("the causally inconsistent fixture should hash");
+        let Err(error) = Simulation::from_snapshot(changed_delivery) else {
+            panic!("report timing must remain tied to its recorded random draw");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("random draw"));
+
+        let mut missing_draw = restored.snapshot();
+        missing_draw.random_draws.clear();
+        let core_stream = missing_draw
+            .random_streams
+            .iter_mut()
+            .find(|state| state.key == random::core_report_delay_stream())
+            .expect("the core report-delay stream should be persisted");
+        core_stream.position = 0;
+        core_stream.generator_state = core_stream.seed;
+        missing_draw.next_random_draw_id = 1;
+        missing_draw.checkpoint_hash =
+            snapshot_checkpoint_hash(&missing_draw).expect("the draw-omission fixture should hash");
+        let Err(error) = Simulation::from_snapshot(missing_draw) else {
+            panic!("every report dispatch must retain its generating random draw");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("core random draw"));
+
+        let mut malformed_legacy =
+            serde_json::to_value(restored.snapshot()).expect("snapshot should convert to JSON");
+        let malformed_object = malformed_legacy
+            .as_object_mut()
+            .expect("snapshot JSON should be an object");
+        malformed_object.insert("snapshot_format_version".to_owned(), Value::from(3));
+        malformed_object.remove("run_manifest");
+        malformed_object.remove("run_manifest_hash");
+        malformed_object.remove("checkpoint_hash");
+        malformed_object.remove("root_seed");
+        malformed_object.remove("random_streams");
+        malformed_object.remove("random_draws");
+        malformed_object.remove("next_random_draw_id");
+        malformed_object.insert(
+            "rng".to_owned(),
+            serde_json::to_value(DeterministicRng::from_seed(35))
+                .expect("legacy RNG fixture should serialize"),
+        );
+        let malformed_dispatch = malformed_object
+            .get_mut("events")
+            .and_then(Value::as_array_mut)
+            .and_then(|events| {
+                events.iter_mut().find(|event| {
+                    event
+                        .get("kind")
+                        .and_then(|kind| kind.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("report_dispatched")
+                })
+            })
+            .expect("the legacy fixture should contain a report dispatch");
+        malformed_dispatch["timestamp"] = Value::from(i64::MAX);
+        malformed_dispatch["kind"]["arrives_at"] = Value::from(i64::MIN);
+        let malformed_json = serde_json::to_string(&malformed_legacy)
+            .expect("malformed legacy fixture should still serialize");
+        let Err(error) = Simulation::from_snapshot_json(&malformed_json) else {
+            panic!("legacy report-time overflow must return a structured error");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("legacy report timing"));
+
         let report_pending = restored
             .snapshot_json()
             .expect("pending reports should serialize");
@@ -6224,6 +7827,8 @@ mod tests {
 
         let mut exhausted_counter = simulation.snapshot();
         exhausted_counter.next_command_id = u64::MAX;
+        exhausted_counter.checkpoint_hash = snapshot_checkpoint_hash(&exhausted_counter)
+            .expect("the coherent exhausted fixture should hash");
         let mut restored =
             Simulation::from_snapshot(exhausted_counter).expect("the exhausted sentinel is valid");
         let before = restored.snapshot();
@@ -6552,6 +8157,14 @@ mod tests {
 
         let mut due_at_boundary = causal_cut.snapshot();
         due_at_boundary.scheduled[0].key.at = due_at_boundary.now;
+        due_at_boundary.boundaries[0].state_hash = Some(
+            snapshot_state_hash(&due_at_boundary)
+                .expect("the structurally corrupted state should hash"),
+        );
+        due_at_boundary.boundaries[0].hash = compute_boundary_hash(&due_at_boundary.boundaries[0])
+            .expect("the structurally corrupted boundary should hash");
+        due_at_boundary.checkpoint_hash = snapshot_checkpoint_hash(&due_at_boundary)
+            .expect("the structurally corrupted fixture should still hash");
         let error = Simulation::from_snapshot(due_at_boundary)
             .err()
             .expect("completed boundaries cannot retain due ingress");
@@ -6581,6 +8194,269 @@ mod tests {
                 .snapshot_json()
                 .expect("failed settlement must restore every serialized field")
         );
+    }
+
+    #[test]
+    fn scoped_random_streams_are_isolated_recorded_hashed_and_replayable() {
+        let (scenario, _) = demo_scenario();
+        let mut primary_only = Simulation::new(73, scenario.clone()).expect("demo should load");
+        primary_only
+            .register_plugin(&PrimaryRandomPlugin)
+            .expect("primary random plugin should register");
+
+        let mut with_noise = Simulation::new(73, scenario.clone()).expect("demo should load");
+        with_noise
+            .register_plugin(&NoiseRandomPlugin)
+            .expect("noise random plugin should register");
+        with_noise
+            .register_plugin(&PrimaryRandomPlugin)
+            .expect("primary random plugin should register");
+
+        let request = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
+        let primary_receipt = primary_only
+            .settle_boundary(request.clone())
+            .expect("primary boundary should settle");
+        with_noise
+            .settle_boundary(request)
+            .expect("noise boundary should settle");
+
+        let primary_draw = primary_only
+            .random_draws()
+            .first()
+            .expect("the primary system should record its draw");
+        let isolated_draw = with_noise
+            .random_draws()
+            .iter()
+            .find(|draw| draw.stream == primary_random_stream())
+            .expect("the primary stream should remain present with unrelated noise");
+        assert_eq!(primary_draw.value, isolated_draw.value);
+        assert_eq!(primary_draw.position, isolated_draw.position);
+        assert_eq!(primary_draw.id, primary_receipt.random_draws[0]);
+        assert_eq!(
+            primary_draw.cause,
+            CauseRef::Boundary(primary_receipt.boundary_id)
+        );
+        assert!(matches!(
+            &primary_draw.producer,
+            RandomDrawProducer::BoundarySystem {
+                boundary,
+                plugin,
+                system,
+            } if *boundary == primary_receipt.boundary_id
+                && plugin == "random-primary"
+                && system == "roll"
+        ));
+
+        let first_hash = primary_receipt.boundary_hash;
+        let second_receipt = primary_only
+            .settle_boundary(
+                BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(1))
+                    .with_cadence(SystemCadence::Daily),
+            )
+            .expect("second primary boundary should settle");
+        let second_boundary = primary_only
+            .boundaries()
+            .last()
+            .expect("second boundary should be recorded");
+        assert_eq!(second_boundary.previous_hash, first_hash);
+        assert_eq!(second_boundary.hash, second_receipt.boundary_hash);
+        assert!(second_boundary.state_hash.is_some());
+        assert_eq!(
+            primary_only.boundary_head_hash(),
+            Some(second_receipt.boundary_hash.as_str())
+        );
+
+        let restored = Simulation::from_snapshot_with_plugins(
+            primary_only.snapshot(),
+            &[&PrimaryRandomPlugin],
+        )
+        .expect("scoped random evidence should survive snapshot restoration");
+        assert_eq!(primary_only.snapshot(), restored.snapshot());
+
+        let mut changed_state = primary_only.snapshot();
+        changed_state.world.armies[0].morale += 1;
+        let Err(error) =
+            Simulation::from_snapshot_with_plugins(changed_state, &[&PrimaryRandomPlugin])
+        else {
+            panic!("persisted state cannot change while retaining its checkpoint commitment");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("checkpoint hash"));
+
+        let mut missing_state_commitment = primary_only.snapshot();
+        missing_state_commitment.boundaries[0].state_hash = None;
+        missing_state_commitment.boundaries[0].hash =
+            compute_boundary_hash(&missing_state_commitment.boundaries[0])
+                .expect("the malformed legacy-style boundary should hash");
+        let first_hash = missing_state_commitment.boundaries[0].hash.clone();
+        missing_state_commitment.boundaries[1].previous_hash = first_hash;
+        missing_state_commitment.boundaries[1].hash =
+            compute_boundary_hash(&missing_state_commitment.boundaries[1])
+                .expect("the dependent boundary should rehash");
+        missing_state_commitment.checkpoint_hash =
+            snapshot_checkpoint_hash(&missing_state_commitment)
+                .expect("the malformed checkpoint should hash");
+        let Err(error) = Simulation::from_snapshot_with_plugins(
+            missing_state_commitment,
+            &[&PrimaryRandomPlugin],
+        ) else {
+            panic!("declared format-4 runs require every boundary state commitment");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let replayed = Simulation::replay_with_boundaries(
+            73,
+            scenario,
+            &[&PrimaryRandomPlugin],
+            primary_only.command_log(),
+            primary_only.boundaries(),
+            primary_only.time(),
+        )
+        .expect("scoped draws and boundary hashes should replay exactly");
+        assert_eq!(primary_only.snapshot(), replayed.snapshot());
+
+        let mut corrupted_draw = primary_only.snapshot();
+        corrupted_draw.random_draws[0].value = (corrupted_draw.random_draws[0].value + 1)
+            % corrupted_draw.random_draws[0].upper_exclusive;
+        let Err(error) =
+            Simulation::from_snapshot_with_plugins(corrupted_draw, &[&PrimaryRandomPlugin])
+        else {
+            panic!("tampered random evidence must not load");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut corrupted_hash = primary_only.snapshot();
+        corrupted_hash.boundaries[0].hash.replace_range(..1, "f");
+        let Err(error) =
+            Simulation::from_snapshot_with_plugins(corrupted_hash, &[&PrimaryRandomPlugin])
+        else {
+            panic!("tampered boundary hashes must not load");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn run_and_plugin_manifests_bind_continuation_and_replay() {
+        let (scenario, _) = demo_scenario();
+        let scenario_manifest =
+            ArtifactManifest::for_scenario("cm", "reference-scenario", "1", &scenario)
+                .expect("scenario identity should hash");
+        let run_configuration =
+            ArtifactManifest::from_bytes("cm", "run-policy", "1", b"validation/reference")
+                .expect("run configuration should hash");
+        let mut run_manifest = RunManifest::declared(scenario_manifest, run_configuration);
+        let RunManifest::Declared {
+            rules,
+            content,
+            localization_contracts,
+            sources,
+            ..
+        } = &mut run_manifest
+        else {
+            unreachable!("the fixture creates a declared manifest");
+        };
+        rules.extend([
+            ArtifactManifest::from_bytes("cm", "zeta-rules", "1", b"zeta")
+                .expect("rule identity should hash"),
+            ArtifactManifest::from_bytes("cm", "alpha-rules", "1", b"alpha")
+                .expect("rule identity should hash"),
+        ]);
+        content.push(
+            ArtifactManifest::from_bytes("cm", "historical-content", "1", b"content")
+                .expect("content identity should hash"),
+        );
+        localization_contracts.push(
+            ArtifactManifest::from_bytes("cm", "localization-contract", "1", b"keys-v1")
+                .expect("localization identity should hash"),
+        );
+        sources.push(
+            ArtifactManifest::from_bytes("cm", "source-ledger", "1", b"sources")
+                .expect("source identity should hash"),
+        );
+
+        let mut simulation = Simulation::new_with_manifest(91, scenario.clone(), run_manifest)
+            .expect("declared run identity should be admitted");
+        let RunManifest::Declared { rules, .. } = simulation.run_manifest() else {
+            unreachable!("new runs retain a declared manifest");
+        };
+        assert_eq!(rules[0].name, "alpha-rules");
+        assert_eq!(rules[1].name, "zeta-rules");
+        assert!(is_canonical_hash(simulation.run_manifest_hash()));
+        simulation
+            .register_plugin(&PrimaryRandomPlugin)
+            .expect("versioned plugin should register");
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("manifest-bound boundary should settle");
+
+        let exact_manifest = simulation.run_manifest().clone();
+        let snapshot = simulation.snapshot();
+        let restored =
+            Simulation::from_snapshot_with_plugins(snapshot.clone(), &[&PrimaryRandomPlugin])
+                .expect("the exact executable manifest should restore");
+        assert_eq!(simulation.snapshot(), restored.snapshot());
+
+        let Err(error) = Simulation::from_snapshot_with_plugins(
+            snapshot.clone(),
+            &[&ChangedPrimaryRandomPlugin],
+        ) else {
+            panic!("changed executable semantics must not rehydrate an exact descriptor");
+        };
+        assert_eq!(error.code, ErrorCode::PluginManifestMismatch);
+
+        let mut changed_scenario = scenario.clone();
+        changed_scenario.world.armies[0].strength += 1;
+        let Err(error) =
+            Simulation::new_with_manifest(91, changed_scenario, exact_manifest.clone())
+        else {
+            panic!("a scenario must match its declared semantic identity");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRunManifest);
+
+        let mut corrupted_manifest_hash = snapshot.clone();
+        let replacement = if corrupted_manifest_hash.run_manifest_hash.starts_with('f') {
+            "e"
+        } else {
+            "f"
+        };
+        corrupted_manifest_hash
+            .run_manifest_hash
+            .replace_range(..1, replacement);
+        let Err(error) = Simulation::from_snapshot(corrupted_manifest_hash) else {
+            panic!("a tampered run manifest hash must not load");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRunManifest);
+
+        let replayed = Simulation::replay_with_run_manifest(
+            91,
+            scenario.clone(),
+            exact_manifest.clone(),
+            &[&PrimaryRandomPlugin],
+            simulation.command_log(),
+            simulation.boundaries(),
+            simulation.time(),
+        )
+        .expect("the exact run and plugin environment should replay");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+
+        let mut changed_environment = exact_manifest;
+        let RunManifest::Declared { content, .. } = &mut changed_environment else {
+            unreachable!("the fixture retains a declared manifest");
+        };
+        content[0].semantic_hash =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let Err(error) = Simulation::replay_with_run_manifest(
+            91,
+            scenario,
+            changed_environment,
+            &[&PrimaryRandomPlugin],
+            simulation.command_log(),
+            simulation.boundaries(),
+            simulation.time(),
+        ) else {
+            panic!("replay under changed content identity must fail");
+        };
+        assert_eq!(error.code, ErrorCode::ReplayMismatch);
     }
 
     #[test]
@@ -6758,6 +8634,52 @@ mod tests {
                 .snapshot_json()
                 .expect("a panicking plugin must leave no serialized change")
         );
+
+        let (mut ceiling_scenario, ceiling_ids) = demo_scenario();
+        ceiling_scenario.start_time = SimTime::from_minutes(i64::MAX - 60);
+        let mut ceiling = Simulation::new(35, ceiling_scenario)
+            .expect("a scenario near the time ceiling should load");
+        let ceiling_before = ceiling
+            .snapshot_json()
+            .expect("the ceiling fixture should serialize");
+        let movement_error = ceiling
+            .submit(move_order(&ceiling_ids))
+            .expect_err("movement whose arrival overflows simulation time must fail");
+        assert_eq!(movement_error.code, ErrorCode::InvalidDuration);
+        let advance_error = ceiling
+            .advance(SimDuration::hours(2))
+            .expect_err("advancing beyond the time domain must fail");
+        assert_eq!(advance_error.code, ErrorCode::InvalidDuration);
+        assert_eq!(
+            ceiling_before,
+            ceiling
+                .snapshot_json()
+                .expect("time overflow must leave the simulation unchanged")
+        );
+
+        ceiling
+            .register_plugin(&FailingPlugin)
+            .expect("registration should remain open after rejected execution");
+        let scheduled_before = ceiling
+            .snapshot_json()
+            .expect("the registered ceiling fixture should serialize");
+        let schedule_error = ceiling
+            .submit(CommandEnvelope::new(
+                Issuer::Actor(ceiling_ids.commander),
+                Command::Plugin {
+                    plugin: "failing-test".to_owned(),
+                    command: "mutate".to_owned(),
+                    payload: serde_json::json!({ "scheduled": true }),
+                },
+            ))
+            .expect_err("plugin work whose target overflows simulation time must fail");
+        assert_eq!(schedule_error.code, ErrorCode::InvalidDuration);
+        assert_eq!(
+            scheduled_before,
+            ceiling
+                .snapshot_json()
+                .expect("rejected plugin scheduling must not mutate the simulation")
+        );
     }
 
     #[test]
@@ -6841,8 +8763,22 @@ mod tests {
     }
 
     #[test]
-    fn plugin_command_journal_replays_only_with_recorded_plugins() {
+    fn command_only_replay_journal_binds_the_recorded_plugin_environment() {
         let (scenario, ids) = demo_scenario();
+        let mut registration_closed_only =
+            Simulation::new(35, scenario.clone()).expect("demo should load");
+        registration_closed_only
+            .advance(SimDuration::ZERO)
+            .expect("zero advance should close authoritative registration");
+        let closure_journal = registration_closed_only.replay_journal();
+        let closure_replay =
+            Simulation::replay_from_journal(scenario.clone(), &[], &closure_journal)
+                .expect("exact replay should reproduce registration closure without other work");
+        assert_eq!(
+            registration_closed_only.snapshot(),
+            closure_replay.snapshot()
+        );
+
         let plugin = AuthorityPlugin;
         let mut simulation = Simulation::new(35, scenario.clone()).expect("demo should load");
         simulation
@@ -6869,6 +8805,19 @@ mod tests {
             panic!("plugin replay without executable handlers must fail");
         };
         assert_eq!(error.code, ErrorCode::PluginCommandNotFound);
+        let journal = simulation.replay_journal();
+        let exact =
+            Simulation::replay_from_journal(scenario.clone(), &[&AuthorityPlugin], &journal)
+                .expect("the exact command-only environment should replay");
+        assert_eq!(simulation.snapshot(), exact.snapshot());
+
+        let Err(error) =
+            Simulation::replay_from_journal(scenario.clone(), &[&ChangedAuthorityPlugin], &journal)
+        else {
+            panic!("changed handler semantics must fail before command-only replay");
+        };
+        assert_eq!(error.code, ErrorCode::ReplayEnvironmentMismatch);
+
         let replayed = Simulation::replay_with_plugins(
             35,
             scenario,

@@ -214,23 +214,34 @@ JSON escape hatch, or a narrow green demo test is not conformance evidence.
 
 ## Current baseline
 
-The v0.3 engine adds a public, deterministic fourteen-phase settlement API.
+The v0.4 engine provides a public, deterministic fourteen-phase settlement API.
 Boundary systems declare cadence, reads, writes, reservation participation,
-allocation reads, emissions, and visibility. The kernel provides stable
-allocation order, separately staged ordinary and conditional commits,
-same-boundary overlays, next-boundary visibility, full rollback on fatal error,
-and persisted boundary evidence with exact plugin/system provenance. Snapshot
-format 3 validates that evidence and explicitly migrates compatible format 2
-saves. These are substantial but still partial implementations of CM-E04
-through CM-E07, CM-E09, CM-E12, and CM-E13.
+allocation reads, owned random streams, emissions, and visibility. The kernel
+provides stable allocation order, separately staged ordinary and conditional
+commits, same-boundary overlays, next-boundary visibility, full rollback on
+fatal error, scoped deterministic draws, and persisted boundary evidence with
+exact plugin/system provenance. Snapshot format 4 adds random draw journals,
+state and boundary hash chains, a current-state checkpoint commitment, hashed
+run/content/source manifests, exact plugin version and semantic identities, and
+an environment-bound replay journal that also verifies command-only and
+registration-closure-only runs. Every report dispatch must retain exactly one
+causally linked core random draw, and authoritative scheduling rejects time
+overflow rather than saturating. Current-format checkpoints also require an
+exact engine-version match unless an explicit migration rewrites their
+commitments.
+Compatible handler-free format 2 and 3 saves migrate with explicit legacy
+provenance for continuation and explicitly reject unsupported exact replay.
+These are substantial but still partial implementations of CM-E04 through
+CM-E09, CM-E12, and CM-E13.
 
 Canwu is not yet CM-conformant. The major remaining gaps include generic domain
 entity/record lifecycles; complete authority, seat, idempotency, and run-policy
 contracts; unified typed ingress and automatic calendar scheduling; released,
 carried, and lost reservation outcomes plus atomic conservation bundles;
-structured nonfatal rejection evidence; scoped/versioned random streams;
-field-level provenance and structured report facts; immutable generation-tagged
-actor projections; hashes, manifests, migrations, replay journals, forks, and
-lineage; constrained data/rule packages; binding-oriented batch APIs; and a
-versioned deterministic solver boundary. Final conformance still requires the
-public CM-shaped integration fixture and the requirement-by-requirement audit.
+structured nonfatal rejection evidence; field-level provenance and structured
+report facts; immutable generation-tagged
+actor projections; a general migration registry, replay environment discovery,
+fork lineage, and branch comparison; constrained data/rule packages;
+binding-oriented batch APIs; and a versioned deterministic solver boundary.
+Final conformance still requires the public CM-shaped integration fixture and
+the requirement-by-requirement audit.
