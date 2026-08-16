@@ -4,7 +4,7 @@
 
 Website: [canwu.org](https://canwu.org)
 
-<img src="assets/branding/canwu-logo-en.png" alt="Canwu historical simulation engine logo" width="320">
+<img src="assets/branding/canwu-banner-en.png" alt="Canwu simulation engine banner" width="720">
 
 Canwu is a headless historical simulation engine written in Rust. It simulates
 a historical world, advances time in a repeatable way, accepts validated
@@ -58,18 +58,7 @@ not runtime simulation plugins. The `website` and `assets` directories contain
 the community site and project media.
 
 Read [the architecture](docs/architecture.md) and
-[end-state design](docs/end-state.md) before changing boundaries. Release and
-compatibility rules are defined in [versioning](docs/versioning.md).
-
-## Version and platforms
-
-Canwu uses Semantic Versioning, with all workspace crates currently at `0.4.0`
-and released in lockstep. The canonical version is in the root `Cargo.toml`.
-
-The supported operating systems are Windows, macOS, and Linux. The simulation
-crates are headless and platform-neutral; the reference debug client uses
-OpenGL through `eframe`, with Wayland and X11 enabled on Linux. The CI matrix
-checks all three operating systems.
+[end-state design](docs/end-state.md) before changing boundaries.
 
 ## Development
 
@@ -151,3 +140,10 @@ Canwu logo or public acknowledgement; [BRANDING.md](BRANDING.md) explains
 optional, non-endorsing use of the project marks. Third-party dependencies
 remain under their own licenses; see
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+## Supported platforms
+
+The supported operating systems are Windows, macOS, and Linux. The simulation
+crates are headless and platform-neutral; the reference debug client uses
+OpenGL through `eframe`, with Wayland and X11 enabled on Linux. The CI matrix
+checks all three operating systems.

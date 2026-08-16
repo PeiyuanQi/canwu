@@ -4,7 +4,7 @@
 
 网站：[canwu.org](https://canwu.org)
 
-<img src="assets/branding/canwu-logo-zh-cn.png" alt="Canwu 参伍历史模拟引擎标志" width="320">
+<img src="assets/branding/canwu-banner-zh-cn.png" alt="Canwu 参伍引擎横幅" width="720">
 
 Canwu 是一个使用 Rust 编写的无界面历史模拟引擎。它负责模拟历史世界、
 以可重复的方式推进时间、验证外部命令，并记录事件和因果关系。它还可以分别
@@ -52,17 +52,7 @@ cargo run -p canwu-api --example phased_boundary
 素材。
 
 修改架构边界前，请先阅读[架构说明](docs/architecture.md)和
-[最终设计](docs/end-state.md)。版本发布和兼容规则见
-[版本说明](docs/versioning.md)。
-
-## 版本和平台
-
-Canwu 使用语义化版本。工作区中的所有 crate 当前版本都是 `0.4.0`，并会使用
-同一个版本一起发布。根目录 `Cargo.toml` 中的版本号是唯一标准。
-
-Canwu 支持 Windows、macOS 和 Linux。模拟相关 crate 不依赖具体平台。参考
-调试客户端通过 `eframe` 使用 OpenGL，并在 Linux 上支持 Wayland 和 X11。
-持续集成会检查这三个操作系统。
+[最终设计](docs/end-state.md)。
 
 ## 开发
 
@@ -139,3 +129,9 @@ Apache 许可证不要求产品显示 Canwu 标志或公开鸣谢；如自愿使
 请遵循 [BRANDING.md](BRANDING.md) 中关于避免暗示背书的说明。第三方依赖继续
 使用各自的许可证，详见
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+
+## 支持的平台
+
+Canwu 支持 Windows、macOS 和 Linux。模拟相关 crate 不依赖具体平台。参考
+调试客户端通过 `eframe` 使用 OpenGL，并在 Linux 上支持 Wayland 和 X11。
+持续集成会检查这三个操作系统。
