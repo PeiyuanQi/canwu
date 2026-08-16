@@ -802,32 +802,32 @@ impl SimulationView<'_> {
 
     pub fn army(&self, id: ArmyId) -> Result<Option<&Army>, CanwuError> {
         self.require_read(&StateKey::core_armies())?;
-        Ok(self.state.armies.get(&id))
+        Ok(self.state.current.armies.get(&id))
     }
 
     pub fn person(&self, id: PersonId) -> Result<Option<&Person>, CanwuError> {
         self.require_read(&StateKey::core_people())?;
-        Ok(self.state.people.get(&id))
+        Ok(self.state.current.people.get(&id))
     }
 
     pub fn government(&self, id: GovernmentId) -> Result<Option<&Government>, CanwuError> {
         self.require_read(&StateKey::core_governments())?;
-        Ok(self.state.governments.get(&id))
+        Ok(self.state.current.governments.get(&id))
     }
 
     pub fn territory(&self, id: TerritoryId) -> Result<Option<&Territory>, CanwuError> {
         self.require_read(&StateKey::core_territories())?;
-        Ok(self.state.territories.get(&id))
+        Ok(self.state.current.territories.get(&id))
     }
 
     pub fn route(&self, id: RouteId) -> Result<Option<&Route>, CanwuError> {
         self.require_read(&StateKey::core_routes())?;
-        Ok(self.state.routes.get(&id))
+        Ok(self.state.current.routes.get(&id))
     }
 
     pub fn actor_knowledge(&self, actor: PersonId) -> Result<Option<&ActorKnowledge>, CanwuError> {
         self.require_read(&StateKey::core_knowledge())?;
-        Ok(self.state.knowledge.for_actor(actor))
+        Ok(self.state.current.knowledge.for_actor(actor))
     }
 
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
@@ -883,7 +883,7 @@ impl SimulationView<'_> {
         Ok(self
             .record_overlay
             .and_then(|overlay| overlay.get(reference))
-            .or_else(|| self.state.domain_records.get(reference)))
+            .or_else(|| self.state.current.domain_records.get(reference)))
     }
 
     pub fn proposed_domain_record(
@@ -954,7 +954,7 @@ impl SimulationView<'_> {
         Ok(self
             .component_overlay
             .and_then(|overlay| overlay.get(&key))
-            .or_else(|| self.state.plugin_components.get(&key))
+            .or_else(|| self.state.current.plugin_components.get(&key))
             .map(|record| &record.value))
     }
 
@@ -2756,21 +2756,26 @@ struct RuntimeMetadata {
 }
 
 #[derive(Clone)]
-struct RuntimeState {
-    scheduler: RuntimeScheduler,
-    counters: RuntimeCounters,
-    metadata: RuntimeMetadata,
+struct RuntimeCurrentState {
     people: BTreeMap<PersonId, Person>,
     governments: BTreeMap<GovernmentId, Government>,
     territories: BTreeMap<TerritoryId, Territory>,
     routes: BTreeMap<RouteId, Route>,
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
-    evidence: RuntimeEvidence,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
     root_seed: u64,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+}
+
+#[derive(Clone)]
+struct RuntimeState {
+    current: RuntimeCurrentState,
+    scheduler: RuntimeScheduler,
+    counters: RuntimeCounters,
+    metadata: RuntimeMetadata,
+    evidence: RuntimeEvidence,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -3073,6 +3078,47 @@ impl Simulation {
         let initial_scenario = Some(scenario.clone());
         let mut simulation = Self {
             state: RuntimeState {
+                current: RuntimeCurrentState {
+                    people: scenario
+                        .world
+                        .people
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    governments: scenario
+                        .world
+                        .governments
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    territories: scenario
+                        .world
+                        .territories
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    routes: scenario
+                        .world
+                        .routes
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    armies: scenario
+                        .world
+                        .armies
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    knowledge: scenario.knowledge,
+                    plugin_components: BTreeMap::new(),
+                    domain_records: scenario
+                        .domain_records
+                        .into_iter()
+                        .map(|record| (record.reference.clone(), record))
+                        .collect(),
+                    root_seed: seed,
+                    random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
+                },
                 scheduler: RuntimeScheduler {
                     initial_time: scenario.start_time,
                     now: scenario.start_time,
@@ -3102,37 +3148,6 @@ impl Simulation {
                     plugin_registration_closed: false,
                     replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
                 },
-                people: scenario
-                    .world
-                    .people
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                governments: scenario
-                    .world
-                    .governments
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                territories: scenario
-                    .world
-                    .territories
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                routes: scenario
-                    .world
-                    .routes
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                armies: scenario
-                    .world
-                    .armies
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                knowledge: scenario.knowledge,
                 evidence: RuntimeEvidence {
                     events: Vec::new(),
                     commands: Vec::new(),
@@ -3141,14 +3156,6 @@ impl Simulation {
                     boundaries: Vec::new(),
                     random_draws: Vec::new(),
                 },
-                plugin_components: BTreeMap::new(),
-                domain_records: scenario
-                    .domain_records
-                    .into_iter()
-                    .map(|record| (record.reference.clone(), record))
-                    .collect(),
-                root_seed: seed,
-                random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
             },
             schema,
             plugins,
@@ -3600,7 +3607,7 @@ impl Simulation {
                 ));
             }
             records::validate_records_for_owner(
-                &self.state.domain_records,
+                &self.state.current.domain_records,
                 &self.plugins.record_schemas,
                 plugin_name,
                 self.state.scheduler.now,
@@ -3608,10 +3615,11 @@ impl Simulation {
             )?;
             for stream in self.plugins.random_stream_owners.keys() {
                 self.state
+                    .current
                     .random_streams
                     .entry(stream.clone())
                     .or_insert_with(|| {
-                        RandomStreamState::initial(self.state.root_seed, stream.clone())
+                        RandomStreamState::initial(self.state.current.root_seed, stream.clone())
                     });
             }
             self.refresh_checkpoint_hash()
@@ -3628,7 +3636,7 @@ impl Simulation {
     fn ensure_runtime_ready(&self) -> Result<(), CanwuError> {
         self.plugins.ensure_active()?;
         records::validate_record_store(
-            &self.state.domain_records,
+            &self.state.current.domain_records,
             &self.plugins.record_schemas,
             self.state.scheduler.now,
             &|entity| runtime_entity_exists(&self.state, entity),
@@ -3637,7 +3645,7 @@ impl Simulation {
 
     fn domain_record_feature_enabled(&self) -> bool {
         !self.plugins.record_schemas.is_empty()
-            || !self.state.domain_records.is_empty()
+            || !self.state.current.domain_records.is_empty()
             || self
                 .state
                 .evidence
@@ -3701,17 +3709,17 @@ impl Simulation {
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         WorldSnapshot {
-            people: self.state.people.values().cloned().collect(),
-            governments: self.state.governments.values().cloned().collect(),
-            territories: self.state.territories.values().cloned().collect(),
-            routes: self.state.routes.values().cloned().collect(),
-            armies: self.state.armies.values().cloned().collect(),
+            people: self.state.current.people.values().cloned().collect(),
+            governments: self.state.current.governments.values().cloned().collect(),
+            territories: self.state.current.territories.values().cloned().collect(),
+            routes: self.state.current.routes.values().cloned().collect(),
+            armies: self.state.current.armies.values().cloned().collect(),
         }
     }
 
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
-        &self.state.knowledge
+        &self.state.current.knowledge
     }
 
     #[must_use]
@@ -3736,11 +3744,11 @@ impl Simulation {
 
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
-        self.state.domain_records.get(reference)
+        self.state.current.domain_records.get(reference)
     }
 
     pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
-        self.state.domain_records.values()
+        self.state.current.domain_records.values()
     }
 
     #[must_use]
@@ -3776,7 +3784,7 @@ impl Simulation {
         ReplayJournal {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
-            root_seed: self.state.root_seed,
+            root_seed: self.state.current.root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
             run_configuration: self.state.metadata.run_configuration.clone(),
@@ -4736,7 +4744,7 @@ impl Simulation {
         let mut reservation_request_records = Vec::new();
         let mut offers = Vec::new();
         let mut requests = Vec::new();
-        let mut random_overlay = boundary_snapshot.random_streams.clone();
+        let mut random_overlay = boundary_snapshot.current.random_streams.clone();
         let mut pending_random_draws = Vec::new();
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
@@ -4975,7 +4983,7 @@ impl Simulation {
             emissions,
             generated_ingress,
         } = evidence;
-        self.state.random_streams = random_overlay;
+        self.state.current.random_streams = random_overlay;
         let random_draws =
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
         self.state.metadata.plugin_registration_closed = true;
@@ -5034,8 +5042,20 @@ impl Simulation {
 
     fn compute_boundary_state_hash(&self) -> Result<String, CanwuError> {
         let world = self.world();
-        let plugin_components: Vec<_> = self.state.plugin_components.values().cloned().collect();
-        let domain_records: Vec<_> = self.state.domain_records.values().cloned().collect();
+        let plugin_components: Vec<_> = self
+            .state
+            .current
+            .plugin_components
+            .values()
+            .cloned()
+            .collect();
+        let domain_records: Vec<_> = self
+            .state
+            .current
+            .domain_records
+            .values()
+            .cloned()
+            .collect();
         let plugin_descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
         let scheduled: Vec<_> = self
             .state
@@ -5047,7 +5067,13 @@ impl Simulation {
                 action: action.clone(),
             })
             .collect();
-        let random_streams: Vec<_> = self.state.random_streams.values().cloned().collect();
+        let random_streams: Vec<_> = self
+            .state
+            .current
+            .random_streams
+            .values()
+            .cloned()
+            .collect();
         let (authoritative_manifest, authoritative_manifest_hash) = authoritative_run_identity(
             &self.state.metadata.run_manifest,
             &self.state.metadata.run_manifest_hash,
@@ -5064,7 +5090,7 @@ impl Simulation {
             now: self.state.scheduler.now,
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             world: &world,
-            knowledge: &self.state.knowledge,
+            knowledge: &self.state.current.knowledge,
             events: &self.state.evidence.events,
             commands: &self.state.evidence.commands,
             command_attempts: &self.state.evidence.command_attempts,
@@ -5074,7 +5100,7 @@ impl Simulation {
             plugin_descriptors: &plugin_descriptors,
             schema: &self.schema,
             scheduled: &scheduled,
-            root_seed: self.state.root_seed,
+            root_seed: self.state.current.root_seed,
             random_streams: &random_streams,
             random_draws: &self.state.evidence.random_draws,
             next_event_id: self.state.counters.next_event_id,
@@ -5134,18 +5160,36 @@ impl Simulation {
             now: self.state.scheduler.now,
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             world: self.world(),
-            knowledge: self.state.knowledge.clone(),
+            knowledge: self.state.current.knowledge.clone(),
             events: self.state.evidence.events.clone(),
             commands: self.state.evidence.commands.clone(),
             command_attempts: self.state.evidence.command_attempts.clone(),
             ingress: self.state.evidence.ingress.clone(),
             boundaries: self.state.evidence.boundaries.clone(),
-            plugin_components: self.state.plugin_components.values().cloned().collect(),
-            domain_records: self.state.domain_records.values().cloned().collect(),
+            plugin_components: self
+                .state
+                .current
+                .plugin_components
+                .values()
+                .cloned()
+                .collect(),
+            domain_records: self
+                .state
+                .current
+                .domain_records
+                .values()
+                .cloned()
+                .collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
-            root_seed: self.state.root_seed,
-            random_streams: self.state.random_streams.values().cloned().collect(),
+            root_seed: self.state.current.root_seed,
+            random_streams: self
+                .state
+                .current
+                .random_streams
+                .values()
+                .cloned()
+                .collect(),
             random_draws: self.state.evidence.random_draws.clone(),
             scheduled: self
                 .state
@@ -5218,6 +5262,65 @@ impl Simulation {
         };
         let mut simulation = Self {
             state: RuntimeState {
+                current: RuntimeCurrentState {
+                    people: snapshot
+                        .world
+                        .people
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    governments: snapshot
+                        .world
+                        .governments
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    territories: snapshot
+                        .world
+                        .territories
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    routes: snapshot
+                        .world
+                        .routes
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    armies: snapshot
+                        .world
+                        .armies
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    knowledge: snapshot.knowledge,
+                    plugin_components: snapshot
+                        .plugin_components
+                        .into_iter()
+                        .map(|record| {
+                            (
+                                component_key(
+                                    &record.plugin,
+                                    &record.state,
+                                    &record.entity,
+                                    &record.component,
+                                ),
+                                record,
+                            )
+                        })
+                        .collect(),
+                    domain_records: snapshot
+                        .domain_records
+                        .into_iter()
+                        .map(|record| (record.reference.clone(), record))
+                        .collect(),
+                    root_seed: snapshot.root_seed,
+                    random_streams: snapshot
+                        .random_streams
+                        .into_iter()
+                        .map(|state| (state.key.clone(), state))
+                        .collect(),
+                },
                 scheduler: RuntimeScheduler {
                     initial_time: snapshot.initial_time,
                     now: snapshot.now,
@@ -5255,37 +5358,6 @@ impl Simulation {
                     plugin_registration_closed: snapshot.plugin_registration_closed,
                     replay_revision_format_version: snapshot.replay_revision_format_version,
                 },
-                people: snapshot
-                    .world
-                    .people
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                governments: snapshot
-                    .world
-                    .governments
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                territories: snapshot
-                    .world
-                    .territories
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                routes: snapshot
-                    .world
-                    .routes
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                armies: snapshot
-                    .world
-                    .armies
-                    .into_iter()
-                    .map(|value| (value.id, value))
-                    .collect(),
-                knowledge: snapshot.knowledge,
                 evidence: RuntimeEvidence {
                     events: snapshot.events,
                     commands: snapshot.commands,
@@ -5294,32 +5366,6 @@ impl Simulation {
                     boundaries: snapshot.boundaries,
                     random_draws: snapshot.random_draws,
                 },
-                plugin_components: snapshot
-                    .plugin_components
-                    .into_iter()
-                    .map(|record| {
-                        (
-                            component_key(
-                                &record.plugin,
-                                &record.state,
-                                &record.entity,
-                                &record.component,
-                            ),
-                            record,
-                        )
-                    })
-                    .collect(),
-                domain_records: snapshot
-                    .domain_records
-                    .into_iter()
-                    .map(|record| (record.reference.clone(), record))
-                    .collect(),
-                root_seed: snapshot.root_seed,
-                random_streams: snapshot
-                    .random_streams
-                    .into_iter()
-                    .map(|state| (state.key.clone(), state))
-                    .collect(),
             },
             schema: snapshot.schema,
             plugins,
@@ -5385,14 +5431,14 @@ impl Simulation {
                         "move commands require an accountable actor origin",
                     ));
                 };
-                let person = self.state.people.get(&actor).ok_or_else(|| {
+                let person = self.state.current.people.get(&actor).ok_or_else(|| {
                     CanwuError::new(
                         ErrorCode::ActorNotFound,
                         format!("actor {actor} was not found"),
                     )
                     .with_entity(EntityRef::Person(actor))
                 })?;
-                let army_state = self.state.armies.get(army).ok_or_else(|| {
+                let army_state = self.state.current.armies.get(army).ok_or_else(|| {
                     CanwuError::new(
                         ErrorCode::ArmyNotFound,
                         format!("army {army} was not found"),
@@ -5414,7 +5460,7 @@ impl Simulation {
                     )
                     .with_entity(EntityRef::Army(*army)));
                 }
-                if !self.state.territories.contains_key(destination) {
+                if !self.state.current.territories.contains_key(destination) {
                     return Err(CanwuError::new(
                         ErrorCode::DestinationNotFound,
                         format!("destination {destination} was not found"),
@@ -5423,6 +5469,7 @@ impl Simulation {
                 }
                 let route = self
                     .state
+                    .current
                     .routes
                     .values()
                     .find(|route| route.connects(army_state.location, *destination))
@@ -5467,7 +5514,7 @@ impl Simulation {
                         "army morale must be between 0 and 100",
                     ));
                 }
-                let old_morale = self.state.armies.get(army).map_or_else(
+                let old_morale = self.state.current.armies.get(army).map_or_else(
                     || {
                         Err(CanwuError::new(
                             ErrorCode::ArmyNotFound,
@@ -5545,7 +5592,7 @@ impl Simulation {
                 destination,
                 arrival_at,
             } => {
-                let army_state = self.state.armies.get_mut(&army).ok_or_else(|| {
+                let army_state = self.state.current.armies.get_mut(&army).ok_or_else(|| {
                     CanwuError::new(ErrorCode::ArmyNotFound, "validated army disappeared")
                 })?;
                 army_state.transit = Some(TransitState {
@@ -5587,6 +5634,7 @@ impl Simulation {
                 new_morale,
             } => {
                 self.state
+                    .current
                     .armies
                     .get_mut(&army)
                     .ok_or_else(|| {
@@ -5766,7 +5814,7 @@ impl Simulation {
         correlation_id: u64,
     ) -> Result<(), CanwuError> {
         let commander = {
-            let army_state = self.state.armies.get_mut(&army).ok_or_else(|| {
+            let army_state = self.state.current.armies.get_mut(&army).ok_or_else(|| {
                 CanwuError::new(ErrorCode::ArmyNotFound, "scheduled army no longer exists")
             })?;
             army_state.location = destination;
@@ -5806,6 +5854,7 @@ impl Simulation {
 
         let recipients: Vec<_> = self
             .state
+            .current
             .people
             .keys()
             .copied()
@@ -5880,12 +5929,13 @@ impl Simulation {
         source: KnowledgeSource,
         confidence_per_mille: u16,
     ) {
-        let (strength, known_name) = self.state.armies.get(&army).map_or_else(
+        let (strength, known_name) = self.state.current.armies.get(&army).map_or_else(
             || (0, None),
             |value| (value.strength, Some(value.name.clone())),
         );
         let actor = self
             .state
+            .current
             .knowledge
             .actors
             .entry(recipient)
@@ -6005,15 +6055,20 @@ impl Simulation {
         }
         let (draw_id, next_random_draw_id) =
             claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
-        let state = self.state.random_streams.get_mut(stream).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidRandomStream,
-                format!(
-                    "random stream {}.{}@{} is not initialized",
-                    stream.namespace, stream.name, stream.version
-                ),
-            )
-        })?;
+        let state = self
+            .state
+            .current
+            .random_streams
+            .get_mut(stream)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidRandomStream,
+                    format!(
+                        "random stream {}.{}@{} is not initialized",
+                        stream.namespace, stream.name, stream.version
+                    ),
+                )
+            })?;
         let next_position = state.position.checked_add(1).ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::IdentifierExhausted,
@@ -6134,7 +6189,7 @@ impl Simulation {
         let mut stage_record_changes = BTreeMap::new();
         if !mutation_requests.is_empty() {
             let (next_records, applied) = records::apply_mutation_bundle(
-                &self.state.domain_records,
+                &self.state.current.domain_records,
                 &self.plugins.record_schemas,
                 self.state.scheduler.now,
                 &|entity| runtime_entity_exists(&self.state, entity),
@@ -6157,7 +6212,7 @@ impl Simulation {
                 stage_record_changes
                     .insert(change.current.reference.clone(), (index, change.clone()));
             }
-            self.state.domain_records = next_records;
+            self.state.current.domain_records = next_records;
             record_changes.extend(applied);
         }
 
@@ -6198,10 +6253,11 @@ impl Simulation {
                     let key = component_key(&staged.plugin, &state, &entity, &component);
                     let previous = self
                         .state
+                        .current
                         .plugin_components
                         .get(&key)
                         .map(|record| record.value.clone());
-                    self.state.plugin_components.insert(
+                    self.state.current.plugin_components.insert(
                         key,
                         PluginComponentRecord {
                             plugin: staged.plugin.clone(),
@@ -6370,7 +6426,7 @@ impl Simulation {
                     summary,
                 } => {
                     let key = component_key(plugin, &state, &entity, &component);
-                    self.state.plugin_components.insert(
+                    self.state.current.plugin_components.insert(
                         key,
                         PluginComponentRecord {
                             plugin: plugin.to_owned(),
@@ -7068,7 +7124,7 @@ fn extend_boundary_domain_record_overlay(
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
 ) -> Result<(), CanwuError> {
-    let mut base = state.domain_records.clone();
+    let mut base = state.current.domain_records.clone();
     base.extend(
         overlay
             .iter()
@@ -10330,14 +10386,14 @@ fn snapshot_entity_identity_exists(snapshot: &SimulationSnapshot, entity: &Entit
 
 fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
     match entity {
-        EntityRef::Army(id) => state.armies.contains_key(id),
+        EntityRef::Army(id) => state.current.armies.contains_key(id),
         EntityRef::Domain(reference) => {
-            records::domain_entity_exists(&state.domain_records, reference)
+            records::domain_entity_exists(&state.current.domain_records, reference)
         }
-        EntityRef::Government(id) => state.governments.contains_key(id),
-        EntityRef::Person(id) => state.people.contains_key(id),
-        EntityRef::Route(id) => state.routes.contains_key(id),
-        EntityRef::Territory(id) => state.territories.contains_key(id),
+        EntityRef::Government(id) => state.current.governments.contains_key(id),
+        EntityRef::Person(id) => state.current.people.contains_key(id),
+        EntityRef::Route(id) => state.current.routes.contains_key(id),
+        EntityRef::Territory(id) => state.current.territories.contains_key(id),
         EntityRef::Organization(_) | EntityRef::Resource(_) => false,
     }
 }
@@ -10345,6 +10401,7 @@ fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
 fn runtime_entity_identity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
     match entity {
         EntityRef::Domain(reference) => state
+            .current
             .domain_records
             .get(reference)
             .is_some_and(|record| record.class == DomainRecordClass::Entity),
@@ -10413,7 +10470,7 @@ fn runtime_entity_exists_with_record_overlay(
     match entity {
         EntityRef::Domain(reference) => record_overlay
             .get(reference)
-            .or_else(|| state.domain_records.get(reference))
+            .or_else(|| state.current.domain_records.get(reference))
             .is_some_and(|record| {
                 record.class == DomainRecordClass::Entity && !record.is_deleted()
             }),
@@ -10459,6 +10516,7 @@ fn proposal_entity_identity_exists(
         return runtime_entity_identity_exists(state, entity);
     };
     if state
+        .current
         .domain_records
         .get(reference)
         .is_some_and(|record| record.class == DomainRecordClass::Entity)
@@ -10481,7 +10539,7 @@ fn proposal_entity_identity_exists(
 }
 
 fn validate_runtime_domain_dependents(state: &RuntimeState) -> Result<(), CanwuError> {
-    validate_domain_dependents_with_records(state, &state.domain_records)
+    validate_domain_dependents_with_records(state, &state.current.domain_records)
 }
 
 fn validate_domain_dependents_with_records(
@@ -10490,6 +10548,7 @@ fn validate_domain_dependents_with_records(
 ) -> Result<(), CanwuError> {
     let unavailable = |entity: &EntityRef| matches!(entity, EntityRef::Domain(reference) if !records::domain_entity_exists(domain_records, reference));
     if state
+        .current
         .plugin_components
         .values()
         .any(|component| unavailable(&component.entity))
@@ -14757,7 +14816,7 @@ mod tests {
                 "snapshot should retain flat field {public_field}"
             );
         }
-        for internal_owner in ["metadata", "counters", "evidence", "scheduler"] {
+        for internal_owner in ["current", "metadata", "counters", "evidence", "scheduler"] {
             assert!(
                 !snapshot_object.contains_key(internal_owner),
                 "private owner {internal_owner} must not enter the snapshot wire shape"
@@ -14775,7 +14834,7 @@ mod tests {
         let journal_object = journal_value
             .as_object()
             .expect("replay journal JSON should remain a flat object");
-        for internal_owner in ["metadata", "counters", "evidence", "scheduler"] {
+        for internal_owner in ["current", "metadata", "counters", "evidence", "scheduler"] {
             assert!(
                 !journal_object.contains_key(internal_owner),
                 "private owner {internal_owner} must not enter the journal wire shape"

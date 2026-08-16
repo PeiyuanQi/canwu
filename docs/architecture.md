@@ -259,6 +259,8 @@ owner without spreading evidence mutation back through the runtime.
 
 The remaining runtime bookkeeping is partitioned by responsibility rather than
 stored as unrelated fields on the authoritative world container.
+`RuntimeCurrentState` owns the mutable core world, actor-relative knowledge,
+plugin components, generic domain records, and scoped random-stream positions.
 `RuntimeScheduler` owns the committed clock, scheduled actions, and pending
 canonical ingress; `RuntimeCounters` owns monotonic identifiers, the
 authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns

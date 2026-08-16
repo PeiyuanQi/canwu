@@ -174,6 +174,20 @@ growth is +3.8%, exact replay is +3.9%, and individual operations range from
 -3.1% to +5.0%. With identical allocation curves and no algorithmic change,
 these elapsed differences remain consistent with local measurement noise.
 
+## Runtime-current-state ownership comparison
+
+The mutable-state ownership refactor is recorded in separate
+[`elapsed`](baselines/2026-08-16-runtime-current-state-elapsed.json) and
+[`allocation`](baselines/2026-08-16-runtime-current-state-allocations.json)
+reports, using the runtime-partition reports as its before baseline. It moves
+world, knowledge, plugin/domain state, and random-stream positions behind one
+private owner without changing public persistence or runtime algorithms.
+
+Allocation operations, allocated bytes, and snapshot sizes are again identical
+at every scale. At scale 512 the snapshot remains 3,138,540 bytes; elapsed
+medians range from -4.9% to +3.2%, with history growth at -4.9% and exact replay
+at -3.7%. These are treated as local timing variance, not an optimization gain.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
