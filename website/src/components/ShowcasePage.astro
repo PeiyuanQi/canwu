@@ -5,13 +5,14 @@ interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/src/lib.rs";
+const apiLines: Record<string, number> = { act: 598, advance: 258, settle_boundary: 262, world: 178, events: 188, snapshot_json: 282, fork: 401, diff: 408, replay_with_plugins: 312, describe_capabilities: 636, observe: 432, available_actions: 568, explain: 621, wait: 269, inspect: 490, query_as: 417, snapshot: 278 };
 
 const c = isEnglish
   ? {
       title: "Canwu integration patterns",
       description: "Concrete integration boundaries for games, historical research, agent environments, and public-history clients.",
       label: "Integration patterns",
-      heading: "Put one deterministic world behind the client you need",
+      heading: "Use one deterministic simulation core with any client",
       intro: "Canwu is the single source of truth for simulation time, state, commands, and events. The client remains responsible for presentation, authentication, orchestration, and shipping content. This page distinguishes what works in v0.4 from what still needs to be built.",
       index: "Integration types",
       available: "Available in the core",
@@ -20,7 +21,7 @@ const c = isEnglish
       relevant: "Public API",
       evidence: "Integration shape",
       cases: [
-        { id: "games", number: "01", kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server boundary while keeping the renderer and player experience independent.", available: ["Deterministic time and frame-independent scheduling", "Validated commands and events with recorded causes", "Actor-scoped observations and delayed reports", "Domain state managed through declared plugins"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Shipping scenarios, art, audio, and content"], missing: ["Official renderer adapters", "A production multiplayer server", "A complete playable campaign"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
+        { id: "games", number: "01", kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server boundary while keeping the renderer and player experience independent.", available: ["Deterministic time and frame-independent scheduling", "Validated commands and events with recorded causes", "Actor-scoped observations and delayed reports", "Domain state managed through declared plugins"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production-ready scenarios, art, audio, and game content"], missing: ["Official renderer adapters", "A production multiplayer server", "A complete playable campaign"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
 let events = canwu.advance(SimDuration::hours(1))?;
 let world = canwu.world();` },
         { id: "research", number: "02", kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep simulation runs independent of a notebook or visualization layer, then compare branches through snapshots and state diffs.", available: ["Deterministic run state and snapshots", "Fork, diff, and exact replay interfaces", "Causal events, random-draw journals, and state hashes", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "A statistical analysis package", "Claims of historical accuracy without model validation"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
@@ -37,13 +38,13 @@ query_as(actor) → perspective-specific view` },
       ],
       next: "Start with evidence, not a slide deck",
       nextCopy: "Run the checked-in example first. Then use the architecture document to decide where your client ends and Canwu begins.",
-      run: "Run move_army", architecture: "Read integration architecture", source: "Open API source",
+      run: "View move_army source", architecture: "Read integration architecture", source: "Open API source",
     }
   : {
       title: "参伍集成模式",
       description: "游戏、历史研究、智能体环境与公共史客户端接入参伍的具体技术边界。",
       label: "集成模式",
-      heading: "在所需客户端背后，共用一个确定性世界",
+      heading: "让不同客户端共享同一个确定性模拟世界",
       intro: "参伍统一维护模拟时间、世界状态、命令与事件；客户端负责表现、认证、编排和可发行内容。本页区分 v0.4 已经可用的能力，以及仍需建设的部分。",
       index: "集成类型",
       available: "内核已经提供",
@@ -69,7 +70,7 @@ query_as(actor) → 角色视角` },
       ],
       next: "先运行证据，再阅读愿景",
       nextCopy: "先运行仓库中的示例，再通过架构文档确定客户端与参伍之间的边界。",
-      run: "运行 move_army", architecture: "阅读集成架构", source: "打开 API 源码",
+      run: "查看 move_army 示例", architecture: "阅读集成架构", source: "打开 API 源码",
     };
 ---
 
@@ -85,7 +86,7 @@ query_as(actor) → 角色视角` },
         <header><code>{item.number}</code><p>{item.kind} · {item.status}</p><h2>{item.title}</h2><span>{item.purpose}</span></header>
         <div class="integration-details">
           <div class="responsibility-grid three"><article><h3>{c.available}</h3><ul class="technical-list">{item.available.map((entry) => <li>{entry}</li>)}</ul></article><article><h3>{c.client}</h3><ul class="technical-list">{item.client.map((entry) => <li>{entry}</li>)}</ul></article><article><h3>{c.notIncluded}</h3><ul class="technical-list">{item.missing.map((entry) => <li>{entry}</li>)}</ul></article></div>
-          <div class="integration-proof"><div><span>{c.evidence}</span><pre><code>{item.proof}</code></pre></div><div class="api-strip"><span>{c.relevant}</span><div>{item.api.map((name) => <a href={apiSource}><code>{name}()</code></a>)}</div></div></div>
+          <div class="integration-proof"><div><span>{c.evidence}</span><pre><code>{item.proof}</code></pre></div><div class="api-strip"><span>{c.relevant}</span><div>{item.api.map((name) => <a href={`${apiSource}#L${apiLines[name]}`}><code>{name}()</code></a>)}</div></div></div>
         </div>
       </section>
     ))}
