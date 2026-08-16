@@ -2816,6 +2816,13 @@ struct RuntimeCommitmentCache {
     events: OrderedCommitmentAccumulator,
     ingress: OrderedCommitmentAccumulator,
     random_draws: OrderedCommitmentAccumulator,
+    world: Option<String>,
+    knowledge: Option<String>,
+    plugin_components: Option<String>,
+    domain_records: Option<String>,
+    scheduler: Option<String>,
+    random_streams: Option<String>,
+    identity: Option<String>,
 }
 
 impl RuntimeCommitmentCache {
@@ -2846,6 +2853,13 @@ impl RuntimeCommitmentCache {
                 &evidence.random_draws,
                 |draw| draw.id,
             )?,
+            world: None,
+            knowledge: None,
+            plugin_components: None,
+            domain_records: None,
+            scheduler: None,
+            random_streams: None,
+            identity: None,
         })
     }
 
@@ -2867,6 +2881,101 @@ impl RuntimeCommitmentCache {
             random_draws: self.random_draws.root(),
         }
     }
+
+    fn needs(&self) -> CommitmentDomains {
+        let mut domains = CommitmentDomains::default();
+        for (missing, domain) in [
+            (self.world.is_none(), CommitmentDomains::WORLD),
+            (self.knowledge.is_none(), CommitmentDomains::KNOWLEDGE),
+            (
+                self.plugin_components.is_none(),
+                CommitmentDomains::PLUGIN_COMPONENTS,
+            ),
+            (
+                self.domain_records.is_none(),
+                CommitmentDomains::DOMAIN_RECORDS,
+            ),
+            (self.scheduler.is_none(), CommitmentDomains::SCHEDULER),
+            (
+                self.random_streams.is_none(),
+                CommitmentDomains::RANDOM_STREAMS,
+            ),
+            (self.identity.is_none(), CommitmentDomains::IDENTITY),
+        ] {
+            if missing {
+                domains.insert(domain);
+            }
+        }
+        domains
+    }
+
+    fn invalidate(&mut self, domains: CommitmentDomains) {
+        if domains.contains(CommitmentDomains::WORLD) {
+            self.world = None;
+        }
+        if domains.contains(CommitmentDomains::KNOWLEDGE) {
+            self.knowledge = None;
+        }
+        if domains.contains(CommitmentDomains::PLUGIN_COMPONENTS) {
+            self.plugin_components = None;
+        }
+        if domains.contains(CommitmentDomains::DOMAIN_RECORDS) {
+            self.domain_records = None;
+        }
+        if domains.contains(CommitmentDomains::SCHEDULER) {
+            self.scheduler = None;
+        }
+        if domains.contains(CommitmentDomains::RANDOM_STREAMS) {
+            self.random_streams = None;
+        }
+        if domains.contains(CommitmentDomains::IDENTITY) {
+            self.identity = None;
+        }
+    }
+
+    fn apply(&mut self, updates: RuntimeCommitmentRootUpdates) {
+        if let Some(root) = updates.world {
+            self.world = Some(root);
+        }
+        if let Some(root) = updates.knowledge {
+            self.knowledge = Some(root);
+        }
+        if let Some(root) = updates.plugin_components {
+            self.plugin_components = Some(root);
+        }
+        if let Some(root) = updates.domain_records {
+            self.domain_records = Some(root);
+        }
+        if let Some(root) = updates.scheduler {
+            self.scheduler = Some(root);
+        }
+        if let Some(root) = updates.random_streams {
+            self.random_streams = Some(root);
+        }
+        if let Some(root) = updates.identity {
+            self.identity = Some(root);
+        }
+    }
+
+    fn domain_roots(&self) -> Result<RuntimeDomainCommitmentRoots, CanwuError> {
+        let required = |root: &Option<String>, domain: &str| {
+            root.clone().ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    format!("runtime commitment cache is missing its {domain} root"),
+                )
+            })
+        };
+        Ok(RuntimeDomainCommitmentRoots {
+            world: required(&self.world, "world")?,
+            knowledge: required(&self.knowledge, "knowledge")?,
+            plugin_components: required(&self.plugin_components, "plugin-component")?,
+            domain_records: required(&self.domain_records, "domain-record")?,
+            scheduler: required(&self.scheduler, "scheduler")?,
+            random_streams: required(&self.random_streams, "random-stream")?,
+            identity: required(&self.identity, "identity")?,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -2876,6 +2985,57 @@ struct JournalCommitmentRoots {
     events: String,
     ingress: String,
     random_draws: String,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CommitmentDomains(u8);
+
+impl CommitmentDomains {
+    const WORLD: Self = Self(1 << 0);
+    const KNOWLEDGE: Self = Self(1 << 1);
+    const PLUGIN_COMPONENTS: Self = Self(1 << 2);
+    const DOMAIN_RECORDS: Self = Self(1 << 3);
+    const SCHEDULER: Self = Self(1 << 4);
+    const RANDOM_STREAMS: Self = Self(1 << 5);
+    const IDENTITY: Self = Self(1 << 6);
+
+    const fn contains(self, domain: Self) -> bool {
+        self.0 & domain.0 == domain.0
+    }
+
+    fn insert(&mut self, domain: Self) {
+        self.0 |= domain.0;
+    }
+}
+
+impl std::ops::BitOr for CommitmentDomains {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self(self.0 | rhs.0)
+    }
+}
+
+#[derive(Default)]
+struct RuntimeCommitmentRootUpdates {
+    world: Option<String>,
+    knowledge: Option<String>,
+    plugin_components: Option<String>,
+    domain_records: Option<String>,
+    scheduler: Option<String>,
+    random_streams: Option<String>,
+    identity: Option<String>,
+}
+
+#[derive(Clone)]
+struct RuntimeDomainCommitmentRoots {
+    world: String,
+    knowledge: String,
+    plugin_components: String,
+    domain_records: String,
+    scheduler: String,
+    random_streams: String,
+    identity: String,
 }
 
 #[derive(Clone)]
@@ -3791,6 +3951,9 @@ impl Simulation {
         let plugins_start = self.plugins.clone();
         let result = (|| {
             self.plugins.register(plugin, &mut self.schema)?;
+            self.invalidate_commitments(
+                CommitmentDomains::RANDOM_STREAMS | CommitmentDomains::IDENTITY,
+            );
             if !self.plugins.record_schemas.is_empty()
                 && self.state.metadata.initial_scenario.is_none()
             {
@@ -4347,6 +4510,7 @@ impl Simulation {
         let event_start = self.state.evidence.events.len();
         self.state.counters.next_command_id = next_command_id;
         self.state.counters.next_correlation_id = next_correlation_id;
+        self.invalidate_commitments(prepared.commitment_invalidation());
 
         if let Err(error) = self.apply_prepared(prepared, command_id, correlation_id) {
             self.state = transaction_start;
@@ -5177,6 +5341,7 @@ impl Simulation {
             emissions,
             generated_ingress,
         } = evidence;
+        self.invalidate_commitments(CommitmentDomains::RANDOM_STREAMS);
         self.state.current.random_streams = random_overlay;
         let random_draws =
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
@@ -5308,90 +5473,113 @@ impl Simulation {
         })
     }
 
-    fn compute_commitment_roots(
+    fn compute_commitment_root_updates(
         &self,
-        journal_roots: &JournalCommitmentRoots,
-    ) -> Result<CommitmentRoots, CanwuError> {
-        let world = self.world();
-        let plugin_components: Vec<_> = self
-            .state
-            .current
-            .plugin_components
-            .values()
-            .cloned()
-            .collect();
-        let domain_records: Vec<_> = self
-            .state
-            .current
-            .domain_records
-            .values()
-            .cloned()
-            .collect();
-        let plugin_descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
-        let scheduled: Vec<_> = self
-            .state
-            .scheduler
-            .actions
-            .iter()
-            .map(|(key, action)| ScheduledRecord {
-                key: key.clone(),
-                action: action.clone(),
+        needs: CommitmentDomains,
+    ) -> Result<RuntimeCommitmentRootUpdates, CanwuError> {
+        let world = needs
+            .contains(CommitmentDomains::WORLD)
+            .then(|| world_commitment_root(&self.world()))
+            .transpose()?;
+        let knowledge = needs
+            .contains(CommitmentDomains::KNOWLEDGE)
+            .then(|| knowledge_commitment_root(&self.state.current.knowledge))
+            .transpose()?;
+        let plugin_components = needs
+            .contains(CommitmentDomains::PLUGIN_COMPONENTS)
+            .then(|| {
+                let values: Vec<_> = self
+                    .state
+                    .current
+                    .plugin_components
+                    .values()
+                    .cloned()
+                    .collect();
+                plugin_component_commitment_root(&values)
             })
-            .collect();
-        let random_streams: Vec<_> = self
-            .state
-            .current
-            .random_streams
-            .values()
-            .cloned()
-            .collect();
-        let (authoritative_manifest, authoritative_manifest_hash) = authoritative_run_identity(
-            &self.state.metadata.run_manifest,
-            &self.state.metadata.run_manifest_hash,
-            &self.state.metadata.run_configuration,
-        )?;
-        let initial_scenario = self.bound_initial_scenario();
-        commitment_roots(
-            &StateHashMaterial {
-                engine_version: ENGINE_VERSION,
-                snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
-                run_manifest: &authoritative_manifest,
-                run_manifest_hash: &authoritative_manifest_hash,
-                initial_time: self.state.scheduler.initial_time,
-                initial_scenario,
-                now: self.state.scheduler.now,
-                plugin_registration_closed: self.state.metadata.plugin_registration_closed,
-                world: &world,
-                knowledge: &self.state.current.knowledge,
-                events: &self.state.evidence.events,
-                commands: &self.state.evidence.commands,
-                command_attempts: &self.state.evidence.command_attempts,
-                ingress: &self.state.evidence.ingress,
-                plugin_components: &plugin_components,
-                domain_records: &domain_records,
-                plugin_descriptors: &plugin_descriptors,
-                schema: &self.schema,
-                scheduled: &scheduled,
-                root_seed: self.state.current.root_seed,
-                random_streams: &random_streams,
-                random_draws: &self.state.evidence.random_draws,
-                next_event_id: self.state.counters.next_event_id,
-                next_command_id: self.state.counters.next_command_id,
-                next_command_attempt_id: self.state.counters.next_command_attempt_id,
-                next_ingress_id: self.state.counters.next_ingress_id,
-                next_boundary_id: self.state.counters.next_boundary_id,
-                next_random_draw_id: self.state.counters.next_random_draw_id,
-                next_schedule_sequence: self.state.counters.next_schedule_sequence,
-                next_correlation_id: self.state.counters.next_correlation_id,
-            },
-            self.boundary_head_hash(),
-            Some(journal_roots),
-        )
+            .transpose()?;
+        let domain_records = needs
+            .contains(CommitmentDomains::DOMAIN_RECORDS)
+            .then(|| {
+                let values: Vec<_> = self
+                    .state
+                    .current
+                    .domain_records
+                    .values()
+                    .cloned()
+                    .collect();
+                domain_record_commitment_root(&values)
+            })
+            .transpose()?;
+        let scheduler = needs
+            .contains(CommitmentDomains::SCHEDULER)
+            .then(|| {
+                let scheduled: Vec<_> = self
+                    .state
+                    .scheduler
+                    .actions
+                    .iter()
+                    .map(|(key, action)| ScheduledRecord {
+                        key: key.clone(),
+                        action: action.clone(),
+                    })
+                    .collect();
+                scheduler_commitment_root(self.state.scheduler.now, &scheduled)
+            })
+            .transpose()?;
+        let random_streams = needs
+            .contains(CommitmentDomains::RANDOM_STREAMS)
+            .then(|| {
+                let values: Vec<_> = self
+                    .state
+                    .current
+                    .random_streams
+                    .values()
+                    .cloned()
+                    .collect();
+                random_stream_commitment_root(&values)
+            })
+            .transpose()?;
+        let identity = if needs.contains(CommitmentDomains::IDENTITY) {
+            let descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
+            let (manifest, manifest_hash) = authoritative_run_identity(
+                &self.state.metadata.run_manifest,
+                &self.state.metadata.run_manifest_hash,
+                &self.state.metadata.run_configuration,
+            )?;
+            Some(identity_commitment_root(
+                ENGINE_VERSION,
+                SNAPSHOT_FORMAT_VERSION,
+                &manifest,
+                &manifest_hash,
+                self.state.scheduler.initial_time,
+                self.bound_initial_scenario(),
+                &descriptors,
+                &self.schema,
+            )?)
+        } else {
+            None
+        };
+        Ok(RuntimeCommitmentRootUpdates {
+            world,
+            knowledge,
+            plugin_components,
+            domain_records,
+            scheduler,
+            random_streams,
+            identity,
+        })
+    }
+
+    fn invalidate_commitments(&mut self, domains: CommitmentDomains) {
+        if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
+            cache.invalidate(domains);
+        }
     }
 
     fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
         if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION {
-            let journal_roots = {
+            let needs = {
                 let cache = if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
                     cache
                 } else {
@@ -5404,9 +5592,38 @@ impl Simulation {
                         .expect("the commitment cache was initialized")
                 };
                 cache.sync(&self.state.evidence)?;
-                cache.roots()
+                cache.needs()
             };
-            let roots = self.compute_commitment_roots(&journal_roots)?;
+            let updates = self.compute_commitment_root_updates(needs)?;
+            let boundary_head = self.boundary_head_hash().map(str::to_owned);
+            let control = ControlCommitmentMaterial {
+                plugin_registration_closed: self.state.metadata.plugin_registration_closed,
+                next_event_id: self.state.counters.next_event_id,
+                next_command_id: self.state.counters.next_command_id,
+                next_command_attempt_id: self.state.counters.next_command_attempt_id,
+                next_ingress_id: self.state.counters.next_ingress_id,
+                next_boundary_id: self.state.counters.next_boundary_id,
+                next_random_draw_id: self.state.counters.next_random_draw_id,
+                next_schedule_sequence: self.state.counters.next_schedule_sequence,
+                next_correlation_id: self.state.counters.next_correlation_id,
+            };
+            let (domain_roots, journal_roots) = {
+                let cache = self
+                    .state
+                    .metadata
+                    .commitment_cache
+                    .as_mut()
+                    .expect("the commitment cache was initialized");
+                cache.apply(updates);
+                (cache.domain_roots()?, cache.roots())
+            };
+            let roots = runtime_commitment_roots(
+                &domain_roots,
+                &journal_roots,
+                self.state.current.root_seed,
+                boundary_head.as_deref(),
+                &control,
+            )?;
             self.state.metadata.checkpoint_hash = checkpoint_hash_for_commitments(
                 &roots,
                 &self.state.metadata.run_manifest_hash,
@@ -5997,6 +6214,7 @@ impl Simulation {
             && boundary_time <= target
         {
             let boundary_start = self.state.clone();
+            self.invalidate_commitments(CommitmentDomains::SCHEDULER);
             self.state.scheduler.now = boundary_time;
             while self
                 .state
@@ -6023,6 +6241,7 @@ impl Simulation {
             }
         }
         let target_start = self.state.clone();
+        self.invalidate_commitments(CommitmentDomains::SCHEDULER);
         self.state.scheduler.now = target;
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
@@ -6038,12 +6257,22 @@ impl Simulation {
         {
             self.advance_to(next)?;
         }
+        self.invalidate_commitments(CommitmentDomains::SCHEDULER);
         self.state.scheduler.now = target;
         self.state.metadata.plugin_registration_closed = true;
         self.refresh_checkpoint_hash()
     }
 
     fn execute_scheduled_at(&mut self, at: SimTime) -> Result<(), CanwuError> {
+        if self
+            .state
+            .scheduler
+            .actions
+            .first_key_value()
+            .is_some_and(|(key, _)| key.at == at)
+        {
+            self.invalidate_commitments(CommitmentDomains::SCHEDULER);
+        }
         while self
             .state
             .scheduler
@@ -6131,6 +6360,7 @@ impl Simulation {
         order_event: EventId,
         correlation_id: u64,
     ) -> Result<(), CanwuError> {
+        self.invalidate_commitments(CommitmentDomains::WORLD);
         let commander = {
             let army_state = self.state.current.armies.get_mut(&army).ok_or_else(|| {
                 CanwuError::new(ErrorCode::ArmyNotFound, "scheduled army no longer exists")
@@ -6247,6 +6477,7 @@ impl Simulation {
         source: KnowledgeSource,
         confidence_per_mille: u16,
     ) {
+        self.invalidate_commitments(CommitmentDomains::KNOWLEDGE);
         let (strength, known_name) = self.state.current.armies.get(&army).map_or_else(
             || (0, None),
             |value| (value.strength, Some(value.name.clone())),
@@ -6373,6 +6604,7 @@ impl Simulation {
         }
         let (draw_id, next_random_draw_id) =
             claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
+        self.invalidate_commitments(CommitmentDomains::RANDOM_STREAMS);
         let state = self
             .state
             .current
@@ -6530,6 +6762,7 @@ impl Simulation {
                 stage_record_changes
                     .insert(change.current.reference.clone(), (index, change.clone()));
             }
+            self.invalidate_commitments(CommitmentDomains::DOMAIN_RECORDS);
             self.state.current.domain_records = next_records;
             record_changes.extend(applied);
         }
@@ -6569,6 +6802,7 @@ impl Simulation {
                     summary,
                 } => {
                     let key = component_key(&staged.plugin, &state, &entity, &component);
+                    self.invalidate_commitments(CommitmentDomains::PLUGIN_COMPONENTS);
                     let previous = self
                         .state
                         .current
@@ -6744,6 +6978,7 @@ impl Simulation {
                     summary,
                 } => {
                     let key = component_key(plugin, &state, &entity, &component);
+                    self.invalidate_commitments(CommitmentDomains::PLUGIN_COMPONENTS);
                     self.state.current.plugin_components.insert(
                         key,
                         PluginComponentRecord {
@@ -6817,6 +7052,7 @@ impl Simulation {
         )?;
         let key = ScheduleKey { at, sequence };
         self.state.counters.next_schedule_sequence = next_sequence;
+        self.invalidate_commitments(CommitmentDomains::SCHEDULER);
         if self.state.scheduler.actions.insert(key, action).is_some() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
@@ -7047,6 +7283,27 @@ enum PreparedCommand {
         directives: Vec<SystemDirective>,
         allowed_writes: Vec<StateKey>,
     },
+}
+
+impl PreparedCommand {
+    fn commitment_invalidation(&self) -> CommitmentDomains {
+        match self {
+            Self::MoveArmy { .. } => {
+                CommitmentDomains::WORLD
+                    | CommitmentDomains::KNOWLEDGE
+                    | CommitmentDomains::PLUGIN_COMPONENTS
+                    | CommitmentDomains::SCHEDULER
+            }
+            Self::DebugMorale { .. } => {
+                CommitmentDomains::WORLD
+                    | CommitmentDomains::PLUGIN_COMPONENTS
+                    | CommitmentDomains::SCHEDULER
+            }
+            Self::Plugin { .. } => {
+                CommitmentDomains::PLUGIN_COMPONENTS | CommitmentDomains::SCHEDULER
+            }
+        }
+    }
 }
 
 struct PendingReservationOffer {
@@ -11741,45 +11998,49 @@ where
     canonical_hash(domain, &ordered)
 }
 
-fn commitment_roots(
-    material: &StateHashMaterial<'_>,
-    boundary_head: Option<&str>,
-    journal_roots: Option<&JournalCommitmentRoots>,
-) -> Result<CommitmentRoots, CanwuError> {
-    let world = canonical_hash(
+fn world_commitment_root(world: &WorldSnapshot) -> Result<String, CanwuError> {
+    canonical_hash(
         "canwu.commitment.world.v1",
         &WorldCommitmentMaterial {
             people: canonical_sorted_hash_by(
                 "canwu.commitment.world.people.v1",
-                &material.world.people,
+                &world.people,
                 |value| value.id,
             )?,
             governments: canonical_sorted_hash_by(
                 "canwu.commitment.world.governments.v1",
-                &material.world.governments,
+                &world.governments,
                 |value| value.id,
             )?,
             territories: canonical_sorted_hash_by(
                 "canwu.commitment.world.territories.v1",
-                &material.world.territories,
+                &world.territories,
                 |value| value.id,
             )?,
             routes: canonical_sorted_hash_by(
                 "canwu.commitment.world.routes.v1",
-                &material.world.routes,
+                &world.routes,
                 |value| value.id,
             )?,
             armies: canonical_sorted_hash_by(
                 "canwu.commitment.world.armies.v1",
-                &material.world.armies,
+                &world.armies,
                 |value| value.id,
             )?,
         },
-    )?;
-    let knowledge = canonical_hash("canwu.commitment.knowledge.v1", material.knowledge)?;
-    let plugin_components = canonical_sorted_hash_by(
+    )
+}
+
+fn knowledge_commitment_root(knowledge: &KnowledgeSnapshot) -> Result<String, CanwuError> {
+    canonical_hash("canwu.commitment.knowledge.v1", knowledge)
+}
+
+fn plugin_component_commitment_root(
+    components: &[PluginComponentRecord],
+) -> Result<String, CanwuError> {
+    canonical_sorted_hash_by(
         "canwu.commitment.plugin-components.v1",
-        material.plugin_components,
+        components,
         |record| {
             component_key(
                 &record.plugin,
@@ -11788,23 +12049,78 @@ fn commitment_roots(
                 &record.component,
             )
         },
-    )?;
-    let domain_records = canonical_sorted_hash_by(
-        "canwu.commitment.domain-records.v1",
-        material.domain_records,
-        |record| record.reference.clone(),
-    )?;
-    let scheduler = canonical_hash(
+    )
+}
+
+fn domain_record_commitment_root(records: &[DomainRecord]) -> Result<String, CanwuError> {
+    canonical_sorted_hash_by("canwu.commitment.domain-records.v1", records, |record| {
+        record.reference.clone()
+    })
+}
+
+fn scheduler_commitment_root(
+    now: SimTime,
+    scheduled: &[ScheduledRecord],
+) -> Result<String, CanwuError> {
+    canonical_hash(
         "canwu.commitment.scheduler.v1",
         &SchedulerCommitmentMaterial {
-            now: material.now,
+            now,
             scheduled: canonical_sorted_hash_by(
                 "canwu.commitment.scheduler.entries.v1",
-                material.scheduled,
+                scheduled,
                 |record| record.key.clone(),
             )?,
         },
-    )?;
+    )
+}
+
+fn random_stream_commitment_root(streams: &[RandomStreamState]) -> Result<String, CanwuError> {
+    canonical_sorted_hash_by("canwu.commitment.random.streams.v1", streams, |stream| {
+        stream.key.clone()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn identity_commitment_root(
+    engine_version: &str,
+    snapshot_format_version: u32,
+    run_manifest: &RunManifest,
+    run_manifest_hash: &str,
+    initial_time: SimTime,
+    initial_scenario: Option<&Scenario>,
+    plugin_descriptors: &[PluginDescriptor],
+    schema: &SchemaRegistry,
+) -> Result<String, CanwuError> {
+    canonical_hash(
+        "canwu.commitment.identity.v1",
+        &IdentityCommitmentMaterial {
+            engine_version,
+            snapshot_format_version,
+            run_manifest,
+            run_manifest_hash,
+            initial_time,
+            initial_scenario,
+            plugin_descriptors: canonical_sorted_hash_by(
+                "canwu.commitment.identity.plugins.v1",
+                plugin_descriptors,
+                |descriptor| descriptor.name.clone(),
+            )?,
+            schema,
+        },
+    )
+}
+
+fn commitment_roots(
+    material: &StateHashMaterial<'_>,
+    boundary_head: Option<&str>,
+    journal_roots: Option<&JournalCommitmentRoots>,
+) -> Result<CommitmentRoots, CanwuError> {
+    let world = world_commitment_root(material.world)?;
+    let knowledge = knowledge_commitment_root(material.knowledge)?;
+    let plugin_components = plugin_component_commitment_root(material.plugin_components)?;
+    let domain_records = domain_record_commitment_root(material.domain_records)?;
+    let scheduler = scheduler_commitment_root(material.now, material.scheduled)?;
     let command_root = match journal_roots {
         Some(roots) => roots.commands.clone(),
         None => canonical_sorted_hash_by(
@@ -11846,11 +12162,7 @@ fn commitment_roots(
         "canwu.commitment.random.v1",
         &RandomCommitmentMaterial {
             root_seed: material.root_seed,
-            streams: canonical_sorted_hash_by(
-                "canwu.commitment.random.streams.v1",
-                material.random_streams,
-                |stream| stream.key.clone(),
-            )?,
+            streams: random_stream_commitment_root(material.random_streams)?,
             draws: match journal_roots {
                 Some(roots) => roots.random_draws.clone(),
                 None => canonical_sorted_hash_by(
@@ -11865,22 +12177,15 @@ fn commitment_roots(
         "canwu.commitment.boundary-chain.v1",
         boundary_head.unwrap_or(GENESIS_BOUNDARY_HASH),
     )?;
-    let identity = canonical_hash(
-        "canwu.commitment.identity.v1",
-        &IdentityCommitmentMaterial {
-            engine_version: material.engine_version,
-            snapshot_format_version: material.snapshot_format_version,
-            run_manifest: material.run_manifest,
-            run_manifest_hash: material.run_manifest_hash,
-            initial_time: material.initial_time,
-            initial_scenario: material.initial_scenario,
-            plugin_descriptors: canonical_sorted_hash_by(
-                "canwu.commitment.identity.plugins.v1",
-                material.plugin_descriptors,
-                |descriptor| descriptor.name.clone(),
-            )?,
-            schema: material.schema,
-        },
+    let identity = identity_commitment_root(
+        material.engine_version,
+        material.snapshot_format_version,
+        material.run_manifest,
+        material.run_manifest_hash,
+        material.initial_time,
+        material.initial_scenario,
+        material.plugin_descriptors,
+        material.schema,
     )?;
     let control = canonical_hash(
         "canwu.commitment.control.v1",
@@ -11909,6 +12214,47 @@ fn commitment_roots(
         boundary_chain,
         identity,
         control,
+    })
+}
+
+fn runtime_commitment_roots(
+    domain: &RuntimeDomainCommitmentRoots,
+    journal: &JournalCommitmentRoots,
+    root_seed: u64,
+    boundary_head: Option<&str>,
+    control: &ControlCommitmentMaterial,
+) -> Result<CommitmentRoots, CanwuError> {
+    let commands = canonical_hash(
+        "canwu.commitment.commands.v1",
+        &CommandCommitmentMaterial {
+            commands: journal.commands.clone(),
+            attempts: journal.attempts.clone(),
+        },
+    )?;
+    let random = canonical_hash(
+        "canwu.commitment.random.v1",
+        &RandomCommitmentMaterial {
+            root_seed,
+            streams: domain.random_streams.clone(),
+            draws: journal.random_draws.clone(),
+        },
+    )?;
+    Ok(CommitmentRoots {
+        world: domain.world.clone(),
+        knowledge: domain.knowledge.clone(),
+        plugin_components: domain.plugin_components.clone(),
+        domain_records: domain.domain_records.clone(),
+        scheduler: domain.scheduler.clone(),
+        commands,
+        events: journal.events.clone(),
+        ingress: journal.ingress.clone(),
+        random,
+        boundary_chain: canonical_hash(
+            "canwu.commitment.boundary-chain.v1",
+            boundary_head.unwrap_or(GENESIS_BOUNDARY_HASH),
+        )?,
+        identity: domain.identity.clone(),
+        control: canonical_hash("canwu.commitment.control.v1", control)?,
     })
 }
 
@@ -15729,6 +16075,130 @@ mod tests {
         assert_eq!(replayed.snapshot().commitment_format_version, 0);
         assert!(replayed.snapshot().commitment_roots.is_none());
         assert_eq!(replayed.checkpoint_hash(), legacy_journal.checkpoint_hash);
+    }
+
+    #[test]
+    fn cached_mutable_commitments_match_independent_snapshot_roots_after_each_mutation() {
+        fn assert_exact(simulation: &Simulation) {
+            let snapshot = simulation.snapshot();
+            let expected = snapshot_commitment_roots(&snapshot)
+                .expect("serialized state should independently reproduce every commitment root");
+            assert_eq!(snapshot.commitment_roots.as_ref(), Some(&expected));
+            let cache = simulation
+                .state
+                .metadata
+                .commitment_cache
+                .as_ref()
+                .expect("current runtimes should maintain a private commitment cache");
+            assert!(
+                [
+                    &cache.world,
+                    &cache.knowledge,
+                    &cache.plugin_components,
+                    &cache.domain_records,
+                    &cache.scheduler,
+                    &cache.random_streams,
+                    &cache.identity,
+                ]
+                .into_iter()
+                .all(Option::is_some),
+                "every invalidated domain must be refreshed before a transaction commits"
+            );
+        }
+
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(101, scenario.clone()).expect("cache fixture should load");
+        assert_exact(&simulation);
+        simulation
+            .register_plugin(&AuthorityPlugin)
+            .expect("component plugin should register");
+        assert_exact(&simulation);
+        simulation
+            .register_plugin(&PrimaryRandomPlugin)
+            .expect("random plugin should register");
+        assert_exact(&simulation);
+
+        let before_rejection = simulation
+            .snapshot()
+            .commitment_roots
+            .expect("current snapshots should have roots");
+        let rejected = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                simulation.revision() + 1,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale: 75,
+                    },
+                ),
+            ))
+            .expect("stale input should become deterministic rejection evidence");
+        assert!(matches!(rejected, CommandOutcome::Rejected { .. }));
+        assert_exact(&simulation);
+        let after_rejection = simulation
+            .snapshot()
+            .commitment_roots
+            .expect("current snapshots should have roots");
+        assert_eq!(before_rejection.world, after_rejection.world);
+        assert_eq!(before_rejection.knowledge, after_rejection.knowledge);
+        assert_eq!(
+            before_rejection.plugin_components,
+            after_rejection.plugin_components
+        );
+        assert_eq!(
+            before_rejection.domain_records,
+            after_rejection.domain_records
+        );
+        assert_eq!(before_rejection.scheduler, after_rejection.scheduler);
+        assert_eq!(before_rejection.random, after_rejection.random);
+        assert_eq!(before_rejection.identity, after_rejection.identity);
+        assert_ne!(before_rejection.commands, after_rejection.commands);
+        assert_ne!(before_rejection.control, after_rejection.control);
+
+        simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                simulation.revision(),
+                CommandEnvelope::new(
+                    Issuer::Actor(ids.commander),
+                    Command::Plugin {
+                        plugin: "authority-test".to_owned(),
+                        command: "set_stance".to_owned(),
+                        payload: Value::Null,
+                    },
+                ),
+            ))
+            .expect("component command should commit");
+        assert_exact(&simulation);
+        simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(3),
+                simulation.revision(),
+                move_order(&ids),
+            ))
+            .expect("movement command should commit");
+        assert_exact(&simulation);
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("random boundary should commit");
+        assert_exact(&simulation);
+        simulation
+            .advance(SimDuration::days(1))
+            .expect("scheduled arrival should commit");
+        assert_exact(&simulation);
+
+        let mut records = Simulation::new(103, scenario).expect("record cache fixture should load");
+        records
+            .register_plugin(&RecordLifecyclePlugin)
+            .expect("record plugin should register");
+        assert_exact(&records);
+        records
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("record mutation boundary should commit");
+        assert_exact(&records);
     }
 
     #[test]

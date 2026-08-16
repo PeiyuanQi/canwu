@@ -289,11 +289,15 @@ existing contract and are reproduced by exact replay; when a snapshot is exactly
 at its boundary head, loading also recomputes and compares that boundary state
 commitment directly. Runtime checkpoint refresh keeps cloneable incremental hash
 state for append-only commands, attempts, events, ingress, and random draws, and
-feeds only newly appended journal tails into those roots. Mutable world,
-knowledge, plugin/record, scheduler, stream, identity, and control domains are
-still recomputed canonically. The cache is internal and never trusted on load:
-snapshot validation independently rebuilds every persisted root from serialized
-evidence.
+feeds only newly appended journal tails into those roots. It also retains the
+last canonical roots for world, knowledge, plugin components, domain records,
+the scheduler, random streams, and run/plugin identity. The private mutation
+helpers invalidate the domains they own; settlement remains conservative where
+several domains can change together. Runtime control and the combined roots are
+cheaply rebuilt at every checkpoint. The cache is cloneable with transaction
+state, is restored by rollback, and is never trusted on load: snapshot validation
+independently rebuilds every persisted root from serialized evidence before the
+runtime cache is reconstructed.
 
 Randomness is available to phased systems only through declared
 `RandomStreamKey` values. The kernel derives each stream from the run root seed,

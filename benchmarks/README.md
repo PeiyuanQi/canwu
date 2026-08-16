@@ -227,6 +227,29 @@ fall modestly because full transaction clones still dominate. Snapshot size is
 unchanged at 3,139,624 bytes, while load/validate remains an intentionally
 uncached full proof (+1.6% elapsed in this run).
 
+## Mutable-domain commitment-cache comparison
+
+The next cache slice is recorded in separate
+[`elapsed`](baselines/2026-08-16-mutable-domain-commitment-cache-elapsed.json)
+and
+[`allocation`](baselines/2026-08-16-mutable-domain-commitment-cache-allocations.json)
+reports, using the incremental journal-commitment milestone as its before
+baseline. Checkpoint-v4 bytes and commitment-format 1 are unchanged. The runtime
+retains canonical roots for unchanged mutable domains and invalidates them at
+their private mutation boundaries; loading still performs a fully uncached proof.
+
+At scale 512, history growth falls from 2,868.295 ms to 2,275.531 ms (-20.7%)
+and exact replay from 3,995.156 ms to 3,034.680 ms (-24.0%). The two paths remove
+7,220,458 and 13,071,290 allocation operations respectively, and request
+1,160,908,352 and 2,020,434,370 fewer bytes. Persisted rejection falls from
+1.700 ms to 1.140 ms (-32.9%) and removes 8,797 allocation operations because it
+can reuse every large mutable-domain root. Empty and populated boundaries remove
+17,576 and 11,426 operations. Accepted-command allocation and elapsed time are
+effectively unchanged because that workload mutates the large world and scheduler
+domains. Snapshot size remains 3,139,624 bytes; snapshot construction and
+serialization allocations are unchanged, and load/validate remains intentionally
+uncached.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
@@ -235,9 +258,10 @@ The allocation evidence identifies two distinct growth classes:
   retained history in the current implementation.
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
-  fifteen times as long. At scale 512, growth requested 49,870,296 allocation
-  operations and 6,303,353,559 bytes; replay requested 73,811,083 operations and
-  8,804,462,784 bytes. These paths still exhibit approximately quadratic growth.
+  fifteen to sixteen times as long. At scale 512, growth requested 42,649,838
+  allocation operations and 5,142,445,207 bytes; replay requested 60,739,793
+  operations and 6,784,028,414 bytes. These paths still exhibit approximately
+  quadratic growth.
 
 Those observations establish optimization targets; they do not change any
 runtime contract or claim that one subsystem alone is the cause.
