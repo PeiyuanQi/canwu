@@ -65,14 +65,18 @@ boundary a structural property instead of a UI convention.
 
 ## World, time, and events
 
-A validated command produces an event and optional scheduled work. Scheduled
-items are ordered by `(simulation timestamp, insertion sequence)`, so equal-time
-work is deterministic. New scheduled directives must target a strictly future
-and representable simulation time; checked time arithmetic rejects overflow
-instead of saturating into current or ambiguous work. Same-time consequences
-are emitted directly, so a completed boundary cannot retain due ingress. When
-work executes it may change state, emit a derived event with a causal reference,
-update knowledge, and schedule further work.
+A validated command produces an event and optional scheduled work. Internal
+scheduled continuations are ordered by `(simulation timestamp, insertion
+sequence)`. Host-facing work uses one persisted ingress queue for commands,
+plugin-defined communication/acknowledgement/information packets, and calendar work. Queue
+order is `(due time, class, descending priority, issue time, ingress ID)`, with
+classes ordered command, communication, acknowledgement, information, then
+scheduled system. Late input is rejected rather than inserted behind a
+committed boundary. A boundary system may schedule a typed follow-up packet;
+even a zero-delay packet becomes eligible only after the current admission cut,
+so it settles at a second boundary at the same simulation timestamp instead of
+retroactively changing the boundary that created it. New scheduled work must
+use representable checked time arithmetic rather than saturation.
 `canwu-time` exposes checked hour/day construction and checked time/duration
 arithmetic for data-dependent values. Its convenience constructors and
 operators never clamp; an out-of-range convenience operation fails loudly.
@@ -175,12 +179,22 @@ visibility and rollback contract as other authoritative domain changes.
 ## Phased settlement boundary
 
 `settle_boundary(BoundaryRequest)` is the authoritative extension path for new
-domain mechanics. It transactionally advances scheduled ingress to the
-requested time, admits previously unconsumed command and event evidence, takes
-an immutable boundary snapshot, and visits all fourteen CM phases in order.
-Caller-supplied cadence categories are canonicalized; event-driven systems are
-selected only when admitted events exist. Systems within a phase execute by
-`(plugin name, system name)`.
+domain mechanics. It transactionally executes internal scheduled continuations
+strictly before the requested time, admits and processes due canonical ingress,
+then executes equal-time internal scheduled continuations before taking the
+immutable boundary snapshot. It visits all fourteen settlement phases in order.
+Caller-supplied cadence categories are
+canonicalized; event-driven systems are selected when admitted events or
+ingress exist. `advance_canonical` and `step_canonical` select the earlier of
+internal scheduled work and canonical ingress so hosts cannot step past due
+work. Equal-time command ingress is processed before internal scheduled
+continuations, preserving the declared command-before-scheduled-system order. A
+system that declares `canwu.core.ingress` read access can resolve only the
+admitted plugin packets owned by its own plugin; future, command, calendar,
+and other-plugin payloads remain unavailable through that view. Systems within a
+phase execute by `(plugin name, system name)`. The boundary builds one sparse,
+non-iterated admission index from the packets admitted at that boundary, so
+repeated lookups neither rescan the queue nor allocate against total history.
 
 The kernel owns ingress, snapshot, ordinary commit, and conditional-transition
 commit. Phase-six systems publish resource capacity and competing claims.
@@ -201,13 +215,17 @@ Any fatal error restores time, queues, state, journals, random state, counters,
 and boundary records to their pre-boundary values.
 
 Each successful boundary persists its ID, time, correlation, cadence set,
-admitted command attempts, accepted commands, and events, reservation evidence,
-allocations, random draws, field changes, domain record lifecycle changes, exact
-plugin/system provenance, a deterministic state hash, and the previous and
-current boundary hashes. Every committed domain record change has one indexed,
-causally linked evidence event. Snapshot loading reconstructs the initial record
-store from this history, deterministically reapplies each commit stage, and
-requires the result to equal the persisted ordered store. Reservations,
+admitted command attempts, accepted commands, admitted and boundary-generated
+ingress, and events, reservation evidence, allocations, random draws, field
+changes, domain record lifecycle changes, exact producer plugin/system/phase/
+visibility provenance, a deterministic state hash, and the previous and current
+boundary hashes. Every
+committed domain record change has one indexed, causally linked evidence event.
+Snapshot loading reconstructs the initial record store from this history,
+deterministically reapplies each commit stage, and requires the result to equal
+the persisted ordered store. It also reconstructs queued command attempts and
+calendar cadences in admission order rather than treating boundary membership as
+sufficient evidence. Reservations,
 component writes, command authority, and event entities are checked against the
 domain identities available to the originating proposal and after its atomic
 commit stage, so rehashed evidence cannot consume another system's invisible
@@ -246,21 +264,25 @@ stream progress cannot preserve an apparently coherent report history.
 The legacy immediate command/event path remains for the movement slice and
 compatibility examples. It is transactional, but it is not a substitute for the
 fourteen-phase boundary and cannot own state also managed by phased systems.
-`submit` preserves that direct compatibility path. CM-facing hosts use
-`process_command`, which accepts an owned `CommandRequest` with an idempotency
-key, expected revision, expected simulation time, typed issuer, and explicit
-seat/authority context. Accepted and expected-rejected attempts are persisted,
-hashed, admitted at the next boundary, restored by save/load, and regenerated
-by exact replay. Exact retries return the original outcome without new
-mutation; request-ID collisions are fail-closed and stale revision/time pairs
-retain the committed revision. The revision advances on every accepted command
-or published settlement boundary, while expected simulation time detects clock
-and scheduled-work advancement. Declared external commands require both guards.
-Live requests, compatibility-only legacy-direct calls, and frozen replay inputs
-are distinct ingress classes. Only exact replay can consume a
-`FrozenReplay` input, so a live caller cannot bypass a read-only run by labeling
-itself as replay. Automatic calendar policy, communication/acknowledgement
-ingress, and conservation bundles remain later conformance work.
+`submit` preserves that direct compatibility path. `process_command` accepts an
+owned tracked `CommandRequest` with an idempotency key, expected revision,
+expected simulation time, typed issuer, and explicit seat/authority context.
+Natural-clock hosts enqueue that request with `enqueue_command` and settle it
+through `advance_canonical` or `step_canonical`; plugin packets use
+`enqueue_plugin_ingress`, and explicit calendar work uses
+`schedule_calendar_boundary`. Accepted and expected-rejected attempts are
+persisted, hashed, admitted at a boundary, restored by save/load, and regenerated
+by exact replay. Exact retries return the original outcome without new mutation;
+request-ID collisions are fail-closed and stale revision/time pairs retain the
+committed revision. The revision advances on every accepted command or published
+settlement boundary, while expected simulation time detects clock and scheduled
+work advancement. Declared external commands require both guards. Live requests,
+compatibility-only legacy-direct calls, and frozen replay inputs remain distinct;
+only exact replay can consume `FrozenReplay`, and declared read-only runs reject
+newly authored plugin ingress. Plugin boundary systems can return
+`ScheduleIngress` to continue communication pipelines without host orchestration.
+Recurring calendar policy and conservation bundles remain later conformance
+work.
 
 Command handlers receive an immutable `CommandContext` containing the issuer
 asserted by the trusted in-process host, typed decision origin, seat and
@@ -353,7 +375,8 @@ That profile does not move Celestial Mandate rules into Canwu. Instead, it
 requires Canwu to provide the deterministic settlement, authority, ownership,
 transaction, knowledge, persistence, lineage, package, and publication
 contracts through public extension points. The current v0.4 runtime adds scoped
-randomness, run/plugin identity, boundary hash evidence, typed run policy, and
-replayable authority-aware request ingress to the v0.3 phased settlement
-foundation, but it is still only a partial conformance result; the remaining
-gaps are tracked in the profile itself.
+randomness, run/plugin identity, boundary hash evidence, typed run policy,
+replayable authority-aware requests, and a canonical
+command/communication/calendar ingress journal to the v0.3 phased settlement
+foundation. It is still only a partial conformance result; the remaining gaps
+are tracked in the profile itself.

@@ -7,6 +7,7 @@
 )]
 
 mod boundary;
+mod ingress;
 mod manifest;
 mod policy;
 mod random;
@@ -14,10 +15,14 @@ mod records;
 
 pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
-    BoundarySystemHandler, ReservationAllocation, ReservationDisposition, ReservationOffer,
-    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
-    ReservationRequestRecord,
+    BoundaryIngressGeneration, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
+    BoundarySystemContract, BoundarySystemHandler, ReservationAllocation, ReservationDisposition,
+    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
+    ReservationRequest, ReservationRequestRecord,
+};
+pub use ingress::{
+    IngressClass, IngressPayload, IngressReceipt, IngressRecord, PluginIngressDescriptor,
+    PluginIngressRequest,
 };
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use policy::{
@@ -37,8 +42,8 @@ pub use records::{
 
 use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng,
-    DomainRecordKind, DomainRecordRef, EntityRef, EventId, FieldSchema, GovernmentId, PersonId,
-    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    DomainRecordKind, DomainRecordRef, EntityRef, EventId, FieldSchema, GovernmentId, IngressId,
+    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -51,10 +56,12 @@ use canwu_world::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+
+use ingress::IngressQueueKey;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
@@ -73,6 +80,7 @@ pub enum ErrorCode {
     DuplicateDomainRecordKind,
     DuplicatePlugin,
     DuplicatePluginCommand,
+    DuplicatePluginIngress,
     DuplicatePluginSystem,
     DuplicateStateOwner,
     DuplicateReservationOfferer,
@@ -95,6 +103,7 @@ pub enum ErrorCode {
     InvalidSnapshot,
     IdentifierExhausted,
     LegacyReplayUnavailable,
+    LateIngress,
     MissingIdempotencyKey,
     MixedCommandIngress,
     NoRoute,
@@ -161,6 +170,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::DuplicateDomainRecordKind => "duplicate_domain_record_kind",
         ErrorCode::DuplicatePlugin => "duplicate_plugin",
         ErrorCode::DuplicatePluginCommand => "duplicate_plugin_command",
+        ErrorCode::DuplicatePluginIngress => "duplicate_plugin_ingress",
         ErrorCode::DuplicatePluginSystem => "duplicate_plugin_system",
         ErrorCode::DuplicateStateOwner => "duplicate_state_owner",
         ErrorCode::DuplicateReservationOfferer => "duplicate_reservation_offerer",
@@ -183,6 +193,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::InvalidSnapshot => "invalid_snapshot",
         ErrorCode::IdentifierExhausted => "identifier_exhausted",
         ErrorCode::LegacyReplayUnavailable => "legacy_replay_unavailable",
+        ErrorCode::LateIngress => "late_ingress",
         ErrorCode::MissingIdempotencyKey => "missing_idempotency_key",
         ErrorCode::MixedCommandIngress => "mixed_command_ingress",
         ErrorCode::NoRoute => "no_route",
@@ -400,6 +411,11 @@ impl StateKey {
     #[must_use]
     pub fn core_events() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "events")
+    }
+
+    #[must_use]
+    pub fn core_ingress() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "ingress")
     }
 }
 
@@ -704,6 +720,8 @@ pub struct PluginDescriptor {
     #[serde(default)]
     pub boundary_systems: Vec<BoundarySystemContract>,
     pub commands: Vec<PluginActionDescriptor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<PluginIngressDescriptor>,
     pub schema_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_schemas: Vec<DomainRecordSchema>,
@@ -752,6 +770,8 @@ pub struct SimulationView<'a> {
     state_owners: &'a BTreeMap<StateKey, String>,
     reader: Option<&'a str>,
     allowed_reads: Option<&'a [StateKey]>,
+    allowed_ingress: Option<&'a HashSet<IngressId>>,
+    ingress_plugin: Option<&'a str>,
     component_overlay: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     record_overlay: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
@@ -805,6 +825,31 @@ impl SimulationView<'_> {
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
         Ok(self.state.events.iter().find(|event| event.id == id))
+    }
+
+    pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
+        self.require_read(&StateKey::core_ingress())?;
+        if self
+            .allowed_ingress
+            .is_none_or(|allowed| !allowed.contains(&id))
+        {
+            return Ok(None);
+        }
+        let record = id
+            .get()
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| self.state.ingress.get(index))
+            .filter(|record| record.id == id);
+        if let (Some(owner), Some(record)) = (self.ingress_plugin, record)
+            && !matches!(
+                &record.payload,
+                IngressPayload::Plugin { plugin, .. } if plugin == owner
+            )
+        {
+            return Ok(None);
+        }
+        Ok(record)
     }
 
     pub fn domain_record(
@@ -965,6 +1010,7 @@ pub struct PluginRegistry {
     systems: Vec<RegisteredSystem>,
     boundary_systems: Vec<RegisteredBoundarySystem>,
     commands: BTreeMap<(String, String), RegisteredCommand>,
+    ingress: BTreeMap<(String, String), PluginIngressDescriptor>,
     state_owners: BTreeMap<StateKey, String>,
     immediate_write_states: BTreeMap<StateKey, String>,
     boundary_writers: BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
@@ -1341,6 +1387,60 @@ impl PluginRegistrar<'_> {
         *self.registry = candidate;
         Ok(())
     }
+
+    pub fn register_ingress(
+        &mut self,
+        descriptor: PluginIngressDescriptor,
+    ) -> Result<(), CanwuError> {
+        validate_ingress_descriptor(&descriptor)?;
+        let key = (self.plugin.clone(), descriptor.name.clone());
+        if self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .is_some_and(|plugin| {
+                plugin
+                    .ingress
+                    .iter()
+                    .any(|candidate| candidate.name == descriptor.name)
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicatePluginIngress,
+                format!(
+                    "plugin {} already registered ingress type {}",
+                    self.plugin, descriptor.name
+                ),
+            ));
+        }
+        if self
+            .registry
+            .ingress
+            .get(&key)
+            .is_some_and(|existing| existing != &descriptor)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::PluginManifestMismatch,
+                format!(
+                    "plugin {} changed the stored ingress type {}",
+                    self.plugin, descriptor.name
+                ),
+            ));
+        }
+        let mut candidate = self.registry.clone();
+        candidate.ingress.insert(key, descriptor.clone());
+        let plugin_descriptor = candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        plugin_descriptor.name.clone_from(&self.plugin);
+        plugin_descriptor.ingress.push(descriptor);
+        plugin_descriptor
+            .ingress
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        *self.registry = candidate;
+        Ok(())
+    }
 }
 
 impl PluginRegistry {
@@ -1416,6 +1516,7 @@ impl PluginRegistry {
             systems: Vec::new(),
             boundary_systems: Vec::new(),
             commands: BTreeMap::new(),
+            ingress: BTreeMap::new(),
             state_owners: BTreeMap::new(),
             immediate_write_states: BTreeMap::new(),
             boundary_writers: BTreeMap::new(),
@@ -1646,6 +1747,25 @@ impl PluginRegistry {
                     ))
                 })?;
             }
+            if descriptor
+                .ingress
+                .windows(2)
+                .any(|pair| pair[0].name >= pair[1].name)
+            {
+                return invalid_snapshot("plugin ingress types are not in canonical order");
+            }
+            for ingress in &descriptor.ingress {
+                validate_ingress_descriptor(ingress).map_err(|error| {
+                    invalid_snapshot_error(format!("invalid plugin ingress descriptor: {error}"))
+                })?;
+                if registry
+                    .ingress
+                    .insert((plugin.clone(), ingress.name.clone()), ingress.clone())
+                    .is_some()
+                {
+                    return invalid_snapshot("plugin descriptor has duplicate ingress types");
+                }
+            }
             let schema_types: BTreeSet<_> = descriptor.schema_types.iter().collect();
             if schema_types.len() != descriptor.schema_types.len()
                 || descriptor
@@ -1764,6 +1884,12 @@ fn validate_system_contract(
     }
     validate_state_keys(&mut contract.reads)?;
     validate_state_keys(&mut contract.writes)?;
+    if contract.reads.contains(&StateKey::core_ingress()) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "canonical ingress can be read only by phased boundary systems",
+        ));
+    }
     Ok(())
 }
 
@@ -1789,6 +1915,37 @@ fn validate_action_descriptor(
     }
     validate_state_keys(&mut descriptor.reads)?;
     validate_state_keys(&mut descriptor.writes)?;
+    if descriptor.reads.contains(&StateKey::core_ingress()) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin commands cannot inspect the canonical ingress queue",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ingress_descriptor(descriptor: &PluginIngressDescriptor) -> Result<(), CanwuError> {
+    if descriptor.name.trim().is_empty()
+        || descriptor.name != descriptor.name.trim()
+        || descriptor.description.trim().is_empty()
+        || descriptor.description != descriptor.description.trim()
+        || descriptor.class == IngressClass::Command
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin ingress types require canonical names/descriptions and cannot claim the core command class",
+        ));
+    }
+    if let PayloadSchema::Object { properties, .. } = &descriptor.payload_schema
+        && properties
+            .keys()
+            .any(|name| name.trim().is_empty() || name != name.trim())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin ingress payload property names cannot be empty",
+        ));
+    }
     Ok(())
 }
 
@@ -2167,6 +2324,51 @@ impl BoundaryDomainEntityCuts {
             })
             .map_or(before_proposal, |change| change.current_live)
     }
+
+    fn identity_exists_for_proposal(
+        &self,
+        final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+        reference: &DomainRecordRef,
+        phase: BoundaryPhase,
+        commit_stage: DomainRecordCommitStage,
+        plugin: &str,
+        system: &str,
+    ) -> bool {
+        if !final_records.contains_key(reference) {
+            return false;
+        }
+        let visible_after = match phase {
+            BoundaryPhase::DomainDeltaProposal => None,
+            BoundaryPhase::HistoricalCandidateEvaluation => Some(DomainRecordCommitStage::Ordinary),
+            BoundaryPhase::StrategicAggregation => Some(DomainRecordCommitStage::Transition),
+            BoundaryPhase::PerspectiveAndReportMaterialization => {
+                Some(DomainRecordCommitStage::Aggregation)
+            }
+            BoundaryPhase::EventIngress
+            | BoundaryPhase::BoundarySnapshot
+            | BoundaryPhase::DerivedFieldSolve
+            | BoundaryPhase::PerceptionAndAttentionRefresh
+            | BoundaryPhase::DecisionAndAcceptedEffectIntake
+            | BoundaryPhase::ReservationAndAllocation
+            | BoundaryPhase::InvariantValidation
+            | BoundaryPhase::AtomicDomainCommit
+            | BoundaryPhase::ConditionalTransitionCommit
+            | BoundaryPhase::SaveReplayAndDiagnosticHashing => return false,
+        };
+        self.changes
+            .get(reference)
+            .and_then(|changes| {
+                changes
+                    .iter()
+                    .find(|change| !change.previous_live && change.current_live)
+            })
+            .is_none_or(|creation| {
+                visible_after.is_some_and(|stage| creation.stage <= stage)
+                    || (creation.stage == commit_stage
+                        && creation.plugin == plugin
+                        && creation.system == system)
+            })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2187,13 +2389,13 @@ impl DomainRecordHistory {
     fn from_initial_records(records: &BTreeMap<DomainRecordRef, DomainRecord>) -> Self {
         let lifetimes = records
             .values()
-            .filter(|record| domain_record_is_live_entity(record))
+            .filter(|record| record.class == DomainRecordClass::Entity)
             .map(|record| {
                 (
                     record.reference.clone(),
                     DomainEntityLifetime {
                         created_at: DomainHistoryCut::GENESIS,
-                        deleted_at: None,
+                        deleted_at: record.is_deleted().then_some(DomainHistoryCut::GENESIS),
                     },
                 )
             })
@@ -2250,6 +2452,12 @@ impl DomainRecordHistory {
         self.lifetimes.get(reference).is_some_and(|lifetime| {
             lifetime.created_at <= cut && lifetime.deleted_at.is_none_or(|deleted| cut < deleted)
         })
+    }
+
+    fn exists(&self, reference: &DomainRecordRef, cut: DomainHistoryCut) -> bool {
+        self.lifetimes
+            .get(reference)
+            .is_some_and(|lifetime| lifetime.created_at <= cut)
     }
 
     fn before_time(snapshot: &SimulationSnapshot, at: SimTime) -> DomainHistoryCut {
@@ -2457,11 +2665,23 @@ fn command_attempt_id_slice_is_empty(value: &&[CommandAttemptId]) -> bool {
     value.is_empty()
 }
 
+fn ingress_id_slice_is_empty(value: &&[IngressId]) -> bool {
+    value.is_empty()
+}
+
+fn ingress_generation_slice_is_empty(value: &&[BoundaryIngressGeneration]) -> bool {
+    value.is_empty()
+}
+
 fn domain_record_slice_is_empty(value: &&[DomainRecord]) -> bool {
     value.is_empty()
 }
 
 fn domain_record_change_slice_is_empty(value: &&[DomainRecordChange]) -> bool {
+    value.is_empty()
+}
+
+fn ingress_record_slice_is_empty(value: &&[IngressRecord]) -> bool {
     value.is_empty()
 }
 
@@ -2485,6 +2705,8 @@ struct RuntimeState {
     events: Vec<SimEvent>,
     commands: Vec<CommandRecord>,
     command_attempts: Vec<CommandAttemptRecord>,
+    ingress: Vec<IngressRecord>,
+    pending_ingress: BTreeSet<IngressQueueKey>,
     boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
@@ -2494,6 +2716,7 @@ struct RuntimeState {
     next_event_id: u64,
     next_command_id: u64,
     next_command_attempt_id: u64,
+    next_ingress_id: u64,
     next_boundary_id: u64,
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
@@ -2523,6 +2746,8 @@ pub struct SimulationSnapshot {
     pub commands: Vec<CommandRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_attempts: Vec<CommandAttemptRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<IngressRecord>,
     #[serde(default)]
     pub boundaries: Vec<BoundaryRecord>,
     pub plugin_components: Vec<PluginComponentRecord>,
@@ -2543,6 +2768,8 @@ pub struct SimulationSnapshot {
     next_command_id: u64,
     #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
     next_command_attempt_id: u64,
+    #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
+    next_ingress_id: u64,
     #[serde(default)]
     next_boundary_id: u64,
     #[serde(default)]
@@ -2564,6 +2791,8 @@ pub struct ReplayJournal {
     pub plugin_registration_closed: bool,
     pub commands: Vec<CommandRecord>,
     pub command_attempts: Vec<CommandAttemptRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<IngressRecord>,
     pub boundaries: Vec<BoundaryRecord>,
     pub final_time: SimTime,
     pub checkpoint_hash: String,
@@ -2583,6 +2812,8 @@ struct ReplayJournalWire {
     commands: Vec<CommandRecord>,
     #[serde(default)]
     command_attempts: Vec<CommandAttemptRecord>,
+    #[serde(default)]
+    ingress: Vec<IngressRecord>,
     boundaries: Vec<BoundaryRecord>,
     final_time: SimTime,
     checkpoint_hash: String,
@@ -2609,6 +2840,7 @@ impl<'de> Deserialize<'de> for ReplayJournal {
             plugin_registration_closed: wire.plugin_registration_closed,
             commands: wire.commands,
             command_attempts: wire.command_attempts,
+            ingress: wire.ingress,
             boundaries: wire.boundaries,
             final_time: wire.final_time,
             checkpoint_hash: wire.checkpoint_hash,
@@ -2803,6 +3035,8 @@ impl Simulation {
                 events: Vec::new(),
                 commands: Vec::new(),
                 command_attempts: Vec::new(),
+                ingress: Vec::new(),
+                pending_ingress: BTreeSet::new(),
                 boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
                 domain_records: scenario
@@ -2816,6 +3050,7 @@ impl Simulation {
                 next_event_id: 1,
                 next_command_id: 1,
                 next_command_attempt_id: 1,
+                next_ingress_id: 1,
                 next_boundary_id: 1,
                 next_random_draw_id: 1,
                 next_schedule_sequence: 1,
@@ -2892,7 +3127,7 @@ impl Simulation {
     ) -> Result<Self, CanwuError> {
         let simulation =
             Self::new_with_manifest_and_plugins(seed, scenario, run_manifest, plugins)?;
-        Self::replay_records(simulation, commands, &[], boundaries, final_time)
+        Self::replay_records(simulation, commands, &[], &[], boundaries, final_time)
     }
 
     /// Reconstructs caller-supplied inputs under a caller-supplied declared run
@@ -2929,6 +3164,7 @@ impl Simulation {
             simulation,
             commands,
             command_attempts,
+            &[],
             boundaries,
             final_time,
         )
@@ -2986,6 +3222,7 @@ impl Simulation {
             simulation,
             &journal.commands,
             &journal.command_attempts,
+            &journal.ingress,
             &journal.boundaries,
             journal.final_time,
         )?;
@@ -3011,17 +3248,25 @@ impl Simulation {
         mut simulation: Self,
         commands: &[CommandRecord],
         attempts: &[CommandAttemptRecord],
+        ingress: &[IngressRecord],
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
         simulation.ensure_runtime_ready()?;
         if !attempts.is_empty() {
             return Self::replay_attempt_records(
-                simulation, commands, attempts, boundaries, final_time,
+                simulation, commands, attempts, ingress, boundaries, final_time,
             );
         }
+        let mut next_ingress = 0;
         let mut next_command = 0;
-        for expected_boundary in boundaries {
+        for (boundary_index, expected_boundary) in boundaries.iter().enumerate() {
+            enqueue_replay_ingress_cut(
+                &mut simulation,
+                ingress,
+                &mut next_ingress,
+                boundary_index,
+            )?;
             for admitted in &expected_boundary.admitted_commands {
                 let Some(record) = commands.get(next_command) else {
                     return Err(CanwuError::new(
@@ -3061,6 +3306,18 @@ impl Simulation {
         for record in &commands[next_command..] {
             replay_command_record(&mut simulation, record, final_time)?;
         }
+        enqueue_replay_ingress_cut(
+            &mut simulation,
+            ingress,
+            &mut next_ingress,
+            boundaries.len(),
+        )?;
+        if next_ingress != ingress.len() {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "ingress journal contains an impossible future boundary issue cut",
+            ));
+        }
         if final_time < simulation.time() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDuration,
@@ -3068,6 +3325,7 @@ impl Simulation {
             ));
         }
         if final_time > simulation.time() {
+            simulation.ensure_legacy_advance_does_not_cross_ingress(final_time)?;
             simulation.advance_to(final_time)?;
         }
         Ok(simulation)
@@ -3077,11 +3335,26 @@ impl Simulation {
         mut simulation: Self,
         commands: &[CommandRecord],
         attempts: &[CommandAttemptRecord],
+        ingress: &[IngressRecord],
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
+        let command_ingress_requests: BTreeSet<_> = ingress
+            .iter()
+            .filter_map(|record| match &record.payload {
+                IngressPayload::Command { request } => Some(request.request_id),
+                IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+            })
+            .collect();
+        let mut next_ingress = 0;
         let mut next_attempt = 0;
-        for expected_boundary in boundaries {
+        for (boundary_index, expected_boundary) in boundaries.iter().enumerate() {
+            enqueue_replay_ingress_cut(
+                &mut simulation,
+                ingress,
+                &mut next_ingress,
+                boundary_index,
+            )?;
             let mut admitted_commands = Vec::new();
             for admitted in &expected_boundary.admitted_attempts {
                 let Some(record) = attempts.get(next_attempt) else {
@@ -3096,7 +3369,12 @@ impl Simulation {
                         "boundary replay attempt admission does not match journal order",
                     ));
                 }
-                replay_attempt_record(&mut simulation, record, commands, expected_boundary.at)?;
+                let queued = record
+                    .request_id
+                    .is_some_and(|request| command_ingress_requests.contains(&request));
+                if !queued {
+                    replay_attempt_record(&mut simulation, record, commands, expected_boundary.at)?;
+                }
                 if let CommandAttemptOutcome::Accepted { command_id } = record.outcome {
                     admitted_commands.push(command_id);
                 }
@@ -3131,6 +3409,18 @@ impl Simulation {
         for record in &attempts[next_attempt..] {
             replay_attempt_record(&mut simulation, record, commands, final_time)?;
         }
+        enqueue_replay_ingress_cut(
+            &mut simulation,
+            ingress,
+            &mut next_ingress,
+            boundaries.len(),
+        )?;
+        if next_ingress != ingress.len() {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "ingress journal contains an impossible future boundary issue cut",
+            ));
+        }
         if simulation.command_log() != commands {
             return Err(CanwuError::new(
                 ErrorCode::ReplayMismatch,
@@ -3144,6 +3434,7 @@ impl Simulation {
             ));
         }
         if final_time > simulation.time() {
+            simulation.ensure_legacy_advance_does_not_cross_ingress(final_time)?;
             simulation.advance_to(final_time)?;
         }
         Ok(simulation)
@@ -3302,6 +3593,11 @@ impl Simulation {
     }
 
     #[must_use]
+    pub fn ingress_log(&self) -> &[IngressRecord] {
+        &self.state.ingress
+    }
+
+    #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.state.domain_records.get(reference)
     }
@@ -3350,6 +3646,7 @@ impl Simulation {
             plugin_registration_closed: self.state.plugin_registration_closed,
             commands: self.state.commands.clone(),
             command_attempts: self.state.command_attempts.clone(),
+            ingress: self.state.ingress.clone(),
             boundaries: self.state.boundaries.clone(),
             final_time: self.state.now,
             checkpoint_hash: self.state.checkpoint_hash.clone(),
@@ -3363,10 +3660,248 @@ impl Simulation {
         }
     }
 
+    pub fn enqueue_command(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: CommandRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_runtime_ready()?;
+        self.ensure_canonical_ingress_can_start()?;
+        self.ensure_command_ingress_family(CommandIngress::LiveRequest)?;
+        for record in &self.state.ingress {
+            let IngressPayload::Command { request: existing } = &record.payload else {
+                continue;
+            };
+            if existing.request_id != request.request_id {
+                continue;
+            }
+            if existing.as_ref() == &request
+                && record.due_at == due_at
+                && record.priority == priority
+            {
+                return Ok(IngressReceipt {
+                    ingress_id: record.id,
+                    issued_at: record.issued_at,
+                    due_at: record.due_at,
+                });
+            }
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                format!(
+                    "command request {} is already queued with different ingress content",
+                    request.request_id
+                ),
+            ));
+        }
+        if self
+            .state
+            .command_attempts
+            .iter()
+            .any(|attempt| attempt.request_id == Some(request.request_id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                format!(
+                    "command request {} was already processed outside canonical ingress",
+                    request.request_id
+                ),
+            ));
+        }
+        if request
+            .envelope
+            .expected_time
+            .is_some_and(|expected| expected != due_at)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::SimulationTimeConflict,
+                "queued command expected time must equal its due simulation time",
+            ));
+        }
+        self.append_ingress(
+            due_at,
+            IngressClass::Command,
+            priority,
+            IngressPayload::Command {
+                request: Box::new(request),
+            },
+            None,
+            false,
+        )
+    }
+
+    pub fn enqueue_plugin_ingress(
+        &mut self,
+        mut request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_runtime_ready()?;
+        self.ensure_canonical_ingress_can_start()?;
+        if self
+            .state
+            .run_configuration
+            .declared()
+            .is_some_and(|configuration| configuration.interaction == InteractionPolicy::ReadOnly)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InteractionReadOnly,
+                "the run interaction policy rejects newly authored plugin ingress",
+            ));
+        }
+        let key = (request.plugin.clone(), request.packet_type.clone());
+        let descriptor = self.plugins.ingress.get(&key).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!(
+                    "plugin ingress type {}.{} is not registered",
+                    request.plugin, request.packet_type
+                ),
+            )
+        })?;
+        descriptor.payload_schema.validate(&request.payload)?;
+        request.affected_entities.sort();
+        request.affected_entities.dedup();
+        if request
+            .affected_entities
+            .iter()
+            .any(|entity| !runtime_entity_identity_exists(&self.state, entity))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EntityNotFound,
+                "plugin ingress references an unknown entity identity",
+            ));
+        }
+        if let Some(cause) = &request.cause {
+            if matches!(
+                cause,
+                CauseRef::Boundary(_) | CauseRef::Command(_) | CauseRef::Event(_)
+            ) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPayload,
+                    "boundary, command, and event causes are reserved for plugin-generated ingress",
+                ));
+            }
+            validate_runtime_cause(&self.state, cause)?;
+        }
+        self.append_ingress(
+            request.due_at,
+            descriptor.class,
+            request.priority,
+            IngressPayload::Plugin {
+                plugin: request.plugin,
+                packet_type: request.packet_type,
+                payload: request.payload,
+                affected_entities: request.affected_entities,
+            },
+            request.cause,
+            false,
+        )
+    }
+
+    pub fn schedule_calendar_boundary(
+        &mut self,
+        due_at: SimTime,
+        mut cadences: Vec<SystemCadence>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_runtime_ready()?;
+        self.ensure_canonical_ingress_can_start()?;
+        if cadences.contains(&SystemCadence::EventDriven) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "calendar ingress cannot declare event-driven cadence",
+            ));
+        }
+        cadences.sort();
+        cadences.dedup();
+        if cadences.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "calendar ingress requires at least one scheduled cadence",
+            ));
+        }
+        self.append_ingress(
+            due_at,
+            IngressClass::ScheduledSystem,
+            0,
+            IngressPayload::Calendar { cadences },
+            Some(CauseRef::System("canwu.core.calendar".to_owned())),
+            false,
+        )
+    }
+
+    fn append_ingress(
+        &mut self,
+        due_at: SimTime,
+        class: IngressClass,
+        priority: i32,
+        payload: IngressPayload,
+        cause: Option<CauseRef>,
+        after_current_boundary: bool,
+    ) -> Result<IngressReceipt, CanwuError> {
+        if due_at < self.state.now {
+            return Err(CanwuError::new(
+                ErrorCode::LateIngress,
+                format!(
+                    "ingress due at {due_at} cannot be queued after committed time {}",
+                    self.state.now
+                ),
+            ));
+        }
+        let transaction_start = self.state.clone();
+        let (id, next_id) = claim_counter(self.state.next_ingress_id, "ingress ID")?;
+        let boundary_count = u64::try_from(self.state.boundaries.len()).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "boundary count exceeds the ingress journal range",
+            )
+        })?;
+        let eligible_boundary_count = if after_current_boundary {
+            boundary_count.checked_add(1).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "ingress boundary eligibility exceeds the journal range",
+                )
+            })?
+        } else {
+            boundary_count
+        };
+        let record = IngressRecord {
+            id: IngressId::new(id),
+            issued_at: self.state.now,
+            eligible_boundary_count,
+            due_at,
+            class,
+            priority,
+            payload,
+            cause,
+        };
+        self.state.next_ingress_id = next_id;
+        self.state
+            .pending_ingress
+            .insert(IngressQueueKey::from_record(&record));
+        self.state.ingress.push(record.clone());
+        self.state.plugin_registration_closed = true;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            self.state = transaction_start;
+            return Err(error);
+        }
+        Ok(IngressReceipt {
+            ingress_id: record.id,
+            issued_at: record.issued_at,
+            due_at: record.due_at,
+        })
+    }
+
     pub fn process_command(
         &mut self,
         request: CommandRequest,
     ) -> Result<CommandOutcome, CanwuError> {
+        self.ensure_runtime_ready()?;
+        if !self.state.ingress.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::MixedCommandIngress,
+                "direct command requests cannot bypass an active canonical ingress journal",
+            ));
+        }
         self.admit_command(
             Some(request.request_id),
             Some(request.expected_revision),
@@ -3527,13 +4062,24 @@ impl Simulation {
             .commands
             .iter()
             .any(|record| record.attempt_id.is_none());
-        let has_tracked_attempts = !self.state.command_attempts.is_empty();
+        let has_tracked_attempts =
+            !self.state.command_attempts.is_empty() || !self.state.ingress.is_empty();
         if (ingress == CommandIngress::LegacyDirect && has_tracked_attempts)
             || (ingress != CommandIngress::LegacyDirect && has_legacy_commands)
         {
             return Err(CanwuError::new(
                 ErrorCode::MixedCommandIngress,
                 "legacy-direct commands and tracked request/replay attempts cannot coexist in one run",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_canonical_ingress_can_start(&self) -> Result<(), CanwuError> {
+        if runtime_has_unqueued_command_history(&self.state) {
+            return Err(CanwuError::new(
+                ErrorCode::MixedCommandIngress,
+                "canonical ingress cannot be added after direct command history",
             ));
         }
         Ok(())
@@ -3666,6 +4212,73 @@ impl Simulation {
         )
     }
 
+    pub fn advance_canonical(
+        &mut self,
+        duration: SimDuration,
+    ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
+        self.ensure_runtime_ready()?;
+        if duration.is_negative() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "canonical simulation time cannot advance by a negative duration",
+            ));
+        }
+        let target = self.state.now.checked_add(duration).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "canonical simulation target time exceeds the supported range",
+            )
+        })?;
+        let mut receipts = Vec::new();
+        while let Some(next_due) = self.next_canonical_due_time()
+            && next_due <= target
+        {
+            let at = next_due.max(self.state.now);
+            receipts.push(self.settle_boundary(BoundaryRequest::at(at))?);
+        }
+        if self.state.now < target {
+            self.advance_to(target)?;
+        }
+        Ok(receipts)
+    }
+
+    pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
+        self.ensure_runtime_ready()?;
+        let Some(next_due) = self.next_canonical_due_time() else {
+            return Ok(None);
+        };
+        self.settle_boundary(BoundaryRequest::at(next_due.max(self.state.now)))
+            .map(Some)
+    }
+
+    fn next_canonical_due_time(&self) -> Option<SimTime> {
+        let scheduled = self.state.scheduler.keys().next().map(|key| key.at);
+        let ingress = self.state.pending_ingress.first().map(|key| key.due_at);
+        match (scheduled, ingress) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(value), None) | (None, Some(value)) => Some(value),
+            (None, None) => None,
+        }
+    }
+
+    fn take_due_ingress(&mut self, at: SimTime) -> Vec<IngressId> {
+        let mut admitted = Vec::new();
+        while self
+            .state
+            .pending_ingress
+            .first()
+            .is_some_and(|key| key.due_at <= at)
+        {
+            let key = self
+                .state
+                .pending_ingress
+                .pop_first()
+                .expect("pending ingress was checked as non-empty");
+            admitted.push(key.id);
+        }
+        admitted
+    }
+
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
         self.ensure_runtime_ready()?;
         if duration.is_negative() {
@@ -3680,11 +4293,18 @@ impl Simulation {
                 "simulation target time exceeds the supported range",
             )
         })?;
+        self.ensure_legacy_advance_does_not_cross_ingress(target)?;
         self.advance_to(target)
     }
 
     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
         self.ensure_runtime_ready()?;
+        if self.state.pending_ingress.first().is_some() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "pending canonical ingress requires step_canonical",
+            ));
+        }
         let Some(next_time) = self.state.scheduler.keys().next().map(|key| key.at) else {
             return Ok(Vec::new());
         };
@@ -3712,6 +4332,7 @@ impl Simulation {
                 "advance_until target time exceeds the supported range",
             )
         })?;
+        self.ensure_legacy_advance_does_not_cross_ingress(target)?;
         let start = self.state.events.len();
         while self.state.now < target && !condition(self) {
             let next_time = self
@@ -3728,6 +4349,24 @@ impl Simulation {
         Ok(self.state.events[start..].to_vec())
     }
 
+    fn ensure_legacy_advance_does_not_cross_ingress(
+        &self,
+        target: SimTime,
+    ) -> Result<(), CanwuError> {
+        if self
+            .state
+            .pending_ingress
+            .first()
+            .is_some_and(|key| key.due_at <= target)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "legacy time advancement cannot cross pending canonical ingress; use advance_canonical",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn settle_boundary(
         &mut self,
         mut request: BoundaryRequest,
@@ -3737,6 +4376,17 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
                 "a settlement boundary cannot precede committed simulation time",
+            ));
+        }
+        if self
+            .state
+            .pending_ingress
+            .first()
+            .is_some_and(|key| key.due_at < request.at)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "a settlement boundary cannot step past earlier canonical ingress",
             ));
         }
         if request.cadences.contains(&SystemCadence::EventDriven) {
@@ -3760,9 +4410,47 @@ impl Simulation {
 
     fn settle_boundary_inner(
         &mut self,
-        request: BoundaryRequest,
+        mut request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
-        self.advance_to(request.at)?;
+        self.advance_to_before_boundary(request.at)?;
+
+        let admitted_ingress = self.take_due_ingress(request.at);
+        let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
+        for ingress_id in &admitted_ingress {
+            let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
+                CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    "ingress ID exceeds the platform index range",
+                )
+            })?;
+            let record = self.state.ingress.get(index).cloned().ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    "pending ingress references an unknown record",
+                )
+            })?;
+            match record.payload {
+                IngressPayload::Command { request: command } => {
+                    let CommandRequest {
+                        request_id,
+                        expected_revision,
+                        envelope,
+                    } = *command;
+                    self.admit_command(
+                        Some(request_id),
+                        Some(expected_revision),
+                        envelope,
+                        CommandIngress::LiveRequest,
+                        true,
+                    )?;
+                }
+                IngressPayload::Calendar { cadences } => request.cadences.extend(cadences),
+                IngressPayload::Plugin { .. } => {}
+            }
+        }
+        self.execute_scheduled_at(request.at)?;
+        request.cadences.sort();
+        request.cadences.dedup();
 
         let previously_admitted_attempts: BTreeSet<_> = self
             .state
@@ -3831,9 +4519,7 @@ impl Simulation {
         let mut ordinary = Vec::new();
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
-        let mut changes = Vec::new();
-        let mut record_changes = Vec::new();
-        let mut emissions = Vec::new();
+        let mut evidence = PendingBoundaryEvidence::default();
 
         for phase in BoundaryPhase::ALL {
             match phase {
@@ -3844,9 +4530,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
-                        &mut changes,
-                        &mut record_changes,
-                        &mut emissions,
+                        &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
                     visible_overlay.clear();
@@ -3861,9 +4545,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
-                        &mut changes,
-                        &mut record_changes,
-                        &mut emissions,
+                        &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
                     visible_overlay.clear();
@@ -3878,7 +4560,7 @@ impl Simulation {
                     && boundary_system_due(
                         &registered.contract,
                         &request.cadences,
-                        !admitted_events.is_empty(),
+                        !admitted_events.is_empty() || !admitted_ingress.is_empty(),
                     )
             }) {
                 let reader = format!("{}.{}", registered.plugin, registered.contract.name);
@@ -3896,6 +4578,8 @@ impl Simulation {
                     state_owners: &state_owners,
                     reader: Some(&reader),
                     allowed_reads: Some(&registered.contract.reads),
+                    allowed_ingress: Some(&admitted_ingress_index),
+                    ingress_plugin: Some(&registered.plugin),
                     component_overlay: Some(&visible_overlay),
                     proposed_components: (phase == BoundaryPhase::InvariantValidation)
                         .then_some(&candidate_overlay),
@@ -3914,8 +4598,13 @@ impl Simulation {
                     system: registered.contract.name.clone(),
                     admitted_attempts: admitted_attempts.clone(),
                     admitted_commands: admitted_commands.clone(),
+                    admitted_ingress: admitted_ingress.clone(),
                     admitted_events: admitted_events.clone(),
-                    emitted_events: emissions.iter().map(|emission| emission.event).collect(),
+                    emitted_events: evidence
+                        .emissions
+                        .iter()
+                        .map(|emission| emission.event)
+                        .collect(),
                 };
                 let proposal =
                     catch_unwind(AssertUnwindSafe(|| (registered.handler)(&view, &context)))
@@ -3932,8 +4621,7 @@ impl Simulation {
                     &registered.plugin,
                     &registered.contract,
                     view_state,
-                    &state_owners,
-                    &record_schemas,
+                    &self.plugins,
                     &visible_record_overlay,
                     &proposal,
                 )?;
@@ -3972,6 +4660,7 @@ impl Simulation {
                     StagedBoundaryDirective {
                         plugin: registered.plugin.clone(),
                         system: registered.contract.name.clone(),
+                        phase,
                         visibility: registered.contract.visibility,
                         directive,
                     }
@@ -4039,9 +4728,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
-                        &mut changes,
-                        &mut record_changes,
-                        &mut emissions,
+                        &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
                 }
@@ -4055,14 +4742,13 @@ impl Simulation {
             }
         }
 
-        self.apply_boundary_stage(
-            boundary_id,
-            correlation_id,
-            deferred,
-            &mut changes,
-            &mut record_changes,
-            &mut emissions,
-        )?;
+        self.apply_boundary_stage(boundary_id, correlation_id, deferred, &mut evidence)?;
+        let PendingBoundaryEvidence {
+            changes,
+            record_changes,
+            emissions,
+            generated_ingress,
+        } = evidence;
         self.state.random_streams = random_overlay;
         let random_draws =
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
@@ -4079,6 +4765,8 @@ impl Simulation {
             cadences: request.cadences,
             admitted_attempts,
             admitted_commands,
+            admitted_ingress,
+            generated_ingress: generated_ingress.clone(),
             admitted_events,
             reservation_offers: reservation_offer_records,
             reservation_requests: reservation_request_records,
@@ -4101,6 +4789,10 @@ impl Simulation {
             emitted_events: emissions
                 .into_iter()
                 .map(|emission| emission.event)
+                .collect(),
+            generated_ingress: generated_ingress
+                .into_iter()
+                .map(|generation| generation.ingress)
                 .collect(),
             random_draws,
             boundary_hash,
@@ -4145,6 +4837,7 @@ impl Simulation {
             events: &self.state.events,
             commands: &self.state.commands,
             command_attempts: &self.state.command_attempts,
+            ingress: &self.state.ingress,
             plugin_components: &plugin_components,
             domain_records: &domain_records,
             plugin_descriptors: &plugin_descriptors,
@@ -4156,6 +4849,7 @@ impl Simulation {
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
             next_command_attempt_id: self.state.next_command_attempt_id,
+            next_ingress_id: self.state.next_ingress_id,
             next_boundary_id: self.state.next_boundary_id,
             next_random_draw_id: self.state.next_random_draw_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
@@ -4192,6 +4886,7 @@ impl Simulation {
             events: self.state.events.clone(),
             commands: self.state.commands.clone(),
             command_attempts: self.state.command_attempts.clone(),
+            ingress: self.state.ingress.clone(),
             boundaries: self.state.boundaries.clone(),
             plugin_components: self.state.plugin_components.values().cloned().collect(),
             domain_records: self.state.domain_records.values().cloned().collect(),
@@ -4213,6 +4908,7 @@ impl Simulation {
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
             next_command_attempt_id: self.state.next_command_attempt_id,
+            next_ingress_id: self.state.next_ingress_id,
             next_boundary_id: self.state.next_boundary_id,
             next_random_draw_id: self.state.next_random_draw_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
@@ -4239,6 +4935,17 @@ impl Simulation {
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
         validate_snapshot(&snapshot, &plugins)?;
+        let admitted_ingress: BTreeSet<_> = snapshot
+            .boundaries
+            .iter()
+            .flat_map(|boundary| boundary.admitted_ingress.iter().copied())
+            .collect();
+        let pending_ingress = snapshot
+            .ingress
+            .iter()
+            .filter(|record| !admitted_ingress.contains(&record.id))
+            .map(IngressQueueKey::from_record)
+            .collect();
         let initial_scenario = match snapshot.initial_scenario.clone() {
             Some(initial_scenario) => Some(initial_scenario),
             None if !snapshot.plugin_registration_closed => match snapshot.run_manifest.as_ref() {
@@ -4309,6 +5016,8 @@ impl Simulation {
                 events: snapshot.events,
                 commands: snapshot.commands,
                 command_attempts: snapshot.command_attempts,
+                ingress: snapshot.ingress,
+                pending_ingress,
                 boundaries: snapshot.boundaries,
                 plugin_components: snapshot
                     .plugin_components
@@ -4340,6 +5049,7 @@ impl Simulation {
                 next_event_id: snapshot.next_event_id,
                 next_command_id: snapshot.next_command_id,
                 next_command_attempt_id: snapshot.next_command_attempt_id,
+                next_ingress_id: snapshot.next_ingress_id,
                 next_boundary_id: snapshot.next_boundary_id,
                 next_random_draw_id: snapshot.next_random_draw_id,
                 next_schedule_sequence: snapshot.next_schedule_sequence,
@@ -4685,6 +5395,34 @@ impl Simulation {
             return Err(error);
         }
         Ok(self.state.events[start..].to_vec())
+    }
+
+    fn advance_to_before_boundary(&mut self, target: SimTime) -> Result<(), CanwuError> {
+        while let Some(next) = self.state.scheduler.keys().next().map(|key| key.at)
+            && next < target
+        {
+            self.advance_to(next)?;
+        }
+        self.state.now = target;
+        self.state.plugin_registration_closed = true;
+        self.refresh_checkpoint_hash()
+    }
+
+    fn execute_scheduled_at(&mut self, at: SimTime) -> Result<(), CanwuError> {
+        while self
+            .state
+            .scheduler
+            .first_key_value()
+            .is_some_and(|(key, _)| key.at == at)
+        {
+            let (_, action) = self
+                .state
+                .scheduler
+                .pop_first()
+                .expect("scheduler was checked as non-empty");
+            self.execute_scheduled(action)?;
+        }
+        Ok(())
     }
 
     fn execute_scheduled(&mut self, action: ScheduledAction) -> Result<(), CanwuError> {
@@ -5096,10 +5834,12 @@ impl Simulation {
         boundary_id: BoundaryId,
         correlation_id: u64,
         directives: Vec<StagedBoundaryDirective>,
-        changes: &mut Vec<BoundaryChange>,
-        record_changes: &mut Vec<DomainRecordChange>,
-        emissions: &mut Vec<BoundaryEmission>,
+        evidence: &mut PendingBoundaryEvidence,
     ) -> Result<(), CanwuError> {
+        let changes = &mut evidence.changes;
+        let record_changes = &mut evidence.record_changes;
+        let emissions = &mut evidence.emissions;
+        let generated_ingress = &mut evidence.generated_ingress;
         let mutation_requests: Vec<_> = directives
             .iter()
             .filter_map(|staged| match &staged.directive {
@@ -5112,7 +5852,9 @@ impl Simulation {
                         summary,
                     })
                 }
-                BoundaryDirective::SetComponent { .. } | BoundaryDirective::Emit { .. } => None,
+                BoundaryDirective::SetComponent { .. }
+                | BoundaryDirective::Emit { .. }
+                | BoundaryDirective::ScheduleIngress { .. } => None,
             })
             .collect();
         let mut stage_record_changes = BTreeMap::new();
@@ -5153,6 +5895,9 @@ impl Simulation {
                 BoundaryDirective::Emit { affected, .. } => affected
                     .iter()
                     .find(|entity| !runtime_entity_exists(&self.state, entity)),
+                BoundaryDirective::ScheduleIngress { affected, .. } => affected
+                    .iter()
+                    .find(|entity| !runtime_entity_identity_exists(&self.state, entity)),
                 BoundaryDirective::MutateRecord { .. } => None,
             };
             if let Some(entity) = unavailable {
@@ -5275,6 +6020,58 @@ impl Simulation {
                         kind: BoundaryEmissionKind::Explicit,
                     });
                 }
+                BoundaryDirective::ScheduleIngress {
+                    after,
+                    packet_type,
+                    priority,
+                    payload,
+                    mut affected,
+                } => {
+                    self.ensure_canonical_ingress_can_start()?;
+                    let descriptor = self
+                        .plugins
+                        .ingress
+                        .get(&(staged.plugin.clone(), packet_type.clone()))
+                        .ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::InvalidPayload,
+                                format!(
+                                    "boundary system {}.{} scheduled undeclared ingress type {packet_type}",
+                                    staged.plugin, staged.system
+                                ),
+                            )
+                        })?
+                        .clone();
+                    descriptor.payload_schema.validate(&payload)?;
+                    affected.sort();
+                    affected.dedup();
+                    let due_at = self.state.now.checked_add(after).ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDuration,
+                            "boundary-generated ingress exceeds the supported time range",
+                        )
+                    })?;
+                    let receipt = self.append_ingress(
+                        due_at,
+                        descriptor.class,
+                        priority,
+                        IngressPayload::Plugin {
+                            plugin: staged.plugin.clone(),
+                            packet_type,
+                            payload,
+                            affected_entities: affected,
+                        },
+                        Some(CauseRef::Boundary(boundary_id)),
+                        true,
+                    )?;
+                    generated_ingress.push(BoundaryIngressGeneration {
+                        ingress: receipt.ingress_id,
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        phase: staged.phase,
+                        visibility: staged.visibility,
+                    });
+                }
             }
         }
         validate_runtime_domain_dependents(&self.state)?;
@@ -5385,6 +6182,8 @@ impl Simulation {
             state_owners: &self.plugins.state_owners,
             reader: Some(reader),
             allowed_reads: Some(reads),
+            allowed_ingress: None,
+            ingress_plugin: None,
             component_overlay: None,
             proposed_components: None,
             record_overlay: None,
@@ -5394,6 +6193,92 @@ impl Simulation {
             random_session: None,
         }
     }
+}
+
+fn enqueue_replay_ingress_cut(
+    simulation: &mut Simulation,
+    ingress: &[IngressRecord],
+    next_ingress: &mut usize,
+    boundary_count: usize,
+) -> Result<(), CanwuError> {
+    let expected_boundary_count = u64::try_from(boundary_count).map_err(|_| {
+        CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            "boundary count exceeds ingress range",
+        )
+    })?;
+    while let Some(record) = ingress.get(*next_ingress) {
+        if record.eligible_boundary_count < expected_boundary_count {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "ingress journal skipped its recorded issue boundary",
+            ));
+        }
+        if record.eligible_boundary_count > expected_boundary_count {
+            break;
+        }
+        if record.issued_at < simulation.time() {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "ingress journal issue time precedes replay state",
+            ));
+        }
+        if record.issued_at > simulation.time() {
+            simulation.ensure_legacy_advance_does_not_cross_ingress(record.issued_at)?;
+            simulation.advance_to(record.issued_at)?;
+        }
+        if let Some(actual) = simulation.state.ingress.get(*next_ingress) {
+            if actual != record {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    "plugin-generated ingress does not match journal evidence",
+                ));
+            }
+            *next_ingress += 1;
+            continue;
+        }
+        if matches!(record.cause, Some(CauseRef::Boundary(_))) {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "recorded boundary-generated ingress was not reproduced by its plugin system",
+            ));
+        }
+        let receipt = match &record.payload {
+            IngressPayload::Command { request } => simulation.enqueue_command(
+                record.due_at,
+                record.priority,
+                request.as_ref().clone(),
+            )?,
+            IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                payload,
+                affected_entities,
+            } => {
+                let mut request = PluginIngressRequest::new(
+                    plugin.clone(),
+                    packet_type.clone(),
+                    record.due_at,
+                    payload.clone(),
+                )
+                .with_priority(record.priority);
+                request.affected_entities.clone_from(affected_entities);
+                request.cause.clone_from(&record.cause);
+                simulation.enqueue_plugin_ingress(request)?
+            }
+            IngressPayload::Calendar { cadences } => {
+                simulation.schedule_calendar_boundary(record.due_at, cadences.clone())?
+            }
+        };
+        if receipt.ingress_id != record.id || simulation.state.ingress.last() != Some(record) {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "regenerated ingress record does not match journal evidence",
+            ));
+        }
+        *next_ingress += 1;
+    }
+    Ok(())
 }
 
 fn replay_command_record(
@@ -5407,6 +6292,7 @@ fn replay_command_record(
             "replay command timestamps do not match authoritative operation order",
         ));
     }
+    simulation.ensure_legacy_advance_does_not_cross_ingress(record.accepted_at)?;
     simulation.advance_to(record.accepted_at)?;
     let CommandOutcome::Accepted { receipt } = simulation.admit_command(
         None,
@@ -5442,6 +6328,7 @@ fn replay_attempt_record(
             "replay command-attempt timestamps do not match authoritative operation order",
         ));
     }
+    simulation.ensure_legacy_advance_does_not_cross_ingress(record.at)?;
     simulation.advance_to(record.at)?;
     let outcome = simulation.admit_command(
         record.request_id,
@@ -5531,8 +6418,17 @@ struct ReservationAllocationResult {
 struct StagedBoundaryDirective {
     plugin: String,
     system: String,
+    phase: BoundaryPhase,
     visibility: StateVisibility,
     directive: BoundaryDirective,
+}
+
+#[derive(Default)]
+struct PendingBoundaryEvidence {
+    changes: Vec<BoundaryChange>,
+    record_changes: Vec<DomainRecordChange>,
+    emissions: Vec<BoundaryEmission>,
+    generated_ingress: Vec<BoundaryIngressGeneration>,
 }
 
 struct PendingBoundaryRandomDraw {
@@ -5552,12 +6448,15 @@ fn boundary_system_due(
     }
 }
 
+fn boundary_has_event_ingress(record: &BoundaryRecord) -> bool {
+    !record.admitted_events.is_empty() || !record.admitted_ingress.is_empty()
+}
+
 fn validate_boundary_proposal(
     plugin: &str,
     contract: &BoundarySystemContract,
     state: &RuntimeState,
-    state_owners: &BTreeMap<StateKey, String>,
-    record_schemas: &records::DomainRecordSchemas,
+    plugins: &PluginRegistry,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     proposal: &BoundaryProposal,
 ) -> Result<(), CanwuError> {
@@ -5574,13 +6473,20 @@ fn validate_boundary_proposal(
     }
 
     let entity_exists = |entity: &EntityRef| {
-        proposal_entity_exists(state, record_schemas, record_overlay, proposal, entity)
+        proposal_entity_exists(
+            state,
+            &plugins.record_schemas,
+            record_overlay,
+            proposal,
+            entity,
+        )
     };
     let mut offered_pools = BTreeSet::new();
     for offer in &proposal.offers {
         validate_reservation_pool(&offer.pool, &entity_exists)?;
         if !contract.reservation_offers.contains(&offer.pool.state)
-            || state_owners
+            || plugins
+                .state_owners
                 .get(&offer.pool.state)
                 .is_none_or(|owner| owner != plugin)
         {
@@ -5637,10 +6543,11 @@ fn validate_boundary_proposal(
                 if component.trim().is_empty()
                     || component != component.trim()
                     || !contract.writes.contains(state_key)
-                    || state_owners
+                    || plugins
+                        .state_owners
                         .get(state_key)
                         .is_none_or(|owner| owner != plugin)
-                    || is_domain_record_state(record_schemas, state_key)
+                    || is_domain_record_state(&plugins.record_schemas, state_key)
                 {
                     return Err(CanwuError::new(
                         ErrorCode::UndeclaredStateWrite,
@@ -5676,10 +6583,12 @@ fn validate_boundary_proposal(
                 let state_key = records::record_state_key(&target.kind);
                 if !canonical_text(summary)
                     || !contract.writes.contains(&state_key)
-                    || state_owners
+                    || plugins
+                        .state_owners
                         .get(&state_key)
                         .is_none_or(|owner| owner != plugin)
-                    || record_schemas
+                    || plugins
+                        .record_schemas
                         .get(&target.kind)
                         .is_none_or(|(owner, _)| owner != plugin)
                 {
@@ -5723,6 +6632,49 @@ fn validate_boundary_proposal(
                         ErrorCode::EntityNotFound,
                         format!(
                             "boundary system {plugin}.{} emitted an event for a missing entity",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
+            BoundaryDirective::ScheduleIngress {
+                after,
+                packet_type,
+                payload,
+                affected,
+                ..
+            } => {
+                let descriptor = plugins
+                    .ingress
+                    .get(&(plugin.to_owned(), packet_type.clone()))
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidPayload,
+                            format!(
+                                "boundary system {plugin}.{} scheduled undeclared ingress type {packet_type}",
+                                contract.name
+                            ),
+                        )
+                    })?;
+                if after.is_negative() || state.now.checked_add(*after).is_none() {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidDuration,
+                        "boundary-generated ingress requires a nonnegative supported delay",
+                    ));
+                }
+                descriptor.payload_schema.validate(payload)?;
+                if affected.iter().any(|entity| {
+                    !proposal_entity_identity_exists(
+                        state,
+                        &plugins.record_schemas,
+                        proposal,
+                        entity,
+                    )
+                }) {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!(
+                            "boundary system {plugin}.{} scheduled ingress for an unknown entity identity",
                             contract.name
                         ),
                     ));
@@ -5859,7 +6811,9 @@ fn extend_boundary_domain_record_overlay(
                     summary,
                 })
             }
-            BoundaryDirective::SetComponent { .. } | BoundaryDirective::Emit { .. } => None,
+            BoundaryDirective::SetComponent { .. }
+            | BoundaryDirective::Emit { .. }
+            | BoundaryDirective::ScheduleIngress { .. } => None,
         })
         .collect();
     if requests.is_empty() {
@@ -6550,12 +7504,22 @@ fn validate_snapshot(
             "declared runs cannot contain accepted commands without tracked attempt evidence",
         );
     }
+    if !snapshot.ingress.is_empty()
+        && has_unqueued_command_history(
+            &snapshot.commands,
+            &snapshot.command_attempts,
+            &snapshot.ingress,
+        )
+    {
+        return invalid_snapshot("canonical ingress cannot coexist with direct command history");
+    }
     if snapshot.initial_time > snapshot.now {
         return invalid_snapshot("snapshot initial time cannot follow its current time");
     }
     let has_execution_evidence = snapshot.now != snapshot.initial_time
         || !snapshot.commands.is_empty()
         || !snapshot.command_attempts.is_empty()
+        || !snapshot.ingress.is_empty()
         || !snapshot.events.is_empty()
         || !snapshot.boundaries.is_empty()
         || !snapshot.plugin_components.is_empty()
@@ -6568,6 +7532,7 @@ fn validate_snapshot(
         || snapshot.next_event_id != 1
         || snapshot.next_command_id != 1
         || snapshot.next_command_attempt_id != 1
+        || snapshot.next_ingress_id != 1
         || snapshot.next_boundary_id != 1
         || snapshot.next_random_draw_id != 1
         || snapshot.next_schedule_sequence != 1
@@ -6589,6 +7554,7 @@ fn validate_snapshot(
         &domain_records,
         initial_domain_records.as_ref(),
     )?;
+    let max_ingress_id = validate_ingress_records(snapshot, plugins, &domain_history)?;
     let boundary_count = u64::try_from(snapshot.boundaries.len())
         .map_err(|_| invalid_snapshot_error("boundary count exceeds the revision range"))?;
     let mut boundaries_before_attempt = vec![boundary_count; snapshot.command_attempts.len()];
@@ -7103,6 +8069,11 @@ fn validate_snapshot(
             .map_or(0, |attempt| attempt.id.get()),
         "command attempt",
     )?;
+    validate_contiguous_or_exhausted_next_counter(
+        snapshot.next_ingress_id,
+        max_ingress_id,
+        "ingress",
+    )?;
     validate_contiguous_next_counter(snapshot.next_boundary_id, max_boundary_id, "boundary")?;
     validate_contiguous_or_exhausted_next_counter(
         snapshot.next_random_draw_id,
@@ -7253,7 +8224,7 @@ fn validate_random_evidence(
                     || !boundary_system_due(
                         contract,
                         &record.cadences,
-                        !record.admitted_events.is_empty(),
+                        boundary_has_event_ingress(record),
                     )
                     || plugins.random_stream_owners.get(&draw.stream)
                         != Some(&(plugin.clone(), system.clone()))
@@ -7385,6 +8356,316 @@ fn validate_snapshot_domain_records(
     Ok(records)
 }
 
+fn validate_ingress_records(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    history: &DomainRecordHistory,
+) -> Result<u64, CanwuError> {
+    let boundary_count = u64::try_from(snapshot.boundaries.len())
+        .map_err(|_| invalid_snapshot_error("boundary count exceeds the ingress journal range"))?;
+    let mut generated_by_boundary = BTreeMap::new();
+    for boundary in &snapshot.boundaries {
+        if boundary
+            .generated_ingress
+            .windows(2)
+            .any(|pair| pair[0].ingress >= pair[1].ingress)
+        {
+            return invalid_snapshot(
+                "boundary-generated ingress evidence is not in canonical identifier order",
+            );
+        }
+        for generation in &boundary.generated_ingress {
+            if generated_by_boundary
+                .insert(generation.ingress, boundary.id)
+                .is_some()
+            {
+                return invalid_snapshot(
+                    "ingress is claimed as generated by more than one boundary",
+                );
+            }
+            let index =
+                usize::try_from(generation.ingress.get().saturating_sub(1)).map_err(|_| {
+                    invalid_snapshot_error(
+                        "boundary-generated ingress ID exceeds the platform index range",
+                    )
+                })?;
+            let Some(record) = snapshot.ingress.get(index) else {
+                return invalid_snapshot(
+                    "boundary-generated ingress evidence references an unknown record",
+                );
+            };
+            if record.id != generation.ingress
+                || record.issued_at != boundary.at
+                || record.eligible_boundary_count != boundary.id.get()
+                || record.cause != Some(CauseRef::Boundary(boundary.id))
+                || !matches!(&record.payload, IngressPayload::Plugin { .. })
+            {
+                return invalid_snapshot(
+                    "boundary-generated ingress evidence disagrees with its record",
+                );
+            }
+        }
+    }
+    let mut previous_issue = None;
+    let mut command_request_ids = BTreeSet::new();
+    for (index, record) in snapshot.ingress.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("ingress index exceeds identifier space"))?;
+        if record.id.get() != expected_id
+            || record.issued_at < snapshot.initial_time
+            || record.issued_at > snapshot.now
+            || record.due_at < record.issued_at
+            || record.eligible_boundary_count > boundary_count
+            || previous_issue.is_some_and(|previous| {
+                (record.eligible_boundary_count, record.issued_at, record.id) <= previous
+            })
+        {
+            return invalid_snapshot("ingress journal identity, time, or issue cut is invalid");
+        }
+        validate_snapshot_ingress_cause(snapshot, record)?;
+        let issue_boundary_count =
+            usize::try_from(record.eligible_boundary_count).map_err(|_| {
+                invalid_snapshot_error("ingress issue cut exceeds the platform index range")
+            })?;
+        if issue_boundary_count > 0
+            && record.issued_at < snapshot.boundaries[issue_boundary_count - 1].at
+        {
+            return invalid_snapshot("ingress predates its declared eligibility boundary");
+        }
+        let issue_cut = DomainHistoryCut::after_boundaries(issue_boundary_count);
+        match &record.payload {
+            IngressPayload::Command { request } => {
+                if record.class != IngressClass::Command
+                    || request.request_id.get() == 0
+                    || !command_request_ids.insert(request.request_id)
+                    || request
+                        .envelope
+                        .expected_time
+                        .is_some_and(|expected| expected != record.due_at)
+                    || record.cause.is_some()
+                {
+                    return invalid_snapshot("queued command ingress is not canonical");
+                }
+            }
+            IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                payload,
+                affected_entities,
+            } => {
+                let Some(descriptor) = plugins.ingress.get(&(plugin.clone(), packet_type.clone()))
+                else {
+                    return invalid_snapshot("plugin ingress references an undeclared packet type");
+                };
+                if record.class != descriptor.class
+                    || affected_entities.windows(2).any(|pair| pair[0] >= pair[1])
+                    || affected_entities.iter().any(|entity| {
+                        !snapshot_entity_identity_exists_in_history(
+                            snapshot, history, issue_cut, entity,
+                        )
+                    })
+                {
+                    return invalid_snapshot("plugin ingress class or entity evidence is invalid");
+                }
+                match &record.cause {
+                    Some(CauseRef::Boundary(boundary))
+                        if generated_by_boundary.get(&record.id) == Some(boundary) => {}
+                    Some(CauseRef::Boundary(_)) => {
+                        return invalid_snapshot(
+                            "boundary-caused ingress lacks matching generation evidence",
+                        );
+                    }
+                    Some(CauseRef::Command(_) | CauseRef::Event(_)) => {
+                        return invalid_snapshot(
+                            "command- and event-generated ingress is not supported by this snapshot format",
+                        );
+                    }
+                    Some(CauseRef::System(_)) | None
+                        if !generated_by_boundary.contains_key(&record.id) => {}
+                    Some(CauseRef::System(_)) | None => {
+                        return invalid_snapshot(
+                            "external ingress is incorrectly claimed as boundary-generated",
+                        );
+                    }
+                }
+                if snapshot
+                    .run_configuration
+                    .as_ref()
+                    .and_then(RunConfigurationSnapshot::declared)
+                    .is_some_and(|configuration| {
+                        configuration.interaction == InteractionPolicy::ReadOnly
+                    })
+                    && !matches!(&record.cause, Some(CauseRef::Boundary(_)))
+                {
+                    return invalid_snapshot(
+                        "declared read-only runs cannot contain newly authored plugin ingress",
+                    );
+                }
+                descriptor
+                    .payload_schema
+                    .validate(payload)
+                    .map_err(|error| {
+                        invalid_snapshot_error(format!(
+                            "plugin ingress payload is invalid: {error}"
+                        ))
+                    })?;
+            }
+            IngressPayload::Calendar { cadences } => {
+                if record.class != IngressClass::ScheduledSystem
+                    || record.priority != 0
+                    || cadences.is_empty()
+                    || cadences.contains(&SystemCadence::EventDriven)
+                    || cadences.windows(2).any(|pair| pair[0] >= pair[1])
+                    || record.cause != Some(CauseRef::System("canwu.core.calendar".to_owned()))
+                {
+                    return invalid_snapshot("calendar ingress is not canonical");
+                }
+            }
+        }
+        previous_issue = Some((record.eligible_boundary_count, record.issued_at, record.id));
+    }
+
+    let attempts_by_request: BTreeMap<_, _> = snapshot
+        .command_attempts
+        .iter()
+        .filter_map(|attempt| attempt.request_id.map(|request| (request, attempt)))
+        .collect();
+    let mut pending = BTreeSet::new();
+    let mut cursor = 0;
+    for (boundary_index, boundary) in snapshot.boundaries.iter().enumerate() {
+        let available_after = u64::try_from(boundary_index)
+            .map_err(|_| invalid_snapshot_error("boundary index exceeds ingress range"))?;
+        while let Some(record) = snapshot.ingress.get(cursor)
+            && record.eligible_boundary_count <= available_after
+        {
+            if record.issued_at > boundary.at {
+                return invalid_snapshot("ingress is assigned to a boundary before it was issued");
+            }
+            pending.insert(IngressQueueKey::from_record(record));
+            cursor += 1;
+        }
+        if pending.first().is_some_and(|key| key.due_at < boundary.at) {
+            return invalid_snapshot("a boundary steps past earlier canonical ingress");
+        }
+        let expected: Vec<_> = pending
+            .iter()
+            .take_while(|key| key.due_at <= boundary.at)
+            .map(|key| key.id)
+            .collect();
+        if boundary.admitted_ingress != expected {
+            return invalid_snapshot(
+                "boundary ingress admission does not match the canonical due queue",
+            );
+        }
+        let mut expected_attempts = Vec::new();
+        let mut expected_commands = Vec::new();
+        let mut expected_cadences = BTreeSet::new();
+        for ingress_id in expected {
+            let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
+                invalid_snapshot_error("admitted ingress ID exceeds the platform index range")
+            })?;
+            let record = &snapshot.ingress[index];
+            if let IngressPayload::Command { request } = &record.payload {
+                let Some(attempt) = attempts_by_request.get(&request.request_id) else {
+                    return invalid_snapshot(
+                        "admitted command ingress is missing its deterministic attempt outcome",
+                    );
+                };
+                if attempt.at != boundary.at
+                    || attempt.envelope != request.envelope
+                    || attempt.expected_revision != Some(request.expected_revision)
+                    || attempt.ingress != CommandIngress::LiveRequest
+                {
+                    return invalid_snapshot(
+                        "command ingress, attempt outcome, and boundary admission disagree",
+                    );
+                }
+                expected_attempts.push(attempt.id);
+                if let CommandAttemptOutcome::Accepted { command_id } = attempt.outcome {
+                    expected_commands.push(command_id);
+                }
+            } else if let IngressPayload::Calendar { cadences } = &record.payload {
+                expected_cadences.extend(cadences.iter().cloned());
+            }
+            pending.remove(&IngressQueueKey::from_record(record));
+        }
+        if !snapshot.ingress.is_empty()
+            && (boundary.admitted_attempts != expected_attempts
+                || boundary.admitted_commands != expected_commands
+                || expected_cadences
+                    .iter()
+                    .any(|cadence| !boundary.cadences.contains(cadence)))
+        {
+            return invalid_snapshot(
+                "boundary command or calendar effects do not match admitted ingress order",
+            );
+        }
+    }
+    for record in &snapshot.ingress[cursor..] {
+        if record.eligible_boundary_count != boundary_count {
+            return invalid_snapshot("ingress issue cuts skip a completed boundary");
+        }
+        pending.insert(IngressQueueKey::from_record(record));
+    }
+    if pending.iter().any(|key| key.due_at < snapshot.now) {
+        return invalid_snapshot("snapshot retains ingress overdue before committed time");
+    }
+    for key in &pending {
+        let index = usize::try_from(key.id.get().saturating_sub(1)).map_err(|_| {
+            invalid_snapshot_error("pending ingress ID exceeds the platform index range")
+        })?;
+        if let IngressPayload::Command { request } = &snapshot.ingress[index].payload
+            && attempts_by_request.contains_key(&request.request_id)
+        {
+            return invalid_snapshot("pending command ingress already has an attempt outcome");
+        }
+    }
+    Ok(snapshot.ingress.last().map_or(0, |record| record.id.get()))
+}
+
+fn validate_snapshot_ingress_cause(
+    snapshot: &SimulationSnapshot,
+    record: &IngressRecord,
+) -> Result<(), CanwuError> {
+    let valid = match &record.cause {
+        None => true,
+        Some(CauseRef::Boundary(id)) => {
+            journal_record_by_id(&snapshot.boundaries, id.get(), |value| value.id.get())
+                .is_some_and(|boundary| {
+                    boundary.id == *id
+                        && boundary.at <= record.issued_at
+                        && id.get() <= record.eligible_boundary_count
+                })
+        }
+        Some(CauseRef::Command(id)) => {
+            journal_record_by_id(&snapshot.commands, id.get(), |value| value.id.get())
+                .is_some_and(|command| command.accepted_at <= record.issued_at)
+        }
+        Some(CauseRef::Event(id)) => {
+            journal_record_by_id(&snapshot.events, id.get(), |value| value.id.get())
+                .is_some_and(|event| event.timestamp <= record.issued_at)
+        }
+        Some(CauseRef::System(name)) => canonical_text(name),
+    };
+    if valid {
+        Ok(())
+    } else {
+        invalid_snapshot("ingress cause references unavailable or future evidence")
+    }
+}
+
+fn journal_record_by_id<T>(
+    records: &[T],
+    id: u64,
+    record_id: impl FnOnce(&T) -> u64,
+) -> Option<&T> {
+    let index = usize::try_from(id.checked_sub(1)?).ok()?;
+    let record = records.get(index)?;
+    (record_id(record) == id).then_some(record)
+}
+
 fn validate_boundary_records(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
@@ -7473,6 +8754,13 @@ fn validate_boundary_records(
         )?;
         let cuts =
             validate_boundary_record_changes(record, snapshot, plugins, &mut domain_record_values)?;
+        validate_boundary_ingress_generation(
+            record,
+            snapshot,
+            plugins,
+            &domain_record_values,
+            &cuts,
+        )?;
         validate_boundary_reservations(record, snapshot, plugins, &domain_record_values, &cuts)?;
         validate_boundary_changes(record, snapshot, plugins, &domain_record_values, &cuts)?;
         for change in &record.changes {
@@ -7710,7 +8998,7 @@ fn validate_boundary_reservations(
             || !boundary_system_due(
                 contract,
                 &record.cadences,
-                !record.admitted_events.is_empty(),
+                boundary_has_event_ingress(record),
             )
             || !contract
                 .reservation_offers
@@ -7751,7 +9039,7 @@ fn validate_boundary_reservations(
             || !boundary_system_due(
                 contract,
                 &record.cadences,
-                !record.admitted_events.is_empty(),
+                boundary_has_event_ingress(record),
             )
             || !contract
                 .reservation_requests
@@ -7825,6 +9113,73 @@ fn snapshot_boundary_contract<'a>(
         .find(|contract| contract.name == system)
 }
 
+fn validate_boundary_ingress_generation(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    cuts: &BoundaryDomainEntityCuts,
+) -> Result<(), CanwuError> {
+    for generation in &record.generated_ingress {
+        let Some(contract) =
+            snapshot_boundary_contract(plugins, &generation.plugin, &generation.system)
+        else {
+            return invalid_snapshot("generated ingress references an unknown boundary system");
+        };
+        let Some(commit_stage) = domain_record_commit_stage(contract.phase, contract.visibility)
+        else {
+            return invalid_snapshot("generated ingress has no deterministic commit stage");
+        };
+        let index = usize::try_from(generation.ingress.get().saturating_sub(1)).map_err(|_| {
+            invalid_snapshot_error("generated ingress ID exceeds the journal index range")
+        })?;
+        let Some(ingress) = snapshot.ingress.get(index) else {
+            return invalid_snapshot("generated ingress references an unknown ingress record");
+        };
+        let IngressPayload::Plugin {
+            plugin,
+            affected_entities,
+            ..
+        } = &ingress.payload
+        else {
+            return invalid_snapshot("boundary systems may generate only plugin ingress");
+        };
+        let generated_delay = ingress.due_at.checked_sub(ingress.issued_at);
+        if generation.phase != contract.phase
+            || generation.visibility != contract.visibility
+            || plugin != &generation.plugin
+            || ingress.id != generation.ingress
+            || ingress.issued_at != record.at
+            || ingress.eligible_boundary_count != record.id.get()
+            || ingress.cause != Some(CauseRef::Boundary(record.id))
+            || generated_delay.is_none_or(SimDuration::is_negative)
+            || generated_delay.and_then(|delay| ingress.issued_at.checked_add(delay))
+                != Some(ingress.due_at)
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                boundary_has_event_ingress(record),
+            )
+            || affected_entities.iter().any(|entity| match entity {
+                EntityRef::Domain(reference) => !cuts.identity_exists_for_proposal(
+                    final_records,
+                    reference,
+                    contract.phase,
+                    commit_stage,
+                    &generation.plugin,
+                    &generation.system,
+                ),
+                _ => !core_world_entity_exists(&snapshot.world, entity),
+            })
+        {
+            return invalid_snapshot(
+                "generated ingress producer, commit stage, or entity provenance is inconsistent",
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_boundary_changes(
     record: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
@@ -7860,7 +9215,7 @@ fn validate_boundary_changes(
             || !boundary_system_due(
                 contract,
                 &record.cadences,
-                !record.admitted_events.is_empty(),
+                boundary_has_event_ingress(record),
             )
             || contract.visibility != change.visibility
             || plugins.state_owners.get(&change.state) != Some(&change.plugin)
@@ -7915,7 +9270,7 @@ fn validate_boundary_record_changes(
             || !boundary_system_due(
                 contract,
                 &record.cadences,
-                !record.admitted_events.is_empty(),
+                boundary_has_event_ingress(record),
             )
             || contract.visibility != change.visibility
             || plugins.state_owners.get(&state) != Some(&change.plugin)
@@ -8025,7 +9380,7 @@ fn validate_boundary_emissions(
         if !boundary_system_due(
             contract,
             &record.cadences,
-            !record.admitted_events.is_empty(),
+            boundary_has_event_ingress(record),
         ) {
             return invalid_snapshot("boundary emission source system was not due");
         }
@@ -8604,6 +9959,18 @@ fn snapshot_entity_exists_in_history(
     }
 }
 
+fn snapshot_entity_identity_exists_in_history(
+    snapshot: &SimulationSnapshot,
+    history: &DomainRecordHistory,
+    cut: DomainHistoryCut,
+    entity: &EntityRef,
+) -> bool {
+    match entity {
+        EntityRef::Domain(reference) => history.exists(reference, cut),
+        _ => core_world_entity_exists(&snapshot.world, entity),
+    }
+}
+
 fn snapshot_entity_exists_at_boundary(
     snapshot: &SimulationSnapshot,
     final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
@@ -8665,6 +10032,57 @@ fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
     }
 }
 
+fn runtime_entity_identity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
+    match entity {
+        EntityRef::Domain(reference) => state
+            .domain_records
+            .get(reference)
+            .is_some_and(|record| record.class == DomainRecordClass::Entity),
+        _ => runtime_entity_exists(state, entity),
+    }
+}
+
+fn runtime_has_unqueued_command_history(state: &RuntimeState) -> bool {
+    has_unqueued_command_history(&state.commands, &state.command_attempts, &state.ingress)
+}
+
+fn has_unqueued_command_history(
+    commands: &[CommandRecord],
+    attempts: &[CommandAttemptRecord],
+    ingress: &[IngressRecord],
+) -> bool {
+    let queued_requests: BTreeSet<_> = ingress
+        .iter()
+        .filter_map(|record| match &record.payload {
+            IngressPayload::Command { request } => Some(request.request_id),
+            IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+        })
+        .collect();
+    commands.iter().any(|command| command.attempt_id.is_none())
+        || attempts.iter().any(|attempt| {
+            attempt
+                .request_id
+                .is_none_or(|request| !queued_requests.contains(&request))
+        })
+}
+
+fn validate_runtime_cause(state: &RuntimeState, cause: &CauseRef) -> Result<(), CanwuError> {
+    let valid = match cause {
+        CauseRef::Boundary(id) => state.boundaries.iter().any(|record| record.id == *id),
+        CauseRef::Command(id) => state.commands.iter().any(|record| record.id == *id),
+        CauseRef::Event(id) => state.events.iter().any(|event| event.id == *id),
+        CauseRef::System(name) => canonical_text(name),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "ingress cause does not reference canonical committed evidence",
+        ))
+    }
+}
+
 fn runtime_entity_exists_with_record_overlay(
     state: &RuntimeState,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
@@ -8707,6 +10125,37 @@ fn proposal_entity_exists(
         };
     }
     runtime_entity_exists_with_record_overlay(state, record_overlay, entity)
+}
+
+fn proposal_entity_identity_exists(
+    state: &RuntimeState,
+    schemas: &records::DomainRecordSchemas,
+    proposal: &BoundaryProposal,
+    entity: &EntityRef,
+) -> bool {
+    let EntityRef::Domain(reference) = entity else {
+        return runtime_entity_identity_exists(state, entity);
+    };
+    if state
+        .domain_records
+        .get(reference)
+        .is_some_and(|record| record.class == DomainRecordClass::Entity)
+    {
+        return true;
+    }
+    proposal.directives.iter().any(|directive| {
+        let BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Create { record },
+            ..
+        } = directive
+        else {
+            return false;
+        };
+        &record.reference == reference
+            && schemas
+                .get(&reference.kind)
+                .is_some_and(|(_, schema)| schema.class == DomainRecordClass::Entity)
+    })
 }
 
 fn validate_runtime_domain_dependents(state: &RuntimeState) -> Result<(), CanwuError> {
@@ -8826,16 +10275,20 @@ fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), Ca
     if snapshot.run_configuration.is_some()
         || snapshot.initial_scenario.is_some()
         || !snapshot.command_attempts.is_empty()
+        || !snapshot.ingress.is_empty()
         || !snapshot.domain_records.is_empty()
         || snapshot.next_command_attempt_id != 1
+        || snapshot.next_ingress_id != 1
         || snapshot
             .commands
             .iter()
             .any(|record| record.attempt_id.is_some() || !record.emitted_events.is_empty())
-        || snapshot
-            .boundaries
-            .iter()
-            .any(|record| !record.admitted_attempts.is_empty() || !record.record_changes.is_empty())
+        || snapshot.boundaries.iter().any(|record| {
+            !record.admitted_attempts.is_empty()
+                || !record.admitted_ingress.is_empty()
+                || !record.generated_ingress.is_empty()
+                || !record.record_changes.is_empty()
+        })
     {
         return invalid_snapshot(
             "legacy snapshots cannot contain current run-policy or command-attempt evidence",
@@ -9017,6 +10470,8 @@ struct StateHashMaterial<'a> {
     commands: &'a [CommandRecord],
     #[serde(skip_serializing_if = "command_attempt_slice_is_empty")]
     command_attempts: &'a [CommandAttemptRecord],
+    #[serde(skip_serializing_if = "ingress_record_slice_is_empty")]
+    ingress: &'a [IngressRecord],
     plugin_components: &'a [PluginComponentRecord],
     #[serde(skip_serializing_if = "domain_record_slice_is_empty")]
     domain_records: &'a [DomainRecord],
@@ -9030,6 +10485,8 @@ struct StateHashMaterial<'a> {
     next_command_id: u64,
     #[serde(skip_serializing_if = "is_one_u64")]
     next_command_attempt_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    next_ingress_id: u64,
     next_boundary_id: u64,
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
@@ -9110,6 +10567,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         events: &snapshot.events,
         commands: &snapshot.commands,
         command_attempts: &snapshot.command_attempts,
+        ingress: &snapshot.ingress,
         plugin_components: &snapshot.plugin_components,
         domain_records: &snapshot.domain_records,
         plugin_descriptors: &snapshot.plugin_descriptors,
@@ -9121,6 +10579,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         next_event_id: snapshot.next_event_id,
         next_command_id: snapshot.next_command_id,
         next_command_attempt_id: snapshot.next_command_attempt_id,
+        next_ingress_id: snapshot.next_ingress_id,
         next_boundary_id: snapshot.next_boundary_id,
         next_random_draw_id: snapshot.next_random_draw_id,
         next_schedule_sequence: snapshot.next_schedule_sequence,
@@ -9198,6 +10657,14 @@ fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> bool {
     if admitted_commands.len() != snapshot.commands.len() {
         return false;
     }
+    let admitted_ingress: BTreeSet<_> = snapshot
+        .boundaries
+        .iter()
+        .flat_map(|record| record.admitted_ingress.iter().copied())
+        .collect();
+    if admitted_ingress.len() != snapshot.ingress.len() {
+        return false;
+    }
     let accounted_events: BTreeSet<_> = snapshot
         .boundaries
         .iter()
@@ -9222,6 +10689,10 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
         #[serde(skip_serializing_if = "command_attempt_id_slice_is_empty")]
         admitted_attempts: &'a [CommandAttemptId],
         admitted_commands: &'a [CommandId],
+        #[serde(skip_serializing_if = "ingress_id_slice_is_empty")]
+        admitted_ingress: &'a [IngressId],
+        #[serde(skip_serializing_if = "ingress_generation_slice_is_empty")]
+        generated_ingress: &'a [BoundaryIngressGeneration],
         admitted_events: &'a [EventId],
         reservation_offers: &'a [ReservationOfferRecord],
         reservation_requests: &'a [ReservationRequestRecord],
@@ -9244,6 +10715,8 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
             cadences: &record.cadences,
             admitted_attempts: &record.admitted_attempts,
             admitted_commands: &record.admitted_commands,
+            admitted_ingress: &record.admitted_ingress,
+            generated_ingress: &record.generated_ingress,
             admitted_events: &record.admitted_events,
             reservation_offers: &record.reservation_offers,
             reservation_requests: &record.reservation_requests,
@@ -11071,6 +12544,218 @@ mod tests {
         }
     }
 
+    struct CanonicalIngressPlugin;
+
+    fn ingress_class_name(class: IngressClass) -> &'static str {
+        match class {
+            IngressClass::Command => "command",
+            IngressClass::Communication => "communication",
+            IngressClass::Acknowledgement => "acknowledgement",
+            IngressClass::Information => "information",
+            IngressClass::ScheduledSystem => "scheduled_system",
+        }
+    }
+
+    fn consume_canonical_ingress(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        for value in 1..=32 {
+            let id = IngressId::new(value);
+            if !context.admitted_ingress.contains(&id) && view.ingress(id)?.is_some() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "boundary systems must not observe ingress before admission",
+                ));
+            }
+        }
+        let mut order = Vec::new();
+        for ingress_id in &context.admitted_ingress {
+            let Some(record) = view.ingress(*ingress_id)? else {
+                continue;
+            };
+            let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                ..
+            } = &record.payload
+            else {
+                continue;
+            };
+            if plugin == "canonical-ingress" {
+                order.push(format!(
+                    "{}:{packet_type}:{}",
+                    ingress_class_name(record.class),
+                    record.priority
+                ));
+            }
+        }
+        if order.is_empty() {
+            return Ok(BoundaryProposal::default());
+        }
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::SetComponent {
+                state: StateKey::new("ingress-fixture", "received"),
+                entity: EntityRef::Person(PersonId::new(1)),
+                component: "canonical-order".to_owned(),
+                value: serde_json::json!(order),
+                summary: "Record canonical ingress order".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn mark_daily_calendar(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::SetComponent {
+                state: StateKey::new("ingress-fixture", "calendar"),
+                entity: EntityRef::Person(PersonId::new(1)),
+                component: "daily".to_owned(),
+                value: Value::Bool(true),
+                summary: "Run the queued daily calendar boundary".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for CanonicalIngressPlugin {
+        fn name(&self) -> &'static str {
+            "canonical-ingress"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000025");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            for (name, description, class) in [
+                (
+                    "dispatch",
+                    "A command or communication packet in transit",
+                    IngressClass::Communication,
+                ),
+                (
+                    "ack",
+                    "A deterministic command acknowledgement",
+                    IngressClass::Acknowledgement,
+                ),
+                (
+                    "report",
+                    "A deterministic information packet",
+                    IngressClass::Information,
+                ),
+            ] {
+                registrar.register_ingress(PluginIngressDescriptor {
+                    name: name.to_owned(),
+                    description: description.to_owned(),
+                    class,
+                    payload_schema: object_payload_schema("label"),
+                })?;
+            }
+            let mut consumer = BoundarySystemContract::new(
+                "consume-ingress",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::EventDriven,
+            );
+            consumer.reads = vec![StateKey::core_ingress()];
+            consumer.writes = vec![StateKey::new("ingress-fixture", "received")];
+            consumer.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(consumer, consume_canonical_ingress)?;
+
+            let mut calendar = BoundarySystemContract::new(
+                "daily-calendar",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            calendar.writes = vec![StateKey::new("ingress-fixture", "calendar")];
+            calendar.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(calendar, mark_daily_calendar)
+        }
+    }
+
+    struct GeneratedIngressPlugin;
+
+    fn relay_generated_ingress(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let mut directives = Vec::new();
+        for ingress_id in &context.admitted_ingress {
+            let Some(record) = view.ingress(*ingress_id)? else {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "generated-ingress context references a missing record",
+                ));
+            };
+            let IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                affected_entities,
+                ..
+            } = &record.payload
+            else {
+                continue;
+            };
+            if plugin != "generated-ingress" {
+                continue;
+            }
+            match packet_type.as_str() {
+                "dispatch" => directives.push(BoundaryDirective::ScheduleIngress {
+                    after: SimDuration::ZERO,
+                    packet_type: "ack".to_owned(),
+                    priority: 5,
+                    payload: serde_json::json!({ "label": "automatic acknowledgement" }),
+                    affected: affected_entities.clone(),
+                }),
+                "ack" => directives.push(BoundaryDirective::SetComponent {
+                    state: StateKey::new("generated-ingress-fixture", "received"),
+                    entity: EntityRef::Person(PersonId::new(1)),
+                    component: "acknowledged".to_owned(),
+                    value: Value::Bool(true),
+                    summary: "Record the automatically generated acknowledgement".to_owned(),
+                }),
+                _ => {}
+            }
+        }
+        Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for GeneratedIngressPlugin {
+        fn name(&self) -> &'static str {
+            "generated-ingress"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000026");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "dispatch".to_owned(),
+                description: "A communication packet that requires acknowledgement".to_owned(),
+                class: IngressClass::Communication,
+                payload_schema: object_payload_schema("label"),
+            })?;
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "ack".to_owned(),
+                description: "A boundary-generated acknowledgement".to_owned(),
+                class: IngressClass::Acknowledgement,
+                payload_schema: object_payload_schema("label"),
+            })?;
+            let mut relay = BoundarySystemContract::new(
+                "relay-ingress",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::EventDriven,
+            );
+            relay.reads = vec![StateKey::core_ingress()];
+            relay.writes = vec![StateKey::new("generated-ingress-fixture", "received")];
+            relay.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(relay, relay_generated_ingress)
+        }
+    }
+
     fn move_order(ids: &DemoIds) -> CommandEnvelope {
         CommandEnvelope::new(
             Issuer::Actor(ids.commander),
@@ -11295,7 +12980,7 @@ mod tests {
         assert_eq!(legacy_first.snapshot(), after_legacy);
 
         let mut tracked_first =
-            Simulation::new(35, scenario).expect("compatibility run should load");
+            Simulation::new(35, scenario.clone()).expect("compatibility run should load");
         let outcome = tracked_first
             .process_command(CommandRequest::new(
                 CommandRequestId::new(1),
@@ -11316,8 +13001,47 @@ mod tests {
             .expect_err("legacy direct commands cannot follow tracked attempts");
         assert_eq!(error.code, ErrorCode::MixedCommandIngress);
         assert_eq!(tracked_first.snapshot(), after_tracked);
-        Simulation::from_snapshot(after_tracked)
+        Simulation::from_snapshot(after_tracked.clone())
             .expect("a rejection-only tracked journal should remain loadable");
+
+        let error = tracked_first
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect_err("canonical ingress cannot begin after a direct tracked attempt");
+        assert_eq!(error.code, ErrorCode::MixedCommandIngress);
+        assert_eq!(tracked_first.snapshot(), after_tracked);
+
+        tracked_first
+            .append_ingress(
+                SimTime::EPOCH,
+                IngressClass::ScheduledSystem,
+                0,
+                IngressPayload::Calendar {
+                    cadences: vec![SystemCadence::Daily],
+                },
+                Some(CauseRef::System("canwu.core.calendar".to_owned())),
+                false,
+            )
+            .expect("the fixture should construct coherent mixed ingress evidence");
+        let error = Simulation::from_snapshot(tracked_first.snapshot())
+            .err()
+            .expect("snapshot validation must reject mixed direct and canonical history");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut canonical_first =
+            Simulation::new(35, scenario).expect("canonical compatibility run should load");
+        canonical_first
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect("calendar ingress should establish the canonical family");
+        let after_canonical = canonical_first.snapshot();
+        let error = canonical_first
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                0,
+                move_order(&ids),
+            ))
+            .expect_err("direct tracked requests cannot bypass canonical ingress");
+        assert_eq!(error.code, ErrorCode::MixedCommandIngress);
+        assert_eq!(canonical_first.snapshot(), after_canonical);
     }
 
     #[test]
@@ -13688,5 +15412,611 @@ mod tests {
         )
         .expect("plugin-aware replay should succeed");
         assert_eq!(simulation.snapshot(), replayed.snapshot());
+    }
+
+    #[test]
+    fn canonical_ingress_orders_commands_packets_and_calendar_work() {
+        let (scenario, ids) = demo_scenario();
+        let plugin = CanonicalIngressPlugin;
+        let mut simulation =
+            Simulation::new(41, scenario.clone()).expect("ingress fixture should load");
+        simulation
+            .register_plugin(&plugin)
+            .expect("canonical ingress plugin should register");
+        let due_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(1))
+            .expect("fixture due time should be representable");
+
+        let information = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "report",
+                due_at,
+                serde_json::json!({ "label": "field report" }),
+            ))
+            .expect("information should queue");
+        let low_priority = simulation
+            .enqueue_plugin_ingress(
+                PluginIngressRequest::new(
+                    "canonical-ingress",
+                    "dispatch",
+                    due_at,
+                    serde_json::json!({ "label": "routine dispatch" }),
+                )
+                .with_priority(-10),
+            )
+            .expect("low-priority communication should queue");
+        let acknowledgement = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "ack",
+                due_at,
+                serde_json::json!({ "label": "received" }),
+            ))
+            .expect("acknowledgement should queue");
+        let high_priority = simulation
+            .enqueue_plugin_ingress(
+                PluginIngressRequest::new(
+                    "canonical-ingress",
+                    "dispatch",
+                    due_at,
+                    serde_json::json!({ "label": "urgent dispatch" }),
+                )
+                .with_priority(10),
+            )
+            .expect("high-priority communication should queue");
+        let calendar = simulation
+            .schedule_calendar_boundary(due_at, vec![SystemCadence::Daily])
+            .expect("daily calendar work should queue");
+        let command_request = CommandRequest::new(
+            CommandRequestId::new(77),
+            0,
+            move_order(&ids).at_time(due_at),
+        );
+        let command = simulation
+            .enqueue_command(due_at, 0, command_request.clone())
+            .expect("command should queue");
+        let future_at = due_at
+            .checked_add(SimDuration::hours(1))
+            .expect("future ingress time should be representable");
+        let future = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "report",
+                future_at,
+                serde_json::json!({ "label": "future report" }),
+            ))
+            .expect("future information should queue without becoming visible early");
+        assert_eq!(
+            simulation
+                .enqueue_command(due_at, 0, command_request.clone())
+                .expect("an exact queued retry should be idempotent"),
+            command
+        );
+        assert_eq!(simulation.ingress_log().len(), 7);
+        let collision = simulation
+            .enqueue_command(due_at, 1, command_request)
+            .expect_err("a queued request-ID collision must fail closed");
+        assert_eq!(collision.code, ErrorCode::IdempotencyConflict);
+        let mixed_before = simulation.snapshot();
+        let mixed = simulation
+            .submit(move_order(&ids))
+            .expect_err("legacy commands cannot bypass queued tracked ingress");
+        assert_eq!(mixed.code, ErrorCode::MixedCommandIngress);
+        assert_eq!(simulation.snapshot(), mixed_before);
+
+        let before_legacy_advance = simulation.snapshot();
+        let error = simulation
+            .advance(SimDuration::hours(1))
+            .expect_err("legacy advancement cannot skip canonical ingress");
+        assert_eq!(error.code, ErrorCode::InvalidBoundary);
+        assert_eq!(simulation.snapshot(), before_legacy_advance);
+
+        let before_skipped_boundary = simulation.snapshot();
+        let error = simulation
+            .settle_boundary(BoundaryRequest::at(future_at))
+            .expect_err("manual settlement cannot skip an earlier ingress due time");
+        assert_eq!(error.code, ErrorCode::InvalidBoundary);
+        assert_eq!(simulation.snapshot(), before_skipped_boundary);
+
+        let pending_json = simulation
+            .snapshot_json()
+            .expect("pending ingress should serialize");
+        let mut restored = Simulation::from_snapshot_json_with_plugins(&pending_json, &[&plugin])
+            .expect("pending ingress should restore with its plugin contract");
+        assert_eq!(simulation.snapshot(), restored.snapshot());
+
+        let receipts = simulation
+            .advance_canonical(SimDuration::hours(1))
+            .expect("canonical advancement should settle every due input");
+        let restored_receipts = restored
+            .advance_canonical(SimDuration::hours(1))
+            .expect("restored canonical ingress should settle identically");
+        assert_eq!(receipts, restored_receipts);
+        assert_eq!(simulation.snapshot(), restored.snapshot());
+        assert_eq!(receipts.len(), 1);
+
+        let boundary = simulation
+            .boundaries()
+            .last()
+            .expect("canonical advancement should publish a boundary");
+        let mut altered_boundary = boundary.clone();
+        altered_boundary.admitted_ingress.pop();
+        assert_ne!(
+            compute_boundary_hash(boundary).expect("boundary evidence should hash"),
+            compute_boundary_hash(&altered_boundary)
+                .expect("altered boundary evidence should hash"),
+            "canonical admission evidence must be committed by the boundary chain",
+        );
+        assert_eq!(boundary.cadences, vec![SystemCadence::Daily]);
+        assert_eq!(
+            boundary.admitted_ingress,
+            vec![
+                command.ingress_id,
+                high_priority.ingress_id,
+                low_priority.ingress_id,
+                acknowledgement.ingress_id,
+                information.ingress_id,
+                calendar.ingress_id,
+            ]
+        );
+        assert_eq!(boundary.admitted_attempts, vec![CommandAttemptId::new(1)]);
+        assert_eq!(boundary.admitted_commands, vec![CommandId::new(1)]);
+        assert!(!boundary.admitted_ingress.contains(&future.ingress_id));
+        let snapshot = simulation.snapshot();
+        assert!(snapshot.plugin_components.iter().any(|component| {
+            component.state == StateKey::new("ingress-fixture", "received")
+                && component.value
+                    == serde_json::json!([
+                        "communication:dispatch:10",
+                        "communication:dispatch:-10",
+                        "acknowledgement:ack:0",
+                        "information:report:0"
+                    ])
+        }));
+        assert!(snapshot.plugin_components.iter().any(|component| {
+            component.state == StateKey::new("ingress-fixture", "calendar")
+                && component.value == Value::Bool(true)
+        }));
+
+        let post_boundary_due = future_at
+            .checked_add(SimDuration::hours(1))
+            .expect("post-boundary ingress time should be representable");
+        simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "report",
+                post_boundary_due,
+                serde_json::json!({ "label": "post-boundary report" }),
+            ))
+            .expect("future ingress may be authored after a completed boundary");
+        let post_boundary_snapshot = simulation.snapshot();
+        let post_boundary_restored =
+            Simulation::from_snapshot_with_plugins(post_boundary_snapshot.clone(), &[&plugin])
+                .expect("post-boundary pending ingress must not invalidate its own snapshot");
+        assert_eq!(post_boundary_restored.snapshot(), post_boundary_snapshot);
+
+        let late_before = simulation.snapshot();
+        let late = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "report",
+                SimTime::EPOCH,
+                serde_json::json!({ "label": "late report" }),
+            ))
+            .expect_err("late ingress cannot rewrite an already committed boundary");
+        assert_eq!(late.code, ErrorCode::LateIngress);
+        assert_eq!(simulation.snapshot(), late_before);
+
+        let journal = simulation.replay_journal();
+        let replayed = Simulation::replay_from_journal(scenario, &[&plugin], &journal)
+            .expect("canonical ingress should replay in its recorded environment");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+
+        let mut reordered = simulation.snapshot();
+        reordered.boundaries[0].admitted_ingress.swap(0, 1);
+        rehash_tampered_snapshot(&mut reordered);
+        let error = Simulation::from_snapshot_with_plugins(reordered, &[&plugin])
+            .err()
+            .expect("a rehashed noncanonical ingress order must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut predating_issue_cut = simulation.snapshot();
+        let last = predating_issue_cut
+            .ingress
+            .last_mut()
+            .expect("the fixture retains post-boundary ingress");
+        last.issued_at = SimTime::EPOCH;
+        rehash_tampered_snapshot(&mut predating_issue_cut);
+        let error = Simulation::from_snapshot_with_plugins(predating_issue_cut, &[&plugin])
+            .err()
+            .expect("ingress cannot predate its declared boundary issue cut");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut skipped_due_time = simulation.snapshot();
+        let information_record = skipped_due_time
+            .ingress
+            .iter_mut()
+            .find(|record| record.id == information.ingress_id)
+            .expect("the information ingress should remain in the journal");
+        information_record.due_at = SimTime::EPOCH;
+        rehash_tampered_snapshot(&mut skipped_due_time);
+        let error = Simulation::from_snapshot_with_plugins(skipped_due_time, &[&plugin])
+            .err()
+            .expect("a boundary cannot be forged past an earlier due ingress time");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn command_ingress_precedes_equal_time_internal_scheduled_work() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation = Simulation::new(47, scenario).expect("ordering fixture should load");
+        simulation
+            .enqueue_command(
+                SimTime::EPOCH,
+                0,
+                CommandRequest::new(CommandRequestId::new(1), 0, move_order(&ids)),
+            )
+            .expect("the initial movement should queue");
+        simulation
+            .step_canonical()
+            .expect("the movement boundary should settle")
+            .expect("the queued movement supplies due work");
+        let arrival_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(18))
+            .expect("arrival time should be representable");
+        let return_order = CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::MoveArmy {
+                army: ids.army,
+                destination: ids.western_territory,
+            },
+        )
+        .at_time(arrival_at);
+        simulation
+            .enqueue_command(
+                arrival_at,
+                0,
+                CommandRequest::new(
+                    CommandRequestId::new(2),
+                    simulation.revision(),
+                    return_order,
+                ),
+            )
+            .expect("the equal-time return order should queue");
+
+        simulation
+            .step_canonical()
+            .expect("the equal-time boundary should settle")
+            .expect("the arrival and command are both due");
+        let attempt = simulation
+            .command_attempts()
+            .last()
+            .expect("the queued command should leave attempt evidence");
+        assert!(matches!(
+            &attempt.outcome,
+            CommandAttemptOutcome::Rejected { error }
+                if error.code == ErrorCode::InvalidAuthority
+                    && error.message.contains("already moving")
+        ));
+        assert_eq!(
+            simulation
+                .world()
+                .army(ids.army)
+                .expect("the army should remain present")
+                .location,
+            ids.eastern_territory,
+            "the scheduled arrival executes after the command-class admission decision",
+        );
+    }
+
+    #[test]
+    fn exact_replay_cannot_advance_past_unadmitted_due_ingress() {
+        let (scenario, _) = demo_scenario();
+        let mut simulation =
+            Simulation::new(49, scenario.clone()).expect("replay fixture should load");
+        let due_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(1))
+            .expect("due time should be representable");
+        simulation
+            .schedule_calendar_boundary(due_at, vec![SystemCadence::Daily])
+            .expect("calendar ingress should queue");
+        let forged_final = due_at
+            .checked_add(SimDuration::hours(1))
+            .expect("forged final time should be representable");
+        let mut forged_snapshot = simulation.snapshot();
+        forged_snapshot.now = forged_final;
+        forged_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&forged_snapshot)
+            .expect("the forged journal checkpoint should hash");
+        let mut journal = simulation.replay_journal();
+        journal.final_time = forged_final;
+        journal.checkpoint_hash = forged_snapshot.checkpoint_hash;
+
+        let error = Simulation::replay_from_journal(scenario, &[], &journal)
+            .err()
+            .expect("replay must not cross unadmitted due ingress");
+        assert_eq!(error.code, ErrorCode::InvalidBoundary);
+    }
+
+    #[test]
+    fn snapshot_ingress_reconstructs_ordered_command_and_calendar_effects() {
+        let (scenario, ids) = demo_scenario();
+        let mut commands =
+            Simulation::new(51, scenario.clone()).expect("command fixture should load");
+        for (request_id, revision, priority, morale) in [(1, 0, 10, 80), (2, 1, 0, 90)] {
+            let envelope = CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            )
+            .at_time(SimTime::EPOCH);
+            commands
+                .enqueue_command(
+                    SimTime::EPOCH,
+                    priority,
+                    CommandRequest::new(CommandRequestId::new(request_id), revision, envelope),
+                )
+                .expect("ordered command should queue");
+        }
+        commands
+            .step_canonical()
+            .expect("command boundary should settle")
+            .expect("commands supply due work");
+        commands
+            .schedule_calendar_boundary(
+                SimTime::EPOCH
+                    .checked_add(SimDuration::hours(1))
+                    .expect("future time should be representable"),
+                vec![SystemCadence::Daily],
+            )
+            .expect("future ingress keeps the snapshot beyond its boundary head");
+        let mut reordered_commands = commands.snapshot();
+        reordered_commands.ingress[0].priority = 0;
+        reordered_commands.ingress[1].priority = 10;
+        reordered_commands.boundaries[0].admitted_ingress.swap(0, 1);
+        rehash_tampered_snapshot(&mut reordered_commands);
+        let error = Simulation::from_snapshot(reordered_commands)
+            .err()
+            .expect("queue order cannot be detached from command-attempt order");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut relabeled_attempt = commands.snapshot();
+        relabeled_attempt.command_attempts[0].ingress = CommandIngress::FrozenReplay;
+        rehash_tampered_snapshot(&mut relabeled_attempt);
+        let error = Simulation::from_snapshot(relabeled_attempt)
+            .err()
+            .expect("queued command attempts must retain live-request provenance");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut calendar = Simulation::new(53, scenario).expect("calendar fixture should load");
+        calendar
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect("calendar work should queue");
+        calendar
+            .step_canonical()
+            .expect("calendar boundary should settle")
+            .expect("calendar work supplies a boundary");
+        calendar
+            .schedule_calendar_boundary(
+                SimTime::EPOCH
+                    .checked_add(SimDuration::hours(1))
+                    .expect("future time should be representable"),
+                vec![SystemCadence::Daily],
+            )
+            .expect("future calendar work keeps the snapshot beyond its boundary head");
+        let mut omitted_calendar = calendar.snapshot();
+        omitted_calendar.boundaries[0].cadences.clear();
+        rehash_tampered_snapshot(&mut omitted_calendar);
+        let error = Simulation::from_snapshot(omitted_calendar)
+            .err()
+            .expect("admitted calendar work must appear in boundary cadence evidence");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn generated_ingress_delay_must_be_representable() {
+        let (mut scenario, _) = demo_scenario();
+        let earliest = SimTime::from_minutes(i64::MIN);
+        scenario.start_time = earliest;
+        for actor in scenario.knowledge.actors.values_mut() {
+            for army in actor.armies.values_mut() {
+                army.observed_at = earliest;
+                army.learned_at = earliest;
+            }
+        }
+        let plugin = GeneratedIngressPlugin;
+        let mut simulation =
+            Simulation::new(55, scenario).expect("extreme-time ingress fixture should load");
+        simulation
+            .register_plugin(&plugin)
+            .expect("generated ingress plugin should register");
+        simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "generated-ingress",
+                "dispatch",
+                earliest,
+                serde_json::json!({ "label": "dispatch" }),
+            ))
+            .expect("extreme-time dispatch should queue");
+        simulation
+            .step_canonical()
+            .expect("extreme-time boundary should settle")
+            .expect("dispatch supplies due work");
+        let mut overflow = simulation.snapshot();
+        overflow.ingress[1].due_at = SimTime::from_minutes(i64::MAX);
+        rehash_tampered_snapshot(&mut overflow);
+        let error = Simulation::from_snapshot_with_plugins(overflow, &[&plugin])
+            .err()
+            .expect("generated delay must fit the simulation duration domain");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn boundary_generated_zero_delay_ingress_waits_for_the_next_same_time_boundary() {
+        let (scenario, _) = demo_scenario();
+        let plugin = GeneratedIngressPlugin;
+        let mut simulation =
+            Simulation::new(43, scenario.clone()).expect("generated ingress fixture should load");
+        simulation
+            .register_plugin(&plugin)
+            .expect("generated ingress plugin should register");
+        let dispatch = simulation
+            .enqueue_plugin_ingress(
+                PluginIngressRequest::new(
+                    "generated-ingress",
+                    "dispatch",
+                    SimTime::EPOCH,
+                    serde_json::json!({ "label": "dispatch" }),
+                )
+                .with_entity(EntityRef::Person(PersonId::new(1))),
+            )
+            .expect("dispatch should queue");
+
+        let first = simulation
+            .step_canonical()
+            .expect("the first canonical boundary should settle")
+            .expect("the dispatch supplies due work");
+        assert_eq!(first.settled_at, SimTime::EPOCH);
+        assert_eq!(first.generated_ingress, vec![IngressId::new(2)]);
+        assert_eq!(simulation.boundaries().len(), 1);
+        assert_eq!(
+            simulation.boundaries()[0].admitted_ingress,
+            vec![dispatch.ingress_id]
+        );
+        assert_eq!(
+            simulation.boundaries()[0]
+                .generated_ingress
+                .iter()
+                .map(|generation| generation.ingress)
+                .collect::<Vec<_>>(),
+            vec![IngressId::new(2)],
+        );
+        let generation = &simulation.boundaries()[0].generated_ingress[0];
+        assert_eq!(generation.plugin, "generated-ingress");
+        assert_eq!(generation.system, "relay-ingress");
+        assert_eq!(generation.phase, BoundaryPhase::DomainDeltaProposal);
+        assert_eq!(generation.visibility, StateVisibility::SameBoundary);
+        let mut altered_boundary = simulation.boundaries()[0].clone();
+        altered_boundary.generated_ingress.clear();
+        assert_ne!(
+            compute_boundary_hash(&simulation.boundaries()[0])
+                .expect("generated ingress evidence should hash"),
+            compute_boundary_hash(&altered_boundary)
+                .expect("altered generation evidence should hash"),
+            "generated ingress evidence must be committed by the boundary chain",
+        );
+        assert!(
+            !simulation
+                .snapshot()
+                .plugin_components
+                .iter()
+                .any(|component| {
+                    component.state == StateKey::new("generated-ingress-fixture", "received")
+                })
+        );
+
+        let pending = simulation.snapshot();
+        let mut restored = Simulation::from_snapshot_with_plugins(pending.clone(), &[&plugin])
+            .expect("a pending generated acknowledgement should restore");
+        assert_eq!(restored.snapshot(), pending);
+
+        let second = simulation
+            .step_canonical()
+            .expect("the generated acknowledgement boundary should settle")
+            .expect("the acknowledgement remains due at the same simulation time");
+        let restored_second = restored
+            .step_canonical()
+            .expect("the restored acknowledgement boundary should settle")
+            .expect("the restored acknowledgement remains due");
+        assert_eq!(second, restored_second);
+        assert_eq!(second.settled_at, SimTime::EPOCH);
+        assert!(second.generated_ingress.is_empty());
+        assert_eq!(simulation.boundaries().len(), 2);
+        assert_eq!(
+            simulation.boundaries()[1].admitted_ingress,
+            vec![IngressId::new(2)]
+        );
+        assert!(
+            simulation
+                .snapshot()
+                .plugin_components
+                .iter()
+                .any(|component| {
+                    component.state == StateKey::new("generated-ingress-fixture", "received")
+                        && component.value == Value::Bool(true)
+                })
+        );
+        assert_eq!(simulation.snapshot(), restored.snapshot());
+
+        let journal = simulation.replay_journal();
+        let replayed = Simulation::replay_from_journal(scenario, &[&plugin], &journal)
+            .expect("boundary-generated ingress should replay from its producing system");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+
+        let mut missing_generation_evidence = simulation.snapshot();
+        missing_generation_evidence.boundaries[0]
+            .generated_ingress
+            .clear();
+        rehash_tampered_snapshot(&mut missing_generation_evidence);
+        let error = Simulation::from_snapshot_with_plugins(missing_generation_evidence, &[&plugin])
+            .err()
+            .expect("boundary-caused ingress without producer evidence must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut false_producer = simulation.snapshot();
+        false_producer.boundaries[0].generated_ingress[0].phase =
+            BoundaryPhase::StrategicAggregation;
+        rehash_tampered_snapshot(&mut false_producer);
+        let error = Simulation::from_snapshot_with_plugins(false_producer, &[&plugin])
+            .err()
+            .expect("generated ingress must retain exact producer-stage provenance");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn read_only_runs_reject_live_plugin_ingress_without_mutation() {
+        let (scenario, _) = demo_scenario();
+        let configuration = RunConfiguration::read_only_observer();
+        let manifest = manifest_for_configuration(&scenario, &configuration);
+        let plugin = CanonicalIngressPlugin;
+        let mut simulation =
+            Simulation::new_with_run_configuration(47, scenario, manifest, configuration)
+                .expect("read-only ingress fixture should load");
+        simulation
+            .register_plugin(&plugin)
+            .expect("read-only ingress plugin should register");
+        let before = simulation.snapshot();
+        let error = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canonical-ingress",
+                "report",
+                SimTime::EPOCH,
+                serde_json::json!({ "label": "unauthorized live report" }),
+            ))
+            .expect_err("read-only runs cannot accept newly authored plugin ingress");
+        assert_eq!(error.code, ErrorCode::InteractionReadOnly);
+        assert_eq!(simulation.snapshot(), before);
+
+        simulation
+            .append_ingress(
+                SimTime::EPOCH,
+                IngressClass::Information,
+                0,
+                IngressPayload::Plugin {
+                    plugin: "canonical-ingress".to_owned(),
+                    packet_type: "report".to_owned(),
+                    payload: serde_json::json!({ "label": "forged live report" }),
+                    affected_entities: Vec::new(),
+                },
+                None,
+                false,
+            )
+            .expect("the fixture should construct coherent but unauthorized evidence");
+        let error = Simulation::from_snapshot_with_plugins(simulation.snapshot(), &[&plugin])
+            .err()
+            .expect("snapshot validation must reject impossible read-only live ingress");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
     }
 }

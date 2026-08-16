@@ -49,6 +49,7 @@ define_id!(CommandId);
 define_id!(CommandRequestId);
 define_id!(EventId);
 define_id!(GovernmentId);
+define_id!(IngressId);
 define_id!(OrganizationId);
 define_id!(PersonId);
 define_id!(RandomDrawId);

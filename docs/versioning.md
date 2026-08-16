@@ -57,6 +57,27 @@ IDs. Legacy-direct command records are restricted to compatibility provenance;
 declared runs require tracked attempt evidence. Legacy format 2 and 3 inputs are
 rejected if they attempt to smuggle these newer fields into a historical shape.
 
+Format 4 also permits additive canonical-ingress descriptors, records, counters,
+and boundary admission/generation evidence. Empty ingress fields and the default
+next-ingress counter are omitted, preserving the serialized and hashed shape of
+earlier record-free format-4 state. Persisted queue order is due time, class,
+descending priority, issue time, then ingress ID; every record also carries the
+boundary-count cut after which it can be admitted. Boundary-generated packets
+name their producing boundary and appear in that boundary's ordered
+`generated_ingress` evidence with the producer plugin, system, phase, and
+visibility/commit-stage input. Both admission and generation evidence are bound
+by the chained boundary hash. A zero-delay generated packet is deliberately
+assigned to the next admission cut, which may create a second boundary at the
+same timestamp. Loading validates descriptor ownership and schemas, stable
+entity identities at the issue and producer-proposal cuts, canonical admission
+order, cause and generation provenance, pending-work timeliness, and counter
+continuity. Command-attempt order, live-request provenance, and admitted calendar
+cadences are reconstructed from the queue. Generated delays must fit the signed
+simulation-duration domain. Exact replay re-enqueues external records but
+requires plugin systems to reproduce boundary-generated records. Declared read-only runs reject newly authored live
+plugin ingress. Format 2 and 3 inputs reject all of these fields rather than
+interpreting canonical-ingress semantics under a legacy identity.
+
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,
 controller, seat, observation, interaction, and trace policy do not alter

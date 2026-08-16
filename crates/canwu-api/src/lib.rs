@@ -4,8 +4,8 @@
 
 pub use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
-    DomainRecordKind, DomainRecordRef, EntityRef, EventId, GovernmentId, PersonId, RandomDrawId,
-    RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    DomainRecordKind, DomainRecordRef, EntityRef, EventId, GovernmentId, IngressId, PersonId,
+    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 pub use canwu_event::{CauseRef, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -13,24 +13,26 @@ pub use canwu_knowledge::{
 };
 pub use canwu_sim::{
     ArtifactManifest, BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission,
-    BoundaryEmissionKind, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
-    BoundaryRequest, BoundarySystemContract, BoundarySystemHandler, CanwuError, Command,
-    CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
-    CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
-    CommandRejection, CommandRequest, ControllerPolicy, DecisionOrigin, DemoIds, DomainRecord,
-    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
-    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
-    ErrorCode, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty, PayloadSchema,
-    PayloadValueType, PluginActionDescriptor, PluginCommandHandler, PluginDescriptor,
-    PluginRegistrar, PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
-    RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
-    RandomStreamState, ReplayJournal, ReservationAllocation, ReservationDisposition,
-    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
-    ReservationRequest, ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot,
-    RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
-    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy,
+    BoundaryEmissionKind, BoundaryIngressGeneration, BoundaryPhase, BoundaryProposal,
+    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    BoundarySystemHandler, CanwuError, Command, CommandAttemptOutcome, CommandAttemptRecord,
+    CommandAuthority, CommandContext, CommandEnvelope, CommandIngress, CommandOutcome,
+    CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection, CommandRequest,
+    ControllerPolicy, DecisionOrigin, DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass,
+    DomainRecordDraft, DomainRecordLifecycle, DomainRecordMutation, DomainRecordOperation,
+    DomainRecordSchema, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
+    DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode, IngressClass, IngressPayload,
+    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty,
+    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
+    PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
+    PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RandomStreamState,
+    ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
+    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
+    ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
+    SNAPSHOT_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationPlugin,
+    SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey, StateVisibility,
+    SystemCadence, SystemContract, SystemDirective, TracePolicy,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -205,6 +207,11 @@ impl Canwu {
     }
 
     #[must_use]
+    pub fn ingress_log(&self) -> &[IngressRecord] {
+        self.simulation.ingress_log()
+    }
+
+    #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
     }
@@ -253,6 +260,41 @@ impl Canwu {
         request: CommandRequest,
     ) -> Result<CommandOutcome, CanwuError> {
         self.simulation.process_command(request)
+    }
+
+    pub fn enqueue_command(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: CommandRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_command(due_at, priority, request)
+    }
+
+    pub fn enqueue_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn schedule_calendar_boundary(
+        &mut self,
+        due_at: SimTime,
+        cadences: Vec<SystemCadence>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.schedule_calendar_boundary(due_at, cadences)
+    }
+
+    pub fn advance_canonical(
+        &mut self,
+        duration: SimDuration,
+    ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
+        self.simulation.advance_canonical(duration)
+    }
+
+    pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
+        self.simulation.step_canonical()
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {

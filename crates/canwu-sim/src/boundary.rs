@@ -2,8 +2,10 @@ use crate::{
     CanwuError, DomainRecordChange, DomainRecordMutation, RandomStreamKey, SimulationView,
     StateKey, StateVisibility, SystemCadence,
 };
-use canwu_core::{BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, RandomDrawId};
-use canwu_time::SimTime;
+use canwu_core::{
+    BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, IngressId, RandomDrawId,
+};
+use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -112,6 +114,13 @@ pub enum BoundaryDirective {
         summary: String,
         affected: Vec<EntityRef>,
     },
+    ScheduleIngress {
+        after: SimDuration,
+        packet_type: String,
+        priority: i32,
+        payload: Value,
+        affected: Vec<EntityRef>,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -169,6 +178,7 @@ pub struct BoundaryContext {
     pub system: String,
     pub admitted_attempts: Vec<CommandAttemptId>,
     pub admitted_commands: Vec<CommandId>,
+    pub admitted_ingress: Vec<IngressId>,
     pub admitted_events: Vec<EventId>,
     pub emitted_events: Vec<EventId>,
 }
@@ -227,6 +237,15 @@ pub struct BoundaryEmission {
     pub kind: BoundaryEmissionKind,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryIngressGeneration {
+    pub ingress: IngressId,
+    pub plugin: String,
+    pub system: String,
+    pub phase: crate::BoundaryPhase,
+    pub visibility: StateVisibility,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct BoundaryRecord {
     pub id: BoundaryId,
@@ -236,6 +255,10 @@ pub struct BoundaryRecord {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub admitted_attempts: Vec<CommandAttemptId>,
     pub admitted_commands: Vec<CommandId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admitted_ingress: Vec<IngressId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generated_ingress: Vec<BoundaryIngressGeneration>,
     pub admitted_events: Vec<EventId>,
     pub reservation_offers: Vec<ReservationOfferRecord>,
     pub reservation_requests: Vec<ReservationRequestRecord>,
@@ -259,6 +282,7 @@ pub struct BoundaryReceipt {
     pub boundary_id: BoundaryId,
     pub settled_at: SimTime,
     pub emitted_events: Vec<EventId>,
+    pub generated_ingress: Vec<IngressId>,
     pub random_draws: Vec<RandomDrawId>,
     pub boundary_hash: String,
     pub change_count: usize,
