@@ -47,15 +47,15 @@ Astro telemetry is disabled by every package script through
 6. After DNS verification completes, enable **Enforce HTTPS** in GitHub Pages.
 
 GitHub's repository Pages setting is authoritative for the custom domain when
-deploying with GitHub Actions. `public/CNAME` records the intended domain in the
-site source but does not replace that setting.
+deploying with GitHub Actions. `public/CNAME` records the same intended domain
+in the site source.
 
 ## Credits and privacy
 
 The public [credits page](https://canwu.org/credits/) lists the principal
 frameworks, build tools, publishing services, visual sources, design references,
-licenses, and trademark notices. The site uses no analytics, tracking pixels,
-or third-party hosted fonts.
+licenses, and trademark notices. The site serves static, analytics-free pages
+with system-font stacks and zero third-party font requests.
 
 ## License
 

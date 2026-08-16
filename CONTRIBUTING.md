@@ -11,6 +11,12 @@ below before submitting work.
 - Keep the simulation headless and preserve the validated command boundary.
 - Preserve Windows, macOS, and Linux support.
 - Keep changes focused and document user-visible or architectural behavior.
+- Treat tests as durable evidence. Commit a test only when it is necessary,
+  reusable, very likely to fail under a plausible future change, and
+  non-trivial: it exercises a multi-step invariant, public contract,
+  persistence/replay boundary, or failure-recovery path beyond format, lint,
+  compile, or a simple accessor assertion. Run narrower one-off verification
+  inline; the project uses no TDD requirement, test quota, or coverage target.
 - Identify third-party code, data, assets, or generated material and its license
   in the pull request. Do not submit material that cannot be distributed under
   the project and contributor terms.

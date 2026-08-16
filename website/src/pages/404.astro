@@ -3,16 +3,16 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 ---
 
 <BaseLayout
-  title="页面未找到 — 参伍引擎"
-  description="该地址不存在，或内容已经移动。"
+  title="探索参伍 — 参伍引擎"
+  description="请从首页、文档或 GitHub 继续探索参伍。"
   locale="auto"
   zhPath="/"
   enPath="/en/"
 >
   <script is:inline>
     if (document.documentElement.dataset.locale === "en") {
-      const title = "Page not found — Canwu Engine";
-      const description = "This address does not exist, or the content has moved.";
+      const title = "Choose a Canwu destination";
+      const description = "Continue exploring Canwu from the home page, documentation, or GitHub.";
       document.title = title;
       document.querySelector('meta[name="description"]')?.setAttribute("content", description);
       document.querySelector('meta[property="og:title"]')?.setAttribute("content", title);
@@ -23,9 +23,9 @@ import BaseLayout from "../layouts/BaseLayout.astro";
   </script>
 
   <section class="not-found page-width" data-locale-content="zh-CN">
-    <p class="eyebrow">404 · 页面不存在</p>
-    <h1>找不到这个页面。</h1>
-    <p>该地址不存在，或内容已经移动。你可以返回首页、查看文档，或者在 GitHub 报告失效链接。</p>
+    <p class="eyebrow">404 · 探索参伍</p>
+    <h1>请选择下一站。</h1>
+    <p>请从首页、文档或 GitHub 继续浏览，也欢迎在 GitHub 提交链接更新。</p>
     <div class="action-row">
       <a class="button primary" href="/">返回首页</a>
       <a class="button" href="https://github.com/PeiyuanQi/canwu/tree/main/docs">查看文档 ↗</a>
@@ -34,9 +34,9 @@ import BaseLayout from "../layouts/BaseLayout.astro";
   </section>
 
   <section class="not-found page-width" data-locale-content="en">
-    <p class="eyebrow">404 · Page not found</p>
-    <h1>We could not find this page.</h1>
-    <p>This address does not exist, or the content has moved. Return home, browse the documentation, or report a broken link on GitHub.</p>
+    <p class="eyebrow">404 · Explore Canwu</p>
+    <h1>Choose your next destination.</h1>
+    <p>Continue from the home page, browse the documentation, or share a link update on GitHub.</p>
     <div class="action-row">
       <a class="button primary" href="/en/">Return home</a>
       <a class="button" href="https://github.com/PeiyuanQi/canwu/tree/main/docs">Read the docs ↗</a>

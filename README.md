@@ -77,7 +77,13 @@ for local setup and contribution terms. Coding agents must also follow
 3. State the invariant, identify every affected surface, and make the smallest
    coherent implementation. Keep semantic changes separate from large file
    moves or generated-file refreshes.
-4. Add durable tests and run:
+4. Treat tests as durable evidence. Commit a test only when it is necessary,
+   reusable, very likely to fail under a plausible future change, and
+   non-trivial: it must exercise a multi-step invariant, public contract,
+   persistence/replay boundary, or failure-recovery path beyond format, lint,
+   compile, or a simple accessor assertion. Run narrower one-off verification
+   inline. Canwu uses no TDD requirement, test quota, or coverage target. Then
+   run:
 
    ```text
    cargo fmt --all -- --check

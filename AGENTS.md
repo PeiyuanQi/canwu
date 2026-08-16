@@ -29,8 +29,11 @@
    surface before implementation.
 4. Make the smallest coherent change. Keep behavior changes separate from large
    file moves, generated-file refreshes, licensing work, and unrelated cleanup.
-5. Add durable tests for reusable architectural invariants, then run the scoped
-   checks and the full repository verification listed below.
+5. Treat tests as durable evidence rather than a development process. Admit a
+   committed test only when it is necessary, reusable, non-trivial, and very
+   likely to catch a plausible future regression. Run narrower one-off checks
+   inline without committing them, then run the scoped checks and full
+   repository verification listed below.
 6. For public API, persistence, replay, migration, authority, determinism, or
    performance changes, obtain an independent review before committing. Resolve
    every blocking finding and re-run the affected checks.
@@ -105,8 +108,15 @@ contracts, never the reverse.
 - Use integer or fixed-unit simulation values where floating-point behavior
   could affect determinism.
 - The debug client depends on `canwu-api`, not on simulation internals.
-- Add committed tests only for architectural invariants that are reusable and
-  plausibly regress under future changes.
+- Tests are evidence, not process. The project uses no test-driven-development
+  requirement, test quota, or coverage target.
+- Admit a committed test only when it is necessary for a durable contract,
+  reusable across implementations, very likely to fail under a plausible
+  future change, and non-trivial. Non-trivial tests exercise a multi-step
+  invariant, public contract, persistence/replay boundary, or failure recovery
+  path that format, lint, compile, or a simple accessor assertion cannot prove.
+- Run useful verification that falls below that bar once inline and leave it out
+  of the committed test suite.
 
 ## Verification
 

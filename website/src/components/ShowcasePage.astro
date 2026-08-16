@@ -5,7 +5,7 @@ interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/src/lib.rs";
-const apiLines: Record<string, number> = { act: 598, advance: 258, settle_boundary: 262, world: 178, events: 188, snapshot_json: 282, fork: 401, diff: 408, replay_with_plugins: 312, describe_capabilities: 636, observe: 432, available_actions: 568, explain: 621, wait: 269, inspect: 490, query_as: 417, snapshot: 278 };
+const apiLines: Record<string, number> = { act: 711, advance: 332, settle_boundary: 336, world: 189, events: 199, snapshot_json: 356, fork: 514, diff: 521, replay_with_plugins: 425, describe_capabilities: 749, observe: 545, available_actions: 681, explain: 734, wait: 343, inspect: 603, query_as: 530, snapshot: 352 };
 
 const c = isEnglish
   ? {
@@ -13,30 +13,30 @@ const c = isEnglish
       description: "Concrete integration boundaries for games, historical research, agent environments, and public-history clients.",
       label: "Integration patterns",
       heading: "Use one deterministic simulation core with any client",
-      intro: "Canwu is the single source of truth for simulation time, state, commands, and events. The client remains responsible for presentation, authentication, orchestration, and shipping content. This page distinguishes what works in v0.4 from what still needs to be built.",
+      intro: "Canwu is the single source of truth for simulation time, state, commands, and events. The client contributes presentation, authentication, orchestration, and shipping content. This page maps today's engine capabilities and the ecosystem opportunities around each integration.",
       index: "Integration types",
       available: "Available in the core",
       client: "Your client provides",
-      notIncluded: "Not included yet",
+      notIncluded: "Ecosystem opportunities",
       relevant: "Public API",
       evidence: "Integration shape",
       cases: [
-        { id: "games", number: "01", kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server boundary while keeping the renderer and player experience independent.", available: ["Deterministic time and frame-independent scheduling", "Validated commands and events with recorded causes", "Actor-scoped observations and delayed reports", "Domain state managed through declared plugins"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production-ready scenarios, art, audio, and game content"], missing: ["Official renderer adapters", "A production multiplayer server", "A complete playable campaign"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
+        { id: "games", number: "01", kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server boundary while keeping the renderer and player experience independent.", available: ["Deterministic time and frame-independent scheduling", "Validated commands and events with recorded causes", "Actor-scoped observations and delayed reports", "Domain state managed through declared plugins"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production-ready scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
 let events = canwu.advance(SimDuration::hours(1))?;
 let world = canwu.world();` },
-        { id: "research", number: "02", kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep simulation runs independent of a notebook or visualization layer, then compare branches through snapshots and state diffs.", available: ["Deterministic run state and snapshots", "Fork, diff, and exact replay interfaces", "Causal events, random-draw journals, and state hashes", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "A statistical analysis package", "Claims of historical accuracy without model validation"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
+        { id: "research", number: "02", kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep simulation runs independent of a notebook or visualization layer, then compare branches through snapshots and state diffs.", available: ["Deterministic run state and snapshots", "Fork, diff, and exact replay interfaces", "Causal events, random-draw journals, and state hashes", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Model-validation frameworks for historical accuracy"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
 let mut branch = canwu.fork();
 branch.act(actor, intervention)?;
 let comparison = baseline.diff(&branch);` },
-        { id: "agents", number: "03", kind: "Agents", status: "Semantic loop available", title: "Multi-agent historical environments", purpose: "Give each model a stable action loop without exposing omniscient state or forcing it to operate a scenario-specific visual interface.", available: ["Capability and legal-action discovery", "Observations limited to the represented actor", "Actor identity and command validation", "Causal explanations for resulting events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["A hosted agent service", "A bundled model or prompt framework", "Automatic authentication or authorization policy"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
+        { id: "agents", number: "03", kind: "Agents", status: "Semantic loop available", title: "Multi-agent historical environments", purpose: "Give each model a stable action loop with actor-scoped observations and semantic actions suited to programmatic clients.", available: ["Capability and legal-action discovery", "Observations limited to the represented actor", "Actor identity and command validation", "Causal explanations for resulting events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Authentication and authorization policies"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
 let actions = canwu.available_actions(actor)?;
 let events = canwu.act(actor, selected_action)?;
 let why = canwu.explain(&explanation_request);` },
-        { id: "education", number: "04", kind: "Education", status: "Architecture direction", title: "Classroom and public-history tools", purpose: "Use replayable state and multiple actor perspectives beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and scenario state", "Different perspectives on the same world", "Repeatable interventions through snapshots and forks", "Causal records that can support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["A maintained teaching application", "Curriculum packages or museum installations", "Validation for any specific educational standard"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → timeline or map state
+        { id: "education", number: "04", kind: "Education", status: "Architecture direction", title: "Classroom and public-history tools", purpose: "Use replayable state and multiple actor perspectives beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and scenario state", "Different perspectives on the same world", "Repeatable interventions through snapshots and forks", "Causal records that can support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → timeline or map state
 events()        → causal history
 query_as(actor) → perspective-specific view` },
       ],
-      next: "Start with evidence, not a slide deck",
+      next: "Start with runnable evidence",
       nextCopy: "Run the checked-in example first. Then use the architecture document to decide where your client ends and Canwu begins.",
       run: "View move_army source", architecture: "Read integration architecture", source: "Open API source",
     }
@@ -45,26 +45,26 @@ query_as(actor) → perspective-specific view` },
       description: "游戏、历史研究、智能体环境与公共史客户端接入参伍的具体技术边界。",
       label: "集成模式",
       heading: "让不同客户端共享同一个确定性模拟世界",
-      intro: "参伍统一维护模拟时间、世界状态、命令与事件；客户端负责表现、认证、编排和可发行内容。本页区分 v0.4 已经可用的能力，以及仍需建设的部分。",
+      intro: "参伍统一维护模拟时间、世界状态、命令与事件；客户端贡献表现、认证、编排和可发行内容。本页展示当前引擎能力与每类集成周围的生态扩展方向。",
       index: "集成类型",
       available: "内核已经提供",
       client: "客户端需要提供",
-      notIncluded: "目前尚未提供",
+      notIncluded: "生态扩展方向",
       relevant: "公开 API",
       evidence: "接入方式",
       cases: [
-        { id: "games", number: "01", kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；渲染器与玩家体验保持独立。", available: ["确定性时间与不依赖帧率的调度", "经验证命令与记录原因的事件", "按角色过滤的观察结果与延迟报告", "通过声明式插件管理领域状态"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["官方渲染器适配器", "可直接部署的多人服务端", "完整可玩的战役"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
+        { id: "games", number: "01", kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；渲染器与玩家体验保持独立。", available: ["确定性时间与画面帧率解耦的调度", "经验证命令与记录原因的事件", "按角色过滤的观察结果与延迟报告", "通过声明式插件管理领域状态"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["渲染器适配器", "生产级多人服务", "完整可玩战役"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
 let events = canwu.advance(SimDuration::hours(1))?;
 let world = canwu.world();` },
-        { id: "research", number: "02", kind: "研究", status: "分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再通过快照与状态差异比较不同分支。", available: ["确定性运行状态与快照", "分支、差异与精确重演接口", "因果事件、随机抽取日志与状态哈希", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "未经模型验证的历史准确性结论"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
+        { id: "research", number: "02", kind: "研究", status: "分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再通过快照与状态差异比较不同分支。", available: ["确定性运行状态与快照", "分支、差异与精确重演接口", "因果事件、随机抽取日志与状态哈希", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "支撑历史准确性研究的模型验证框架"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
 let mut branch = canwu.fork();
 branch.act(actor, intervention)?;
 let comparison = baseline.diff(&branch);` },
-        { id: "agents", number: "03", kind: "智能体", status: "语义循环已可用", title: "多智能体历史环境", purpose: "让每个模型使用稳定的行动循环，同时不暴露全知状态，也不要求模型操纵某个场景专用的图形界面。", available: ["能力与合法行动发现", "限定到所代表角色的观察结果", "角色身份与命令验证", "对结果事件的因果解释"], client: ["模型选择与编排", "指定发令主体之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "内置模型或提示词框架", "自动身份认证与授权政策"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
+        { id: "agents", number: "03", kind: "智能体", status: "语义循环已可用", title: "多智能体历史环境", purpose: "让每个模型使用稳定行动循环，通过角色限定观察与语义行动接入模拟。", available: ["能力与合法行动发现", "限定到所代表角色的观察结果", "角色身份与命令验证", "对结果事件的因果解释"], client: ["模型选择与编排", "指定发令主体之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "身份认证与授权政策"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
 let actions = canwu.available_actions(actor)?;
 let events = canwu.act(actor, selected_action)?;
 let why = canwu.explain(&explanation_request);` },
-        { id: "education", number: "04", kind: "教育", status: "架构方向", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重演状态与多个角色视角。", available: ["历史时间与场景状态", "同一世界中的不同角色视角", "通过快照与分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包或博物馆装置", "针对特定教育标准的验证"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → 时间线或地图状态
+        { id: "education", number: "04", kind: "教育", status: "架构方向", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重演状态与多个角色视角。", available: ["历史时间与场景状态", "同一世界中的不同角色视角", "通过快照与分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → 时间线或地图状态
 events()        → 因果历史
 query_as(actor) → 角色视角` },
       ],
