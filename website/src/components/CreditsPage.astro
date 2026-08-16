@@ -1,0 +1,46 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+interface Props { locale: "zh-CN" | "en"; }
+const { locale } = Astro.props;
+const isEnglish = locale === "en";
+
+const c = isEnglish
+  ? {
+      title: "Canwu Website Credits", description: "Framework, build-tool, platform, visual, and trademark credits for canwu.org.",
+      eyebrow: "Credits & acknowledgements", headline: "Built visibly.", headlineEm: "Credited properly.", intro: "Canwu records causes inside simulated worlds. Its website should be just as explicit about what helped create it. This page lists the framework, tools, services, visual sources, and reference material used for canwu.org.",
+      privacy: "Site privacy", privacyCopy: "No analytics. No tracking pixels. No hosted fonts. Astro telemetry is disabled in local and deployment scripts.",
+      groups: [
+        { category: "Framework", items: [["Astro 7", "Static site framework", "MIT", "https://astro.build/"], ["Astro Sitemap", "Search-engine sitemap integration", "MIT", "https://docs.astro.build/en/guides/integrations-guide/sitemap/"], ["Astro Check", "Astro and TypeScript validation", "MIT", "https://www.npmjs.com/package/@astrojs/check"], ["Vite", "Build tooling used by Astro", "MIT", "https://vite.dev/"], ["TypeScript", "Type checking for site source", "Apache-2.0", "https://www.typescriptlang.org/"], ["cross-env", "Cross-platform build environment configuration", "MIT", "https://github.com/kentcdodds/cross-env"], ["pnpm", "Reproducible package installation", "MIT", "https://pnpm.io/"]] },
+        { category: "Publishing", items: [["GitHub Pages", "Static website hosting", "Service", "https://pages.github.com/"], ["GitHub Actions", "Automated build and deployment", "Service", "https://github.com/features/actions"]] },
+        { category: "Visual production", items: [["OpenAI image generation", "Original social-preview card", "Service", "https://openai.com/index/image-generation-api/"]] },
+      ],
+      visual: "Visual authorship", visualTitle: "Canwu’s own mark.", visualTitle2: "Authorship made explicit.", visualCopy: "The site uses the official Canwu “35” symbol from the project branding assets. Page ornaments, diagrams, grids, and atmospheric backgrounds are built in CSS. The Open Graph social card is an original generated raster composition using the official mark as a supplied reference; its production prompt is preserved in the website source. Typography uses local system fonts with no third-party font requests.", branding: "Canwu branding guide ↗", prompt: "Social-card prompt ↗",
+      references: "Design references", referencesTitle: "Studied, not copied.", referencesCopy: "The information architecture was informed by patterns common to established engine sites: a direct product promise, feature pillars, technical proof, application stories, and a clear path to source and documentation. No copy, layouts, imagery, or brand assets were reused.",
+      legalTitle: "Licenses, notices, and trademarks", legalOne: "Canwu is source-available under the Canwu License 1.0. Software dependencies retain their own licenses and attribution requirements.", legalTwo: "Unity is a trademark of Unity Technologies. Unreal and Unreal Engine are trademarks or registered trademarks of Epic Games, Inc. Godot and Bevy names belong to their respective projects and rights holders. References indicate possible client categories or design study only; they do not imply endorsement, official integration, or affiliation.",
+      links: ["Canwu License ↗", "Third-party licenses ↗", "Third-party notices ↗", "Website notices ↗", "Sponsors ↗"],
+    }
+  : {
+      title: "参伍网站鸣谢", description: "canwu.org 使用的框架、构建工具、平台、视觉制作与商标鸣谢。",
+      eyebrow: "鸣谢与致谢", headline: "建设过程公开。", headlineEm: "鸣谢对象清楚。", intro: "参伍会在模拟世界中记录因果，其网站也应明确记录帮助它建立的一切。本页列出 canwu.org 使用的框架、工具、服务、视觉来源与设计参考。",
+      privacy: "网站隐私", privacyCopy: "无分析统计、无跟踪像素、无托管字体。Astro 遥测在本地与部署脚本中均已关闭。",
+      groups: [
+        { category: "框架与工具", items: [["Astro 7", "静态网站框架", "MIT", "https://astro.build/"], ["Astro Sitemap", "搜索引擎站点地图集成", "MIT", "https://docs.astro.build/en/guides/integrations-guide/sitemap/"], ["Astro Check", "Astro 与 TypeScript 验证", "MIT", "https://www.npmjs.com/package/@astrojs/check"], ["Vite", "Astro 使用的构建工具", "MIT", "https://vite.dev/"], ["TypeScript", "网站源码类型检查", "Apache-2.0", "https://www.typescriptlang.org/"], ["cross-env", "跨平台构建环境配置", "MIT", "https://github.com/kentcdodds/cross-env"], ["pnpm", "可重复的软件包安装", "MIT", "https://pnpm.io/"]] },
+        { category: "发布平台", items: [["GitHub Pages", "静态网站托管", "服务", "https://pages.github.com/"], ["GitHub Actions", "自动构建与部署", "服务", "https://github.com/features/actions"]] },
+        { category: "视觉制作", items: [["OpenAI 图像生成", "原创社交预览图", "服务", "https://openai.com/index/image-generation-api/"]] },
+      ],
+      visual: "视觉作者信息", visualTitle: "使用参伍自己的标志。", visualTitle2: "明确每一种创作来源。", visualCopy: "网站使用项目品牌资产中的官方参伍“35”标志。页面装饰、图表、网格与氛围背景由 CSS 构建。Open Graph 社交预览图是以官方标志为参考生成的原创位图作品，其制作提示词保存在网站源码中。字体全部使用本地系统字体，不请求第三方字体服务。", branding: "参伍品牌指南 ↗", prompt: "社交预览图提示词 ↗",
+      references: "设计参考", referencesTitle: "研究其方法，而非复制作品。", referencesCopy: "网站的信息架构参考了成熟引擎网站常见的组织方式：直接的产品承诺、功能支柱、技术证据、应用故事，以及清晰的源码与文档入口。没有复用任何文案、布局、图像或品牌资产。",
+      legalTitle: "许可证、声明与商标", legalOne: "参伍依据 Canwu License 1.0 以源码可用方式发布。软件依赖继续遵循其各自的许可证与署名要求。", legalTwo: "Unity 是 Unity Technologies 的商标。Unreal 与 Unreal Engine 是 Epic Games, Inc. 的商标或注册商标。Godot 与 Bevy 名称归各自项目及权利人所有。相关提及仅用于说明可能的客户端类型或设计研究，不表示背书、官方集成或隶属关系。",
+      links: ["Canwu 许可证 ↗", "第三方许可证 ↗", "第三方声明 ↗", "网站声明 ↗", "赞助者 ↗"],
+    };
+
+const legalUrls = ["https://github.com/PeiyuanQi/canwu/blob/main/LICENSE", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_LICENSES.md", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_NOTICES.html", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md", "https://github.com/PeiyuanQi/canwu/blob/main/SPONSORS.md"];
+---
+
+<BaseLayout title={c.title} description={c.description} locale={locale} zhPath="/credits/" enPath="/en/credits/">
+  <section class="page-hero credits-hero"><p class="eyebrow"><span></span> {c.eyebrow}</p><h1>{c.headline}<br /><em>{c.headlineEm}</em></h1><div class="page-hero-grid"><p>{c.intro}</p><div class="privacy-note"><span>{c.privacy}</span><p>{c.privacyCopy}</p></div></div></section>
+  <section class="credits-section section-wide">{c.groups.map((group) => <div class="credit-group"><h2>{group.category}</h2><div>{group.items.map(([name, role, license, url]) => <a class="credit-row" href={url}><strong>{name}</strong><span>{role}</span><small>{license}</small><b>↗</b></a>)}</div></div>)}</section>
+  <section class="credits-notes section-wide"><article><p class="eyebrow"><span></span> {c.visual}</p><h2>{c.visualTitle}<br />{c.visualTitle2}</h2><p>{c.visualCopy}</p><div class="reference-links"><a href="https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md">{c.branding}</a><a href="https://github.com/PeiyuanQi/canwu/blob/main/website/OG_IMAGE_PROMPT.md">{c.prompt}</a></div></article><article><p class="eyebrow"><span></span> {c.references}</p><h2>{c.referencesTitle}</h2><p>{c.referencesCopy}</p><div class="reference-links"><a href="https://godotengine.org/">Godot ↗</a><a href="https://bevyengine.org/">Bevy ↗</a><a href="https://unity.com/">Unity ↗</a><a href="https://www.unrealengine.com/">Unreal Engine ↗</a></div></article></section>
+  <section class="trademark-section section-wide"><h2>{c.legalTitle}</h2><div><p>{c.legalOne}</p><p>{c.legalTwo}</p><div class="reference-links">{c.links.map((label, index) => <a href={legalUrls[index]}>{label}</a>)}</div></div></section>
+</BaseLayout>

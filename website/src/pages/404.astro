@@ -1,0 +1,21 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+---
+
+<BaseLayout
+  title="页面未找到 — 参伍引擎"
+  description="无法找到请求的参伍网站页面。"
+  locale="zh-CN"
+  zhPath="/"
+  enPath="/en/"
+>
+  <section class="not-found section-wide">
+    <p class="eyebrow"><span></span> 404 · 时间线分歧</p>
+    <h1>这起事件从未被记录。</h1>
+    <p>页面可能已经移动，或者这条历史分支从未存在。</p>
+    <div class="hero-actions">
+      <a class="button button-primary" href="/">返回参伍首页</a>
+      <a class="button button-secondary" href="/en/">English site</a>
+    </div>
+  </section>
+</BaseLayout>

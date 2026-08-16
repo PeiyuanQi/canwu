@@ -1,6 +1,8 @@
-# Canwu（参伍 / 35 Engine）
+# 参伍引擎 Canwu Engine
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+Website: [canwu.org](https://canwu.org)
 
 <img src="assets/branding/canwu-logo-en.png" alt="Canwu historical simulation engine logo" width="320">
 

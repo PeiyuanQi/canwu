@@ -1,0 +1,97 @@
+---
+import BaseLayout from "../layouts/BaseLayout.astro";
+
+interface Props {
+  locale: "zh-CN" | "en";
+}
+
+const { locale } = Astro.props;
+const isEnglish = locale === "en";
+const prefix = isEnglish ? "/en" : "";
+
+const c = isEnglish
+  ? {
+      title: "Canwu Engine — Headless historical simulation",
+      description: "Canwu is a fast, headless, agent-native historical simulation engine written in Rust.",
+      eyebrow: "Historical simulation kernel · Rust · v0.4",
+      headline: "Simulate history.", headlineEm: "Render it your way.",
+      lede: "Canwu is a thin, deterministic engine for worlds shaped by time, cause, consequence, and incomplete knowledge—from antiquity to the late twentieth century, without forcing a renderer or editor on top.",
+      explore: "Explore the engine", source: "View source on GitHub ↗",
+      facts: [["Core", "Headless Rust"], ["World model", "Actor-relative"], ["Execution", "Deterministic"]],
+      orbitAria: "Canwu connects time, events, knowledge, and commands", orbitLabels: ["TIME", "EVENT", "KNOWLEDGE", "COMMAND"], markAlt: "Canwu 35 symbol mark", orbitCopy: ["SIMULATION", "WITHOUT", "THE STAGE"],
+      why: "Why Canwu", whyTitle: "A world engine with nothing to hide behind.",
+      pillars: [["01", "Historical simulation", "Time, causality, imperfect knowledge, and events that remember why they happened."], ["02", "Headless by choice", "Keep Canwu at the center. Plug in the renderer, interface, or research client you prefer."], ["03", "Fast by design", "A compact Rust core spends its budget on simulation—not a mandatory editor or render loop."], ["04", "Agent-native", "Agents discover legal actions, observe actor-relative knowledge, act, and explain through one semantic contract."]],
+      thin: "Thin by architecture", thinTitle: "Your renderer is a lens.", thinTitle2: "Canwu is the world beneath it.",
+      thinCopy: "Connect a game engine, a web map, a command-line study, or a custom data interface through the public API. The simulation stays portable because no presentation layer receives privileged access to mutable state.", readArchitecture: "Read the architecture ↗",
+      stackAria: "Replaceable clients connect through Canwu's public API to the historical simulation core", clients: ["Game engine", "Web client", "Research tool", "AI agent"], adapter: "Your adapter", api: "CANWU PUBLIC API", apiDetails: "commands · queries · events · snapshots", core: "HISTORICAL SIMULATION CORE", coreDetails: "time · causality · knowledge · plugins · replay", replaceable: "No renderer is privileged. Every client remains replaceable.",
+      agnostic: "Region- and period-agnostic", eraTitle: "One kernel.", eraTitleEm: "Many centuries.", eraCopy: "Canwu’s core is not tied to one dynasty, continent, or campaign. Domain plugins supply the rules and records for the societies you want to model.",
+      eras: [["01", "Antiquity", "Polities, exchange, migration"], ["02", "Medieval worlds", "Courts, faith, land, tribute"], ["03", "Early modern", "States, trade, empires"], ["04", "Industrial age", "Production, logistics, mass politics"], ["05", "20th century", "Institutions, media, global systems"]],
+      agent: "Agent-native", agentTitle: "Teach the interface once.", agentTitle2: "Let every world speak it.", agentCopy: "Agents should not need a new editor ritual for every simulation. Canwu exposes a stable semantic loop: discover capabilities, observe from an actor’s perspective, inspect details, choose legal actions, act, wait, and explain consequences.", checks: ["Actor-relative observations instead of leaked omniscience", "Machine-readable action schemas and validation", "Causal event explanations and compact progressive disclosure"], agentAria: "Example of an agent interacting with Canwu", terminalBecause: "Because: verified report changed threat estimate.",
+      atlas: "Application atlas", seeAll: "See every use case →", showcaseTitle: "Build the view your history deserves.", applications: [["Grand strategy", "Nations, courts, armies, economies, and information moving at different speeds."], ["Historical research", "Repeatable scenarios, counterfactual forks, causal records, and inspectable evidence."], ["Agent worlds", "Multi-agent environments where each actor sees only what they could plausibly know."], ["Learning & museums", "Interactive histories presented through maps, timelines, archives, or spatial experiences."]],
+      foundation: "Current foundation", proofTitle: "Evidence, not magic.", proofCopy: "Canwu is an active v0.4 development engine. Its public architecture already centers repeatable time, validated commands, actor knowledge, causal events, snapshots, forks, diffs, replay, and deterministic plugin boundaries.", proof: [["14", "ordered simulation phases in the authoritative boundary"], ["3", "supported development platforms: Windows, macOS, Linux"], ["∞", "possible presentation layers outside the headless core"]],
+      sourceAvailable: "Source available", licenseTitle: "Start without royalties.", licenseTitle2: "Scale on progressive terms.", licenseCopy: "Personal, community, research, educational, nonprofit, and commercial use is royalty-free while a product family remains at or below US $10 million in its applicable 12-month revenue period. The license text is authoritative.", readLicense: "Read the Canwu License 1.0 ↗",
+      closing: "Build a world that remembers", closingEm: "why.", closingSuffix: "", github: "Explore Canwu on GitHub ↗", browse: "Browse applications",
+    }
+  : {
+      title: "参伍引擎 — 无头历史模拟引擎",
+      description: "参伍是以 Rust 编写的快速、无头、智能体原生历史模拟引擎。",
+      eyebrow: "历史模拟内核 · Rust · v0.4",
+      headline: "模拟历史。", headlineEm: "呈现由你。",
+      lede: "参伍是一款轻量、确定性的历史模拟引擎。世界由时间、因果、后果与不完整知识推动，时代跨度从古代延伸至二十世纪末，同时不强制绑定任何渲染器或编辑器。",
+      explore: "探索引擎", source: "在 GitHub 查看源码 ↗",
+      facts: [["内核", "无头 Rust"], ["世界模型", "角色视角"], ["执行方式", "确定性"]],
+      orbitAria: "参伍连接时间、事件、知识与命令", orbitLabels: ["时间", "事件", "知识", "命令"], markAlt: "参伍 35 标志", orbitCopy: ["模拟世界", "不受舞台", "所束缚"],
+      why: "为何选择参伍", whyTitle: "世界无需躲在表现层之后。",
+      pillars: [["01", "历史模拟", "时间、因果、不完备知识，以及能够追溯自身缘由的事件。"], ["02", "无头，而非残缺", "让参伍负责世界核心；渲染器、界面与研究客户端由你选择。"], ["03", "为速度而薄", "紧凑的 Rust 内核把资源留给模拟，而不是强制的编辑器或渲染循环。"], ["04", "智能体原生", "智能体通过统一语义契约发现合法行动、观察、行动并解释结果。"]],
+      thin: "架构轻薄", thinTitle: "渲染器是镜头。", thinTitle2: "参伍是镜头之下的世界。",
+      thinCopy: "通过公开 API 连接游戏引擎、网页地图、命令行研究工具或自定义数据界面。任何表现层都无法直接取得可变世界状态，因此模拟始终可移植、客户端始终可替换。", readArchitecture: "阅读架构文档 ↗",
+      stackAria: "可替换客户端通过参伍公开 API 连接历史模拟内核", clients: ["游戏引擎", "网页客户端", "研究工具", "AI 智能体"], adapter: "你的适配器", api: "参伍公开 API", apiDetails: "命令 · 查询 · 事件 · 快照", core: "历史模拟内核", coreDetails: "时间 · 因果 · 知识 · 插件 · 重演", replaceable: "没有任何渲染器享有特权，每个客户端都可以替换。",
+      agnostic: "不绑定地区与时代", eraTitle: "一个内核。", eraTitleEm: "横跨数千年。", eraCopy: "参伍的核心不绑定某个王朝、洲域或战役。领域插件为你想模拟的社会提供规则、记录与制度。",
+      eras: [["01", "古代世界", "政体、交换、迁徙"], ["02", "中古世界", "宫廷、信仰、土地、贡赋"], ["03", "近世时期", "国家、贸易、帝国"], ["04", "工业时代", "生产、物流、大众政治"], ["05", "二十世纪", "制度、媒体、全球体系"]],
+      agent: "智能体原生", agentTitle: "接口只教一次。", agentTitle2: "让每个世界都能开口。", agentCopy: "智能体不应为了每个模拟重新学习一套编辑器仪式。参伍提供稳定的语义循环：发现能力、从角色视角观察、逐层检查、选择合法行动、执行、等待并解释后果。", checks: ["角色视角观察，不泄露全知真相", "机器可读的行动模式与输入验证", "因果事件解释与渐进式上下文披露"], agentAria: "智能体与参伍交互的示例", terminalBecause: "因为：经核实的报告改变了威胁判断。",
+      atlas: "应用图谱", seeAll: "查看全部应用方向 →", showcaseTitle: "为历史选择它应有的呈现方式。", applications: [["大战略游戏", "国家、宫廷、军队、经济与情报以不同速度运转。"], ["历史研究", "可重复场景、反事实分支、因果记录与可检查证据。"], ["智能体世界", "多智能体环境，每个参与者只能看到其角色理应知道的信息。"], ["教育与博物馆", "用地图、时间线、档案或空间体验呈现可交互的历史。"]],
+      foundation: "当前基础", proofTitle: "以证据代替魔法。", proofCopy: "参伍目前处于 v0.4 活跃开发阶段。公开架构已经围绕可重复时间、经验证命令、角色知识、因果事件、快照、分支、差异、重演与确定性插件边界展开。", proof: [["14", "个按固定顺序执行的权威模拟阶段"], ["3", "个开发支持平台：Windows、macOS、Linux"], ["∞", "种可置于无头内核之外的表现方式"]],
+      sourceAvailable: "源码可用", licenseTitle: "起步无需版税。", licenseTitle2: "成功后按累进条款扩展。", licenseCopy: "个人、社区、研究、教育、非营利及商业用途，在同一产品系列适用的十二个月收入不超过 1,000 万美元时均免版税。法律效力以许可证正文为准。", readLicense: "阅读 Canwu License 1.0 ↗",
+      closing: "构建一个记得", closingEm: "“为什么”", closingSuffix: "的世界。", github: "在 GitHub 探索参伍 ↗", browse: "浏览应用场景",
+    };
+---
+
+<BaseLayout title={c.title} description={c.description} locale={locale} zhPath="/" enPath="/en/">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow"><span></span> {c.eyebrow}</p>
+      <h1>{c.headline}<br /><em>{c.headlineEm}</em></h1>
+      <p class="hero-lede">{c.lede}</p>
+      <div class="hero-actions"><a class="button button-primary" href="#engine">{c.explore}</a><a class="button button-secondary" href="https://github.com/PeiyuanQi/canwu">{c.source}</a></div>
+      <dl class="hero-facts">{c.facts.map(([term, detail]) => <div><dt>{term}</dt><dd>{detail}</dd></div>)}</dl>
+    </div>
+    <div class="hero-orbit" aria-label={c.orbitAria}>
+      <div class="orbit-ring orbit-one"></div><div class="orbit-ring orbit-two"></div>
+      <div class="orbit-label label-time">{c.orbitLabels[0]}</div><div class="orbit-label label-event">{c.orbitLabels[1]}</div><div class="orbit-label label-knowledge">{c.orbitLabels[2]}</div><div class="orbit-label label-command">{c.orbitLabels[3]}</div>
+      <img src="/brand/canwu-mark.png" width="512" height="512" alt={c.markAlt} /><p>{c.orbitCopy[0]}<br />{c.orbitCopy[1]}<br />{c.orbitCopy[2]}</p>
+    </div>
+  </section>
+  <section class="pillars" id="engine" aria-labelledby="engine-title"><div class="section-intro"><p class="eyebrow"><span></span> {c.why}</p><h2 id="engine-title">{c.whyTitle}</h2></div><div class="pillar-grid">{c.pillars.map(([number, title, copy]) => <article class="pillar-card"><span>{number}</span><h3>{title}</h3><p>{copy}</p></article>)}</div></section>
+  <section class="headless-section section-wide" aria-labelledby="headless-title"><div class="headless-copy"><p class="eyebrow"><span></span> {c.thin}</p><h2 id="headless-title">{c.thinTitle}<br />{c.thinTitle2}</h2><p>{c.thinCopy}</p><a class="text-link" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.readArchitecture}</a></div><div class="stack-diagram" aria-label={c.stackAria}><div class="stack-row stack-clients">{c.clients.map((client) => <span>{client}</span>)}</div><div class="stack-connector"><span>{c.adapter}</span></div><div class="stack-row stack-api"><strong>{c.api}</strong><span>{c.apiDetails}</span></div><div class="stack-row stack-core"><strong>{c.core}</strong><span>{c.coreDetails}</span></div><p>{c.replaceable}</p></div></section>
+  <section class="era-section section-wide" aria-labelledby="era-title"><div class="era-header"><p class="eyebrow"><span></span> {c.agnostic}</p><h2 id="era-title">{c.eraTitle}<br /><em>{c.eraTitleEm}</em></h2><p>{c.eraCopy}</p></div><ol class="era-line">{c.eras.map(([number, title, copy]) => <li><span>{number}</span><b>{title}</b><small>{copy}</small></li>)}</ol></section>
+  <section class="agent-section section-wide" aria-labelledby="agent-title"><div class="agent-copy"><p class="eyebrow"><span></span> {c.agent}</p><h2 id="agent-title">{c.agentTitle}<br />{c.agentTitle2}</h2><p>{c.agentCopy}</p><ul class="check-list">{c.checks.map((item) => <li>{item}</li>)}</ul></div><div class="agent-terminal" aria-label={c.agentAria}><div class="terminal-top"><span></span><span></span><span></span><b>CANWU / SEMANTIC API</b></div><pre><code><i>&gt;</i> describe_capabilities()
+<span>interfaces</span>  observe · inspect · query
+            available_actions · act · explain
+
+<i>&gt;</i> observe(actor="envoy.17")
+<span>time</span>        1898-09-21
+<span>knowledge</span>   partial · confidence 740‰
+<span>source_age</span>  3 days
+
+<i>&gt;</i> available_actions()
+01  request_audience
+02  verify_report
+03  dispatch_message
+
+<i>&gt;</i> explain(event="dispatch.204")
+<b>{c.terminalBecause}</b></code></pre></div></section>
+  <section class="showcase-preview section-wide" aria-labelledby="showcase-title"><div class="section-intro"><div><p class="eyebrow"><span></span> {c.atlas}</p><a class="text-link" href={`${prefix}/showcase/`}>{c.seeAll}</a></div><h2 id="showcase-title">{c.showcaseTitle}</h2></div><div class="application-grid">{c.applications.map(([title, copy], index) => <a class="application-card" href={`${prefix}/showcase/#case-${index + 1}`}><span>0{index + 1}</span><div><h3>{title}</h3><p>{copy}</p></div><b aria-hidden="true">↗</b></a>)}</div></section>
+  <section class="proof-section section-wide" aria-labelledby="proof-title"><div><p class="eyebrow"><span></span> {c.foundation}</p><h2 id="proof-title">{c.proofTitle}</h2><p>{c.proofCopy}</p></div><div class="proof-list">{c.proof.map(([number, copy]) => <article><span>{number}</span><p>{copy}</p></article>)}</div></section>
+  <section class="license-section section-wide"><p class="eyebrow"><span></span> {c.sourceAvailable}</p><div><h2>{c.licenseTitle}<br />{c.licenseTitle2}</h2><p>{c.licenseCopy}</p><a class="button button-secondary" href="https://github.com/PeiyuanQi/canwu/blob/main/LICENSE">{c.readLicense}</a></div></section>
+  <section class="closing-cta section-wide"><p>参伍 · CANWU</p><h2>{c.closing} <em>{c.closingEm}</em>{c.closingSuffix}</h2><div><a class="button button-primary" href="https://github.com/PeiyuanQi/canwu">{c.github}</a><a class="button button-secondary" href={`${prefix}/showcase/`}>{c.browse}</a></div></section>
+</BaseLayout>

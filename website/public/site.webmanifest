@@ -1,0 +1,17 @@
+{
+  "name": "参伍引擎 Canwu Engine",
+  "short_name": "Canwu",
+  "description": "无头、智能体原生的历史模拟引擎。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#11100d",
+  "theme_color": "#11100d",
+  "icons": [
+    {
+      "src": "/brand/canwu-mark.png",
+      "sizes": "1024x1024",
+      "type": "image/png"
+    }
+  ]
+}

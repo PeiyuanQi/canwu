@@ -1,0 +1,123 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+  locale?: "zh-CN" | "en";
+  zhPath?: string;
+  enPath?: string;
+}
+
+const {
+  title,
+  description,
+  locale = "en",
+  zhPath = "/",
+  enPath = "/en/",
+} = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+const currentPath = Astro.url.pathname;
+const isEnglish = locale === "en";
+const prefix = isEnglish ? "/en" : "";
+
+const ui = isEnglish
+  ? {
+      skip: "Skip to content",
+      homeLabel: "Canwu home",
+      navLabel: "Primary navigation",
+      engine: "Engine",
+      showcases: "Showcases",
+      credits: "Credits",
+      menu: "Menu",
+      language: "中文",
+      footerLine: "History is a system. Make it legible.",
+      footerSub: "Headless historical simulation from antiquity to the near-modern world.",
+    }
+  : {
+      skip: "跳到正文",
+      homeLabel: "参伍引擎首页",
+      navLabel: "主导航",
+      engine: "引擎",
+      showcases: "应用场景",
+      credits: "鸣谢",
+      menu: "菜单",
+      language: "EN",
+      footerLine: "历史是一套系统，让它清晰可见。",
+      footerSub: "从古代到近现代的无头历史模拟引擎。",
+    };
+
+const navItems = [
+  { href: `${prefix}/#engine` || "/#engine", label: ui.engine },
+  { href: `${prefix}/showcase/`, label: ui.showcases },
+  { href: `${prefix}/credits/`, label: ui.credits },
+];
+---
+
+<!doctype html>
+<html lang={locale}>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#11100d" />
+    <link rel="canonical" href={canonical} />
+    <link rel="alternate" hreflang="zh-CN" href={new URL(zhPath, Astro.site)} />
+    <link rel="alternate" hreflang="en" href={new URL(enPath, Astro.site)} />
+    <link rel="alternate" hreflang="x-default" href={new URL(zhPath, Astro.site)} />
+    <link rel="icon" href="/brand/canwu-mark.png" />
+    <link rel="apple-touch-icon" href="/brand/canwu-mark.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Canwu Engine" />
+    <meta property="og:locale" content={isEnglish ? "en_US" : "zh_CN"} />
+    <meta property="og:locale:alternate" content={isEnglish ? "zh_CN" : "en_US"} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL("/og.png", Astro.site)} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={new URL("/og.png", Astro.site)} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">{ui.skip}</a>
+    <header class="site-header">
+      <a class="brand" href={isEnglish ? "/en/" : "/"} aria-label={ui.homeLabel}>
+        <img src="/brand/canwu-mark.png" width="48" height="48" alt="" />
+        <span><b>参伍引擎</b><small>Canwu Engine</small></span>
+      </a>
+      <nav aria-label={ui.navLabel}>
+        {navItems.map((item) => (
+          <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>
+        ))}
+        <a class="language-switch" href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
+        <a class="nav-github" href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+      </nav>
+      <details class="mobile-menu">
+        <summary>{ui.menu}</summary>
+        <div>
+          {navItems.map((item) => <a href={item.href}>{item.label}</a>)}
+          <a href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
+          <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+        </div>
+      </details>
+    </header>
+    <main id="content"><slot /></main>
+    <footer class="site-footer">
+      <div>
+        <p class="footer-mark"><span>参伍</span> {ui.footerLine}</p>
+        <p>{ui.footerSub}</p>
+      </div>
+      <div class="footer-links">
+        <a href={`${prefix}/#engine` || "/#engine"}>{ui.engine}</a>
+        <a href={`${prefix}/showcase/`}>{ui.showcases}</a>
+        <a href={`${prefix}/credits/`}>{ui.credits}</a>
+        <a href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
+        <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+      </div>
+    </footer>
+  </body>
+</html>
