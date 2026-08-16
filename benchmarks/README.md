@@ -683,3 +683,26 @@ on a sub-0.1-ms case. These are treated as local timing noise. The milestone
 makes no runtime-performance claim; it gives atomic settlement and its
 visibility/allocation rules a dedicated dependency surface while preserving
 the sequential reference path and exact evidence contract.
+
+## Ingress-module extraction comparison
+
+The behavior-preserving ingress extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-ingress-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-ingress-module-allocations.json) reports,
+using the settlement-module milestone as its before baseline. It moves command
+submission/admission, request idempotency, revision guards, rejection evidence,
+canonical ingress enqueueing, and due-queue driving into the existing
+`canwu-sim/src/ingress.rs` model module. Settlement, replay, persistence, and
+command execution keep the same crate-internal admission surface.
+`canwu-sim/src/lib.rs` falls from 11,286 to 10,544 nonblank source lines, while
+the combined ingress model/runtime module contains 876 nonblank source lines.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by -0.7%, accepted commands -4.5%,
+rejected commands +4.3%, empty boundaries -4.6%, populated boundaries -2.6%,
+snapshot creation -2.8%, load validation -2.0%, and exact replay -1.1%. These
+are treated as local timing noise. The milestone makes no runtime-performance
+claim; it gives authoritative ingress ordering and command-admission evidence a
+dedicated dependency surface while preserving idempotency, revision, rejection,
+and replay contracts.
