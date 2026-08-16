@@ -273,10 +273,13 @@ through `advance_canonical` or `step_canonical`; plugin packets use
 `schedule_calendar_boundary`. Accepted and expected-rejected attempts are
 persisted, hashed, admitted at a boundary, restored by save/load, and regenerated
 by exact replay. Exact retries return the original outcome without new mutation;
-request-ID collisions are fail-closed and stale revision/time pairs retain the
-committed revision. The revision advances on every accepted command or published
-settlement boundary, while expected simulation time detects clock and scheduled
-work advancement. Declared external commands require both guards. Live requests,
+request-ID collisions are fail-closed without creating evidence. The persisted
+authoritative revision advances exactly once for every accepted command,
+persisted expected rejection, and published settlement boundary. Failed
+transactions and exact retries do not advance it. Bare clock movement, queued but
+unadmitted ingress, and plugin setup do not create a revision transaction;
+expected simulation time independently detects clock and scheduled-work
+advancement. Declared external commands require both guards. Live requests,
 compatibility-only legacy-direct calls, and frozen replay inputs remain distinct;
 only exact replay can consume `FrozenReplay`, and declared read-only runs reject
 newly authored plugin ingress. Plugin boundary systems can return
@@ -330,9 +333,13 @@ identical. Use
 engine and snapshot versions, root seed, run manifest, run configuration,
 plugin descriptors, the plugin-registration lifecycle state, accepted commands,
 accepted/rejected command attempts, boundaries, final time, and final checkpoint
-hash before executing anything. The older `replay*` helpers
-reconstruct caller-supplied fixtures but do not claim recorded-environment
-verification. Automatic package discovery remains later work. New plugin
+hash plus the final authoritative revision before executing anything. The older
+`replay*` helpers reconstruct caller-supplied fixtures but do not claim
+recorded-environment verification. Automatic package discovery remains later
+work. Revision-format-0 snapshots can migrate and continue, but retain
+migration-only replay provenance because snapshot-only migration cannot rebuild
+every historical boundary state commitment. They therefore cannot export a
+journal that claims current exact replay. New plugin
 registration closes after the first recorded tracked attempt (accepted or
 expected-rejected), successful compatibility command, time advance, or phased
 settlement; exact snapshot rehydration remains allowed after that point.

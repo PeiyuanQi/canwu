@@ -42,7 +42,7 @@ deterministic state hash and a chained boundary hash. Snapshots also persist a
 hashed run manifest for scenario, rules, content, localization contracts, run
 configuration, and source identities. Additive format-4 run-policy fields use
 explicit `CompatibilityV1` or `LegacyUnspecified` provenance when older data did
-not record the six CM policy dimensions. Earlier format-4 snapshots with a
+not record the six run-policy dimensions. Earlier format-4 snapshots with a
 custom run-configuration artifact hydrate as `ManifestOnlyV1`: their exact
 manifest identity and replay remain valid, but the engine does not invent
 policy dimensions that were never serialized. Pre-policy format-4 replay
@@ -77,6 +77,29 @@ simulation-duration domain. Exact replay re-enqueues external records but
 requires plugin systems to reproduce boundary-generated records. Declared read-only runs reject newly authored live
 plugin ingress. Format 2 and 3 inputs reject all of these fields rather than
 interpreting canonical-ingress semantics under a legacy identity.
+
+Format 4 also has a separately versioned authoritative-revision sub-contract.
+Revision format 1 persists a monotonic value that advances exactly once for each
+accepted command, persisted expected rejection, or completed settlement
+boundary. Failed transactions, exact retries, request-ID collisions, bare clock
+movement, queued but unadmitted ingress, and plugin setup do not advance it;
+expected simulation time remains the independent guard for clock and scheduled
+work. The value is reconstructible as tracked command attempts plus boundaries,
+or as legacy-direct commands plus boundaries when no attempt journal exists.
+Checkpoint domain `canwu.checkpoint.v3` binds the revision format and value in
+addition to deterministic state, the boundary-chain head, and applicable run
+identity. The boundary-state hash deliberately remains revision-neutral.
+
+An earlier format-4 snapshot defaults to revision format 0. Loading first
+verifies its legacy checkpoint, translates command-attempt revisions and
+expected-revision guards without changing their stale/current relationship,
+refreshes the boundary-head state commitment and chained boundary hashes when
+needed, derives the final revision from committed evidence, and emits a current
+checkpoint. A format-0 replay journal does not carry a final revision commitment
+and is therefore not reinterpreted as exact replay. Its snapshot can migrate and
+continue, but retains migration-only replay provenance because snapshot-only
+migration cannot reconstruct every historical boundary state commitment. Saves
+created under revision format 1 export current exact-replay journals normally.
 
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,

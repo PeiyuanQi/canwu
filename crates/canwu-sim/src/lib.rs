@@ -65,6 +65,8 @@ use ingress::IngressQueueKey;
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+/// Version of the independently migrated authoritative revision commitment.
+pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -497,6 +499,11 @@ impl CommandEnvelope {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommandRequest {
     pub request_id: CommandRequestId,
+    /// Must equal the persisted authoritative revision at command admission.
+    ///
+    /// Accepted commands, persisted expected rejections, and completed
+    /// settlement boundaries advance the revision. Bare clock movement does
+    /// not, so declared external commands also carry `envelope.expected_time`.
     pub expected_revision: u64,
     pub envelope: CommandEnvelope,
 }
@@ -541,6 +548,7 @@ pub struct CommandReceipt {
     pub attempt_id: Option<CommandAttemptId>,
     pub command_id: CommandId,
     pub request_id: Option<CommandRequestId>,
+    /// Authoritative revision after the accepted command commits.
     pub revision: u64,
     pub accepted_at: SimTime,
     pub emitted_events: Vec<EventId>,
@@ -550,6 +558,8 @@ pub struct CommandReceipt {
 pub struct CommandRejection {
     pub attempt_id: Option<CommandAttemptId>,
     pub request_id: Option<CommandRequestId>,
+    /// Authoritative revision after persisted rejection evidence commits.
+    /// Non-persisted conflicts retain the already committed current revision.
     pub retained_revision: u64,
     pub rejected_at: SimTime,
     pub error: CanwuError,
@@ -573,6 +583,7 @@ pub enum CommandAttemptOutcome {
 pub struct CommandAttemptRecord {
     pub id: CommandAttemptId,
     pub at: SimTime,
+    /// Authoritative revision immediately before this attempt transaction.
     pub revision_before: u64,
     pub ingress: CommandIngress,
     pub request_id: Option<CommandRequestId>,
@@ -2653,6 +2664,16 @@ const fn one_u64() -> u64 {
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn is_one_u64(value: &u64) -> bool {
     *value == 1
 }
@@ -2662,14 +2683,6 @@ fn command_attempt_slice_is_empty(value: &&[CommandAttemptRecord]) -> bool {
 }
 
 fn command_attempt_id_slice_is_empty(value: &&[CommandAttemptId]) -> bool {
-    value.is_empty()
-}
-
-fn ingress_id_slice_is_empty(value: &&[IngressId]) -> bool {
-    value.is_empty()
-}
-
-fn ingress_generation_slice_is_empty(value: &&[BoundaryIngressGeneration]) -> bool {
     value.is_empty()
 }
 
@@ -2721,6 +2734,8 @@ struct RuntimeState {
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
+    state_revision: u64,
+    replay_revision_format_version: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -2735,6 +2750,15 @@ pub struct SimulationSnapshot {
     pub run_configuration: Option<RunConfigurationSnapshot>,
     #[serde(default)]
     pub checkpoint_hash: String,
+    #[serde(default)]
+    /// Version of the revision migration and checkpoint sub-contract.
+    pub revision_format_version: u32,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    /// Monotonic revision after all persisted attempt and boundary transactions.
+    pub state_revision: u64,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    /// Revision-evidence format available to exact replay; zero is migration-only.
+    pub replay_revision_format_version: u32,
     pub initial_time: SimTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_scenario: Option<Scenario>,
@@ -2796,6 +2820,10 @@ pub struct ReplayJournal {
     pub boundaries: Vec<BoundaryRecord>,
     pub final_time: SimTime,
     pub checkpoint_hash: String,
+    /// Revision-evidence format verified by this exact replay journal.
+    pub revision_format_version: u32,
+    /// Final persisted authoritative revision after replay.
+    pub final_revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -2817,6 +2845,10 @@ struct ReplayJournalWire {
     boundaries: Vec<BoundaryRecord>,
     final_time: SimTime,
     checkpoint_hash: String,
+    #[serde(default)]
+    revision_format_version: u32,
+    #[serde(default)]
+    final_revision: u64,
 }
 
 impl<'de> Deserialize<'de> for ReplayJournal {
@@ -2844,6 +2876,8 @@ impl<'de> Deserialize<'de> for ReplayJournal {
             boundaries: wire.boundaries,
             final_time: wire.final_time,
             checkpoint_hash: wire.checkpoint_hash,
+            revision_format_version: wire.revision_format_version,
+            final_revision: wire.final_revision,
         })
     }
 }
@@ -3055,6 +3089,8 @@ impl Simulation {
                 next_random_draw_id: 1,
                 next_schedule_sequence: 1,
                 next_correlation_id: 1,
+                state_revision: 0,
+                replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
             },
             schema,
             plugins,
@@ -3177,41 +3213,64 @@ impl Simulation {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
+        if journal.revision_format_version != STATE_REVISION_FORMAT_VERSION {
+            return Err(CanwuError::new(
+                ErrorCode::LegacyReplayUnavailable,
+                "legacy revision histories can continue after snapshot migration but cannot claim exact replay because historical state commitments cannot be reconstructed without their original runtime",
+            ));
+        }
+        let expected_final_revision = authoritative_revision_count(
+            journal.commands.len(),
+            journal.command_attempts.len(),
+            journal.boundaries.len(),
+        )?;
+        if journal.final_revision != expected_final_revision {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "replay journal final revision is inconsistent with its committed evidence",
+            ));
+        }
+        let normalized = journal;
         if matches!(journal.run_manifest, RunManifest::MigratedLegacy { .. }) {
             return Err(CanwuError::new(
                 ErrorCode::LegacyReplayUnavailable,
                 "legacy checkpoints can continue after migration but lack enough recorded identity for exact replay",
             ));
         }
-        manifest::validate(&journal.run_manifest, Some(&scenario), false)?;
-        manifest::validate_run_configuration(&journal.run_manifest, &journal.run_configuration)?;
-        if journal.engine_version != ENGINE_VERSION
-            || journal.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
-            || !is_canonical_hash(&journal.run_manifest_hash)
-            || manifest::hash(&journal.run_manifest)? != journal.run_manifest_hash
-            || !is_canonical_hash(&journal.checkpoint_hash)
+        manifest::validate(&normalized.run_manifest, Some(&scenario), false)?;
+        manifest::validate_run_configuration(
+            &normalized.run_manifest,
+            &normalized.run_configuration,
+        )?;
+        if normalized.engine_version != ENGINE_VERSION
+            || normalized.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
+            || !is_canonical_hash(&normalized.run_manifest_hash)
+            || manifest::hash(&normalized.run_manifest)? != normalized.run_manifest_hash
+            || !is_canonical_hash(&normalized.checkpoint_hash)
         {
             return Err(CanwuError::new(
                 ErrorCode::ReplayEnvironmentMismatch,
                 "replay journal engine, format, or run identity does not match this runtime",
             ));
         }
-        PluginRegistry::from_descriptors(journal.plugin_descriptors.clone()).map_err(|error| {
-            CanwuError::new(
-                ErrorCode::ReplayEnvironmentMismatch,
-                format!("replay journal plugin manifest is invalid: {error}"),
-            )
-        })?;
+        PluginRegistry::from_descriptors(normalized.plugin_descriptors.clone()).map_err(
+            |error| {
+                CanwuError::new(
+                    ErrorCode::ReplayEnvironmentMismatch,
+                    format!("replay journal plugin manifest is invalid: {error}"),
+                )
+            },
+        )?;
 
         let simulation = Self::new_with_configuration_snapshot(
-            journal.root_seed,
+            normalized.root_seed,
             scenario,
-            journal.run_manifest.clone(),
-            journal.run_configuration.clone(),
+            normalized.run_manifest.clone(),
+            normalized.run_configuration.clone(),
         )?;
         let simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
-        if actual_descriptors != journal.plugin_descriptors {
+        if actual_descriptors != normalized.plugin_descriptors {
             return Err(CanwuError::new(
                 ErrorCode::ReplayEnvironmentMismatch,
                 "active plugin identities and contracts do not match the replay journal",
@@ -3220,22 +3279,28 @@ impl Simulation {
 
         let mut simulation = Self::replay_records(
             simulation,
-            &journal.commands,
-            &journal.command_attempts,
-            &journal.ingress,
-            &journal.boundaries,
-            journal.final_time,
+            &normalized.commands,
+            &normalized.command_attempts,
+            &normalized.ingress,
+            &normalized.boundaries,
+            normalized.final_time,
         )?;
-        if journal.plugin_registration_closed && !simulation.state.plugin_registration_closed {
+        if normalized.plugin_registration_closed && !simulation.state.plugin_registration_closed {
             simulation.advance(SimDuration::ZERO)?;
         }
-        if simulation.state.plugin_registration_closed != journal.plugin_registration_closed {
+        if simulation.state.plugin_registration_closed != normalized.plugin_registration_closed {
             return Err(CanwuError::new(
                 ErrorCode::ReplayMismatch,
                 "replayed plugin-registration lifecycle does not match the recorded journal",
             ));
         }
-        if simulation.checkpoint_hash() != journal.checkpoint_hash {
+        if simulation.revision() != normalized.final_revision {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "replayed final state revision does not match the recorded journal",
+            ));
+        }
+        if simulation.checkpoint_hash() != normalized.checkpoint_hash {
             return Err(CanwuError::new(
                 ErrorCode::ReplayMismatch,
                 "replayed final checkpoint does not match the recorded journal",
@@ -3540,8 +3605,15 @@ impl Simulation {
     }
 
     #[must_use]
+    /// Returns the persisted authoritative transaction revision.
+    ///
+    /// Accepted commands, persisted expected rejections, and completed
+    /// settlement boundaries each advance it exactly once. Failed work, exact
+    /// retries, bare clock movement, queued but unadmitted ingress, and plugin
+    /// setup do not advance it; use the expected-time guard with external
+    /// commands to detect clock and scheduled-work advancement.
     pub const fn revision(&self) -> u64 {
-        self.state.next_correlation_id.saturating_sub(1)
+        self.state.state_revision
     }
 
     #[must_use]
@@ -3650,6 +3722,8 @@ impl Simulation {
             boundaries: self.state.boundaries.clone(),
             final_time: self.state.now,
             checkpoint_hash: self.state.checkpoint_hash.clone(),
+            revision_format_version: self.state.replay_revision_format_version,
+            final_revision: self.state.state_revision,
         }
     }
 
@@ -4039,6 +4113,13 @@ impl Simulation {
                 outcome: CommandAttemptOutcome::Accepted { command_id },
             });
         }
+        let revision = match self.advance_state_revision() {
+            Ok(revision) => revision,
+            Err(error) => {
+                self.state = transaction_start;
+                return Err(error);
+            }
+        };
         if let Err(error) = self.refresh_checkpoint_hash() {
             self.state = transaction_start;
             return Err(error);
@@ -4049,7 +4130,7 @@ impl Simulation {
                 attempt_id: record_attempt.then_some(attempt_id),
                 command_id,
                 request_id: admission.request_id,
-                revision: admission.revision_before + 1,
+                revision,
                 accepted_at: self.state.now,
                 emitted_events,
             },
@@ -4144,7 +4225,12 @@ impl Simulation {
                 rejection: CommandRejection {
                     attempt_id: Some(attempt.id),
                     request_id: Some(request_id),
-                    retained_revision: attempt.revision_before,
+                    retained_revision: attempt.revision_before.checked_add(1).ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidSnapshot,
+                            "cached command attempt revision is exhausted",
+                        )
+                    })?,
                     rejected_at: attempt.at,
                     error: error.clone(),
                 },
@@ -4182,6 +4268,13 @@ impl Simulation {
                 error: error.clone(),
             },
         });
+        let revision = match self.advance_state_revision() {
+            Ok(revision) => revision,
+            Err(revision_error) => {
+                self.state = transaction_start;
+                return Err(revision_error);
+            }
+        };
         if let Err(hash_error) = self.refresh_checkpoint_hash() {
             self.state = transaction_start;
             return Err(hash_error);
@@ -4190,7 +4283,7 @@ impl Simulation {
             rejection: CommandRejection {
                 attempt_id: Some(attempt_id),
                 request_id: admission.request_id,
-                retained_revision: admission.revision_before,
+                retained_revision: revision,
                 rejected_at: self.state.now,
                 error,
             },
@@ -4782,6 +4875,7 @@ impl Simulation {
         record.hash = compute_boundary_hash(&record)?;
         let boundary_hash = record.hash.clone();
         self.state.boundaries.push(record);
+        self.advance_state_revision()?;
         self.refresh_checkpoint_hash()?;
         Ok(BoundaryReceipt {
             boundary_id,
@@ -4864,8 +4958,22 @@ impl Simulation {
             self.boundary_head_hash(),
             &self.state.run_manifest_hash,
             &self.state.run_configuration,
+            STATE_REVISION_FORMAT_VERSION,
+            self.state.state_revision,
+            self.state.replay_revision_format_version,
         )?;
         Ok(())
+    }
+
+    fn advance_state_revision(&mut self) -> Result<u64, CanwuError> {
+        let Some(next) = self.state.state_revision.checked_add(1) else {
+            return Err(CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "authoritative state revision space is exhausted",
+            ));
+        };
+        self.state.state_revision = next;
+        Ok(next)
     }
 
     #[must_use]
@@ -4877,6 +4985,9 @@ impl Simulation {
             run_manifest_hash: self.state.run_manifest_hash.clone(),
             run_configuration: Some(self.state.run_configuration.clone()),
             checkpoint_hash: self.state.checkpoint_hash.clone(),
+            revision_format_version: STATE_REVISION_FORMAT_VERSION,
+            state_revision: self.state.state_revision,
+            replay_revision_format_version: self.state.replay_revision_format_version,
             initial_time: self.state.initial_time,
             initial_scenario: self.bound_initial_scenario().cloned(),
             now: self.state.now,
@@ -5054,6 +5165,8 @@ impl Simulation {
                 next_random_draw_id: snapshot.next_random_draw_id,
                 next_schedule_sequence: snapshot.next_schedule_sequence,
                 next_correlation_id: snapshot.next_correlation_id,
+                state_revision: snapshot.state_revision,
+                replay_revision_format_version: snapshot.replay_revision_format_version,
             },
             schema: snapshot.schema,
             plugins,
@@ -7424,6 +7537,12 @@ fn validate_snapshot(
     if snapshot.engine_version.trim().is_empty() {
         return invalid_snapshot("snapshot engine version cannot be empty");
     }
+    if snapshot.revision_format_version != STATE_REVISION_FORMAT_VERSION {
+        return invalid_snapshot("snapshot state revision format is not current");
+    }
+    if snapshot.replay_revision_format_version > STATE_REVISION_FORMAT_VERSION {
+        return invalid_snapshot("snapshot exact-replay revision format is unsupported");
+    }
     let Some(run_manifest) = &snapshot.run_manifest else {
         return Err(CanwuError::new(
             ErrorCode::InvalidRunManifest,
@@ -7555,23 +7674,8 @@ fn validate_snapshot(
         initial_domain_records.as_ref(),
     )?;
     let max_ingress_id = validate_ingress_records(snapshot, plugins, &domain_history)?;
-    let boundary_count = u64::try_from(snapshot.boundaries.len())
-        .map_err(|_| invalid_snapshot_error("boundary count exceeds the revision range"))?;
-    let mut boundaries_before_attempt = vec![boundary_count; snapshot.command_attempts.len()];
-    for (boundary_index, boundary) in snapshot.boundaries.iter().enumerate() {
-        let prior_boundaries = u64::try_from(boundary_index)
-            .map_err(|_| invalid_snapshot_error("boundary index exceeds the revision range"))?;
-        for attempt_id in &boundary.admitted_attempts {
-            let attempt_index =
-                usize::try_from(attempt_id.get().saturating_sub(1)).map_err(|_| {
-                    invalid_snapshot_error("boundary attempt ID exceeds the journal index range")
-                })?;
-            let Some(value) = boundaries_before_attempt.get_mut(attempt_index) else {
-                return invalid_snapshot("boundary admits an unknown command attempt");
-            };
-            *value = prior_boundaries;
-        }
-    }
+    let boundaries_before_attempt =
+        boundaries_before_attempts(snapshot.command_attempts.len(), &snapshot.boundaries)?;
     let mut request_ids = BTreeSet::new();
     let mut accepted_attempts = BTreeMap::new();
     let mut command_boundary_counts = BTreeMap::new();
@@ -7584,7 +7688,8 @@ fn validate_snapshot(
             .ok_or_else(|| {
                 invalid_snapshot_error("command attempt index exceeds identifier space")
             })?;
-        let expected_revision = accepted_command_count
+        let expected_revision = u64::try_from(index)
+            .map_err(|_| invalid_snapshot_error("command attempt index exceeds revision space"))?
             .checked_add(boundaries_before_attempt[index])
             .ok_or_else(|| invalid_snapshot_error("command revision space is exhausted"))?;
         if attempt.id.get() != expected_id
@@ -7840,6 +7945,9 @@ fn validate_snapshot(
             .map(|record| record.hash.as_str()),
         &snapshot.run_manifest_hash,
         run_configuration,
+        snapshot.revision_format_version,
+        snapshot.state_revision,
+        snapshot.replay_revision_format_version,
     )?;
     if !is_canonical_hash(&snapshot.checkpoint_hash)
         || expected_checkpoint_hash != snapshot.checkpoint_hash
@@ -8102,6 +8210,16 @@ fn validate_snapshot(
     )?;
     if max_correlation_id > authoritative_commit_count {
         return invalid_snapshot("causal evidence references an uncommitted correlation");
+    }
+    let expected_state_revision = authoritative_revision_count(
+        snapshot.commands.len(),
+        snapshot.command_attempts.len(),
+        snapshot.boundaries.len(),
+    )?;
+    if snapshot.state_revision != expected_state_revision {
+        return invalid_snapshot(
+            "persisted state revision does not match committed command, rejection, and boundary evidence",
+        );
     }
     Ok(())
 }
@@ -10232,6 +10350,7 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
                 return invalid_snapshot("format 4 snapshots cannot contain the legacy global RNG");
             }
             hydrate_snapshot_run_configuration(&mut snapshot)?;
+            migrate_snapshot_revision(&mut snapshot)?;
             Ok(snapshot)
         }
         2 => {
@@ -10271,8 +10390,314 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
     }
 }
 
+fn migrate_snapshot_revision(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
+    match snapshot.revision_format_version {
+        STATE_REVISION_FORMAT_VERSION => Ok(()),
+        0 => {
+            if snapshot.state_revision != 0 || snapshot.replay_revision_format_version != 0 {
+                return invalid_snapshot(
+                    "legacy revision snapshots cannot contain current revision or replay provenance",
+                );
+            }
+            let legacy_checkpoint = snapshot_checkpoint_hash(snapshot)?;
+            if !is_canonical_hash(&snapshot.checkpoint_hash)
+                || legacy_checkpoint != snapshot.checkpoint_hash
+            {
+                return invalid_snapshot(
+                    "legacy checkpoint hash does not bind the pre-migration state",
+                );
+            }
+            validate_legacy_boundary_hash_chain(&snapshot.boundaries)?;
+            migrate_command_attempt_revisions(
+                &mut snapshot.command_attempts,
+                &snapshot.boundaries,
+            )?;
+            migrate_ingress_command_revisions(
+                &mut snapshot.ingress,
+                &snapshot.command_attempts,
+                &snapshot.boundaries,
+            )?;
+            if snapshot_is_at_boundary_head(snapshot) {
+                let migrated_state_hash = snapshot_state_hash(snapshot)?;
+                snapshot
+                    .boundaries
+                    .last_mut()
+                    .expect("boundary-head snapshots have a final boundary")
+                    .state_hash = Some(migrated_state_hash);
+            }
+            rehash_snapshot_boundaries(snapshot)?;
+            snapshot.state_revision = authoritative_revision_count(
+                snapshot.commands.len(),
+                snapshot.command_attempts.len(),
+                snapshot.boundaries.len(),
+            )?;
+            snapshot.revision_format_version = STATE_REVISION_FORMAT_VERSION;
+            snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)?;
+            Ok(())
+        }
+        version => Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "state revision format {version} is unsupported; this engine reads legacy format 0 and current format {STATE_REVISION_FORMAT_VERSION}"
+            ),
+        )),
+    }
+}
+
+fn rehash_snapshot_boundaries(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
+    let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
+    for boundary in &mut snapshot.boundaries {
+        boundary.previous_hash.clone_from(&previous_hash);
+        boundary.hash = compute_boundary_hash(boundary)?;
+        previous_hash.clone_from(&boundary.hash);
+    }
+    Ok(())
+}
+
+fn validate_legacy_boundary_hash_chain(boundaries: &[BoundaryRecord]) -> Result<(), CanwuError> {
+    let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
+    for boundary in boundaries {
+        if boundary.previous_hash != previous_hash
+            || !is_canonical_hash(&boundary.hash)
+            || boundary
+                .state_hash
+                .as_deref()
+                .is_some_and(|hash| !is_canonical_hash(hash))
+            || compute_boundary_hash(boundary)? != boundary.hash
+        {
+            return invalid_snapshot("legacy boundary hash chain is inconsistent");
+        }
+        previous_hash.clone_from(&boundary.hash);
+    }
+    Ok(())
+}
+
+fn migrate_ingress_command_revisions(
+    ingress: &mut [IngressRecord],
+    attempts: &[CommandAttemptRecord],
+    boundaries: &[BoundaryRecord],
+) -> Result<(), CanwuError> {
+    let mut attempts_by_request = BTreeMap::new();
+    for attempt in attempts {
+        let Some(request_id) = attempt.request_id else {
+            continue;
+        };
+        let expected_revision = attempt.expected_revision.ok_or_else(|| {
+            invalid_snapshot_error("tracked command attempt is missing its revision guard")
+        })?;
+        if attempts_by_request
+            .insert(request_id, expected_revision)
+            .is_some()
+        {
+            return invalid_snapshot("command request ID is reused across attempt evidence");
+        }
+    }
+    let (legacy_revision_by_cut, migrated_revision_by_cut) =
+        revision_values_after_boundary_cuts(attempts, boundaries)?;
+    let admitted_ingress: BTreeSet<_> = boundaries
+        .iter()
+        .flat_map(|boundary| boundary.admitted_ingress.iter().copied())
+        .collect();
+    for record in ingress {
+        let IngressPayload::Command { request } = &mut record.payload else {
+            continue;
+        };
+        if admitted_ingress.contains(&record.id) {
+            request.expected_revision =
+                *attempts_by_request
+                    .get(&request.request_id)
+                    .ok_or_else(|| {
+                        invalid_snapshot_error(
+                            "admitted command ingress is missing its deterministic attempt",
+                        )
+                    })?;
+            continue;
+        }
+        let issue_cut = usize::try_from(record.eligible_boundary_count).map_err(|_| {
+            invalid_snapshot_error("command ingress issue cut exceeds the platform index range")
+        })?;
+        let legacy_revision = *legacy_revision_by_cut.get(issue_cut).ok_or_else(|| {
+            invalid_snapshot_error("command ingress issue cut exceeds boundary history")
+        })?;
+        let migrated_revision = migrated_revision_by_cut[issue_cut];
+        request.expected_revision = translate_revision_guard(
+            request.expected_revision,
+            legacy_revision,
+            migrated_revision,
+        )?;
+    }
+    Ok(())
+}
+
+fn revision_values_after_boundary_cuts(
+    attempts: &[CommandAttemptRecord],
+    boundaries: &[BoundaryRecord],
+) -> Result<(Vec<u64>, Vec<u64>), CanwuError> {
+    let mut legacy = vec![0];
+    let mut migrated = vec![0];
+    let mut accepted_attempts = 0_u64;
+    let mut admitted_attempts = 0_u64;
+    for (boundary_index, boundary) in boundaries.iter().enumerate() {
+        for attempt_id in &boundary.admitted_attempts {
+            let attempt_index =
+                usize::try_from(attempt_id.get().saturating_sub(1)).map_err(|_| {
+                    invalid_snapshot_error("boundary attempt ID exceeds the journal index range")
+                })?;
+            let attempt = attempts.get(attempt_index).ok_or_else(|| {
+                invalid_snapshot_error("boundary admits an unknown command attempt")
+            })?;
+            admitted_attempts = admitted_attempts.checked_add(1).ok_or_else(|| {
+                invalid_snapshot_error("admitted attempt count exceeds revision space")
+            })?;
+            if matches!(attempt.outcome, CommandAttemptOutcome::Accepted { .. }) {
+                accepted_attempts = accepted_attempts.checked_add(1).ok_or_else(|| {
+                    invalid_snapshot_error("accepted attempt count exceeds revision space")
+                })?;
+            }
+        }
+        let completed_boundaries = u64::try_from(boundary_index)
+            .ok()
+            .and_then(|index| index.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("boundary count exceeds revision space"))?;
+        legacy.push(
+            accepted_attempts
+                .checked_add(completed_boundaries)
+                .ok_or_else(|| invalid_snapshot_error("legacy revision space is exhausted"))?,
+        );
+        migrated.push(
+            admitted_attempts
+                .checked_add(completed_boundaries)
+                .ok_or_else(|| invalid_snapshot_error("migrated revision space is exhausted"))?,
+        );
+    }
+    Ok((legacy, migrated))
+}
+
+fn migrate_command_attempt_revisions(
+    attempts: &mut [CommandAttemptRecord],
+    boundaries: &[BoundaryRecord],
+) -> Result<(), CanwuError> {
+    let boundaries_before = boundaries_before_attempts(attempts.len(), boundaries)?;
+    let mut accepted_commands = 0_u64;
+    for (index, attempt) in attempts.iter_mut().enumerate() {
+        let attempt_index = u64::try_from(index)
+            .map_err(|_| invalid_snapshot_error("command attempt index exceeds revision space"))?;
+        let legacy_revision = accepted_commands
+            .checked_add(boundaries_before[index])
+            .ok_or_else(|| invalid_snapshot_error("legacy command revision space is exhausted"))?;
+        let migrated_revision = attempt_index
+            .checked_add(boundaries_before[index])
+            .ok_or_else(|| invalid_snapshot_error("command revision space is exhausted"))?;
+        if attempt.revision_before != legacy_revision {
+            return invalid_snapshot("legacy command attempt revision is inconsistent");
+        }
+        if let Some(expected) = attempt.expected_revision {
+            attempt.expected_revision = Some(translate_revision_guard(
+                expected,
+                legacy_revision,
+                migrated_revision,
+            )?);
+        }
+        attempt.revision_before = migrated_revision;
+        match &mut attempt.outcome {
+            CommandAttemptOutcome::Accepted { .. } => {
+                if attempt
+                    .expected_revision
+                    .is_some_and(|expected| expected != migrated_revision)
+                {
+                    return invalid_snapshot(
+                        "legacy accepted attempt has a stale expected revision",
+                    );
+                }
+                accepted_commands = accepted_commands.checked_add(1).ok_or_else(|| {
+                    invalid_snapshot_error("accepted command count exceeds revision space")
+                })?;
+            }
+            CommandAttemptOutcome::Rejected { error }
+                if error.code == ErrorCode::SimulationRevisionConflict =>
+            {
+                let expected = attempt.expected_revision.ok_or_else(|| {
+                    invalid_snapshot_error("revision conflict is missing its expected revision")
+                })?;
+                error.message = format!(
+                    "command expected revision {expected}, but simulation is at revision {migrated_revision}"
+                );
+            }
+            CommandAttemptOutcome::Rejected { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn translate_revision_guard(
+    expected: u64,
+    legacy_revision: u64,
+    migrated_revision: u64,
+) -> Result<u64, CanwuError> {
+    if expected >= legacy_revision {
+        Ok(migrated_revision
+            .checked_add(expected - legacy_revision)
+            .unwrap_or(if migrated_revision == u64::MAX {
+                0
+            } else {
+                u64::MAX
+            }))
+    } else {
+        migrated_revision
+            .checked_sub(legacy_revision - expected)
+            .ok_or_else(|| invalid_snapshot_error("migrated expected revision underflowed"))
+    }
+}
+
+fn boundaries_before_attempts(
+    attempt_count: usize,
+    boundaries: &[BoundaryRecord],
+) -> Result<Vec<u64>, CanwuError> {
+    let boundary_count = u64::try_from(boundaries.len())
+        .map_err(|_| invalid_snapshot_error("boundary count exceeds revision space"))?;
+    let mut values = vec![boundary_count; attempt_count];
+    for (boundary_index, boundary) in boundaries.iter().enumerate() {
+        let prior_boundaries = u64::try_from(boundary_index)
+            .map_err(|_| invalid_snapshot_error("boundary index exceeds revision space"))?;
+        for attempt_id in &boundary.admitted_attempts {
+            let attempt_index =
+                usize::try_from(attempt_id.get().saturating_sub(1)).map_err(|_| {
+                    invalid_snapshot_error("boundary attempt ID exceeds the journal index range")
+                })?;
+            let Some(value) = values.get_mut(attempt_index) else {
+                return invalid_snapshot("boundary admits an unknown command attempt");
+            };
+            *value = prior_boundaries;
+        }
+    }
+    Ok(values)
+}
+
+fn authoritative_revision_count(
+    command_count: usize,
+    attempt_count: usize,
+    boundary_count: usize,
+) -> Result<u64, CanwuError> {
+    let command_transactions = if attempt_count == 0 {
+        command_count
+    } else {
+        attempt_count
+    };
+    u64::try_from(command_transactions)
+        .ok()
+        .and_then(|commands| {
+            u64::try_from(boundary_count)
+                .ok()
+                .and_then(|boundaries| commands.checked_add(boundaries))
+        })
+        .ok_or_else(|| invalid_snapshot_error("authoritative revision space is exhausted"))
+}
+
 fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
-    if snapshot.run_configuration.is_some()
+    if snapshot.revision_format_version != 0
+        || snapshot.state_revision != 0
+        || snapshot.replay_revision_format_version != 0
+        || snapshot.run_configuration.is_some()
         || snapshot.initial_scenario.is_some()
         || !snapshot.command_attempts.is_empty()
         || !snapshot.ingress.is_empty()
@@ -10419,6 +10844,12 @@ fn migrate_format_3_snapshot(
     snapshot.run_manifest_hash = manifest::hash(&run_manifest)?;
     snapshot.run_manifest = Some(run_manifest);
     snapshot.run_configuration = Some(RunConfigurationSnapshot::LegacyUnspecified);
+    snapshot.state_revision = authoritative_revision_count(
+        snapshot.commands.len(),
+        snapshot.command_attempts.len(),
+        snapshot.boundaries.len(),
+    )?;
+    snapshot.revision_format_version = STATE_REVISION_FORMAT_VERSION;
     ENGINE_VERSION.clone_into(&mut snapshot.engine_version);
     snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(&snapshot)?;
@@ -10504,6 +10935,17 @@ struct CheckpointHashMaterialV2<'a> {
     state_hash: &'a str,
     boundary_head: Option<&'a str>,
     run_manifest_hash: &'a str,
+}
+
+#[derive(Serialize)]
+struct CheckpointHashMaterialV3<'a> {
+    state_hash: &'a str,
+    boundary_head: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_manifest_hash: Option<&'a str>,
+    revision_format_version: u32,
+    state_revision: u64,
+    replay_revision_format_version: u32,
 }
 
 fn state_hash(material: &StateHashMaterial<'_>) -> Result<String, CanwuError> {
@@ -10602,7 +11044,35 @@ fn checkpoint_hash_for_configuration(
     boundary_head: Option<&str>,
     run_manifest_hash: &str,
     run_configuration: &RunConfigurationSnapshot,
+    revision_format_version: u32,
+    state_revision: u64,
+    replay_revision_format_version: u32,
 ) -> Result<String, CanwuError> {
+    if revision_format_version == STATE_REVISION_FORMAT_VERSION {
+        return canonical_hash(
+            "canwu.checkpoint.v3",
+            &CheckpointHashMaterialV3 {
+                state_hash,
+                boundary_head,
+                run_manifest_hash: matches!(
+                    run_configuration,
+                    RunConfigurationSnapshot::Declared(_)
+                )
+                .then_some(run_manifest_hash),
+                revision_format_version,
+                state_revision,
+                replay_revision_format_version,
+            },
+        );
+    }
+    if revision_format_version != 0 || state_revision != 0 || replay_revision_format_version != 0 {
+        return Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "state revision format {revision_format_version} is unsupported; this engine writes format {STATE_REVISION_FORMAT_VERSION}"
+            ),
+        ));
+    }
     if !matches!(run_configuration, RunConfigurationSnapshot::Declared(_)) {
         return checkpoint_hash(state_hash, boundary_head);
     }
@@ -10631,6 +11101,9 @@ fn snapshot_checkpoint_hash(snapshot: &SimulationSnapshot) -> Result<String, Can
                 "snapshot is missing its run configuration",
             )
         })?,
+        snapshot.revision_format_version,
+        snapshot.state_revision,
+        snapshot.replay_revision_format_version,
     )
 }
 
@@ -10689,10 +11162,10 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
         #[serde(skip_serializing_if = "command_attempt_id_slice_is_empty")]
         admitted_attempts: &'a [CommandAttemptId],
         admitted_commands: &'a [CommandId],
-        #[serde(skip_serializing_if = "ingress_id_slice_is_empty")]
-        admitted_ingress: &'a [IngressId],
-        #[serde(skip_serializing_if = "ingress_generation_slice_is_empty")]
-        generated_ingress: &'a [BoundaryIngressGeneration],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        admitted_ingress: Option<&'a [IngressId]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        generated_ingress: Option<&'a [BoundaryIngressGeneration]>,
         admitted_events: &'a [EventId],
         reservation_offers: &'a [ReservationOfferRecord],
         reservation_requests: &'a [ReservationRequestRecord],
@@ -10715,8 +11188,10 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
             cadences: &record.cadences,
             admitted_attempts: &record.admitted_attempts,
             admitted_commands: &record.admitted_commands,
-            admitted_ingress: &record.admitted_ingress,
-            generated_ingress: &record.generated_ingress,
+            admitted_ingress: (!record.admitted_ingress.is_empty())
+                .then_some(record.admitted_ingress.as_slice()),
+            generated_ingress: (!record.generated_ingress.is_empty())
+                .then_some(record.generated_ingress.as_slice()),
             admitted_events: &record.admitted_events,
             reservation_offers: &record.reservation_offers,
             reservation_requests: &record.reservation_requests,
@@ -12889,9 +13364,9 @@ mod tests {
             panic!("stale revisions must be rejected");
         };
         assert_eq!(rejection.attempt_id, Some(CommandAttemptId::new(2)));
-        assert_eq!(rejection.retained_revision, 1);
+        assert_eq!(rejection.retained_revision, 2);
         assert_eq!(rejection.error.code, ErrorCode::SimulationRevisionConflict);
-        assert_eq!(simulation.revision(), 1);
+        assert_eq!(simulation.revision(), 2);
         assert_eq!(simulation.command_log().len(), 1);
         assert_eq!(simulation.command_attempts().len(), 2);
 
@@ -13164,19 +13639,19 @@ mod tests {
             panic!("a pre-boundary revision must be stale");
         };
         assert_eq!(rejection.error.code, ErrorCode::SimulationRevisionConflict);
-        assert_eq!(rejection.retained_revision, 1);
+        assert_eq!(rejection.retained_revision, 2);
         let accepted = after_boundary
             .process_command(CommandRequest::new(
                 CommandRequestId::new(2),
-                1,
+                2,
                 command_at(SimTime::EPOCH),
             ))
             .expect("current revision should be accepted");
         let CommandOutcome::Accepted { receipt } = accepted else {
             panic!("current revision and time should admit the command");
         };
-        assert_eq!(receipt.revision, 2);
-        assert_eq!(after_boundary.revision(), 2);
+        assert_eq!(receipt.revision, 3);
+        assert_eq!(after_boundary.revision(), 3);
         let boundary_journal = after_boundary.replay_journal();
         let boundary_replay =
             Simulation::replay_from_journal(scenario.clone(), &[], &boundary_journal)
@@ -13201,22 +13676,341 @@ mod tests {
             panic!("a pre-advance simulation time must be stale");
         };
         assert_eq!(rejection.error.code, ErrorCode::SimulationTimeConflict);
-        assert_eq!(rejection.retained_revision, 0);
+        assert_eq!(rejection.retained_revision, 1);
         let accepted = after_clock
             .process_command(CommandRequest::new(
                 CommandRequestId::new(2),
-                0,
+                1,
                 command_at(after_clock.time()),
             ))
             .expect("current revision and time should be accepted");
         let CommandOutcome::Accepted { receipt } = accepted else {
             panic!("current clock guard should admit the command");
         };
-        assert_eq!(receipt.revision, 1);
+        assert_eq!(receipt.revision, 2);
         let clock_journal = after_clock.replay_journal();
         let clock_replay = Simulation::replay_from_journal(scenario, &[], &clock_journal)
             .expect("clock-relative time evidence should replay exactly");
         assert_eq!(after_clock.snapshot(), clock_replay.snapshot());
+    }
+
+    #[test]
+    fn authoritative_revision_is_persisted_migrated_and_rollback_safe() {
+        let (scenario, ids) = demo_scenario();
+        let invalid_morale = |morale| {
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            )
+        };
+        let first_request = CommandRequest::new(CommandRequestId::new(1), 0, invalid_morale(101));
+        let mut simulation =
+            Simulation::new(35, scenario.clone()).expect("compatibility run should load");
+
+        let first = simulation
+            .process_command(first_request.clone())
+            .expect("expected rejection should persist");
+        let CommandOutcome::Rejected { rejection } = &first else {
+            panic!("invalid morale must be rejected");
+        };
+        assert_eq!(rejection.retained_revision, 1);
+        assert_eq!(simulation.revision(), 1);
+
+        let after_first = simulation.snapshot();
+        assert_eq!(
+            simulation
+                .process_command(first_request)
+                .expect("an exact retry should return the recorded outcome"),
+            first
+        );
+        assert_eq!(simulation.snapshot(), after_first);
+
+        let second = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                1,
+                invalid_morale(102),
+            ))
+            .expect("a second expected rejection should persist");
+        let CommandOutcome::Rejected { rejection } = second else {
+            panic!("invalid morale must be rejected");
+        };
+        assert_eq!(rejection.retained_revision, 2);
+        assert_eq!(simulation.revision(), 2);
+
+        let before_conflict = simulation.snapshot();
+        let conflict = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                2,
+                invalid_morale(103),
+            ))
+            .expect("a request-ID collision should return a non-persisted rejection");
+        let CommandOutcome::Rejected { rejection } = conflict else {
+            panic!("a request-ID collision must not be accepted");
+        };
+        assert_eq!(rejection.attempt_id, None);
+        assert_eq!(rejection.error.code, ErrorCode::IdempotencyConflict);
+        assert_eq!(rejection.retained_revision, 2);
+        assert_eq!(simulation.snapshot(), before_conflict);
+
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("an empty boundary should publish");
+        assert_eq!(simulation.revision(), 3);
+        let first_boundary_snapshot = simulation.snapshot();
+        let third = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(3),
+                3,
+                invalid_morale(103),
+            ))
+            .expect("a post-boundary expected rejection should persist");
+        let CommandOutcome::Rejected { rejection } = third else {
+            panic!("invalid morale must be rejected");
+        };
+        assert_eq!(rejection.retained_revision, 4);
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH + SimDuration::hours(1)))
+            .expect("a second empty boundary should publish");
+        assert_eq!(simulation.revision(), 5);
+        let current_snapshot = simulation.snapshot();
+        let restored = Simulation::from_snapshot(current_snapshot.clone())
+            .expect("current revision evidence should survive load");
+        assert_eq!(restored.revision(), 5);
+        assert_eq!(restored.snapshot(), current_snapshot);
+        let replayed =
+            Simulation::replay_from_journal(scenario.clone(), &[], &simulation.replay_journal())
+                .expect("current revision evidence should replay exactly");
+        assert_eq!(replayed.snapshot(), current_snapshot);
+
+        let mut inconsistent_revision = current_snapshot.clone();
+        inconsistent_revision.state_revision = 6;
+        inconsistent_revision.checkpoint_hash = snapshot_checkpoint_hash(&inconsistent_revision)
+            .expect("the inconsistent revision fixture should remain coherently hashed");
+        let error = Simulation::from_snapshot(inconsistent_revision)
+            .err()
+            .expect("a rehashed revision without evidence must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("state revision"));
+
+        let mut legacy_first_boundary = first_boundary_snapshot;
+        legacy_first_boundary.command_attempts[1].revision_before = 0;
+        legacy_first_boundary.command_attempts[1].expected_revision = Some(0);
+        legacy_first_boundary.revision_format_version = 0;
+        legacy_first_boundary.state_revision = 0;
+        legacy_first_boundary.replay_revision_format_version = 0;
+        let legacy_first_boundary_state_hash = snapshot_state_hash(&legacy_first_boundary)
+            .expect("legacy first-boundary state should hash canonically");
+
+        let mut legacy_snapshot = current_snapshot.clone();
+        legacy_snapshot.command_attempts[1].revision_before = 0;
+        legacy_snapshot.command_attempts[1].expected_revision = Some(0);
+        legacy_snapshot.command_attempts[2].revision_before = 1;
+        legacy_snapshot.command_attempts[2].expected_revision = Some(u64::MAX);
+        legacy_snapshot.command_attempts[2].outcome = CommandAttemptOutcome::Rejected {
+            error: CanwuError::new(
+                ErrorCode::SimulationRevisionConflict,
+                format!(
+                    "command expected revision {}, but simulation is at revision 1",
+                    u64::MAX
+                ),
+            ),
+        };
+        legacy_snapshot.revision_format_version = 0;
+        legacy_snapshot.state_revision = 0;
+        legacy_snapshot.replay_revision_format_version = 0;
+        legacy_snapshot.boundaries[0].state_hash = Some(legacy_first_boundary_state_hash);
+        let legacy_state_hash = snapshot_state_hash(&legacy_snapshot)
+            .expect("legacy revision state should hash canonically");
+        legacy_snapshot
+            .boundaries
+            .last_mut()
+            .expect("the migration fixture has a boundary head")
+            .state_hash = Some(legacy_state_hash);
+        rehash_snapshot_boundaries(&mut legacy_snapshot)
+            .expect("legacy boundary evidence should hash canonically");
+        legacy_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&legacy_snapshot)
+            .expect("legacy checkpoint should bind its pre-migration state");
+        let mut legacy_value =
+            serde_json::to_value(legacy_snapshot).expect("legacy fixture should serialize");
+        let legacy_object = legacy_value
+            .as_object_mut()
+            .expect("legacy snapshot JSON should be an object");
+        legacy_object.remove("revision_format_version");
+        legacy_object.remove("state_revision");
+        legacy_object.remove("replay_revision_format_version");
+        let mut broken_chain = legacy_value.clone();
+        broken_chain["boundaries"][0]["correlation_id"] = Value::from(999_u64);
+        let error = Simulation::from_snapshot_json(
+            &serde_json::to_string(&broken_chain).expect("tampered legacy fixture should encode"),
+        )
+        .err()
+        .expect("migration must not launder a broken legacy boundary hash chain");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("legacy boundary hash chain"));
+
+        let migrated = Simulation::from_snapshot_json(
+            &serde_json::to_string(&legacy_value).expect("legacy fixture should encode"),
+        )
+        .expect("legacy command revisions should migrate deterministically");
+        assert_eq!(migrated.revision(), 5);
+        assert_eq!(migrated.command_attempts()[1].revision_before, 1);
+        assert_eq!(migrated.command_attempts()[2].revision_before, 3);
+        assert_eq!(
+            migrated.command_attempts()[2].expected_revision,
+            Some(u64::MAX)
+        );
+        assert_eq!(migrated.snapshot().replay_revision_format_version, 0);
+        let reloaded = Simulation::from_snapshot(migrated.snapshot())
+            .expect("migration-only replay provenance should survive save and load");
+        assert_eq!(reloaded.revision(), 5);
+
+        let migrated_journal = reloaded.replay_journal();
+        assert_eq!(migrated_journal.revision_format_version, 0);
+        let error = Simulation::replay_from_journal(scenario, &[], &migrated_journal)
+            .err()
+            .expect("revision-migrated histories must not claim current exact replay");
+        assert_eq!(error.code, ErrorCode::LegacyReplayUnavailable);
+
+        let mut continued = reloaded;
+        continued
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH + SimDuration::hours(2)))
+            .expect("a revision-migrated snapshot should remain continuable");
+        assert_eq!(continued.revision(), 6);
+    }
+
+    #[test]
+    fn legacy_revision_migration_rebases_admitted_and_pending_command_ingress() {
+        let (scenario, ids) = demo_scenario();
+        let invalid_request = |request_id, revision, morale| {
+            CommandRequest::new(
+                CommandRequestId::new(request_id),
+                revision,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale,
+                    },
+                ),
+            )
+        };
+        let mut simulation =
+            Simulation::new(47, scenario).expect("canonical migration run should load");
+        simulation
+            .enqueue_command(SimTime::EPOCH, 0, invalid_request(1, 0, 101))
+            .expect("first invalid command should queue");
+        simulation
+            .step_canonical()
+            .expect("first command boundary should settle")
+            .expect("first command should create a boundary");
+        assert_eq!(simulation.revision(), 2);
+        let after_first_boundary = simulation.snapshot();
+
+        let second_at = SimTime::EPOCH + SimDuration::hours(1);
+        simulation
+            .enqueue_command(second_at, 0, invalid_request(2, 2, 102))
+            .expect("second invalid command should queue");
+        simulation
+            .advance_canonical(SimDuration::hours(1))
+            .expect("second command boundary should settle");
+        assert_eq!(simulation.revision(), 4);
+        let after_second_boundary = simulation.snapshot();
+
+        let pending_at = second_at + SimDuration::hours(1);
+        simulation
+            .enqueue_command(pending_at, 0, invalid_request(3, 4, 103))
+            .expect("pending invalid command should queue");
+        let current_snapshot = simulation.snapshot();
+
+        let legacyize = |snapshot: &mut SimulationSnapshot| {
+            snapshot.revision_format_version = 0;
+            snapshot.state_revision = 0;
+            snapshot.replay_revision_format_version = 0;
+            for (index, attempt) in snapshot.command_attempts.iter_mut().enumerate() {
+                let legacy_revision = u64::try_from(index).expect("fixture index should fit");
+                attempt.revision_before = legacy_revision;
+                attempt.expected_revision = Some(legacy_revision);
+            }
+            for (index, record) in snapshot.ingress.iter_mut().enumerate() {
+                let IngressPayload::Command { request } = &mut record.payload else {
+                    continue;
+                };
+                request.expected_revision = u64::try_from(index).expect("fixture index should fit");
+            }
+        };
+
+        let mut legacy_first = after_first_boundary;
+        legacyize(&mut legacy_first);
+        let first_state_hash =
+            snapshot_state_hash(&legacy_first).expect("legacy first command boundary should hash");
+
+        let mut legacy_second = after_second_boundary;
+        legacyize(&mut legacy_second);
+        legacy_second.boundaries[0].state_hash = Some(first_state_hash.clone());
+        let second_state_hash = snapshot_state_hash(&legacy_second)
+            .expect("legacy second command boundary should hash");
+
+        let mut legacy_snapshot = current_snapshot;
+        legacyize(&mut legacy_snapshot);
+        legacy_snapshot.boundaries[0].state_hash = Some(first_state_hash);
+        legacy_snapshot.boundaries[1].state_hash = Some(second_state_hash);
+        rehash_snapshot_boundaries(&mut legacy_snapshot)
+            .expect("legacy ingress boundary chain should hash");
+        legacy_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&legacy_snapshot)
+            .expect("legacy ingress checkpoint should hash");
+        let mut legacy_value =
+            serde_json::to_value(legacy_snapshot).expect("legacy ingress fixture should serialize");
+        let legacy_object = legacy_value
+            .as_object_mut()
+            .expect("legacy ingress snapshot should be an object");
+        legacy_object.remove("revision_format_version");
+        legacy_object.remove("state_revision");
+        legacy_object.remove("replay_revision_format_version");
+
+        let mut migrated = Simulation::from_snapshot_json(
+            &serde_json::to_string(&legacy_value).expect("legacy ingress fixture should encode"),
+        )
+        .expect("admitted and pending command guards should migrate coherently");
+        assert_eq!(migrated.revision(), 4);
+        assert_eq!(
+            migrated
+                .command_attempts()
+                .iter()
+                .map(|attempt| (attempt.revision_before, attempt.expected_revision))
+                .collect::<Vec<_>>(),
+            vec![(0, Some(0)), (2, Some(2))]
+        );
+        assert_eq!(
+            migrated
+                .ingress_log()
+                .iter()
+                .filter_map(|record| match &record.payload {
+                    IngressPayload::Command { request } => Some(request.expected_revision),
+                    IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+                })
+                .collect::<Vec<_>>(),
+            vec![0, 2, 4]
+        );
+        assert_eq!(migrated.snapshot().replay_revision_format_version, 0);
+
+        migrated
+            .step_canonical()
+            .expect("migrated pending command should settle")
+            .expect("pending command should create a boundary");
+        assert_eq!(migrated.revision(), 6);
+        assert_eq!(
+            migrated
+                .command_attempts()
+                .last()
+                .expect("pending command should create an attempt")
+                .revision_before,
+            4
+        );
     }
 
     #[test]
@@ -13228,9 +14022,8 @@ mod tests {
             .register_plugin(&AuthorityPlugin)
             .expect("payload-validation plugin should register");
         let requests = [
-            CommandRequest::new(
+            (
                 CommandRequestId::new(1),
-                0,
                 CommandEnvelope::new(
                     Issuer::Actor(ids.commander),
                     Command::MoveArmy {
@@ -13239,9 +14032,8 @@ mod tests {
                     },
                 ),
             ),
-            CommandRequest::new(
+            (
                 CommandRequestId::new(2),
-                0,
                 CommandEnvelope::new(
                     Issuer::Debug,
                     Command::DebugSetArmyMorale {
@@ -13250,9 +14042,8 @@ mod tests {
                     },
                 ),
             ),
-            CommandRequest::new(
+            (
                 CommandRequestId::new(3),
-                0,
                 CommandEnvelope::new(
                     Issuer::Actor(ids.commander),
                     Command::Plugin {
@@ -13262,9 +14053,8 @@ mod tests {
                     },
                 ),
             ),
-            CommandRequest::new(
+            (
                 CommandRequestId::new(4),
-                0,
                 CommandEnvelope::new(
                     Issuer::Actor(ids.commander),
                     Command::Plugin {
@@ -13281,18 +14071,20 @@ mod tests {
             ErrorCode::InvalidPayload,
             ErrorCode::PluginCommandNotFound,
         ];
-        for (request, expected_code) in requests.into_iter().zip(expected) {
+        for ((request_id, envelope), expected_code) in requests.into_iter().zip(expected) {
+            let revision_before = simulation.revision();
             let outcome = simulation
-                .process_command(request)
+                .process_command(CommandRequest::new(request_id, revision_before, envelope))
                 .expect("expected domain rejection should be a command outcome");
             let CommandOutcome::Rejected { rejection } = outcome else {
                 panic!("invalid command fixture must be rejected");
             };
             assert_eq!(rejection.error.code, expected_code);
-            assert_eq!(rejection.retained_revision, 0);
+            assert_eq!(rejection.retained_revision, revision_before + 1);
         }
         assert!(simulation.command_log().is_empty());
         assert_eq!(simulation.command_attempts().len(), 4);
+        assert_eq!(simulation.revision(), 4);
 
         let snapshot = simulation.snapshot();
         let restored = Simulation::from_snapshot(snapshot.clone())
@@ -13584,6 +14376,9 @@ mod tests {
         legacy_object.remove("run_manifest_hash");
         legacy_object.remove("run_configuration");
         legacy_object.remove("checkpoint_hash");
+        legacy_object.remove("revision_format_version");
+        legacy_object.remove("state_revision");
+        legacy_object.remove("replay_revision_format_version");
         legacy_object.remove("boundaries");
         legacy_object.remove("next_boundary_id");
         legacy_object.remove("root_seed");
@@ -13686,6 +14481,9 @@ mod tests {
         malformed_object.remove("run_manifest_hash");
         malformed_object.remove("run_configuration");
         malformed_object.remove("checkpoint_hash");
+        malformed_object.remove("revision_format_version");
+        malformed_object.remove("state_revision");
+        malformed_object.remove("replay_revision_format_version");
         malformed_object.remove("root_seed");
         malformed_object.remove("random_streams");
         malformed_object.remove("random_draws");

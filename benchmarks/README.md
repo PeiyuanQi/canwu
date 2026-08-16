@@ -77,6 +77,39 @@ the exact feature and build-flag environment used for that pass.
 | 128 | 385 | 128 | 128 | 128 | 384 | 128 | 128 | 786,568 B | 239.522 ms | 3.638 ms | 335.063 ms |
 | 512 | 1,537 | 512 | 512 | 512 | 1,536 | 512 | 512 | 3,137,566 B | 4,030.170 ms | 17.663 ms | 5,758.903 ms |
 
+## State-revision milestone comparison
+
+The persisted authoritative-revision milestone was measured with the same
+machine, toolchain, profile, scales, warmup, and sample counts. Its separate
+[`elapsed`](baselines/2026-08-16-state-revision-elapsed.json) and
+[`allocation`](baselines/2026-08-16-state-revision-allocations.json) artifacts
+embed the exact source fingerprints used for the run.
+
+At scale 512, the semantic persistence change did not alter the allocation
+complexity of any individual operation. Accepted/rejected commands, empty and
+populated boundaries, snapshot creation/serialization/loading, and exact replay
+all retained their prior allocation-operation counts; end-to-end growth added
+8 operations and exact replay added 11. The snapshot grew by 835 bytes
+(3,137,566 to 3,138,401 bytes, about 0.03%) for the revision contract and
+checkpoint data.
+
+| Case at scale 512 | Baseline median | Revision median | Change | Baseline allocation ops | Revision allocation ops |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| History growth | 4,030.170 ms | 4,048.313 ms | +0.5% | 45,551,539 | 45,551,547 |
+| Accepted command | 3.095 ms | 3.113 ms | +0.6% | 32,032 | 32,032 |
+| Persisted rejection | 2.975 ms | 3.031 ms | +1.9% | 32,021 | 32,021 |
+| Empty boundary | 7.953 ms | 8.242 ms | +3.6% | 69,037 | 69,037 |
+| Populated boundary | 7.849 ms | 8.038 ms | +2.4% | 69,149 | 69,149 |
+| Snapshot creation | 0.695 ms | 0.701 ms | +0.9% | 25,208 | 25,208 |
+| Pretty serialization | 3.603 ms | 3.607 ms | +0.1% | 16 | 16 |
+| Load and validate | 17.663 ms | 17.313 ms | -2.0% | 97,442 | 97,442 |
+| Exact replay | 5,758.903 ms | 5,804.774 ms | +0.8% | 67,297,025 | 67,297,036 |
+
+Elapsed changes at this size remain within the noise expected from local wall
+time measurements. The unchanged allocation curves show that this correctness
+milestone neither resolves nor materially worsens the quadratic history-growth
+and replay bottlenecks established by the baseline.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,

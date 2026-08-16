@@ -30,9 +30,9 @@ pub use canwu_sim::{
     ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
     ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
     ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
-    SNAPSHOT_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationPlugin,
-    SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemContract, SystemDirective, TracePolicy,
+    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
+    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -158,6 +158,12 @@ impl Canwu {
     }
 
     #[must_use]
+    /// Returns the persisted authoritative transaction revision.
+    ///
+    /// Accepted commands, persisted expected rejections, and completed
+    /// settlement boundaries each advance it exactly once. Failed work, exact
+    /// retries, bare clock movement, queued but unadmitted ingress, and plugin
+    /// setup do not advance it; combine it with command expected-time guards.
     pub fn revision(&self) -> u64 {
         self.simulation.revision()
     }
