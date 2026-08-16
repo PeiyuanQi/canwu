@@ -56,3 +56,9 @@ The public [credits page](https://canwu.org/credits/) lists the principal
 frameworks, build tools, publishing services, visual sources, design references,
 licenses, and trademark notices. The site uses no analytics, tracking pixels,
 or third-party hosted fonts.
+
+## License
+
+The Canwu website source is licensed under the repository's
+[Apache License 2.0](LICENSE). Third-party website tools and assets remain under
+the licenses listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

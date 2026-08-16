@@ -40,15 +40,15 @@
         <div class="intro">
             <h1>Canwu Third-Party Notices</h1>
             <p>
-                These components are not covered by the Canwu License 1.0.
-                They remain under the licenses shown below.
+                These third-party components are not covered by Canwu's
+                Apache-2.0 license. They remain under the licenses shown below.
             </p>
         </div>
 
         <h2>License overview</h2>
         <ul class="licenses-overview">
             {{#each overview}}
-            <li><a href="#{{id}}">{{name}}</a> ({{count}})</li>
+            <li><a href="#{{id}}">{{name}}</a></li>
             {{/each}}
         </ul>
 
@@ -60,7 +60,9 @@
                 <h4>Used by:</h4>
                 <ul class="license-used-by">
                     {{#each used_by}}
+                    {{#if crate.source}}
                     <li><a href="{{#if crate.repository}} {{crate.repository}} {{else}} https://crates.io/crates/{{crate.name}} {{/if}}">{{crate.name}} {{crate.version}}</a></li>
+                    {{/if}}
                     {{/each}}
                 </ul>
                 <pre class="license-text">{{text}}</pre>

@@ -66,11 +66,9 @@ Canwu 支持 Windows、macOS 和 Linux。模拟相关 crate 不依赖具体平�
 
 ## 开发
 
-欢迎提交代码、错误报告、示例、文档改进和严谨的架构讨论。本地环境、常用
-命令、项目规则和 Contributor License Grant（贡献者许可授权）都写在
-[CONTRIBUTING.md](CONTRIBUTING.md) 中。外部贡献者提交拉取请求时必须接受
-其中的授权条款。编码智能体还必须遵循 [AGENTS.md](AGENTS.md) 以及更靠近
-目标目录的说明。
+欢迎提交代码、错误报告、示例、文档改进和严谨的架构讨论。本地环境和贡献
+条款见 [CONTRIBUTING.md](CONTRIBUTING.md)。编码智能体还必须遵循
+[AGENTS.md](AGENTS.md) 以及更靠近目标目录的说明。
 
 <details>
 <summary><strong>开发流程</strong></summary>
@@ -133,13 +131,11 @@ let events = canwu.advance(SimDuration::days(1))?;
 
 ## 许可证
 
-本项目按照 Canwu License 1.0 以源代码可用的方式发布。对于同一个产品系列，
-在适用的连续 12 个月内，产品收入不超过 1,000 万美元时，个人、社区、研究、
-教育、非营利和商业使用都不需要支付版税。只有超过该门槛的收入才按照累进
-边际费率计算版税。
+Canwu 是按照 [Apache License 2.0](LICENSE) 发布的开源软件。任何人都可以在
+开源或专有产品中使用、修改和分发 Canwu，无需支付版税或提交收入报告。分发
+时必须遵守 Apache 许可证，并保留适用的许可证和 [NOTICE](NOTICE) 材料。
 
-商业产品必须显示 [Canwu 官方标志](BRANDING.md)，并在产品或面向用户的材料
-中说明该产品使用了 Canwu。产品可以保持专有，独立的下游代码也不需要公开
-源代码。完整且具有约束力的条款以 [LICENSE](LICENSE) 为准。第三方依赖继续
+Apache 许可证不要求产品显示 Canwu 标志或公开鸣谢；如自愿使用项目标志，
+请遵循 [BRANDING.md](BRANDING.md) 中关于避免暗示背书的说明。第三方依赖继续
 使用各自的许可证，详见
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

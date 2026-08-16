@@ -1,7 +1,7 @@
 # Third-Party Licenses
 
-Canwu uses third-party Rust crates. Those crates are not covered by the Canwu
-License 1.0. Each dependency remains under the license chosen by its own
+Canwu uses third-party Rust crates. Those crates are not covered by Canwu's
+Apache-2.0 license. Each dependency remains under the license chosen by its own
 authors.
 
 This file is a readable inventory and release checklist. It does not replace
@@ -15,8 +15,8 @@ notices that the generator does not collect.
 
 ## Current dependency set
 
-The inventory was reviewed against the locked dependency graph on August 15,
-2026. `cargo metadata --locked --format-version 1` reports 312 external
+The inventory was reviewed against the locked dependency graph on August 16,
+2026. `cargo metadata --locked --format-version 1` reports 316 external
 packages, and every package in that graph declares license metadata.
 
 The complete versioned package list is recorded in `Cargo.lock`. The external
@@ -43,13 +43,14 @@ licenses. An `AND` means all listed terms apply to the relevant code or assets.
 
 | Package | Locked version | Declared license |
 | --- | ---: | --- |
+| `blake3` | 1.8.6 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | `eframe` | 0.32.3 | MIT OR Apache-2.0 |
 | `image` | 0.25.10 | MIT OR Apache-2.0 |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 |
 | `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
 
 The first-party `canwu-*` crates are not third-party dependencies. They use the
-root [Canwu License 1.0](LICENSE).
+root [Apache License 2.0](LICENSE).
 
 ## Bundled fonts
 
@@ -81,15 +82,16 @@ must:
 4. update this file when `Cargo.lock` or enabled features change the inventory;
 5. preserve additional upstream NOTICE files in
    `THIRD_PARTY_NOTICES_EXTRA.md`; and
-6. include `LICENSE`, this inventory, both notice files, and required branding
-   material in every compiled release package.
+6. include `LICENSE`, `NOTICE`, this inventory, and both third-party notice
+   files in every compiled release package; include branding assets only when
+   the release itself uses them.
 
 Platform-specific dependencies differ across Windows, macOS, and Linux. A
 release for one platform only needs notices for material included in that
 release, but the repository inventory should continue to cover the complete
 locked cross-platform graph.
 
-`cargo-about` 0.8.4 warns that the first-party Canwu crates have no SPDX
-`license` field because they inherit a custom `license-file` from the workspace.
-Those warnings are expected. Warnings or failures for an external package are
-not expected and must be resolved before release.
+The first-party Canwu crates inherit the workspace's `Apache-2.0` SPDX license
+expression and package copies of the root `LICENSE` and `NOTICE` files.
+Warnings or failures for an external package are not expected and must be
+resolved before release.

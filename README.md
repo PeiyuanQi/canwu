@@ -75,10 +75,8 @@ checks all three operating systems.
 
 Contributions, bug reports, examples, documentation improvements, and careful
 architecture discussions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for local setup, development commands, project rules, and the Contributor
-License Grant. External contributors must accept that grant when opening a pull
-request. Coding agents must also follow [AGENTS.md](AGENTS.md) and any nearer
-instructions.
+for local setup and contribution terms. Coding agents must also follow
+[AGENTS.md](AGENTS.md) and any nearer instructions.
 
 <details>
 <summary><strong>Development flow</strong></summary>
@@ -144,14 +142,12 @@ commits attributable boundary evidence.
 
 ## License
 
-This project is source-available under the Canwu License 1.0. Personal,
-community, research, educational, nonprofit, and commercial use is
-royalty-free while a Product Family remains at or below $10 million in revenue
-during its applicable 12-month measurement period. Progressive marginal
-royalties apply only to revenue above that threshold. Commercial products must
-display an [official Canwu logo](BRANDING.md) and include a Canwu
-acknowledgement in the product or its user-facing materials. Proprietary
-products are permitted, and independent downstream code does not need to be
-disclosed or open-sourced. See [LICENSE](LICENSE) for the authoritative terms.
-Third-party dependencies remain under their own licenses; see
+Canwu is open-source software licensed under the
+[Apache License 2.0](LICENSE). You may use, modify, and distribute Canwu in
+open-source or proprietary products without royalties or revenue reporting.
+Distributed copies must comply with the Apache License and preserve applicable
+license and [NOTICE](NOTICE) material. The Apache License does not require a
+Canwu logo or public acknowledgement; [BRANDING.md](BRANDING.md) explains
+optional, non-endorsing use of the project marks. Third-party dependencies
+remain under their own licenses; see
 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

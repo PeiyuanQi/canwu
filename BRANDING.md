@@ -16,16 +16,18 @@ avatars, and badges. All supplied assets are square images with a white
 background. Keep enough surrounding space for the mark and text to remain easy
 to read.
 
-## Commercial products
+## Optional attribution and trademark use
 
-The [Canwu License 1.0](LICENSE) requires a commercial product that uses Canwu
-to show one of these official logos in user-facing material and include a clear
-acknowledgement such as "Powered by Canwu" or "This product uses Canwu."
+Canwu is licensed under the [Apache License 2.0](LICENSE). The license does not
+require a product to display a Canwu logo or public acknowledgement, and it does
+not grant general rights to use Canwu names, trademarks, or logos.
 
-For an application or game, place the logo and acknowledgement in a visible
-location such as the credits, About screen, acknowledgements screen, or legal
-notices. For a product without a user interface, use its documentation,
-packaging, store listing, or similar material supplied to users.
+The project owner, Peiyuan Qi, grants a limited, non-exclusive permission to
+use an unmodified official logo solely to truthfully identify Canwu or
+acknowledge that a product uses Canwu. Optional phrases include "Powered by
+Canwu" and "This product uses Canwu." A product may place that attribution in
+its credits, About screen, legal notices, documentation, packaging, or store
+listing.
 
 You may resize the logo proportionally or convert it to another file format if
 its appearance is preserved. Use the supplied symbol-only mark instead of
@@ -34,5 +36,6 @@ recolor, redraw, or otherwise change the logo. Do not use it in a way that
 suggests endorsement, ownership, or a special relationship with the Canwu
 project.
 
-The logos are not a requirement to display project sponsors. Sponsorship and
-branding are separate matters.
+Logo use must not imply endorsement, ownership, certification, or a special
+relationship with the Canwu project. Sponsorship and branding are separate
+matters.

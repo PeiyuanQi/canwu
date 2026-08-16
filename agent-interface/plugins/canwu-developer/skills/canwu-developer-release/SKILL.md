@@ -1,12 +1,12 @@
 ---
 name: canwu-developer-release
-description: Prepare and verify Canwu releases, packages, tags, and release artifacts. Use for SemVer decisions, cross-platform release checks, Cargo packaging, custom-license integrity, commercial attribution, third-party dependency audits, notice generation, or any request to publish or distribute Canwu source crates or compiled binaries.
+description: Prepare and verify Canwu releases, packages, tags, and release artifacts. Use for SemVer decisions, cross-platform release checks, Cargo packaging, Apache-2.0 license integrity, NOTICE preservation, third-party dependency audits, notice generation, or any request to publish or distribute Canwu source crates or compiled binaries.
 ---
 
 # Release Canwu
 
 Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
-`docs/versioning.md`, `LICENSE`, `BRANDING.md`, and
+`docs/versioning.md`, `LICENSE`, `NOTICE`, `BRANDING.md`, and
 `THIRD_PARTY_LICENSES.md` before changing release state.
 
 ## Prepare
@@ -16,10 +16,12 @@ Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
 2. Choose the SemVer change from `docs/versioning.md`. Do not bump the version
    unless the user authorized a release and the intended compatibility change
    requires it.
-3. Treat `TBD` copyright-holder, Licensor, governing-law, or court fields in
-   `LICENSE` as blockers for a formal public release.
-4. Confirm every first-party crate inherits the same workspace version and
-   `license-file`.
+3. Confirm the root `LICENSE` contains the unmodified Apache License 2.0 and
+   `NOTICE` identifies Canwu and Peiyuan Qi without unresolved placeholders.
+4. Confirm every first-party crate inherits the workspace `Apache-2.0` SPDX
+   expression and packages byte-for-byte copies of the root `LICENSE` and
+   `NOTICE`. Confirm separately distributable website and agent-plugin bundles
+   carry matching copies too.
 
 ## Verify code and packages
 
@@ -33,23 +35,22 @@ cargo check --locked -p canwu-debug
 ```
 
 Use `cargo package --allow-dirty --no-verify --list -p <crate>` to inspect each
-source package. A source crate normally references dependencies instead of
-bundling them. A compiled binary contains dependency code and assets and needs
-the complete notice bundle.
+source package. Every first-party source package must contain `LICENSE` and
+`NOTICE`. A compiled binary also contains dependency code and assets and needs
+the complete third-party notice bundle.
 
 ## Verify license integrity
 
-- Keep the title `Canwu License 1.0` and describe it as source-available, not
-  OSI-approved open source.
-- Preserve the Product Family aggregation and progressive marginal brackets.
-  At $50 million Product Revenue, the royalty must remain exactly $325,000.
-- Preserve the commercial Canwu logo and acknowledgement requirement from
-  `LICENSE` and `BRANDING.md`.
-- Confirm Third-Party Materials are excluded from the Canwu license grant and
-  remain under their upstream licenses.
-- Never apply Canwu royalties, branding, or attribution to a third-party
-  component used independently of Canwu.
-- Sponsorship must not create downstream acknowledgement or licensing duties.
+- Keep the root license text identical to the standard Apache License 2.0.
+- Keep Cargo metadata, package contents, READMEs, contributor terms, plugin
+  manifests, website copy, and release documentation aligned on `Apache-2.0`.
+- Do not add royalties, revenue thresholds, field-of-use limits, mandatory
+  product displays, or other custom restrictions to the Apache license.
+- Treat Canwu logo use as optional and separate from the copyright license.
+  `BRANDING.md` controls truthful, non-endorsing use of project marks.
+- Confirm third-party materials remain under their upstream licenses and are
+  not presented as first-party Apache-2.0 material.
+- Preserve the inbound-equals-outbound Apache-2.0 contribution terms.
 
 ## Generate third-party notices
 
@@ -65,16 +66,15 @@ generator does not collect every upstream NOTICE file.
 
 Check that the output includes:
 
-- Apache, MIT, BSD, Unicode, zlib, ISC, Boost, and other selected license text;
+- Apache, MIT, BSD, Unicode, ISC, Boost, font, and other selected license text;
 - `epaint_default_fonts` plus SIL Open Font License and Ubuntu Font Licence;
 - the emoji font MIT notice and Hack/Bitstream Vera notice from
   `THIRD_PARTY_NOTICES_EXTRA.md`; and
 - every external crate in the release dependency graph.
 
-`cargo-about` 0.8.4 emits warnings for Canwu's own crates because Cargo exposes
-the custom workspace `license-file` without an SPDX `license` expression. These
-first-party warnings are known. Do not dismiss warnings, missing text, or
-unaccepted licenses for external packages.
+Warnings, missing text, or unaccepted licenses for any package must be resolved
+before release. First-party Canwu crates have explicit Apache-2.0 metadata and
+must not produce missing-license warnings.
 
 ## Avoid known release pitfalls
 
@@ -94,13 +94,14 @@ unaccepted licenses for external packages.
   preservation.
 - Regenerating notices online can change harvested text even when `Cargo.lock`
   does not change. Inspect the diff instead of accepting it mechanically.
-- Do not publish a compiled archive containing only the Canwu `LICENSE`.
+- Do not publish a source package without its Apache `LICENSE` and `NOTICE`.
+- Do not publish a compiled archive without the third-party notice bundle.
 
 ## Assemble and report
 
-Include `LICENSE`, `BRANDING.md`, required logo assets,
-`THIRD_PARTY_LICENSES.md`, `THIRD_PARTY_NOTICES.html`, and
-`THIRD_PARTY_NOTICES_EXTRA.md` with compiled releases. Report the version,
-targets, verification commands, notice changes, unresolved legal fields, and
-the exact files included. Do not tag, publish, upload, or push unless the user
-authorized that external state change.
+Include `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`,
+`THIRD_PARTY_NOTICES.html`, and `THIRD_PARTY_NOTICES_EXTRA.md` with compiled
+releases. Include `BRANDING.md` and logo assets when the release uses those
+marks. Report the version, targets, verification commands, notice changes,
+package contents, and exact files included. Do not tag, publish, upload, or push
+unless the user authorized that external state change.

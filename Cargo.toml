@@ -14,7 +14,7 @@ resolver = "2"
 [workspace.package]
 version = "0.4.0"
 edition = "2024"
-license-file = "LICENSE"
+license = "Apache-2.0"
 repository = "https://github.com/PeiyuanQi/canwu"
 rust-version = "1.85"
 
