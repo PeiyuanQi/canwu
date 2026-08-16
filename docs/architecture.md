@@ -303,6 +303,9 @@ detected before mutable command application, its evidence transaction is
 narrower again: it preflights identifiers and revision, then checkpoints only
 the attempt tail, affected counters and registration flag, commitment cache and
 roots, and checkpoint hash.
+The six rollback checkpoint definitions and their exact capture/restore logic
+live in the dedicated `canwu-sim` transactions module; command, ingress,
+settlement, and scheduling orchestration call those shared private boundaries.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,

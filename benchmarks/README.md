@@ -411,6 +411,26 @@ replay +0.8%. These are treated as local timing noise. The milestone makes no
 runtime-performance claim; it establishes a narrower ownership surface for later
 storage work.
 
+## Transaction-module extraction comparison
+
+The behavior-preserving rollback-checkpoint extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-transactions-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-transactions-module-allocations.json) reports,
+using the persistence-module milestone as its before baseline. It moves the
+rejection, ingress, command, boundary, scheduled-batch, and clock checkpoint
+types and their exact capture/restore bodies into
+`canwu-sim/src/transactions.rs`. `canwu-sim/src/lib.rs` falls from 18,680 to
+18,436 lines, with 257 focused lines in the new module.
+
+Every measured allocation summary, history count, checkpoint hash, checkpoint-
+storage size, and flat snapshot size is identical at all four scales. At scale
+512, history growth changes by +0.2%, accepted commands +0.6%, empty boundaries
++0.7%, populated boundaries -2.3%, load validation -3.2%, and exact replay
++0.1%. The rejected-command median moves from 0.067 ms to 0.075 ms (+12.4%) on a
+sub-0.1-ms case. These are treated as local timing noise. The milestone makes no
+runtime-performance claim; it narrows rollback ownership without changing what
+any transaction captures or restores.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted commands, individual
