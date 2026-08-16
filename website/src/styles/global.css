@@ -107,7 +107,8 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .scope-strip h3 { margin: 0 0 .7rem; font-size: 1.1rem; }
 .scope-strip span { color: var(--muted); font-size: .87rem; line-height: 1.65; }
 
-.quick-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 3rem; }
+.quick-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr); gap: 3rem; }
+.quick-grid > * { min-width: 0; }
 .quick-grid h3 { margin: 0 0 .9rem; font-size: .92rem; }
 .quick-grid .technical-list { margin-top: 1.2rem; }
 .status-box { padding: 1.5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
@@ -239,7 +240,8 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   .hero-code { max-width: 760px; }
   .section-heading { grid-template-columns: .3fr 1fr; }.section-heading > span { grid-column: 2; }
   .feature-grid { grid-template-columns: repeat(2, 1fr); }
-  .quick-grid, .architecture-grid { grid-template-columns: 1fr; }
+  .quick-grid { grid-template-columns: minmax(0, 1fr); }
+  .architecture-grid { grid-template-columns: 1fr; }
   .trust-grid { grid-template-columns: 1fr; }
   .responsibility-grid.three { grid-template-columns: 1fr; }
   .integration-proof, .stack-intro { grid-template-columns: 1fr; }

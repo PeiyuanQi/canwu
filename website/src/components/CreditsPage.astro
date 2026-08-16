@@ -7,61 +7,50 @@ const isEnglish = locale === "en";
 
 const c = isEnglish
   ? {
-      title: "Canwu website implementation and credits",
-      description: "Implementation, dependency, privacy, design-reference, license, and trademark notes for canwu.org.",
-      label: "Website notes", heading: "Implementation and credits",
-      intro: "canwu.org is a static Astro project deployed with GitHub Pages. This page records the direct tools and services used by the website; complete application dependency notices remain in the main repository.",
-      privacyTitle: "Privacy", privacy: ["No analytics or tracking pixels", "No third-party hosted fonts", "No client-side application framework runtime", "Astro telemetry disabled in local and deployment scripts"],
-      rows: [
-        ["Astro 7", "Static site framework", "MIT", "https://astro.build/"],
-        ["@astrojs/sitemap", "Sitemap generation", "MIT", "https://docs.astro.build/en/guides/integrations-guide/sitemap/"],
-        ["@astrojs/check", "Astro and TypeScript validation", "MIT", "https://www.npmjs.com/package/@astrojs/check"],
-        ["Vite", "Build pipeline used by Astro", "MIT", "https://vite.dev/"],
-        ["TypeScript", "Type checking", "Apache-2.0", "https://www.typescriptlang.org/"],
-        ["cross-env", "Cross-platform environment variables", "MIT", "https://github.com/kentcdodds/cross-env"],
-        ["pnpm", "Package management", "MIT", "https://pnpm.io/"],
-        ["GitHub Actions", "Automated build and deployment", "Service", "https://github.com/features/actions"],
-        ["GitHub Pages", "Static hosting and TLS", "Service", "https://pages.github.com/"],
+      title: "Canwu project and website information",
+      description: "License, contribution, third-party, privacy, framework, and hosting information for Canwu and canwu.org.",
+      label: "Project information", heading: "License, participation, and website credits",
+      intro: "The engine and its website have different dependency boundaries. This page gives adopters and contributors direct access to the authoritative license, contribution rules, third-party notices, and website implementation details.",
+      trust: [
+        { title: "Engine license", status: "Source-available · not OSI-approved", copy: "Canwu is distributed under the Canwu License 1.0. Read the complete license before distributing or commercializing a product; the license file is authoritative.", links: [["Read LICENSE", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]] },
+        { title: "Contributing", status: "Public repository", copy: "Development happens in public on GitHub. Review the architecture and contributor rules before proposing changes to simulation boundaries or public APIs.", links: [["Contribution guide", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["Open issues", "https://github.com/PeiyuanQi/canwu/issues"], ["Contributors", "https://github.com/PeiyuanQi/canwu/graphs/contributors"]] },
+        { title: "Third-party software", status: "Separate notices", copy: "Engine dependencies retain their own licenses. The repository notices are the authoritative inventory for Canwu itself; website tooling is listed separately below.", links: [["Engine notices", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_LICENSES.md"], ["Website notices", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"]] },
       ],
+      privacyTitle: "Website privacy", privacy: ["No analytics or tracking pixels", "No third-party hosted fonts", "No account system or user-submitted data", "Astro telemetry disabled in local and deployment scripts"],
+      stackLabel: "Website stack", stackTitle: "Framework and hosting credits", stackIntro: "canwu.org is a static Astro site. The production build is created by GitHub Actions and served through GitHub Pages.",
+      rows: [["Astro 7", "Static site framework", "MIT", "https://astro.build/"], ["Vite", "Build pipeline used by Astro", "MIT", "https://vite.dev/"], ["TypeScript", "Type checking", "Apache-2.0", "https://www.typescriptlang.org/"], ["GitHub Actions", "Automated build and deployment", "Service", "https://github.com/features/actions"], ["GitHub Pages", "Static hosting and TLS", "Service", "https://pages.github.com/"]],
       columns: ["Project", "Use", "License / type"],
-      designTitle: "Design reference", designCopy: "The revised information structure takes cues from Bevy and Godot: concise project identity, real code, direct documentation links, feature explanations, project status, and contribution paths. No copy, layout code, illustrations, or brand assets were reused.",
-      assetsTitle: "Project assets", assetsCopy: "The website uses the official Canwu 35 mark from assets/branding. Layout, diagrams, and code panels are written in HTML and CSS. The site does not use generated hero art or a generated social card.",
-      sourceTitle: "Source and notices", sourceCopy: "Website source lives in website/. The application license and third-party notices remain authoritative for Canwu itself.",
-      legalTitle: "Trademarks", legalCopy: "Godot and Bevy names belong to their respective projects and rights holders. References do not imply endorsement, integration, or affiliation.",
-      links: [["Website source", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["Website notices", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["Canwu license", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"], ["Application notices", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_NOTICES.html"]],
+      sourceTitle: "Website source", sourceCopy: "Website source, build scripts, bilingual page components, and the full tool inventory are maintained in website/ inside the main repository.",
+      brandTitle: "Brand assets", brandCopy: "The site uses the official Canwu 35 mark documented in BRANDING.md. Page diagrams and code panels are implemented with semantic HTML and CSS.",
+      legalTitle: "Trademark references", legalCopy: "Godot and Bevy names belong to their respective projects and rights holders. References do not imply endorsement or affiliation.",
+      links: [["Website source", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["Website notices", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["Brand guide", "https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md"]],
     }
   : {
-      title: "参伍网站实现与鸣谢",
-      description: "canwu.org 的实现、依赖、隐私、设计参考、许可证与商标说明。",
-      label: "网站说明", heading: "实现与鸣谢",
-      intro: "canwu.org 是通过 GitHub Pages 部署的静态 Astro 项目。本页记录网站直接使用的工具与服务；参伍应用本身的完整依赖声明仍以主仓库文件为准。",
-      privacyTitle: "隐私", privacy: ["无分析统计或跟踪像素", "无第三方托管字体", "不加载客户端应用框架运行时", "本地与部署脚本均关闭 Astro 遥测"],
-      rows: [
-        ["Astro 7", "静态网站框架", "MIT", "https://astro.build/"],
-        ["@astrojs/sitemap", "站点地图生成", "MIT", "https://docs.astro.build/en/guides/integrations-guide/sitemap/"],
-        ["@astrojs/check", "Astro 与 TypeScript 验证", "MIT", "https://www.npmjs.com/package/@astrojs/check"],
-        ["Vite", "Astro 使用的构建管线", "MIT", "https://vite.dev/"],
-        ["TypeScript", "类型检查", "Apache-2.0", "https://www.typescriptlang.org/"],
-        ["cross-env", "跨平台环境变量", "MIT", "https://github.com/kentcdodds/cross-env"],
-        ["pnpm", "软件包管理", "MIT", "https://pnpm.io/"],
-        ["GitHub Actions", "自动构建与部署", "服务", "https://github.com/features/actions"],
-        ["GitHub Pages", "静态托管与 TLS", "服务", "https://pages.github.com/"],
+      title: "参伍项目与网站说明",
+      description: "参伍与 canwu.org 的许可证、贡献、第三方软件、隐私、框架与托管说明。",
+      label: "项目信息", heading: "许可、参与方式与网站鸣谢",
+      intro: "参伍引擎与网站具有不同的依赖边界。本页为采用者和贡献者提供许可证、贡献规则、第三方声明与网站实现信息的权威入口。",
+      trust: [
+        { title: "引擎许可证", status: "源码可用 · 非 OSI 开源", copy: "参伍采用 Canwu License 1.0。分发产品或开展商业使用前请阅读完整许可证；仓库中的许可证文件具有权威性。", links: [["阅读 LICENSE", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"]] },
+        { title: "参与贡献", status: "公开仓库", copy: "开发工作在 GitHub 公开进行。提出涉及模拟边界或公开 API 的变更前，请先了解项目架构与贡献规则。", links: [["贡献指南", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["现有议题", "https://github.com/PeiyuanQi/canwu/issues"], ["贡献者", "https://github.com/PeiyuanQi/canwu/graphs/contributors"]] },
+        { title: "第三方软件", status: "分别声明", copy: "引擎依赖继续使用各自许可证。仓库声明是参伍引擎本身的权威清单；网站工具在下方单独列出。", links: [["引擎声明", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_LICENSES.md"], ["网站声明", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"]] },
       ],
+      privacyTitle: "网站隐私", privacy: ["无分析统计或跟踪像素", "无第三方托管字体", "无账号系统，也不收集用户提交数据", "本地与部署脚本均关闭 Astro 遥测"],
+      stackLabel: "网站技术栈", stackTitle: "框架与托管鸣谢", stackIntro: "canwu.org 是静态 Astro 网站，由 GitHub Actions 构建并通过 GitHub Pages 提供服务。",
+      rows: [["Astro 7", "静态网站框架", "MIT", "https://astro.build/"], ["Vite", "Astro 使用的构建管线", "MIT", "https://vite.dev/"], ["TypeScript", "类型检查", "Apache-2.0", "https://www.typescriptlang.org/"], ["GitHub Actions", "自动构建与部署", "服务", "https://github.com/features/actions"], ["GitHub Pages", "静态托管与 TLS", "服务", "https://pages.github.com/"]],
       columns: ["项目", "用途", "许可证 / 类型"],
-      designTitle: "设计参考", designCopy: "新版信息结构参考 Bevy 与 Godot 的做法：简洁项目身份、真实代码、直接文档入口、功能说明、项目状态与贡献路径。没有复用任何文案、布局代码、插图或品牌资产。",
-      assetsTitle: "项目资产", assetsCopy: "网站使用 assets/branding 中的官方参伍 35 标志。布局、图表与代码面板均由 HTML 和 CSS 编写。网站不使用生成式首图或生成式社交预览图。",
-      sourceTitle: "源码与声明", sourceCopy: "网站源码位于 website/。参伍应用本身的许可证与第三方声明继续具有权威性。",
-      legalTitle: "商标", legalCopy: "Godot 与 Bevy 名称归各自项目及权利人所有。相关提及不表示背书、集成或隶属关系。",
-      links: [["网站源码", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["网站声明", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["Canwu 许可证", "https://github.com/PeiyuanQi/canwu/blob/main/LICENSE"], ["应用第三方声明", "https://github.com/PeiyuanQi/canwu/blob/main/THIRD_PARTY_NOTICES.html"]],
+      sourceTitle: "网站源码", sourceCopy: "网站源码、构建脚本、中英文页面组件与完整工具清单均维护在主仓库的 website/ 目录中。",
+      brandTitle: "品牌资产", brandCopy: "网站使用 BRANDING.md 中记录的官方参伍 35 标志。页面图表与代码面板由语义化 HTML 和 CSS 实现。",
+      legalTitle: "商标引用", legalCopy: "Godot 与 Bevy 名称归各自项目及权利人所有。相关提及不表示背书或隶属关系。",
+      links: [["网站源码", "https://github.com/PeiyuanQi/canwu/tree/main/website"], ["网站声明", "https://github.com/PeiyuanQi/canwu/blob/main/website/THIRD_PARTY_NOTICES.md"], ["品牌指南", "https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md"]],
     };
 ---
 
 <BaseLayout title={c.title} description={c.description} locale={locale} zhPath="/credits/" enPath="/en/credits/">
   <section class="reference-hero page-width"><p>{c.label}</p><h1>{c.heading}</h1><span>{c.intro}</span></section>
-
+  <section class="trust-grid page-width">{c.trust.map((item) => <article><code>{item.status}</code><h2>{item.title}</h2><p>{item.copy}</p><div class="reference-links">{item.links.map(([label, url]) => <a href={url}>{label} ↗</a>)}</div></article>)}</section>
   <section class="privacy-section page-width"><header><p>{c.privacyTitle}</p></header><ul class="technical-list">{c.privacy.map((item) => <li>{item}</li>)}</ul></section>
-
+  <section class="stack-intro page-width"><p>{c.stackLabel}</p><h2>{c.stackTitle}</h2><span>{c.stackIntro}</span></section>
   <section class="credit-table page-width"><header><span>{c.columns[0]}</span><span>{c.columns[1]}</span><span>{c.columns[2]}</span><span></span></header>{c.rows.map(([name, role, license, url]) => <a href={url}><code>{name}</code><span>{role}</span><small>{license}</small><b>↗</b></a>)}</section>
-
-  <section class="implementation-grid page-width"><article><h2>{c.designTitle}</h2><p>{c.designCopy}</p><div class="reference-links"><a href="https://bevyengine.org/">Bevy ↗</a><a href="https://godotengine.org/">Godot ↗</a></div></article><article><h2>{c.assetsTitle}</h2><p>{c.assetsCopy}</p><a href="https://github.com/PeiyuanQi/canwu/blob/main/BRANDING.md">BRANDING.md ↗</a></article><article><h2>{c.sourceTitle}</h2><p>{c.sourceCopy}</p><div class="reference-links">{c.links.map(([label, url]) => <a href={url}>{label} ↗</a>)}</div></article><article><h2>{c.legalTitle}</h2><p>{c.legalCopy}</p></article></section>
+  <section class="implementation-grid page-width"><article><h2>{c.sourceTitle}</h2><p>{c.sourceCopy}</p><div class="reference-links">{c.links.map(([label, url]) => <a href={url}>{label} ↗</a>)}</div></article><article><h2>{c.brandTitle}</h2><p>{c.brandCopy}</p></article><article class="wide"><h2>{c.legalTitle}</h2><p>{c.legalCopy}</p></article></section>
 </BaseLayout>
