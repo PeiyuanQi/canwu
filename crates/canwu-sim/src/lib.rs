@@ -3136,6 +3136,58 @@ impl RejectionTransactionCheckpoint {
     }
 }
 
+struct CommandTransactionCheckpoint {
+    armies: BTreeMap<ArmyId, Army>,
+    knowledge: KnowledgeSnapshot,
+    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    scheduled_actions: BTreeMap<ScheduleKey, ScheduledAction>,
+    counters: RuntimeCounters,
+    event_count: usize,
+    command_count: usize,
+    command_attempt_count: usize,
+    plugin_registration_closed: bool,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl CommandTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            armies: state.current.armies.clone(),
+            knowledge: state.current.knowledge.clone(),
+            plugin_components: state.current.plugin_components.clone(),
+            scheduled_actions: state.scheduler.actions.clone(),
+            counters: state.counters.clone(),
+            event_count: state.evidence.events.len(),
+            command_count: state.evidence.commands.len(),
+            command_attempt_count: state.evidence.command_attempts.len(),
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState) {
+        state.current.armies = self.armies;
+        state.current.knowledge = self.knowledge;
+        state.current.plugin_components = self.plugin_components;
+        state.scheduler.actions = self.scheduled_actions;
+        state.counters = self.counters;
+        state.evidence.events.truncate(self.event_count);
+        state.evidence.commands.truncate(self.command_count);
+        state
+            .evidence
+            .command_attempts
+            .truncate(self.command_attempt_count);
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
@@ -4543,14 +4595,30 @@ impl Simulation {
             }
             Err(error) => return Err(error),
         };
-        let transaction_start = self.state.clone();
+        let next_attempt_id = if record_attempt {
+            let (claimed_id, next_attempt_id) = claim_counter(
+                self.state.counters.next_command_attempt_id,
+                "command attempt ID",
+            )?;
+            if claimed_id != attempt_id.get() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    "command attempt allocation changed during application",
+                ));
+            }
+            Some(next_attempt_id)
+        } else {
+            None
+        };
+        let revision = self.next_state_revision()?;
+        let transaction = CommandTransactionCheckpoint::capture(&self.state);
         let event_start = self.state.evidence.events.len();
         self.state.counters.next_command_id = next_command_id;
         self.state.counters.next_correlation_id = next_correlation_id;
         self.invalidate_commitments(prepared.commitment_invalidation());
 
         if let Err(error) = self.apply_prepared(prepared, command_id, correlation_id) {
-            self.state = transaction_start;
+            transaction.restore(&mut self.state);
             if is_expected_command_rejection(&error.code) && record_attempt {
                 return self.record_command_rejection(attempt_id, admission, envelope, error);
             }
@@ -4572,11 +4640,7 @@ impl Simulation {
                 Vec::new()
             },
         });
-        if record_attempt {
-            let (_, next_attempt_id) = claim_counter(
-                self.state.counters.next_command_attempt_id,
-                "command attempt ID",
-            )?;
+        if let Some(next_attempt_id) = next_attempt_id {
             self.state.counters.next_command_attempt_id = next_attempt_id;
             self.state
                 .evidence
@@ -4592,15 +4656,9 @@ impl Simulation {
                     outcome: CommandAttemptOutcome::Accepted { command_id },
                 });
         }
-        let revision = match self.advance_state_revision() {
-            Ok(revision) => revision,
-            Err(error) => {
-                self.state = transaction_start;
-                return Err(error);
-            }
-        };
+        self.state.counters.state_revision = revision;
         if let Err(error) = self.refresh_checkpoint_hash() {
-            self.state = transaction_start;
+            transaction.restore(&mut self.state);
             return Err(error);
         }
 
@@ -16304,6 +16362,65 @@ mod tests {
             Some(
                 snapshot_commitment_roots(&snapshot)
                     .expect("the repaired rejection should independently reproduce its roots")
+            )
+        );
+    }
+
+    #[test]
+    fn command_transaction_restores_writable_domains_after_hash_failure() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(109, scenario).expect("command rollback fixture should load");
+        let before = simulation.snapshot();
+        simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_mut()
+            .expect("current runtimes should maintain a commitment cache")
+            .commands
+            .len = 2;
+        let request = || {
+            CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale: 73,
+                    },
+                ),
+            )
+        };
+
+        let error = simulation
+            .process_command(request())
+            .expect_err("a fatal commitment-cache mismatch must abort command application");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert_eq!(simulation.snapshot(), before);
+        let restored_cache = simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_ref()
+            .expect("rollback should restore the private cache");
+        assert_eq!(restored_cache.commands.len, 2);
+
+        simulation.state.metadata.commitment_cache = None;
+        simulation
+            .refresh_checkpoint_hash()
+            .expect("discarding the injected corrupt cache should rebuild it from evidence");
+        let outcome = simulation
+            .process_command(request())
+            .expect("the repaired runtime should accept the same command");
+        assert!(matches!(outcome, CommandOutcome::Accepted { .. }));
+        let snapshot = simulation.snapshot();
+        assert_eq!(
+            snapshot.commitment_roots,
+            Some(
+                snapshot_commitment_roots(&snapshot)
+                    .expect("the repaired command should independently reproduce its roots")
             )
         );
     }

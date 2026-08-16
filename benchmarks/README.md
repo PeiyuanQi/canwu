@@ -272,6 +272,26 @@ operations and 816,659,938 requested bytes. All accepted-command, boundary,
 snapshot, serialization, and load-validation allocation counts are unchanged,
 and snapshot size remains 3,139,624 bytes.
 
+## Staged command-transaction comparison
+
+The accepted-command rollback replacement is recorded in separate
+[`elapsed`](baselines/2026-08-16-staged-command-transaction-elapsed.json) and
+[`allocation`](baselines/2026-08-16-staged-command-transaction-allocations.json)
+reports, using the staged rejection transaction as its before baseline. Command
+application checkpoints only armies, actor knowledge, plugin components,
+scheduled actions, counters, event/command/attempt tails, registration state,
+and commitments. Immutable core maps, generic records, ingress, boundaries,
+random state/evidence, and the clock are not cloned.
+
+At scale 512, accepted command processing falls from 1.818 ms to 0.830 ms
+(-54.3%), from 36,203 allocation operations to 13,553, and from 4,969,076
+requested bytes to 2,750,991. History growth falls from 1,893.517 ms to
+1,610.544 ms (-14.9%) and exact replay from 2,572.965 ms to 2,291.933 ms
+(-10.9%). Each end-to-end path removes 7,656,955 allocation operations and
+676,559,408 requested bytes. Rejection, boundary, snapshot, serialization, and
+load-validation allocation counts are unchanged, and snapshot size remains
+3,139,624 bytes.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
@@ -280,9 +300,9 @@ The allocation evidence identifies two distinct growth classes:
   retained history in the current implementation.
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
-  fifteen times as long. At scale 512, growth requested 33,636,124 allocation
-  operations and 4,325,785,269 bytes; replay requested 51,726,079 operations and
-  5,967,368,476 bytes. These paths still exhibit approximately
+  fifteen times as long. At scale 512, growth requested 25,979,169 allocation
+  operations and 3,649,225,861 bytes; replay requested 44,069,124 operations and
+  5,290,809,068 bytes. These paths still exhibit approximately
   quadratic growth.
 
 Those observations establish optimization targets; they do not change any

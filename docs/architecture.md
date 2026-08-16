@@ -267,13 +267,16 @@ authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns
 the initial scenario binding, run identity, plugin-registration state, replay
 revision provenance, and current checkpoint commitment. These owners are
 private implementation boundaries. Snapshot and replay formats remain flat,
-and accepted-command and settlement transactions still clone every partition
-together until their staged replacements land. When an expected rejection is
-detected before mutable command application, its evidence transaction is already
-narrower: it preflights identifiers and revision, then checkpoints only the
-attempt tail, affected counters and registration flag, commitment cache and
-roots, and checkpoint hash. A fatal commitment failure restores those fields
-without cloning mutable world, scheduler, or unrelated evidence.
+and settlement transactions still clone every partition together until their
+staged replacement lands. Command application now checkpoints only its writable
+domains: armies, actor knowledge, plugin components, scheduled actions, counters,
+the event/command/attempt tails, registration state, and commitments. It does not
+clone immutable core maps, domain records, ingress, boundary or random evidence,
+random streams, or the clock. When an expected rejection is detected before
+mutable command application, its evidence transaction is narrower again: it
+preflights identifiers and revision, then checkpoints only the attempt tail,
+affected counters and registration flag, commitment cache and roots, and
+checkpoint hash.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
@@ -363,8 +366,8 @@ Command application, each same-timestamp scheduled batch, and each phased
 settlement are transactional. If fallible event or plugin processing fails,
 state, time, queues, events, boundary records, random state, and ID counters
 return to the last successful transaction or timestamp boundary. Once command
-application has begun, its full transaction clone still governs rollback; after
-that rollback, any persisted rejection evidence uses the explicit narrow
+application has begun, its writable-domain checkpoint governs rollback; after
+that rollback, any persisted rejection evidence uses the narrower rejection
 checkpoint described above. Plugin directives validate every referenced entity
 before mutation. Snapshot loading also proves that pending arrivals agree with
 army transit, move commands, order events, timestamps, and correlations, and
