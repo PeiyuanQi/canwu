@@ -12,11 +12,78 @@
   truth. Keep them aligned with public APIs and dependency boundaries.
 - Follow `docs/versioning.md`. The root `[workspace.package].version` is the
   canonical SemVer version and all first-party crates version in lockstep.
-- External mutations must enter through validated commands. Do not expose a
-  mutable reference to live simulation state.
+- External mutations must enter through validated commands or canonical ingress.
+  Do not expose a mutable reference to live simulation state.
 - Agent-facing reads must be actor-relative and must not leak ground truth.
 - Preserve Windows, macOS, and Linux support. Avoid assumptions about path
   separators, shells, case sensitivity, line endings, or platform-only APIs.
+
+## Agent Development Flow
+
+1. Read this file and every nearer `AGENTS.md` before editing.
+2. Inspect `git status` and preserve user-owned or concurrent changes. Use a
+   worktree for unrelated work; stay in the current checkout when the task
+   explicitly depends on its uncommitted state.
+3. Name the invariant being changed and use the change-surface map below to
+   inspect every affected public, persistence, replay, documentation, and test
+   surface before implementation.
+4. Make the smallest coherent change. Keep behavior changes separate from large
+   file moves, generated-file refreshes, licensing work, and unrelated cleanup.
+5. Add durable tests for reusable architectural invariants, then run the scoped
+   checks and the full repository verification listed below.
+6. For public API, persistence, replay, migration, authority, determinism, or
+   performance changes, obtain an independent review before committing. Resolve
+   every blocking finding and re-run the affected checks.
+7. When explicitly asked to commit or push, stage explicit paths only, use a
+   conventional commit, push without force, and report remaining uncommitted
+   work separately.
+
+<details>
+<summary><strong>Project hierarchy and change-surface map</strong></summary>
+
+### Repository hierarchy
+
+- `crates/canwu-core`: stable IDs, deterministic RNG, and schema metadata shared
+  across packages.
+- `crates/canwu-time`: deterministic simulation time and duration arithmetic.
+- `crates/canwu-event`: causal event types and evidence references.
+- `crates/canwu-world`: authoritative world entities and immutable snapshots.
+- `crates/canwu-knowledge`: actor-relative knowledge and observation state.
+- `crates/canwu-sim`: authoritative state, ingress, settlement, scheduling,
+  plugins, records, persistence, validation, hashing, migration, and replay.
+- `crates/canwu-api`: the supported public facade and re-export boundary.
+- `crates/canwu-debug`: reference client; it may depend on `canwu-api` only.
+- `docs`: architecture, end-state, versioning, and compatibility contracts.
+- `agent-interface`: Codex plugin packages and skills. Follow its nested
+  `AGENTS.md`; these are development/user tools, not runtime simulation plugins.
+- `website` and `assets`: community site and project media, outside the
+  authoritative simulation runtime.
+- `.github`: CI workflows, the pull-request template, and repository automation.
+
+### Change-surface map
+
+| If changing | Inspect and usually update |
+| --- | --- |
+| Stable IDs, generic references, or schemas | `canwu-core`; owning world/event/record types; `canwu-api` re-exports; serialization and migration tests |
+| World entity shape or lifecycle | `canwu-world`; `canwu-knowledge`; simulation validation/persistence/replay; public queries; debug projections |
+| Actor-relative knowledge or visibility | `canwu-knowledge`; `SimulationView`; `canwu-api`; information-flow and replay tests |
+| Commands, authority, run policy, or ingress | `canwu-sim` policy/ingress/validation; core request IDs; `canwu-api`; snapshot/replay/versioning docs; stale/idempotency/rollback tests |
+| Settlement phases, reservations, or scheduling | `canwu-sim` boundary/scheduling code; architecture docs; API-only examples; atomicity, ordering, and exact-replay tests |
+| Random algorithms, streams, or draws | `canwu-core` deterministic generator; `canwu-sim` random ownership, journals, persistence, hashing, validation, migration, and replay; statistical-boundary and tamper tests |
+| Runtime plugin, component, or record contracts | registrar/descriptors/semantic hashes; ownership checks; snapshot rehydration; `canwu-api`; plugin fixtures and examples |
+| Snapshot fields, journals, hashes, or format versions | persistence, hashing, validation, migration, replay, and checkpoint code together; `docs/versioning.md`; old-format and per-domain tamper tests |
+| Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes |
+| Agent skills or plugin packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; plugin validation |
+| Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; notices/license inventory; contribution/release docs; packaged plugin notices |
+| Website or branding | `website`; `assets`; `BRANDING.md`; community-facing README links; site-specific checks |
+| Community README or onboarding structure | Keep `README.md` and `README.zh-CN.md` equivalent in claims, sections, commands, links, and folded development flow; update related website/docs links when needed |
+
+If a change crosses several rows, treat that as one architectural milestone and
+verify the whole dependency path. Keep application-specific rules and entity
+types outside Canwu core; downstream packages depend on Canwu's generic public
+contracts, never the reverse.
+
+</details>
 
 ## Git Workflow
 
@@ -45,3 +112,9 @@
 - Test: `cargo test --workspace`
 - Build debug client: `cargo check -p canwu-debug`
 - Cross-platform CI: `.github/workflows/ci.yml` runs on Windows, macOS, and Linux.
+- Public examples when APIs or behavior change:
+  `cargo run -p canwu-api --example move_army`,
+  `cargo run -p canwu-api --example phased_boundary`, and
+  `cargo run -p canwu-api --example plugin`.
+- Rust documentation when public types or docs change:
+  `cargo doc --workspace --no-deps`.

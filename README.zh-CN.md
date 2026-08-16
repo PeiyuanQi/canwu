@@ -1,6 +1,8 @@
-# Canwu（参伍 / 35 Engine）
+# 参伍引擎 Canwu Engine
 
 [English](README.md) | [简体中文](README.zh-CN.md)
+
+网站：[canwu.org](https://canwu.org)
 
 <img src="assets/branding/canwu-logo-zh-cn.png" alt="Canwu 参伍历史模拟引擎标志" width="320">
 
@@ -11,16 +13,30 @@ Canwu 是一个使用 Rust 编写的无界面历史模拟引擎。它负责模�
 Canwu 不负责画面、音频、动画或正式的产品界面。游戏、研究工具、Python
 程序、网页客户端和 AI 智能体通过公开 API 使用 Canwu。
 
-目前的 v0.4 开发版本保留小型移动场景，并加入面向《社稷》领域插件的确定性
-十四阶段结算边界。插件声明分阶段读写、独立随机流，以及精确的版本和语义
-身份。内核记录带因果结果的随机抽取、稳定资源分配、运行与内容清单，并为每个
-成功边界生成连续哈希链，再以检查点哈希把当前状态绑定到链首。精确重放使用
-包含完整运行环境的记录日志，并保留权威执行是否已关闭插件注册这一生命周期
-状态。移动场景继续演示命令验证、行程调度、因果事件和
-按角色延迟送达的知识。这个版本向《社稷》符合性目标迈出了实质一步，但尚不
-代表已经完全符合。
+Canwu 面向的不只是一个可随意修改的游戏状态对象。它提供确定性时间、经过
+验证并带权限语义的命令、原子结算、角色相对知识、类型化扩展点、因果证据、
+存档加载验证和精确重放。引擎本身保持领域中立：应用通过公开契约定义自己的
+规则与内容，而不是把应用专属类型加入内核。
 
-## 工作区
+项目仍在积极开发。公开示例有意保持小而清晰，方便开发者检查、测试，并把
+这些保证复用到更大型的游戏、研究环境和智能体驱动模拟中。
+
+## 快速开始
+
+安装满足根目录 `Cargo.toml` 中 `rust-version` 要求的 Rust 工具链，然后运行
+无界面移动示例：
+
+```text
+cargo run -p canwu-api --example move_army
+```
+
+如需查看只使用公开 API 的分阶段插件示例：
+
+```text
+cargo run -p canwu-api --example phased_boundary
+```
+
+## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
 - `canwu-time`：不依赖画面帧率的历史时间
@@ -30,6 +46,10 @@ Canwu 不负责画面、音频、动画或正式的产品界面。游戏、研�
 - `canwu-sim`：不公开的模拟状态、命令、调度和插件
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
 - `canwu-debug`：只使用公开 API 的小型参考客户端
+
+`docs` 保存架构契约。`agent-interface` 保存供引擎使用者和仓库维护者使用的
+技能工具，它们不是运行时模拟插件。`website` 和 `assets` 保存社区网站与项目
+素材。
 
 修改架构边界前，请先阅读[架构说明](docs/architecture.md)和
 [最终设计](docs/end-state.md)。版本发布和兼容规则见
@@ -46,9 +66,37 @@ Canwu 支持 Windows、macOS 和 Linux。模拟相关 crate 不依赖具体平�
 
 ## 开发
 
-本地环境、常用命令、项目规则和 Contributor License Grant（贡献者许可授权）
-都写在 [CONTRIBUTING.md](CONTRIBUTING.md) 中。外部贡献者提交拉取请求时必须
-接受其中的授权条款。
+欢迎提交代码、错误报告、示例、文档改进和严谨的架构讨论。本地环境、常用
+命令、项目规则和 Contributor License Grant（贡献者许可授权）都写在
+[CONTRIBUTING.md](CONTRIBUTING.md) 中。外部贡献者提交拉取请求时必须接受
+其中的授权条款。编码智能体还必须遵循 [AGENTS.md](AGENTS.md) 以及更靠近
+目标目录的说明。
+
+<details>
+<summary><strong>开发流程</strong></summary>
+
+1. 阅读 `AGENTS.md`、`docs/architecture.md`、`docs/end-state.md`，以及目标目录
+   附近的其他仓库说明。
+2. 检查 `git status`，保留已有工作；互不相关的并行改动应使用 worktree。
+3. 说明要改变的约束，找出所有受影响的表面，并完成最小且完整的一组改动。
+   语义变更不要和大规模文件移动或生成文件刷新混在一起。
+4. 添加可长期保留的测试，并运行：
+
+   ```text
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace
+   cargo check -p canwu-debug
+   ```
+
+5. 公开 API 或文档发生变化时，运行受影响的公开示例和
+   `cargo doc --workspace --no-deps`。
+6. 架构、持久化、重放、权限、确定性或性能改动必须经过独立审查；只提交范围
+   清晰并且验证通过的里程碑。
+
+详细的项目层级和变更表面映射见 [AGENTS.md](AGENTS.md)。
+
+</details>
 
 ## 智能体技能
 
