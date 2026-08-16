@@ -224,22 +224,34 @@ exact plugin/system provenance. Snapshot format 4 adds random draw journals,
 state and boundary hash chains, a current-state checkpoint commitment, hashed
 run/content/source manifests, exact plugin version and semantic identities, and
 an environment-bound replay journal that also verifies command-only and
-registration-closure-only runs. Every report dispatch must retain exactly one
+registration-closure-only runs. Declared runs now also bind the six orthogonal
+CM policy dimensions. Their supported request path distinguishes human, AI,
+institutional, replay, system, debug, experiment, and compatibility actor
+origins; validates explicit decision/seat authority before mutation; enforces
+idempotency and mandatory expected revision/time pairs for declared external
+commands; advances revision on accepted commands and published settlement
+boundaries; persists accepted and expected-rejected attempts; admits them into
+boundary evidence; and replays them exactly. Frozen
+replay ingress is kernel-only, so live callers cannot self-label around
+`ReadOnly`. Observation/trace-only variants retain distinct save identities but
+produce identical authoritative state/boundary hashes and RNG state. Every
+report dispatch must retain exactly one
 causally linked core random draw, and authoritative scheduling rejects time
 overflow rather than saturating. Current-format checkpoints also require an
 exact engine-version match unless an explicit migration rewrites their
 commitments.
 Compatible handler-free format 2 and 3 saves migrate with explicit legacy
 provenance for continuation and explicitly reject unsupported exact replay.
-These are substantial but still partial implementations of CM-E04 through
-CM-E09, CM-E12, and CM-E13.
+These are substantial but still partial implementations of CM-E02, CM-E04
+through CM-E09, and CM-E11 through CM-E13.
 
 Canwu is not yet CM-conformant. The major remaining gaps include generic domain
-entity/record lifecycles; complete authority, seat, idempotency, and run-policy
-contracts; unified typed ingress and automatic calendar scheduling; released,
+entity/record lifecycles; authority scopes that prevent human/AI double control,
+institution/advisor permission semantics, experiment lineage, and the remaining
+canonical run-configuration identity fields; unified command,
+communication/acknowledgement, and automatic calendar ingress; released,
 carried, and lost reservation outcomes plus atomic conservation bundles;
-structured nonfatal rejection evidence; field-level provenance and structured
-report facts; immutable generation-tagged
+field-level provenance and structured report facts; immutable generation-tagged
 actor projections; a general migration registry, replay environment discovery,
 fork lineage, and branch comparison; constrained data/rule packages;
 binding-oriented batch APIs; and a versioned deterministic solver boundary.

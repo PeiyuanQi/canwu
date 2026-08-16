@@ -176,9 +176,10 @@ queues, state, journals, random state, counters, and boundary records to their
 pre-boundary values.
 
 Each successful boundary persists its ID, time, correlation, cadence set,
-admitted commands and events, reservation evidence, allocations, random draws,
-field changes, exact plugin/system provenance, a deterministic state hash, and
-the previous and current boundary hashes. Boundary-caused events do not invoke
+admitted command attempts, accepted commands, and events, reservation evidence,
+allocations, random draws, field changes, exact plugin/system provenance, a
+deterministic state hash, and the previous and current boundary hashes.
+Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
 admission. Format 4 snapshots validate this evidence and require exact plugin
 identity and descriptor rehydration before continuation. Because format-4 state
@@ -210,17 +211,34 @@ stream progress cannot preserve an apparently coherent report history.
 The legacy immediate command/event path remains for the movement slice and
 compatibility examples. It is transactional, but it is not a substitute for the
 fourteen-phase boundary and cannot own state also managed by phased systems.
-Automatic calendar policy, unified typed ingress classes, structured domain
-rejections, and conservation bundles remain later conformance work.
+`submit` preserves that direct compatibility path. CM-facing hosts use
+`process_command`, which accepts an owned `CommandRequest` with an idempotency
+key, expected revision, expected simulation time, typed issuer, and explicit
+seat/authority context. Accepted and expected-rejected attempts are persisted,
+hashed, admitted at the next boundary, restored by save/load, and regenerated
+by exact replay. Exact retries return the original outcome without new
+mutation; request-ID collisions are fail-closed and stale revision/time pairs
+retain the committed revision. The revision advances on every accepted command
+or published settlement boundary, while expected simulation time detects clock
+and scheduled-work advancement. Declared external commands require both guards.
+Live requests, compatibility-only legacy-direct calls, and frozen replay inputs
+are distinct ingress classes. Only exact replay can consume a
+`FrozenReplay` input, so a live caller cannot bypass a read-only run by labeling
+itself as replay. Automatic calendar policy, communication/acknowledgement
+ingress, and conservation bundles remain later conformance work.
 
 Command handlers receive an immutable `CommandContext` containing the issuer
-asserted by the trusted in-process host, proposed command ID, simulation time,
-and expected-time guard alongside the read-only simulation view. Canwu does not
-authenticate a freely constructed `CommandEnvelope`; network, IPC, and account
-adapters must authenticate callers before selecting an `Issuer`. Handlers
-return directives and cannot take a mutable world reference. Directives can
-update declared components, emit attributable custom events, or schedule future
-directives.
+asserted by the trusted in-process host, typed decision origin, seat and
+permission-profile context, command-relevant run policy, ingress class, command
+and attempt identities, request identity, revision, simulation time, and
+expected revision/time guards alongside the read-only simulation view. Canwu
+does not authenticate a freely constructed `CommandEnvelope`; network, IPC, and
+account adapters must authenticate callers before selecting an `Issuer` and
+authority context. Handlers return directives and cannot take a mutable world
+reference. Directives can update declared components, emit attributable custom
+events, or schedule future directives. `CommandPolicyContext` intentionally
+omits run purpose, observation, and trace, preventing authoritative handlers
+from branching on presentation-only dimensions.
 
 Executable plugin handlers are stateless Rust function pointers. Deterministic
 plugin state belongs in serialized, plugin-owned components; hidden mutex,
@@ -243,22 +261,34 @@ hashes. Continuation is blocked until every required plugin is rehydrated, and
 registration must reproduce the exact stored identity and descriptor before
 its handlers become active. `RunManifest` separately binds scenario, rules,
 content, localization-sensitive contracts, run configuration, and source
-provenance; its hash participates in authoritative boundary state hashes. Use
+provenance. A declared `RunConfigurationSnapshot` carries the six orthogonal CM
+policy dimensions and is validated against that manifest. Authoritative state
+and boundary hashes normalize admission and presentation policy so changing
+only observation or trace policy cannot change simulation-result identity or
+RNG state. The checkpoint remains a save-container commitment and additionally
+binds the exact full run-manifest hash, so differently authorized or observable
+runs cannot masquerade as the same save even when their simulated state is
+identical. Use
 `ReplayJournal` and `replay_from_journal` for exact replay: the journal freezes
-engine and snapshot versions, root seed, run manifest, plugin descriptors,
-the plugin-registration lifecycle state, commands, boundaries, final time, and
-final checkpoint hash before executing anything. The older `replay*` helpers
+engine and snapshot versions, root seed, run manifest, run configuration,
+plugin descriptors, the plugin-registration lifecycle state, accepted commands,
+accepted/rejected command attempts, boundaries, final time, and final checkpoint
+hash before executing anything. The older `replay*` helpers
 reconstruct caller-supplied fixtures but do not claim recorded-environment
 verification. Automatic package discovery remains later work. New plugin
-registration closes after the first successful authoritative command, time
-advance, or phased settlement; exact snapshot rehydration remains allowed after
-that point. Snapshots retain the run's initial time and reject a
+registration closes after the first recorded tracked attempt (accepted or
+expected-rejected), successful compatibility command, time advance, or phased
+settlement; exact snapshot rehydration remains allowed after that point.
+Snapshots retain the run's initial time and reject a
 registration-open flag when commands, events, queued work, component state,
 counter movement, or elapsed simulation time proves execution already began.
 Format 2 and 3 checkpoints without plugins can continue after explicit
 migration with identity-unbound legacy provenance. Exact replay is rejected
 with `legacy_replay_unavailable`, because those formats did not retain enough
-environment identity or state commitments to make that claim safely.
+environment identity or state commitments to make that claim safely. Earlier
+format-4 saves that retained a custom run-configuration artifact but not the
+six policy dimensions hydrate as `ManifestOnlyV1`; their recorded manifest and
+exact replay remain valid without fabricating modern policy semantics.
 
 ## External renderer integration
 
@@ -288,6 +318,7 @@ That profile does not move Celestial Mandate rules into Canwu. Instead, it
 requires Canwu to provide the deterministic settlement, authority, ownership,
 transaction, knowledge, persistence, lineage, package, and publication
 contracts through public extension points. The current v0.4 runtime adds scoped
-randomness, run/plugin identity, and boundary hash evidence to the v0.3 phased
-settlement foundation, but it is still only a partial conformance result; the
-remaining gaps are tracked in the profile itself.
+randomness, run/plugin identity, boundary hash evidence, typed run policy, and
+replayable authority-aware request ingress to the v0.3 phased settlement
+foundation, but it is still only a partial conformance result; the remaining
+gaps are tracked in the profile itself.

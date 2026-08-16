@@ -8,6 +8,7 @@
 
 mod boundary;
 mod manifest;
+mod policy;
 mod random;
 
 pub use boundary::{
@@ -18,14 +19,20 @@ pub use boundary::{
     ReservationRequestRecord,
 };
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
+pub use policy::{
+    CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
+    RUN_CONFIGURATION_FORMAT_VERSION, RunConfiguration, RunConfigurationSnapshot, RunPurpose,
+    SeatBinding, SeatPolicy, TracePolicy,
+};
 pub use random::{
     RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
     RandomStreamState,
 };
 
 use canwu_core::{
-    ArmyId, BoundaryId, CommandId, DeterministicRng, EntityRef, EventId, FieldSchema, GovernmentId,
-    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng, EntityRef,
+    EventId, FieldSchema, GovernmentId, PersonId, RandomDrawId, RouteId, SchemaRegistry,
+    TerritoryId, TypeSchema,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -65,14 +72,19 @@ pub enum ErrorCode {
     InvalidAuthority,
     InvalidBoundary,
     InvalidDuration,
+    IdempotencyConflict,
+    InteractionReadOnly,
     InvalidPayload,
     InvalidPluginRegistration,
     InvalidRandomDraw,
     InvalidRandomStream,
+    InvalidRunConfiguration,
     InvalidRunManifest,
     InvalidSnapshot,
     IdentifierExhausted,
     LegacyReplayUnavailable,
+    MissingIdempotencyKey,
+    MixedCommandIngress,
     NoRoute,
     PluginCommandNotFound,
     PluginManifestMismatch,
@@ -81,6 +93,7 @@ pub enum ErrorCode {
     PluginRegistrationClosed,
     ReplayMismatch,
     ReplayEnvironmentMismatch,
+    SimulationRevisionConflict,
     SimulationTimeConflict,
     UndeclaredRandomStream,
     UndeclaredStateRead,
@@ -141,14 +154,19 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::InvalidAuthority => "invalid_authority",
         ErrorCode::InvalidBoundary => "invalid_boundary",
         ErrorCode::InvalidDuration => "invalid_duration",
+        ErrorCode::IdempotencyConflict => "idempotency_conflict",
+        ErrorCode::InteractionReadOnly => "interaction_read_only",
         ErrorCode::InvalidPayload => "invalid_payload",
         ErrorCode::InvalidPluginRegistration => "invalid_plugin_registration",
         ErrorCode::InvalidRandomDraw => "invalid_random_draw",
         ErrorCode::InvalidRandomStream => "invalid_random_stream",
+        ErrorCode::InvalidRunConfiguration => "invalid_run_configuration",
         ErrorCode::InvalidRunManifest => "invalid_run_manifest",
         ErrorCode::InvalidSnapshot => "invalid_snapshot",
         ErrorCode::IdentifierExhausted => "identifier_exhausted",
         ErrorCode::LegacyReplayUnavailable => "legacy_replay_unavailable",
+        ErrorCode::MissingIdempotencyKey => "missing_idempotency_key",
+        ErrorCode::MixedCommandIngress => "mixed_command_ingress",
         ErrorCode::NoRoute => "no_route",
         ErrorCode::PluginCommandNotFound => "plugin_command_not_found",
         ErrorCode::PluginManifestMismatch => "plugin_manifest_mismatch",
@@ -157,6 +175,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::PluginRegistrationClosed => "plugin_registration_closed",
         ErrorCode::ReplayMismatch => "replay_mismatch",
         ErrorCode::ReplayEnvironmentMismatch => "replay_environment_mismatch",
+        ErrorCode::SimulationRevisionConflict => "simulation_revision_conflict",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
         ErrorCode::UndeclaredRandomStream => "undeclared_random_stream",
         ErrorCode::UndeclaredStateRead => "undeclared_state_read",
@@ -170,15 +189,85 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum Issuer {
     Actor(PersonId),
+    Human(String),
+    Ai(String),
+    Institution(String),
+    Replay(String),
+    Experiment(String),
     Debug,
     System(String),
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandIngress {
+    LegacyDirect,
+    LiveRequest,
+    FrozenReplay,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DecisionOrigin {
+    Actor {
+        actor: PersonId,
+    },
+    Institution {
+        institution: EntityRef,
+        responsible_actor: Option<PersonId>,
+    },
+    Council {
+        council_id: String,
+    },
+    NoResponsibleActor {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CommandAuthority {
+    pub decision_origin: DecisionOrigin,
+    pub seat_id: Option<String>,
+    pub permission_profile_id: Option<String>,
+    pub command_subject: Option<EntityRef>,
+}
+
+impl CommandAuthority {
+    #[must_use]
+    pub const fn for_actor(actor: PersonId) -> Self {
+        Self {
+            decision_origin: DecisionOrigin::Actor { actor },
+            seat_id: None,
+            permission_profile_id: None,
+            command_subject: None,
+        }
+    }
+
+    #[must_use]
+    pub fn no_responsible_actor(reason: impl Into<String>) -> Self {
+        Self {
+            decision_origin: DecisionOrigin::NoResponsibleActor {
+                reason: reason.into(),
+            },
+            seat_id: None,
+            permission_profile_id: None,
+            command_subject: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommandContext {
     pub issuer: Issuer,
+    pub authority: CommandAuthority,
+    pub run_policy: CommandPolicyContext,
+    pub ingress: CommandIngress,
+    pub attempt_id: Option<CommandAttemptId>,
     pub command_id: CommandId,
+    pub request_id: Option<CommandRequestId>,
+    pub revision: u64,
     pub simulation_time: SimTime,
+    pub expected_revision: Option<u64>,
     pub expected_time: Option<SimTime>,
 }
 
@@ -341,6 +430,8 @@ pub enum Command {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommandEnvelope {
     pub issuer: Issuer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<CommandAuthority>,
     pub command: Command,
     pub expected_time: Option<SimTime>,
 }
@@ -350,6 +441,7 @@ impl CommandEnvelope {
     pub const fn new(issuer: Issuer, command: Command) -> Self {
         Self {
             issuer,
+            authority: None,
             command,
             expected_time: None,
         }
@@ -360,20 +452,99 @@ impl CommandEnvelope {
         self.expected_time = Some(expected_time);
         self
     }
+
+    #[must_use]
+    pub fn with_authority(mut self, authority: CommandAuthority) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CommandRequest {
+    pub request_id: CommandRequestId,
+    pub expected_revision: u64,
+    pub envelope: CommandEnvelope,
+}
+
+impl CommandRequest {
+    #[must_use]
+    pub const fn new(
+        request_id: CommandRequestId,
+        expected_revision: u64,
+        envelope: CommandEnvelope,
+    ) -> Self {
+        Self {
+            request_id,
+            expected_revision,
+            envelope,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CommandAdmission {
+    request_id: Option<CommandRequestId>,
+    expected_revision: Option<u64>,
+    expected_time: Option<SimTime>,
+    revision_before: u64,
+    ingress: CommandIngress,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CommandRecord {
     pub id: CommandId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<CommandAttemptId>,
     pub accepted_at: SimTime,
     pub envelope: CommandEnvelope,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted_events: Vec<EventId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CommandReceipt {
+    pub attempt_id: Option<CommandAttemptId>,
     pub command_id: CommandId,
+    pub request_id: Option<CommandRequestId>,
+    pub revision: u64,
     pub accepted_at: SimTime,
     pub emitted_events: Vec<EventId>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CommandRejection {
+    pub attempt_id: Option<CommandAttemptId>,
+    pub request_id: Option<CommandRequestId>,
+    pub retained_revision: u64,
+    pub rejected_at: SimTime,
+    pub error: CanwuError,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum CommandOutcome {
+    Accepted { receipt: CommandReceipt },
+    Rejected { rejection: CommandRejection },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum CommandAttemptOutcome {
+    Accepted { command_id: CommandId },
+    Rejected { error: CanwuError },
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CommandAttemptRecord {
+    pub id: CommandAttemptId,
+    pub at: SimTime,
+    pub revision_before: u64,
+    pub ingress: CommandIngress,
+    pub request_id: Option<CommandRequestId>,
+    pub expected_revision: Option<u64>,
+    pub envelope: CommandEnvelope,
+    pub outcome: CommandAttemptOutcome,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1785,12 +1956,30 @@ struct ScheduledRecord {
     action: ScheduledAction,
 }
 
+const fn one_u64() -> u64 {
+    1
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_one_u64(value: &u64) -> bool {
+    *value == 1
+}
+
+fn command_attempt_slice_is_empty(value: &&[CommandAttemptRecord]) -> bool {
+    value.is_empty()
+}
+
+fn command_attempt_id_slice_is_empty(value: &&[CommandAttemptId]) -> bool {
+    value.is_empty()
+}
+
 #[derive(Clone)]
 struct RuntimeState {
     initial_time: SimTime,
     now: SimTime,
     run_manifest: RunManifest,
     run_manifest_hash: String,
+    run_configuration: RunConfigurationSnapshot,
     checkpoint_hash: String,
     plugin_registration_closed: bool,
     people: BTreeMap<PersonId, Person>,
@@ -1802,6 +1991,7 @@ struct RuntimeState {
     scheduler: BTreeMap<ScheduleKey, ScheduledAction>,
     events: Vec<SimEvent>,
     commands: Vec<CommandRecord>,
+    command_attempts: Vec<CommandAttemptRecord>,
     boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     root_seed: u64,
@@ -1809,6 +1999,7 @@ struct RuntimeState {
     random_draws: Vec<RandomDrawRecord>,
     next_event_id: u64,
     next_command_id: u64,
+    next_command_attempt_id: u64,
     next_boundary_id: u64,
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
@@ -1823,6 +2014,8 @@ pub struct SimulationSnapshot {
     pub run_manifest: Option<RunManifest>,
     #[serde(default)]
     pub run_manifest_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_configuration: Option<RunConfigurationSnapshot>,
     #[serde(default)]
     pub checkpoint_hash: String,
     pub initial_time: SimTime,
@@ -1832,6 +2025,8 @@ pub struct SimulationSnapshot {
     pub knowledge: KnowledgeSnapshot,
     pub events: Vec<SimEvent>,
     pub commands: Vec<CommandRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_attempts: Vec<CommandAttemptRecord>,
     #[serde(default)]
     pub boundaries: Vec<BoundaryRecord>,
     pub plugin_components: Vec<PluginComponentRecord>,
@@ -1848,6 +2043,8 @@ pub struct SimulationSnapshot {
     legacy_rng: Option<DeterministicRng>,
     next_event_id: u64,
     next_command_id: u64,
+    #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
+    next_command_attempt_id: u64,
     #[serde(default)]
     next_boundary_id: u64,
     #[serde(default)]
@@ -1856,7 +2053,7 @@ pub struct SimulationSnapshot {
     next_correlation_id: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 /// Complete recorded environment and input journal for exact replay.
 pub struct ReplayJournal {
     pub engine_version: String,
@@ -1864,12 +2061,61 @@ pub struct ReplayJournal {
     pub root_seed: u64,
     pub run_manifest: RunManifest,
     pub run_manifest_hash: String,
+    pub run_configuration: RunConfigurationSnapshot,
     pub plugin_descriptors: Vec<PluginDescriptor>,
     pub plugin_registration_closed: bool,
     pub commands: Vec<CommandRecord>,
+    pub command_attempts: Vec<CommandAttemptRecord>,
     pub boundaries: Vec<BoundaryRecord>,
     pub final_time: SimTime,
     pub checkpoint_hash: String,
+}
+
+#[derive(Deserialize)]
+struct ReplayJournalWire {
+    engine_version: String,
+    snapshot_format_version: u32,
+    root_seed: u64,
+    run_manifest: RunManifest,
+    run_manifest_hash: String,
+    #[serde(default)]
+    run_configuration: Option<RunConfigurationSnapshot>,
+    plugin_descriptors: Vec<PluginDescriptor>,
+    plugin_registration_closed: bool,
+    commands: Vec<CommandRecord>,
+    #[serde(default)]
+    command_attempts: Vec<CommandAttemptRecord>,
+    boundaries: Vec<BoundaryRecord>,
+    final_time: SimTime,
+    checkpoint_hash: String,
+}
+
+impl<'de> Deserialize<'de> for ReplayJournal {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ReplayJournalWire::deserialize(deserializer)?;
+        let run_configuration = wire
+            .run_configuration
+            .map_or_else(|| inferred_run_configuration(&wire.run_manifest), Ok)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            engine_version: wire.engine_version,
+            snapshot_format_version: wire.snapshot_format_version,
+            root_seed: wire.root_seed,
+            run_manifest: wire.run_manifest,
+            run_manifest_hash: wire.run_manifest_hash,
+            run_configuration,
+            plugin_descriptors: wire.plugin_descriptors,
+            plugin_registration_closed: wire.plugin_registration_closed,
+            commands: wire.commands,
+            command_attempts: wire.command_attempts,
+            boundaries: wire.boundaries,
+            final_time: wire.final_time,
+            checkpoint_hash: wire.checkpoint_hash,
+        })
+    }
 }
 
 pub struct Simulation {
@@ -1889,11 +2135,44 @@ impl Simulation {
     pub fn new_with_manifest(
         seed: u64,
         scenario: Scenario,
+        run_manifest: RunManifest,
+    ) -> Result<Self, CanwuError> {
+        Self::new_with_configuration_snapshot(
+            seed,
+            scenario,
+            run_manifest,
+            RunConfigurationSnapshot::CompatibilityV1,
+        )
+    }
+
+    /// Creates a run whose six policy dimensions are persisted and bound to
+    /// the run-configuration artifact in `run_manifest`.
+    pub fn new_with_run_configuration(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        mut run_configuration: RunConfiguration,
+    ) -> Result<Self, CanwuError> {
+        run_configuration.canonicalize();
+        Self::new_with_configuration_snapshot(
+            seed,
+            scenario,
+            run_manifest,
+            RunConfigurationSnapshot::Declared(run_configuration),
+        )
+    }
+
+    fn new_with_configuration_snapshot(
+        seed: u64,
+        scenario: Scenario,
         mut run_manifest: RunManifest,
+        run_configuration: RunConfigurationSnapshot,
     ) -> Result<Self, CanwuError> {
         validate_scenario(&scenario)?;
         manifest::canonicalize(&mut run_manifest);
         manifest::validate(&run_manifest, Some(&scenario), false)?;
+        manifest::validate_run_configuration(&run_manifest, &run_configuration)?;
+        validate_run_configuration_entities(&run_configuration, &scenario.world)?;
         let run_manifest_hash = manifest::hash(&run_manifest)?;
         if scenario
             .world
@@ -1915,6 +2194,7 @@ impl Simulation {
                 now: scenario.start_time,
                 run_manifest,
                 run_manifest_hash,
+                run_configuration,
                 checkpoint_hash: String::new(),
                 plugin_registration_closed: false,
                 people: scenario
@@ -1951,6 +2231,7 @@ impl Simulation {
                 scheduler: BTreeMap::new(),
                 events: Vec::new(),
                 commands: Vec::new(),
+                command_attempts: Vec::new(),
                 boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
                 root_seed: seed,
@@ -1958,6 +2239,7 @@ impl Simulation {
                 random_draws: Vec::new(),
                 next_event_id: 1,
                 next_command_id: 1,
+                next_command_attempt_id: 1,
                 next_boundary_id: 1,
                 next_random_draw_id: 1,
                 next_schedule_sequence: 1,
@@ -2036,7 +2318,44 @@ impl Simulation {
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
-        Self::replay_records(simulation, commands, boundaries, final_time)
+        Self::replay_records(simulation, commands, &[], boundaries, final_time)
+    }
+
+    /// Reconstructs caller-supplied inputs under a caller-supplied declared run
+    /// configuration. This does not establish recorded-environment identity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_with_run_configuration(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        run_configuration: RunConfiguration,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        command_attempts: &[CommandAttemptRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        if command_attempts
+            .iter()
+            .any(|attempt| attempt.ingress == CommandIngress::FrozenReplay)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "frozen replay attempts require an environment-bound replay journal",
+            ));
+        }
+        let mut simulation =
+            Self::new_with_run_configuration(seed, scenario, run_manifest, run_configuration)?;
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        Self::replay_records(
+            simulation,
+            commands,
+            command_attempts,
+            boundaries,
+            final_time,
+        )
     }
 
     /// Replays only after the recorded engine, run, seed, and plugin manifests
@@ -2053,6 +2372,7 @@ impl Simulation {
             ));
         }
         manifest::validate(&journal.run_manifest, Some(&scenario), false)?;
+        manifest::validate_run_configuration(&journal.run_manifest, &journal.run_configuration)?;
         if journal.engine_version != ENGINE_VERSION
             || journal.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
             || !is_canonical_hash(&journal.run_manifest_hash)
@@ -2071,8 +2391,12 @@ impl Simulation {
             )
         })?;
 
-        let mut simulation =
-            Self::new_with_manifest(journal.root_seed, scenario, journal.run_manifest.clone())?;
+        let mut simulation = Self::new_with_configuration_snapshot(
+            journal.root_seed,
+            scenario,
+            journal.run_manifest.clone(),
+            journal.run_configuration.clone(),
+        )?;
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
@@ -2087,6 +2411,7 @@ impl Simulation {
         let mut simulation = Self::replay_records(
             simulation,
             &journal.commands,
+            &journal.command_attempts,
             &journal.boundaries,
             journal.final_time,
         )?;
@@ -2111,9 +2436,15 @@ impl Simulation {
     fn replay_records(
         mut simulation: Self,
         commands: &[CommandRecord],
+        attempts: &[CommandAttemptRecord],
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
+        if !attempts.is_empty() {
+            return Self::replay_attempt_records(
+                simulation, commands, attempts, boundaries, final_time,
+            );
+        }
         let mut next_command = 0;
         for expected_boundary in boundaries {
             for admitted in &expected_boundary.admitted_commands {
@@ -2159,6 +2490,82 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDuration,
                 "replay final time cannot precede the last command",
+            ));
+        }
+        if final_time > simulation.time() {
+            simulation.advance_to(final_time)?;
+        }
+        Ok(simulation)
+    }
+
+    fn replay_attempt_records(
+        mut simulation: Self,
+        commands: &[CommandRecord],
+        attempts: &[CommandAttemptRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        let mut next_attempt = 0;
+        for expected_boundary in boundaries {
+            let mut admitted_commands = Vec::new();
+            for admitted in &expected_boundary.admitted_attempts {
+                let Some(record) = attempts.get(next_attempt) else {
+                    return Err(CanwuError::new(
+                        ErrorCode::ReplayMismatch,
+                        "boundary replay admits a command attempt absent from the journal",
+                    ));
+                };
+                if record.id != *admitted {
+                    return Err(CanwuError::new(
+                        ErrorCode::ReplayMismatch,
+                        "boundary replay attempt admission does not match journal order",
+                    ));
+                }
+                replay_attempt_record(&mut simulation, record, commands, expected_boundary.at)?;
+                if let CommandAttemptOutcome::Accepted { command_id } = record.outcome {
+                    admitted_commands.push(command_id);
+                }
+                next_attempt += 1;
+            }
+            if admitted_commands != expected_boundary.admitted_commands {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    "boundary replay accepted-command cut disagrees with admitted attempts",
+                ));
+            }
+            let receipt = simulation.settle_boundary(BoundaryRequest {
+                at: expected_boundary.at,
+                cadences: expected_boundary.cadences.clone(),
+            })?;
+            let Some(actual_boundary) = simulation.boundaries().last() else {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    "boundary replay did not append settlement evidence",
+                ));
+            };
+            if receipt.boundary_id != expected_boundary.id || actual_boundary != expected_boundary {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    format!(
+                        "regenerated boundary {} did not match its journal evidence",
+                        expected_boundary.id
+                    ),
+                ));
+            }
+        }
+        for record in &attempts[next_attempt..] {
+            replay_attempt_record(&mut simulation, record, commands, final_time)?;
+        }
+        if simulation.command_log() != commands {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "replayed accepted command journal does not match its recorded evidence",
+            ));
+        }
+        if final_time < simulation.time() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "replay final time cannot precede the last command attempt",
             ));
         }
         if final_time > simulation.time() {
@@ -2221,6 +2628,16 @@ impl Simulation {
     }
 
     #[must_use]
+    pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
+        &self.state.run_configuration
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.state.next_correlation_id.saturating_sub(1)
+    }
+
+    #[must_use]
     pub fn run_manifest_hash(&self) -> &str {
         &self.state.run_manifest_hash
     }
@@ -2228,6 +2645,13 @@ impl Simulation {
     #[must_use]
     pub fn checkpoint_hash(&self) -> &str {
         &self.state.checkpoint_hash
+    }
+
+    /// Hash of simulated state and causal evidence. Run-purpose, controller,
+    /// seat, observation, interaction, and trace policy remain save identity
+    /// but are deliberately excluded from this authoritative result identity.
+    pub fn authoritative_state_hash(&self) -> Result<String, CanwuError> {
+        self.compute_boundary_state_hash()
     }
 
     #[must_use]
@@ -2254,6 +2678,11 @@ impl Simulation {
     #[must_use]
     pub fn command_log(&self) -> &[CommandRecord] {
         &self.state.commands
+    }
+
+    #[must_use]
+    pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
+        &self.state.command_attempts
     }
 
     #[must_use]
@@ -2291,9 +2720,11 @@ impl Simulation {
             root_seed: self.state.root_seed,
             run_manifest: self.state.run_manifest.clone(),
             run_manifest_hash: self.state.run_manifest_hash.clone(),
+            run_configuration: self.state.run_configuration.clone(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             plugin_registration_closed: self.state.plugin_registration_closed,
             commands: self.state.commands.clone(),
+            command_attempts: self.state.command_attempts.clone(),
             boundaries: self.state.boundaries.clone(),
             final_time: self.state.now,
             checkpoint_hash: self.state.checkpoint_hash.clone(),
@@ -2301,17 +2732,83 @@ impl Simulation {
     }
 
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
+        match self.admit_command(None, None, envelope, CommandIngress::LegacyDirect, false)? {
+            CommandOutcome::Accepted { receipt } => Ok(receipt),
+            CommandOutcome::Rejected { rejection } => Err(rejection.error),
+        }
+    }
+
+    pub fn process_command(
+        &mut self,
+        request: CommandRequest,
+    ) -> Result<CommandOutcome, CanwuError> {
+        self.admit_command(
+            Some(request.request_id),
+            Some(request.expected_revision),
+            request.envelope,
+            CommandIngress::LiveRequest,
+            true,
+        )
+    }
+
+    fn admit_command(
+        &mut self,
+        request_id: Option<CommandRequestId>,
+        expected_revision: Option<u64>,
+        envelope: CommandEnvelope,
+        ingress: CommandIngress,
+        record_attempt: bool,
+    ) -> Result<CommandOutcome, CanwuError> {
         self.plugins.ensure_active()?;
+        self.ensure_command_ingress_family(ingress)?;
+        if let Some(cached) =
+            self.cached_command_outcome(request_id, expected_revision, &envelope)?
+        {
+            return Ok(cached);
+        }
+
+        let revision_before = self.revision();
+        let admission = CommandAdmission {
+            request_id,
+            expected_revision,
+            expected_time: envelope.expected_time,
+            revision_before,
+            ingress,
+        };
+        let attempt_id = if record_attempt {
+            let (value, _) =
+                claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
+            CommandAttemptId::new(value)
+        } else {
+            CommandAttemptId::default()
+        };
+        let authority = match resolve_command_authority(&envelope) {
+            Ok(authority) => authority,
+            Err(error) if is_expected_command_rejection(&error.code) && record_attempt => {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
+            Err(error) => return Err(error),
+        };
+        if let Err(error) = self.validate_command_ingress(&envelope.issuer, &authority, admission) {
+            if is_expected_command_rejection(&error.code) && record_attempt {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
+            return Err(error);
+        }
         if let Some(expected_time) = envelope.expected_time
             && expected_time != self.state.now
         {
-            return Err(CanwuError::new(
+            let error = CanwuError::new(
                 ErrorCode::SimulationTimeConflict,
                 format!(
                     "command expected time {expected_time}, but simulation is at {}",
                     self.state.now
                 ),
-            ));
+            );
+            if record_attempt {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
+            return Err(error);
         }
 
         let (command_id_value, next_command_id) =
@@ -2321,11 +2818,24 @@ impl Simulation {
         let command_id = CommandId::new(command_id_value);
         let context = CommandContext {
             issuer: envelope.issuer.clone(),
+            authority,
+            run_policy: self.state.run_configuration.command_policy(),
+            ingress: admission.ingress,
+            attempt_id: record_attempt.then_some(attempt_id),
             command_id,
+            request_id: admission.request_id,
+            revision: admission.revision_before,
             simulation_time: self.state.now,
+            expected_revision: admission.expected_revision,
             expected_time: envelope.expected_time,
         };
-        let prepared = self.prepare_command(&envelope, &context)?;
+        let prepared = match self.prepare_command(&envelope, &context) {
+            Ok(prepared) => prepared,
+            Err(error) if is_expected_command_rejection(&error.code) && record_attempt => {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
+            Err(error) => return Err(error),
+        };
         let transaction_start = self.state.clone();
         let event_start = self.state.events.len();
         self.state.next_command_id = next_command_id;
@@ -2333,27 +2843,202 @@ impl Simulation {
 
         if let Err(error) = self.apply_prepared(prepared, command_id, correlation_id) {
             self.state = transaction_start;
+            if is_expected_command_rejection(&error.code) && record_attempt {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
             return Err(error);
         }
+        let emitted_events: Vec<_> = self.state.events[event_start..]
+            .iter()
+            .map(|event| event.id)
+            .collect();
         self.state.plugin_registration_closed = true;
         self.state.commands.push(CommandRecord {
             id: command_id,
+            attempt_id: record_attempt.then_some(attempt_id),
             accepted_at: self.state.now,
-            envelope,
+            envelope: envelope.clone(),
+            emitted_events: if record_attempt {
+                emitted_events.clone()
+            } else {
+                Vec::new()
+            },
         });
+        if record_attempt {
+            let (_, next_attempt_id) =
+                claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
+            self.state.next_command_attempt_id = next_attempt_id;
+            self.state.command_attempts.push(CommandAttemptRecord {
+                id: attempt_id,
+                at: self.state.now,
+                revision_before: admission.revision_before,
+                ingress: admission.ingress,
+                request_id: admission.request_id,
+                expected_revision: admission.expected_revision,
+                envelope,
+                outcome: CommandAttemptOutcome::Accepted { command_id },
+            });
+        }
         if let Err(error) = self.refresh_checkpoint_hash() {
             self.state = transaction_start;
             return Err(error);
         }
 
-        Ok(CommandReceipt {
-            command_id,
-            accepted_at: self.state.now,
-            emitted_events: self.state.events[event_start..]
-                .iter()
-                .map(|event| event.id)
-                .collect(),
+        Ok(CommandOutcome::Accepted {
+            receipt: CommandReceipt {
+                attempt_id: record_attempt.then_some(attempt_id),
+                command_id,
+                request_id: admission.request_id,
+                revision: admission.revision_before + 1,
+                accepted_at: self.state.now,
+                emitted_events,
+            },
         })
+    }
+
+    fn ensure_command_ingress_family(&self, ingress: CommandIngress) -> Result<(), CanwuError> {
+        let has_legacy_commands = self
+            .state
+            .commands
+            .iter()
+            .any(|record| record.attempt_id.is_none());
+        let has_tracked_attempts = !self.state.command_attempts.is_empty();
+        if (ingress == CommandIngress::LegacyDirect && has_tracked_attempts)
+            || (ingress != CommandIngress::LegacyDirect && has_legacy_commands)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::MixedCommandIngress,
+                "legacy-direct commands and tracked request/replay attempts cannot coexist in one run",
+            ));
+        }
+        Ok(())
+    }
+
+    fn cached_command_outcome(
+        &self,
+        request_id: Option<CommandRequestId>,
+        expected_revision: Option<u64>,
+        envelope: &CommandEnvelope,
+    ) -> Result<Option<CommandOutcome>, CanwuError> {
+        let Some(request_id) = request_id else {
+            return Ok(None);
+        };
+        let Some(attempt) = self
+            .state
+            .command_attempts
+            .iter()
+            .find(|attempt| attempt.request_id == Some(request_id))
+        else {
+            return Ok(None);
+        };
+        if attempt.expected_revision != expected_revision || &attempt.envelope != envelope {
+            return Ok(Some(CommandOutcome::Rejected {
+                rejection: CommandRejection {
+                    attempt_id: None,
+                    request_id: Some(request_id),
+                    retained_revision: self.revision(),
+                    rejected_at: self.state.now,
+                    error: CanwuError::new(
+                        ErrorCode::IdempotencyConflict,
+                        "this command request ID was already used for different input",
+                    ),
+                },
+            }));
+        }
+        match &attempt.outcome {
+            CommandAttemptOutcome::Accepted { command_id } => {
+                let record = self
+                    .state
+                    .commands
+                    .iter()
+                    .find(|record| record.id == *command_id)
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidSnapshot,
+                            "accepted command attempt references a missing command",
+                        )
+                    })?;
+                Ok(Some(CommandOutcome::Accepted {
+                    receipt: CommandReceipt {
+                        attempt_id: Some(attempt.id),
+                        command_id: *command_id,
+                        request_id: Some(request_id),
+                        revision: attempt.revision_before + 1,
+                        accepted_at: record.accepted_at,
+                        emitted_events: record.emitted_events.clone(),
+                    },
+                }))
+            }
+            CommandAttemptOutcome::Rejected { error } => Ok(Some(CommandOutcome::Rejected {
+                rejection: CommandRejection {
+                    attempt_id: Some(attempt.id),
+                    request_id: Some(request_id),
+                    retained_revision: attempt.revision_before,
+                    rejected_at: attempt.at,
+                    error: error.clone(),
+                },
+            })),
+        }
+    }
+
+    fn record_command_rejection(
+        &mut self,
+        attempt_id: CommandAttemptId,
+        admission: CommandAdmission,
+        envelope: CommandEnvelope,
+        error: CanwuError,
+    ) -> Result<CommandOutcome, CanwuError> {
+        let transaction_start = self.state.clone();
+        let (claimed_id, next_attempt_id) =
+            claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
+        if claimed_id != attempt_id.get() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "command attempt allocation changed during rejection",
+            ));
+        }
+        self.state.next_command_attempt_id = next_attempt_id;
+        self.state.plugin_registration_closed = true;
+        self.state.command_attempts.push(CommandAttemptRecord {
+            id: attempt_id,
+            at: self.state.now,
+            revision_before: admission.revision_before,
+            ingress: admission.ingress,
+            request_id: admission.request_id,
+            expected_revision: admission.expected_revision,
+            envelope,
+            outcome: CommandAttemptOutcome::Rejected {
+                error: error.clone(),
+            },
+        });
+        if let Err(hash_error) = self.refresh_checkpoint_hash() {
+            self.state = transaction_start;
+            return Err(hash_error);
+        }
+        Ok(CommandOutcome::Rejected {
+            rejection: CommandRejection {
+                attempt_id: Some(attempt_id),
+                request_id: admission.request_id,
+                retained_revision: admission.revision_before,
+                rejected_at: self.state.now,
+                error,
+            },
+        })
+    }
+
+    fn validate_command_ingress(
+        &self,
+        issuer: &Issuer,
+        authority: &CommandAuthority,
+        admission: CommandAdmission,
+    ) -> Result<(), CanwuError> {
+        validate_command_ingress_policy(
+            &self.state.run_configuration,
+            issuer,
+            authority,
+            admission,
+            &|entity| runtime_entity_exists(&self.state, entity),
+        )
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
@@ -2454,6 +3139,12 @@ impl Simulation {
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.advance_to(request.at)?;
 
+        let previously_admitted_attempts: BTreeSet<_> = self
+            .state
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_attempts.iter().copied())
+            .collect();
         let previously_admitted_commands: BTreeSet<_> = self
             .state
             .boundaries
@@ -2465,6 +3156,13 @@ impl Simulation {
             .boundaries
             .iter()
             .flat_map(|record| record.admitted_events.iter().copied())
+            .collect();
+        let admitted_attempts: Vec<_> = self
+            .state
+            .command_attempts
+            .iter()
+            .map(|record| record.id)
+            .filter(|id| !previously_admitted_attempts.contains(id))
             .collect();
         let admitted_commands: Vec<_> = self
             .state
@@ -2577,6 +3275,7 @@ impl Simulation {
                     phase,
                     plugin: registered.plugin.clone(),
                     system: registered.contract.name.clone(),
+                    admitted_attempts: admitted_attempts.clone(),
                     admitted_commands: admitted_commands.clone(),
                     admitted_events: admitted_events.clone(),
                     emitted_events: emissions.iter().map(|emission| emission.event).collect(),
@@ -2712,6 +3411,7 @@ impl Simulation {
             at: request.at,
             correlation_id,
             cadences: request.cadences,
+            admitted_attempts,
             admitted_commands,
             admitted_events,
             reservation_offers: reservation_offer_records,
@@ -2756,11 +3456,16 @@ impl Simulation {
             })
             .collect();
         let random_streams: Vec<_> = self.state.random_streams.values().cloned().collect();
+        let (authoritative_manifest, authoritative_manifest_hash) = authoritative_run_identity(
+            &self.state.run_manifest,
+            &self.state.run_manifest_hash,
+            &self.state.run_configuration,
+        )?;
         state_hash(&StateHashMaterial {
             engine_version: ENGINE_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
-            run_manifest: &self.state.run_manifest,
-            run_manifest_hash: &self.state.run_manifest_hash,
+            run_manifest: &authoritative_manifest,
+            run_manifest_hash: &authoritative_manifest_hash,
             initial_time: self.state.initial_time,
             now: self.state.now,
             plugin_registration_closed: self.state.plugin_registration_closed,
@@ -2768,6 +3473,7 @@ impl Simulation {
             knowledge: &self.state.knowledge,
             events: &self.state.events,
             commands: &self.state.commands,
+            command_attempts: &self.state.command_attempts,
             plugin_components: &plugin_components,
             plugin_descriptors: &plugin_descriptors,
             schema: &self.schema,
@@ -2777,6 +3483,7 @@ impl Simulation {
             random_draws: &self.state.random_draws,
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
+            next_command_attempt_id: self.state.next_command_attempt_id,
             next_boundary_id: self.state.next_boundary_id,
             next_random_draw_id: self.state.next_random_draw_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
@@ -2786,7 +3493,12 @@ impl Simulation {
 
     fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
         let state_hash = self.compute_boundary_state_hash()?;
-        self.state.checkpoint_hash = checkpoint_hash(&state_hash, self.boundary_head_hash())?;
+        self.state.checkpoint_hash = checkpoint_hash_for_configuration(
+            &state_hash,
+            self.boundary_head_hash(),
+            &self.state.run_manifest_hash,
+            &self.state.run_configuration,
+        )?;
         Ok(())
     }
 
@@ -2797,6 +3509,7 @@ impl Simulation {
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             run_manifest: Some(self.state.run_manifest.clone()),
             run_manifest_hash: self.state.run_manifest_hash.clone(),
+            run_configuration: Some(self.state.run_configuration.clone()),
             checkpoint_hash: self.state.checkpoint_hash.clone(),
             initial_time: self.state.initial_time,
             now: self.state.now,
@@ -2805,6 +3518,7 @@ impl Simulation {
             knowledge: self.state.knowledge.clone(),
             events: self.state.events.clone(),
             commands: self.state.commands.clone(),
+            command_attempts: self.state.command_attempts.clone(),
             boundaries: self.state.boundaries.clone(),
             plugin_components: self.state.plugin_components.values().cloned().collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
@@ -2824,6 +3538,7 @@ impl Simulation {
             legacy_rng: None,
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
+            next_command_attempt_id: self.state.next_command_attempt_id,
             next_boundary_id: self.state.next_boundary_id,
             next_random_draw_id: self.state.next_random_draw_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
@@ -2857,6 +3572,9 @@ impl Simulation {
                     invalid_snapshot_error("snapshot is missing its run manifest")
                 })?,
                 run_manifest_hash: snapshot.run_manifest_hash.clone(),
+                run_configuration: snapshot.run_configuration.clone().ok_or_else(|| {
+                    invalid_snapshot_error("snapshot is missing its run configuration")
+                })?,
                 checkpoint_hash: snapshot.checkpoint_hash.clone(),
                 plugin_registration_closed: snapshot.plugin_registration_closed,
                 people: snapshot
@@ -2897,6 +3615,7 @@ impl Simulation {
                     .collect(),
                 events: snapshot.events,
                 commands: snapshot.commands,
+                command_attempts: snapshot.command_attempts,
                 boundaries: snapshot.boundaries,
                 plugin_components: snapshot
                     .plugin_components
@@ -2922,6 +3641,7 @@ impl Simulation {
                 random_draws: snapshot.random_draws,
                 next_event_id: snapshot.next_event_id,
                 next_command_id: snapshot.next_command_id,
+                next_command_attempt_id: snapshot.next_command_attempt_id,
                 next_boundary_id: snapshot.next_boundary_id,
                 next_random_draw_id: snapshot.next_random_draw_id,
                 next_schedule_sequence: snapshot.next_schedule_sequence,
@@ -2985,10 +3705,10 @@ impl Simulation {
     ) -> Result<PreparedCommand, CanwuError> {
         match &envelope.command {
             Command::MoveArmy { army, destination } => {
-                let Issuer::Actor(actor) = envelope.issuer else {
+                let Some(actor) = decision_actor(&context.authority) else {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidAuthority,
-                        "move commands require an actor issuer",
+                        "move commands require an accountable actor origin",
                     ));
                 };
                 let person = self.state.people.get(&actor).ok_or_else(|| {
@@ -3889,12 +4609,84 @@ fn replay_command_record(
         ));
     }
     simulation.advance_to(record.accepted_at)?;
-    let receipt = simulation.submit(record.envelope.clone())?;
+    let CommandOutcome::Accepted { receipt } = simulation.admit_command(
+        None,
+        None,
+        record.envelope.clone(),
+        CommandIngress::LegacyDirect,
+        false,
+    )?
+    else {
+        return Err(CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            "legacy replay command was rejected",
+        ));
+    };
     if receipt.command_id != record.id {
         return Err(CanwuError::new(
             ErrorCode::ReplayMismatch,
             "replay command IDs did not match the journal",
         ));
+    }
+    Ok(())
+}
+
+fn replay_attempt_record(
+    simulation: &mut Simulation,
+    record: &CommandAttemptRecord,
+    commands: &[CommandRecord],
+    latest_time: SimTime,
+) -> Result<(), CanwuError> {
+    if record.at < simulation.time() || record.at > latest_time {
+        return Err(CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            "replay command-attempt timestamps do not match authoritative operation order",
+        ));
+    }
+    simulation.advance_to(record.at)?;
+    let outcome = simulation.admit_command(
+        record.request_id,
+        record.expected_revision,
+        record.envelope.clone(),
+        record.ingress,
+        true,
+    )?;
+    if simulation.command_attempts().last() != Some(record) {
+        return Err(CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            format!(
+                "regenerated command attempt {} did not match its journal evidence",
+                record.id
+            ),
+        ));
+    }
+    match (&record.outcome, outcome) {
+        (CommandAttemptOutcome::Accepted { command_id }, CommandOutcome::Accepted { receipt })
+            if receipt.command_id == *command_id =>
+        {
+            let index = usize::try_from(command_id.get().saturating_sub(1)).map_err(|_| {
+                CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    "replayed command ID exceeds the journal index range",
+                )
+            })?;
+            if simulation.command_log().last() != commands.get(index) {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    "regenerated command record did not match its journal evidence",
+                ));
+            }
+        }
+        (
+            CommandAttemptOutcome::Rejected { error: expected },
+            CommandOutcome::Rejected { rejection },
+        ) if rejection.error == *expected => {}
+        _ => {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "replayed command-attempt outcome differs from its journal evidence",
+            ));
+        }
     }
     Ok(())
 }
@@ -4361,6 +5153,340 @@ fn validate_directives(
     Ok(())
 }
 
+fn resolve_command_authority(envelope: &CommandEnvelope) -> Result<CommandAuthority, CanwuError> {
+    if let Some(authority) = &envelope.authority {
+        return Ok(authority.clone());
+    }
+    match &envelope.issuer {
+        Issuer::Actor(actor) => Ok(CommandAuthority::for_actor(*actor)),
+        Issuer::Debug => Ok(CommandAuthority::no_responsible_actor("debug-command")),
+        Issuer::System(system) => Ok(CommandAuthority::no_responsible_actor(format!(
+            "system:{system}"
+        ))),
+        Issuer::Human(_)
+        | Issuer::Ai(_)
+        | Issuer::Institution(_)
+        | Issuer::Replay(_)
+        | Issuer::Experiment(_) => Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "typed command origins require an explicit authority context",
+        )),
+    }
+}
+
+fn validate_command_ingress_policy(
+    run_configuration: &RunConfigurationSnapshot,
+    issuer: &Issuer,
+    authority: &CommandAuthority,
+    admission: CommandAdmission,
+    entity_exists: &dyn Fn(&EntityRef) -> bool,
+) -> Result<(), CanwuError> {
+    let CommandAdmission {
+        request_id,
+        expected_revision,
+        expected_time,
+        revision_before: current_revision,
+        ingress,
+    } = admission;
+    if request_id.is_some_and(|id| id.get() == 0) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "command request IDs must be nonzero",
+        ));
+    }
+    if let Some(expected) = expected_revision
+        && expected != current_revision
+    {
+        return Err(CanwuError::new(
+            ErrorCode::SimulationRevisionConflict,
+            format!(
+                "command expected revision {expected}, but simulation is at revision {current_revision}"
+            ),
+        ));
+    }
+    validate_command_authority(authority, entity_exists)?;
+    if matches!(issuer, Issuer::Replay(_)) != (ingress == CommandIngress::FrozenReplay) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "replay command origins are valid only for frozen replay ingress",
+        ));
+    }
+
+    let RunConfigurationSnapshot::Declared(configuration) = run_configuration else {
+        return Ok(());
+    };
+    if ingress == CommandIngress::LegacyDirect {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "declared runs require tracked request or frozen replay ingress",
+        ));
+    }
+    let external = !matches!(issuer, Issuer::System(_));
+    if configuration.require_idempotency_keys && external && request_id.is_none() {
+        return Err(CanwuError::new(
+            ErrorCode::MissingIdempotencyKey,
+            "this run requires a stable command request ID",
+        ));
+    }
+    if configuration.require_idempotency_keys && external && expected_revision.is_none() {
+        return Err(CanwuError::new(
+            ErrorCode::SimulationRevisionConflict,
+            "this run requires an expected command revision",
+        ));
+    }
+    if configuration.interaction == InteractionPolicy::ReadOnly
+        && !matches!(issuer, Issuer::Replay(_) | Issuer::System(_))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InteractionReadOnly,
+            "the run interaction policy rejects newly authored authoritative commands",
+        ));
+    }
+    if external && expected_time.is_none() {
+        return Err(CanwuError::new(
+            ErrorCode::SimulationTimeConflict,
+            "declared external commands require an expected simulation time",
+        ));
+    }
+
+    match issuer {
+        Issuer::Actor(_) => Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "declared runs require a typed human, AI, institution, replay, experiment, debug, or system origin",
+        )),
+        Issuer::Human(controller) => {
+            let Some(binding) = &configuration.seat_binding else {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "human commands require the run's exact seat binding",
+                ));
+            };
+            if configuration.controller != ControllerPolicy::HumanRoleBound
+                || controller != &binding.controller_id
+                || authority.seat_id.as_deref() != Some(binding.seat_id.as_str())
+                || authority.permission_profile_id.as_deref()
+                    != Some(binding.permission_profile_id.as_str())
+                || !authority_matches_seat_binding(configuration.seat, binding, authority)
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "human command origin does not match the active controller, seat binding, and permission profile",
+                ));
+            }
+            Ok(())
+        }
+        Issuer::Ai(controller) | Issuer::Institution(controller) => {
+            if !canonical_text(controller)
+                || matches!(
+                    authority.decision_origin,
+                    DecisionOrigin::NoResponsibleActor { .. }
+                )
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "AI and institutional commands require a canonical controller and responsible decision origin",
+                ));
+            }
+            Ok(())
+        }
+        Issuer::Replay(source) => {
+            if !canonical_text(source)
+                || ingress != CommandIngress::FrozenReplay
+                || configuration.purpose != RunPurpose::Replay
+                || configuration.controller != ControllerPolicy::ReplayController
+                || configuration.interaction != InteractionPolicy::ReadOnly
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "replay command sources require a replay-purpose, replay-controller, read-only run",
+                ));
+            }
+            if let Some(binding) = &configuration.seat_binding
+                && (source != &binding.controller_id
+                    || authority.seat_id.as_deref() != Some(binding.seat_id.as_str())
+                    || authority.permission_profile_id.as_deref()
+                        != Some(binding.permission_profile_id.as_str())
+                    || !authority_matches_seat_binding(configuration.seat, binding, authority))
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "frozen replay input does not match its recorded controller and seat binding",
+                ));
+            }
+            Ok(())
+        }
+        Issuer::Experiment(intervention) => {
+            if configuration.interaction != InteractionPolicy::VersionedExperiment
+                || !configuration.declared_interventions.contains(intervention)
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "experiment commands must name an intervention declared by the run",
+                ));
+            }
+            Ok(())
+        }
+        Issuer::Debug => {
+            if !configuration.diagnostic_commands_enabled {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "debug command authority is disabled by the run configuration",
+                ));
+            }
+            Ok(())
+        }
+        Issuer::System(system) => {
+            if !canonical_text(system)
+                || !matches!(
+                    authority.decision_origin,
+                    DecisionOrigin::NoResponsibleActor { .. }
+                )
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "system commands require a canonical system ID and typed no-responsible-actor origin",
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_command_authority(
+    authority: &CommandAuthority,
+    entity_exists: &dyn Fn(&EntityRef) -> bool,
+) -> Result<(), CanwuError> {
+    if authority
+        .seat_id
+        .as_ref()
+        .is_some_and(|value| !canonical_text(value))
+        || authority
+            .permission_profile_id
+            .as_ref()
+            .is_some_and(|value| !canonical_text(value))
+        || authority.seat_id.is_some() != authority.permission_profile_id.is_some()
+        || authority
+            .command_subject
+            .as_ref()
+            .is_some_and(|entity| !entity_exists(entity))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "command authority contains an invalid seat, permission profile, or subject",
+        ));
+    }
+    match &authority.decision_origin {
+        DecisionOrigin::Actor { actor } => {
+            if !entity_exists(&EntityRef::Person(*actor)) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "command decision origin references a missing actor",
+                ));
+            }
+        }
+        DecisionOrigin::Institution {
+            institution,
+            responsible_actor,
+        } => {
+            if !entity_exists(institution)
+                || responsible_actor.is_some_and(|actor| !entity_exists(&EntityRef::Person(actor)))
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "command decision origin references a missing institution or actor",
+                ));
+            }
+        }
+        DecisionOrigin::Council { council_id } if !canonical_text(council_id) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "command council origin requires a canonical ID",
+            ));
+        }
+        DecisionOrigin::NoResponsibleActor { reason } if !canonical_text(reason) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "no-responsible-actor origins require a canonical reason",
+            ));
+        }
+        DecisionOrigin::Council { .. } | DecisionOrigin::NoResponsibleActor { .. } => {}
+    }
+    Ok(())
+}
+
+fn authority_matches_seat_binding(
+    seat: SeatPolicy,
+    binding: &SeatBinding,
+    authority: &CommandAuthority,
+) -> bool {
+    match (seat, &authority.decision_origin) {
+        (SeatPolicy::CharacterBound, DecisionOrigin::Actor { actor }) => {
+            binding.actor == Some(*actor) && binding.institution.is_none()
+        }
+        (
+            SeatPolicy::InstitutionBound,
+            DecisionOrigin::Institution {
+                institution,
+                responsible_actor,
+            },
+        ) => {
+            binding.institution.as_ref() == Some(institution)
+                && binding
+                    .actor
+                    .is_none_or(|actor| Some(actor) == *responsible_actor)
+        }
+        (SeatPolicy::ObserverSeat | SeatPolicy::AdvisorSeat, origin) => {
+            let actor_matches = binding.actor.is_none_or(
+                |expected| matches!(origin, DecisionOrigin::Actor { actor } if *actor == expected),
+            );
+            let institution_matches = binding.institution.as_ref().is_none_or(|expected| {
+                matches!(
+                    origin,
+                    DecisionOrigin::Institution { institution, .. } if institution == expected
+                )
+            });
+            actor_matches && institution_matches
+        }
+        _ => false,
+    }
+}
+
+const fn decision_actor(authority: &CommandAuthority) -> Option<PersonId> {
+    match &authority.decision_origin {
+        DecisionOrigin::Actor { actor } => Some(*actor),
+        DecisionOrigin::Institution {
+            responsible_actor, ..
+        } => *responsible_actor,
+        DecisionOrigin::Council { .. } | DecisionOrigin::NoResponsibleActor { .. } => None,
+    }
+}
+
+const fn is_expected_command_rejection(code: &ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::ActorNotFound
+            | ErrorCode::ArmyNotFound
+            | ErrorCode::DestinationNotFound
+            | ErrorCode::EntityNotFound
+            | ErrorCode::IdempotencyConflict
+            | ErrorCode::InteractionReadOnly
+            | ErrorCode::InvalidAuthority
+            | ErrorCode::InvalidDuration
+            | ErrorCode::InvalidPayload
+            | ErrorCode::MissingIdempotencyKey
+            | ErrorCode::MixedCommandIngress
+            | ErrorCode::NoRoute
+            | ErrorCode::PluginCommandNotFound
+            | ErrorCode::SimulationRevisionConflict
+            | ErrorCode::SimulationTimeConflict
+            | ErrorCode::ValueOutOfRange
+    )
+}
+
+fn canonical_text(value: &str) -> bool {
+    !value.is_empty() && value == value.trim()
+}
+
 fn component_key(
     plugin: &str,
     state: &StateKey,
@@ -4373,6 +5499,45 @@ fn component_key(
         entity: entity.clone(),
         component: component.to_owned(),
     }
+}
+
+fn snapshot_command_attempt_preflight_error(
+    snapshot: &SimulationSnapshot,
+    attempt: &CommandAttemptRecord,
+) -> Option<CanwuError> {
+    let authority = match resolve_command_authority(&attempt.envelope) {
+        Ok(authority) => authority,
+        Err(error) => return Some(error),
+    };
+    if let Err(error) = validate_command_ingress_policy(
+        snapshot
+            .run_configuration
+            .as_ref()
+            .expect("snapshot run configuration is validated before command attempts"),
+        &attempt.envelope.issuer,
+        &authority,
+        CommandAdmission {
+            request_id: attempt.request_id,
+            expected_revision: attempt.expected_revision,
+            expected_time: attempt.envelope.expected_time,
+            revision_before: attempt.revision_before,
+            ingress: attempt.ingress,
+        },
+        &|entity| snapshot_entity_exists(&snapshot.world, entity),
+    ) {
+        return Some(error);
+    }
+    attempt.envelope.expected_time.and_then(|expected_time| {
+        (expected_time != attempt.at).then(|| {
+            CanwuError::new(
+                ErrorCode::SimulationTimeConflict,
+                format!(
+                    "command expected time {expected_time}, but simulation is at {}",
+                    attempt.at
+                ),
+            )
+        })
+    })
 }
 
 fn validate_snapshot(
@@ -4397,11 +5562,28 @@ fn validate_snapshot(
             "snapshot run manifest hash is inconsistent",
         ));
     }
+    let Some(run_configuration) = &snapshot.run_configuration else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunConfiguration,
+            "snapshot is missing its run configuration",
+        ));
+    };
+    manifest::validate_run_configuration(run_manifest, run_configuration)?;
+    validate_run_configuration_entities(run_configuration, &snapshot.world)?;
+    if matches!(run_configuration, RunConfigurationSnapshot::Declared(_))
+        && !snapshot.commands.is_empty()
+        && snapshot.command_attempts.is_empty()
+    {
+        return invalid_snapshot(
+            "declared runs cannot contain accepted commands without tracked attempt evidence",
+        );
+    }
     if snapshot.initial_time > snapshot.now {
         return invalid_snapshot("snapshot initial time cannot follow its current time");
     }
     let has_execution_evidence = snapshot.now != snapshot.initial_time
         || !snapshot.commands.is_empty()
+        || !snapshot.command_attempts.is_empty()
         || !snapshot.events.is_empty()
         || !snapshot.boundaries.is_empty()
         || !snapshot.plugin_components.is_empty()
@@ -4413,6 +5595,7 @@ fn validate_snapshot(
         || !snapshot.scheduled.is_empty()
         || snapshot.next_event_id != 1
         || snapshot.next_command_id != 1
+        || snapshot.next_command_attempt_id != 1
         || snapshot.next_boundary_id != 1
         || snapshot.next_random_draw_id != 1
         || snapshot.next_schedule_sequence != 1
@@ -4427,6 +5610,95 @@ fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.territories, |value| value.id, "territories")?;
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
+    let boundary_count = u64::try_from(snapshot.boundaries.len())
+        .map_err(|_| invalid_snapshot_error("boundary count exceeds the revision range"))?;
+    let mut boundaries_before_attempt = vec![boundary_count; snapshot.command_attempts.len()];
+    for (boundary_index, boundary) in snapshot.boundaries.iter().enumerate() {
+        let prior_boundaries = u64::try_from(boundary_index)
+            .map_err(|_| invalid_snapshot_error("boundary index exceeds the revision range"))?;
+        for attempt_id in &boundary.admitted_attempts {
+            let attempt_index =
+                usize::try_from(attempt_id.get().saturating_sub(1)).map_err(|_| {
+                    invalid_snapshot_error("boundary attempt ID exceeds the journal index range")
+                })?;
+            let Some(value) = boundaries_before_attempt.get_mut(attempt_index) else {
+                return invalid_snapshot("boundary admits an unknown command attempt");
+            };
+            *value = prior_boundaries;
+        }
+    }
+    let mut request_ids = BTreeSet::new();
+    let mut accepted_attempts = BTreeMap::new();
+    let mut accepted_command_count = 0_u64;
+    let mut previous_attempt = None;
+    for (index, attempt) in snapshot.command_attempts.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                invalid_snapshot_error("command attempt index exceeds identifier space")
+            })?;
+        let expected_revision = accepted_command_count
+            .checked_add(boundaries_before_attempt[index])
+            .ok_or_else(|| invalid_snapshot_error("command revision space is exhausted"))?;
+        if attempt.id.get() != expected_id
+            || attempt.at < snapshot.initial_time
+            || attempt.at > snapshot.now
+            || attempt.revision_before != expected_revision
+            || attempt.request_id.is_some() != attempt.expected_revision.is_some()
+            || previous_attempt.is_some_and(|(at, id)| (attempt.at, attempt.id) <= (at, id))
+            || attempt.request_id.is_some_and(|id| !request_ids.insert(id))
+        {
+            return invalid_snapshot("command attempt journal is not canonical");
+        }
+        let preflight_error = snapshot_command_attempt_preflight_error(snapshot, attempt);
+        match &attempt.outcome {
+            CommandAttemptOutcome::Accepted { command_id } => {
+                if preflight_error.is_some() {
+                    return invalid_snapshot(
+                        "accepted command attempt violates its recorded ingress policy",
+                    );
+                }
+                let Some(next_command_count) = accepted_command_count.checked_add(1) else {
+                    return invalid_snapshot("command identifier space is exhausted");
+                };
+                if command_id.get() != next_command_count
+                    || attempt
+                        .expected_revision
+                        .is_some_and(|expected| expected != expected_revision)
+                    || accepted_attempts.insert(*command_id, attempt).is_some()
+                {
+                    return invalid_snapshot(
+                        "accepted command attempt does not match command revision order",
+                    );
+                }
+                accepted_command_count = next_command_count;
+            }
+            CommandAttemptOutcome::Rejected { error } => {
+                if !is_expected_command_rejection(&error.code) {
+                    return invalid_snapshot(
+                        "command attempt journal contains a non-rejection engine failure",
+                    );
+                }
+                if preflight_error
+                    .as_ref()
+                    .is_some_and(|expected| expected != error)
+                {
+                    return invalid_snapshot(
+                        "rejected command attempt disagrees with deterministic ingress validation",
+                    );
+                }
+            }
+        }
+        previous_attempt = Some((attempt.at, attempt.id));
+    }
+    if !snapshot.command_attempts.is_empty()
+        && accepted_command_count
+            != u64::try_from(snapshot.commands.len())
+                .map_err(|_| invalid_snapshot_error("command count exceeds the revision range"))?
+    {
+        return invalid_snapshot("accepted command attempts do not cover the command journal");
+    }
     let mut command_ids = BTreeSet::new();
     let mut previous_command = None;
     for (index, record) in snapshot.commands.iter().enumerate() {
@@ -4445,6 +5717,27 @@ fn validate_snapshot(
                 .is_some_and(|expected| expected != record.accepted_at)
         {
             return invalid_snapshot("command timestamps are invalid");
+        }
+        if snapshot.command_attempts.is_empty() {
+            if record.attempt_id.is_some() || !record.emitted_events.is_empty() {
+                return invalid_snapshot(
+                    "legacy commands cannot contain partial command-attempt evidence",
+                );
+            }
+        } else {
+            let Some(attempt) = accepted_attempts.get(&record.id) else {
+                return invalid_snapshot("command is missing its accepted attempt evidence");
+            };
+            if record.attempt_id != Some(attempt.id)
+                || record.accepted_at != attempt.at
+                || record.envelope != attempt.envelope
+                || record
+                    .emitted_events
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+            {
+                return invalid_snapshot("command and attempt evidence disagree");
+            }
         }
         if previous_command.is_some_and(|(time, id)| (record.accepted_at, record.id) <= (time, id))
         {
@@ -4481,33 +5774,6 @@ fn validate_snapshot(
         validate_event_kind(snapshot, plugins, event)?;
         previous_event = Some((event.timestamp, event.id));
     }
-    let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(snapshot, plugins)?;
-    let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
-    let current_state_hash = snapshot_state_hash(snapshot)?;
-    let expected_checkpoint_hash = checkpoint_hash(
-        &current_state_hash,
-        snapshot
-            .boundaries
-            .last()
-            .map(|record| record.hash.as_str()),
-    )?;
-    if !is_canonical_hash(&snapshot.checkpoint_hash)
-        || expected_checkpoint_hash != snapshot.checkpoint_hash
-    {
-        return invalid_snapshot(
-            "checkpoint hash does not bind the persisted state to its boundary head",
-        );
-    }
-    if matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }))
-        && snapshot_is_at_boundary_head(snapshot)
-        && snapshot
-            .boundaries
-            .last()
-            .and_then(|record| record.state_hash.as_deref())
-            != Some(current_state_hash.as_str())
-    {
-        return invalid_snapshot("boundary-head state commitment does not match persisted state");
-    }
     for event in &snapshot.events {
         match &event.cause {
             Some(CauseRef::Boundary(id)) => {
@@ -4541,7 +5807,55 @@ fn validate_snapshot(
             Some(CauseRef::Event(_) | CauseRef::System(_)) | None => {}
         }
     }
-
+    for command in &snapshot.commands {
+        if snapshot.command_attempts.is_empty() {
+            continue;
+        }
+        let mut expected_events = Vec::new();
+        for event in snapshot
+            .events
+            .iter()
+            .filter(|event| event.timestamp == command.accepted_at)
+        {
+            if event_command_root(&snapshot.events, event.id)? == Some(command.id) {
+                expected_events.push(event.id);
+            }
+        }
+        if command.emitted_events != expected_events {
+            return invalid_snapshot(
+                "command receipt events do not match their synchronous causal evidence",
+            );
+        }
+    }
+    let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(snapshot, plugins)?;
+    let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
+    let current_state_hash = snapshot_state_hash(snapshot)?;
+    let expected_checkpoint_hash = checkpoint_hash_for_configuration(
+        &current_state_hash,
+        snapshot
+            .boundaries
+            .last()
+            .map(|record| record.hash.as_str()),
+        &snapshot.run_manifest_hash,
+        run_configuration,
+    )?;
+    if !is_canonical_hash(&snapshot.checkpoint_hash)
+        || expected_checkpoint_hash != snapshot.checkpoint_hash
+    {
+        return invalid_snapshot(
+            "checkpoint hash does not bind the persisted state to its boundary head",
+        );
+    }
+    if matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }))
+        && snapshot_is_at_boundary_head(snapshot)
+        && snapshot
+            .boundaries
+            .last()
+            .and_then(|record| record.state_hash.as_deref())
+            != Some(current_state_hash.as_str())
+    {
+        return invalid_snapshot("boundary-head state commitment does not match persisted state");
+    }
     let mut component_keys = BTreeSet::new();
     let mut previous_component = None;
     for record in &snapshot.plugin_components {
@@ -4744,6 +6058,14 @@ fn validate_snapshot(
             .unwrap_or(0),
         "command",
     )?;
+    validate_contiguous_or_exhausted_next_counter(
+        snapshot.next_command_attempt_id,
+        snapshot
+            .command_attempts
+            .last()
+            .map_or(0, |attempt| attempt.id.get()),
+        "command attempt",
+    )?;
     validate_contiguous_next_counter(snapshot.next_boundary_id, max_boundary_id, "boundary")?;
     validate_contiguous_or_exhausted_next_counter(
         snapshot.next_random_draw_id,
@@ -4755,11 +6077,24 @@ fn validate_snapshot(
         max_schedule_sequence,
         "schedule sequence",
     )?;
-    validate_next_counter(
+    let authoritative_commit_count = u64::try_from(snapshot.commands.len())
+        .ok()
+        .and_then(|commands| {
+            u64::try_from(snapshot.boundaries.len())
+                .ok()
+                .and_then(|boundaries| commands.checked_add(boundaries))
+        })
+        .ok_or_else(|| {
+            invalid_snapshot_error("authoritative commit count exceeds revision space")
+        })?;
+    validate_contiguous_next_counter(
         snapshot.next_correlation_id,
-        max_correlation_id,
+        authoritative_commit_count,
         "correlation",
     )?;
+    if max_correlation_id > authoritative_commit_count {
+        return invalid_snapshot("causal evidence references an uncommitted correlation");
+    }
     Ok(())
 }
 
@@ -4993,6 +6328,7 @@ fn validate_boundary_records(
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
     let mut boundary_values = BTreeMap::new();
+    let mut next_attempt = 0;
     let mut next_command = 0;
     let mut next_event = 0;
     let mut previous_boundary = None;
@@ -5022,7 +6358,13 @@ fn validate_boundary_records(
         {
             return invalid_snapshot("boundary cadences are not canonical");
         }
-        validate_boundary_admission(record, snapshot, &mut next_command, &mut next_event)?;
+        validate_boundary_admission(
+            record,
+            snapshot,
+            &mut next_attempt,
+            &mut next_command,
+            &mut next_event,
+        )?;
         validate_boundary_reservations(record, snapshot, plugins)?;
         validate_boundary_changes(record, snapshot, plugins)?;
         for change in &record.changes {
@@ -5089,19 +6431,55 @@ fn validate_boundary_records(
 fn validate_boundary_admission(
     record: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
+    next_attempt: &mut usize,
     next_command: &mut usize,
     next_event: &mut usize,
 ) -> Result<(), CanwuError> {
     if record
-        .admitted_commands
+        .admitted_attempts
         .windows(2)
         .any(|pair| pair[0] >= pair[1])
+        || record
+            .admitted_commands
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
         || record
             .admitted_events
             .windows(2)
             .any(|pair| pair[0] >= pair[1])
     {
         return invalid_snapshot("boundary admission lists are not canonical");
+    }
+    let mut accepted_attempt_commands = Vec::new();
+    for id in &record.admitted_attempts {
+        let Some(attempt) = snapshot.command_attempts.get(*next_attempt) else {
+            return invalid_snapshot("boundary admits a command attempt beyond the journal prefix");
+        };
+        if attempt.id != *id || attempt.at > record.at {
+            return invalid_snapshot(
+                "boundary command-attempt admission is out of order or premature",
+            );
+        }
+        if let CommandAttemptOutcome::Accepted { command_id } = attempt.outcome {
+            accepted_attempt_commands.push(command_id);
+        }
+        *next_attempt += 1;
+    }
+    if snapshot
+        .command_attempts
+        .get(*next_attempt)
+        .is_some_and(|attempt| attempt.at < record.at)
+    {
+        return invalid_snapshot(
+            "boundary omitted an earlier command attempt from its admission cut",
+        );
+    }
+    if !snapshot.command_attempts.is_empty()
+        && accepted_attempt_commands != record.admitted_commands
+    {
+        return invalid_snapshot(
+            "boundary command admission does not match its accepted attempt evidence",
+        );
     }
     for id in &record.admitted_commands {
         let Some(command) = snapshot.commands.get(*next_command) else {
@@ -5456,7 +6834,31 @@ fn validate_snapshot_command(
         Issuer::System(name) if name.trim().is_empty() => {
             return invalid_snapshot("system command issuer cannot be empty");
         }
-        Issuer::Actor(_) | Issuer::Debug | Issuer::System(_) => {}
+        Issuer::Human(name)
+        | Issuer::Ai(name)
+        | Issuer::Institution(name)
+        | Issuer::Replay(name)
+        | Issuer::Experiment(name)
+            if !canonical_text(name) =>
+        {
+            return invalid_snapshot("typed command issuer ID is not canonical");
+        }
+        Issuer::Actor(_)
+        | Issuer::Human(_)
+        | Issuer::Ai(_)
+        | Issuer::Institution(_)
+        | Issuer::Replay(_)
+        | Issuer::Experiment(_)
+        | Issuer::Debug
+        | Issuer::System(_) => {}
+    }
+    if let Some(authority) = &envelope.authority {
+        validate_command_authority(authority, &|entity| {
+            snapshot_entity_exists(&snapshot.world, entity)
+        })
+        .map_err(|error| {
+            invalid_snapshot_error(format!("command authority is invalid: {error}"))
+        })?;
     }
     match &envelope.command {
         Command::MoveArmy { army, destination } => {
@@ -5492,6 +6894,31 @@ fn validate_snapshot_command(
         }
     }
     Ok(())
+}
+
+fn event_command_root(
+    events: &[SimEvent],
+    mut event_id: EventId,
+) -> Result<Option<CommandId>, CanwuError> {
+    for _ in 0..events.len() {
+        let index = event_id
+            .get()
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| invalid_snapshot_error("event cause chain contains an invalid ID"))?;
+        let event = events
+            .get(index)
+            .filter(|event| event.id == event_id)
+            .ok_or_else(|| {
+                invalid_snapshot_error("event cause chain references an unknown event")
+            })?;
+        match event.cause.as_ref() {
+            Some(CauseRef::Command(command)) => return Ok(Some(*command)),
+            Some(CauseRef::Event(parent)) => event_id = *parent,
+            Some(CauseRef::Boundary(_) | CauseRef::System(_)) | None => return Ok(None),
+        }
+    }
+    invalid_snapshot("event cause chain contains a cycle")
 }
 
 fn validate_event_kind(
@@ -5798,6 +7225,32 @@ fn claim_counter(current: u64, label: &str) -> Result<(u64, u64), CanwuError> {
     Ok((current, next))
 }
 
+fn validate_run_configuration_entities(
+    run_configuration: &RunConfigurationSnapshot,
+    world: &WorldSnapshot,
+) -> Result<(), CanwuError> {
+    let Some(binding) = run_configuration
+        .declared()
+        .and_then(|configuration| configuration.seat_binding.as_ref())
+    else {
+        return Ok(());
+    };
+    if binding
+        .actor
+        .is_some_and(|actor| world.person(actor).is_none())
+        || binding
+            .institution
+            .as_ref()
+            .is_some_and(|institution| !snapshot_entity_exists(world, institution))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunConfiguration,
+            "run seat binding references an entity absent from the scenario or snapshot",
+        ));
+    }
+    Ok(())
+}
+
 fn snapshot_entity_exists(world: &WorldSnapshot, entity: &EntityRef) -> bool {
     match entity {
         EntityRef::Army(id) => world.army(*id).is_some(),
@@ -5835,6 +7288,7 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             if snapshot.legacy_rng.is_some() {
                 return invalid_snapshot("format 4 snapshots cannot contain the legacy global RNG");
             }
+            hydrate_snapshot_run_configuration(&mut snapshot)?;
             Ok(snapshot)
         }
         2 => {
@@ -5844,6 +7298,7 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             {
                 return invalid_snapshot("format 2 snapshots cannot contain current manifest data");
             }
+            validate_legacy_ingress_shape(&snapshot)?;
             let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
             if !snapshot.boundaries.is_empty() || !matches!(snapshot.next_boundary_id, 0 | 1) {
                 return invalid_snapshot("format 2 snapshots cannot contain phased-boundary state");
@@ -5859,6 +7314,7 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             {
                 return invalid_snapshot("format 3 snapshots cannot contain current manifest data");
             }
+            validate_legacy_ingress_shape(&snapshot)?;
             let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
             migrate_format_3_snapshot(snapshot, 3, checkpoint_hash)
         }
@@ -5870,6 +7326,26 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             ),
         )),
     }
+}
+
+fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+    if snapshot.run_configuration.is_some()
+        || !snapshot.command_attempts.is_empty()
+        || snapshot.next_command_attempt_id != 1
+        || snapshot
+            .commands
+            .iter()
+            .any(|record| record.attempt_id.is_some() || !record.emitted_events.is_empty())
+        || snapshot
+            .boundaries
+            .iter()
+            .any(|record| !record.admitted_attempts.is_empty())
+    {
+        return invalid_snapshot(
+            "legacy snapshots cannot contain current run-policy or command-attempt evidence",
+        );
+    }
+    Ok(())
 }
 
 fn migrate_format_3_snapshot(
@@ -5993,10 +7469,39 @@ fn migrate_format_3_snapshot(
     );
     snapshot.run_manifest_hash = manifest::hash(&run_manifest)?;
     snapshot.run_manifest = Some(run_manifest);
+    snapshot.run_configuration = Some(RunConfigurationSnapshot::LegacyUnspecified);
     ENGINE_VERSION.clone_into(&mut snapshot.engine_version);
     snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(&snapshot)?;
     Ok(snapshot)
+}
+
+fn hydrate_snapshot_run_configuration(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
+    if snapshot.run_configuration.is_some() {
+        return Ok(());
+    }
+    let Some(run_manifest) = &snapshot.run_manifest else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "snapshot is missing its run manifest",
+        ));
+    };
+    snapshot.run_configuration = Some(inferred_run_configuration(run_manifest)?);
+    Ok(())
+}
+
+fn inferred_run_configuration(
+    run_manifest: &RunManifest,
+) -> Result<RunConfigurationSnapshot, CanwuError> {
+    Ok(match run_manifest {
+        RunManifest::Declared {
+            run_configuration, ..
+        } if run_configuration.semantic_hash == policy::compatibility_configuration_hash()? => {
+            RunConfigurationSnapshot::CompatibilityV1
+        }
+        RunManifest::Declared { .. } => RunConfigurationSnapshot::ManifestOnlyV1,
+        RunManifest::MigratedLegacy { .. } => RunConfigurationSnapshot::LegacyUnspecified,
+    })
 }
 
 #[derive(Serialize)]
@@ -6012,6 +7517,8 @@ struct StateHashMaterial<'a> {
     knowledge: &'a KnowledgeSnapshot,
     events: &'a [SimEvent],
     commands: &'a [CommandRecord],
+    #[serde(skip_serializing_if = "command_attempt_slice_is_empty")]
+    command_attempts: &'a [CommandAttemptRecord],
     plugin_components: &'a [PluginComponentRecord],
     plugin_descriptors: &'a [PluginDescriptor],
     schema: &'a SchemaRegistry,
@@ -6021,14 +7528,57 @@ struct StateHashMaterial<'a> {
     random_draws: &'a [RandomDrawRecord],
     next_event_id: u64,
     next_command_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    next_command_attempt_id: u64,
     next_boundary_id: u64,
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
 }
 
+#[derive(Serialize)]
+struct CheckpointHashMaterialV1<'a> {
+    state_hash: &'a str,
+    boundary_head: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct CheckpointHashMaterialV2<'a> {
+    state_hash: &'a str,
+    boundary_head: Option<&'a str>,
+    run_manifest_hash: &'a str,
+}
+
 fn state_hash(material: &StateHashMaterial<'_>) -> Result<String, CanwuError> {
     canonical_hash("canwu.boundary-state.v1", material)
+}
+
+fn authoritative_run_identity(
+    run_manifest: &RunManifest,
+    run_manifest_hash: &str,
+    run_configuration: &RunConfigurationSnapshot,
+) -> Result<(RunManifest, String), CanwuError> {
+    if !matches!(run_configuration, RunConfigurationSnapshot::Declared(_)) {
+        return Ok((run_manifest.clone(), run_manifest_hash.to_owned()));
+    }
+    let mut authoritative_manifest = run_manifest.clone();
+    let RunManifest::Declared {
+        run_configuration, ..
+    } = &mut authoritative_manifest
+    else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "declared run policy requires a declared run manifest",
+        ));
+    };
+    **run_configuration = ArtifactManifest::new(
+        "canwu.core",
+        "authoritative-policy-excluded",
+        "1",
+        policy::authoritative_configuration_hash()?,
+    )?;
+    let authoritative_manifest_hash = manifest::hash(&authoritative_manifest)?;
+    Ok((authoritative_manifest, authoritative_manifest_hash))
 }
 
 fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
@@ -6038,11 +7588,19 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
             "snapshot is missing its run manifest",
         ));
     };
+    let run_configuration = snapshot.run_configuration.as_ref().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidRunConfiguration,
+            "snapshot is missing its run configuration",
+        )
+    })?;
+    let (authoritative_manifest, authoritative_manifest_hash) =
+        authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
     state_hash(&StateHashMaterial {
         engine_version: &snapshot.engine_version,
         snapshot_format_version: snapshot.snapshot_format_version,
-        run_manifest,
-        run_manifest_hash: &snapshot.run_manifest_hash,
+        run_manifest: &authoritative_manifest,
+        run_manifest_hash: &authoritative_manifest_hash,
         initial_time: snapshot.initial_time,
         now: snapshot.now,
         plugin_registration_closed: snapshot.plugin_registration_closed,
@@ -6050,6 +7608,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         knowledge: &snapshot.knowledge,
         events: &snapshot.events,
         commands: &snapshot.commands,
+        command_attempts: &snapshot.command_attempts,
         plugin_components: &snapshot.plugin_components,
         plugin_descriptors: &snapshot.plugin_descriptors,
         schema: &snapshot.schema,
@@ -6059,6 +7618,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         random_draws: &snapshot.random_draws,
         next_event_id: snapshot.next_event_id,
         next_command_id: snapshot.next_command_id,
+        next_command_attempt_id: snapshot.next_command_attempt_id,
         next_boundary_id: snapshot.next_boundary_id,
         next_random_draw_id: snapshot.next_random_draw_id,
         next_schedule_sequence: snapshot.next_schedule_sequence,
@@ -6067,29 +7627,49 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
 }
 
 fn checkpoint_hash(state_hash: &str, boundary_head: Option<&str>) -> Result<String, CanwuError> {
-    #[derive(Serialize)]
-    struct CheckpointHashMaterial<'a> {
-        state_hash: &'a str,
-        boundary_head: Option<&'a str>,
-    }
-
     canonical_hash(
         "canwu.checkpoint.v1",
-        &CheckpointHashMaterial {
+        &CheckpointHashMaterialV1 {
             state_hash,
             boundary_head,
         },
     )
 }
 
+fn checkpoint_hash_for_configuration(
+    state_hash: &str,
+    boundary_head: Option<&str>,
+    run_manifest_hash: &str,
+    run_configuration: &RunConfigurationSnapshot,
+) -> Result<String, CanwuError> {
+    if !matches!(run_configuration, RunConfigurationSnapshot::Declared(_)) {
+        return checkpoint_hash(state_hash, boundary_head);
+    }
+    canonical_hash(
+        "canwu.checkpoint.v2",
+        &CheckpointHashMaterialV2 {
+            state_hash,
+            boundary_head,
+            run_manifest_hash,
+        },
+    )
+}
+
 fn snapshot_checkpoint_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
     let state_hash = snapshot_state_hash(snapshot)?;
-    checkpoint_hash(
+    checkpoint_hash_for_configuration(
         &state_hash,
         snapshot
             .boundaries
             .last()
             .map(|record| record.hash.as_str()),
+        &snapshot.run_manifest_hash,
+        snapshot.run_configuration.as_ref().ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidRunConfiguration,
+                "snapshot is missing its run configuration",
+            )
+        })?,
     )
 }
 
@@ -6098,6 +7678,14 @@ fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> bool {
         return false;
     };
     if last.at != snapshot.now {
+        return false;
+    }
+    let admitted_attempts: BTreeSet<_> = snapshot
+        .boundaries
+        .iter()
+        .flat_map(|record| record.admitted_attempts.iter().copied())
+        .collect();
+    if admitted_attempts.len() != snapshot.command_attempts.len() {
         return false;
     }
     let admitted_commands: BTreeSet<_> = snapshot
@@ -6129,6 +7717,8 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
         at: SimTime,
         correlation_id: u64,
         cadences: &'a [SystemCadence],
+        #[serde(skip_serializing_if = "command_attempt_id_slice_is_empty")]
+        admitted_attempts: &'a [CommandAttemptId],
         admitted_commands: &'a [CommandId],
         admitted_events: &'a [EventId],
         reservation_offers: &'a [ReservationOfferRecord],
@@ -6148,6 +7738,7 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
             at: record.at,
             correlation_id: record.correlation_id,
             cadences: &record.cadences,
+            admitted_attempts: &record.admitted_attempts,
             admitted_commands: &record.admitted_commands,
             admitted_events: &record.admitted_events,
             reservation_offers: &record.reservation_offers,
@@ -7480,6 +9071,33 @@ mod tests {
         )
     }
 
+    fn manifest_for_configuration(
+        scenario: &Scenario,
+        configuration: &RunConfiguration,
+    ) -> RunManifest {
+        let scenario_manifest =
+            ArtifactManifest::for_scenario("cm", "policy-fixture", "1", scenario)
+                .expect("scenario identity should hash");
+        let configuration_manifest =
+            ArtifactManifest::for_run_configuration("cm", "run-configuration", "1", configuration)
+                .expect("run configuration identity should hash");
+        RunManifest::declared(scenario_manifest, configuration_manifest)
+    }
+
+    fn character_authority(
+        actor: PersonId,
+        army: ArmyId,
+        seat_id: &str,
+        permission_profile_id: &str,
+    ) -> CommandAuthority {
+        CommandAuthority {
+            decision_origin: DecisionOrigin::Actor { actor },
+            seat_id: Some(seat_id.to_owned()),
+            permission_profile_id: Some(permission_profile_id.to_owned()),
+            command_subject: Some(EntityRef::Army(army)),
+        }
+    }
+
     #[test]
     fn deterministic_seed_and_event_order_survive_equal_runs() {
         let (scenario, ids) = demo_scenario();
@@ -7493,6 +9111,645 @@ mod tests {
         let second = Simulation::replay(35, scenario, first.command_log(), first.time())
             .expect("journal should replay");
         assert_eq!(first.snapshot(), second.snapshot());
+    }
+
+    #[test]
+    fn typed_ingress_is_idempotent_revision_guarded_and_replayable() {
+        let (scenario, ids) = demo_scenario();
+        let configuration = RunConfiguration::play_as_character(
+            "seat.commander",
+            "controller.human",
+            ids.commander,
+            "permission.military-command",
+        );
+        let manifest = manifest_for_configuration(&scenario, &configuration);
+        let mut simulation = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest.clone(),
+            configuration.clone(),
+        )
+        .expect("declared character run should load");
+        let envelope = CommandEnvelope::new(
+            Issuer::Human("controller.human".to_owned()),
+            Command::MoveArmy {
+                army: ids.army,
+                destination: ids.eastern_territory,
+            },
+        )
+        .with_authority(character_authority(
+            ids.commander,
+            ids.army,
+            "seat.commander",
+            "permission.military-command",
+        ))
+        .at_time(SimTime::EPOCH);
+        let request = CommandRequest::new(CommandRequestId::new(1), 0, envelope.clone());
+        let accepted = simulation
+            .process_command(request.clone())
+            .expect("typed request should produce an outcome");
+        let CommandOutcome::Accepted { receipt } = &accepted else {
+            panic!("matching controller and seat should be accepted");
+        };
+        assert_eq!(receipt.attempt_id, Some(CommandAttemptId::new(1)));
+        assert_eq!(receipt.command_id, CommandId::new(1));
+        assert_eq!(receipt.request_id, Some(CommandRequestId::new(1)));
+        assert_eq!(receipt.revision, 1);
+        assert_eq!(simulation.revision(), 1);
+
+        let after_accept = simulation.snapshot();
+        assert_eq!(
+            simulation
+                .process_command(request)
+                .expect("an exact retry should be served from idempotency evidence"),
+            accepted
+        );
+        assert_eq!(simulation.snapshot(), after_accept);
+
+        let mut collision_envelope = envelope.clone();
+        collision_envelope.command = Command::MoveArmy {
+            army: ids.army,
+            destination: ids.western_territory,
+        };
+        let collision = simulation
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                1,
+                collision_envelope,
+            ))
+            .expect("request-ID collision should be a structured outcome");
+        let CommandOutcome::Rejected { rejection } = collision else {
+            panic!("request-ID reuse with different input must be rejected");
+        };
+        assert_eq!(rejection.attempt_id, None);
+        assert_eq!(rejection.retained_revision, 1);
+        assert_eq!(rejection.error.code, ErrorCode::IdempotencyConflict);
+        assert_eq!(simulation.snapshot(), after_accept);
+
+        let stale_request = CommandRequest::new(CommandRequestId::new(2), 0, envelope);
+        let stale = simulation
+            .process_command(stale_request.clone())
+            .expect("a stale request should remain structured evidence");
+        let CommandOutcome::Rejected { rejection } = &stale else {
+            panic!("stale revisions must be rejected");
+        };
+        assert_eq!(rejection.attempt_id, Some(CommandAttemptId::new(2)));
+        assert_eq!(rejection.retained_revision, 1);
+        assert_eq!(rejection.error.code, ErrorCode::SimulationRevisionConflict);
+        assert_eq!(simulation.revision(), 1);
+        assert_eq!(simulation.command_log().len(), 1);
+        assert_eq!(simulation.command_attempts().len(), 2);
+
+        let after_stale = simulation.snapshot();
+        assert_eq!(
+            simulation
+                .process_command(stale_request)
+                .expect("an exact rejected retry should be cached"),
+            stale
+        );
+        assert_eq!(simulation.snapshot(), after_stale);
+        let restored = Simulation::from_snapshot(after_stale.clone())
+            .expect("typed ingress evidence should survive save/load");
+        assert_eq!(restored.snapshot(), after_stale);
+
+        let mut cyclic_cause = after_stale.clone();
+        let event_id = cyclic_cause.events[0].id;
+        cyclic_cause.events[0].cause = Some(CauseRef::Event(event_id));
+        cyclic_cause.checkpoint_hash = snapshot_checkpoint_hash(&cyclic_cause)
+            .expect("cyclic cause fixture should carry a coherent container commitment");
+        let Err(error) = Simulation::from_snapshot(cyclic_cause) else {
+            panic!("event cause cycles must be rejected without unbounded traversal");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("parent event"));
+
+        let mut forged = after_stale;
+        forged.command_attempts[0].envelope.issuer = Issuer::Human("controller.other".to_owned());
+        forged.commands[0].envelope = forged.command_attempts[0].envelope.clone();
+        forged.checkpoint_hash = snapshot_checkpoint_hash(&forged)
+            .expect("the forged fixture should carry a coherent container commitment");
+        let Err(error) = Simulation::from_snapshot(forged) else {
+            panic!("accepted attempts that violate recorded policy must not load");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("ingress policy"));
+
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("attempt evidence should enter the next boundary");
+        let boundary = simulation
+            .boundaries()
+            .last()
+            .expect("the boundary should be recorded");
+        assert_eq!(
+            boundary.admitted_attempts,
+            vec![CommandAttemptId::new(1), CommandAttemptId::new(2)]
+        );
+        assert_eq!(boundary.admitted_commands, vec![CommandId::new(1)]);
+        let journal = simulation.replay_journal();
+        let replayed_fixture = Simulation::replay_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest,
+            configuration,
+            &[],
+            simulation.command_log(),
+            simulation.command_attempts(),
+            simulation.boundaries(),
+            simulation.time(),
+        )
+        .expect("declared caller-supplied request journal should replay");
+        assert_eq!(simulation.snapshot(), replayed_fixture.snapshot());
+        let replayed = Simulation::replay_from_journal(scenario, &[], &journal)
+            .expect("accepted and rejected request evidence should replay exactly");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+    }
+
+    #[test]
+    fn legacy_direct_and_tracked_request_ingress_cannot_mix() {
+        let (scenario, ids) = demo_scenario();
+        let mut legacy_first =
+            Simulation::new(35, scenario.clone()).expect("compatibility run should load");
+        legacy_first
+            .submit(move_order(&ids))
+            .expect("legacy direct command should be accepted");
+        let after_legacy = legacy_first.snapshot();
+        let error = legacy_first
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                1,
+                move_order(&ids),
+            ))
+            .expect_err("tracked requests cannot follow legacy-direct commands");
+        assert_eq!(error.code, ErrorCode::MixedCommandIngress);
+        assert_eq!(legacy_first.snapshot(), after_legacy);
+
+        let mut tracked_first =
+            Simulation::new(35, scenario).expect("compatibility run should load");
+        let outcome = tracked_first
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Actor(ids.observer),
+                    Command::MoveArmy {
+                        army: ids.army,
+                        destination: ids.eastern_territory,
+                    },
+                ),
+            ))
+            .expect("domain rejection should remain tracked evidence");
+        assert!(matches!(outcome, CommandOutcome::Rejected { .. }));
+        let after_tracked = tracked_first.snapshot();
+        let error = tracked_first
+            .submit(move_order(&ids))
+            .expect_err("legacy direct commands cannot follow tracked attempts");
+        assert_eq!(error.code, ErrorCode::MixedCommandIngress);
+        assert_eq!(tracked_first.snapshot(), after_tracked);
+        Simulation::from_snapshot(after_tracked)
+            .expect("a rejection-only tracked journal should remain loadable");
+    }
+
+    #[test]
+    fn declared_runs_reject_untracked_legacy_command_history() {
+        let (scenario, ids) = demo_scenario();
+        let configuration = RunConfiguration::play_as_character(
+            "seat.commander",
+            "controller.human",
+            ids.commander,
+            "permission.military-command",
+        );
+        let manifest = manifest_for_configuration(&scenario, &configuration);
+        let mut declared = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest.clone(),
+            configuration.clone(),
+        )
+        .expect("declared run should load");
+        let envelope = CommandEnvelope::new(
+            Issuer::Human("controller.human".to_owned()),
+            Command::MoveArmy {
+                army: ids.army,
+                destination: ids.eastern_territory,
+            },
+        )
+        .with_authority(character_authority(
+            ids.commander,
+            ids.army,
+            "seat.commander",
+            "permission.military-command",
+        ))
+        .at_time(SimTime::EPOCH);
+        let before = declared.snapshot();
+        let error = declared
+            .submit(envelope)
+            .expect_err("declared runs must not accept compatibility-only ingress");
+        assert_eq!(error.code, ErrorCode::InvalidAuthority);
+        assert_eq!(declared.snapshot(), before);
+
+        let mut compatibility =
+            Simulation::new(35, scenario.clone()).expect("compatibility run should load");
+        compatibility
+            .submit(move_order(&ids))
+            .expect("legacy command fixture should be accepted");
+        let mut forged = compatibility.snapshot();
+        forged.run_manifest = before.run_manifest;
+        forged.run_manifest_hash = before.run_manifest_hash;
+        forged.run_configuration = before.run_configuration;
+        forged.checkpoint_hash = snapshot_checkpoint_hash(&forged)
+            .expect("forged container should have a coherent commitment");
+        let Err(error) = Simulation::from_snapshot(forged) else {
+            panic!("declared snapshots cannot smuggle untracked accepted commands");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("tracked attempt evidence"));
+
+        let Err(error) = Simulation::replay_with_run_configuration(
+            35,
+            scenario,
+            manifest,
+            configuration,
+            &[],
+            compatibility.command_log(),
+            &[],
+            &[],
+            compatibility.time(),
+        ) else {
+            panic!("declared fixture replay cannot reinterpret legacy command input");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidAuthority);
+    }
+
+    #[test]
+    fn declared_revision_and_time_guards_cover_boundaries_and_clock() {
+        let (scenario, ids) = demo_scenario();
+        let configuration = RunConfiguration::play_as_character(
+            "seat.commander",
+            "controller.human",
+            ids.commander,
+            "permission.military-command",
+        );
+        let manifest = manifest_for_configuration(&scenario, &configuration);
+        let command_at = |time| {
+            CommandEnvelope::new(
+                Issuer::Human("controller.human".to_owned()),
+                Command::MoveArmy {
+                    army: ids.army,
+                    destination: ids.eastern_territory,
+                },
+            )
+            .with_authority(character_authority(
+                ids.commander,
+                ids.army,
+                "seat.commander",
+                "permission.military-command",
+            ))
+            .at_time(time)
+        };
+
+        let mut after_boundary = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest.clone(),
+            configuration.clone(),
+        )
+        .expect("declared run should load");
+        after_boundary
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("boundary should publish");
+        assert_eq!(after_boundary.revision(), 1);
+        let stale = after_boundary
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                command_at(SimTime::EPOCH),
+            ))
+            .expect("stale boundary revision should be retained as evidence");
+        let CommandOutcome::Rejected { rejection } = stale else {
+            panic!("a pre-boundary revision must be stale");
+        };
+        assert_eq!(rejection.error.code, ErrorCode::SimulationRevisionConflict);
+        assert_eq!(rejection.retained_revision, 1);
+        let accepted = after_boundary
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                1,
+                command_at(SimTime::EPOCH),
+            ))
+            .expect("current revision should be accepted");
+        let CommandOutcome::Accepted { receipt } = accepted else {
+            panic!("current revision and time should admit the command");
+        };
+        assert_eq!(receipt.revision, 2);
+        assert_eq!(after_boundary.revision(), 2);
+        let boundary_journal = after_boundary.replay_journal();
+        let boundary_replay =
+            Simulation::replay_from_journal(scenario.clone(), &[], &boundary_journal)
+                .expect("boundary-relative revision evidence should replay exactly");
+        assert_eq!(after_boundary.snapshot(), boundary_replay.snapshot());
+
+        let mut after_clock =
+            Simulation::new_with_run_configuration(35, scenario.clone(), manifest, configuration)
+                .expect("declared run should load");
+        after_clock
+            .advance(SimDuration::hours(1))
+            .expect("clock should advance");
+        assert_eq!(after_clock.revision(), 0);
+        let stale = after_clock
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                command_at(SimTime::EPOCH),
+            ))
+            .expect("stale time should be retained as evidence");
+        let CommandOutcome::Rejected { rejection } = stale else {
+            panic!("a pre-advance simulation time must be stale");
+        };
+        assert_eq!(rejection.error.code, ErrorCode::SimulationTimeConflict);
+        assert_eq!(rejection.retained_revision, 0);
+        let accepted = after_clock
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(2),
+                0,
+                command_at(after_clock.time()),
+            ))
+            .expect("current revision and time should be accepted");
+        let CommandOutcome::Accepted { receipt } = accepted else {
+            panic!("current clock guard should admit the command");
+        };
+        assert_eq!(receipt.revision, 1);
+        let clock_journal = after_clock.replay_journal();
+        let clock_replay = Simulation::replay_from_journal(scenario, &[], &clock_journal)
+            .expect("clock-relative time evidence should replay exactly");
+        assert_eq!(after_clock.snapshot(), clock_replay.snapshot());
+    }
+
+    #[test]
+    fn expected_domain_rejections_survive_load_and_exact_replay() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(35, scenario.clone()).expect("compatibility run should load");
+        simulation
+            .register_plugin(&AuthorityPlugin)
+            .expect("payload-validation plugin should register");
+        let requests = [
+            CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Actor(ids.commander),
+                    Command::MoveArmy {
+                        army: ArmyId::new(999),
+                        destination: ids.eastern_territory,
+                    },
+                ),
+            ),
+            CommandRequest::new(
+                CommandRequestId::new(2),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::DebugSetArmyMorale {
+                        army: ids.army,
+                        morale: 101,
+                    },
+                ),
+            ),
+            CommandRequest::new(
+                CommandRequestId::new(3),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Actor(ids.commander),
+                    Command::Plugin {
+                        plugin: "authority-test".to_owned(),
+                        command: "set_stance".to_owned(),
+                        payload: serde_json::json!({}),
+                    },
+                ),
+            ),
+            CommandRequest::new(
+                CommandRequestId::new(4),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Actor(ids.commander),
+                    Command::Plugin {
+                        plugin: "missing-plugin".to_owned(),
+                        command: "missing-command".to_owned(),
+                        payload: Value::Null,
+                    },
+                ),
+            ),
+        ];
+        let expected = [
+            ErrorCode::ArmyNotFound,
+            ErrorCode::ValueOutOfRange,
+            ErrorCode::InvalidPayload,
+            ErrorCode::PluginCommandNotFound,
+        ];
+        for (request, expected_code) in requests.into_iter().zip(expected) {
+            let outcome = simulation
+                .process_command(request)
+                .expect("expected domain rejection should be a command outcome");
+            let CommandOutcome::Rejected { rejection } = outcome else {
+                panic!("invalid command fixture must be rejected");
+            };
+            assert_eq!(rejection.error.code, expected_code);
+            assert_eq!(rejection.retained_revision, 0);
+        }
+        assert!(simulation.command_log().is_empty());
+        assert_eq!(simulation.command_attempts().len(), 4);
+
+        let snapshot = simulation.snapshot();
+        let restored = Simulation::from_snapshot(snapshot.clone())
+            .expect("expected rejection evidence must not invalidate its own snapshot");
+        assert_eq!(restored.snapshot(), snapshot);
+        let journal = simulation.replay_journal();
+        let replayed = Simulation::replay_from_journal(scenario, &[&AuthorityPlugin], &journal)
+            .expect("expected rejection evidence should replay exactly");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+    }
+
+    #[test]
+    fn read_only_and_frozen_replay_ingress_are_not_interchangeable() {
+        let (scenario, ids) = demo_scenario();
+        let observer_configuration = RunConfiguration::read_only_observer();
+        let observer_manifest = manifest_for_configuration(&scenario, &observer_configuration);
+        let mut observer = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            observer_manifest,
+            observer_configuration,
+        )
+        .expect("read-only observer run should load");
+        let before = observer.snapshot();
+        let live_human = observer
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                CommandEnvelope::new(
+                    Issuer::Human("controller.human".to_owned()),
+                    Command::MoveArmy {
+                        army: ids.army,
+                        destination: ids.eastern_territory,
+                    },
+                )
+                .with_authority(CommandAuthority::for_actor(ids.commander)),
+            ))
+            .expect("read-only rejection should be structured");
+        let CommandOutcome::Rejected { rejection } = live_human else {
+            panic!("read-only observer must reject a live human command");
+        };
+        assert_eq!(rejection.error.code, ErrorCode::InteractionReadOnly);
+        assert_eq!(observer.world(), before.world);
+        assert_eq!(observer.events(), before.events);
+        assert_eq!(observer.command_log(), before.commands);
+        assert_eq!(observer.random_draws(), before.random_draws);
+        assert_eq!(observer.command_attempts().len(), 1);
+        let observer_journal = observer.replay_journal();
+        let observer_replay =
+            Simulation::replay_from_journal(scenario.clone(), &[], &observer_journal)
+                .expect("read-only rejection evidence should replay exactly");
+        assert_eq!(observer.snapshot(), observer_replay.snapshot());
+
+        let replay_configuration = RunConfiguration::replay_as_character(
+            "seat.commander",
+            "controller.recorded",
+            ids.commander,
+            "permission.military-command",
+        );
+        let replay_manifest = manifest_for_configuration(&scenario, &replay_configuration);
+        let replay_envelope = CommandEnvelope::new(
+            Issuer::Replay("controller.recorded".to_owned()),
+            Command::MoveArmy {
+                army: ids.army,
+                destination: ids.eastern_territory,
+            },
+        )
+        .with_authority(character_authority(
+            ids.commander,
+            ids.army,
+            "seat.commander",
+            "permission.military-command",
+        ))
+        .at_time(SimTime::EPOCH);
+
+        let mut live_replay = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            replay_manifest.clone(),
+            replay_configuration.clone(),
+        )
+        .expect("replay run should load");
+        let outcome = live_replay
+            .process_command(CommandRequest::new(
+                CommandRequestId::new(1),
+                0,
+                replay_envelope.clone(),
+            ))
+            .expect("live replay forgery should be a structured rejection");
+        let CommandOutcome::Rejected { rejection } = outcome else {
+            panic!("a live caller cannot self-identify as frozen replay");
+        };
+        assert_eq!(rejection.error.code, ErrorCode::InvalidAuthority);
+        assert!(live_replay.command_log().is_empty());
+
+        let mut frozen_source = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            replay_manifest.clone(),
+            replay_configuration.clone(),
+        )
+        .expect("frozen replay source should load");
+        let outcome = frozen_source
+            .admit_command(
+                Some(CommandRequestId::new(7)),
+                Some(0),
+                replay_envelope,
+                CommandIngress::FrozenReplay,
+                true,
+            )
+            .expect("the trusted replay path should consume frozen input");
+        assert!(matches!(outcome, CommandOutcome::Accepted { .. }));
+        let Err(error) = Simulation::replay_with_run_configuration(
+            35,
+            scenario.clone(),
+            replay_manifest,
+            replay_configuration,
+            &[],
+            frozen_source.command_log(),
+            frozen_source.command_attempts(),
+            frozen_source.boundaries(),
+            frozen_source.time(),
+        ) else {
+            panic!("caller-supplied fixture replay cannot consume frozen ingress");
+        };
+        assert_eq!(error.code, ErrorCode::ReplayEnvironmentMismatch);
+        let frozen_journal = frozen_source.replay_journal();
+        let frozen_replay = Simulation::replay_from_journal(scenario, &[], &frozen_journal)
+            .expect("frozen controller input should replay exactly");
+        assert_eq!(frozen_source.snapshot(), frozen_replay.snapshot());
+
+        let mut forged_live_ingress = frozen_source.snapshot();
+        forged_live_ingress.command_attempts[0].ingress = CommandIngress::LiveRequest;
+        forged_live_ingress.checkpoint_hash = snapshot_checkpoint_hash(&forged_live_ingress)
+            .expect("the forged fixture should carry a coherent container commitment");
+        let Err(error) = Simulation::from_snapshot(forged_live_ingress) else {
+            panic!("live ingress cannot be relabeled as an accepted replay command");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn observation_and_trace_policy_are_causally_inert() {
+        let (scenario, _) = demo_scenario();
+        let public_configuration = RunConfiguration::read_only_observer();
+        let mut research_configuration = public_configuration.clone();
+        research_configuration.observation = ObservationPolicy::ResearchFull;
+        research_configuration.trace = TracePolicy::FullResearch;
+        let mut public = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest_for_configuration(&scenario, &public_configuration),
+            public_configuration,
+        )
+        .expect("public observer run should load");
+        let mut research = Simulation::new_with_run_configuration(
+            35,
+            scenario.clone(),
+            manifest_for_configuration(&scenario, &research_configuration),
+            research_configuration,
+        )
+        .expect("research observer run should load");
+
+        assert_ne!(public.run_manifest_hash(), research.run_manifest_hash());
+        assert_ne!(public.checkpoint_hash(), research.checkpoint_hash());
+        assert_eq!(
+            public
+                .authoritative_state_hash()
+                .expect("public state should hash"),
+            research
+                .authoritative_state_hash()
+                .expect("research state should hash")
+        );
+        let public_receipt = public
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("public boundary should settle");
+        let research_receipt = research
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("research boundary should settle");
+        assert_eq!(public_receipt.boundary_hash, research_receipt.boundary_hash);
+        assert_eq!(
+            public.boundaries()[0].state_hash,
+            research.boundaries()[0].state_hash
+        );
+        assert_eq!(public.world(), research.world());
+        assert_eq!(public.random_draws(), research.random_draws());
+        assert_eq!(
+            public.snapshot().random_streams,
+            research.snapshot().random_streams
+        );
+        assert_ne!(public.checkpoint_hash(), research.checkpoint_hash());
     }
 
     #[test]
@@ -7591,6 +9848,7 @@ mod tests {
         legacy_object.insert("snapshot_format_version".to_owned(), Value::from(2));
         legacy_object.remove("run_manifest");
         legacy_object.remove("run_manifest_hash");
+        legacy_object.remove("run_configuration");
         legacy_object.remove("checkpoint_hash");
         legacy_object.remove("boundaries");
         legacy_object.remove("next_boundary_id");
@@ -7692,6 +9950,7 @@ mod tests {
         malformed_object.insert("snapshot_format_version".to_owned(), Value::from(3));
         malformed_object.remove("run_manifest");
         malformed_object.remove("run_manifest_hash");
+        malformed_object.remove("run_configuration");
         malformed_object.remove("checkpoint_hash");
         malformed_object.remove("root_seed");
         malformed_object.remove("random_streams");
@@ -7738,6 +9997,99 @@ mod tests {
             .expect("delivered reports should serialize");
         Simulation::from_snapshot_json(&delivered)
             .expect("completed report evidence should restore without pending work");
+    }
+
+    #[test]
+    fn pre_policy_format_four_journals_hydrate_compatibility_provenance() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(73, scenario.clone()).expect("compatibility run should load");
+        simulation
+            .submit(move_order(&ids))
+            .expect("legacy command fixture should be accepted");
+        let mut value =
+            serde_json::to_value(simulation.replay_journal()).expect("journal should become JSON");
+        let object = value
+            .as_object_mut()
+            .expect("replay journal JSON should be an object");
+        object.remove("run_configuration");
+        object.remove("command_attempts");
+        let hydrated: ReplayJournal =
+            serde_json::from_value(value).expect("pre-policy journal should deserialize");
+        assert_eq!(
+            hydrated.run_configuration,
+            RunConfigurationSnapshot::CompatibilityV1
+        );
+        assert!(hydrated.command_attempts.is_empty());
+        let replayed = Simulation::replay_from_journal(scenario.clone(), &[], &hydrated)
+            .expect("pre-policy compatibility journal should replay exactly");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+
+        let mut aliased = Simulation::new(74, scenario)
+            .expect("compatibility run should load")
+            .snapshot();
+        aliased.run_configuration = Some(RunConfigurationSnapshot::ManifestOnlyV1);
+        assert_eq!(
+            snapshot_checkpoint_hash(&aliased)
+                .expect("the provenance alias should remain checkpoint-neutral"),
+            aliased.checkpoint_hash
+        );
+        let Err(error) = Simulation::from_snapshot(aliased) else {
+            panic!("default run identity must have exactly one policy provenance");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidRunManifest);
+    }
+
+    #[test]
+    fn pre_policy_format_four_custom_run_identity_remains_loadable() {
+        let (scenario, _) = demo_scenario();
+        let mut legacy = Simulation::new(73, scenario.clone())
+            .expect("compatibility run should load")
+            .snapshot();
+        let scenario_manifest =
+            ArtifactManifest::for_scenario("legacy", "scenario", "1", &scenario)
+                .expect("scenario should hash");
+        let run_configuration =
+            ArtifactManifest::from_bytes("legacy", "custom-run-policy", "7", b"opaque-policy")
+                .expect("legacy policy identity should hash");
+        let run_manifest = RunManifest::declared(scenario_manifest, run_configuration);
+        legacy.run_manifest_hash = manifest::hash(&run_manifest).expect("manifest should hash");
+        legacy.run_manifest = Some(run_manifest);
+        legacy.run_configuration = Some(RunConfigurationSnapshot::ManifestOnlyV1);
+        legacy.checkpoint_hash = snapshot_checkpoint_hash(&legacy)
+            .expect("manifest-only fixture should retain its old commitment");
+        let expected = legacy.clone();
+
+        let mut value = serde_json::to_value(legacy).expect("snapshot should become JSON");
+        value
+            .as_object_mut()
+            .expect("snapshot JSON should be an object")
+            .remove("run_configuration");
+        let json = serde_json::to_string(&value).expect("legacy snapshot should serialize");
+        let restored = Simulation::from_snapshot_json(&json)
+            .expect("custom pre-policy format-4 identity should hydrate explicitly");
+        assert_eq!(
+            restored.run_configuration(),
+            &RunConfigurationSnapshot::ManifestOnlyV1
+        );
+        assert_eq!(restored.snapshot(), expected);
+        let journal = restored.replay_journal();
+        let mut journal_value =
+            serde_json::to_value(&journal).expect("custom journal should become JSON");
+        let journal_object = journal_value
+            .as_object_mut()
+            .expect("custom journal JSON should be an object");
+        journal_object.remove("run_configuration");
+        journal_object.remove("command_attempts");
+        let hydrated_journal: ReplayJournal = serde_json::from_value(journal_value)
+            .expect("custom pre-policy journal should deserialize");
+        assert_eq!(
+            hydrated_journal.run_configuration,
+            RunConfigurationSnapshot::ManifestOnlyV1
+        );
+        let replayed = Simulation::replay_from_journal(scenario, &[], &hydrated_journal)
+            .expect("manifest-only format-4 evidence should remain exactly replayable");
+        assert_eq!(restored.snapshot(), replayed.snapshot());
     }
 
     #[test]
@@ -8341,10 +10693,11 @@ mod tests {
         let scenario_manifest =
             ArtifactManifest::for_scenario("cm", "reference-scenario", "1", &scenario)
                 .expect("scenario identity should hash");
-        let run_configuration =
-            ArtifactManifest::from_bytes("cm", "run-policy", "1", b"validation/reference")
+        let run_configuration = RunConfiguration::read_only_observer();
+        let run_configuration_manifest =
+            ArtifactManifest::for_run_configuration("cm", "run-policy", "1", &run_configuration)
                 .expect("run configuration should hash");
-        let mut run_manifest = RunManifest::declared(scenario_manifest, run_configuration);
+        let mut run_manifest = RunManifest::declared(scenario_manifest, run_configuration_manifest);
         let RunManifest::Declared {
             rules,
             content,
@@ -8374,8 +10727,13 @@ mod tests {
                 .expect("source identity should hash"),
         );
 
-        let mut simulation = Simulation::new_with_manifest(91, scenario.clone(), run_manifest)
-            .expect("declared run identity should be admitted");
+        let mut simulation = Simulation::new_with_run_configuration(
+            91,
+            scenario.clone(),
+            run_manifest,
+            run_configuration.clone(),
+        )
+        .expect("declared run identity should be admitted");
         let RunManifest::Declared { rules, .. } = simulation.run_manifest() else {
             unreachable!("new runs retain a declared manifest");
         };
@@ -8406,9 +10764,12 @@ mod tests {
 
         let mut changed_scenario = scenario.clone();
         changed_scenario.world.armies[0].strength += 1;
-        let Err(error) =
-            Simulation::new_with_manifest(91, changed_scenario, exact_manifest.clone())
-        else {
+        let Err(error) = Simulation::new_with_run_configuration(
+            91,
+            changed_scenario,
+            exact_manifest.clone(),
+            run_configuration.clone(),
+        ) else {
             panic!("a scenario must match its declared semantic identity");
         };
         assert_eq!(error.code, ErrorCode::InvalidRunManifest);
@@ -8427,12 +10788,14 @@ mod tests {
         };
         assert_eq!(error.code, ErrorCode::InvalidRunManifest);
 
-        let replayed = Simulation::replay_with_run_manifest(
+        let replayed = Simulation::replay_with_run_configuration(
             91,
             scenario.clone(),
             exact_manifest.clone(),
+            run_configuration.clone(),
             &[&PrimaryRandomPlugin],
             simulation.command_log(),
+            simulation.command_attempts(),
             simulation.boundaries(),
             simulation.time(),
         )
@@ -8445,12 +10808,14 @@ mod tests {
         };
         content[0].semantic_hash =
             "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
-        let Err(error) = Simulation::replay_with_run_manifest(
+        let Err(error) = Simulation::replay_with_run_configuration(
             91,
             scenario,
             changed_environment,
+            run_configuration,
             &[&PrimaryRandomPlugin],
             simulation.command_log(),
+            simulation.command_attempts(),
             simulation.boundaries(),
             simulation.time(),
         ) else {

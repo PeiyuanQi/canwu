@@ -3,8 +3,8 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 pub use canwu_core::{
-    ArmyId, BoundaryId, CommandId, EntityRef, EventId, GovernmentId, PersonId, RandomDrawId,
-    RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, EntityRef, EventId,
+    GovernmentId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 pub use canwu_event::{CauseRef, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -14,16 +14,19 @@ pub use canwu_sim::{
     ArtifactManifest, BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission,
     BoundaryEmissionKind, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
     BoundaryRequest, BoundarySystemContract, BoundarySystemHandler, CanwuError, Command,
-    CommandContext, CommandEnvelope, CommandReceipt, CommandRecord, DemoIds, ENGINE_VERSION,
-    ErrorCode, Issuer, PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
-    PluginCommandHandler, PluginDescriptor, PluginRegistrar, PluginRegistry,
-    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer,
-    RandomDrawRecord, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, RunManifest,
-    SNAPSHOT_FORMAT_VERSION, Scenario, SimulationPlugin, SimulationSnapshot,
-    SimulationSystemHandler, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemContract, SystemDirective,
+    CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
+    CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
+    CommandRejection, CommandRequest, ControllerPolicy, DecisionOrigin, DemoIds, ENGINE_VERSION,
+    ErrorCode, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty, PayloadSchema,
+    PayloadValueType, PluginActionDescriptor, PluginCommandHandler, PluginDescriptor,
+    PluginRegistrar, PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
+    RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
+    RandomStreamState, ReplayJournal, ReservationAllocation, ReservationDisposition,
+    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
+    ReservationRequest, ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot,
+    RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
+    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -62,6 +65,22 @@ impl Canwu {
         })
     }
 
+    pub fn new_with_run_configuration(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        run_configuration: RunConfiguration,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new_with_run_configuration(
+                seed,
+                scenario,
+                run_manifest,
+                run_configuration,
+            )?,
+        })
+    }
+
     pub fn demo(seed: u64) -> Result<Self, CanwuError> {
         let (simulation, _) = Simulation::demo(seed)?;
         Ok(Self { simulation })
@@ -84,6 +103,16 @@ impl Canwu {
     }
 
     #[must_use]
+    pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
+        self.simulation.run_configuration()
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.simulation.revision()
+    }
+
+    #[must_use]
     pub fn run_manifest_hash(&self) -> &str {
         self.simulation.run_manifest_hash()
     }
@@ -91,6 +120,10 @@ impl Canwu {
     #[must_use]
     pub fn checkpoint_hash(&self) -> &str {
         self.simulation.checkpoint_hash()
+    }
+
+    pub fn authoritative_state_hash(&self) -> Result<String, CanwuError> {
+        self.simulation.authoritative_state_hash()
     }
 
     #[must_use]
@@ -109,8 +142,18 @@ impl Canwu {
     }
 
     #[must_use]
+    pub fn commands(&self) -> &[CommandRecord] {
+        self.simulation.command_log()
+    }
+
+    #[must_use]
     pub fn boundaries(&self) -> &[BoundaryRecord] {
         self.simulation.boundaries()
+    }
+
+    #[must_use]
+    pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
+        self.simulation.command_attempts()
     }
 
     #[must_use]
@@ -146,6 +189,13 @@ impl Canwu {
 
     pub fn submit(&mut self, command: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
         self.simulation.submit(command)
+    }
+
+    pub fn process_command(
+        &mut self,
+        request: CommandRequest,
+    ) -> Result<CommandOutcome, CanwuError> {
+        self.simulation.process_command(request)
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
@@ -247,6 +297,33 @@ impl Canwu {
                 run_manifest,
                 plugins,
                 commands,
+                boundaries,
+                final_time,
+            )?,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_with_run_configuration(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        run_configuration: RunConfiguration,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        command_attempts: &[CommandAttemptRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::replay_with_run_configuration(
+                seed,
+                scenario,
+                run_manifest,
+                run_configuration,
+                plugins,
+                commands,
+                command_attempts,
                 boundaries,
                 final_time,
             )?,

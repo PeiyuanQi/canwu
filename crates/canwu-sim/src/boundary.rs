@@ -1,7 +1,7 @@
 use crate::{
     CanwuError, RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
 };
-use canwu_core::{BoundaryId, CommandId, EntityRef, EventId, RandomDrawId};
+use canwu_core::{BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, RandomDrawId};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -162,6 +162,7 @@ pub struct BoundaryContext {
     pub phase: crate::BoundaryPhase,
     pub plugin: String,
     pub system: String,
+    pub admitted_attempts: Vec<CommandAttemptId>,
     pub admitted_commands: Vec<CommandId>,
     pub admitted_events: Vec<EventId>,
     pub emitted_events: Vec<EventId>,
@@ -226,6 +227,8 @@ pub struct BoundaryRecord {
     pub at: SimTime,
     pub correlation_id: u64,
     pub cadences: Vec<SystemCadence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub admitted_attempts: Vec<CommandAttemptId>,
     pub admitted_commands: Vec<CommandId>,
     pub admitted_events: Vec<EventId>,
     pub reservation_offers: Vec<ReservationOfferRecord>,

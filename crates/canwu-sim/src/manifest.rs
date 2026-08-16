@@ -1,4 +1,7 @@
-use crate::{CanwuError, ErrorCode, Scenario, canonical_hash, is_canonical_hash};
+use crate::{
+    CanwuError, ErrorCode, RunConfiguration, RunConfigurationSnapshot, Scenario, canonical_hash,
+    is_canonical_hash, policy,
+};
 use serde::{Deserialize, Serialize};
 
 pub const RUN_MANIFEST_FORMAT_VERSION: u32 = 1;
@@ -55,6 +58,18 @@ impl ArtifactManifest {
         scenario: &Scenario,
     ) -> Result<Self, CanwuError> {
         Self::new(namespace, name, version, scenario_semantic_hash(scenario)?)
+    }
+
+    pub fn for_run_configuration(
+        namespace: impl Into<String>,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        configuration: &RunConfiguration,
+    ) -> Result<Self, CanwuError> {
+        let mut configuration = configuration.clone();
+        configuration.canonicalize();
+        configuration.validate()?;
+        Self::new(namespace, name, version, configuration.semantic_hash()?)
     }
 }
 
@@ -209,6 +224,50 @@ pub(crate) fn hash(manifest: &RunManifest) -> Result<String, CanwuError> {
     canonical_hash("canwu.run-manifest.v1", manifest)
 }
 
+pub(crate) fn validate_run_configuration(
+    manifest: &RunManifest,
+    configuration: &RunConfigurationSnapshot,
+) -> Result<(), CanwuError> {
+    configuration.validate()?;
+    match (manifest, configuration) {
+        (
+            RunManifest::Declared {
+                run_configuration, ..
+            },
+            RunConfigurationSnapshot::Declared(_) | RunConfigurationSnapshot::CompatibilityV1,
+        ) => {
+            if configuration.semantic_hash()?.as_deref()
+                != Some(run_configuration.semantic_hash.as_str())
+            {
+                return invalid_manifest(
+                    "run configuration snapshot does not match its manifest identity",
+                );
+            }
+            Ok(())
+        }
+        (
+            RunManifest::Declared {
+                run_configuration, ..
+            },
+            RunConfigurationSnapshot::ManifestOnlyV1,
+        ) => {
+            if run_configuration.semantic_hash == policy::compatibility_configuration_hash()? {
+                return invalid_manifest(
+                    "the default run configuration must use compatibility-v1 provenance",
+                );
+            }
+            Ok(())
+        }
+        (RunManifest::MigratedLegacy { .. }, RunConfigurationSnapshot::LegacyUnspecified) => Ok(()),
+        (RunManifest::Declared { .. }, RunConfigurationSnapshot::LegacyUnspecified) => {
+            invalid_manifest("declared runs cannot use an identity-unbound run configuration")
+        }
+        (RunManifest::MigratedLegacy { .. }, _) => invalid_manifest(
+            "legacy migrations cannot silently inherit a current run configuration",
+        ),
+    }
+}
+
 fn scenario_semantic_hash(scenario: &Scenario) -> Result<String, CanwuError> {
     let mut canonical = scenario.clone();
     canonical.world.people.sort_by_key(|value| value.id);
@@ -220,28 +279,11 @@ fn scenario_semantic_hash(scenario: &Scenario) -> Result<String, CanwuError> {
 }
 
 fn default_run_configuration_manifest() -> Result<ArtifactManifest, CanwuError> {
-    #[derive(Serialize)]
-    struct DefaultRunConfiguration<'a> {
-        scheduler: &'a str,
-        settlement: &'a str,
-        observation: &'a str,
-        trace: &'a str,
-    }
-
-    let semantic_hash = canonical_hash(
-        "canwu.default-run-configuration.v1",
-        &DefaultRunConfiguration {
-            scheduler: "canonical-single-host-v1",
-            settlement: "explicit-fourteen-phase-v1",
-            observation: "actor-scoped-v1",
-            trace: "authoritative-evidence-v1",
-        },
-    )?;
     ArtifactManifest::new(
         "canwu.core",
         "default-run-configuration",
         "1",
-        semantic_hash,
+        policy::compatibility_configuration_hash()?,
     )
 }
 

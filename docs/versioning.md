@@ -40,12 +40,34 @@ streams and a draw journal containing producer, purpose, cause, correlation,
 position, bound, and result. Every successful phased boundary records a
 deterministic state hash and a chained boundary hash. Snapshots also persist a
 hashed run manifest for scenario, rules, content, localization contracts, run
-configuration, and source identities. A recomputed checkpoint hash binds the
-complete current deterministic state to the boundary-chain head. Exact
-`ReplayJournal` replay verifies engine and format versions, root seed, run and
-plugin manifests, the plugin-registration lifecycle state, commands,
-boundaries, final time, and final checkpoint hash, including command-only and
-registration-closure-only runs. Each report dispatch must retain exactly one
+configuration, and source identities. Additive format-4 run-policy fields use
+explicit `CompatibilityV1` or `LegacyUnspecified` provenance when older data did
+not record the six CM policy dimensions. Earlier format-4 snapshots with a
+custom run-configuration artifact hydrate as `ManifestOnlyV1`: their exact
+manifest identity and replay remain valid, but the engine does not invent
+policy dimensions that were never serialized. Pre-policy format-4 replay
+journals hydrate the same provenance from their manifest and default the absent
+attempt journal to empty, so command-only journals remain readable. The default
+compatibility artifact cannot be relabeled as `ManifestOnlyV1`. Declared
+configurations persist those dimensions plus typed live/frozen-replay
+command-attempt evidence,
+including accepted and expected-rejected outcomes, idempotency keys, revision
+and simulation-time guards, authority context, and synchronous emitted-event
+IDs. Legacy-direct command records are restricted to compatibility provenance;
+declared runs require tracked attempt evidence. Legacy format 2 and 3 inputs are
+rejected if they attempt to smuggle these newer fields into a historical shape.
+
+Authoritative state and boundary hashes normalize the run-policy artifact: the
+actual command/effect journal remains authoritative, while run purpose,
+controller, seat, observation, interaction, and trace policy do not alter
+simulation-result identity. The recomputed checkpoint uses a versioned
+save-container commitment that also binds the exact full run-manifest hash.
+Thus observation/trace-only variants have identical authoritative and RNG
+results but distinct save identity. Exact `ReplayJournal` replay verifies engine
+and format versions, root seed, run and plugin manifests, run configuration,
+plugin-registration lifecycle state, accepted commands, command attempts,
+boundaries, final time, and final checkpoint hash, including command-only,
+rejection-only, and registration-closure-only runs. Each report dispatch must retain exactly one
 causally linked core random draw, and authoritative scheduling rejects
 unrepresentable time instead of saturating. Checked hour/day construction and
 checked time/duration arithmetic are available for data-dependent values;

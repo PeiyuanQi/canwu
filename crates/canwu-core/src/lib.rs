@@ -44,7 +44,9 @@ macro_rules! define_id {
 
 define_id!(ArmyId);
 define_id!(BoundaryId);
+define_id!(CommandAttemptId);
 define_id!(CommandId);
+define_id!(CommandRequestId);
 define_id!(EventId);
 define_id!(GovernmentId);
 define_id!(OrganizationId);
