@@ -215,24 +215,15 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .trust-grid article > code { color: var(--green); font-size: .67rem; }
 .trust-grid h2 { margin: 1.2rem 0 .8rem; font-size: 1.2rem; }
 .trust-grid p { color: var(--muted); font-size: .84rem; line-height: 1.65; }
-.stack-intro { display: grid; grid-template-columns: .34fr .66fr 1fr; gap: 2rem; padding-block: 3.5rem 1rem; }
+.stack-intro { display: grid; grid-template-columns: .34fr .66fr 1fr; gap: 2rem; padding-block: 3.5rem; }
 .stack-intro > p { margin: .2rem 0 0; color: var(--accent); font: 700 .68rem/1.3 "Cascadia Code", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .stack-intro h2 { margin: 0; font-size: 2rem; }
 .stack-intro span { color: var(--muted); line-height: 1.65; }
-.credit-table { padding-block: 3rem; }
-.credit-table > header, .credit-table > a { display: grid; grid-template-columns: .68fr 1fr 140px 24px; gap: 1rem; align-items: center; min-height: 50px; padding-inline: .7rem; border-bottom: 1px solid var(--border); }
-.credit-table > header { min-height: 38px; color: var(--subtle); border-top: 1px solid var(--border); font: 650 .64rem/1.2 "Cascadia Code", monospace; letter-spacing: .06em; text-transform: uppercase; }
-.credit-table > a { color: var(--muted); font-size: .8rem; text-decoration: none; }
-.credit-table > a:hover { color: var(--text); background: var(--surface); }
-.credit-table code { color: var(--blue); font-weight: 700; }
-.credit-table small { color: var(--green); }
-.credit-table b { color: var(--accent); font-weight: 500; }
 .implementation-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; padding-block: 0 4.5rem; }
 .implementation-grid article { min-height: 235px; padding: 1.4rem; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; }
 .implementation-grid h2 { margin: 0 0 1rem; font-size: 1.2rem; }
 .implementation-grid p { color: var(--muted); font-size: .85rem; line-height: 1.65; }
 .implementation-grid article > a { color: var(--blue); font-size: .76rem; font-weight: 650; }
-.implementation-grid article.wide { grid-column: 1 / -1; min-height: auto; }
 .reference-links { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1.2rem; }
 .reference-links a { padding: .4rem .55rem; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; font-size: .7rem; text-decoration: none; }
 .reference-links a:hover { color: var(--text); border-color: var(--subtle); }
@@ -269,7 +260,6 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
   .reference-hero { padding-block: 3.5rem 2.5rem; }.reference-hero nav { grid-template-columns: repeat(2, 1fr); }
   .integration-case { grid-template-columns: 1fr; gap: 2rem; }.responsibility-grid { grid-template-columns: 1fr; }.api-strip { grid-template-columns: 1fr; }
   .reference-footer, .privacy-section, .implementation-grid { grid-template-columns: 1fr; }.reference-footer > div:last-child { justify-content: flex-start; }.privacy-section .technical-list { grid-template-columns: 1fr; }
-  .credit-table > header { display: none; }.credit-table > a { grid-template-columns: 1fr 24px; padding-block: .75rem; }.credit-table > a span, .credit-table > a small { grid-column: 1; }.credit-table > a b { grid-column: 2; grid-row: 1 / 4; }
 }
 
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
