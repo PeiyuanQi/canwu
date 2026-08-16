@@ -1,0 +1,18 @@
+[package]
+name = "canwu-performance-harness"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+# Keep this profiling utility outside the production workspace. CI validates
+# the engine workspace; maintainers run this harness deliberately in release
+# mode when recording an architectural baseline.
+[workspace]
+
+[features]
+allocation-counting = []
+
+[dependencies]
+canwu-api = { path = "../../crates/canwu-api" }
+serde_json = "1"

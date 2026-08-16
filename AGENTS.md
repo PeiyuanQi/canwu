@@ -54,6 +54,8 @@
 - `crates/canwu-api`: the supported public facade and re-export boundary.
 - `crates/canwu-debug`: reference client; it may depend on `canwu-api` only.
 - `docs`: architecture, end-state, versioning, and compatibility contracts.
+- `benchmarks`: deterministic non-CI performance harnesses and recorded
+  baselines; measurement tooling, not authoritative runtime code.
 - `agent-interface`: Codex plugin packages and skills. Follow its nested
   `AGENTS.md`; these are development/user tools, not runtime simulation plugins.
 - `website` and `assets`: community site and project media, outside the
@@ -72,6 +74,7 @@
 | Random algorithms, streams, or draws | `canwu-core` deterministic generator; `canwu-sim` random ownership, journals, persistence, hashing, validation, migration, and replay; statistical-boundary and tamper tests |
 | Runtime plugin, component, or record contracts | registrar/descriptors/semantic hashes; ownership checks; snapshot rehydration; `canwu-api`; plugin fixtures and examples |
 | Snapshot fields, journals, hashes, or format versions | persistence, hashing, validation, migration, replay, and checkpoint code together; `docs/versioning.md`; old-format and per-domain tamper tests |
+| Performance or scaling behavior | `benchmarks`; affected runtime paths; deterministic workload counts; allocation, elapsed-time, snapshot-size, and growth evidence before and after |
 | Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes |
 | Agent skills or plugin packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; plugin validation |
 | Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; notices/license inventory; contribution/release docs; packaged plugin notices |
@@ -118,3 +121,8 @@ contracts, never the reverse.
   `cargo run -p canwu-api --example plugin`.
 - Rust documentation when public types or docs change:
   `cargo doc --workspace --no-deps`.
+- Standalone performance harness when its workload or reporting changes:
+  `cargo fmt --manifest-path benchmarks/performance-harness/Cargo.toml -- --check`,
+  `cargo clippy --manifest-path benchmarks/performance-harness/Cargo.toml --all-targets --all-features -- -D warnings`,
+  `cargo test --manifest-path benchmarks/performance-harness/Cargo.toml`, and
+  `cargo test --manifest-path benchmarks/performance-harness/Cargo.toml --features allocation-counting`.
