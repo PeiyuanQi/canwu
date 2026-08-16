@@ -207,6 +207,26 @@ and validates every root. Elapsed medians remain noisy: history growth is -1.3%,
 exact replay -1.2%, and load/validate +6.7%. The increased operation counts are
 the concrete baseline the next incremental-root milestone must remove.
 
+## Incremental journal-commitment comparison
+
+The append-only commitment-cache optimization is recorded in separate
+[`elapsed`](baselines/2026-08-16-incremental-journal-commitments-elapsed.json)
+and
+[`allocation`](baselines/2026-08-16-incremental-journal-commitments-allocations.json)
+reports, using the commitment-roots foundation as its before baseline. It keeps
+checkpoint-v4 bytes unchanged while appending only new commands, attempts,
+events, ingress records, and random draws to cloneable hash state. Snapshot
+loading still rebuilds every root independently.
+
+At scale 512, history growth falls from 3,951.610 ms to 2,868.295 ms (-27.4%)
+and exact replay from 5,664.912 ms to 3,995.156 ms (-29.5%). Allocated bytes
+fall by 3,284,320,984 for growth and 4,925,348,144 for replay; accepted and
+rejected commands each eliminate about 2.93 MB of allocation traffic, and empty
+or populated boundaries eliminate about 5.86 MB. Allocation-operation counts
+fall modestly because full transaction clones still dominate. Snapshot size is
+unchanged at 3,139,624 bytes, while load/validate remains an intentionally
+uncached full proof (+1.6% elapsed in this run).
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
@@ -215,9 +235,9 @@ The allocation evidence identifies two distinct growth classes:
   retained history in the current implementation.
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
-  seventeen times as long. At scale 512, growth requested 45,551,539 allocation
-  operations and 9,690,025,745 bytes; replay requested 67,297,025 operations and
-  13,867,966,718 bytes. These paths exhibit approximately quadratic growth.
+  fifteen times as long. At scale 512, growth requested 49,870,296 allocation
+  operations and 6,303,353,559 bytes; replay requested 73,811,083 operations and
+  8,804,462,784 bytes. These paths still exhibit approximately quadratic growth.
 
 Those observations establish optimization targets; they do not change any
 runtime contract or claim that one subsystem alone is the cause.

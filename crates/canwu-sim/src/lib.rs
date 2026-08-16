@@ -2740,6 +2740,145 @@ struct RuntimeEvidence {
 }
 
 #[derive(Clone)]
+struct OrderedCommitmentAccumulator {
+    hasher: blake3::Hasher,
+    len: usize,
+}
+
+impl OrderedCommitmentAccumulator {
+    fn new(domain: &str) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(domain.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(b"[");
+        Self { hasher, len: 0 }
+    }
+
+    fn from_sorted_by<T, K, F>(domain: &str, values: &[T], mut key: F) -> Result<Self, CanwuError>
+    where
+        T: Serialize,
+        K: Ord,
+        F: FnMut(&T) -> K,
+    {
+        let mut ordered: Vec<_> = values.iter().collect();
+        ordered.sort_by_key(|value| key(value));
+        let mut accumulator = Self::new(domain);
+        for value in ordered {
+            accumulator.append(value)?;
+        }
+        Ok(accumulator)
+    }
+
+    fn append<T: Serialize>(&mut self, value: &T) -> Result<(), CanwuError> {
+        let encoded = serde_json::to_vec(value).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("could not encode incremental commitment item: {error}"),
+            )
+        })?;
+        if self.len != 0 {
+            self.hasher.update(b",");
+        }
+        self.hasher.update(&encoded);
+        self.len = self.len.checked_add(1).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "incremental commitment item count is exhausted",
+            )
+        })?;
+        Ok(())
+    }
+
+    fn sync_tail<T: Serialize>(&mut self, values: &[T]) -> Result<(), CanwuError> {
+        if self.len > values.len() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "append-only commitment cache exceeds its evidence journal",
+            ));
+        }
+        for value in &values[self.len..] {
+            self.append(value)?;
+        }
+        Ok(())
+    }
+
+    fn root(&self) -> String {
+        let mut hasher = self.hasher.clone();
+        hasher.update(b"]");
+        hasher.finalize().to_hex().to_string()
+    }
+}
+
+#[derive(Clone)]
+struct RuntimeCommitmentCache {
+    commands: OrderedCommitmentAccumulator,
+    attempts: OrderedCommitmentAccumulator,
+    events: OrderedCommitmentAccumulator,
+    ingress: OrderedCommitmentAccumulator,
+    random_draws: OrderedCommitmentAccumulator,
+}
+
+impl RuntimeCommitmentCache {
+    fn from_evidence(evidence: &RuntimeEvidence) -> Result<Self, CanwuError> {
+        Ok(Self {
+            commands: OrderedCommitmentAccumulator::from_sorted_by(
+                "canwu.commitment.commands.accepted.v1",
+                &evidence.commands,
+                |record| record.id,
+            )?,
+            attempts: OrderedCommitmentAccumulator::from_sorted_by(
+                "canwu.commitment.commands.attempts.v1",
+                &evidence.command_attempts,
+                |record| record.id,
+            )?,
+            events: OrderedCommitmentAccumulator::from_sorted_by(
+                "canwu.commitment.events.v1",
+                &evidence.events,
+                |event| event.id,
+            )?,
+            ingress: OrderedCommitmentAccumulator::from_sorted_by(
+                "canwu.commitment.ingress.v1",
+                &evidence.ingress,
+                |record| record.id,
+            )?,
+            random_draws: OrderedCommitmentAccumulator::from_sorted_by(
+                "canwu.commitment.random.draws.v1",
+                &evidence.random_draws,
+                |draw| draw.id,
+            )?,
+        })
+    }
+
+    fn sync(&mut self, evidence: &RuntimeEvidence) -> Result<(), CanwuError> {
+        self.commands.sync_tail(&evidence.commands)?;
+        self.attempts.sync_tail(&evidence.command_attempts)?;
+        self.events.sync_tail(&evidence.events)?;
+        self.ingress.sync_tail(&evidence.ingress)?;
+        self.random_draws.sync_tail(&evidence.random_draws)?;
+        Ok(())
+    }
+
+    fn roots(&self) -> JournalCommitmentRoots {
+        JournalCommitmentRoots {
+            commands: self.commands.root(),
+            attempts: self.attempts.root(),
+            events: self.events.root(),
+            ingress: self.ingress.root(),
+            random_draws: self.random_draws.root(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct JournalCommitmentRoots {
+    commands: String,
+    attempts: String,
+    events: String,
+    ingress: String,
+    random_draws: String,
+}
+
+#[derive(Clone)]
 struct RuntimeScheduler {
     initial_time: SimTime,
     now: SimTime,
@@ -2772,6 +2911,7 @@ struct RuntimeMetadata {
     checkpoint_hash: String,
     commitment_format_version: u32,
     commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
     plugin_registration_closed: bool,
     replay_revision_format_version: u32,
 }
@@ -3179,6 +3319,7 @@ impl Simulation {
                     checkpoint_hash: String::new(),
                     commitment_format_version: COMMITMENT_FORMAT_VERSION,
                     commitment_roots: None,
+                    commitment_cache: None,
                     plugin_registration_closed: false,
                     replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
                 },
@@ -3382,6 +3523,7 @@ impl Simulation {
         if normalized.commitment_format_version == 0 {
             simulation.state.metadata.commitment_format_version = 0;
             simulation.state.metadata.commitment_roots = None;
+            simulation.state.metadata.commitment_cache = None;
             simulation.refresh_checkpoint_hash()?;
         }
         let simulation = Self::activate_initial_plugins(simulation, plugins)?;
@@ -5166,7 +5308,10 @@ impl Simulation {
         })
     }
 
-    fn compute_commitment_roots(&self) -> Result<CommitmentRoots, CanwuError> {
+    fn compute_commitment_roots(
+        &self,
+        journal_roots: &JournalCommitmentRoots,
+    ) -> Result<CommitmentRoots, CanwuError> {
         let world = self.world();
         let plugin_components: Vec<_> = self
             .state
@@ -5240,12 +5385,28 @@ impl Simulation {
                 next_correlation_id: self.state.counters.next_correlation_id,
             },
             self.boundary_head_hash(),
+            Some(journal_roots),
         )
     }
 
     fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
         if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION {
-            let roots = self.compute_commitment_roots()?;
+            let journal_roots = {
+                let cache = if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
+                    cache
+                } else {
+                    self.state.metadata.commitment_cache =
+                        Some(RuntimeCommitmentCache::from_evidence(&self.state.evidence)?);
+                    self.state
+                        .metadata
+                        .commitment_cache
+                        .as_mut()
+                        .expect("the commitment cache was initialized")
+                };
+                cache.sync(&self.state.evidence)?;
+                cache.roots()
+            };
+            let roots = self.compute_commitment_roots(&journal_roots)?;
             self.state.metadata.checkpoint_hash = checkpoint_hash_for_commitments(
                 &roots,
                 &self.state.metadata.run_manifest_hash,
@@ -5267,6 +5428,7 @@ impl Simulation {
                 self.state.metadata.replay_revision_format_version,
             )?;
             self.state.metadata.commitment_roots = None;
+            self.state.metadata.commitment_cache = None;
         } else {
             return Err(CanwuError::new(
                 ErrorCode::UnsupportedSnapshotVersion,
@@ -5510,6 +5672,7 @@ impl Simulation {
                     checkpoint_hash: snapshot.checkpoint_hash.clone(),
                     commitment_format_version: snapshot.commitment_format_version,
                     commitment_roots: snapshot.commitment_roots.clone(),
+                    commitment_cache: None,
                     plugin_registration_closed: snapshot.plugin_registration_closed,
                     replay_revision_format_version: snapshot.replay_revision_format_version,
                 },
@@ -11581,6 +11744,7 @@ where
 fn commitment_roots(
     material: &StateHashMaterial<'_>,
     boundary_head: Option<&str>,
+    journal_roots: Option<&JournalCommitmentRoots>,
 ) -> Result<CommitmentRoots, CanwuError> {
     let world = canonical_hash(
         "canwu.commitment.world.v1",
@@ -11641,29 +11805,43 @@ fn commitment_roots(
             )?,
         },
     )?;
+    let command_root = match journal_roots {
+        Some(roots) => roots.commands.clone(),
+        None => canonical_sorted_hash_by(
+            "canwu.commitment.commands.accepted.v1",
+            material.commands,
+            |record| record.id,
+        )?,
+    };
+    let attempt_root = match journal_roots {
+        Some(roots) => roots.attempts.clone(),
+        None => canonical_sorted_hash_by(
+            "canwu.commitment.commands.attempts.v1",
+            material.command_attempts,
+            |record| record.id,
+        )?,
+    };
     let commands = canonical_hash(
         "canwu.commitment.commands.v1",
         &CommandCommitmentMaterial {
-            commands: canonical_sorted_hash_by(
-                "canwu.commitment.commands.accepted.v1",
-                material.commands,
-                |record| record.id,
-            )?,
-            attempts: canonical_sorted_hash_by(
-                "canwu.commitment.commands.attempts.v1",
-                material.command_attempts,
-                |record| record.id,
-            )?,
+            commands: command_root,
+            attempts: attempt_root,
         },
     )?;
-    let events =
-        canonical_sorted_hash_by("canwu.commitment.events.v1", material.events, |event| {
+    let events = match journal_roots {
+        Some(roots) => roots.events.clone(),
+        None => canonical_sorted_hash_by("canwu.commitment.events.v1", material.events, |event| {
             event.id
-        })?;
-    let ingress =
-        canonical_sorted_hash_by("canwu.commitment.ingress.v1", material.ingress, |record| {
-            record.id
-        })?;
+        })?,
+    };
+    let ingress = match journal_roots {
+        Some(roots) => roots.ingress.clone(),
+        None => {
+            canonical_sorted_hash_by("canwu.commitment.ingress.v1", material.ingress, |record| {
+                record.id
+            })?
+        }
+    };
     let random = canonical_hash(
         "canwu.commitment.random.v1",
         &RandomCommitmentMaterial {
@@ -11673,11 +11851,14 @@ fn commitment_roots(
                 material.random_streams,
                 |stream| stream.key.clone(),
             )?,
-            draws: canonical_sorted_hash_by(
-                "canwu.commitment.random.draws.v1",
-                material.random_draws,
-                |draw| draw.id,
-            )?,
+            draws: match journal_roots {
+                Some(roots) => roots.random_draws.clone(),
+                None => canonical_sorted_hash_by(
+                    "canwu.commitment.random.draws.v1",
+                    material.random_draws,
+                    |draw| draw.id,
+                )?,
+            },
         },
     )?;
     let boundary_chain = canonical_hash(
@@ -11860,6 +12041,7 @@ fn snapshot_commitment_roots(snapshot: &SimulationSnapshot) -> Result<Commitment
             .boundaries
             .last()
             .map(|record| record.hash.as_str()),
+        None,
     )
 }
 

@@ -287,9 +287,13 @@ so historical journals can still reproduce checkpoint v3 while current journals
 reproduce checkpoint v4. Historical boundary state commitments remain on their
 existing contract and are reproduced by exact replay; when a snapshot is exactly
 at its boundary head, loading also recomputes and compares that boundary state
-commitment directly. Runtime root refresh is still derived from canonical domain
-material in this foundation milestone; incremental cached updates are the next
-optimization step.
+commitment directly. Runtime checkpoint refresh keeps cloneable incremental hash
+state for append-only commands, attempts, events, ingress, and random draws, and
+feeds only newly appended journal tails into those roots. Mutable world,
+knowledge, plugin/record, scheduler, stream, identity, and control domains are
+still recomputed canonically. The cache is internal and never trusted on load:
+snapshot validation independently rebuilds every persisted root from serialized
+evidence.
 
 Randomness is available to phased systems only through declared
 `RandomStreamKey` values. The kernel derives each stream from the run root seed,
