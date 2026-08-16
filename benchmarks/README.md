@@ -706,3 +706,28 @@ are treated as local timing noise. The milestone makes no runtime-performance
 claim; it gives authoritative ingress ordering and command-admission evidence a
 dedicated dependency surface while preserving idempotency, revision, rejection,
 and replay contracts.
+
+## Scheduling-module extraction comparison
+
+The behavior-preserving scheduling extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-scheduling-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-scheduling-module-allocations.json) reports,
+using the ingress-module milestone as its before baseline. It moves public time
+advancement, scheduled-batch execution, arrival and knowledge-report handling,
+event emission, runtime random draws/outcomes, scheduler insertion, and runtime
+plugin views into `canwu-sim/src/scheduling.rs`. Command, settlement, ingress,
+and replay callers retain crate-internal execution methods.
+`canwu-sim/src/lib.rs` falls from 10,544 to 9,924 nonblank source lines, with
+640 nonblank source lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by +0.5%, accepted commands -0.3%,
+empty boundaries +5.6%, populated boundaries -2.0%, snapshot creation -1.6%,
+load validation -4.0%, exact replay +1.0%, and repeated live-evidence sealing
++3.1%. The rejected-command median moves from 0.073 to 0.066 ms (-9.7%), while
+caller-owned segment release moves from 0.236 to 0.268 ms (+13.5%) on a
+sub-0.3-ms case. These are treated as local timing noise. The milestone makes
+no runtime-performance claim; it gives deterministic time, scheduled action,
+event, and runtime-random execution one explicit dependency surface while
+preserving sequential ordering and rollback behavior.
