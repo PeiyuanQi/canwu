@@ -30,10 +30,12 @@ knowledge is absent.
 
 ## Causality and explanation
 
-Events carry command or parent-event causes and correlation IDs. Future field
-provenance should add compact `(entity, component, field) -> event` indexes rather
-than replacing the event model. Explanation can then grow from event chains to
-domain-specific causal narratives.
+Events carry command, parent-event, boundary, or typed system causes and
+correlation IDs. Boundary records preserve exact plugin/system emission sources
+and committed component-change evidence. Future field provenance should add
+compact `(entity, component, field) -> event` indexes rather than replacing the
+event model. Explanation can then grow from event chains to domain-specific
+causal narratives.
 
 ## Persistence and counterfactuals
 

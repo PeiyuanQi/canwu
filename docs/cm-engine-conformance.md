@@ -214,7 +214,23 @@ JSON escape hatch, or a narrow green demo test is not conformance evidence.
 
 ## Current baseline
 
-The v0.2 movement slice already supplies useful pieces of CM-E02, CM-E03,
-CM-E08, CM-E09, CM-E10, CM-E12, CM-E14, and CM-E16. It does not yet satisfy any
-of those requirements in full. CM-E01, CM-E04 through CM-E07, CM-E11, CM-E13,
-and CM-E15 require substantial kernel work.
+The v0.3 engine adds a public, deterministic fourteen-phase settlement API.
+Boundary systems declare cadence, reads, writes, reservation participation,
+allocation reads, emissions, and visibility. The kernel provides stable
+allocation order, separately staged ordinary and conditional commits,
+same-boundary overlays, next-boundary visibility, full rollback on fatal error,
+and persisted boundary evidence with exact plugin/system provenance. Snapshot
+format 3 validates that evidence and explicitly migrates compatible format 2
+saves. These are substantial but still partial implementations of CM-E04
+through CM-E07, CM-E09, CM-E12, and CM-E13.
+
+Canwu is not yet CM-conformant. The major remaining gaps include generic domain
+entity/record lifecycles; complete authority, seat, idempotency, and run-policy
+contracts; unified typed ingress and automatic calendar scheduling; released,
+carried, and lost reservation outcomes plus atomic conservation bundles;
+structured nonfatal rejection evidence; scoped/versioned random streams;
+field-level provenance and structured report facts; immutable generation-tagged
+actor projections; hashes, manifests, migrations, replay journals, forks, and
+lineage; constrained data/rule packages; binding-oriented batch APIs; and a
+versioned deterministic solver boundary. Final conformance still requires the
+public CM-shaped integration fixture and the requirement-by-requirement audit.

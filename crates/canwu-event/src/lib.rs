@@ -1,12 +1,13 @@
 //! Inspectable, serializable events with compact causal provenance.
 
-use canwu_core::{ArmyId, CommandId, EntityRef, EventId, PersonId, TerritoryId};
+use canwu_core::{ArmyId, BoundaryId, CommandId, EntityRef, EventId, PersonId, TerritoryId};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum CauseRef {
+    Boundary(BoundaryId),
     Command(CommandId),
     Event(EventId),
     System(String),

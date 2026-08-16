@@ -11,12 +11,16 @@ pub use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
 };
 pub use canwu_sim::{
-    BoundaryPhase, CanwuError, Command, CommandContext, CommandEnvelope, CommandReceipt,
-    CommandRecord, DemoIds, ENGINE_VERSION, ErrorCode, Issuer, PayloadProperty, PayloadSchema,
-    PayloadValueType, PluginActionDescriptor, PluginCommandHandler, PluginDescriptor,
-    PluginRegistrar, PluginRegistry, SNAPSHOT_FORMAT_VERSION, Scenario, SimulationPlugin,
-    SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemContract, SystemDirective,
+    BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
+    BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
+    BoundarySystemContract, BoundarySystemHandler, CanwuError, Command, CommandContext,
+    CommandEnvelope, CommandReceipt, CommandRecord, DemoIds, ENGINE_VERSION, ErrorCode, Issuer,
+    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
+    PluginDescriptor, PluginRegistrar, PluginRegistry, ReservationAllocation,
+    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
+    ReservationRef, ReservationRequest, ReservationRequestRecord, SNAPSHOT_FORMAT_VERSION,
+    Scenario, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView,
+    StateKey, StateVisibility, SystemCadence, SystemContract, SystemDirective,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -71,6 +75,11 @@ impl Canwu {
     }
 
     #[must_use]
+    pub fn boundaries(&self) -> &[BoundaryRecord] {
+        self.simulation.boundaries()
+    }
+
+    #[must_use]
     pub const fn schema(&self) -> &SchemaRegistry {
         self.simulation.schema()
     }
@@ -92,6 +101,13 @@ impl Canwu {
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
         self.simulation.advance(duration)
+    }
+
+    pub fn settle_boundary(
+        &mut self,
+        request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.simulation.settle_boundary(request)
     }
 
     pub fn wait(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
@@ -147,6 +163,21 @@ impl Canwu {
         Ok(Self {
             simulation: Simulation::replay_with_plugins(
                 seed, scenario, plugins, commands, final_time,
+            )?,
+        })
+    }
+
+    pub fn replay_with_boundaries(
+        seed: u64,
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::replay_with_boundaries(
+                seed, scenario, plugins, commands, boundaries, final_time,
             )?,
         })
     }
@@ -426,6 +457,13 @@ impl Canwu {
                 event: Some(event.id),
             });
             current = match &event.cause {
+                Some(CauseRef::Boundary(boundary)) => {
+                    chain.push(ExplanationStep {
+                        label: format!("Committed by boundary {boundary}"),
+                        event: None,
+                    });
+                    None
+                }
                 Some(CauseRef::Event(parent)) => self
                     .events()
                     .iter()

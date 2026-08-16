@@ -1,0 +1,240 @@
+use crate::{CanwuError, SimulationView, StateKey, StateVisibility, SystemCadence};
+use canwu_core::{BoundaryId, CommandId, EntityRef, EventId};
+use canwu_time::SimTime;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ReservationPoolKey {
+    pub state: StateKey,
+    pub entity: EntityRef,
+    pub resource: String,
+}
+
+impl ReservationPoolKey {
+    #[must_use]
+    pub fn new(state: StateKey, entity: EntityRef, resource: impl Into<String>) -> Self {
+        Self {
+            state,
+            entity,
+            resource: resource.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ReservationRef {
+    pub plugin: String,
+    pub system: String,
+    pub request: String,
+}
+
+impl ReservationRef {
+    #[must_use]
+    pub fn new(
+        plugin: impl Into<String>,
+        system: impl Into<String>,
+        request: impl Into<String>,
+    ) -> Self {
+        Self {
+            plugin: plugin.into(),
+            system: system.into(),
+            request: request.into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationOffer {
+    pub pool: ReservationPoolKey,
+    pub capacity: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationRequest {
+    pub request: String,
+    pub pool: ReservationPoolKey,
+    pub quantity: u64,
+    pub priority: i32,
+    pub tie_break: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationOfferRecord {
+    pub plugin: String,
+    pub system: String,
+    pub offer: ReservationOffer,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationRequestRecord {
+    pub reservation: ReservationRef,
+    pub request: ReservationRequest,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReservationDisposition {
+    Fulfilled,
+    Partial,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ReservationAllocation {
+    pub reservation: ReservationRef,
+    pub pool: ReservationPoolKey,
+    pub requested: u64,
+    pub granted: u64,
+    pub remaining_after: u64,
+    pub disposition: ReservationDisposition,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BoundaryDirective {
+    SetComponent {
+        state: StateKey,
+        entity: EntityRef,
+        component: String,
+        value: Value,
+        summary: String,
+    },
+    Emit {
+        event_type: String,
+        summary: String,
+        affected: Vec<EntityRef>,
+    },
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct BoundaryProposal {
+    pub offers: Vec<ReservationOffer>,
+    pub requests: Vec<ReservationRequest>,
+    pub directives: Vec<BoundaryDirective>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundarySystemContract {
+    pub name: String,
+    pub phase: crate::BoundaryPhase,
+    pub cadence: SystemCadence,
+    pub reads: Vec<StateKey>,
+    pub writes: Vec<StateKey>,
+    pub emits: Vec<String>,
+    pub reservation_offers: Vec<StateKey>,
+    pub reservation_requests: Vec<StateKey>,
+    pub reservation_reads: Vec<ReservationRef>,
+    pub visibility: StateVisibility,
+}
+
+impl BoundarySystemContract {
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        phase: crate::BoundaryPhase,
+        cadence: SystemCadence,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            phase,
+            cadence,
+            reads: Vec::new(),
+            writes: Vec::new(),
+            emits: Vec::new(),
+            reservation_offers: Vec::new(),
+            reservation_requests: Vec::new(),
+            reservation_reads: Vec::new(),
+            visibility: StateVisibility::NextBoundary,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryContext {
+    pub boundary_id: BoundaryId,
+    pub at: SimTime,
+    pub phase: crate::BoundaryPhase,
+    pub plugin: String,
+    pub system: String,
+    pub admitted_commands: Vec<CommandId>,
+    pub admitted_events: Vec<EventId>,
+    pub emitted_events: Vec<EventId>,
+}
+
+pub type BoundarySystemHandler =
+    fn(&SimulationView<'_>, &BoundaryContext) -> Result<BoundaryProposal, CanwuError>;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryRequest {
+    pub at: SimTime,
+    pub cadences: Vec<SystemCadence>,
+}
+
+impl BoundaryRequest {
+    #[must_use]
+    pub const fn at(at: SimTime) -> Self {
+        Self {
+            at,
+            cadences: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_cadence(mut self, cadence: SystemCadence) -> Self {
+        self.cadences.push(cadence);
+        self
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BoundaryChange {
+    pub plugin: String,
+    pub system: String,
+    pub state: StateKey,
+    pub entity: EntityRef,
+    pub component: String,
+    pub previous: Option<Value>,
+    pub value: Value,
+    pub visibility: StateVisibility,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BoundaryEmissionKind {
+    Change { change_index: u64 },
+    Explicit,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryEmission {
+    pub plugin: String,
+    pub system: String,
+    pub event: EventId,
+    pub kind: BoundaryEmissionKind,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BoundaryRecord {
+    pub id: BoundaryId,
+    pub at: SimTime,
+    pub correlation_id: u64,
+    pub cadences: Vec<SystemCadence>,
+    pub admitted_commands: Vec<CommandId>,
+    pub admitted_events: Vec<EventId>,
+    pub reservation_offers: Vec<ReservationOfferRecord>,
+    pub reservation_requests: Vec<ReservationRequestRecord>,
+    pub allocations: Vec<ReservationAllocation>,
+    pub changes: Vec<BoundaryChange>,
+    pub emissions: Vec<BoundaryEmission>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryReceipt {
+    pub boundary_id: BoundaryId,
+    pub settled_at: SimTime,
+    pub emitted_events: Vec<EventId>,
+    pub change_count: usize,
+    pub allocations: Vec<ReservationAllocation>,
+}

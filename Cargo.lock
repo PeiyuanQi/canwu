@@ -236,7 +236,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-core",
  "canwu-event",
@@ -250,14 +250,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-debug"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-api",
  "eframe",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-event"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-sim"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-core",
  "canwu-event",
@@ -299,14 +299,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-time"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-world"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "canwu-core",
  "canwu-time",

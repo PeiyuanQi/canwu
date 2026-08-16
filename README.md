@@ -13,13 +13,14 @@ Canwu does not render graphics, play audio, or provide a production user
 interface. Games, research tools, Python programs, web clients, and AI agents
 use Canwu through its public APIs.
 
-The current v0.2 development slice retains the small movement scenario while
-adding the first Celestial Mandate conformance contracts. The scenario contains
-two people, one government, one army, three territories, and two routes. A
-commander can order the army to move. The engine validates the order, schedules
-the journey, advances time, moves the army on arrival, and records the resulting
-events. The commander learns about the arrival immediately. Another person
-keeps older information until a report reaches them.
+The current v0.3 development slice retains the small movement scenario and adds
+a deterministic fourteen-phase settlement boundary for Celestial Mandate-style
+domain plugins. Plugins can declare phased reads and writes, compete for
+reservations through stable allocation rules, stage same-boundary or
+next-boundary changes, and persist exact boundary evidence for replay. The
+movement scenario still demonstrates validated commands, scheduled travel,
+causal events, and actor-specific delayed knowledge. This is meaningful progress
+toward the CM profile, not a claim of full conformance.
 
 ## Workspace
 
@@ -38,7 +39,7 @@ compatibility rules are defined in [versioning](docs/versioning.md).
 
 ## Version and platforms
 
-Canwu uses Semantic Versioning, with all workspace crates currently at `0.2.0`
+Canwu uses Semantic Versioning, with all workspace crates currently at `0.3.0`
 and released in lockstep. The canonical version is in the root `Cargo.toml`.
 
 The supported operating systems are Windows, macOS, and Linux. The simulation
@@ -80,6 +81,10 @@ canwu.submit(CommandEnvelope::new(
 let events = canwu.advance(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
+
+See `crates/canwu-api/examples/phased_boundary.rs` for an API-only plugin that
+offers and claims a conserved resource, consumes its declared allocation, and
+commits attributable boundary evidence.
 
 ## License
 

@@ -67,7 +67,9 @@ boundary a structural property instead of a UI convention.
 
 A validated command produces an event and optional scheduled work. Scheduled
 items are ordered by `(simulation timestamp, insertion sequence)`, so equal-time
-work is deterministic. When work executes it may change state, emit a derived
+work is deterministic. New scheduled directives must target a strictly future
+simulation time; same-time consequences are emitted directly, so a completed
+boundary cannot retain due ingress. When work executes it may change state, emit a derived
 event with a causal reference, update knowledge, and schedule further work.
 Initial `Scenario` values currently admit stationary armies only: in-flight
 state requires the command, event, correlation, and queue evidence carried by a
@@ -121,22 +123,66 @@ filter event changes to facts visible to the requesting actor.
 
 ## Plugins
 
-Plugins register schema, semantic action metadata, command handlers, and event
-systems. Registration is transactional: duplicate plugin, command, system,
-schema, or authoritative state ownership claims reject the complete plugin
-registration without changing the live registry. Registered systems declare a
-`SystemContract` containing their canonical boundary phase, cadence, read set,
-write set, and visibility. The runtime enforces declared reads for both core
-world collections and plugin-owned components, and it rejects every component
-write that is undeclared or targets another owner's `StateKey`. Persisted
-component identity is the typed tuple `(plugin, state key, entity, component)`;
-text separators cannot alias records.
+Plugins register schema, semantic action metadata, command handlers, legacy
+event reactors, and phased boundary systems. Registration is transactional:
+duplicate plugin, command, system, schema, state owner, phase writer, or
+reservation offerer claims reject the complete plugin registration without
+changing the live registry. Immediate handlers use `SystemContract`;
+authoritative phased systems use `BoundarySystemContract`, which declares
+phase, cadence, reads, writes, reservation offers and requests, later allocation
+reads, emitted records, and visibility. Immediate and phased handlers cannot
+write the same `StateKey`.
 
-The current v0.2 executor supports event-driven, same-boundary systems only.
-They execute by `(phase, plugin name, system name)`, never by registration
-order. Other cadence and visibility values are present in the serialized
-contract but registration rejects them until the canonical phased-boundary
-runtime implements their semantics.
+The runtime enforces declared reads for core collections, plugin components,
+and reservation results. It rejects every component write that is undeclared or
+targets another owner's `StateKey`. Persisted component identity is the typed
+tuple `(plugin, state key, entity, component)`; text separators cannot alias
+records. Executable order is always canonical and never depends on plugin
+registration order.
+
+## Phased settlement boundary
+
+`settle_boundary(BoundaryRequest)` is the authoritative extension path for new
+domain mechanics. It transactionally advances scheduled ingress to the
+requested time, admits previously unconsumed command and event evidence, takes
+an immutable boundary snapshot, and visits all fourteen CM phases in order.
+Caller-supplied cadence categories are canonicalized; event-driven systems are
+selected only when admitted events exist. Systems within a phase execute by
+`(plugin name, system name)`.
+
+The kernel owns ingress, snapshot, ordinary commit, and conditional-transition
+commit. Phase-six systems publish resource capacity and competing claims.
+Allocation sorts by pool, descending priority, explicit tie-break key, and
+reservation identity, then records fulfilled, partial, or rejected results.
+Only systems with an explicit `reservation_reads` declaration can consume an
+allocation.
+
+Phase-seven changes are staged against the immutable boundary snapshot.
+Same-boundary values are exposed through the normal read-only overlay, while
+next-boundary values remain hidden from current-state reads until settlement has
+finished. Invariant systems can separately inspect every staged candidate with
+`proposed_component`, still subject to their declared read set. Ordinary changes
+commit at phase nine. Historical candidates stage a separate transition bundle
+for phase eleven. Strategic aggregation and perspective/report materialization
+use the same ownership and visibility rules. Any fatal error restores time,
+queues, state, journals, random state, counters, and boundary records to their
+pre-boundary values.
+
+Each successful boundary persists its ID, time, correlation, cadence set,
+admitted commands and events, reservation evidence, allocations, field changes,
+and exact plugin/system event provenance. Boundary-caused events do not invoke
+legacy immediate reactors; they enter the next boundary through normal event
+admission. Format 3 snapshots validate this evidence and require exact plugin
+descriptor rehydration before continuation. Boundary-aware replay uses command
+admission lists to reconstruct operation order and rejects any regenerated
+boundary whose complete evidence differs from the journal.
+
+The legacy immediate command/event path remains for the movement slice and
+compatibility examples. It is transactional, but it is not a substitute for the
+fourteen-phase boundary and cannot own state also managed by phased systems.
+Automatic calendar policy, unified typed ingress classes, structured domain
+rejections, conservation bundles, scoped random streams, and boundary hashing
+remain later conformance work.
 
 Command handlers receive an immutable `CommandContext` containing the issuer
 asserted by the trusted in-process host, proposed command ID, simulation time,
@@ -153,12 +199,13 @@ atomic, cache, counter, or RNG state is not part of the extension contract.
 This keeps command rollback, failed-boundary recovery, forks, snapshots, and
 replay independent.
 
-Command application and each same-timestamp scheduled batch are transactional.
-If fallible event or plugin processing fails, state, time, queues, events, and ID
-counters return to the last successful transaction or timestamp boundary.
-Plugin directives validate every referenced entity before mutation. Snapshot
-loading also proves that pending arrivals agree with army transit, move commands,
-order events, timestamps, and correlations, and that pending or completed report
+Command application, each same-timestamp scheduled batch, and each phased
+settlement are transactional. If fallible event or plugin processing fails,
+state, time, queues, events, boundary records, random state, and ID counters
+return to the last successful transaction or timestamp boundary. Plugin
+directives validate every referenced entity before mutation. Snapshot loading
+also proves that pending arrivals agree with army transit, move commands, order
+events, timestamps, and correlations, and that pending or completed report
 delivery agrees with its dispatch and arrival evidence.
 
 Executable handlers are not serialized. A snapshot stores validated plugin and
@@ -168,7 +215,7 @@ its handlers become active. Use the plugin-aware snapshot/replay constructors
 when executable packages are known at load time. Richer versioned package
 manifests and automatic environment discovery remain required by the CM
 conformance profile. New plugin registration closes after the first successful
-authoritative command or time advance; exact snapshot rehydration remains
+authoritative command, time advance, or phased settlement; exact snapshot rehydration remains
 allowed after that point. Snapshots retain the run's initial time and reject a
 registration-open flag when commands, events, queued work, component state,
 counter movement, or elapsed simulation time proves execution already began.
@@ -200,5 +247,6 @@ is maintained in [`cm-engine-conformance.md`](cm-engine-conformance.md).
 That profile does not move Celestial Mandate rules into Canwu. Instead, it
 requires Canwu to provide the deterministic settlement, authority, ownership,
 transaction, knowledge, persistence, lineage, package, and publication
-contracts through public extension points. The current v0.2 movement slice is
-foundational evidence only and is not a conformance claim.
+contracts through public extension points. The current v0.3 boundary runtime is
+substantial evidence for CM-E04 through CM-E07, but it is still only a partial
+conformance result; the remaining gaps are tracked in the profile itself.

@@ -10,7 +10,7 @@ all first-party crates use that version in lockstep.
 - `MINOR`: backward-compatible functionality. Before `1.0.0`, a minor release
   may contain an intentional breaking API change, which must be documented.
 - `PATCH`: backward-compatible fixes, documentation, and internal improvements.
-- Pre-release identifiers such as `0.2.0-alpha.1` are used for unstable release
+- Pre-release identifiers such as `0.3.0-alpha.1` are used for unstable release
   candidates when needed.
 
 The SemVer compatibility surface includes exported Rust API types and behavior,
@@ -30,16 +30,27 @@ descriptors, block authoritative continuation while required handlers are
 inactive, and accept rehydration only when registration recreates the exact
 stored descriptor. Plugin command journals must use plugin-aware replay.
 
-Snapshot format 2 adds namespaced plugin component records plus deterministic,
-typed state keys, machine-validated command payload schemas, declared
-read/write ownership, the plugin-registration lifecycle flag, actor-known army
-names, initial simulation time, and deterministic plugin system/action
-contracts. Component records use typed `(plugin, state, entity, component)`
-identity. Load validates canonical ordering, references, causes, transit/queue
-and report-delivery coherence, registration lifecycle, descriptors, ownership,
-and counter continuity before constructing runtime maps. Format 1 is
-intentionally rejected; no released save depends on that initial
-development-only format.
+Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
+emission provenance, command and event admission, reservation offers, requests,
+allocations, committed component changes, boundary causes, and the next boundary
+counter. Loading recomputes allocation evidence and validates each boundary
+change and emission against its serialized plugin contract. The engine performs
+an explicit format 2 to format 3 migration when no phased-boundary state is
+present. Boundary-aware replay regenerates and compares complete boundary
+records rather than silently replaying only the command subset of a run.
+
+Snapshot format 2 introduced namespaced plugin component records,
+deterministic typed state keys, machine-validated command payload schemas,
+declared read/write ownership, the plugin-registration lifecycle flag,
+actor-known army names, initial simulation time, and deterministic plugin
+system/action contracts. Component records use typed
+`(plugin, state, entity, component)` identity. Format 1 remains intentionally
+rejected; no released save depends on that initial development-only format.
+
+Every supported load validates canonical ordering, references, causes,
+transit/queue and report-delivery coherence, registration lifecycle,
+descriptors, ownership, boundary evidence, and counter continuity before
+constructing runtime maps.
 
 ## Supported operating systems
 

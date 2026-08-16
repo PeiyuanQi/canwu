@@ -6,9 +6,19 @@
     clippy::too_many_lines
 )]
 
+mod boundary;
+
+pub use boundary::{
+    BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
+    BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    BoundarySystemHandler, ReservationAllocation, ReservationDisposition, ReservationOffer,
+    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
+    ReservationRequestRecord,
+};
+
 use canwu_core::{
-    ArmyId, CommandId, DeterministicRng, EntityRef, EventId, FieldSchema, GovernmentId, PersonId,
-    RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandId, DeterministicRng, EntityRef, EventId, FieldSchema, GovernmentId,
+    PersonId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -26,7 +36,7 @@ use std::fmt::{Display, Formatter};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -35,12 +45,15 @@ pub enum ErrorCode {
     ActorNotFound,
     ArmyNotFound,
     DestinationNotFound,
+    DuplicateBoundaryWriter,
     DuplicatePlugin,
     DuplicatePluginCommand,
     DuplicatePluginSystem,
     DuplicateStateOwner,
+    DuplicateReservationOfferer,
     EntityNotFound,
     InvalidAuthority,
+    InvalidBoundary,
     InvalidDuration,
     InvalidPayload,
     InvalidPluginRegistration,
@@ -52,6 +65,7 @@ pub enum ErrorCode {
     PluginNotActive,
     PluginPanicked,
     PluginRegistrationClosed,
+    ReplayMismatch,
     SimulationTimeConflict,
     UndeclaredStateRead,
     UndeclaredStateWrite,
@@ -101,12 +115,15 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::ActorNotFound => "actor_not_found",
         ErrorCode::ArmyNotFound => "army_not_found",
         ErrorCode::DestinationNotFound => "destination_not_found",
+        ErrorCode::DuplicateBoundaryWriter => "duplicate_boundary_writer",
         ErrorCode::DuplicatePlugin => "duplicate_plugin",
         ErrorCode::DuplicatePluginCommand => "duplicate_plugin_command",
         ErrorCode::DuplicatePluginSystem => "duplicate_plugin_system",
         ErrorCode::DuplicateStateOwner => "duplicate_state_owner",
+        ErrorCode::DuplicateReservationOfferer => "duplicate_reservation_offerer",
         ErrorCode::EntityNotFound => "entity_not_found",
         ErrorCode::InvalidAuthority => "invalid_authority",
+        ErrorCode::InvalidBoundary => "invalid_boundary",
         ErrorCode::InvalidDuration => "invalid_duration",
         ErrorCode::InvalidPayload => "invalid_payload",
         ErrorCode::InvalidPluginRegistration => "invalid_plugin_registration",
@@ -118,6 +135,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::PluginNotActive => "plugin_not_active",
         ErrorCode::PluginPanicked => "plugin_panicked",
         ErrorCode::PluginRegistrationClosed => "plugin_registration_closed",
+        ErrorCode::ReplayMismatch => "replay_mismatch",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
         ErrorCode::UndeclaredStateRead => "undeclared_state_read",
         ErrorCode::UndeclaredStateWrite => "undeclared_state_write",
@@ -160,6 +178,25 @@ pub enum BoundaryPhase {
     StrategicAggregation = 12,
     PerspectiveAndReportMaterialization = 13,
     SaveReplayAndDiagnosticHashing = 14,
+}
+
+impl BoundaryPhase {
+    pub const ALL: [Self; 14] = [
+        Self::EventIngress,
+        Self::BoundarySnapshot,
+        Self::DerivedFieldSolve,
+        Self::PerceptionAndAttentionRefresh,
+        Self::DecisionAndAcceptedEffectIntake,
+        Self::ReservationAndAllocation,
+        Self::DomainDeltaProposal,
+        Self::InvariantValidation,
+        Self::AtomicDomainCommit,
+        Self::HistoricalCandidateEvaluation,
+        Self::ConditionalTransitionCommit,
+        Self::StrategicAggregation,
+        Self::PerspectiveAndReportMaterialization,
+        Self::SaveReplayAndDiagnosticHashing,
+    ];
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -224,6 +261,16 @@ impl StateKey {
     #[must_use]
     pub fn core_knowledge() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "knowledge")
+    }
+
+    #[must_use]
+    pub fn core_commands() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "commands")
+    }
+
+    #[must_use]
+    pub fn core_events() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "events")
     }
 }
 
@@ -437,6 +484,8 @@ pub struct PluginActionDescriptor {
 pub struct PluginDescriptor {
     pub name: String,
     pub systems: Vec<SystemContract>,
+    #[serde(default)]
+    pub boundary_systems: Vec<BoundarySystemContract>,
     pub commands: Vec<PluginActionDescriptor>,
     pub schema_types: Vec<String>,
 }
@@ -484,6 +533,10 @@ pub struct SimulationView<'a> {
     state_owners: &'a BTreeMap<StateKey, String>,
     reader: Option<&'a str>,
     allowed_reads: Option<&'a [StateKey]>,
+    component_overlay: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
+    proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
+    allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
+    allowed_reservations: Option<&'a [ReservationRef]>,
 }
 
 impl SimulationView<'_> {
@@ -522,6 +575,36 @@ impl SimulationView<'_> {
         Ok(self.state.knowledge.for_actor(actor))
     }
 
+    pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
+        self.require_read(&StateKey::core_commands())?;
+        Ok(self.state.commands.iter().find(|record| record.id == id))
+    }
+
+    pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
+        self.require_read(&StateKey::core_events())?;
+        Ok(self.state.events.iter().find(|event| event.id == id))
+    }
+
+    pub fn reservation(
+        &self,
+        reservation: &ReservationRef,
+    ) -> Result<Option<&ReservationAllocation>, CanwuError> {
+        let reader = self.reader.unwrap_or("unscoped caller");
+        if self
+            .allowed_reservations
+            .is_none_or(|allowed| !allowed.contains(reservation))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredStateRead,
+                format!(
+                    "system {reader} did not declare reservation read {}.{}.{}",
+                    reservation.plugin, reservation.system, reservation.request
+                ),
+            ));
+        }
+        Ok(self.allocations.and_then(|values| values.get(reservation)))
+    }
+
     pub fn component(
         &self,
         state: &StateKey,
@@ -538,10 +621,34 @@ impl SimulationView<'_> {
                 ),
             ));
         };
+        let key = component_key(owner, state, entity, component);
         Ok(self
-            .state
-            .plugin_components
-            .get(&component_key(owner, state, entity, component))
+            .component_overlay
+            .and_then(|overlay| overlay.get(&key))
+            .or_else(|| self.state.plugin_components.get(&key))
+            .map(|record| &record.value))
+    }
+
+    pub fn proposed_component(
+        &self,
+        state: &StateKey,
+        entity: &EntityRef,
+        component: &str,
+    ) -> Result<Option<&Value>, CanwuError> {
+        self.require_read(state)?;
+        let Some(owner) = self.state_owners.get(state) else {
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredStateRead,
+                format!(
+                    "state {}.{} has no registered owner",
+                    state.namespace, state.name
+                ),
+            ));
+        };
+        let key = component_key(owner, state, entity, component);
+        Ok(self
+            .proposed_components
+            .and_then(|proposals| proposals.get(&key))
             .map(|record| &record.value))
     }
 
@@ -580,8 +687,12 @@ pub struct PluginRegistry {
     descriptors: BTreeMap<String, PluginDescriptor>,
     active_plugins: BTreeSet<String>,
     systems: Vec<RegisteredSystem>,
+    boundary_systems: Vec<RegisteredBoundarySystem>,
     commands: BTreeMap<(String, String), RegisteredCommand>,
     state_owners: BTreeMap<StateKey, String>,
+    immediate_write_states: BTreeMap<StateKey, String>,
+    boundary_writers: BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
+    reservation_offerers: BTreeMap<StateKey, (String, String)>,
 }
 
 #[derive(Clone)]
@@ -589,6 +700,13 @@ struct RegisteredSystem {
     plugin: String,
     contract: SystemContract,
     handler: SimulationSystemHandler,
+}
+
+#[derive(Clone)]
+struct RegisteredBoundarySystem {
+    plugin: String,
+    contract: BoundarySystemContract,
+    handler: BoundarySystemHandler,
 }
 
 #[derive(Clone)]
@@ -607,7 +725,9 @@ impl PluginRegistrar<'_> {
     pub fn register_schema(&mut self, schema: TypeSchema) -> Result<(), CanwuError> {
         validate_type_schema(&schema)?;
         let type_name = schema.type_name.clone();
-        if let Some(existing) = self.schema.get(&type_name) {
+        let mut candidate_schema = self.schema.clone();
+        let mut candidate_registry = self.registry.clone();
+        if let Some(existing) = candidate_schema.get(&type_name) {
             if existing != &schema {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidPluginRegistration,
@@ -617,10 +737,9 @@ impl PluginRegistrar<'_> {
                 ));
             }
         } else {
-            self.schema.register(schema);
+            candidate_schema.register(schema);
         }
-        let descriptor = self
-            .registry
+        let descriptor = candidate_registry
             .descriptors
             .entry(self.plugin.clone())
             .or_default();
@@ -636,6 +755,8 @@ impl PluginRegistrar<'_> {
         descriptor.name.clone_from(&self.plugin);
         descriptor.schema_types.push(type_name);
         descriptor.schema_types.sort();
+        *self.schema = candidate_schema;
+        *self.registry = candidate_registry;
         Ok(())
     }
 
@@ -654,6 +775,10 @@ impl PluginRegistrar<'_> {
                     .systems
                     .iter()
                     .any(|candidate| candidate.name == contract.name)
+                    || descriptor
+                        .boundary_systems
+                        .iter()
+                        .any(|candidate| candidate.name == contract.name)
             })
         {
             return Err(CanwuError::new(
@@ -664,14 +789,16 @@ impl PluginRegistrar<'_> {
                 ),
             ));
         }
-        register_state_owners(
-            &mut self.registry.state_owners,
+        let mut candidate = self.registry.clone();
+        register_state_owners(&mut candidate.state_owners, &self.plugin, &contract.writes)?;
+        register_immediate_write_states(
+            &mut candidate.immediate_write_states,
+            &candidate.boundary_writers,
             &self.plugin,
             &contract.writes,
         )?;
         {
-            let descriptor = self
-                .registry
+            let descriptor = candidate
                 .descriptors
                 .entry(self.plugin.clone())
                 .or_default();
@@ -681,18 +808,95 @@ impl PluginRegistrar<'_> {
                 .systems
                 .sort_by(|left, right| (left.phase, &left.name).cmp(&(right.phase, &right.name)));
         }
-        self.registry.systems.push(RegisteredSystem {
+        candidate.systems.push(RegisteredSystem {
             plugin: self.plugin.clone(),
             contract,
             handler,
         });
-        self.registry.systems.sort_by(|left, right| {
+        candidate.systems.sort_by(|left, right| {
             (left.contract.phase, &left.plugin, &left.contract.name).cmp(&(
                 right.contract.phase,
                 &right.plugin,
                 &right.contract.name,
             ))
         });
+        *self.registry = candidate;
+        Ok(())
+    }
+
+    pub fn register_boundary_system(
+        &mut self,
+        mut contract: BoundarySystemContract,
+        handler: BoundarySystemHandler,
+    ) -> Result<(), CanwuError> {
+        validate_boundary_system_contract(&mut contract)?;
+        if self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .is_some_and(|descriptor| {
+                descriptor
+                    .systems
+                    .iter()
+                    .any(|candidate| candidate.name == contract.name)
+                    || descriptor
+                        .boundary_systems
+                        .iter()
+                        .any(|candidate| candidate.name == contract.name)
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicatePluginSystem,
+                format!(
+                    "plugin {} already registered system {}",
+                    self.plugin, contract.name
+                ),
+            ));
+        }
+        let mut owned_state = contract.writes.clone();
+        owned_state.extend(contract.reservation_offers.iter().cloned());
+        owned_state.sort();
+        owned_state.dedup();
+        let mut candidate = self.registry.clone();
+        register_state_owners(&mut candidate.state_owners, &self.plugin, &owned_state)?;
+        register_boundary_writers(
+            &mut candidate.boundary_writers,
+            &candidate.immediate_write_states,
+            &self.plugin,
+            &contract.name,
+            contract.phase,
+            &contract.writes,
+        )?;
+        register_reservation_offerers(
+            &mut candidate.reservation_offerers,
+            &self.plugin,
+            &contract.name,
+            &contract.reservation_offers,
+        )?;
+        {
+            let descriptor = candidate
+                .descriptors
+                .entry(self.plugin.clone())
+                .or_default();
+            descriptor.name.clone_from(&self.plugin);
+            descriptor.boundary_systems.push(contract.clone());
+            descriptor
+                .boundary_systems
+                .sort_by(|left, right| (left.phase, &left.name).cmp(&(right.phase, &right.name)));
+        }
+        candidate.boundary_systems.push(RegisteredBoundarySystem {
+            plugin: self.plugin.clone(),
+            contract,
+            handler,
+        });
+        candidate.boundary_systems.sort_by(|left, right| {
+            (left.contract.phase, &left.plugin, &left.contract.name).cmp(&(
+                right.contract.phase,
+                &right.plugin,
+                &right.contract.name,
+            ))
+        });
+        *self.registry = candidate;
         Ok(())
     }
 
@@ -712,14 +916,20 @@ impl PluginRegistrar<'_> {
                 ),
             ));
         }
+        let mut candidate = self.registry.clone();
         register_state_owners(
-            &mut self.registry.state_owners,
+            &mut candidate.state_owners,
+            &self.plugin,
+            &descriptor.writes,
+        )?;
+        register_immediate_write_states(
+            &mut candidate.immediate_write_states,
+            &candidate.boundary_writers,
             &self.plugin,
             &descriptor.writes,
         )?;
         {
-            let plugin_descriptor = self
-                .registry
+            let plugin_descriptor = candidate
                 .descriptors
                 .entry(self.plugin.clone())
                 .or_default();
@@ -729,13 +939,14 @@ impl PluginRegistrar<'_> {
                 .commands
                 .sort_by(|left, right| left.name.cmp(&right.name));
         }
-        self.registry.commands.insert(
+        candidate.commands.insert(
             command_key,
             RegisteredCommand {
                 descriptor,
                 handler,
             },
         );
+        *self.registry = candidate;
         Ok(())
     }
 }
@@ -808,8 +1019,12 @@ impl PluginRegistry {
             descriptors: BTreeMap::new(),
             active_plugins: BTreeSet::new(),
             systems: Vec::new(),
+            boundary_systems: Vec::new(),
             commands: BTreeMap::new(),
             state_owners: BTreeMap::new(),
+            immediate_write_states: BTreeMap::new(),
+            boundary_writers: BTreeMap::new(),
+            reservation_offerers: BTreeMap::new(),
         };
         let mut previous_plugin = None;
         for mut descriptor in descriptors {
@@ -853,6 +1068,71 @@ impl PluginRegistry {
                             "invalid plugin state ownership descriptor: {error}"
                         ))
                     })?;
+                register_immediate_write_states(
+                    &mut registry.immediate_write_states,
+                    &registry.boundary_writers,
+                    &plugin,
+                    &contract.writes,
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid immediate state writer descriptor: {error}"
+                    ))
+                })?;
+            }
+            if descriptor
+                .boundary_systems
+                .windows(2)
+                .any(|pair| (pair[0].phase, &pair[0].name) >= (pair[1].phase, &pair[1].name))
+            {
+                return invalid_snapshot("boundary systems are not in canonical order");
+            }
+            for contract in &mut descriptor.boundary_systems {
+                if !system_names.insert(contract.name.clone()) {
+                    return invalid_snapshot("plugin descriptor has duplicate system names");
+                }
+                let original = contract.clone();
+                validate_boundary_system_contract(contract).map_err(|error| {
+                    invalid_snapshot_error(format!("invalid boundary system descriptor: {error}"))
+                })?;
+                if *contract != original {
+                    return invalid_snapshot(
+                        "boundary system declarations are not in canonical order",
+                    );
+                }
+                let mut owned_state = contract.writes.clone();
+                owned_state.extend(contract.reservation_offers.iter().cloned());
+                owned_state.sort();
+                owned_state.dedup();
+                register_state_owners(&mut registry.state_owners, &plugin, &owned_state).map_err(
+                    |error| {
+                        invalid_snapshot_error(format!(
+                            "invalid boundary state ownership descriptor: {error}"
+                        ))
+                    },
+                )?;
+                register_boundary_writers(
+                    &mut registry.boundary_writers,
+                    &registry.immediate_write_states,
+                    &plugin,
+                    &contract.name,
+                    contract.phase,
+                    &contract.writes,
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!("invalid boundary writer descriptor: {error}"))
+                })?;
+                register_reservation_offerers(
+                    &mut registry.reservation_offerers,
+                    &plugin,
+                    &contract.name,
+                    &contract.reservation_offers,
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid reservation offerer descriptor: {error}"
+                    ))
+                })?;
             }
             if descriptor
                 .commands
@@ -881,6 +1161,17 @@ impl PluginRegistry {
                             "invalid plugin state ownership descriptor: {error}"
                         ))
                     })?;
+                register_immediate_write_states(
+                    &mut registry.immediate_write_states,
+                    &registry.boundary_writers,
+                    &plugin,
+                    &action.writes,
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid immediate state writer descriptor: {error}"
+                    ))
+                })?;
             }
             let schema_types: BTreeSet<_> = descriptor.schema_types.iter().collect();
             if schema_types.len() != descriptor.schema_types.len()
@@ -949,6 +1240,18 @@ fn validate_system_contract(
             "plugin system name must be non-empty and have no surrounding whitespace",
         ));
     }
+    if matches!(
+        contract.phase,
+        BoundaryPhase::EventIngress
+            | BoundaryPhase::BoundarySnapshot
+            | BoundaryPhase::AtomicDomainCommit
+            | BoundaryPhase::ConditionalTransitionCommit
+    ) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!("boundary phase {:?} is owned by the kernel", contract.phase),
+        ));
+    }
     if contract.cadence != SystemCadence::EventDriven {
         return Err(CanwuError::new(
             ErrorCode::InvalidPluginRegistration,
@@ -997,6 +1300,97 @@ fn validate_action_descriptor(
     Ok(())
 }
 
+fn validate_boundary_system_contract(
+    contract: &mut BoundarySystemContract,
+) -> Result<(), CanwuError> {
+    if contract.name.trim().is_empty() || contract.name != contract.name.trim() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "boundary system name must be non-empty and canonical",
+        ));
+    }
+    validate_state_keys(&mut contract.reads)?;
+    validate_state_keys(&mut contract.writes)?;
+    validate_state_keys(&mut contract.reservation_offers)?;
+    validate_state_keys(&mut contract.reservation_requests)?;
+    validate_reservation_refs(&mut contract.reservation_reads)?;
+    validate_canonical_names(&mut contract.emits, "boundary event type")?;
+
+    let may_propose_changes = matches!(
+        contract.phase,
+        BoundaryPhase::DomainDeltaProposal
+            | BoundaryPhase::HistoricalCandidateEvaluation
+            | BoundaryPhase::StrategicAggregation
+            | BoundaryPhase::PerspectiveAndReportMaterialization
+    );
+    if (!contract.writes.is_empty() || !contract.emits.is_empty()) && !may_propose_changes {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!(
+                "boundary system {} declares changes in kernel-owned phase {:?}",
+                contract.name, contract.phase
+            ),
+        ));
+    }
+    let declares_reservations =
+        !contract.reservation_offers.is_empty() || !contract.reservation_requests.is_empty();
+    if declares_reservations && contract.phase != BoundaryPhase::ReservationAndAllocation {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!(
+                "boundary system {} declares reservations outside reservation and allocation",
+                contract.name
+            ),
+        ));
+    }
+    if !contract.reservation_reads.is_empty()
+        && contract.phase <= BoundaryPhase::ReservationAndAllocation
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!(
+                "boundary system {} reads allocations before reservation commit",
+                contract.name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reservation_refs(values: &mut Vec<ReservationRef>) -> Result<(), CanwuError> {
+    if values.iter().any(|reservation| {
+        reservation.plugin.trim().is_empty()
+            || reservation.plugin != reservation.plugin.trim()
+            || reservation.system.trim().is_empty()
+            || reservation.system != reservation.system.trim()
+            || reservation.request.trim().is_empty()
+            || reservation.request != reservation.request.trim()
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "reservation read declarations must be non-empty and canonical",
+        ));
+    }
+    let unique: BTreeSet<_> = values.drain(..).collect();
+    values.extend(unique);
+    Ok(())
+}
+
+fn validate_canonical_names(values: &mut Vec<String>, label: &str) -> Result<(), CanwuError> {
+    if values
+        .iter()
+        .any(|value| value.trim().is_empty() || value != value.trim())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!("{label} declarations must be non-empty and canonical"),
+        ));
+    }
+    let unique: BTreeSet<_> = values.drain(..).collect();
+    values.extend(unique);
+    Ok(())
+}
+
 fn register_state_owners(
     owners: &mut BTreeMap<StateKey, String>,
     plugin: &str,
@@ -1026,6 +1420,144 @@ fn register_state_owners(
     }
     for key in writes {
         owners.insert(key.clone(), plugin.to_owned());
+    }
+    Ok(())
+}
+
+fn register_boundary_writers(
+    writers: &mut BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
+    immediate_writes: &BTreeMap<StateKey, String>,
+    plugin: &str,
+    system: &str,
+    phase: BoundaryPhase,
+    declared_states: &[StateKey],
+) -> Result<(), CanwuError> {
+    let Some(stage) = boundary_write_stage(phase) else {
+        if declared_states.is_empty() {
+            return Ok(());
+        }
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            format!("boundary phase {phase:?} cannot own state writes"),
+        ));
+    };
+    for state in declared_states {
+        if let Some(immediate_plugin) = immediate_writes.get(state) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "boundary state {}.{} conflicts with immediate writes from plugin {immediate_plugin}",
+                    state.namespace, state.name
+                ),
+            ));
+        }
+        if let Some((existing_plugin, existing_system)) = writers.get(&(stage, state.clone()))
+            && (existing_plugin != plugin || existing_system != system)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicateBoundaryWriter,
+                format!(
+                    "boundary state {}.{} is written by both {existing_plugin}.{existing_system} and {plugin}.{system}",
+                    state.namespace, state.name
+                ),
+            ));
+        }
+    }
+    for state in declared_states {
+        writers.insert(
+            (stage, state.clone()),
+            (plugin.to_owned(), system.to_owned()),
+        );
+    }
+    Ok(())
+}
+
+fn register_immediate_write_states(
+    immediate_writes: &mut BTreeMap<StateKey, String>,
+    boundary_writers: &BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
+    plugin: &str,
+    writes: &[StateKey],
+) -> Result<(), CanwuError> {
+    for state in writes {
+        if boundary_writers
+            .keys()
+            .any(|(_, boundary_state)| boundary_state == state)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "immediate state {}.{} conflicts with a phased boundary writer",
+                    state.namespace, state.name
+                ),
+            ));
+        }
+        if immediate_writes
+            .get(state)
+            .is_some_and(|existing| existing != plugin)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicateStateOwner,
+                format!(
+                    "immediate state {}.{} is written by multiple plugins",
+                    state.namespace, state.name
+                ),
+            ));
+        }
+    }
+    for state in writes {
+        immediate_writes.insert(state.clone(), plugin.to_owned());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum BoundaryWriteStage {
+    Ordinary,
+    Transition,
+    Aggregation,
+    Perspective,
+}
+
+const fn boundary_write_stage(phase: BoundaryPhase) -> Option<BoundaryWriteStage> {
+    match phase {
+        BoundaryPhase::DomainDeltaProposal => Some(BoundaryWriteStage::Ordinary),
+        BoundaryPhase::HistoricalCandidateEvaluation => Some(BoundaryWriteStage::Transition),
+        BoundaryPhase::StrategicAggregation => Some(BoundaryWriteStage::Aggregation),
+        BoundaryPhase::PerspectiveAndReportMaterialization => Some(BoundaryWriteStage::Perspective),
+        BoundaryPhase::EventIngress
+        | BoundaryPhase::BoundarySnapshot
+        | BoundaryPhase::DerivedFieldSolve
+        | BoundaryPhase::PerceptionAndAttentionRefresh
+        | BoundaryPhase::DecisionAndAcceptedEffectIntake
+        | BoundaryPhase::ReservationAndAllocation
+        | BoundaryPhase::InvariantValidation
+        | BoundaryPhase::AtomicDomainCommit
+        | BoundaryPhase::ConditionalTransitionCommit
+        | BoundaryPhase::SaveReplayAndDiagnosticHashing => None,
+    }
+}
+
+fn register_reservation_offerers(
+    offerers: &mut BTreeMap<StateKey, (String, String)>,
+    plugin: &str,
+    system: &str,
+    offered_state: &[StateKey],
+) -> Result<(), CanwuError> {
+    for state in offered_state {
+        if let Some((existing_plugin, existing_system)) = offerers.get(state)
+            && (existing_plugin != plugin || existing_system != system)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicateReservationOfferer,
+                format!(
+                    "reservation state {}.{} is offered by both {existing_plugin}.{existing_system} and {plugin}.{system}",
+                    state.namespace, state.name
+                ),
+            ));
+        }
+    }
+    for state in offered_state {
+        offerers.insert(state.clone(), (plugin.to_owned(), system.to_owned()));
     }
     Ok(())
 }
@@ -1110,10 +1642,12 @@ struct RuntimeState {
     scheduler: BTreeMap<ScheduleKey, ScheduledAction>,
     events: Vec<SimEvent>,
     commands: Vec<CommandRecord>,
+    boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     rng: DeterministicRng,
     next_event_id: u64,
     next_command_id: u64,
+    next_boundary_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
 }
@@ -1129,6 +1663,8 @@ pub struct SimulationSnapshot {
     pub knowledge: KnowledgeSnapshot,
     pub events: Vec<SimEvent>,
     pub commands: Vec<CommandRecord>,
+    #[serde(default)]
+    pub boundaries: Vec<BoundaryRecord>,
     pub plugin_components: Vec<PluginComponentRecord>,
     pub plugin_descriptors: Vec<PluginDescriptor>,
     pub schema: SchemaRegistry,
@@ -1136,6 +1672,8 @@ pub struct SimulationSnapshot {
     rng: DeterministicRng,
     next_event_id: u64,
     next_command_id: u64,
+    #[serde(default)]
+    next_boundary_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
 }
@@ -1202,10 +1740,12 @@ impl Simulation {
                 scheduler: BTreeMap::new(),
                 events: Vec::new(),
                 commands: Vec::new(),
+                boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
                 rng: DeterministicRng::from_seed(seed),
                 next_event_id: 1,
                 next_command_id: 1,
+                next_boundary_id: 1,
                 next_schedule_sequence: 1,
                 next_correlation_id: 1,
             },
@@ -1235,25 +1775,61 @@ impl Simulation {
         commands: &[CommandRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
+        Self::replay_with_boundaries(seed, scenario, plugins, commands, &[], final_time)
+    }
+
+    pub fn replay_with_boundaries(
+        seed: u64,
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+        commands: &[CommandRecord],
+        boundaries: &[BoundaryRecord],
+        final_time: SimTime,
+    ) -> Result<Self, CanwuError> {
         let mut simulation = Self::new(seed, scenario)?;
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
-        for record in commands {
-            if record.accepted_at < simulation.time() || record.accepted_at > final_time {
+        let mut next_command = 0;
+        for expected_boundary in boundaries {
+            for admitted in &expected_boundary.admitted_commands {
+                let Some(record) = commands.get(next_command) else {
+                    return Err(CanwuError::new(
+                        ErrorCode::ReplayMismatch,
+                        "boundary replay admits a command absent from the journal",
+                    ));
+                };
+                if record.id != *admitted {
+                    return Err(CanwuError::new(
+                        ErrorCode::ReplayMismatch,
+                        "boundary replay command admission does not match journal order",
+                    ));
+                }
+                replay_command_record(&mut simulation, record, expected_boundary.at)?;
+                next_command += 1;
+            }
+            let receipt = simulation.settle_boundary(BoundaryRequest {
+                at: expected_boundary.at,
+                cadences: expected_boundary.cadences.clone(),
+            })?;
+            let Some(actual_boundary) = simulation.boundaries().last() else {
                 return Err(CanwuError::new(
-                    ErrorCode::InvalidSnapshot,
-                    "replay command timestamps must be ordered and no later than final time",
+                    ErrorCode::ReplayMismatch,
+                    "boundary replay did not append settlement evidence",
+                ));
+            };
+            if receipt.boundary_id != expected_boundary.id || actual_boundary != expected_boundary {
+                return Err(CanwuError::new(
+                    ErrorCode::ReplayMismatch,
+                    format!(
+                        "regenerated boundary {} did not match its journal evidence",
+                        expected_boundary.id
+                    ),
                 ));
             }
-            simulation.advance(record.accepted_at - simulation.time())?;
-            let receipt = simulation.submit(record.envelope.clone())?;
-            if receipt.command_id != record.id {
-                return Err(CanwuError::new(
-                    ErrorCode::InvalidSnapshot,
-                    "replay command IDs did not match the journal",
-                ));
-            }
+        }
+        for record in &commands[next_command..] {
+            replay_command_record(&mut simulation, record, final_time)?;
         }
         if final_time < simulation.time() {
             return Err(CanwuError::new(
@@ -1316,6 +1892,11 @@ impl Simulation {
     #[must_use]
     pub fn command_log(&self) -> &[CommandRecord] {
         &self.state.commands
+    }
+
+    #[must_use]
+    pub fn boundaries(&self) -> &[BoundaryRecord] {
+        &self.state.boundaries
     }
 
     #[must_use]
@@ -1431,6 +2012,294 @@ impl Simulation {
         Ok(self.state.events[start..].to_vec())
     }
 
+    pub fn settle_boundary(
+        &mut self,
+        mut request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.plugins.ensure_active()?;
+        if request.at < self.state.now {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "a settlement boundary cannot precede committed simulation time",
+            ));
+        }
+        if request.cadences.contains(&SystemCadence::EventDriven) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "event-driven cadence is derived from admitted events, not caller supplied",
+            ));
+        }
+        request.cadences.sort();
+        request.cadences.dedup();
+
+        let transaction_start = self.state.clone();
+        match self.settle_boundary_inner(request) {
+            Ok(receipt) => Ok(receipt),
+            Err(error) => {
+                self.state = transaction_start;
+                Err(error)
+            }
+        }
+    }
+
+    fn settle_boundary_inner(
+        &mut self,
+        request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.advance_to(request.at)?;
+
+        let previously_admitted_commands: BTreeSet<_> = self
+            .state
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_commands.iter().copied())
+            .collect();
+        let previously_admitted_events: BTreeSet<_> = self
+            .state
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_events.iter().copied())
+            .collect();
+        let admitted_commands: Vec<_> = self
+            .state
+            .commands
+            .iter()
+            .map(|record| record.id)
+            .filter(|id| !previously_admitted_commands.contains(id))
+            .collect();
+        let admitted_events: Vec<_> = self
+            .state
+            .events
+            .iter()
+            .map(|event| event.id)
+            .filter(|id| !previously_admitted_events.contains(id))
+            .collect();
+
+        let (boundary_id_value, next_boundary_id) =
+            claim_counter(self.state.next_boundary_id, "boundary ID")?;
+        let (correlation_id, next_correlation_id) =
+            claim_counter(self.state.next_correlation_id, "boundary correlation ID")?;
+        self.state.next_boundary_id = next_boundary_id;
+        self.state.next_correlation_id = next_correlation_id;
+        let boundary_id = BoundaryId::new(boundary_id_value);
+
+        let boundary_snapshot = self.state.clone();
+        let systems = self.plugins.boundary_systems.clone();
+        let state_owners = self.plugins.state_owners.clone();
+        let mut allocations = BTreeMap::new();
+        let mut allocation_records = Vec::new();
+        let mut reservation_offer_records = Vec::new();
+        let mut reservation_request_records = Vec::new();
+        let mut offers = Vec::new();
+        let mut requests = Vec::new();
+        let mut visible_overlay = BTreeMap::new();
+        let mut candidate_overlay = BTreeMap::new();
+        let mut ordinary = Vec::new();
+        let mut transitions = Vec::new();
+        let mut deferred = Vec::new();
+        let mut changes = Vec::new();
+        let mut emissions = Vec::new();
+
+        for phase in BoundaryPhase::ALL {
+            match phase {
+                BoundaryPhase::AtomicDomainCommit => {
+                    let (same_boundary, next_boundary) =
+                        partition_boundary_visibility(std::mem::take(&mut ordinary));
+                    self.apply_boundary_stage(
+                        boundary_id,
+                        correlation_id,
+                        same_boundary,
+                        &mut changes,
+                        &mut emissions,
+                    )?;
+                    deferred.extend(next_boundary);
+                    visible_overlay.clear();
+                    candidate_overlay.clear();
+                }
+                BoundaryPhase::ConditionalTransitionCommit => {
+                    let (same_boundary, next_boundary) =
+                        partition_boundary_visibility(std::mem::take(&mut transitions));
+                    self.apply_boundary_stage(
+                        boundary_id,
+                        correlation_id,
+                        same_boundary,
+                        &mut changes,
+                        &mut emissions,
+                    )?;
+                    deferred.extend(next_boundary);
+                    visible_overlay.clear();
+                }
+                _ => {}
+            }
+
+            let mut phase_directives = Vec::new();
+            for registered in systems.iter().filter(|registered| {
+                registered.contract.phase == phase
+                    && boundary_system_due(
+                        &registered.contract,
+                        &request.cadences,
+                        !admitted_events.is_empty(),
+                    )
+            }) {
+                let reader = format!("{}.{}", registered.plugin, registered.contract.name);
+                let view_state = if phase <= BoundaryPhase::InvariantValidation {
+                    &boundary_snapshot
+                } else {
+                    &self.state
+                };
+                let view = SimulationView {
+                    state: view_state,
+                    state_owners: &state_owners,
+                    reader: Some(&reader),
+                    allowed_reads: Some(&registered.contract.reads),
+                    component_overlay: Some(&visible_overlay),
+                    proposed_components: (phase == BoundaryPhase::InvariantValidation)
+                        .then_some(&candidate_overlay),
+                    allocations: Some(&allocations),
+                    allowed_reservations: Some(&registered.contract.reservation_reads),
+                };
+                let context = BoundaryContext {
+                    boundary_id,
+                    at: request.at,
+                    phase,
+                    plugin: registered.plugin.clone(),
+                    system: registered.contract.name.clone(),
+                    admitted_commands: admitted_commands.clone(),
+                    admitted_events: admitted_events.clone(),
+                    emitted_events: emissions.iter().map(|emission| emission.event).collect(),
+                };
+                let proposal =
+                    catch_unwind(AssertUnwindSafe(|| (registered.handler)(&view, &context)))
+                        .map_err(|_| {
+                            CanwuError::new(
+                                ErrorCode::PluginPanicked,
+                                format!(
+                                    "boundary system {}.{} panicked",
+                                    registered.plugin, registered.contract.name
+                                ),
+                            )
+                        })??;
+                validate_boundary_proposal(
+                    &registered.plugin,
+                    &registered.contract,
+                    view_state,
+                    &state_owners,
+                    &proposal,
+                )?;
+                offers.extend(
+                    proposal
+                        .offers
+                        .into_iter()
+                        .map(|offer| PendingReservationOffer {
+                            plugin: registered.plugin.clone(),
+                            system: registered.contract.name.clone(),
+                            offer,
+                        }),
+                );
+                requests.extend(proposal.requests.into_iter().map(|request| {
+                    PendingReservationRequest {
+                        reservation: ReservationRef::new(
+                            &registered.plugin,
+                            &registered.contract.name,
+                            &request.request,
+                        ),
+                        request,
+                    }
+                }));
+                phase_directives.extend(proposal.directives.into_iter().map(|directive| {
+                    StagedBoundaryDirective {
+                        plugin: registered.plugin.clone(),
+                        system: registered.contract.name.clone(),
+                        visibility: registered.contract.visibility,
+                        directive,
+                    }
+                }));
+            }
+
+            match phase {
+                BoundaryPhase::ReservationAndAllocation => {
+                    let result = allocate_reservations(
+                        std::mem::take(&mut offers),
+                        std::mem::take(&mut requests),
+                    )?;
+                    allocations = result.by_reservation;
+                    allocation_records = result.records;
+                    reservation_offer_records = result.offers;
+                    reservation_request_records = result.requests;
+                }
+                BoundaryPhase::DomainDeltaProposal => {
+                    extend_boundary_candidate_overlay(
+                        &boundary_snapshot,
+                        &mut candidate_overlay,
+                        &phase_directives,
+                    )?;
+                    extend_boundary_overlay(
+                        &boundary_snapshot,
+                        &mut visible_overlay,
+                        &phase_directives,
+                    )?;
+                    ordinary.extend(phase_directives);
+                }
+                BoundaryPhase::HistoricalCandidateEvaluation => {
+                    extend_boundary_overlay(&self.state, &mut visible_overlay, &phase_directives)?;
+                    transitions.extend(phase_directives);
+                }
+                BoundaryPhase::StrategicAggregation
+                | BoundaryPhase::PerspectiveAndReportMaterialization => {
+                    let (same_boundary, next_boundary) =
+                        partition_boundary_visibility(phase_directives);
+                    self.apply_boundary_stage(
+                        boundary_id,
+                        correlation_id,
+                        same_boundary,
+                        &mut changes,
+                        &mut emissions,
+                    )?;
+                    deferred.extend(next_boundary);
+                }
+                _ if !phase_directives.is_empty() => {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        format!("boundary phase {phase:?} cannot produce state directives"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        self.apply_boundary_stage(
+            boundary_id,
+            correlation_id,
+            deferred,
+            &mut changes,
+            &mut emissions,
+        )?;
+        self.state.plugin_registration_closed = true;
+        self.state.boundaries.push(BoundaryRecord {
+            id: boundary_id,
+            at: request.at,
+            correlation_id,
+            cadences: request.cadences,
+            admitted_commands,
+            admitted_events,
+            reservation_offers: reservation_offer_records,
+            reservation_requests: reservation_request_records,
+            allocations: allocation_records.clone(),
+            changes: changes.clone(),
+            emissions: emissions.clone(),
+        });
+        Ok(BoundaryReceipt {
+            boundary_id,
+            settled_at: request.at,
+            emitted_events: emissions
+                .into_iter()
+                .map(|emission| emission.event)
+                .collect(),
+            change_count: changes.len(),
+            allocations: allocation_records,
+        })
+    }
+
     #[must_use]
     pub fn snapshot(&self) -> SimulationSnapshot {
         SimulationSnapshot {
@@ -1443,6 +2312,7 @@ impl Simulation {
             knowledge: self.state.knowledge.clone(),
             events: self.state.events.clone(),
             commands: self.state.commands.clone(),
+            boundaries: self.state.boundaries.clone(),
             plugin_components: self.state.plugin_components.values().cloned().collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
@@ -1458,6 +2328,7 @@ impl Simulation {
             rng: self.state.rng,
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
+            next_boundary_id: self.state.next_boundary_id,
             next_schedule_sequence: self.state.next_schedule_sequence,
             next_correlation_id: self.state.next_correlation_id,
         }
@@ -1473,17 +2344,7 @@ impl Simulation {
     }
 
     pub fn from_snapshot(snapshot: SimulationSnapshot) -> Result<Self, CanwuError> {
-        if snapshot.snapshot_format_version != SNAPSHOT_FORMAT_VERSION {
-            return Err(CanwuError::new(
-                ErrorCode::UnsupportedSnapshotVersion,
-                format!(
-                    "snapshot format {} from engine {} is unsupported; this engine reads format {}",
-                    snapshot.snapshot_format_version,
-                    snapshot.engine_version,
-                    SNAPSHOT_FORMAT_VERSION
-                ),
-            ));
-        }
+        let snapshot = migrate_snapshot(snapshot)?;
         validate_scenario(&Scenario {
             start_time: snapshot.now,
             world: snapshot.world.clone(),
@@ -1534,6 +2395,7 @@ impl Simulation {
                     .collect(),
                 events: snapshot.events,
                 commands: snapshot.commands,
+                boundaries: snapshot.boundaries,
                 plugin_components: snapshot
                     .plugin_components
                     .into_iter()
@@ -1552,6 +2414,7 @@ impl Simulation {
                 rng: snapshot.rng,
                 next_event_id: snapshot.next_event_id,
                 next_command_id: snapshot.next_command_id,
+                next_boundary_id: snapshot.next_boundary_id,
                 next_schedule_sequence: snapshot.next_schedule_sequence,
                 next_correlation_id: snapshot.next_correlation_id,
             },
@@ -2068,19 +2931,8 @@ impl Simulation {
         cause: Option<CauseRef>,
         correlation_id: u64,
     ) -> Result<EventId, CanwuError> {
-        let (event_id, next_event_id) = claim_counter(self.state.next_event_id, "event ID")?;
-        let id = EventId::new(event_id);
-        self.state.next_event_id = next_event_id;
-        let event = SimEvent {
-            id,
-            timestamp: self.state.now,
-            kind,
-            affected_entities,
-            summary,
-            cause,
-            correlation_id,
-        };
-        self.state.events.push(event.clone());
+        let event = self.append_event(kind, affected_entities, summary, cause, correlation_id)?;
+        let id = event.id;
 
         let systems = self.plugins.systems.clone();
         for registered in systems {
@@ -2116,6 +2968,124 @@ impl Simulation {
             )?;
         }
         Ok(id)
+    }
+
+    fn append_event(
+        &mut self,
+        kind: EventKind,
+        affected_entities: Vec<EntityRef>,
+        summary: String,
+        cause: Option<CauseRef>,
+        correlation_id: u64,
+    ) -> Result<SimEvent, CanwuError> {
+        let (event_id, next_event_id) = claim_counter(self.state.next_event_id, "event ID")?;
+        let id = EventId::new(event_id);
+        self.state.next_event_id = next_event_id;
+        let event = SimEvent {
+            id,
+            timestamp: self.state.now,
+            kind,
+            affected_entities,
+            summary,
+            cause,
+            correlation_id,
+        };
+        self.state.events.push(event.clone());
+        Ok(event)
+    }
+
+    fn apply_boundary_stage(
+        &mut self,
+        boundary_id: BoundaryId,
+        correlation_id: u64,
+        directives: Vec<StagedBoundaryDirective>,
+        changes: &mut Vec<BoundaryChange>,
+        emissions: &mut Vec<BoundaryEmission>,
+    ) -> Result<(), CanwuError> {
+        for staged in directives {
+            match staged.directive {
+                BoundaryDirective::SetComponent {
+                    state,
+                    entity,
+                    component,
+                    value,
+                    summary,
+                } => {
+                    let key = component_key(&staged.plugin, &state, &entity, &component);
+                    let previous = self
+                        .state
+                        .plugin_components
+                        .get(&key)
+                        .map(|record| record.value.clone());
+                    self.state.plugin_components.insert(
+                        key,
+                        PluginComponentRecord {
+                            plugin: staged.plugin.clone(),
+                            state: state.clone(),
+                            entity: entity.clone(),
+                            component: component.clone(),
+                            value: value.clone(),
+                        },
+                    );
+                    let change_index = u64::try_from(changes.len()).map_err(|_| {
+                        CanwuError::new(
+                            ErrorCode::IdentifierExhausted,
+                            "boundary change index exceeds the persistent identifier space",
+                        )
+                    })?;
+                    changes.push(BoundaryChange {
+                        plugin: staged.plugin.clone(),
+                        system: staged.system.clone(),
+                        state,
+                        entity: entity.clone(),
+                        component: component.clone(),
+                        previous,
+                        value,
+                        visibility: staged.visibility,
+                        summary: summary.clone(),
+                    });
+                    let event = self.append_event(
+                        EventKind::Plugin {
+                            plugin: staged.plugin.clone(),
+                            event_type: format!("{component}_changed"),
+                        },
+                        vec![entity],
+                        summary,
+                        Some(CauseRef::Boundary(boundary_id)),
+                        correlation_id,
+                    )?;
+                    emissions.push(BoundaryEmission {
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        event: event.id,
+                        kind: BoundaryEmissionKind::Change { change_index },
+                    });
+                }
+                BoundaryDirective::Emit {
+                    event_type,
+                    summary,
+                    affected,
+                } => {
+                    let event = self.append_event(
+                        EventKind::Plugin {
+                            plugin: staged.plugin.clone(),
+                            event_type,
+                        },
+                        affected,
+                        summary,
+                        Some(CauseRef::Boundary(boundary_id)),
+                        correlation_id,
+                    )?;
+                    emissions.push(BoundaryEmission {
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        event: event.id,
+                        kind: BoundaryEmissionKind::Explicit,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn apply_directives(
@@ -2210,8 +3180,34 @@ impl Simulation {
             state_owners: &self.plugins.state_owners,
             reader: Some(reader),
             allowed_reads: Some(reads),
+            component_overlay: None,
+            proposed_components: None,
+            allocations: None,
+            allowed_reservations: None,
         }
     }
+}
+
+fn replay_command_record(
+    simulation: &mut Simulation,
+    record: &CommandRecord,
+    latest_time: SimTime,
+) -> Result<(), CanwuError> {
+    if record.accepted_at < simulation.time() || record.accepted_at > latest_time {
+        return Err(CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            "replay command timestamps do not match authoritative operation order",
+        ));
+    }
+    simulation.advance(record.accepted_at - simulation.time())?;
+    let receipt = simulation.submit(record.envelope.clone())?;
+    if receipt.command_id != record.id {
+        return Err(CanwuError::new(
+            ErrorCode::ReplayMismatch,
+            "replay command IDs did not match the journal",
+        ));
+    }
+    Ok(())
 }
 
 enum PreparedCommand {
@@ -2232,6 +3228,358 @@ enum PreparedCommand {
         directives: Vec<SystemDirective>,
         allowed_writes: Vec<StateKey>,
     },
+}
+
+struct PendingReservationOffer {
+    plugin: String,
+    system: String,
+    offer: ReservationOffer,
+}
+
+struct PendingReservationRequest {
+    reservation: ReservationRef,
+    request: ReservationRequest,
+}
+
+struct ReservationAllocationResult {
+    by_reservation: BTreeMap<ReservationRef, ReservationAllocation>,
+    offers: Vec<ReservationOfferRecord>,
+    requests: Vec<ReservationRequestRecord>,
+    records: Vec<ReservationAllocation>,
+}
+
+struct StagedBoundaryDirective {
+    plugin: String,
+    system: String,
+    visibility: StateVisibility,
+    directive: BoundaryDirective,
+}
+
+fn boundary_system_due(
+    contract: &BoundarySystemContract,
+    cadences: &[SystemCadence],
+    has_admitted_events: bool,
+) -> bool {
+    match contract.cadence {
+        SystemCadence::EventDriven => has_admitted_events,
+        _ => cadences.contains(&contract.cadence),
+    }
+}
+
+fn validate_boundary_proposal(
+    plugin: &str,
+    contract: &BoundarySystemContract,
+    state: &RuntimeState,
+    state_owners: &BTreeMap<StateKey, String>,
+    proposal: &BoundaryProposal,
+) -> Result<(), CanwuError> {
+    if contract.phase != BoundaryPhase::ReservationAndAllocation
+        && (!proposal.offers.is_empty() || !proposal.requests.is_empty())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidBoundary,
+            format!(
+                "boundary system {plugin}.{} proposed reservations in phase {:?}",
+                contract.name, contract.phase
+            ),
+        ));
+    }
+
+    let mut offered_pools = BTreeSet::new();
+    for offer in &proposal.offers {
+        validate_reservation_pool(&offer.pool, state)?;
+        if !contract.reservation_offers.contains(&offer.pool.state)
+            || state_owners
+                .get(&offer.pool.state)
+                .is_none_or(|owner| owner != plugin)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "boundary system {plugin}.{} offered undeclared state {}.{}",
+                    contract.name, offer.pool.state.namespace, offer.pool.state.name
+                ),
+            ));
+        }
+        if !offered_pools.insert(&offer.pool) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "boundary system {plugin}.{} offered the same reservation pool twice",
+                    contract.name
+                ),
+            ));
+        }
+    }
+
+    let mut request_names = BTreeSet::new();
+    for request in &proposal.requests {
+        validate_reservation_pool(&request.pool, state)?;
+        if request.request.trim().is_empty()
+            || request.request != request.request.trim()
+            || request.tie_break.trim().is_empty()
+            || request.tie_break != request.tie_break.trim()
+            || request.quantity == 0
+            || !request_names.insert(&request.request)
+            || !contract.reservation_requests.contains(&request.pool.state)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "boundary system {plugin}.{} produced an invalid reservation request",
+                    contract.name
+                ),
+            ));
+        }
+    }
+
+    let mut component_keys = BTreeSet::new();
+    for directive in &proposal.directives {
+        match directive {
+            BoundaryDirective::SetComponent {
+                state: state_key,
+                entity,
+                component,
+                ..
+            } => {
+                if component.trim().is_empty()
+                    || component != component.trim()
+                    || !contract.writes.contains(state_key)
+                    || state_owners
+                        .get(state_key)
+                        .is_none_or(|owner| owner != plugin)
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::UndeclaredStateWrite,
+                        format!(
+                            "boundary system {plugin}.{} produced an undeclared component write",
+                            contract.name
+                        ),
+                    ));
+                }
+                if !runtime_entity_exists(state, entity) {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!(
+                            "boundary system {plugin}.{} targeted missing entity {entity}",
+                            contract.name
+                        ),
+                    )
+                    .with_entity(entity.clone()));
+                }
+                let key = component_key(plugin, state_key, entity, component);
+                if !component_keys.insert(key) {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        format!(
+                            "boundary system {plugin}.{} wrote the same component twice",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
+            BoundaryDirective::Emit {
+                event_type,
+                affected,
+                ..
+            } => {
+                if event_type.trim().is_empty()
+                    || event_type != event_type.trim()
+                    || !contract.emits.contains(event_type)
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        format!(
+                            "boundary system {plugin}.{} emitted an undeclared event type",
+                            contract.name
+                        ),
+                    ));
+                }
+                if affected
+                    .iter()
+                    .any(|entity| !runtime_entity_exists(state, entity))
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!(
+                            "boundary system {plugin}.{} emitted an event for a missing entity",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_reservation_pool(
+    pool: &ReservationPoolKey,
+    state: &RuntimeState,
+) -> Result<(), CanwuError> {
+    if pool.resource.trim().is_empty()
+        || pool.resource != pool.resource.trim()
+        || !runtime_entity_exists(state, &pool.entity)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidBoundary,
+            "reservation pools require a canonical resource and an existing entity",
+        ));
+    }
+    Ok(())
+}
+
+fn extend_boundary_overlay(
+    state: &RuntimeState,
+    overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    directives: &[StagedBoundaryDirective],
+) -> Result<(), CanwuError> {
+    extend_boundary_component_overlay(state, overlay, directives, false)
+}
+
+fn extend_boundary_candidate_overlay(
+    state: &RuntimeState,
+    overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    directives: &[StagedBoundaryDirective],
+) -> Result<(), CanwuError> {
+    extend_boundary_component_overlay(state, overlay, directives, true)
+}
+
+fn extend_boundary_component_overlay(
+    state: &RuntimeState,
+    overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    directives: &[StagedBoundaryDirective],
+    include_next_boundary: bool,
+) -> Result<(), CanwuError> {
+    for staged in directives.iter().filter(|staged| {
+        include_next_boundary || staged.visibility == StateVisibility::SameBoundary
+    }) {
+        if let BoundaryDirective::SetComponent {
+            state: state_key,
+            entity,
+            component,
+            value,
+            ..
+        } = &staged.directive
+        {
+            let key = component_key(&staged.plugin, state_key, entity, component);
+            if overlay.contains_key(&key) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "multiple boundary proposals target the same component",
+                ));
+            }
+            if !runtime_entity_exists(state, entity) {
+                return Err(CanwuError::new(
+                    ErrorCode::EntityNotFound,
+                    format!("boundary proposal targeted missing entity {entity}"),
+                ));
+            }
+            overlay.insert(
+                key,
+                PluginComponentRecord {
+                    plugin: staged.plugin.clone(),
+                    state: state_key.clone(),
+                    entity: entity.clone(),
+                    component: component.clone(),
+                    value: value.clone(),
+                },
+            );
+        }
+    }
+    Ok(())
+}
+
+fn partition_boundary_visibility(
+    directives: Vec<StagedBoundaryDirective>,
+) -> (Vec<StagedBoundaryDirective>, Vec<StagedBoundaryDirective>) {
+    directives
+        .into_iter()
+        .partition(|staged| staged.visibility == StateVisibility::SameBoundary)
+}
+
+fn allocate_reservations(
+    mut offers: Vec<PendingReservationOffer>,
+    mut requests: Vec<PendingReservationRequest>,
+) -> Result<ReservationAllocationResult, CanwuError> {
+    offers.sort_by(|left, right| {
+        left.offer
+            .pool
+            .cmp(&right.offer.pool)
+            .then_with(|| left.plugin.cmp(&right.plugin))
+            .then_with(|| left.system.cmp(&right.system))
+    });
+    let mut remaining = BTreeMap::new();
+    let mut offer_records = Vec::new();
+    for pending in offers {
+        if remaining
+            .insert(pending.offer.pool.clone(), pending.offer.capacity)
+            .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "reservation pool was offered more than once, including by {}.{}",
+                    pending.plugin, pending.system
+                ),
+            ));
+        }
+        offer_records.push(ReservationOfferRecord {
+            plugin: pending.plugin,
+            system: pending.system,
+            offer: pending.offer,
+        });
+    }
+    requests.sort_by(|left, right| {
+        left.request
+            .pool
+            .cmp(&right.request.pool)
+            .then_with(|| right.request.priority.cmp(&left.request.priority))
+            .then_with(|| left.request.tie_break.cmp(&right.request.tie_break))
+            .then_with(|| left.reservation.cmp(&right.reservation))
+    });
+    let mut seen = BTreeSet::new();
+    let mut by_reservation = BTreeMap::new();
+    let mut request_records = Vec::new();
+    let mut records = Vec::new();
+    for pending in requests {
+        if !seen.insert(pending.reservation.clone()) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "reservation request identity is duplicated",
+            ));
+        }
+        request_records.push(ReservationRequestRecord {
+            reservation: pending.reservation.clone(),
+            request: pending.request.clone(),
+        });
+        let available = remaining.entry(pending.request.pool.clone()).or_default();
+        let granted = pending.request.quantity.min(*available);
+        *available -= granted;
+        let disposition = if granted == pending.request.quantity {
+            ReservationDisposition::Fulfilled
+        } else if granted == 0 {
+            ReservationDisposition::Rejected
+        } else {
+            ReservationDisposition::Partial
+        };
+        let allocation = ReservationAllocation {
+            reservation: pending.reservation.clone(),
+            pool: pending.request.pool,
+            requested: pending.request.quantity,
+            granted,
+            remaining_after: *available,
+            disposition,
+        };
+        by_reservation.insert(pending.reservation, allocation.clone());
+        records.push(allocation);
+    }
+    Ok(ReservationAllocationResult {
+        by_reservation,
+        offers: offer_records,
+        requests: request_records,
+        records,
+    })
 }
 
 fn validate_directives(
@@ -2298,10 +3646,10 @@ fn validate_directives(
                 ));
             }
             SystemDirective::Schedule { after, directive } => {
-                if after.is_negative() {
+                if *after <= SimDuration::ZERO {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidDuration,
-                        "plugin systems cannot schedule work in the past",
+                        "plugin systems must schedule work strictly in the future",
                     ));
                 }
                 validate_directives(
@@ -2345,10 +3693,12 @@ fn validate_snapshot(
     let has_execution_evidence = snapshot.now != snapshot.initial_time
         || !snapshot.commands.is_empty()
         || !snapshot.events.is_empty()
+        || !snapshot.boundaries.is_empty()
         || !snapshot.plugin_components.is_empty()
         || !snapshot.scheduled.is_empty()
         || snapshot.next_event_id != 1
         || snapshot.next_command_id != 1
+        || snapshot.next_boundary_id != 1
         || snapshot.next_schedule_sequence != 1
         || snapshot.next_correlation_id != 1;
     if has_execution_evidence && !snapshot.plugin_registration_closed {
@@ -2363,9 +3713,13 @@ fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
     let mut command_ids = BTreeSet::new();
     let mut previous_command = None;
-    for record in &snapshot.commands {
-        if record.id.get() == 0 || !command_ids.insert(record.id) {
-            return invalid_snapshot("command IDs must be unique and nonzero");
+    for (index, record) in snapshot.commands.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("command index exceeds identifier space"))?;
+        if record.id.get() != expected_id || !command_ids.insert(record.id) {
+            return invalid_snapshot("command IDs must be contiguous, unique, and nonzero");
         }
         if record.accepted_at < snapshot.initial_time
             || record.accepted_at > snapshot.now
@@ -2386,9 +3740,14 @@ fn validate_snapshot(
 
     let mut event_ids = BTreeSet::new();
     let mut previous_event = None;
-    for event in &snapshot.events {
-        if event.id.get() == 0 || event.correlation_id == 0 || !event_ids.insert(event.id) {
-            return invalid_snapshot("event IDs must be unique and nonzero");
+    for (index, event) in snapshot.events.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("event index exceeds identifier space"))?;
+        if event.id.get() != expected_id || event.correlation_id == 0 || !event_ids.insert(event.id)
+        {
+            return invalid_snapshot("event IDs must be contiguous, unique, and nonzero");
         }
         if event.timestamp < snapshot.initial_time
             || event.timestamp > snapshot.now
@@ -2406,8 +3765,23 @@ fn validate_snapshot(
         validate_event_kind(snapshot, plugins, event)?;
         previous_event = Some((event.timestamp, event.id));
     }
+    let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(snapshot, plugins)?;
     for event in &snapshot.events {
         match &event.cause {
+            Some(CauseRef::Boundary(id)) => {
+                let Some(boundary) = snapshot.boundaries.iter().find(|record| record.id == *id)
+                else {
+                    return invalid_snapshot("event references an unknown boundary cause");
+                };
+                if boundary.at != event.timestamp
+                    || !boundary
+                        .emissions
+                        .iter()
+                        .any(|emission| emission.event == event.id)
+                {
+                    return invalid_snapshot("event boundary cause does not own the event");
+                }
+            }
             Some(CauseRef::Command(id)) => {
                 let Some(command) = snapshot.commands.iter().find(|record| record.id == *id) else {
                     return invalid_snapshot("event references an unknown command cause");
@@ -2434,6 +3808,11 @@ fn validate_snapshot(
             || !plugins.descriptors.contains_key(&record.plugin)
             || !snapshot_entity_exists(&snapshot.world, &record.entity)
             || plugins.state_owners.get(&record.state) != Some(&record.plugin)
+            || (!plugins.immediate_write_states.contains_key(&record.state)
+                && !plugins
+                    .boundary_writers
+                    .keys()
+                    .any(|(_, state)| state == &record.state))
         {
             return invalid_snapshot("plugin component record is not owned or well formed");
         }
@@ -2490,16 +3869,17 @@ fn validate_snapshot(
         .iter()
         .map(|event| event.correlation_id)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .max(max_boundary_correlation);
     for record in &snapshot.scheduled {
-        if record.key.at < snapshot.now
+        if record.key.at <= snapshot.now
             || record.key.sequence == 0
             || previous_schedule
                 .as_ref()
                 .is_some_and(|previous| previous >= &record.key)
             || !schedule_keys.insert(record.key.clone())
         {
-            return invalid_snapshot("scheduled work has a past or duplicate key");
+            return invalid_snapshot("scheduled work is not future-dated or has a duplicate key");
         }
         previous_schedule = Some(record.key.clone());
         max_schedule_sequence = max_schedule_sequence.max(record.key.sequence);
@@ -2601,7 +3981,7 @@ fn validate_snapshot(
         }
     }
 
-    validate_next_counter(
+    validate_contiguous_or_exhausted_next_counter(
         snapshot.next_event_id,
         snapshot
             .events
@@ -2611,7 +3991,7 @@ fn validate_snapshot(
             .unwrap_or(0),
         "event",
     )?;
-    validate_next_counter(
+    validate_contiguous_or_exhausted_next_counter(
         snapshot.next_command_id,
         snapshot
             .commands
@@ -2621,6 +4001,7 @@ fn validate_snapshot(
             .unwrap_or(0),
         "command",
     )?;
+    validate_contiguous_next_counter(snapshot.next_boundary_id, max_boundary_id, "boundary")?;
     validate_next_counter(
         snapshot.next_schedule_sequence,
         max_schedule_sequence,
@@ -2631,6 +4012,449 @@ fn validate_snapshot(
         max_correlation_id,
         "correlation",
     )?;
+    Ok(())
+}
+
+fn validate_boundary_records(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(u64, u64), CanwuError> {
+    let mut boundary_ids = BTreeSet::new();
+    let mut emitted_events = BTreeSet::new();
+    let mut boundary_correlations = BTreeSet::new();
+    let mut boundary_values = BTreeMap::new();
+    let mut next_command = 0;
+    let mut next_event = 0;
+    let mut previous_boundary = None;
+    let mut max_boundary_id = 0;
+    let mut max_correlation_id = 0;
+
+    for (index, record) in snapshot.boundaries.iter().enumerate() {
+        let expected_id = u64::try_from(index)
+            .ok()
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| invalid_snapshot_error("boundary index exceeds identifier space"))?;
+        if record.id.get() != expected_id || !boundary_ids.insert(record.id) {
+            return invalid_snapshot("boundary IDs must be contiguous, unique, and nonzero");
+        }
+        if record.at < snapshot.initial_time
+            || record.at > snapshot.now
+            || previous_boundary.is_some_and(|(at, id)| (record.at, record.id) <= (at, id))
+            || record.correlation_id == 0
+            || !boundary_correlations.insert(record.correlation_id)
+        {
+            return invalid_snapshot("boundary time, order, or correlation is invalid");
+        }
+        if record.cadences.contains(&SystemCadence::EventDriven)
+            || record.cadences.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return invalid_snapshot("boundary cadences are not canonical");
+        }
+        validate_boundary_admission(record, snapshot, &mut next_command, &mut next_event)?;
+        validate_boundary_reservations(record, snapshot, plugins)?;
+        validate_boundary_changes(record, snapshot, plugins)?;
+        for change in &record.changes {
+            let key = component_key(
+                &change.plugin,
+                &change.state,
+                &change.entity,
+                &change.component,
+            );
+            if change.previous.as_ref() != boundary_values.get(&key) {
+                return invalid_snapshot("boundary change previous-value evidence is inconsistent");
+            }
+            boundary_values.insert(key, change.value.clone());
+        }
+        validate_boundary_emissions(record, snapshot, plugins, &mut emitted_events)?;
+
+        max_boundary_id = record.id.get();
+        max_correlation_id = max_correlation_id.max(record.correlation_id);
+        previous_boundary = Some((record.at, record.id));
+    }
+    let boundary_states: BTreeSet<_> = plugins
+        .boundary_writers
+        .keys()
+        .map(|(_, state)| state.clone())
+        .collect();
+    let persisted_boundary_values: BTreeMap<_, _> = snapshot
+        .plugin_components
+        .iter()
+        .filter(|record| boundary_states.contains(&record.state))
+        .map(|record| {
+            (
+                component_key(
+                    &record.plugin,
+                    &record.state,
+                    &record.entity,
+                    &record.component,
+                ),
+                record.value.clone(),
+            )
+        })
+        .collect();
+    if persisted_boundary_values != boundary_values {
+        return invalid_snapshot(
+            "boundary changes do not materialize the persisted component state",
+        );
+    }
+    Ok((max_boundary_id, max_correlation_id))
+}
+
+fn validate_boundary_admission(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    next_command: &mut usize,
+    next_event: &mut usize,
+) -> Result<(), CanwuError> {
+    if record
+        .admitted_commands
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+        || record
+            .admitted_events
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return invalid_snapshot("boundary admission lists are not canonical");
+    }
+    for id in &record.admitted_commands {
+        let Some(command) = snapshot.commands.get(*next_command) else {
+            return invalid_snapshot("boundary admits a command beyond the journal prefix");
+        };
+        if command.id != *id || command.accepted_at > record.at {
+            return invalid_snapshot("boundary command admission is out of order or premature");
+        }
+        *next_command += 1;
+    }
+    if snapshot
+        .commands
+        .get(*next_command)
+        .is_some_and(|command| command.accepted_at < record.at)
+    {
+        return invalid_snapshot("boundary omitted an earlier command from its admission cut");
+    }
+
+    for id in &record.admitted_events {
+        let Some(event) = snapshot.events.get(*next_event) else {
+            return invalid_snapshot("boundary admits an event beyond the journal prefix");
+        };
+        if event.id != *id || event.timestamp > record.at {
+            return invalid_snapshot("boundary event admission is out of order or premature");
+        }
+        match &event.cause {
+            Some(CauseRef::Boundary(boundary)) if *boundary >= record.id => {
+                return invalid_snapshot("boundary admitted an event from its own or a later cut");
+            }
+            Some(CauseRef::Command(command))
+                if usize::try_from(command.get())
+                    .map_or(true, |command_number| command_number > *next_command) =>
+            {
+                return invalid_snapshot("boundary admitted an event before its command cause");
+            }
+            Some(CauseRef::Event(parent))
+                if usize::try_from(parent.get())
+                    .map_or(true, |event_number| event_number > *next_event) =>
+            {
+                return invalid_snapshot("boundary admitted an event before its parent cause");
+            }
+            Some(
+                CauseRef::Boundary(_)
+                | CauseRef::Command(_)
+                | CauseRef::Event(_)
+                | CauseRef::System(_),
+            )
+            | None => {}
+        }
+        *next_event += 1;
+    }
+    if let Some(event) = snapshot.events.get(*next_event) {
+        let precedes_current_emission = record
+            .emissions
+            .first()
+            .is_some_and(|emission| event.id < emission.event);
+        let comes_from_earlier_boundary = matches!(
+            &event.cause,
+            Some(CauseRef::Boundary(boundary)) if *boundary < record.id
+        );
+        let comes_from_admitted_command = matches!(
+            &event.cause,
+            Some(CauseRef::Command(command))
+                if usize::try_from(command.get())
+                    .is_ok_and(|command_number| command_number <= *next_command)
+        );
+        let comes_from_admitted_parent = matches!(
+            &event.cause,
+            Some(CauseRef::Event(parent))
+                if usize::try_from(parent.get())
+                    .is_ok_and(|event_number| event_number <= *next_event)
+        );
+        if event.timestamp < record.at
+            || (event.timestamp == record.at
+                && (precedes_current_emission
+                    || comes_from_earlier_boundary
+                    || comes_from_admitted_command
+                    || comes_from_admitted_parent))
+        {
+            return invalid_snapshot("boundary omitted an existing event from its admission cut");
+        }
+    }
+    Ok(())
+}
+
+fn validate_boundary_reservations(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    if record.reservation_offers.windows(2).any(|pair| {
+        (&pair[0].offer.pool, &pair[0].plugin, &pair[0].system)
+            >= (&pair[1].offer.pool, &pair[1].plugin, &pair[1].system)
+    }) {
+        return invalid_snapshot("boundary reservation offers are not canonical");
+    }
+    let mut remaining = BTreeMap::new();
+    for offered in &record.reservation_offers {
+        validate_snapshot_reservation_pool(&offered.offer.pool, &snapshot.world)?;
+        let Some(contract) = snapshot_boundary_contract(plugins, &offered.plugin, &offered.system)
+        else {
+            return invalid_snapshot("reservation offer references an unknown boundary system");
+        };
+        if contract.phase != BoundaryPhase::ReservationAndAllocation
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                !record.admitted_events.is_empty(),
+            )
+            || !contract
+                .reservation_offers
+                .contains(&offered.offer.pool.state)
+            || plugins.reservation_offerers.get(&offered.offer.pool.state)
+                != Some(&(offered.plugin.clone(), offered.system.clone()))
+            || remaining
+                .insert(offered.offer.pool.clone(), offered.offer.capacity)
+                .is_some()
+        {
+            return invalid_snapshot("boundary reservation offer is unauthorized or duplicated");
+        }
+    }
+
+    if record.reservation_requests.windows(2).any(|pair| {
+        compare_reservation_request_records(&pair[0], &pair[1]) != std::cmp::Ordering::Less
+    }) || record.allocations.len() != record.reservation_requests.len()
+    {
+        return invalid_snapshot("boundary reservation requests or allocations are not canonical");
+    }
+    let mut request_refs = BTreeSet::new();
+    for (requested, allocation) in record.reservation_requests.iter().zip(&record.allocations) {
+        validate_snapshot_reservation_pool(&requested.request.pool, &snapshot.world)?;
+        let Some(contract) = snapshot_boundary_contract(
+            plugins,
+            &requested.reservation.plugin,
+            &requested.reservation.system,
+        ) else {
+            return invalid_snapshot("reservation request references an unknown boundary system");
+        };
+        if requested.reservation.request != requested.request.request
+            || requested.request.request.trim().is_empty()
+            || requested.request.request != requested.request.request.trim()
+            || requested.request.tie_break.trim().is_empty()
+            || requested.request.tie_break != requested.request.tie_break.trim()
+            || requested.request.quantity == 0
+            || contract.phase != BoundaryPhase::ReservationAndAllocation
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                !record.admitted_events.is_empty(),
+            )
+            || !contract
+                .reservation_requests
+                .contains(&requested.request.pool.state)
+            || !request_refs.insert(requested.reservation.clone())
+        {
+            return invalid_snapshot("boundary reservation request is invalid");
+        }
+        let available = remaining.entry(requested.request.pool.clone()).or_default();
+        let granted = requested.request.quantity.min(*available);
+        *available -= granted;
+        let disposition = if granted == requested.request.quantity {
+            ReservationDisposition::Fulfilled
+        } else if granted == 0 {
+            ReservationDisposition::Rejected
+        } else {
+            ReservationDisposition::Partial
+        };
+        let expected = ReservationAllocation {
+            reservation: requested.reservation.clone(),
+            pool: requested.request.pool.clone(),
+            requested: requested.request.quantity,
+            granted,
+            remaining_after: *available,
+            disposition,
+        };
+        if allocation != &expected {
+            return invalid_snapshot("boundary reservation allocation evidence is inconsistent");
+        }
+    }
+    Ok(())
+}
+
+fn compare_reservation_request_records(
+    left: &ReservationRequestRecord,
+    right: &ReservationRequestRecord,
+) -> std::cmp::Ordering {
+    left.request
+        .pool
+        .cmp(&right.request.pool)
+        .then_with(|| right.request.priority.cmp(&left.request.priority))
+        .then_with(|| left.request.tie_break.cmp(&right.request.tie_break))
+        .then_with(|| left.reservation.cmp(&right.reservation))
+}
+
+fn validate_snapshot_reservation_pool(
+    pool: &ReservationPoolKey,
+    world: &WorldSnapshot,
+) -> Result<(), CanwuError> {
+    if pool.resource.trim().is_empty()
+        || pool.resource != pool.resource.trim()
+        || !snapshot_entity_exists(world, &pool.entity)
+    {
+        return invalid_snapshot("snapshot contains an invalid reservation pool");
+    }
+    Ok(())
+}
+
+fn snapshot_boundary_contract<'a>(
+    plugins: &'a PluginRegistry,
+    plugin: &str,
+    system: &str,
+) -> Option<&'a BoundarySystemContract> {
+    plugins
+        .descriptors
+        .get(plugin)?
+        .boundary_systems
+        .iter()
+        .find(|contract| contract.name == system)
+}
+
+fn validate_boundary_changes(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    let mut change_keys = BTreeSet::new();
+    for change in &record.changes {
+        let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
+        else {
+            return invalid_snapshot("boundary change references an unknown system");
+        };
+        let Some(stage) = boundary_write_stage(contract.phase) else {
+            return invalid_snapshot("boundary change references a non-writing phase");
+        };
+        if change.component.trim().is_empty()
+            || change.component != change.component.trim()
+            || !snapshot_entity_exists(&snapshot.world, &change.entity)
+            || !contract.writes.contains(&change.state)
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                !record.admitted_events.is_empty(),
+            )
+            || contract.visibility != change.visibility
+            || plugins.state_owners.get(&change.state) != Some(&change.plugin)
+            || plugins.boundary_writers.get(&(stage, change.state.clone()))
+                != Some(&(change.plugin.clone(), change.system.clone()))
+            || !change_keys.insert((
+                change.plugin.clone(),
+                change.system.clone(),
+                change.state.clone(),
+                change.entity.clone(),
+                change.component.clone(),
+            ))
+        {
+            return invalid_snapshot("boundary change is unauthorized or duplicated");
+        }
+    }
+    Ok(())
+}
+
+fn validate_boundary_emissions(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    emitted_events: &mut BTreeSet<EventId>,
+) -> Result<(), CanwuError> {
+    if record
+        .emissions
+        .windows(2)
+        .any(|pair| pair[0].event >= pair[1].event)
+    {
+        return invalid_snapshot("boundary emitted event IDs are not canonical");
+    }
+    let mut matched_changes = BTreeSet::new();
+    for emission in &record.emissions {
+        let Some(event) = snapshot
+            .events
+            .iter()
+            .find(|event| event.id == emission.event)
+        else {
+            return invalid_snapshot("boundary references an unknown emitted event");
+        };
+        if event.timestamp != record.at
+            || event.correlation_id != record.correlation_id
+            || event.cause != Some(CauseRef::Boundary(record.id))
+            || !emitted_events.insert(emission.event)
+        {
+            return invalid_snapshot("boundary emitted event evidence is inconsistent");
+        }
+        let EventKind::Plugin { plugin, event_type } = &event.kind else {
+            return invalid_snapshot("boundary emitted a non-plugin event");
+        };
+        if plugin != &emission.plugin {
+            return invalid_snapshot("boundary emission plugin provenance is inconsistent");
+        }
+        let Some(contract) =
+            snapshot_boundary_contract(plugins, &emission.plugin, &emission.system)
+        else {
+            return invalid_snapshot("boundary emission references an unknown system");
+        };
+        if !boundary_system_due(
+            contract,
+            &record.cadences,
+            !record.admitted_events.is_empty(),
+        ) {
+            return invalid_snapshot("boundary emission source system was not due");
+        }
+
+        match emission.kind {
+            BoundaryEmissionKind::Change { change_index } => {
+                let index = usize::try_from(change_index).map_err(|_| {
+                    invalid_snapshot_error("boundary change evidence index is out of range")
+                })?;
+                let Some(change) = record.changes.get(index) else {
+                    return invalid_snapshot("boundary emission references an unknown change");
+                };
+                if !matched_changes.insert(change_index)
+                    || emission.plugin != change.plugin
+                    || emission.system != change.system
+                    || event.summary != change.summary
+                    || event.affected_entities != vec![change.entity.clone()]
+                    || event_type != &format!("{}_changed", change.component)
+                {
+                    return invalid_snapshot("boundary change evidence provenance is inconsistent");
+                }
+            }
+            BoundaryEmissionKind::Explicit => {
+                if !contract.emits.contains(event_type) {
+                    return invalid_snapshot(
+                        "boundary event type is absent from its source system manifest",
+                    );
+                }
+            }
+        }
+    }
+    if matched_changes.len() != record.changes.len() {
+        return invalid_snapshot("boundary change is missing its emitted evidence event");
+    }
     Ok(())
 }
 
@@ -2893,6 +4717,11 @@ fn validate_scheduled_action(
                 );
             }
             match cause {
+                CauseRef::Boundary(id)
+                    if !snapshot.boundaries.iter().any(|record| record.id == *id) =>
+                {
+                    return invalid_snapshot("scheduled directive has an unknown boundary cause");
+                }
                 CauseRef::Command(id)
                     if !snapshot.commands.iter().any(|record| record.id == *id) =>
                 {
@@ -2904,7 +4733,10 @@ fn validate_scheduled_action(
                 CauseRef::System(name) if name.trim().is_empty() => {
                     return invalid_snapshot("scheduled directive has an empty system cause");
                 }
-                CauseRef::Command(_) | CauseRef::Event(_) | CauseRef::System(_) => {}
+                CauseRef::Boundary(_)
+                | CauseRef::Command(_)
+                | CauseRef::Event(_)
+                | CauseRef::System(_) => {}
             }
             validate_directives(
                 plugin,
@@ -2937,6 +4769,31 @@ fn validate_next_counter(next: u64, maximum_existing: u64, label: &str) -> Resul
         return invalid_snapshot(format!("next {label} counter is invalid"));
     }
     Ok(())
+}
+
+fn validate_contiguous_next_counter(
+    next: u64,
+    maximum_existing: u64,
+    label: &str,
+) -> Result<(), CanwuError> {
+    let Some(expected) = maximum_existing.checked_add(1) else {
+        return invalid_snapshot(format!("{label} identifier space is exhausted"));
+    };
+    if next != expected {
+        return invalid_snapshot(format!("next {label} counter is not contiguous"));
+    }
+    Ok(())
+}
+
+fn validate_contiguous_or_exhausted_next_counter(
+    next: u64,
+    maximum_existing: u64,
+    label: &str,
+) -> Result<(), CanwuError> {
+    if next == u64::MAX {
+        return Ok(());
+    }
+    validate_contiguous_next_counter(next, maximum_existing, label)
 }
 
 fn claim_counter(current: u64, label: &str) -> Result<(u64, u64), CanwuError> {
@@ -2974,6 +4831,28 @@ fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
         EntityRef::Route(id) => state.routes.contains_key(id),
         EntityRef::Territory(id) => state.territories.contains_key(id),
         EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+    }
+}
+
+fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapshot, CanwuError> {
+    match snapshot.snapshot_format_version {
+        SNAPSHOT_FORMAT_VERSION => Ok(snapshot),
+        2 => {
+            if !snapshot.boundaries.is_empty() || !matches!(snapshot.next_boundary_id, 0 | 1) {
+                return invalid_snapshot("format 2 snapshots cannot contain phased-boundary state");
+            }
+            snapshot.boundaries.clear();
+            snapshot.next_boundary_id = 1;
+            snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
+            Ok(snapshot)
+        }
+        _ => Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "snapshot format {} from engine {} is unsupported; this engine reads formats 2 and {}",
+                snapshot.snapshot_format_version, snapshot.engine_version, SNAPSHOT_FORMAT_VERSION
+            ),
+        )),
     }
 }
 
@@ -3469,7 +5348,7 @@ mod tests {
                 if plugin == "failing-test" && event_type == "flag_changed"
         ) {
             Ok(vec![SystemDirective::Schedule {
-                after: SimDuration::minutes(-1),
+                after: SimDuration::ZERO,
                 directive: Box::new(SystemDirective::Emit {
                     event_type: "unreachable".to_owned(),
                     summary: "This directive must be rejected".to_owned(),
@@ -3540,6 +5419,74 @@ mod tests {
         _payload: &Value,
     ) -> Result<Vec<SystemDirective>, CanwuError> {
         Ok(Vec::new())
+    }
+
+    fn no_op_boundary(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal::default())
+    }
+
+    struct JournalCommandPlugin;
+
+    impl SimulationPlugin for JournalCommandPlugin {
+        fn name(&self) -> &'static str {
+            "journal-command"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_command(
+                PluginActionDescriptor {
+                    name: "noop".to_owned(),
+                    description: "Append deterministic command evidence".to_owned(),
+                    payload_schema: PayloadSchema::Null,
+                    reads: Vec::new(),
+                    writes: Vec::new(),
+                },
+                no_op_command,
+            )
+        }
+    }
+
+    struct BoundaryGhostPlugin;
+
+    impl SimulationPlugin for BoundaryGhostPlugin {
+        fn name(&self) -> &'static str {
+            "boundary-ghost-test"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_command(
+                PluginActionDescriptor {
+                    name: "seed".to_owned(),
+                    description: "Own immediate state for the conflict fixture".to_owned(),
+                    payload_schema: PayloadSchema::Null,
+                    reads: Vec::new(),
+                    writes: vec![StateKey::new("boundary-conflict", "immediate")],
+                },
+                no_op_command,
+            )?;
+            let mut rejected = BoundarySystemContract::new(
+                "rejected",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            rejected.writes = vec![
+                StateKey::new("boundary-conflict", "immediate"),
+                StateKey::new("boundary-ghost", "value"),
+            ];
+            if registrar
+                .register_boundary_system(rejected, no_op_boundary)
+                .is_ok()
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    "the boundary ghost fixture expected a writer-mode conflict",
+                ));
+            }
+            Ok(())
+        }
     }
 
     struct GhostPlugin;
@@ -3760,6 +5707,287 @@ mod tests {
         }
     }
 
+    fn grain_pool() -> ReservationPoolKey {
+        ReservationPoolKey::new(
+            StateKey::new("logistics", "grain"),
+            EntityRef::Territory(TerritoryId::new(1)),
+            "grain",
+        )
+    }
+
+    fn offer_grain(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            offers: vec![ReservationOffer {
+                pool: grain_pool(),
+                capacity: 10,
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn high_request(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            requests: vec![ReservationRequest {
+                request: "grain".to_owned(),
+                pool: grain_pool(),
+                quantity: 7,
+                priority: 10,
+                tie_break: "high".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn low_request(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            requests: vec![ReservationRequest {
+                request: "grain".to_owned(),
+                pool: grain_pool(),
+                quantity: 7,
+                priority: 0,
+                tie_break: "low".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn record_grant(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+        plugin: &str,
+        state: StateKey,
+        component: &str,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let reservation = ReservationRef::new(plugin, "request", "grain");
+        let allocation = view.reservation(&reservation)?.ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "{} could not find allocation {reservation:?}",
+                    context.system
+                ),
+            )
+        })?;
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::SetComponent {
+                state,
+                entity: EntityRef::Territory(TerritoryId::new(1)),
+                component: component.to_owned(),
+                value: Value::from(allocation.granted),
+                summary: format!("Recorded a grant of {} grain", allocation.granted),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn record_high_grant(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        record_grant(
+            view,
+            context,
+            "high-claim",
+            StateKey::new("allocation", "high"),
+            "high",
+        )
+    }
+
+    fn record_low_grant(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        record_grant(
+            view,
+            context,
+            "low-claim",
+            StateKey::new("allocation", "low"),
+            "low",
+        )
+    }
+
+    fn validate_visibility(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let entity = EntityRef::Territory(TerritoryId::new(1));
+        let high = view
+            .component(&StateKey::new("allocation", "high"), &entity, "high")?
+            .and_then(Value::as_u64);
+        let low = view
+            .component(&StateKey::new("allocation", "low"), &entity, "low")?
+            .and_then(Value::as_u64);
+        let proposed_high = view
+            .proposed_component(&StateKey::new("allocation", "high"), &entity, "high")?
+            .and_then(Value::as_u64);
+        let proposed_low = view
+            .proposed_component(&StateKey::new("allocation", "low"), &entity, "low")?
+            .and_then(Value::as_u64);
+        let expected_current_low = (context.boundary_id.get() > 1).then_some(3);
+        if high != Some(7)
+            || low != expected_current_low
+            || proposed_high != Some(7)
+            || proposed_low != Some(3)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "validators must see all proposals without exposing next-boundary state as current",
+            ));
+        }
+        Ok(BoundaryProposal::default())
+    }
+
+    struct GrainSupplyPlugin;
+    struct HighClaimPlugin;
+    struct LowClaimPlugin;
+    struct VisibilityValidatorPlugin;
+
+    impl SimulationPlugin for GrainSupplyPlugin {
+        fn name(&self) -> &'static str {
+            "grain-supply"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut contract = BoundarySystemContract::new(
+                "offer",
+                BoundaryPhase::ReservationAndAllocation,
+                SystemCadence::Daily,
+            );
+            contract.reservation_offers = vec![StateKey::new("logistics", "grain")];
+            registrar.register_boundary_system(contract, offer_grain)
+        }
+    }
+
+    impl SimulationPlugin for HighClaimPlugin {
+        fn name(&self) -> &'static str {
+            "high-claim"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut request = BoundarySystemContract::new(
+                "request",
+                BoundaryPhase::ReservationAndAllocation,
+                SystemCadence::Daily,
+            );
+            request.reservation_requests = vec![StateKey::new("logistics", "grain")];
+            registrar.register_boundary_system(request, high_request)?;
+            let mut apply = BoundarySystemContract::new(
+                "apply",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            apply.writes = vec![StateKey::new("allocation", "high")];
+            apply.reservation_reads = vec![ReservationRef::new("high-claim", "request", "grain")];
+            apply.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(apply, record_high_grant)
+        }
+    }
+
+    impl SimulationPlugin for LowClaimPlugin {
+        fn name(&self) -> &'static str {
+            "low-claim"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut request = BoundarySystemContract::new(
+                "request",
+                BoundaryPhase::ReservationAndAllocation,
+                SystemCadence::Daily,
+            );
+            request.reservation_requests = vec![StateKey::new("logistics", "grain")];
+            registrar.register_boundary_system(request, low_request)?;
+            let mut apply = BoundarySystemContract::new(
+                "apply",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            apply.writes = vec![StateKey::new("allocation", "low")];
+            apply.reservation_reads = vec![ReservationRef::new("low-claim", "request", "grain")];
+            registrar.register_boundary_system(apply, record_low_grant)
+        }
+    }
+
+    impl SimulationPlugin for VisibilityValidatorPlugin {
+        fn name(&self) -> &'static str {
+            "visibility-validator"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut contract = BoundarySystemContract::new(
+                "validate",
+                BoundaryPhase::InvariantValidation,
+                SystemCadence::Daily,
+            );
+            contract.reads = vec![
+                StateKey::new("allocation", "high"),
+                StateKey::new("allocation", "low"),
+            ];
+            registrar.register_boundary_system(contract, validate_visibility)
+        }
+    }
+
+    fn staged_failure(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::SetComponent {
+                state: StateKey::new("boundary-failure", "value"),
+                entity: EntityRef::Army(ArmyId::new(1)),
+                component: "value".to_owned(),
+                value: Value::Bool(true),
+                summary: "Stage a value before invariant failure".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn reject_boundary(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Err(CanwuError::new(
+            ErrorCode::InvalidBoundary,
+            "injected boundary invariant failure",
+        ))
+    }
+
+    struct BoundaryFailurePlugin;
+
+    impl SimulationPlugin for BoundaryFailurePlugin {
+        fn name(&self) -> &'static str {
+            "boundary-failure"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut propose = BoundarySystemContract::new(
+                "propose",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            propose.writes = vec![StateKey::new("boundary-failure", "value")];
+            propose.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(propose, staged_failure)?;
+            registrar.register_boundary_system(
+                BoundarySystemContract::new(
+                    "reject",
+                    BoundaryPhase::InvariantValidation,
+                    SystemCadence::Daily,
+                ),
+                reject_boundary,
+            )
+        }
+    }
+
     fn move_order(ids: &DemoIds) -> CommandEnvelope {
         CommandEnvelope::new(
             Issuer::Actor(ids.commander),
@@ -3863,6 +6091,25 @@ mod tests {
             panic!("unknown snapshot formats must be rejected");
         };
         assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
+
+        let mut legacy_value = serde_json::to_value(simulation.snapshot())
+            .expect("snapshot should convert to JSON value");
+        let legacy_object = legacy_value
+            .as_object_mut()
+            .expect("snapshot JSON should be an object");
+        legacy_object.insert("snapshot_format_version".to_owned(), Value::from(2));
+        legacy_object.remove("boundaries");
+        legacy_object.remove("next_boundary_id");
+        let legacy_json =
+            serde_json::to_string(&legacy_value).expect("legacy snapshot fixture should serialize");
+        let migrated = Simulation::from_snapshot_json(&legacy_json)
+            .expect("format 2 snapshot should migrate explicitly");
+        assert_eq!(
+            migrated.snapshot().snapshot_format_version,
+            SNAPSHOT_FORMAT_VERSION
+        );
+        assert!(migrated.boundaries().is_empty());
+
         let mut restored = Simulation::from_snapshot_json(&json).expect("snapshot should restore");
         restored
             .advance(SimDuration::days(1))
@@ -4107,6 +6354,233 @@ mod tests {
                 writes: vec![StateKey::new("fresh-domain", "value")],
             })
             .expect("the failed multi-key claim must leave no ghost owner");
+        simulation
+            .register_plugin(&BoundaryGhostPlugin)
+            .expect("a caught boundary registrar error may not poison the candidate registry");
+        simulation
+            .register_plugin(&MarkerPlugin {
+                name: "boundary-ghost-owner",
+                writes: vec![StateKey::new("boundary-ghost", "value")],
+            })
+            .expect("a later boundary-writer failure must leave no ghost owner");
+    }
+
+    #[test]
+    fn phased_boundary_allocates_deterministically_and_respects_visibility() {
+        let (scenario, _) = demo_scenario();
+        let mut first = Simulation::new(35, scenario.clone()).expect("demo should load");
+        first
+            .register_plugin(&JournalCommandPlugin)
+            .expect("journal command plugin should register");
+        first
+            .register_plugin(&GrainSupplyPlugin)
+            .expect("supply plugin should register");
+        first
+            .register_plugin(&HighClaimPlugin)
+            .expect("high claim should register");
+        first
+            .register_plugin(&LowClaimPlugin)
+            .expect("low claim should register");
+        first
+            .register_plugin(&VisibilityValidatorPlugin)
+            .expect("validator should register");
+
+        let mut second = Simulation::new(35, scenario.clone()).expect("demo should load");
+        second
+            .register_plugin(&VisibilityValidatorPlugin)
+            .expect("validator should register");
+        second
+            .register_plugin(&LowClaimPlugin)
+            .expect("low claim should register");
+        second
+            .register_plugin(&HighClaimPlugin)
+            .expect("high claim should register");
+        second
+            .register_plugin(&GrainSupplyPlugin)
+            .expect("supply plugin should register");
+        second
+            .register_plugin(&JournalCommandPlugin)
+            .expect("journal command plugin should register");
+
+        for simulation in [&mut first, &mut second] {
+            for _ in 0..2 {
+                simulation
+                    .submit(CommandEnvelope::new(
+                        Issuer::Debug,
+                        Command::Plugin {
+                            plugin: "journal-command".to_owned(),
+                            command: "noop".to_owned(),
+                            payload: Value::Null,
+                        },
+                    ))
+                    .expect("journal fixture command should be accepted");
+            }
+        }
+
+        let request = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
+        let first_receipt = first
+            .settle_boundary(request.clone())
+            .expect("daily boundary should settle");
+        let second_receipt = second
+            .settle_boundary(request.clone())
+            .expect("registration order must not change settlement");
+        assert_eq!(first_receipt, second_receipt);
+        assert_eq!(first.snapshot(), second.snapshot());
+        let first_followup = first
+            .settle_boundary(request.clone())
+            .expect("a same-time follow-up boundary should settle");
+        let second_followup = second
+            .settle_boundary(request)
+            .expect("the follow-up boundary must remain registration-order independent");
+        assert_eq!(first_followup, second_followup);
+        assert_eq!(first.snapshot(), second.snapshot());
+
+        let allocations: BTreeMap<_, _> = first_receipt
+            .allocations
+            .iter()
+            .map(|allocation| {
+                (
+                    allocation.reservation.plugin.as_str(),
+                    (allocation.granted, allocation.disposition),
+                )
+            })
+            .collect();
+        assert_eq!(
+            allocations.get("high-claim"),
+            Some(&(7, ReservationDisposition::Fulfilled))
+        );
+        assert_eq!(
+            allocations.get("low-claim"),
+            Some(&(3, ReservationDisposition::Partial))
+        );
+        let components: BTreeMap<_, _> = first
+            .snapshot()
+            .plugin_components
+            .into_iter()
+            .map(|record| (record.component, record.value))
+            .collect();
+        assert_eq!(components.get("high").and_then(Value::as_u64), Some(7));
+        assert_eq!(components.get("low").and_then(Value::as_u64), Some(3));
+
+        let json = first
+            .snapshot_json()
+            .expect("settled boundary should serialize");
+        let restored = Simulation::from_snapshot_json_with_plugins(
+            &json,
+            &[
+                &GrainSupplyPlugin,
+                &HighClaimPlugin,
+                &LowClaimPlugin,
+                &JournalCommandPlugin,
+                &VisibilityValidatorPlugin,
+            ],
+        )
+        .expect("settled boundary should rehydrate");
+        assert_eq!(first.snapshot(), restored.snapshot());
+
+        let plugins: &[&dyn SimulationPlugin] = &[
+            &GrainSupplyPlugin,
+            &HighClaimPlugin,
+            &LowClaimPlugin,
+            &JournalCommandPlugin,
+            &VisibilityValidatorPlugin,
+        ];
+        let replayed = Simulation::replay_with_boundaries(
+            35,
+            scenario,
+            plugins,
+            first.command_log(),
+            first.boundaries(),
+            first.time(),
+        )
+        .expect("boundary journal should replay exactly");
+        assert_eq!(first.snapshot(), replayed.snapshot());
+
+        let mut corrupted_allocation = first.snapshot();
+        corrupted_allocation.boundaries[0].allocations[0].granted += 1;
+        let error = Simulation::from_snapshot_with_plugins(corrupted_allocation, plugins)
+            .err()
+            .expect("tampered allocation evidence must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut corrupted_provenance = first.snapshot();
+        corrupted_provenance.boundaries[0].emissions[0].system = "request".to_owned();
+        let error = Simulation::from_snapshot_with_plugins(corrupted_provenance, plugins)
+            .err()
+            .expect("tampered boundary source provenance must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut corrupted_command_cut = first.snapshot();
+        corrupted_command_cut.boundaries[0].admitted_commands = vec![CommandId::new(2)];
+        let error = Simulation::from_snapshot_with_plugins(corrupted_command_cut, plugins)
+            .err()
+            .expect("boundary admission must be a global command-journal prefix");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut corrupted_event_cut = first.snapshot();
+        let later_event = corrupted_event_cut.boundaries[1].emissions[0].event;
+        corrupted_event_cut.boundaries[0].admitted_events = vec![later_event];
+        let error = Simulation::from_snapshot_with_plugins(corrupted_event_cut, plugins)
+            .err()
+            .expect("an earlier boundary cannot admit a later boundary event");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut corrupted_boundary_counter = first.snapshot();
+        corrupted_boundary_counter.next_boundary_id += 1;
+        let error = Simulation::from_snapshot_with_plugins(corrupted_boundary_counter, plugins)
+            .err()
+            .expect("the next boundary counter must not skip an identifier");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let (mut causal_cut, ids) = Simulation::demo(35).expect("demo should load");
+        causal_cut
+            .submit(move_order(&ids))
+            .expect("movement should emit command-caused evidence");
+        causal_cut
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("an evidence-only boundary should settle");
+        assert!(causal_cut.boundaries()[0].emissions.is_empty());
+
+        let mut omitted_same_time_event = causal_cut.snapshot();
+        omitted_same_time_event.boundaries[0]
+            .admitted_events
+            .clear();
+        let error = Simulation::from_snapshot(omitted_same_time_event)
+            .err()
+            .expect("a no-emission boundary cannot omit already caused same-time evidence");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut due_at_boundary = causal_cut.snapshot();
+        due_at_boundary.scheduled[0].key.at = due_at_boundary.now;
+        let error = Simulation::from_snapshot(due_at_boundary)
+            .err()
+            .expect("completed boundaries cannot retain due ingress");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("future-dated"));
+    }
+
+    #[test]
+    fn failed_phased_boundary_restores_ingress_time_state_and_identifiers() {
+        let (mut simulation, _) = Simulation::demo(35).expect("demo should load");
+        simulation
+            .register_plugin(&BoundaryFailurePlugin)
+            .expect("failure fixture should register");
+        let before = simulation
+            .snapshot_json()
+            .expect("snapshot should serialize");
+        let error = simulation
+            .settle_boundary(
+                BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(1))
+                    .with_cadence(SystemCadence::Daily),
+            )
+            .expect_err("invariant rejection must abort the whole boundary");
+        assert_eq!(error.code, ErrorCode::InvalidBoundary);
+        assert_eq!(
+            before,
+            simulation
+                .snapshot_json()
+                .expect("failed settlement must restore every serialized field")
+        );
     }
 
     #[test]
