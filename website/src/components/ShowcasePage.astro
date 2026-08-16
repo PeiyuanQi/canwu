@@ -7,38 +7,67 @@ const isEnglish = locale === "en";
 
 const c = isEnglish
   ? {
-      title: "Canwu Showcases — Games, research, agents, and public history",
-      description: "Explore the games, research simulations, agent worlds, and educational experiences that Canwu is designed to support.",
-      eyebrow: "Application atlas", headline: "One history engine.", headlineEm: "Many ways in.",
-      intro: "Canwu keeps the simulation authoritative and the presentation replaceable. These are design territories, not locked templates: combine them, extend them, or build a client category that does not exist yet.",
-      navAria: "Showcase categories", presentation: "Presentation layer", closingKicker: "BUILD YOUR ADAPTER", closing: "The world is authoritative.", closingEm: "The view is yours.", start: "Start from the repository ↗", study: "Study the architecture ↗",
-      categories: [
-        { id: "case-1", number: "01", eyebrow: "Games", title: "Grand strategy worlds", lead: "Model the world beneath the map: commands, delayed knowledge, scheduled consequences, institutions, and competing systems that settle in a repeatable order.", examples: [["Dynastic strategy", "Succession, offices, obligations, factions, and incomplete intelligence across generations."], ["Campaign simulation", "Movement, logistics, command delay, reconnaissance, and causally attributable outcomes."], ["Persistent worlds", "A headless authority that can keep simulating while any client, map, or renderer connects."]], presentation: "Render with a 2D map, a 3D engine, a browser, a terminal, or several clients at once." },
-        { id: "case-2", number: "02", eyebrow: "Research", title: "Historical process laboratories", lead: "Turn assumptions into inspectable plugins, run repeatable scenarios, fork the timeline, and compare outcomes without losing the event evidence that produced them.", examples: [["Counterfactual studies", "Fork from a snapshot, change one decision or rule set, then diff resulting worlds."], ["Institutional models", "Represent period-specific records and transitions without hard-coding one region into the kernel."], ["Reproducible experiments", "Use deterministic random streams, manifests, journals, and state commitments."]], presentation: "Present results as notebooks, dashboards, maps, network diagrams, or archived datasets." },
-        { id: "case-3", number: "03", eyebrow: "Agents", title: "Multi-agent historical worlds", lead: "Give agents a stable semantic interface across scenarios while keeping each one inside the knowledge, authority, and actions of the actor it represents.", examples: [["Diplomacy sandboxes", "Agents negotiate and act from different seats with different information."], ["Decision evaluation", "Measure choices against legal actions, causal outcomes, and actor-visible evidence."], ["Narrative participants", "Let characters inspect, act, wait, and explain without direct access to ground truth."]], presentation: "Connect orchestration systems, local models, hosted agents, or human-agent mixed interfaces." },
-        { id: "case-4", number: "04", eyebrow: "Learning & public history", title: "Explorable historical systems", lead: "Let learners see how information age, uncertainty, institutions, and delayed consequences change decisions—not just read the final date in a timeline.", examples: [["Museum interactives", "Drive touch tables, projected maps, spatial installations, or guided exhibits."], ["Classroom sandboxes", "Replay a scenario, test an intervention, and discuss the recorded chain of causes."], ["Living archives", "Connect structured records to an explorable world model and multiple perspectives."]], presentation: "Use accessible web experiences, installations, classroom tools, or narrated data stories." },
+      title: "Canwu use cases and integration patterns",
+      description: "Technical responsibility and API notes for game, research, agent, and educational Canwu clients.",
+      label: "Integration notes",
+      heading: "Use cases and client responsibilities",
+      intro: "Canwu is the authoritative simulation layer. Rendering, authentication, orchestration, datasets, and product UI remain outside the engine. The notes below describe that boundary for common client types.",
+      index: "Sections",
+      canwuOwns: "Canwu is responsible for",
+      clientOwns: "External client is responsible for",
+      relevant: "Relevant interfaces",
+      cases: [
+        { id: "games", number: "01", kind: "Games", title: "Grand strategy and persistent worlds", purpose: "Use Canwu as the server-side or embedded authority beneath a map, renderer, and player interface.", canwu: ["Simulation time and deterministic scheduling", "Validated commands and attributable events", "Actor-relative knowledge and delayed information", "Plugin-owned historical state and records"], client: ["2D or 3D rendering", "Input, menus, saves UI, and localization", "Network transport and account authentication", "Scenario data, art, audio, and production content"], api: ["process_command", "advance / settle_boundary", "snapshot", "events", "query_as"] },
+        { id: "research", number: "02", kind: "Research", title: "Historical process experiments", purpose: "Run reproducible scenarios, retain evidence, and compare counterfactual branches without coupling analysis to a game UI.", canwu: ["Deterministic run configuration", "Snapshots, forks, diffs, and replay", "Causal event and random-draw journals", "Plugin manifests and state commitments"], client: ["Research question and model design", "Source datasets and provenance policy", "Statistical analysis and validation", "Charts, notebooks, maps, and publication output"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"] },
+        { id: "agents", number: "03", kind: "Agents", title: "Multi-agent historical environments", purpose: "Give each agent a stable action loop while keeping its observations inside the represented actor's knowledge and authority.", canwu: ["Capability and action discovery", "Actor-relative observations", "Action validation and authority context", "Causal explanations of resulting events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting and conversation state", "Rate limits, transport, and deployment"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"] },
+        { id: "education", number: "04", kind: "Education", title: "Classroom and public-history tools", purpose: "Expose historical systems through timelines, maps, exhibits, or guided scenarios while retaining repeatable simulation state.", canwu: ["Scenario state and historical time", "Multiple perspectives on the same world", "Repeatable interventions and replay", "Causal records for explanation"], client: ["Curriculum and interpretation", "Accessible interaction design", "Museum hardware or web presentation", "Editorial text, media, and citations"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"] },
       ],
+      next: "Start from the public boundary",
+      nextCopy: "If a client needs a read or action the public API cannot express, improve canwu-api instead of reaching into simulation internals.",
+      architecture: "Architecture documentation",
+      example: "API examples",
     }
   : {
-      title: "参伍应用场景 — 游戏、研究、智能体与公共史",
-      description: "探索参伍可支持的大战略游戏、历史研究模拟、多智能体世界与教育体验。",
-      eyebrow: "应用图谱", headline: "一台历史引擎。", headlineEm: "多种进入方式。",
-      intro: "参伍让模拟保持权威，让表现层保持可替换。这里展示的是可组合、可扩展的设计方向，而不是锁死的模板；你也可以创造尚不存在的客户端类型。",
-      navAria: "应用场景分类", presentation: "表现层", closingKicker: "构建你的适配器", closing: "世界保持权威。", closingEm: "视角属于你。", start: "从代码仓库开始 ↗", study: "研究架构文档 ↗",
-      categories: [
-        { id: "case-1", number: "01", eyebrow: "游戏", title: "大战略世界", lead: "模拟地图之下的世界：命令、延迟情报、定时后果、制度，以及按确定顺序结算的竞争系统。", examples: [["王朝战略", "跨越世代模拟继承、官职、义务、派系与不完整情报。"], ["战役模拟", "处理移动、补给、指挥延迟、侦察与可追溯因果的结果。"], ["持续世界", "由无头权威持续推进模拟，地图、渲染器与多个客户端可随时连接。"]], presentation: "使用二维地图、三维引擎、浏览器、终端，或让多个客户端同时呈现。" },
-        { id: "case-2", number: "02", eyebrow: "研究", title: "历史过程实验室", lead: "把假设写成可检查的插件，运行可重复场景，分叉时间线并比较结果，同时保留产生结果的事件证据。", examples: [["反事实研究", "从快照分叉，只改变一个决策或规则集，再比较两个世界。"], ["制度模型", "表达特定时代的记录与转变，而不把某一地区硬编码进内核。"], ["可重复实验", "使用确定性随机流、清单、日志与状态承诺。"]], presentation: "将结果呈现为笔记本、仪表盘、地图、网络图或可归档数据集。" },
-        { id: "case-3", number: "03", eyebrow: "智能体", title: "多智能体历史世界", lead: "为不同场景提供稳定的语义接口，同时把每个智能体限制在其角色拥有的知识、权限与行动范围内。", examples: [["外交沙盒", "智能体在不同席位、不同信息条件下协商并行动。"], ["决策评估", "依据合法行动、因果结果与角色可见证据衡量选择。"], ["叙事参与者", "让角色检查、行动、等待并解释，而不是直接读取世界真相。"]], presentation: "连接编排系统、本地模型、托管智能体，或人机混合界面。" },
-        { id: "case-4", number: "04", eyebrow: "教育与公共史", title: "可探索的历史系统", lead: "让学习者看到信息时效、不确定性、制度与延迟后果如何改变决策，而不只是阅读时间线上的最终日期。", examples: [["博物馆交互", "驱动触控桌、投影地图、空间装置或引导式展览。"], ["课堂沙盒", "重演场景、测试干预，并围绕记录下来的因果链展开讨论。"], ["活档案", "把结构化记录连接到可探索的世界模型与多重视角。"]], presentation: "使用无障碍网页体验、展览装置、课堂工具或叙事型数据作品。" },
+      title: "参伍应用方向与集成方式",
+      description: "参伍游戏、研究、智能体与教育客户端的技术职责和 API 说明。",
+      label: "集成说明",
+      heading: "应用方向与客户端职责",
+      intro: "参伍是权威模拟层。渲染、认证、编排、数据集与产品界面位于引擎之外。以下内容说明常见客户端类型如何划分这条边界。",
+      index: "章节",
+      canwuOwns: "参伍负责",
+      clientOwns: "外部客户端负责",
+      relevant: "相关接口",
+      cases: [
+        { id: "games", number: "01", kind: "游戏", title: "大战略与持续世界", purpose: "将参伍作为地图、渲染器与玩家界面之下的服务端或嵌入式权威。", canwu: ["模拟时间与确定性调度", "经验证命令与可归因事件", "角色视角知识与延迟信息", "插件拥有的历史状态与记录"], client: ["二维或三维渲染", "输入、菜单、存档界面与本地化", "网络传输与账号认证", "场景数据、美术、音频与正式内容"], api: ["process_command", "advance / settle_boundary", "snapshot", "events", "query_as"] },
+        { id: "research", number: "02", kind: "研究", title: "历史过程实验", purpose: "运行可重复场景、保留证据并比较反事实分支，同时不把分析工作绑定到游戏界面。", canwu: ["确定性运行配置", "快照、分支、差异与重演", "因果事件与随机抽取日志", "插件清单与状态承诺"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计分析与验证", "图表、笔记本、地图与出版输出"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"] },
+        { id: "agents", number: "03", kind: "智能体", title: "多智能体历史环境", purpose: "为每个智能体提供稳定行动循环，同时把观察限制在所代表角色的知识与权限内。", canwu: ["能力与行动发现", "角色视角观察", "行动验证与权限上下文", "结果事件的因果解释"], client: ["模型选择与编排", "选择 Issuer 之前的身份认证", "提示词与对话状态", "限流、传输与部署"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"] },
+        { id: "education", number: "04", kind: "教育", title: "课堂与公共史工具", purpose: "通过时间线、地图、展览或引导场景呈现历史系统，同时保留可重复的模拟状态。", canwu: ["场景状态与历史时间", "同一世界的多重视角", "可重复干预与重演", "用于解释的因果记录"], client: ["课程与历史解释", "无障碍交互设计", "博物馆硬件或网页表现", "编辑文本、媒体与引文"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"] },
       ],
+      next: "从公开边界开始",
+      nextCopy: "如果客户端需要的读取或行动无法通过公开 API 表达，应改进 canwu-api，而不是绕过边界访问模拟内部。",
+      architecture: "架构文档",
+      example: "API 示例",
     };
 ---
 
 <BaseLayout title={c.title} description={c.description} locale={locale} zhPath="/showcase/" enPath="/en/showcase/">
-  <section class="page-hero showcase-hero">
-    <p class="eyebrow"><span></span> {c.eyebrow}</p><h1>{c.headline}<br /><em>{c.headlineEm}</em></h1>
-    <div class="page-hero-grid"><p>{c.intro}</p><nav class="section-index" aria-label={c.navAria}>{c.categories.map((category) => <a href={`#${category.id}`}><span>{category.number}</span>{category.title}</a>)}</nav></div>
+  <section class="reference-hero page-width">
+    <p>{c.label}</p><h1>{c.heading}</h1><span>{c.intro}</span>
+    <nav aria-label={c.index}>{c.cases.map((item) => <a href={`#${item.id}`}><code>{item.number}</code>{item.title}</a>)}</nav>
   </section>
-  <div class="showcase-list">{c.categories.map((category) => <section class="showcase-case section-wide" id={category.id} aria-labelledby={`${category.id}-title`}><header><span>{category.number}</span><p>{category.eyebrow}</p><h2 id={`${category.id}-title`}>{category.title}</h2><p class="case-lead">{category.lead}</p></header><div class="case-body"><div class="case-examples">{category.examples.map(([title, copy]) => <article><h3>{title}</h3><p>{copy}</p></article>)}</div><aside><span>{c.presentation}</span><p>{category.presentation}</p></aside></div></section>)}</div>
-  <section class="closing-cta section-wide"><p>{c.closingKicker}</p><h2>{c.closing}<br /><em>{c.closingEm}</em></h2><div><a class="button button-primary" href="https://github.com/PeiyuanQi/canwu">{c.start}</a><a class="button button-secondary" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.study}</a></div></section>
+
+  <div class="integration-list">
+    {c.cases.map((item) => (
+      <section class="integration-case page-width" id={item.id}>
+        <header><code>{item.number}</code><p>{item.kind}</p><h2>{item.title}</h2><span>{item.purpose}</span></header>
+        <div class="responsibility-grid">
+          <article><h3>{c.canwuOwns}</h3><ul class="technical-list">{item.canwu.map((entry) => <li>{entry}</li>)}</ul></article>
+          <article><h3>{c.clientOwns}</h3><ul class="technical-list">{item.client.map((entry) => <li>{entry}</li>)}</ul></article>
+        </div>
+        <div class="api-strip"><span>{c.relevant}</span><div>{item.api.map((name) => <code>{name}</code>)}</div></div>
+      </section>
+    ))}
+  </div>
+
+  <section class="reference-footer page-width"><div><p>{c.next}</p><h2>{c.nextCopy}</h2></div><div><a class="button primary" href="https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md">{c.architecture} ↗</a><a class="button" href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples">{c.example} ↗</a></div></section>
 </BaseLayout>

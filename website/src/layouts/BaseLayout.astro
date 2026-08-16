@@ -26,29 +26,35 @@ const ui = isEnglish
       skip: "Skip to content",
       homeLabel: "Canwu home",
       navLabel: "Primary navigation",
-      engine: "Engine",
-      showcases: "Showcases",
+      features: "Features",
+      quickstart: "Get Started",
+      architecture: "Architecture",
+      showcases: "Use Cases",
       credits: "Credits",
       menu: "Menu",
       language: "中文",
-      footerLine: "History is a system. Make it legible.",
-      footerSub: "Headless historical simulation from antiquity to the near-modern world.",
+      footerLine: "A headless historical simulation engine.",
+      footerSub: "Rust · Deterministic · Agent-native · v0.4.0",
     }
   : {
       skip: "跳到正文",
       homeLabel: "参伍引擎首页",
       navLabel: "主导航",
-      engine: "引擎",
-      showcases: "应用场景",
+      features: "功能",
+      quickstart: "快速开始",
+      architecture: "架构",
+      showcases: "应用",
       credits: "鸣谢",
       menu: "菜单",
       language: "EN",
-      footerLine: "历史是一套系统，让它清晰可见。",
-      footerSub: "从古代到近现代的无头历史模拟引擎。",
+      footerLine: "无头历史模拟引擎。",
+      footerSub: "Rust · 确定性 · 智能体原生 · v0.4.0",
     };
 
 const navItems = [
-  { href: `${prefix}/#engine` || "/#engine", label: ui.engine },
+  { href: `${prefix}/#features` || "/#features", label: ui.features },
+  { href: `${prefix}/#quickstart` || "/#quickstart", label: ui.quickstart },
+  { href: `${prefix}/#architecture` || "/#architecture", label: ui.architecture },
   { href: `${prefix}/showcase/`, label: ui.showcases },
   { href: `${prefix}/credits/`, label: ui.credits },
 ];
@@ -75,11 +81,9 @@ const navItems = [
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
-    <meta property="og:image" content={new URL("/og.png", Astro.site)} />
-    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
-    <meta name="twitter:image" content={new URL("/og.png", Astro.site)} />
     <title>{title}</title>
   </head>
   <body>
@@ -108,11 +112,13 @@ const navItems = [
     <main id="content"><slot /></main>
     <footer class="site-footer">
       <div>
-        <p class="footer-mark"><span>参伍</span> {ui.footerLine}</p>
+        <p class="footer-mark"><span>参伍引擎</span> {ui.footerLine}</p>
         <p>{ui.footerSub}</p>
       </div>
       <div class="footer-links">
-        <a href={`${prefix}/#engine` || "/#engine"}>{ui.engine}</a>
+        <a href={`${prefix}/#quickstart` || "/#quickstart"}>{ui.quickstart}</a>
+        <a href="https://github.com/PeiyuanQi/canwu/tree/main/docs">Docs ↗</a>
+        <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">Contribute ↗</a>
         <a href={`${prefix}/showcase/`}>{ui.showcases}</a>
         <a href={`${prefix}/credits/`}>{ui.credits}</a>
         <a href={isEnglish ? zhPath : enPath} hreflang={isEnglish ? "zh-CN" : "en"}>{ui.language}</a>
