@@ -56,8 +56,9 @@ pub use records::{
 
 use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng,
-    DomainRecordKind, DomainRecordRef, EntityRef, EventId, FieldSchema, GovernmentId, IngressId,
-    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    DomainRecordKind, DomainRecordRef, DomainRecordType, EntityRef, EventId, FieldSchema,
+    GovernmentId, IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId,
+    TypeSchema, TypedDomainRecordRef,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -981,6 +982,13 @@ impl SimulationView<'_> {
             .or_else(|| self.state.current().domain_records.get(reference)))
     }
 
+    pub fn typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Result<Option<&DomainRecord>, CanwuError> {
+        self.domain_record(reference.as_untyped())
+    }
+
     pub fn proposed_domain_record(
         &self,
         reference: &DomainRecordRef,
@@ -989,6 +997,13 @@ impl SimulationView<'_> {
         Ok(self
             .proposed_records
             .and_then(|records| records.get(reference)))
+    }
+
+    pub fn proposed_typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Result<Option<&DomainRecord>, CanwuError> {
+        self.proposed_domain_record(reference.as_untyped())
     }
 
     pub fn reservation(
@@ -2222,6 +2237,14 @@ impl Simulation {
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.state.current.domain_records.get(reference)
+    }
+
+    #[must_use]
+    pub fn typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Option<&DomainRecord> {
+        self.domain_record(reference.as_untyped())
     }
 
     pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {

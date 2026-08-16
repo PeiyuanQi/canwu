@@ -169,6 +169,18 @@ constructor such as `new_with_plugins`; ordinary constructors reject them
 instead of returning a half-configured runtime that could emit an unloadable
 snapshot.
 
+Domain packages can bind those stable identities to compile-time marker types
+with `DomainRecordType` and `TypedDomainRecordRef<T>`. A sealed associated class
+drives both schema classification and the automatically derived
+`DomainEntityType` or `DomainValueType` capability, so a type cannot present a
+record schema and an entity reference at the same time. Typed references
+serialize exactly as `DomainRecordRef` and validate their namespaced kind during
+deserialization. `DomainRecordSchema::for_entity` and `for_record`,
+`DomainRecordDraft::from_typed`, typed simulation/view queries, and
+`DomainRecord::decode_payload` provide a typed package path while the
+authoritative snapshot keeps the existing schema-validated representation.
+This additive facade leaves checkpoint and snapshot formats unchanged.
+
 Domain record state is boundary-only: immediate reactors and commands cannot
 write a record kind as an untyped component. Boundary systems declare the
 record kind's `StateKey`, propose `MutateRecord` directives, and read current or

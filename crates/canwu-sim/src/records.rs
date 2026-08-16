@@ -1,6 +1,10 @@
 use crate::{CanwuError, ErrorCode, PayloadSchema, StateKey, StateVisibility};
-use canwu_core::{CoreEntityKind, DomainRecordKind, DomainRecordRef, EntityRef};
+use canwu_core::{
+    CoreEntityKind, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
+    DomainRecordType, DomainValueType, EntityRef, TypedDomainRecordRef,
+};
 use canwu_time::SimTime;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +21,13 @@ pub enum DomainRecordClass {
 pub enum DomainReferenceTargetKind {
     Core(CoreEntityKind),
     Domain(DomainRecordKind),
+}
+
+impl DomainReferenceTargetKind {
+    #[must_use]
+    pub fn for_domain<T: DomainRecordType>() -> Self {
+        Self::Domain(DomainRecordKind::for_type::<T>())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -45,6 +56,26 @@ impl DomainRecordSchema {
             payload_schema: PayloadSchema::Any,
             references: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn for_type<T: DomainRecordType>() -> Self {
+        let class = if T::Class::IS_ENTITY {
+            DomainRecordClass::Entity
+        } else {
+            DomainRecordClass::Record
+        };
+        Self::new(DomainRecordKind::for_type::<T>(), class)
+    }
+
+    #[must_use]
+    pub fn for_entity<T: DomainEntityType>() -> Self {
+        Self::for_type::<T>()
+    }
+
+    #[must_use]
+    pub fn for_record<T: DomainValueType>() -> Self {
+        Self::for_type::<T>()
     }
 
     #[must_use]
@@ -103,10 +134,30 @@ pub enum DomainReferenceTarget {
     Domain(DomainRecordRef),
 }
 
+impl DomainReferenceTarget {
+    #[must_use]
+    pub fn from_typed<T: DomainRecordType>(reference: TypedDomainRecordRef<T>) -> Self {
+        Self::Domain(reference.into_untyped())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct DomainReference {
     pub role: String,
     pub target: DomainReferenceTarget,
+}
+
+impl DomainReference {
+    #[must_use]
+    pub fn from_typed<T: DomainRecordType>(
+        role: impl Into<String>,
+        reference: TypedDomainRecordRef<T>,
+    ) -> Self {
+        Self {
+            role: role.into(),
+            target: DomainReferenceTarget::from_typed(reference),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -124,6 +175,25 @@ impl DomainRecordDraft {
             payload,
             references: Vec::new(),
         }
+    }
+
+    pub fn from_typed<T: DomainRecordType>(
+        reference: TypedDomainRecordRef<T>,
+        payload: &T::Payload,
+    ) -> Result<Self, CanwuError>
+    where
+        T::Payload: Serialize,
+    {
+        let payload = serde_json::to_value(payload).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                format!(
+                    "typed domain payload for {} could not be encoded: {error}",
+                    DomainRecordKind::for_type::<T>()
+                ),
+            )
+        })?;
+        Ok(Self::new(reference.into_untyped(), payload))
     }
 
     pub(crate) fn canonicalize(&mut self) {
@@ -165,6 +235,36 @@ impl DomainRecord {
     #[must_use]
     pub const fn is_active(&self) -> bool {
         matches!(self.lifecycle, DomainRecordLifecycle::Active)
+    }
+
+    #[must_use]
+    pub fn typed_reference<T: DomainRecordType>(&self) -> Option<TypedDomainRecordRef<T>> {
+        TypedDomainRecordRef::from_untyped(self.reference.clone()).ok()
+    }
+
+    pub fn decode_payload<T: DomainRecordType>(&self) -> Result<T::Payload, CanwuError>
+    where
+        T::Payload: DeserializeOwned,
+    {
+        if !self.reference.kind.matches_type::<T>() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                format!(
+                    "domain record {} cannot be decoded as kind {}",
+                    self.reference,
+                    DomainRecordKind::for_type::<T>()
+                ),
+            ));
+        }
+        T::Payload::deserialize(&self.payload).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                format!(
+                    "domain record {} has an incompatible typed payload: {error}",
+                    self.reference
+                ),
+            )
+        })
     }
 }
 

@@ -1,8 +1,11 @@
 //! Stable identifiers, deterministic utilities, and lightweight schema metadata.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
 
 macro_rules! define_id {
     ($name:ident) => {
@@ -73,6 +76,16 @@ impl DomainRecordKind {
             name: name.into(),
         }
     }
+
+    #[must_use]
+    pub fn for_type<T: DomainRecordType>() -> Self {
+        Self::new(T::NAMESPACE, T::NAME)
+    }
+
+    #[must_use]
+    pub fn matches_type<T: DomainRecordType>(&self) -> bool {
+        self.namespace == T::NAMESPACE && self.name == T::NAME
+    }
 }
 
 impl Display for DomainRecordKind {
@@ -105,6 +118,188 @@ impl DomainRecordRef {
 impl Display for DomainRecordRef {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}:{}", self.kind, self.id)
+    }
+}
+
+/// Compile-time identity for one namespaced application-defined record kind.
+///
+/// The associated payload stays outside the kernel's type graph. Domain
+/// packages use this trait to bind stable identities and payload codecs while
+/// Canwu persists the existing schema-validated [`DomainRecordRef`] shape.
+pub trait DomainRecordType {
+    type Payload;
+    type Class: DomainKindClass;
+
+    const NAMESPACE: &'static str;
+    const NAME: &'static str;
+}
+
+mod domain_kind_class {
+    pub trait Sealed {}
+}
+
+/// Sealed type-level classification for application-defined record kinds.
+pub trait DomainKindClass: domain_kind_class::Sealed {
+    const IS_ENTITY: bool;
+}
+
+/// Type-level class for domain kinds whose instances are entity identities.
+pub enum DomainEntityKindClass {}
+
+impl domain_kind_class::Sealed for DomainEntityKindClass {}
+
+impl DomainKindClass for DomainEntityKindClass {
+    const IS_ENTITY: bool = true;
+}
+
+/// Type-level class for domain kinds whose instances are non-entity records.
+pub enum DomainValueKindClass {}
+
+impl domain_kind_class::Sealed for DomainValueKindClass {}
+
+impl DomainKindClass for DomainValueKindClass {
+    const IS_ENTITY: bool = false;
+}
+
+/// Marker implemented automatically for entity-class domain record types.
+pub trait DomainEntityType: DomainRecordType<Class = DomainEntityKindClass> {}
+
+impl<T: DomainRecordType<Class = DomainEntityKindClass>> DomainEntityType for T {}
+
+/// Marker implemented automatically for non-entity domain record types.
+pub trait DomainValueType: DomainRecordType<Class = DomainValueKindClass> {}
+
+impl<T: DomainRecordType<Class = DomainValueKindClass>> DomainValueType for T {}
+
+/// Typed façade over a stable application-defined record identity.
+///
+/// Its serialized representation is exactly the wrapped [`DomainRecordRef`];
+/// the marker exists only at compile time.
+#[derive(Serialize)]
+#[serde(transparent, bound = "")]
+pub struct TypedDomainRecordRef<T: DomainRecordType> {
+    reference: DomainRecordRef,
+    #[serde(skip)]
+    marker: PhantomData<fn() -> T>,
+}
+
+impl<T: DomainRecordType> Clone for TypedDomainRecordRef<T> {
+    fn clone(&self) -> Self {
+        Self {
+            reference: self.reference.clone(),
+            marker: PhantomData,
+        }
+    }
+}
+
+impl<T: DomainRecordType> std::fmt::Debug for TypedDomainRecordRef<T> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_tuple("TypedDomainRecordRef")
+            .field(&self.reference)
+            .finish()
+    }
+}
+
+impl<T: DomainRecordType> PartialEq for TypedDomainRecordRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.reference == other.reference
+    }
+}
+
+impl<T: DomainRecordType> Eq for TypedDomainRecordRef<T> {}
+
+impl<T: DomainRecordType> PartialOrd for TypedDomainRecordRef<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<T: DomainRecordType> Ord for TypedDomainRecordRef<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.reference.cmp(&other.reference)
+    }
+}
+
+impl<T: DomainRecordType> Hash for TypedDomainRecordRef<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.reference.hash(state);
+    }
+}
+
+impl<'de, T: DomainRecordType> Deserialize<'de> for TypedDomainRecordRef<T> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let reference = DomainRecordRef::deserialize(deserializer)?;
+        Self::from_untyped(reference).map_err(|reference| {
+            serde::de::Error::custom(format!(
+                "domain record reference {reference} does not match typed kind {}",
+                DomainRecordKind::for_type::<T>()
+            ))
+        })
+    }
+}
+
+impl<T: DomainRecordType> TypedDomainRecordRef<T> {
+    #[must_use]
+    pub fn new(id: impl Into<String>) -> Self {
+        Self {
+            reference: DomainRecordRef {
+                kind: DomainRecordKind::for_type::<T>(),
+                id: id.into(),
+            },
+            marker: PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub const fn as_untyped(&self) -> &DomainRecordRef {
+        &self.reference
+    }
+
+    #[must_use]
+    pub fn into_untyped(self) -> DomainRecordRef {
+        self.reference
+    }
+
+    /// Converts an untyped reference when its namespaced kind matches `T`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original reference when it belongs to another kind.
+    pub fn from_untyped(reference: DomainRecordRef) -> Result<Self, DomainRecordRef> {
+        if !reference.kind.matches_type::<T>() {
+            return Err(reference);
+        }
+        Ok(Self {
+            reference,
+            marker: PhantomData,
+        })
+    }
+
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.reference.id
+    }
+}
+
+impl<T: DomainRecordType> Display for TypedDomainRecordRef<T> {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        Display::fmt(&self.reference, formatter)
+    }
+}
+
+impl<T: DomainRecordType> From<TypedDomainRecordRef<T>> for DomainRecordRef {
+    fn from(reference: TypedDomainRecordRef<T>) -> Self {
+        reference.into_untyped()
+    }
+}
+
+impl<T: DomainEntityType> From<TypedDomainRecordRef<T>> for EntityRef {
+    fn from(reference: TypedDomainRecordRef<T>) -> Self {
+        Self::Domain(reference.into_untyped())
     }
 }
 
@@ -245,5 +440,65 @@ impl SchemaRegistry {
 
     pub fn iter(&self) -> impl Iterator<Item = &TypeSchema> {
         self.types.values()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Office;
+
+    impl DomainRecordType for Office {
+        type Payload = String;
+        type Class = DomainEntityKindClass;
+
+        const NAMESPACE: &'static str = "fixture.governance";
+        const NAME: &'static str = "office";
+    }
+
+    struct Obligation;
+
+    impl DomainRecordType for Obligation {
+        type Payload = String;
+        type Class = DomainValueKindClass;
+
+        const NAMESPACE: &'static str = "fixture.governance";
+        const NAME: &'static str = "obligation";
+    }
+
+    #[test]
+    fn typed_domain_identity_preserves_wire_shape_and_kind_boundary() {
+        let typed = TypedDomainRecordRef::<Office>::new("secretariat");
+        let raw = DomainRecordRef::new("fixture.governance", "office", "secretariat");
+
+        assert_eq!(
+            serde_json::to_value(&typed).expect("typed identity should serialize"),
+            serde_json::to_value(&raw).expect("raw identity should serialize")
+        );
+        let round_trip: TypedDomainRecordRef<Office> = serde_json::from_value(
+            serde_json::to_value(&typed).expect("typed identity should serialize"),
+        )
+        .expect("typed identity should deserialize");
+        assert_eq!(round_trip.as_untyped(), &raw);
+        assert_eq!(EntityRef::from(round_trip), EntityRef::Domain(raw.clone()));
+
+        let wrong_kind =
+            DomainRecordRef::new("fixture.governance", "obligation", "secretariat-duty");
+        assert_eq!(
+            TypedDomainRecordRef::<Office>::from_untyped(wrong_kind.clone()),
+            Err(wrong_kind)
+        );
+        assert!(TypedDomainRecordRef::<Obligation>::from_untyped(raw).is_err());
+        assert!(
+            serde_json::from_value::<TypedDomainRecordRef<Office>>(serde_json::json!({
+                "kind": {
+                    "namespace": "fixture.governance",
+                    "name": "obligation"
+                },
+                "id": "secretariat-duty"
+            }))
+            .is_err()
+        );
     }
 }

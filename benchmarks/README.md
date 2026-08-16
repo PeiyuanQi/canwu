@@ -731,3 +731,29 @@ sub-0.3-ms case. These are treated as local timing noise. The milestone makes
 no runtime-performance claim; it gives deterministic time, scheduled action,
 event, and runtime-random execution one explicit dependency surface while
 preserving sequential ordering and rollback behavior.
+
+## Typed-domain foundation comparison
+
+The additive typed-domain foundation is recorded in separate
+[`elapsed`](baselines/2026-08-16-typed-domain-elapsed.json) and
+[`allocation`](baselines/2026-08-16-typed-domain-allocations.json) reports,
+using the scheduling-module milestone as its before baseline. Domain packages
+can declare `DomainRecordType` with a sealed entity/value class, construct
+`TypedDomainRecordRef<T>` identities, build typed schemas and drafts, decode
+typed payloads, and query typed identities through the simulation and public
+facade. Entity and value capabilities derive automatically from the class.
+Typed references retain the existing `DomainRecordRef` wire shape and validate
+the namespaced kind during deserialization, so checkpoint and snapshot formats
+remain unchanged.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by -2.3%, accepted commands +0.8%,
+empty boundaries -7.2%, populated boundaries -1.9%, snapshot creation +2.5%,
+snapshot serialization +2.2%, load validation +1.9%, and exact replay -1.4%.
+The rejected-command median moves from 0.066 to 0.071 ms (+8.0%) on a
+sub-0.1-ms case, while caller-owned segment release moves from 0.268 to 0.237 ms
+(-11.4%) on a sub-0.3-ms case. These are treated as local timing noise. The
+milestone makes no runtime-performance claim; it adds compile-time package
+binding while preserving the authoritative storage, hashing, migration, and
+replay contracts.

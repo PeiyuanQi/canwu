@@ -4,8 +4,10 @@
 
 pub use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
-    DomainRecordKind, DomainRecordRef, EntityRef, EventId, GovernmentId, IngressId, PersonId,
-    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    DomainEntityKindClass, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
+    DomainRecordType, DomainValueKindClass, DomainValueType, EntityRef, EventId, GovernmentId,
+    IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -235,6 +237,14 @@ impl Canwu {
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
+    }
+
+    #[must_use]
+    pub fn typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Option<&DomainRecord> {
+        self.simulation.typed_domain_record(reference)
     }
 
     pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
@@ -940,6 +950,19 @@ impl CompactedCanwu {
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
+    }
+
+    #[must_use]
+    pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+        self.simulation.domain_record(reference)
+    }
+
+    #[must_use]
+    pub fn typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Option<&DomainRecord> {
+        self.simulation.typed_domain_record(reference)
     }
 
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {

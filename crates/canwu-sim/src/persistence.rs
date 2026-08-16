@@ -1,10 +1,11 @@
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryReceipt, BoundaryRecord, BoundaryRequest, CanwuError,
     CommandAttemptRecord, CommandEnvelope, CommandOutcome, CommandReceipt, CommandRecord,
-    CommandRequest, ENGINE_VERSION, ErrorCode, IngressPayload, IngressReceipt, IngressRecord,
-    KnowledgeSnapshot, PluginIngressRequest, RandomDrawRecord, ReplayJournal, RuntimeEvidence,
-    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, ScheduledRecord, SimDuration, SimEvent,
-    SimTime, Simulation, SimulationPlugin, SimulationSnapshot, SystemCadence, WorldSnapshot,
+    CommandRequest, DomainRecord, DomainRecordRef, DomainRecordType, ENGINE_VERSION, ErrorCode,
+    IngressPayload, IngressReceipt, IngressRecord, KnowledgeSnapshot, PluginIngressRequest,
+    RandomDrawRecord, ReplayJournal, RuntimeEvidence, SNAPSHOT_FORMAT_VERSION,
+    STATE_REVISION_FORMAT_VERSION, ScheduledRecord, SimDuration, SimEvent, SimTime, Simulation,
+    SimulationPlugin, SimulationSnapshot, SystemCadence, TypedDomainRecordRef, WorldSnapshot,
     has_unqueued_command_history, invalid_snapshot_error,
 };
 use crate::state::{ArchivedCommandRequestOutcome, ArchivedIngressRequest};
@@ -205,6 +206,19 @@ impl CompactedSimulation {
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
+    }
+
+    #[must_use]
+    pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+        self.simulation.domain_record(reference)
+    }
+
+    #[must_use]
+    pub fn typed_domain_record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Option<&DomainRecord> {
+        self.simulation.typed_domain_record(reference)
     }
 
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
