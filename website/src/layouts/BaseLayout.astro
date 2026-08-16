@@ -111,10 +111,12 @@ const navItems = (variant: typeof variants[number]) => [
   <body>
     {variants.map((variant) => <a class="skip-link" data-locale-content={isAuto ? variant.locale : undefined} href="#content">{variant.ui.skip}</a>)}
     <header class="site-header">
-      <a class="brand" href={isEnglish && !isAuto ? "/en/" : "/"} aria-label={isEnglish && !isAuto ? ui.en.homeLabel : ui.zh.homeLabel}>
-        <img src="/brand/canwu-mark.png" width="48" height="48" alt="" />
-        <span><b>参伍引擎</b><small>Canwu Engine</small></span>
-      </a>
+      {variants.map((variant) => (
+        <a class="brand" data-locale-content={isAuto ? variant.locale : undefined} href={variant.locale === "en" ? "/en/" : "/"} aria-label={variant.ui.homeLabel}>
+          <img src="/brand/canwu-mark.png" width="48" height="48" alt="" />
+          <span><b>参伍引擎</b><small>Canwu Engine</small></span>
+        </a>
+      ))}
       {variants.map((variant) => (
         <nav data-locale-content={isAuto ? variant.locale : undefined} aria-label={variant.ui.navLabel}>
           {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}

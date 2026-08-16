@@ -25,8 +25,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let observer = canwu.observe(ids.observer, &ObserveRequest::default())?;
     println!("time: {}", canwu.time());
     println!("arrival events: {}", arrival_events.len());
-    println!("commander: {:?}", commander.known_armies[0].known_location);
-    println!("observer: {:?}", observer.known_armies[0].known_location);
+    println!(
+        "commander knows location: {:?}",
+        commander.known_armies[0].known_location
+    );
+    println!(
+        "observer still believes location: {:?}",
+        observer.known_armies[0].known_location
+    );
+
+    canwu.advance(SimDuration::days(3))?;
+    let observer = canwu.observe(ids.observer, &ObserveRequest::default())?;
+    println!(
+        "observer after report: {:?}",
+        observer.known_armies[0].known_location
+    );
     Ok(())
 }`;
 
