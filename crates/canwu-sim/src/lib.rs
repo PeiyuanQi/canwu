@@ -69,9 +69,28 @@ pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
 pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
 /// Version of persisted monotonic boundary-admission cursors.
 pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 1;
+/// Version of the domain-separated checkpoint commitment contract.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 1;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Canonical roots for independent authoritative state and evidence domains.
+pub struct CommitmentRoots {
+    pub world: String,
+    pub knowledge: String,
+    pub plugin_components: String,
+    pub domain_records: String,
+    pub scheduler: String,
+    pub commands: String,
+    pub events: String,
+    pub ingress: String,
+    pub random: String,
+    pub boundary_chain: String,
+    pub identity: String,
+    pub control: String,
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -2751,6 +2770,8 @@ struct RuntimeMetadata {
     run_manifest_hash: String,
     run_configuration: RunConfigurationSnapshot,
     checkpoint_hash: String,
+    commitment_format_version: u32,
+    commitment_roots: Option<CommitmentRoots>,
     plugin_registration_closed: bool,
     replay_revision_format_version: u32,
 }
@@ -2790,6 +2811,12 @@ pub struct SimulationSnapshot {
     pub run_configuration: Option<RunConfigurationSnapshot>,
     #[serde(default)]
     pub checkpoint_hash: String,
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    /// Version of the domain-separated checkpoint commitment contract.
+    pub commitment_format_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Persisted canonical roots verified before a snapshot becomes live.
+    pub commitment_roots: Option<CommitmentRoots>,
     #[serde(default)]
     /// Version of the revision migration and checkpoint sub-contract.
     pub revision_format_version: u32,
@@ -2872,6 +2899,8 @@ pub struct ReplayJournal {
     pub boundaries: Vec<BoundaryRecord>,
     pub final_time: SimTime,
     pub checkpoint_hash: String,
+    /// Checkpoint commitment format reproduced by exact replay.
+    pub commitment_format_version: u32,
     /// Revision-evidence format verified by this exact replay journal.
     pub revision_format_version: u32,
     /// Final persisted authoritative revision after replay.
@@ -2897,6 +2926,8 @@ struct ReplayJournalWire {
     boundaries: Vec<BoundaryRecord>,
     final_time: SimTime,
     checkpoint_hash: String,
+    #[serde(default)]
+    commitment_format_version: u32,
     #[serde(default)]
     revision_format_version: u32,
     #[serde(default)]
@@ -2928,6 +2959,7 @@ impl<'de> Deserialize<'de> for ReplayJournal {
             boundaries: wire.boundaries,
             final_time: wire.final_time,
             checkpoint_hash: wire.checkpoint_hash,
+            commitment_format_version: wire.commitment_format_version,
             revision_format_version: wire.revision_format_version,
             final_revision: wire.final_revision,
         })
@@ -3145,6 +3177,8 @@ impl Simulation {
                     run_manifest_hash,
                     run_configuration,
                     checkpoint_hash: String::new(),
+                    commitment_format_version: COMMITMENT_FORMAT_VERSION,
+                    commitment_roots: None,
                     plugin_registration_closed: false,
                     replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
                 },
@@ -3278,6 +3312,18 @@ impl Simulation {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
+        if !matches!(
+            journal.commitment_format_version,
+            0 | COMMITMENT_FORMAT_VERSION
+        ) {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                format!(
+                    "replay journal commitment format {} is unsupported; this engine reads legacy format 0 and current format {COMMITMENT_FORMAT_VERSION}",
+                    journal.commitment_format_version
+                ),
+            ));
+        }
         if journal.revision_format_version != STATE_REVISION_FORMAT_VERSION {
             return Err(CanwuError::new(
                 ErrorCode::LegacyReplayUnavailable,
@@ -3327,12 +3373,17 @@ impl Simulation {
             },
         )?;
 
-        let simulation = Self::new_with_configuration_snapshot(
+        let mut simulation = Self::new_with_configuration_snapshot(
             normalized.root_seed,
             scenario,
             normalized.run_manifest.clone(),
             normalized.run_configuration.clone(),
         )?;
+        if normalized.commitment_format_version == 0 {
+            simulation.state.metadata.commitment_format_version = 0;
+            simulation.state.metadata.commitment_roots = None;
+            simulation.refresh_checkpoint_hash()?;
+        }
         let simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
         if actual_descriptors != normalized.plugin_descriptors {
@@ -3796,6 +3847,7 @@ impl Simulation {
             boundaries: self.state.evidence.boundaries.clone(),
             final_time: self.state.scheduler.now,
             checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
+            commitment_format_version: self.state.metadata.commitment_format_version,
             revision_format_version: self.state.metadata.replay_revision_format_version,
             final_revision: self.state.counters.state_revision,
         }
@@ -5114,17 +5166,116 @@ impl Simulation {
         })
     }
 
-    fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
-        let state_hash = self.compute_boundary_state_hash()?;
-        self.state.metadata.checkpoint_hash = checkpoint_hash_for_configuration(
-            &state_hash,
-            self.boundary_head_hash(),
+    fn compute_commitment_roots(&self) -> Result<CommitmentRoots, CanwuError> {
+        let world = self.world();
+        let plugin_components: Vec<_> = self
+            .state
+            .current
+            .plugin_components
+            .values()
+            .cloned()
+            .collect();
+        let domain_records: Vec<_> = self
+            .state
+            .current
+            .domain_records
+            .values()
+            .cloned()
+            .collect();
+        let plugin_descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
+        let scheduled: Vec<_> = self
+            .state
+            .scheduler
+            .actions
+            .iter()
+            .map(|(key, action)| ScheduledRecord {
+                key: key.clone(),
+                action: action.clone(),
+            })
+            .collect();
+        let random_streams: Vec<_> = self
+            .state
+            .current
+            .random_streams
+            .values()
+            .cloned()
+            .collect();
+        let (authoritative_manifest, authoritative_manifest_hash) = authoritative_run_identity(
+            &self.state.metadata.run_manifest,
             &self.state.metadata.run_manifest_hash,
             &self.state.metadata.run_configuration,
-            STATE_REVISION_FORMAT_VERSION,
-            self.state.counters.state_revision,
-            self.state.metadata.replay_revision_format_version,
         )?;
+        let initial_scenario = self.bound_initial_scenario();
+        commitment_roots(
+            &StateHashMaterial {
+                engine_version: ENGINE_VERSION,
+                snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
+                run_manifest: &authoritative_manifest,
+                run_manifest_hash: &authoritative_manifest_hash,
+                initial_time: self.state.scheduler.initial_time,
+                initial_scenario,
+                now: self.state.scheduler.now,
+                plugin_registration_closed: self.state.metadata.plugin_registration_closed,
+                world: &world,
+                knowledge: &self.state.current.knowledge,
+                events: &self.state.evidence.events,
+                commands: &self.state.evidence.commands,
+                command_attempts: &self.state.evidence.command_attempts,
+                ingress: &self.state.evidence.ingress,
+                plugin_components: &plugin_components,
+                domain_records: &domain_records,
+                plugin_descriptors: &plugin_descriptors,
+                schema: &self.schema,
+                scheduled: &scheduled,
+                root_seed: self.state.current.root_seed,
+                random_streams: &random_streams,
+                random_draws: &self.state.evidence.random_draws,
+                next_event_id: self.state.counters.next_event_id,
+                next_command_id: self.state.counters.next_command_id,
+                next_command_attempt_id: self.state.counters.next_command_attempt_id,
+                next_ingress_id: self.state.counters.next_ingress_id,
+                next_boundary_id: self.state.counters.next_boundary_id,
+                next_random_draw_id: self.state.counters.next_random_draw_id,
+                next_schedule_sequence: self.state.counters.next_schedule_sequence,
+                next_correlation_id: self.state.counters.next_correlation_id,
+            },
+            self.boundary_head_hash(),
+        )
+    }
+
+    fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
+        if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION {
+            let roots = self.compute_commitment_roots()?;
+            self.state.metadata.checkpoint_hash = checkpoint_hash_for_commitments(
+                &roots,
+                &self.state.metadata.run_manifest_hash,
+                self.state.metadata.commitment_format_version,
+                STATE_REVISION_FORMAT_VERSION,
+                self.state.counters.state_revision,
+                self.state.metadata.replay_revision_format_version,
+            )?;
+            self.state.metadata.commitment_roots = Some(roots);
+        } else if self.state.metadata.commitment_format_version == 0 {
+            let state_hash = self.compute_boundary_state_hash()?;
+            self.state.metadata.checkpoint_hash = checkpoint_hash_for_configuration(
+                &state_hash,
+                self.boundary_head_hash(),
+                &self.state.metadata.run_manifest_hash,
+                &self.state.metadata.run_configuration,
+                STATE_REVISION_FORMAT_VERSION,
+                self.state.counters.state_revision,
+                self.state.metadata.replay_revision_format_version,
+            )?;
+            self.state.metadata.commitment_roots = None;
+        } else {
+            return Err(CanwuError::new(
+                ErrorCode::UnsupportedSnapshotVersion,
+                format!(
+                    "commitment format {} is unsupported; this engine writes format {COMMITMENT_FORMAT_VERSION}",
+                    self.state.metadata.commitment_format_version
+                ),
+            ));
+        }
         Ok(())
     }
 
@@ -5148,6 +5299,8 @@ impl Simulation {
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
             run_configuration: Some(self.state.metadata.run_configuration.clone()),
             checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
+            commitment_format_version: self.state.metadata.commitment_format_version,
+            commitment_roots: self.state.metadata.commitment_roots.clone(),
             revision_format_version: STATE_REVISION_FORMAT_VERSION,
             state_revision: self.state.counters.state_revision,
             replay_revision_format_version: self.state.metadata.replay_revision_format_version,
@@ -5355,6 +5508,8 @@ impl Simulation {
                         invalid_snapshot_error("snapshot is missing its run configuration")
                     })?,
                     checkpoint_hash: snapshot.checkpoint_hash.clone(),
+                    commitment_format_version: snapshot.commitment_format_version,
+                    commitment_roots: snapshot.commitment_roots.clone(),
                     plugin_registration_closed: snapshot.plugin_registration_closed,
                     replay_revision_format_version: snapshot.replay_revision_format_version,
                 },
@@ -8170,18 +8325,21 @@ fn validate_snapshot(
     }
     let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
     let current_state_hash = snapshot_state_hash(snapshot)?;
-    let expected_checkpoint_hash = checkpoint_hash_for_configuration(
-        &current_state_hash,
-        snapshot
-            .boundaries
-            .last()
-            .map(|record| record.hash.as_str()),
-        &snapshot.run_manifest_hash,
-        run_configuration,
-        snapshot.revision_format_version,
-        snapshot.state_revision,
-        snapshot.replay_revision_format_version,
-    )?;
+    if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {
+        let persisted_roots = snapshot.commitment_roots.as_ref().ok_or_else(|| {
+            invalid_snapshot_error("current commitment snapshot is missing its domain roots")
+        })?;
+        if !commitment_roots_are_canonical(persisted_roots)
+            || snapshot_commitment_roots(snapshot)? != *persisted_roots
+        {
+            return invalid_snapshot(
+                "persisted commitment roots do not match the canonical snapshot domains",
+            );
+        }
+    } else if snapshot.commitment_format_version != 0 || snapshot.commitment_roots.is_some() {
+        return invalid_snapshot("snapshot commitment metadata is inconsistent");
+    }
+    let expected_checkpoint_hash = snapshot_checkpoint_hash(snapshot)?;
     if !is_canonical_hash(&snapshot.checkpoint_hash)
         || expected_checkpoint_hash != snapshot.checkpoint_hash
     {
@@ -10616,14 +10774,19 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             hydrate_snapshot_run_configuration(&mut snapshot)?;
             migrate_snapshot_revision(&mut snapshot)?;
             migrate_snapshot_admission_cursors(&mut snapshot)?;
+            migrate_snapshot_commitments(&mut snapshot)?;
             Ok(snapshot)
         }
         2 => {
             if snapshot.run_manifest.is_some()
                 || !snapshot.run_manifest_hash.is_empty()
                 || !snapshot.checkpoint_hash.is_empty()
+                || snapshot.commitment_format_version != 0
+                || snapshot.commitment_roots.is_some()
             {
-                return invalid_snapshot("format 2 snapshots cannot contain current manifest data");
+                return invalid_snapshot(
+                    "format 2 snapshots cannot contain current manifest or commitment data",
+                );
             }
             validate_legacy_ingress_shape(&snapshot)?;
             let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
@@ -10638,8 +10801,12 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
             if snapshot.run_manifest.is_some()
                 || !snapshot.run_manifest_hash.is_empty()
                 || !snapshot.checkpoint_hash.is_empty()
+                || snapshot.commitment_format_version != 0
+                || snapshot.commitment_roots.is_some()
             {
-                return invalid_snapshot("format 3 snapshots cannot contain current manifest data");
+                return invalid_snapshot(
+                    "format 3 snapshots cannot contain current manifest or commitment data",
+                );
             }
             validate_legacy_ingress_shape(&snapshot)?;
             let checkpoint_hash = canonical_hash("canwu.legacy-checkpoint.v1", &snapshot)?;
@@ -10732,6 +10899,44 @@ fn migrate_snapshot_admission_cursors(snapshot: &mut SimulationSnapshot) -> Resu
             ErrorCode::UnsupportedSnapshotVersion,
             format!(
                 "admission cursor format {version} is unsupported; this engine reads legacy format 0 and current format {ADMISSION_CURSOR_FORMAT_VERSION}"
+            ),
+        )),
+    }
+}
+
+fn migrate_snapshot_commitments(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
+    match snapshot.commitment_format_version {
+        COMMITMENT_FORMAT_VERSION => {
+            if snapshot.commitment_roots.is_none() {
+                return invalid_snapshot(
+                    "current commitment snapshot is missing its persisted domain roots",
+                );
+            }
+            Ok(())
+        }
+        0 => {
+            if snapshot.commitment_roots.is_some() {
+                return invalid_snapshot(
+                    "legacy commitment snapshot cannot contain current domain roots",
+                );
+            }
+            let legacy_checkpoint = snapshot_checkpoint_hash(snapshot)?;
+            if !is_canonical_hash(&snapshot.checkpoint_hash)
+                || legacy_checkpoint != snapshot.checkpoint_hash
+            {
+                return invalid_snapshot(
+                    "legacy checkpoint hash does not bind the pre-commitment state",
+                );
+            }
+            snapshot.commitment_roots = Some(snapshot_commitment_roots(snapshot)?);
+            snapshot.commitment_format_version = COMMITMENT_FORMAT_VERSION;
+            snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)?;
+            Ok(())
+        }
+        version => Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "commitment format {version} is unsupported; this engine reads legacy format 0 and current format {COMMITMENT_FORMAT_VERSION}"
             ),
         )),
     }
@@ -11194,6 +11399,7 @@ fn migrate_format_3_snapshot(
     ENGINE_VERSION.clone_into(&mut snapshot.engine_version);
     snapshot.snapshot_format_version = SNAPSHOT_FORMAT_VERSION;
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(&snapshot)?;
+    migrate_snapshot_commitments(&mut snapshot)?;
     Ok(snapshot)
 }
 
@@ -11266,6 +11472,60 @@ struct StateHashMaterial<'a> {
 }
 
 #[derive(Serialize)]
+struct WorldCommitmentMaterial {
+    people: String,
+    governments: String,
+    territories: String,
+    routes: String,
+    armies: String,
+}
+
+#[derive(Serialize)]
+struct SchedulerCommitmentMaterial {
+    now: SimTime,
+    scheduled: String,
+}
+
+#[derive(Serialize)]
+struct CommandCommitmentMaterial {
+    commands: String,
+    attempts: String,
+}
+
+#[derive(Serialize)]
+struct RandomCommitmentMaterial {
+    root_seed: u64,
+    streams: String,
+    draws: String,
+}
+
+#[derive(Serialize)]
+struct IdentityCommitmentMaterial<'a> {
+    engine_version: &'a str,
+    snapshot_format_version: u32,
+    run_manifest: &'a RunManifest,
+    run_manifest_hash: &'a str,
+    initial_time: SimTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_scenario: Option<&'a Scenario>,
+    plugin_descriptors: String,
+    schema: &'a SchemaRegistry,
+}
+
+#[derive(Serialize)]
+struct ControlCommitmentMaterial {
+    plugin_registration_closed: bool,
+    next_event_id: u64,
+    next_command_id: u64,
+    next_command_attempt_id: u64,
+    next_ingress_id: u64,
+    next_boundary_id: u64,
+    next_random_draw_id: u64,
+    next_schedule_sequence: u64,
+    next_correlation_id: u64,
+}
+
+#[derive(Serialize)]
 struct CheckpointHashMaterialV1<'a> {
     state_hash: &'a str,
     boundary_head: Option<&'a str>,
@@ -11289,8 +11549,186 @@ struct CheckpointHashMaterialV3<'a> {
     replay_revision_format_version: u32,
 }
 
+#[derive(Serialize)]
+struct CheckpointHashMaterialV4<'a> {
+    commitments: &'a CommitmentRoots,
+    run_manifest_hash: &'a str,
+    commitment_format_version: u32,
+    revision_format_version: u32,
+    state_revision: u64,
+    replay_revision_format_version: u32,
+}
+
 fn state_hash(material: &StateHashMaterial<'_>) -> Result<String, CanwuError> {
     canonical_hash("canwu.boundary-state.v1", material)
+}
+
+fn canonical_sorted_hash_by<T, K, F>(
+    domain: &str,
+    values: &[T],
+    mut key: F,
+) -> Result<String, CanwuError>
+where
+    T: Serialize,
+    K: Ord,
+    F: FnMut(&T) -> K,
+{
+    let mut ordered: Vec<_> = values.iter().collect();
+    ordered.sort_by_key(|value| key(value));
+    canonical_hash(domain, &ordered)
+}
+
+fn commitment_roots(
+    material: &StateHashMaterial<'_>,
+    boundary_head: Option<&str>,
+) -> Result<CommitmentRoots, CanwuError> {
+    let world = canonical_hash(
+        "canwu.commitment.world.v1",
+        &WorldCommitmentMaterial {
+            people: canonical_sorted_hash_by(
+                "canwu.commitment.world.people.v1",
+                &material.world.people,
+                |value| value.id,
+            )?,
+            governments: canonical_sorted_hash_by(
+                "canwu.commitment.world.governments.v1",
+                &material.world.governments,
+                |value| value.id,
+            )?,
+            territories: canonical_sorted_hash_by(
+                "canwu.commitment.world.territories.v1",
+                &material.world.territories,
+                |value| value.id,
+            )?,
+            routes: canonical_sorted_hash_by(
+                "canwu.commitment.world.routes.v1",
+                &material.world.routes,
+                |value| value.id,
+            )?,
+            armies: canonical_sorted_hash_by(
+                "canwu.commitment.world.armies.v1",
+                &material.world.armies,
+                |value| value.id,
+            )?,
+        },
+    )?;
+    let knowledge = canonical_hash("canwu.commitment.knowledge.v1", material.knowledge)?;
+    let plugin_components = canonical_sorted_hash_by(
+        "canwu.commitment.plugin-components.v1",
+        material.plugin_components,
+        |record| {
+            component_key(
+                &record.plugin,
+                &record.state,
+                &record.entity,
+                &record.component,
+            )
+        },
+    )?;
+    let domain_records = canonical_sorted_hash_by(
+        "canwu.commitment.domain-records.v1",
+        material.domain_records,
+        |record| record.reference.clone(),
+    )?;
+    let scheduler = canonical_hash(
+        "canwu.commitment.scheduler.v1",
+        &SchedulerCommitmentMaterial {
+            now: material.now,
+            scheduled: canonical_sorted_hash_by(
+                "canwu.commitment.scheduler.entries.v1",
+                material.scheduled,
+                |record| record.key.clone(),
+            )?,
+        },
+    )?;
+    let commands = canonical_hash(
+        "canwu.commitment.commands.v1",
+        &CommandCommitmentMaterial {
+            commands: canonical_sorted_hash_by(
+                "canwu.commitment.commands.accepted.v1",
+                material.commands,
+                |record| record.id,
+            )?,
+            attempts: canonical_sorted_hash_by(
+                "canwu.commitment.commands.attempts.v1",
+                material.command_attempts,
+                |record| record.id,
+            )?,
+        },
+    )?;
+    let events =
+        canonical_sorted_hash_by("canwu.commitment.events.v1", material.events, |event| {
+            event.id
+        })?;
+    let ingress =
+        canonical_sorted_hash_by("canwu.commitment.ingress.v1", material.ingress, |record| {
+            record.id
+        })?;
+    let random = canonical_hash(
+        "canwu.commitment.random.v1",
+        &RandomCommitmentMaterial {
+            root_seed: material.root_seed,
+            streams: canonical_sorted_hash_by(
+                "canwu.commitment.random.streams.v1",
+                material.random_streams,
+                |stream| stream.key.clone(),
+            )?,
+            draws: canonical_sorted_hash_by(
+                "canwu.commitment.random.draws.v1",
+                material.random_draws,
+                |draw| draw.id,
+            )?,
+        },
+    )?;
+    let boundary_chain = canonical_hash(
+        "canwu.commitment.boundary-chain.v1",
+        boundary_head.unwrap_or(GENESIS_BOUNDARY_HASH),
+    )?;
+    let identity = canonical_hash(
+        "canwu.commitment.identity.v1",
+        &IdentityCommitmentMaterial {
+            engine_version: material.engine_version,
+            snapshot_format_version: material.snapshot_format_version,
+            run_manifest: material.run_manifest,
+            run_manifest_hash: material.run_manifest_hash,
+            initial_time: material.initial_time,
+            initial_scenario: material.initial_scenario,
+            plugin_descriptors: canonical_sorted_hash_by(
+                "canwu.commitment.identity.plugins.v1",
+                material.plugin_descriptors,
+                |descriptor| descriptor.name.clone(),
+            )?,
+            schema: material.schema,
+        },
+    )?;
+    let control = canonical_hash(
+        "canwu.commitment.control.v1",
+        &ControlCommitmentMaterial {
+            plugin_registration_closed: material.plugin_registration_closed,
+            next_event_id: material.next_event_id,
+            next_command_id: material.next_command_id,
+            next_command_attempt_id: material.next_command_attempt_id,
+            next_ingress_id: material.next_ingress_id,
+            next_boundary_id: material.next_boundary_id,
+            next_random_draw_id: material.next_random_draw_id,
+            next_schedule_sequence: material.next_schedule_sequence,
+            next_correlation_id: material.next_correlation_id,
+        },
+    )?;
+    Ok(CommitmentRoots {
+        world,
+        knowledge,
+        plugin_components,
+        domain_records,
+        scheduler,
+        commands,
+        events,
+        ingress,
+        random,
+        boundary_chain,
+        identity,
+        control,
+    })
 }
 
 fn authoritative_run_identity(
@@ -11370,6 +11808,61 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
     })
 }
 
+fn snapshot_commitment_roots(snapshot: &SimulationSnapshot) -> Result<CommitmentRoots, CanwuError> {
+    let Some(run_manifest) = &snapshot.run_manifest else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRunManifest,
+            "snapshot is missing its run manifest",
+        ));
+    };
+    let run_configuration = snapshot.run_configuration.as_ref().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidRunConfiguration,
+            "snapshot is missing its run configuration",
+        )
+    })?;
+    let (authoritative_manifest, authoritative_manifest_hash) =
+        authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
+    commitment_roots(
+        &StateHashMaterial {
+            engine_version: &snapshot.engine_version,
+            snapshot_format_version: snapshot.snapshot_format_version,
+            run_manifest: &authoritative_manifest,
+            run_manifest_hash: &authoritative_manifest_hash,
+            initial_time: snapshot.initial_time,
+            initial_scenario: snapshot.initial_scenario.as_ref(),
+            now: snapshot.now,
+            plugin_registration_closed: snapshot.plugin_registration_closed,
+            world: &snapshot.world,
+            knowledge: &snapshot.knowledge,
+            events: &snapshot.events,
+            commands: &snapshot.commands,
+            command_attempts: &snapshot.command_attempts,
+            ingress: &snapshot.ingress,
+            plugin_components: &snapshot.plugin_components,
+            domain_records: &snapshot.domain_records,
+            plugin_descriptors: &snapshot.plugin_descriptors,
+            schema: &snapshot.schema,
+            scheduled: &snapshot.scheduled,
+            root_seed: snapshot.root_seed,
+            random_streams: &snapshot.random_streams,
+            random_draws: &snapshot.random_draws,
+            next_event_id: snapshot.next_event_id,
+            next_command_id: snapshot.next_command_id,
+            next_command_attempt_id: snapshot.next_command_attempt_id,
+            next_ingress_id: snapshot.next_ingress_id,
+            next_boundary_id: snapshot.next_boundary_id,
+            next_random_draw_id: snapshot.next_random_draw_id,
+            next_schedule_sequence: snapshot.next_schedule_sequence,
+            next_correlation_id: snapshot.next_correlation_id,
+        },
+        snapshot
+            .boundaries
+            .last()
+            .map(|record| record.hash.as_str()),
+    )
+}
+
 fn checkpoint_hash(state_hash: &str, boundary_head: Option<&str>) -> Result<String, CanwuError> {
     canonical_hash(
         "canwu.checkpoint.v1",
@@ -11427,25 +11920,87 @@ fn checkpoint_hash_for_configuration(
     )
 }
 
-fn snapshot_checkpoint_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
-    let state_hash = snapshot_state_hash(snapshot)?;
-    checkpoint_hash_for_configuration(
-        &state_hash,
-        snapshot
-            .boundaries
-            .last()
-            .map(|record| record.hash.as_str()),
-        &snapshot.run_manifest_hash,
-        snapshot.run_configuration.as_ref().ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidRunConfiguration,
-                "snapshot is missing its run configuration",
-            )
-        })?,
-        snapshot.revision_format_version,
-        snapshot.state_revision,
-        snapshot.replay_revision_format_version,
+fn checkpoint_hash_for_commitments(
+    commitments: &CommitmentRoots,
+    run_manifest_hash: &str,
+    commitment_format_version: u32,
+    revision_format_version: u32,
+    state_revision: u64,
+    replay_revision_format_version: u32,
+) -> Result<String, CanwuError> {
+    if commitment_format_version != COMMITMENT_FORMAT_VERSION {
+        return Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "commitment format {commitment_format_version} is unsupported; this engine writes format {COMMITMENT_FORMAT_VERSION}"
+            ),
+        ));
+    }
+    if revision_format_version != STATE_REVISION_FORMAT_VERSION {
+        return Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "commitment format {commitment_format_version} requires state revision format {STATE_REVISION_FORMAT_VERSION}"
+            ),
+        ));
+    }
+    canonical_hash(
+        "canwu.checkpoint.v4",
+        &CheckpointHashMaterialV4 {
+            commitments,
+            run_manifest_hash,
+            commitment_format_version,
+            revision_format_version,
+            state_revision,
+            replay_revision_format_version,
+        },
     )
+}
+
+fn snapshot_checkpoint_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuError> {
+    match snapshot.commitment_format_version {
+        COMMITMENT_FORMAT_VERSION => checkpoint_hash_for_commitments(
+            snapshot.commitment_roots.as_ref().ok_or_else(|| {
+                invalid_snapshot_error("current commitment snapshot is missing its domain roots")
+            })?,
+            &snapshot.run_manifest_hash,
+            snapshot.commitment_format_version,
+            snapshot.revision_format_version,
+            snapshot.state_revision,
+            snapshot.replay_revision_format_version,
+        ),
+        0 => {
+            if snapshot.commitment_roots.is_some() {
+                return invalid_snapshot(
+                    "legacy commitment snapshot cannot contain current domain roots",
+                );
+            }
+            let state_hash = snapshot_state_hash(snapshot)?;
+            checkpoint_hash_for_configuration(
+                &state_hash,
+                snapshot
+                    .boundaries
+                    .last()
+                    .map(|record| record.hash.as_str()),
+                &snapshot.run_manifest_hash,
+                snapshot.run_configuration.as_ref().ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidRunConfiguration,
+                        "snapshot is missing its run configuration",
+                    )
+                })?,
+                snapshot.revision_format_version,
+                snapshot.state_revision,
+                snapshot.replay_revision_format_version,
+            )
+        }
+        version => Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "commitment format {version} is unsupported; this engine reads legacy format 0 and current format {COMMITMENT_FORMAT_VERSION}"
+            ),
+        )),
+    }
 }
 
 fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> bool {
@@ -11566,6 +12121,25 @@ fn is_canonical_hash(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn commitment_roots_are_canonical(roots: &CommitmentRoots) -> bool {
+    [
+        &roots.world,
+        &roots.knowledge,
+        &roots.plugin_components,
+        &roots.domain_records,
+        &roots.scheduler,
+        &roots.commands,
+        &roots.events,
+        &roots.ingress,
+        &roots.random,
+        &roots.boundary_chain,
+        &roots.identity,
+        &roots.control,
+    ]
+    .into_iter()
+    .all(|root| is_canonical_hash(root))
 }
 
 fn invalid_snapshot_error(message: impl Into<String>) -> CanwuError {
@@ -12960,8 +13534,23 @@ mod tests {
                 compute_boundary_hash(boundary).expect("tampered boundary should still hash");
             previous_hash.clone_from(&boundary.hash);
         }
+        refresh_snapshot_commitments_and_checkpoint(snapshot);
+    }
+
+    fn refresh_snapshot_commitments_and_checkpoint(snapshot: &mut SimulationSnapshot) {
+        if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {
+            snapshot.commitment_roots = Some(
+                snapshot_commitment_roots(snapshot)
+                    .expect("snapshot domains should produce commitment roots"),
+            );
+        }
         snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)
             .expect("tampered snapshot should still have a coherent outer commitment");
+    }
+
+    fn downgrade_snapshot_commitments(snapshot: &mut SimulationSnapshot) {
+        snapshot.commitment_format_version = 0;
+        snapshot.commitment_roots = None;
     }
 
     fn record_lifecycle_proposal(context: &BoundaryContext, delete_only: bool) -> BoundaryProposal {
@@ -13726,8 +14315,7 @@ mod tests {
         let mut cyclic_cause = after_stale.clone();
         let event_id = cyclic_cause.events[0].id;
         cyclic_cause.events[0].cause = Some(CauseRef::Event(event_id));
-        cyclic_cause.checkpoint_hash = snapshot_checkpoint_hash(&cyclic_cause)
-            .expect("cyclic cause fixture should carry a coherent container commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut cyclic_cause);
         let Err(error) = Simulation::from_snapshot(cyclic_cause) else {
             panic!("event cause cycles must be rejected without unbounded traversal");
         };
@@ -13737,8 +14325,7 @@ mod tests {
         let mut forged = after_stale;
         forged.command_attempts[0].envelope.issuer = Issuer::Human("controller.other".to_owned());
         forged.commands[0].envelope = forged.command_attempts[0].envelope.clone();
-        forged.checkpoint_hash = snapshot_checkpoint_hash(&forged)
-            .expect("the forged fixture should carry a coherent container commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut forged);
         let Err(error) = Simulation::from_snapshot(forged) else {
             panic!("accepted attempts that violate recorded policy must not load");
         };
@@ -13907,8 +14494,7 @@ mod tests {
         forged.run_manifest = before.run_manifest;
         forged.run_manifest_hash = before.run_manifest_hash;
         forged.run_configuration = before.run_configuration;
-        forged.checkpoint_hash = snapshot_checkpoint_hash(&forged)
-            .expect("forged container should have a coherent commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut forged);
         let Err(error) = Simulation::from_snapshot(forged) else {
             panic!("declared snapshots cannot smuggle untracked accepted commands");
         };
@@ -14174,6 +14760,7 @@ mod tests {
             .state_hash = Some(legacy_state_hash);
         rehash_snapshot_boundaries(&mut legacy_snapshot)
             .expect("legacy boundary evidence should hash canonically");
+        downgrade_snapshot_commitments(&mut legacy_snapshot);
         legacy_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&legacy_snapshot)
             .expect("legacy checkpoint should bind its pre-migration state");
         let mut legacy_value =
@@ -14306,6 +14893,7 @@ mod tests {
         legacy_snapshot.boundaries[1].state_hash = Some(second_state_hash);
         rehash_snapshot_boundaries(&mut legacy_snapshot)
             .expect("legacy ingress boundary chain should hash");
+        downgrade_snapshot_commitments(&mut legacy_snapshot);
         legacy_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&legacy_snapshot)
             .expect("legacy ingress checkpoint should hash");
         let mut legacy_value =
@@ -14663,8 +15251,7 @@ mod tests {
 
         let mut forged_live_ingress = frozen_source.snapshot();
         forged_live_ingress.command_attempts[0].ingress = CommandIngress::LiveRequest;
-        forged_live_ingress.checkpoint_hash = snapshot_checkpoint_hash(&forged_live_ingress)
-            .expect("the forged fixture should carry a coherent container commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut forged_live_ingress);
         let Err(error) = Simulation::from_snapshot(forged_live_ingress) else {
             panic!("live ingress cannot be relabeled as an accepted replay command");
         };
@@ -14846,6 +15433,123 @@ mod tests {
     }
 
     #[test]
+    fn domain_commitments_migrate_replay_and_reject_each_tampered_root() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(97, scenario.clone()).expect("the commitment fixture should load");
+        simulation
+            .submit(move_order(&ids))
+            .expect("the commitment fixture should accept its command");
+        simulation
+            .advance(SimDuration::days(1))
+            .expect("the commitment fixture should execute scheduled work");
+        let snapshot = simulation.snapshot();
+        assert_eq!(
+            snapshot.commitment_format_version,
+            COMMITMENT_FORMAT_VERSION
+        );
+        assert!(commitment_roots_are_canonical(
+            snapshot
+                .commitment_roots
+                .as_ref()
+                .expect("current snapshots should persist domain roots")
+        ));
+
+        let expected_roots = snapshot_commitment_roots(&snapshot)
+            .expect("the canonical snapshot should produce roots");
+        let mut reordered = snapshot.clone();
+        reordered.world.people.reverse();
+        reordered.world.governments.reverse();
+        reordered.world.territories.reverse();
+        reordered.world.routes.reverse();
+        reordered.world.armies.reverse();
+        reordered.events.reverse();
+        reordered.commands.reverse();
+        reordered.command_attempts.reverse();
+        reordered.ingress.reverse();
+        reordered.plugin_components.reverse();
+        reordered.domain_records.reverse();
+        reordered.plugin_descriptors.reverse();
+        reordered.random_streams.reverse();
+        reordered.random_draws.reverse();
+        reordered.scheduled.reverse();
+        assert_eq!(
+            snapshot_commitment_roots(&reordered)
+                .expect("collection insertion order should not affect roots"),
+            expected_roots
+        );
+
+        for root_name in [
+            "world",
+            "knowledge",
+            "plugin_components",
+            "domain_records",
+            "scheduler",
+            "commands",
+            "events",
+            "ingress",
+            "random",
+            "boundary_chain",
+            "identity",
+            "control",
+        ] {
+            let mut forged = snapshot.clone();
+            let mut roots_value = serde_json::to_value(
+                forged
+                    .commitment_roots
+                    .as_ref()
+                    .expect("the fixture should persist roots"),
+            )
+            .expect("commitment roots should become JSON");
+            roots_value
+                .as_object_mut()
+                .expect("commitment roots should be an object")
+                .insert(root_name.to_owned(), Value::String("0".repeat(64)));
+            forged.commitment_roots = Some(
+                serde_json::from_value(roots_value)
+                    .expect("the forged commitment roots should deserialize"),
+            );
+            forged.checkpoint_hash = snapshot_checkpoint_hash(&forged)
+                .expect("the forged roots should produce a coherent outer checkpoint");
+            let error = Simulation::from_snapshot(forged)
+                .err()
+                .expect("every forged domain root must be rejected");
+            assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+            assert!(error.message.contains("commitment roots"));
+        }
+
+        let mut legacy_snapshot = snapshot.clone();
+        downgrade_snapshot_commitments(&mut legacy_snapshot);
+        legacy_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&legacy_snapshot)
+            .expect("the legacy fixture should reproduce checkpoint v3");
+        let legacy_checkpoint = legacy_snapshot.checkpoint_hash.clone();
+        let migrated = Simulation::from_snapshot(legacy_snapshot.clone())
+            .expect("a verified legacy checkpoint should derive current roots");
+        assert_eq!(
+            migrated.snapshot().commitment_format_version,
+            COMMITMENT_FORMAT_VERSION
+        );
+        assert_ne!(migrated.checkpoint_hash(), legacy_checkpoint);
+
+        let mut tampered_legacy = legacy_snapshot;
+        tampered_legacy.world.armies[0].morale += 1;
+        let error = Simulation::from_snapshot(tampered_legacy)
+            .err()
+            .expect("migration must verify the old checkpoint before deriving roots");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("pre-commitment state"));
+
+        let mut legacy_journal = simulation.replay_journal();
+        legacy_journal.commitment_format_version = 0;
+        legacy_journal.checkpoint_hash = legacy_checkpoint;
+        let replayed = Simulation::replay_from_journal(scenario, &[], &legacy_journal)
+            .expect("legacy commitment journals should replay under checkpoint v3");
+        assert_eq!(replayed.snapshot().commitment_format_version, 0);
+        assert!(replayed.snapshot().commitment_roots.is_none());
+        assert_eq!(replayed.checkpoint_hash(), legacy_journal.checkpoint_hash);
+    }
+
+    #[test]
     fn snapshot_round_trip_preserves_pending_work() {
         let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
         simulation
@@ -14865,8 +15569,7 @@ mod tests {
 
         let mut unmigrated_engine = simulation.snapshot();
         unmigrated_engine.engine_version = "0.4.0-other".to_owned();
-        unmigrated_engine.checkpoint_hash = snapshot_checkpoint_hash(&unmigrated_engine)
-            .expect("the other-engine fixture should carry a coherent commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut unmigrated_engine);
         let Err(error) = Simulation::from_snapshot(unmigrated_engine) else {
             panic!("current-format snapshots from another engine must require migration");
         };
@@ -14882,6 +15585,8 @@ mod tests {
         legacy_object.remove("run_manifest_hash");
         legacy_object.remove("run_configuration");
         legacy_object.remove("checkpoint_hash");
+        legacy_object.remove("commitment_format_version");
+        legacy_object.remove("commitment_roots");
         legacy_object.remove("revision_format_version");
         legacy_object.remove("state_revision");
         legacy_object.remove("replay_revision_format_version");
@@ -14955,8 +15660,7 @@ mod tests {
             })
             .expect("the dispatched report should remain pending");
         scheduled.key.at = changed_arrival;
-        changed_delivery.checkpoint_hash = snapshot_checkpoint_hash(&changed_delivery)
-            .expect("the causally inconsistent fixture should hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut changed_delivery);
         let Err(error) = Simulation::from_snapshot(changed_delivery) else {
             panic!("report timing must remain tied to its recorded random draw");
         };
@@ -14973,8 +15677,7 @@ mod tests {
         core_stream.position = 0;
         core_stream.generator_state = core_stream.seed;
         missing_draw.next_random_draw_id = 1;
-        missing_draw.checkpoint_hash =
-            snapshot_checkpoint_hash(&missing_draw).expect("the draw-omission fixture should hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut missing_draw);
         let Err(error) = Simulation::from_snapshot(missing_draw) else {
             panic!("every report dispatch must retain its generating random draw");
         };
@@ -14991,6 +15694,8 @@ mod tests {
         malformed_object.remove("run_manifest_hash");
         malformed_object.remove("run_configuration");
         malformed_object.remove("checkpoint_hash");
+        malformed_object.remove("commitment_format_version");
+        malformed_object.remove("commitment_roots");
         malformed_object.remove("revision_format_version");
         malformed_object.remove("state_revision");
         malformed_object.remove("replay_revision_format_version");
@@ -15102,8 +15807,7 @@ mod tests {
         legacy.run_manifest_hash = manifest::hash(&run_manifest).expect("manifest should hash");
         legacy.run_manifest = Some(run_manifest);
         legacy.run_configuration = Some(RunConfigurationSnapshot::ManifestOnlyV1);
-        legacy.checkpoint_hash = snapshot_checkpoint_hash(&legacy)
-            .expect("manifest-only fixture should retain its old commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut legacy);
         let expected = legacy.clone();
 
         let mut value = serde_json::to_value(legacy).expect("snapshot should become JSON");
@@ -15225,8 +15929,7 @@ mod tests {
 
         let mut exhausted_counter = simulation.snapshot();
         exhausted_counter.next_command_id = u64::MAX;
-        exhausted_counter.checkpoint_hash = snapshot_checkpoint_hash(&exhausted_counter)
-            .expect("the coherent exhausted fixture should hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut exhausted_counter);
         let mut restored =
             Simulation::from_snapshot(exhausted_counter).expect("the exhausted sentinel is valid");
         let before = restored.snapshot();
@@ -15561,8 +16264,7 @@ mod tests {
         );
         due_at_boundary.boundaries[0].hash = compute_boundary_hash(&due_at_boundary.boundaries[0])
             .expect("the structurally corrupted boundary should hash");
-        due_at_boundary.checkpoint_hash = snapshot_checkpoint_hash(&due_at_boundary)
-            .expect("the structurally corrupted fixture should still hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut due_at_boundary);
         let error = Simulation::from_snapshot(due_at_boundary)
             .err()
             .expect("completed boundaries cannot retain due ingress");
@@ -15582,9 +16284,7 @@ mod tests {
         );
         let mut redundant_initial_scenario = record_free_snapshot.clone();
         redundant_initial_scenario.initial_scenario = Some(scenario.clone());
-        redundant_initial_scenario.checkpoint_hash =
-            snapshot_checkpoint_hash(&redundant_initial_scenario)
-                .expect("redundant record-free genesis should still hash coherently");
+        refresh_snapshot_commitments_and_checkpoint(&mut redundant_initial_scenario);
         let error = Simulation::from_snapshot(redundant_initial_scenario)
             .err()
             .expect("record-free snapshots must not carry ignored genesis state");
@@ -15890,8 +16590,7 @@ mod tests {
         shifted_to_genesis.next_event_id = 1;
         shifted_to_genesis.next_boundary_id = 1;
         shifted_to_genesis.next_correlation_id = 1;
-        shifted_to_genesis.checkpoint_hash = snapshot_checkpoint_hash(&shifted_to_genesis)
-            .expect("history-shift forgery should have a coherent outer commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut shifted_to_genesis);
         let error = Simulation::from_snapshot_with_plugins(shifted_to_genesis, plugins)
             .err()
             .expect("record creations cannot be relabeled as manifest-bound genesis state");
@@ -15906,8 +16605,7 @@ mod tests {
         stripped_feature.next_event_id = 1;
         stripped_feature.next_boundary_id = 1;
         stripped_feature.next_correlation_id = 1;
-        stripped_feature.checkpoint_hash = snapshot_checkpoint_hash(&stripped_feature)
-            .expect("feature-strip forgery should have a coherent outer commitment");
+        refresh_snapshot_commitments_and_checkpoint(&mut stripped_feature);
         let error = Simulation::from_snapshot_with_plugins(stripped_feature, plugins)
             .err()
             .expect("record schemas cannot downgrade to an unbound old-v4 snapshot shape");
@@ -16165,7 +16863,7 @@ mod tests {
             panic!("persisted state cannot change while retaining its checkpoint commitment");
         };
         assert_eq!(error.code, ErrorCode::InvalidSnapshot);
-        assert!(error.message.contains("checkpoint hash"));
+        assert!(error.message.contains("commitment roots"));
 
         let mut missing_state_commitment = primary_only.snapshot();
         missing_state_commitment.boundaries[0].state_hash = None;
@@ -16177,9 +16875,7 @@ mod tests {
         missing_state_commitment.boundaries[1].hash =
             compute_boundary_hash(&missing_state_commitment.boundaries[1])
                 .expect("the dependent boundary should rehash");
-        missing_state_commitment.checkpoint_hash =
-            snapshot_checkpoint_hash(&missing_state_commitment)
-                .expect("the malformed checkpoint should hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut missing_state_commitment);
         let Err(error) = Simulation::from_snapshot_with_plugins(
             missing_state_commitment,
             &[&PrimaryRandomPlugin],
@@ -17038,8 +17734,7 @@ mod tests {
             .expect("forged final time should be representable");
         let mut forged_snapshot = simulation.snapshot();
         forged_snapshot.now = forged_final;
-        forged_snapshot.checkpoint_hash = snapshot_checkpoint_hash(&forged_snapshot)
-            .expect("the forged journal checkpoint should hash");
+        refresh_snapshot_commitments_and_checkpoint(&mut forged_snapshot);
         let mut journal = simulation.replay_journal();
         journal.final_time = forged_final;
         journal.checkpoint_hash = forged_snapshot.checkpoint_hash;

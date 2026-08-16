@@ -112,6 +112,20 @@ from their validated boundary lists. The cursors are redundant derived metadata
 and are deliberately excluded from authoritative state and boundary hashes, so
 this optimization does not reinterpret existing simulation-result commitments.
 
+Format 4 also permits commitment format 1. Current snapshots persist
+domain-separated canonical roots for world, knowledge, plugin components,
+generic records, scheduler state, commands and attempts, events, ingress,
+random state and draws, the boundary chain, authoritative run/plugin identity,
+and runtime control counters. Each unordered collection is sorted by stable
+identity before hashing. Checkpoint domain `canwu.checkpoint.v4` binds those
+roots, the exact run-manifest hash, the commitment format, and the authoritative
+revision contract. A format-0 snapshot is never interpreted under the new
+semantics: loading first recomputes and verifies its checkpoint-v3 full-state
+hash, then derives roots and emits checkpoint v4. Any present format-1 root is
+recomputed and compared independently before the outer checkpoint is accepted.
+Replay journals persist their commitment format; format-0 journals reproduce
+checkpoint v3 exactly, while current journals reproduce checkpoint v4.
+
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,
 controller, seat, observation, interaction, and trace policy do not alter

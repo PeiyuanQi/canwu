@@ -270,14 +270,26 @@ private implementation boundaries. Snapshot and replay formats remain flat,
 and a transaction clone still captures every partition together until staged
 transactions replace full-state rollback.
 
-Every snapshot also stores a recomputed checkpoint hash over the complete
-current deterministic state plus the current boundary-chain head. Snapshot
-loading therefore rejects state, queue, knowledge, plugin-state, random, or
-counter changes that retain an earlier checkpoint commitment. Historical
-boundary state commitments are reproduced by exact replay; when a snapshot is
-exactly at its boundary head, loading also recomputes and compares that
-boundary's state commitment directly. The current checkpoint commitment is
-verified for every snapshot.
+Every current snapshot stores commitment format 1 roots for world, knowledge,
+plugin components, generic records, scheduler state, commands and attempts,
+events, ingress, random state/evidence, the boundary chain, run/plugin identity,
+and runtime control counters. Unordered collections are canonicalized by stable
+identity before hashing, so roots do not depend on insertion order. Checkpoint
+domain `canwu.checkpoint.v4` combines those domain-separated roots with the
+exact run-manifest hash and authoritative revision contract. Loading recomputes
+and compares every root before accepting the outer checkpoint.
+
+Earlier format-4 snapshots carry commitment format 0. Migration verifies their
+checkpoint-v3 full-state commitment first, derives the current roots only from
+that verified state, and writes a checkpoint-v4 commitment; it cannot launder a
+tampered legacy snapshot. Exact replay journals record their commitment format,
+so historical journals can still reproduce checkpoint v3 while current journals
+reproduce checkpoint v4. Historical boundary state commitments remain on their
+existing contract and are reproduced by exact replay; when a snapshot is exactly
+at its boundary head, loading also recomputes and compares that boundary state
+commitment directly. Runtime root refresh is still derived from canonical domain
+material in this foundation milestone; incremental cached updates are the next
+optimization step.
 
 Randomness is available to phased systems only through declared
 `RandomStreamKey` values. The kernel derives each stream from the run root seed,

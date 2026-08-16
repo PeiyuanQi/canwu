@@ -188,6 +188,25 @@ at every scale. At scale 512 the snapshot remains 3,138,540 bytes; elapsed
 medians range from -4.9% to +3.2%, with history growth at -4.9% and exact replay
 at -3.7%. These are treated as local timing variance, not an optimization gain.
 
+## Commitment-roots foundation comparison
+
+The versioned domain-root and checkpoint-v4 foundation is recorded in separate
+[`elapsed`](baselines/2026-08-16-commitment-roots-foundation-elapsed.json) and
+[`allocation`](baselines/2026-08-16-commitment-roots-foundation-allocations.json)
+reports, using the runtime-current-state reports as its before baseline. This
+milestone establishes migration and tamper-evident domain roots; it deliberately
+recomputes them from canonical domain material before the incremental-update
+optimization.
+
+At scale 512, the snapshot grows by 1,084 bytes (3,138,540 to 3,139,624 bytes).
+Splitting one large JSON hash into sorted domain leaves reduces allocated bytes
+by 76,732,594 for history growth and 113,061,982 for exact replay, but adds
+4,486,642 and 6,727,784 allocation operations respectively. Snapshot loading
+adds 12,767 operations and 2,729,571 bytes because it independently recomputes
+and validates every root. Elapsed medians remain noisy: history growth is -1.3%,
+exact replay -1.2%, and load/validate +6.7%. The increased operation counts are
+the concrete baseline the next incremental-root milestone must remove.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
