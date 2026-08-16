@@ -569,3 +569,25 @@ boundaries, -0.3% for load validation, and -0.8% for exact replay. These are
 treated as local timing noise. The milestone makes no runtime-performance
 claim; it gives plugin registration and descriptor hydration a dedicated
 ownership surface while preserving the persistence and execution contracts.
+
+## Replay-module extraction comparison
+
+The behavior-preserving replay extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-replay-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-replay-module-allocations.json) reports,
+using the plugin-module milestone as its before baseline. It moves fixture and
+environment-bound replay entry points, boundary/ingress cut reconstruction, and
+command/attempt record applicators into `canwu-sim/src/replay.rs` without
+changing public signatures, journal formats, migration rules, or final
+checkpoint verification. `canwu-sim/src/lib.rs` falls from 17,503 to 16,891
+lines, with 625 focused lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by -0.4%, accepted commands -2.3%,
+empty boundaries +2.8%, populated boundaries -1.2%, load validation -1.4%, and
+exact replay +1.3%. Snapshot creation moves from 0.737 to 0.781 ms (+6.0%) on a
+sub-millisecond case. These are treated as local timing noise. The milestone
+makes no runtime-performance claim; it gives exact replay and fixture
+reconstruction a dedicated dependency surface while preserving deterministic
+regeneration and environment binding.
