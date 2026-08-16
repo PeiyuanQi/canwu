@@ -832,12 +832,22 @@ impl SimulationView<'_> {
 
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
-        Ok(self.state.commands.iter().find(|record| record.id == id))
+        Ok(self
+            .state
+            .evidence
+            .commands
+            .iter()
+            .find(|record| record.id == id))
     }
 
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
-        Ok(self.state.events.iter().find(|event| event.id == id))
+        Ok(self
+            .state
+            .evidence
+            .events
+            .iter()
+            .find(|event| event.id == id))
     }
 
     pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
@@ -852,7 +862,7 @@ impl SimulationView<'_> {
             .get()
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.state.ingress.get(index))
+            .and_then(|index| self.state.evidence.ingress.get(index))
             .filter(|record| record.id == id);
         if let (Some(owner), Some(record)) = (self.ingress_plugin, record)
             && !matches!(
@@ -2701,6 +2711,16 @@ fn ingress_record_slice_is_empty(value: &&[IngressRecord]) -> bool {
 }
 
 #[derive(Clone)]
+struct RuntimeEvidence {
+    events: Vec<SimEvent>,
+    commands: Vec<CommandRecord>,
+    command_attempts: Vec<CommandAttemptRecord>,
+    ingress: Vec<IngressRecord>,
+    boundaries: Vec<BoundaryRecord>,
+    random_draws: Vec<RandomDrawRecord>,
+}
+
+#[derive(Clone)]
 struct RuntimeState {
     initial_time: SimTime,
     initial_scenario: Option<Scenario>,
@@ -2717,17 +2737,12 @@ struct RuntimeState {
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     scheduler: BTreeMap<ScheduleKey, ScheduledAction>,
-    events: Vec<SimEvent>,
-    commands: Vec<CommandRecord>,
-    command_attempts: Vec<CommandAttemptRecord>,
-    ingress: Vec<IngressRecord>,
+    evidence: RuntimeEvidence,
     pending_ingress: BTreeSet<IngressQueueKey>,
-    boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
     root_seed: u64,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
-    random_draws: Vec<RandomDrawRecord>,
     next_event_id: u64,
     next_command_id: u64,
     next_command_attempt_id: u64,
@@ -3083,12 +3098,15 @@ impl Simulation {
                     .collect(),
                 knowledge: scenario.knowledge,
                 scheduler: BTreeMap::new(),
-                events: Vec::new(),
-                commands: Vec::new(),
-                command_attempts: Vec::new(),
-                ingress: Vec::new(),
+                evidence: RuntimeEvidence {
+                    events: Vec::new(),
+                    commands: Vec::new(),
+                    command_attempts: Vec::new(),
+                    ingress: Vec::new(),
+                    boundaries: Vec::new(),
+                    random_draws: Vec::new(),
+                },
                 pending_ingress: BTreeSet::new(),
-                boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
                 domain_records: scenario
                     .domain_records
@@ -3097,7 +3115,6 @@ impl Simulation {
                     .collect(),
                 root_seed: seed,
                 random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
-                random_draws: Vec::new(),
                 next_event_id: 1,
                 next_command_id: 1,
                 next_command_attempt_id: 1,
@@ -3596,6 +3613,7 @@ impl Simulation {
             || !self.state.domain_records.is_empty()
             || self
                 .state
+                .evidence
                 .boundaries
                 .iter()
                 .any(|boundary| !boundary.record_changes.is_empty())
@@ -3671,22 +3689,22 @@ impl Simulation {
 
     #[must_use]
     pub fn events(&self) -> &[SimEvent] {
-        &self.state.events
+        &self.state.evidence.events
     }
 
     #[must_use]
     pub fn command_log(&self) -> &[CommandRecord] {
-        &self.state.commands
+        &self.state.evidence.commands
     }
 
     #[must_use]
     pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
-        &self.state.command_attempts
+        &self.state.evidence.command_attempts
     }
 
     #[must_use]
     pub fn ingress_log(&self) -> &[IngressRecord] {
-        &self.state.ingress
+        &self.state.evidence.ingress
     }
 
     #[must_use]
@@ -3700,17 +3718,18 @@ impl Simulation {
 
     #[must_use]
     pub fn boundaries(&self) -> &[BoundaryRecord] {
-        &self.state.boundaries
+        &self.state.evidence.boundaries
     }
 
     #[must_use]
     pub fn random_draws(&self) -> &[RandomDrawRecord] {
-        &self.state.random_draws
+        &self.state.evidence.random_draws
     }
 
     #[must_use]
     pub fn boundary_head_hash(&self) -> Option<&str> {
         self.state
+            .evidence
             .boundaries
             .last()
             .map(|record| record.hash.as_str())
@@ -3736,10 +3755,10 @@ impl Simulation {
             run_configuration: self.state.run_configuration.clone(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             plugin_registration_closed: self.state.plugin_registration_closed,
-            commands: self.state.commands.clone(),
-            command_attempts: self.state.command_attempts.clone(),
-            ingress: self.state.ingress.clone(),
-            boundaries: self.state.boundaries.clone(),
+            commands: self.state.evidence.commands.clone(),
+            command_attempts: self.state.evidence.command_attempts.clone(),
+            ingress: self.state.evidence.ingress.clone(),
+            boundaries: self.state.evidence.boundaries.clone(),
             final_time: self.state.now,
             checkpoint_hash: self.state.checkpoint_hash.clone(),
             revision_format_version: self.state.replay_revision_format_version,
@@ -3763,7 +3782,7 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
         self.ensure_command_ingress_family(CommandIngress::LiveRequest)?;
-        for record in &self.state.ingress {
+        for record in &self.state.evidence.ingress {
             let IngressPayload::Command { request: existing } = &record.payload else {
                 continue;
             };
@@ -3790,6 +3809,7 @@ impl Simulation {
         }
         if self
             .state
+            .evidence
             .command_attempts
             .iter()
             .any(|attempt| attempt.request_id == Some(request.request_id))
@@ -3942,7 +3962,7 @@ impl Simulation {
         }
         let transaction_start = self.state.clone();
         let (id, next_id) = claim_counter(self.state.next_ingress_id, "ingress ID")?;
-        let boundary_count = u64::try_from(self.state.boundaries.len()).map_err(|_| {
+        let boundary_count = u64::try_from(self.state.evidence.boundaries.len()).map_err(|_| {
             CanwuError::new(
                 ErrorCode::IdentifierExhausted,
                 "boundary count exceeds the ingress journal range",
@@ -3972,7 +3992,7 @@ impl Simulation {
         self.state
             .pending_ingress
             .insert(IngressQueueKey::from_record(&record));
-        self.state.ingress.push(record.clone());
+        self.state.evidence.ingress.push(record.clone());
         self.state.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
             self.state = transaction_start;
@@ -3990,7 +4010,7 @@ impl Simulation {
         request: CommandRequest,
     ) -> Result<CommandOutcome, CanwuError> {
         self.ensure_runtime_ready()?;
-        if !self.state.ingress.is_empty() {
+        if !self.state.evidence.ingress.is_empty() {
             return Err(CanwuError::new(
                 ErrorCode::MixedCommandIngress,
                 "direct command requests cannot bypass an active canonical ingress journal",
@@ -4091,7 +4111,7 @@ impl Simulation {
             Err(error) => return Err(error),
         };
         let transaction_start = self.state.clone();
-        let event_start = self.state.events.len();
+        let event_start = self.state.evidence.events.len();
         self.state.next_command_id = next_command_id;
         self.state.next_correlation_id = next_correlation_id;
 
@@ -4102,12 +4122,12 @@ impl Simulation {
             }
             return Err(error);
         }
-        let emitted_events: Vec<_> = self.state.events[event_start..]
+        let emitted_events: Vec<_> = self.state.evidence.events[event_start..]
             .iter()
             .map(|event| event.id)
             .collect();
         self.state.plugin_registration_closed = true;
-        self.state.commands.push(CommandRecord {
+        self.state.evidence.commands.push(CommandRecord {
             id: command_id,
             attempt_id: record_attempt.then_some(attempt_id),
             accepted_at: self.state.now,
@@ -4122,16 +4142,19 @@ impl Simulation {
             let (_, next_attempt_id) =
                 claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
             self.state.next_command_attempt_id = next_attempt_id;
-            self.state.command_attempts.push(CommandAttemptRecord {
-                id: attempt_id,
-                at: self.state.now,
-                revision_before: admission.revision_before,
-                ingress: admission.ingress,
-                request_id: admission.request_id,
-                expected_revision: admission.expected_revision,
-                envelope,
-                outcome: CommandAttemptOutcome::Accepted { command_id },
-            });
+            self.state
+                .evidence
+                .command_attempts
+                .push(CommandAttemptRecord {
+                    id: attempt_id,
+                    at: self.state.now,
+                    revision_before: admission.revision_before,
+                    ingress: admission.ingress,
+                    request_id: admission.request_id,
+                    expected_revision: admission.expected_revision,
+                    envelope,
+                    outcome: CommandAttemptOutcome::Accepted { command_id },
+                });
         }
         let revision = match self.advance_state_revision() {
             Ok(revision) => revision,
@@ -4160,11 +4183,12 @@ impl Simulation {
     fn ensure_command_ingress_family(&self, ingress: CommandIngress) -> Result<(), CanwuError> {
         let has_legacy_commands = self
             .state
+            .evidence
             .commands
             .iter()
             .any(|record| record.attempt_id.is_none());
-        let has_tracked_attempts =
-            !self.state.command_attempts.is_empty() || !self.state.ingress.is_empty();
+        let has_tracked_attempts = !self.state.evidence.command_attempts.is_empty()
+            || !self.state.evidence.ingress.is_empty();
         if (ingress == CommandIngress::LegacyDirect && has_tracked_attempts)
             || (ingress != CommandIngress::LegacyDirect && has_legacy_commands)
         {
@@ -4197,6 +4221,7 @@ impl Simulation {
         };
         let Some(attempt) = self
             .state
+            .evidence
             .command_attempts
             .iter()
             .find(|attempt| attempt.request_id == Some(request_id))
@@ -4221,6 +4246,7 @@ impl Simulation {
             CommandAttemptOutcome::Accepted { command_id } => {
                 let record = self
                     .state
+                    .evidence
                     .commands
                     .iter()
                     .find(|record| record.id == *command_id)
@@ -4276,18 +4302,21 @@ impl Simulation {
         }
         self.state.next_command_attempt_id = next_attempt_id;
         self.state.plugin_registration_closed = true;
-        self.state.command_attempts.push(CommandAttemptRecord {
-            id: attempt_id,
-            at: self.state.now,
-            revision_before: admission.revision_before,
-            ingress: admission.ingress,
-            request_id: admission.request_id,
-            expected_revision: admission.expected_revision,
-            envelope,
-            outcome: CommandAttemptOutcome::Rejected {
-                error: error.clone(),
-            },
-        });
+        self.state
+            .evidence
+            .command_attempts
+            .push(CommandAttemptRecord {
+                id: attempt_id,
+                at: self.state.now,
+                revision_before: admission.revision_before,
+                ingress: admission.ingress,
+                request_id: admission.request_id,
+                expected_revision: admission.expected_revision,
+                envelope,
+                outcome: CommandAttemptOutcome::Rejected {
+                    error: error.clone(),
+                },
+            });
         let revision = match self.advance_state_revision() {
             Ok(revision) => revision,
             Err(revision_error) => {
@@ -4446,7 +4475,7 @@ impl Simulation {
             )
         })?;
         self.ensure_legacy_advance_does_not_cross_ingress(target)?;
-        let start = self.state.events.len();
+        let start = self.state.evidence.events.len();
         while self.state.now < target && !condition(self) {
             let next_time = self
                 .state
@@ -4459,7 +4488,7 @@ impl Simulation {
                 break;
             }
         }
-        Ok(self.state.events[start..].to_vec())
+        Ok(self.state.evidence.events[start..].to_vec())
     }
 
     fn ensure_legacy_advance_does_not_cross_ingress(
@@ -4536,12 +4565,18 @@ impl Simulation {
                     "ingress ID exceeds the platform index range",
                 )
             })?;
-            let record = self.state.ingress.get(index).cloned().ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::InvalidSnapshot,
-                    "pending ingress references an unknown record",
-                )
-            })?;
+            let record = self
+                .state
+                .evidence
+                .ingress
+                .get(index)
+                .cloned()
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidSnapshot,
+                        "pending ingress references an unknown record",
+                    )
+                })?;
             match record.payload {
                 IngressPayload::Command { request: command } => {
                     let CommandRequest {
@@ -4565,14 +4600,15 @@ impl Simulation {
         request.cadences.sort();
         request.cadences.dedup();
 
-        let admitted_attempt_count =
-            u64::try_from(self.state.command_attempts.len()).map_err(|_| {
+        let admitted_attempt_count = u64::try_from(self.state.evidence.command_attempts.len())
+            .map_err(|_| {
                 invalid_snapshot_error("attempt journal exceeds admission cursor range")
             })?;
-        let admitted_command_count = u64::try_from(self.state.commands.len()).map_err(|_| {
-            invalid_snapshot_error("command journal exceeds admission cursor range")
-        })?;
-        let admitted_event_count = u64::try_from(self.state.events.len())
+        let admitted_command_count =
+            u64::try_from(self.state.evidence.commands.len()).map_err(|_| {
+                invalid_snapshot_error("command journal exceeds admission cursor range")
+            })?;
+        let admitted_event_count = u64::try_from(self.state.evidence.events.len())
             .map_err(|_| invalid_snapshot_error("event journal exceeds admission cursor range"))?;
         let admitted_attempt_start =
             usize::try_from(self.state.admitted_attempt_count).map_err(|_| {
@@ -4588,6 +4624,7 @@ impl Simulation {
             })?;
         let admitted_attempts: Vec<_> = self
             .state
+            .evidence
             .command_attempts
             .get(admitted_attempt_start..)
             .ok_or_else(|| {
@@ -4598,6 +4635,7 @@ impl Simulation {
             .collect();
         let admitted_commands: Vec<_> = self
             .state
+            .evidence
             .commands
             .get(admitted_command_start..)
             .ok_or_else(|| {
@@ -4608,6 +4646,7 @@ impl Simulation {
             .collect();
         let admitted_events: Vec<_> = self
             .state
+            .evidence
             .events
             .get(admitted_event_start..)
             .ok_or_else(|| {
@@ -4879,7 +4918,7 @@ impl Simulation {
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
         self.state.plugin_registration_closed = true;
         let state_hash = self.compute_boundary_state_hash()?;
-        let previous_hash = self.state.boundaries.last().map_or_else(
+        let previous_hash = self.state.evidence.boundaries.last().map_or_else(
             || GENESIS_BOUNDARY_HASH.to_owned(),
             |record| record.hash.clone(),
         );
@@ -4906,7 +4945,7 @@ impl Simulation {
         };
         record.hash = compute_boundary_hash(&record)?;
         let boundary_hash = record.hash.clone();
-        self.state.boundaries.push(record);
+        self.state.evidence.boundaries.push(record);
         self.state.admitted_attempt_count = admitted_attempt_count;
         self.state.admitted_command_count = admitted_command_count;
         self.state.admitted_event_count = admitted_event_count;
@@ -4963,10 +5002,10 @@ impl Simulation {
             plugin_registration_closed: self.state.plugin_registration_closed,
             world: &world,
             knowledge: &self.state.knowledge,
-            events: &self.state.events,
-            commands: &self.state.commands,
-            command_attempts: &self.state.command_attempts,
-            ingress: &self.state.ingress,
+            events: &self.state.evidence.events,
+            commands: &self.state.evidence.commands,
+            command_attempts: &self.state.evidence.command_attempts,
+            ingress: &self.state.evidence.ingress,
             plugin_components: &plugin_components,
             domain_records: &domain_records,
             plugin_descriptors: &plugin_descriptors,
@@ -4974,7 +5013,7 @@ impl Simulation {
             scheduled: &scheduled,
             root_seed: self.state.root_seed,
             random_streams: &random_streams,
-            random_draws: &self.state.random_draws,
+            random_draws: &self.state.evidence.random_draws,
             next_event_id: self.state.next_event_id,
             next_command_id: self.state.next_command_id,
             next_command_attempt_id: self.state.next_command_attempt_id,
@@ -5033,18 +5072,18 @@ impl Simulation {
             plugin_registration_closed: self.state.plugin_registration_closed,
             world: self.world(),
             knowledge: self.state.knowledge.clone(),
-            events: self.state.events.clone(),
-            commands: self.state.commands.clone(),
-            command_attempts: self.state.command_attempts.clone(),
-            ingress: self.state.ingress.clone(),
-            boundaries: self.state.boundaries.clone(),
+            events: self.state.evidence.events.clone(),
+            commands: self.state.evidence.commands.clone(),
+            command_attempts: self.state.evidence.command_attempts.clone(),
+            ingress: self.state.evidence.ingress.clone(),
+            boundaries: self.state.evidence.boundaries.clone(),
             plugin_components: self.state.plugin_components.values().cloned().collect(),
             domain_records: self.state.domain_records.values().cloned().collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
             root_seed: self.state.root_seed,
             random_streams: self.state.random_streams.values().cloned().collect(),
-            random_draws: self.state.random_draws.clone(),
+            random_draws: self.state.evidence.random_draws.clone(),
             scheduled: self
                 .state
                 .scheduler
@@ -5163,12 +5202,15 @@ impl Simulation {
                     .into_iter()
                     .map(|record| (record.key, record.action))
                     .collect(),
-                events: snapshot.events,
-                commands: snapshot.commands,
-                command_attempts: snapshot.command_attempts,
-                ingress: snapshot.ingress,
+                evidence: RuntimeEvidence {
+                    events: snapshot.events,
+                    commands: snapshot.commands,
+                    command_attempts: snapshot.command_attempts,
+                    ingress: snapshot.ingress,
+                    boundaries: snapshot.boundaries,
+                    random_draws: snapshot.random_draws,
+                },
                 pending_ingress,
-                boundaries: snapshot.boundaries,
                 plugin_components: snapshot
                     .plugin_components
                     .into_iter()
@@ -5195,7 +5237,6 @@ impl Simulation {
                     .into_iter()
                     .map(|state| (state.key.clone(), state))
                     .collect(),
-                random_draws: snapshot.random_draws,
                 next_event_id: snapshot.next_event_id,
                 next_command_id: snapshot.next_command_id,
                 next_command_attempt_id: snapshot.next_command_attempt_id,
@@ -5514,7 +5555,7 @@ impl Simulation {
     }
 
     fn advance_to(&mut self, target: SimTime) -> Result<Vec<SimEvent>, CanwuError> {
-        let start = self.state.events.len();
+        let start = self.state.evidence.events.len();
         while let Some(boundary_time) = self.state.scheduler.keys().next().map(|key| key.at)
             && boundary_time <= target
         {
@@ -5549,7 +5590,7 @@ impl Simulation {
             self.state = target_start;
             return Err(error);
         }
-        Ok(self.state.events[start..].to_vec())
+        Ok(self.state.evidence.events[start..].to_vec())
     }
 
     fn advance_to_before_boundary(&mut self, target: SimTime) -> Result<(), CanwuError> {
@@ -5862,7 +5903,7 @@ impl Simulation {
             cause,
             correlation_id,
         };
-        self.state.events.push(event.clone());
+        self.state.evidence.events.push(event.clone());
         Ok(event)
     }
 
@@ -5909,7 +5950,7 @@ impl Simulation {
         state.generator_state = generator.state();
         self.state.next_random_draw_id = next_random_draw_id;
         let id = RandomDrawId::new(draw_id);
-        self.state.random_draws.push(RandomDrawRecord {
+        self.state.evidence.random_draws.push(RandomDrawRecord {
             id,
             at: self.state.now,
             stream: stream.clone(),
@@ -5932,6 +5973,7 @@ impl Simulation {
     ) -> Result<(), CanwuError> {
         let Some(draw) = self
             .state
+            .evidence
             .random_draws
             .last_mut()
             .filter(|draw| draw.id == id)
@@ -5962,7 +6004,7 @@ impl Simulation {
                 claim_counter(self.state.next_random_draw_id, "random draw ID")?;
             let id = RandomDrawId::new(draw_id);
             self.state.next_random_draw_id = next_random_draw_id;
-            self.state.random_draws.push(RandomDrawRecord {
+            self.state.evidence.random_draws.push(RandomDrawRecord {
                 id,
                 at: self.state.now,
                 stream: pending.draw.stream,
@@ -6382,7 +6424,7 @@ fn enqueue_replay_ingress_cut(
             simulation.ensure_legacy_advance_does_not_cross_ingress(record.issued_at)?;
             simulation.advance_to(record.issued_at)?;
         }
-        if let Some(actual) = simulation.state.ingress.get(*next_ingress) {
+        if let Some(actual) = simulation.state.evidence.ingress.get(*next_ingress) {
             if actual != record {
                 return Err(CanwuError::new(
                     ErrorCode::ReplayMismatch,
@@ -6425,7 +6467,9 @@ fn enqueue_replay_ingress_cut(
                 simulation.schedule_calendar_boundary(record.due_at, cadences.clone())?
             }
         };
-        if receipt.ingress_id != record.id || simulation.state.ingress.last() != Some(record) {
+        if receipt.ingress_id != record.id
+            || simulation.state.evidence.ingress.last() != Some(record)
+        {
             return Err(CanwuError::new(
                 ErrorCode::ReplayMismatch,
                 "regenerated ingress record does not match journal evidence",
@@ -10230,7 +10274,11 @@ fn runtime_entity_identity_exists(state: &RuntimeState, entity: &EntityRef) -> b
 }
 
 fn runtime_has_unqueued_command_history(state: &RuntimeState) -> bool {
-    has_unqueued_command_history(&state.commands, &state.command_attempts, &state.ingress)
+    has_unqueued_command_history(
+        &state.evidence.commands,
+        &state.evidence.command_attempts,
+        &state.evidence.ingress,
+    )
 }
 
 fn has_unqueued_command_history(
@@ -10255,9 +10303,17 @@ fn has_unqueued_command_history(
 
 fn validate_runtime_cause(state: &RuntimeState, cause: &CauseRef) -> Result<(), CanwuError> {
     let valid = match cause {
-        CauseRef::Boundary(id) => state.boundaries.iter().any(|record| record.id == *id),
-        CauseRef::Command(id) => state.commands.iter().any(|record| record.id == *id),
-        CauseRef::Event(id) => state.events.iter().any(|event| event.id == *id),
+        CauseRef::Boundary(id) => state
+            .evidence
+            .boundaries
+            .iter()
+            .any(|record| record.id == *id),
+        CauseRef::Command(id) => state
+            .evidence
+            .commands
+            .iter()
+            .any(|record| record.id == *id),
+        CauseRef::Event(id) => state.evidence.events.iter().any(|event| event.id == *id),
         CauseRef::System(name) => canonical_text(name),
     };
     if valid {

@@ -250,6 +250,13 @@ cursors are persisted derived metadata: loading validates them against the
 global boundary-prefix proof, legacy snapshots derive them deterministically,
 and failed settlement restores them with the rest of the transaction.
 
+Append-only events, commands, command attempts, ingress, boundary records, and
+random draws have one internal owner, `RuntimeEvidence`, separate from mutable
+world/knowledge/plugin state. Public snapshots and replay journals deliberately
+retain their existing flat serialized shapes while this internal boundary is
+established; later segmented or checkpoint-plus-journal storage can replace the
+owner without spreading evidence mutation back through the runtime.
+
 Every snapshot also stores a recomputed checkpoint hash over the complete
 current deterministic state plus the current boundary-chain head. Snapshot
 loading therefore rejects state, queue, knowledge, plugin-state, random, or

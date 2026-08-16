@@ -143,6 +143,21 @@ wall time remains approximately quadratic because full-state transaction clones,
 checkpoint hashing, and retained-history serialization still dominate; those
 are separate planned milestones.
 
+## Runtime-evidence ownership comparison
+
+The internal runtime-evidence separation is recorded in
+[`elapsed`](baselines/2026-08-16-runtime-evidence-elapsed.json) and
+[`allocation`](baselines/2026-08-16-runtime-evidence-allocations.json) reports,
+using the admission-cursor milestone as its before baseline. This refactor moves
+all append-only journals behind one `RuntimeEvidence` owner without changing the
+flat snapshot/replay wire shape or runtime algorithms.
+
+All operation allocation counts, allocated bytes, and snapshot sizes are
+identical at every measured scale. At scale 512, elapsed medians range from
+-3.8% to +2.9%; history growth is +0.5% and exact replay is -0.5%. These are
+consistent with local wall-time noise and confirm that the ownership boundary is
+behavior- and cost-neutral before segmented storage is introduced.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
