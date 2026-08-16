@@ -1,0 +1,1171 @@
+{
+  "benchmark": "canwu-architecture-baseline",
+  "engine_version": "0.4.0",
+  "environment": {
+    "arch": "x86_64",
+    "build_target": "",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "cargo_features": [],
+    "encoded_rustflags": "",
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "rustflags": ""
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "growth_samples": 3,
+    "operation_samples": 5,
+    "warmup_iterations": 1
+  },
+  "metric_mode": "elapsed",
+  "recorded_on": "2026-08-16",
+  "scales": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            777400,
+            755800,
+            739200
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 777400,
+            "elapsed_ns_median": 755800,
+            "elapsed_ns_min": 739200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            35700,
+            32800,
+            33300,
+            32900,
+            32500
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 35700,
+            "elapsed_ns_median": 32900,
+            "elapsed_ns_min": 32500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            9900,
+            9500,
+            9200,
+            10500,
+            11100
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 11100,
+            "elapsed_ns_median": 9900,
+            "elapsed_ns_min": 9200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            33600,
+            48200,
+            34600,
+            64000,
+            34700
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 64000,
+            "elapsed_ns_median": 34700,
+            "elapsed_ns_min": 33600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            55700,
+            82700,
+            52700,
+            83400,
+            52800
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 83400,
+            "elapsed_ns_median": 55700,
+            "elapsed_ns_min": 52700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            17100,
+            17600,
+            17000,
+            47300,
+            16900
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 47300,
+            "elapsed_ns_median": 17100,
+            "elapsed_ns_min": 16900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            58400,
+            55600,
+            54800,
+            77100,
+            61800
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 77100,
+            "elapsed_ns_median": 58400,
+            "elapsed_ns_min": 54800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            6100,
+            6600,
+            6200,
+            6600,
+            6600
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "elapsed_ns_max": 6600,
+            "elapsed_ns_median": 6600,
+            "elapsed_ns_min": 6100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            20900,
+            33800,
+            30200,
+            31200,
+            35600
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 35600,
+            "elapsed_ns_median": 31200,
+            "elapsed_ns_min": 20900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            10300,
+            10100,
+            10400,
+            10900,
+            9700
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "elapsed_ns_max": 10900,
+            "elapsed_ns_median": 10300,
+            "elapsed_ns_min": 9700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            400,
+            400,
+            1400,
+            300,
+            400
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "elapsed_ns_max": 1400,
+            "elapsed_ns_median": 400,
+            "elapsed_ns_min": 300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            435700,
+            423200,
+            421100,
+            425500,
+            429200
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 435700,
+            "elapsed_ns_median": 425500,
+            "elapsed_ns_min": 421100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            797600,
+            794700,
+            779800,
+            803000,
+            814800
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 814800,
+            "elapsed_ns_median": 797600,
+            "elapsed_ns_min": 779800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            19100,
+            18700,
+            23800,
+            18800,
+            19000
+          ],
+          "name": "live_archive_seal",
+          "summary": {
+            "elapsed_ns_max": 23800,
+            "elapsed_ns_median": 19000,
+            "elapsed_ns_min": 18700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4400,
+            4600,
+            4800,
+            4300,
+            4900
+          ],
+          "name": "live_archive_segment_release",
+          "summary": {
+            "elapsed_ns_max": 4900,
+            "elapsed_ns_median": 4600,
+            "elapsed_ns_min": 4300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            963500,
+            962000,
+            991400
+          ],
+          "name": "live_archive_cycle_growth",
+          "summary": {
+            "elapsed_ns_max": 991400,
+            "elapsed_ns_median": 963500,
+            "elapsed_ns_min": 962000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            386100,
+            391900,
+            376300
+          ],
+          "name": "live_archive_repeated_seal",
+          "summary": {
+            "elapsed_ns_max": 391900,
+            "elapsed_ns_median": 386100,
+            "elapsed_ns_min": 376300
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "compacted_current_checkpoint_bytes": 18022,
+        "current_state_checkpoint_bytes": 18021,
+        "full_checkpoint_journal_bytes": 68588,
+        "full_journal_segment_bytes": 41715,
+        "released_archive_segment_bytes": 42322
+      },
+      "history": {
+        "boundaries": 8,
+        "checkpoint_hash": "a6bcb5bd1d6e167b0af38f96dcf0afa85fde2a834854a8dfb796e66496ed8b78",
+        "command_attempts": 16,
+        "commands": 8,
+        "domain_records": 0,
+        "events": 24,
+        "ingress": 0,
+        "plugin_components": 8,
+        "random_draws": 8,
+        "snapshot_size_bytes": 57785,
+        "world_entities": 25
+      },
+      "scale": 8
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            4237200,
+            4342800,
+            4361100
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 4361100,
+            "elapsed_ns_median": 4342800,
+            "elapsed_ns_min": 4237200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            84100,
+            74600,
+            99100,
+            92400,
+            86800
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 99100,
+            "elapsed_ns_median": 86800,
+            "elapsed_ns_min": 74600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            12100,
+            16400,
+            15600,
+            10400,
+            44400
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 44400,
+            "elapsed_ns_median": 15600,
+            "elapsed_ns_min": 10400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            54800,
+            54800,
+            56100,
+            54600,
+            58500
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 58500,
+            "elapsed_ns_median": 54800,
+            "elapsed_ns_min": 54600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            91800,
+            93700,
+            99200,
+            89300,
+            88500
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 99200,
+            "elapsed_ns_median": 91800,
+            "elapsed_ns_min": 88500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            49600,
+            50700,
+            48600,
+            50900,
+            48000
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 50900,
+            "elapsed_ns_median": 49600,
+            "elapsed_ns_min": 48000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            283800,
+            289600,
+            273600,
+            206100,
+            198300
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 289600,
+            "elapsed_ns_median": 273600,
+            "elapsed_ns_min": 198300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            11700,
+            11800,
+            17600,
+            11900,
+            13100
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "elapsed_ns_max": 17600,
+            "elapsed_ns_median": 11900,
+            "elapsed_ns_min": 11700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            41900,
+            40500,
+            39900,
+            39700,
+            41800
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 41900,
+            "elapsed_ns_median": 40500,
+            "elapsed_ns_min": 39700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            42300,
+            42600,
+            53500,
+            36600,
+            36400
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "elapsed_ns_max": 53500,
+            "elapsed_ns_median": 42300,
+            "elapsed_ns_min": 36400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            400,
+            300,
+            400,
+            400,
+            400
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "elapsed_ns_max": 400,
+            "elapsed_ns_median": 400,
+            "elapsed_ns_min": 300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1176000,
+            1177100,
+            1147300,
+            1185100,
+            1168300
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 1185100,
+            "elapsed_ns_median": 1176000,
+            "elapsed_ns_min": 1147300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4713800,
+            4719700,
+            4719000,
+            4774000,
+            4649400
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 4774000,
+            "elapsed_ns_median": 4719000,
+            "elapsed_ns_min": 4649400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            47100,
+            47900,
+            46800,
+            44200,
+            44300
+          ],
+          "name": "live_archive_seal",
+          "summary": {
+            "elapsed_ns_max": 47900,
+            "elapsed_ns_median": 46800,
+            "elapsed_ns_min": 44200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            15700,
+            15300,
+            35300,
+            15600,
+            15700
+          ],
+          "name": "live_archive_segment_release",
+          "summary": {
+            "elapsed_ns_max": 35300,
+            "elapsed_ns_median": 15700,
+            "elapsed_ns_min": 15300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            5740600,
+            5576700,
+            5580800
+          ],
+          "name": "live_archive_cycle_growth",
+          "summary": {
+            "elapsed_ns_max": 5740600,
+            "elapsed_ns_median": 5580800,
+            "elapsed_ns_min": 5576700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1411300,
+            1396100,
+            1396900
+          ],
+          "name": "live_archive_repeated_seal",
+          "summary": {
+            "elapsed_ns_max": 1411300,
+            "elapsed_ns_median": 1396900,
+            "elapsed_ns_min": 1396100
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "compacted_current_checkpoint_bytes": 40778,
+        "current_state_checkpoint_bytes": 40778,
+        "full_checkpoint_journal_bytes": 240160,
+        "full_journal_segment_bytes": 166386,
+        "released_archive_segment_bytes": 166994
+      },
+      "history": {
+        "boundaries": 32,
+        "checkpoint_hash": "edee101fe2a235362de166ed987151e3bd59f9a2789ae7c1bdac24a8e9371d45",
+        "command_attempts": 64,
+        "commands": 32,
+        "domain_records": 0,
+        "events": 96,
+        "ingress": 0,
+        "plugin_components": 32,
+        "random_draws": 32,
+        "snapshot_size_bytes": 203239,
+        "world_entities": 97
+      },
+      "scale": 32
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            39732100,
+            40067700,
+            40515700
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 40515700,
+            "elapsed_ns_median": 40067700,
+            "elapsed_ns_min": 39732100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            249300,
+            236900,
+            233100,
+            251500,
+            235100
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 251500,
+            "elapsed_ns_median": 236900,
+            "elapsed_ns_min": 233100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            14800,
+            13400,
+            34300,
+            24300,
+            28100
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 34300,
+            "elapsed_ns_median": 24300,
+            "elapsed_ns_min": 13400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            132600,
+            138100,
+            133800,
+            135500,
+            207800
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 207800,
+            "elapsed_ns_median": 135500,
+            "elapsed_ns_min": 132600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            250600,
+            222500,
+            245400,
+            228600,
+            242600
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 250600,
+            "elapsed_ns_median": 242600,
+            "elapsed_ns_min": 222500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            181100,
+            177500,
+            177000,
+            207300,
+            182600
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 207300,
+            "elapsed_ns_median": 181100,
+            "elapsed_ns_min": 177000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1013900,
+            854500,
+            1017600,
+            822500,
+            991800
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 1017600,
+            "elapsed_ns_median": 991800,
+            "elapsed_ns_min": 822500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            32600,
+            32200,
+            32900,
+            32800,
+            36600
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "elapsed_ns_max": 36600,
+            "elapsed_ns_median": 32800,
+            "elapsed_ns_min": 32200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            147600,
+            130700,
+            130400,
+            130500,
+            130100
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 147600,
+            "elapsed_ns_median": 130500,
+            "elapsed_ns_min": 130100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            144500,
+            150300,
+            156300,
+            145300,
+            170100
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "elapsed_ns_max": 170100,
+            "elapsed_ns_median": 150300,
+            "elapsed_ns_min": 144500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            400,
+            400,
+            400,
+            400,
+            400
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "elapsed_ns_max": 400,
+            "elapsed_ns_median": 400,
+            "elapsed_ns_min": 400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            3851000,
+            4047000,
+            3909700,
+            4034400,
+            3880000
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 4047000,
+            "elapsed_ns_median": 3909700,
+            "elapsed_ns_min": 3851000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            44529500,
+            41415500,
+            41587000,
+            41428100,
+            41142200
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 44529500,
+            "elapsed_ns_median": 41428100,
+            "elapsed_ns_min": 41142200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            148000,
+            173400,
+            148900,
+            151500,
+            158900
+          ],
+          "name": "live_archive_seal",
+          "summary": {
+            "elapsed_ns_max": 173400,
+            "elapsed_ns_median": 151500,
+            "elapsed_ns_min": 148000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            100900,
+            92900,
+            103000,
+            86000,
+            57700
+          ],
+          "name": "live_archive_segment_release",
+          "summary": {
+            "elapsed_ns_max": 103000,
+            "elapsed_ns_median": 92900,
+            "elapsed_ns_min": 57700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            51387500,
+            51511100,
+            51289500
+          ],
+          "name": "live_archive_cycle_growth",
+          "summary": {
+            "elapsed_ns_max": 51511100,
+            "elapsed_ns_median": 51387500,
+            "elapsed_ns_min": 51289500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            5649100,
+            5624800,
+            5689000
+          ],
+          "name": "live_archive_repeated_seal",
+          "summary": {
+            "elapsed_ns_max": 5689000,
+            "elapsed_ns_median": 5649100,
+            "elapsed_ns_min": 5624800
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "compacted_current_checkpoint_bytes": 132145,
+        "current_state_checkpoint_bytes": 132145,
+        "full_checkpoint_journal_bytes": 929720,
+        "full_journal_segment_bytes": 668003,
+        "released_archive_segment_bytes": 668615
+      },
+      "history": {
+        "boundaries": 128,
+        "checkpoint_hash": "9425f033d65573d1490677e57d99928493e3858d0fa26e109e647fb30285bc7c",
+        "command_attempts": 256,
+        "commands": 128,
+        "domain_records": 0,
+        "events": 384,
+        "ingress": 0,
+        "plugin_components": 128,
+        "random_draws": 128,
+        "snapshot_size_bytes": 788341,
+        "world_entities": 385
+      },
+      "scale": 128
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            516060700,
+            522627300,
+            519073500
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 522627300,
+            "elapsed_ns_median": 519073500,
+            "elapsed_ns_min": 516060700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            822500,
+            819800,
+            873100,
+            822500,
+            859200
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 873100,
+            "elapsed_ns_median": 822500,
+            "elapsed_ns_min": 819800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            69200,
+            60600,
+            59100,
+            79500,
+            63600
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 79500,
+            "elapsed_ns_median": 63600,
+            "elapsed_ns_min": 59100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            509800,
+            486400,
+            490000,
+            493100,
+            489100
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 509800,
+            "elapsed_ns_median": 490000,
+            "elapsed_ns_min": 486400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            828400,
+            814100,
+            885700,
+            805400,
+            841300
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 885700,
+            "elapsed_ns_median": 828400,
+            "elapsed_ns_min": 805400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            749700,
+            741900,
+            776800,
+            735000,
+            721700
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 776800,
+            "elapsed_ns_median": 741900,
+            "elapsed_ns_min": 721700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            3580100,
+            3542800,
+            3657500,
+            3533800,
+            3537800
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 3657500,
+            "elapsed_ns_median": 3542800,
+            "elapsed_ns_min": 3533800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            118100,
+            120200,
+            139700,
+            132800,
+            139800
+          ],
+          "name": "checkpoint_create",
+          "summary": {
+            "elapsed_ns_max": 139800,
+            "elapsed_ns_median": 132800,
+            "elapsed_ns_min": 118100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            644500,
+            499700,
+            488300,
+            488400,
+            526300
+          ],
+          "name": "checkpoint_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 644500,
+            "elapsed_ns_median": 499700,
+            "elapsed_ns_min": 488300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            606800,
+            637600,
+            601400,
+            615100,
+            617000
+          ],
+          "name": "journal_segment_full",
+          "summary": {
+            "elapsed_ns_max": 637600,
+            "elapsed_ns_median": 615100,
+            "elapsed_ns_min": 601400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            600,
+            500,
+            400,
+            400,
+            400
+          ],
+          "name": "journal_segment_empty_tail",
+          "summary": {
+            "elapsed_ns_max": 600,
+            "elapsed_ns_median": 400,
+            "elapsed_ns_min": 400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            16524500,
+            18234700,
+            16481000,
+            17217600,
+            16262600
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 18234700,
+            "elapsed_ns_median": 16524500,
+            "elapsed_ns_min": 16262600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            523584000,
+            521470600,
+            524353500,
+            523703100,
+            523654200
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 524353500,
+            "elapsed_ns_median": 523654200,
+            "elapsed_ns_min": 521470600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            598300,
+            559900,
+            585300,
+            555300,
+            566400
+          ],
+          "name": "live_archive_seal",
+          "summary": {
+            "elapsed_ns_max": 598300,
+            "elapsed_ns_median": 566400,
+            "elapsed_ns_min": 555300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            226900,
+            244900,
+            235900,
+            244700,
+            237900
+          ],
+          "name": "live_archive_segment_release",
+          "summary": {
+            "elapsed_ns_max": 244900,
+            "elapsed_ns_median": 237900,
+            "elapsed_ns_min": 226900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            667203700,
+            671059300,
+            668086300
+          ],
+          "name": "live_archive_cycle_growth",
+          "summary": {
+            "elapsed_ns_max": 671059300,
+            "elapsed_ns_median": 668086300,
+            "elapsed_ns_min": 667203700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            22892400,
+            22686500,
+            22703400
+          ],
+          "name": "live_archive_repeated_seal",
+          "summary": {
+            "elapsed_ns_max": 22892400,
+            "elapsed_ns_median": 22703400,
+            "elapsed_ns_min": 22686500
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "compacted_current_checkpoint_bytes": 500496,
+        "current_state_checkpoint_bytes": 500496,
+        "full_checkpoint_journal_bytes": 3700335,
+        "full_journal_segment_bytes": 2683963,
+        "released_archive_segment_bytes": 2684578
+      },
+      "history": {
+        "boundaries": 512,
+        "checkpoint_hash": "12c842063a38f6b86d4fc918192864262efdec3117dea9e8bb286eb73d6d1782",
+        "command_attempts": 1024,
+        "commands": 512,
+        "domain_records": 0,
+        "events": 1536,
+        "ingress": 0,
+        "plugin_components": 512,
+        "random_draws": 512,
+        "snapshot_size_bytes": 3141160,
+        "world_entities": 1537
+      },
+      "scale": 512
+    }
+  ],
+  "schema_version": 2,
+  "snapshot_format_version": 4,
+  "source": {
+    "commit": "179e4d020ea748e4a7757a4e17d976d3ae51b24a",
+    "engine_source_dirty": true,
+    "source_file_hashes": {
+      "Cargo.lock": "02b271a5ec41537069f158592f21f940f92e94b2",
+      "Cargo.toml": "9ac66cd32ab80c97d76516e370f851439b05b5b8",
+      "benchmarks/performance-harness/Cargo.lock": "e5d668dc9d1bec684b5120300cdd0981a35b2b75",
+      "benchmarks/performance-harness/Cargo.toml": "10dcc4d2dcffd4cb43cc78a840234d3f3dca8ea7",
+      "benchmarks/performance-harness/src/main.rs": "6d4b3705cd28952c3b8056b55f30790f0bffd88d",
+      "crates/canwu-api/Cargo.toml": "a184bcd6eabd31d7c118acd673f3bac871c2e290",
+      "crates/canwu-api/examples/move_army.rs": "3fdc22f53e9b1fe13f0791eecea0a0149a81b5a6",
+      "crates/canwu-api/examples/phased_boundary.rs": "837dfae7dc332805929a76ec4f22a85ffc5b405c",
+      "crates/canwu-api/examples/plugin.rs": "9506dc78d6fb38a7817c06380bada1a123f2292b",
+      "crates/canwu-api/src/lib.rs": "5cdc138b4b075ecccc2b17779db773507dface50",
+      "crates/canwu-core/Cargo.toml": "22d8a2b0ba8f31388c1b260b30c9ff87ac6678aa",
+      "crates/canwu-core/src/lib.rs": "8d656deb21d6e9ba77de6d98edfdfea99f776b8b",
+      "crates/canwu-debug/Cargo.toml": "526ff8aecf6c81b41f6a8605eff7ee995dd80506",
+      "crates/canwu-debug/src/main.rs": "a415bb3a0b5a75400ab863bb3bb1e3a994b06311",
+      "crates/canwu-event/Cargo.toml": "02d76b2bcbb48d60caa8513056568fc01731d14d",
+      "crates/canwu-event/src/lib.rs": "3f36952aa757cf84a63f0d375c134588b7220731",
+      "crates/canwu-knowledge/Cargo.toml": "f2c2ad8e67a8430a8d4476edc6497a9d90353df3",
+      "crates/canwu-knowledge/src/lib.rs": "e7ac804117ae5a232e7f82a1ad8649f00622325a",
+      "crates/canwu-sim/Cargo.toml": "b95365963611b5d32e370d8ad2fe3d50e4c45b86",
+      "crates/canwu-sim/src/boundary.rs": "2bdcb6917becb613ab5df31911bfefaa6bf32a7f",
+      "crates/canwu-sim/src/hashing.rs": "2ecf369fe01e8132fc8157446b920279ecea16e4",
+      "crates/canwu-sim/src/ingress.rs": "670dff774973d4c1ebc3c6fec097fe40ee3817dc",
+      "crates/canwu-sim/src/lib.rs": "ead1bfd6cbf63b85251bfce0d03cc183889779f7",
+      "crates/canwu-sim/src/manifest.rs": "6896d750d9ef33df11e01e842eb445f818ec5124",
+      "crates/canwu-sim/src/migration.rs": "2fb9e5b574e0b0f56ed5c765e0d1f9808896b6be",
+      "crates/canwu-sim/src/persistence.rs": "18718343f1f1958359362d614abf18bafa675519",
+      "crates/canwu-sim/src/plugins.rs": "37503e91d942fd63ad1dadc9d263d8746709b127",
+      "crates/canwu-sim/src/policy.rs": "a2221c4ddb5ed3b626325351b70f65a2b8e97058",
+      "crates/canwu-sim/src/random.rs": "60182822f082f8f5aca2d8ebac5aa6951764318a",
+      "crates/canwu-sim/src/records.rs": "f86f9803d850d089b883144746d188126dcde28a",
+      "crates/canwu-sim/src/replay.rs": "fb6f2bb8afddad2ac91f3dd234c48bc5b32bf09d",
+      "crates/canwu-sim/src/state.rs": "3e53a8b71a7e28b7618ab46c2a210e9cb1008ffb",
+      "crates/canwu-sim/src/transactions.rs": "5de836e66ee7dd6026f0d6ae6dfaf8d5df5654f0",
+      "crates/canwu-sim/src/validation.rs": "f42f6cef66b8baa21d618011ccadad74295e7493",
+      "crates/canwu-time/Cargo.toml": "62afaf5f6b2e2087ba4dad1c6d830845dd42405d",
+      "crates/canwu-time/src/lib.rs": "f042bc7a79bc1583239756a9b2aac805fe4708c6",
+      "crates/canwu-world/Cargo.toml": "4a194aae6f3dc48ba8bbe9e0f9c2ba41555eb63e",
+      "crates/canwu-world/src/lib.rs": "9e261a63c5e043ad151bbba8b80fa4eb6abc9ded"
+    },
+    "working_tree_dirty": true
+  }
+}

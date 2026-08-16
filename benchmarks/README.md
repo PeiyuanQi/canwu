@@ -635,3 +635,27 @@ exact replay +0.9%. The accepted-command median moves from 0.844 to 0.972 ms
 The milestone makes no runtime-performance claim; it gives historical format
 interpretation a dedicated dependency surface while preserving deterministic
 migration and current-format validation.
+
+## Hashing-module extraction comparison
+
+The behavior-preserving hashing extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-hashing-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-hashing-module-allocations.json) reports,
+using the migration-module milestone as its before baseline. It moves canonical
+hash material, collection roots, checkpoint commitments, boundary-chain hashes,
+and hash-format validation into `canwu-sim/src/hashing.rs`. Persistence,
+migration, replay, and validation retain the same hash contract through a
+focused module boundary. `canwu-sim/src/lib.rs` falls from 13,452 to 12,645
+nonblank source lines, with 850 nonblank source lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by +0.1%, populated boundaries
++3.0%, snapshot creation -2.1%, snapshot serialization -0.3%, load validation
++1.1%, and exact replay +0.3%. The accepted-command median moves from 0.972 to
+0.823 ms (-15.3%), while the empty-boundary median moves from 0.450 to 0.490 ms
+(+8.9%); both remain sub-millisecond cases. These are treated as local timing
+noise. The milestone makes no runtime-performance claim; it gives every
+authoritative commitment and historical hash format one explicit dependency
+surface while preserving deterministic, insertion-order-independent roots and
+legacy migration behavior.
