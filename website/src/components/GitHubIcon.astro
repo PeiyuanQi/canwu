@@ -1,0 +1,12 @@
+---
+import { faGithub } from "@fortawesome/free-brands-svg-icons/faGithub";
+
+interface Props { class?: string; }
+const { class: className = "github-icon" } = Astro.props;
+const [width, height, , , pathData] = faGithub.icon;
+const path = Array.isArray(pathData) ? pathData.join("") : pathData;
+---
+
+<svg class={className} viewBox={`0 0 ${width} ${height}`} aria-hidden="true" focusable="false">
+  <path fill="currentColor" d={path}></path>
+</svg>

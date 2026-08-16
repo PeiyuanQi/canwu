@@ -1,5 +1,6 @@
 ---
 import "../styles/global.css";
+import GitHubIcon from "../components/GitHubIcon.astro";
 
 interface Props {
   title: string;
@@ -121,7 +122,7 @@ const navItems = (variant: typeof variants[number]) => [
         <nav data-locale-content={isAuto ? variant.locale : undefined} aria-label={variant.ui.navLabel}>
           {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
           <a class="language-switch" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
-          <a class="nav-github" href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+          <a class="nav-github github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
         </nav>
       ))}
       {variants.map((variant) => (
@@ -130,7 +131,7 @@ const navItems = (variant: typeof variants[number]) => [
           <div>
             {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
             <a href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
-            <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+            <a class="github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
           </div>
         </details>
       ))}
@@ -150,7 +151,7 @@ const navItems = (variant: typeof variants[number]) => [
           <a href="https://github.com/PeiyuanQi/canwu/blob/main/LICENSE">{variant.ui.license} ↗</a>
           <a href={`${variant.prefix}/credits/`}>{variant.ui.credits}</a>
           <a href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
-          <a href="https://github.com/PeiyuanQi/canwu">GitHub ↗</a>
+          <a class="github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
         </div>
       </footer>
     ))}
