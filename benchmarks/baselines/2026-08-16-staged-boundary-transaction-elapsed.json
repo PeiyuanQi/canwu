@@ -1,0 +1,671 @@
+{
+  "benchmark": "canwu-architecture-baseline",
+  "engine_version": "0.4.0",
+  "environment": {
+    "arch": "x86_64",
+    "build_target": "",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "cargo_features": [],
+    "encoded_rustflags": "",
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "rustflags": ""
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "growth_samples": 3,
+    "operation_samples": 5,
+    "warmup_iterations": 1
+  },
+  "metric_mode": "elapsed",
+  "recorded_on": "2026-08-16",
+  "scales": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            1052300,
+            1069100,
+            1034600
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 1069100,
+            "elapsed_ns_median": 1052300,
+            "elapsed_ns_min": 1034600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            34900,
+            32600,
+            33500,
+            35600,
+            33000
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 35600,
+            "elapsed_ns_median": 33500,
+            "elapsed_ns_min": 32600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            9400,
+            9500,
+            13600,
+            13500,
+            13100
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 13600,
+            "elapsed_ns_median": 13100,
+            "elapsed_ns_min": 9400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            90600,
+            88200,
+            89700,
+            92100,
+            91600
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 92100,
+            "elapsed_ns_median": 90600,
+            "elapsed_ns_min": 88200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            128700,
+            114200,
+            114700,
+            108600,
+            112600
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 128700,
+            "elapsed_ns_median": 114200,
+            "elapsed_ns_min": 108600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            15900,
+            15200,
+            15700,
+            15000,
+            15400
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 15900,
+            "elapsed_ns_median": 15400,
+            "elapsed_ns_min": 15000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            63000,
+            60300,
+            82900,
+            59100,
+            59200
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 82900,
+            "elapsed_ns_median": 60300,
+            "elapsed_ns_min": 59100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            473800,
+            432500,
+            479600,
+            431300,
+            474100
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 479600,
+            "elapsed_ns_median": 473800,
+            "elapsed_ns_min": 431300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1340000,
+            1278500,
+            1323800,
+            1356600,
+            1398900
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 1398900,
+            "elapsed_ns_median": 1340000,
+            "elapsed_ns_min": 1278500
+          }
+        }
+      ],
+      "history": {
+        "boundaries": 8,
+        "checkpoint_hash": "403e51293896bb09b92e5d81e2ea1a14a8644770b896ff2a64fbe0120d003949",
+        "command_attempts": 16,
+        "commands": 8,
+        "domain_records": 0,
+        "events": 24,
+        "ingress": 0,
+        "plugin_components": 8,
+        "random_draws": 8,
+        "snapshot_size_bytes": 57761,
+        "world_entities": 25
+      },
+      "scale": 8
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            8430900,
+            8131800,
+            7995700
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 8430900,
+            "elapsed_ns_median": 8131800,
+            "elapsed_ns_min": 7995700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            78700,
+            76000,
+            82900,
+            75000,
+            86700
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 86700,
+            "elapsed_ns_median": 78700,
+            "elapsed_ns_min": 75000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            19400,
+            17800,
+            10500,
+            15000,
+            12000
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 19400,
+            "elapsed_ns_median": 15000,
+            "elapsed_ns_min": 10500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            221700,
+            226300,
+            253800,
+            228200,
+            219500
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 253800,
+            "elapsed_ns_median": 226300,
+            "elapsed_ns_min": 219500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            252400,
+            282800,
+            253600,
+            295100,
+            258800
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 295100,
+            "elapsed_ns_median": 258800,
+            "elapsed_ns_min": 252400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            50800,
+            52600,
+            51700,
+            47600,
+            48700
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 52600,
+            "elapsed_ns_median": 50800,
+            "elapsed_ns_min": 47600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            210800,
+            269100,
+            201800,
+            268700,
+            200100
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 269100,
+            "elapsed_ns_median": 210800,
+            "elapsed_ns_min": 200100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1198300,
+            1240400,
+            1216200,
+            1267600,
+            1211400
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 1267600,
+            "elapsed_ns_median": 1216200,
+            "elapsed_ns_min": 1198300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            11235700,
+            11193700,
+            10476200,
+            10507000,
+            10364900
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 11235700,
+            "elapsed_ns_median": 10507000,
+            "elapsed_ns_min": 10364900
+          }
+        }
+      ],
+      "history": {
+        "boundaries": 32,
+        "checkpoint_hash": "1eaa38381ee457c22a3e188fd6fa52a28b741a52d50adb3802241281fed830bb",
+        "command_attempts": 64,
+        "commands": 32,
+        "domain_records": 0,
+        "events": 96,
+        "ingress": 0,
+        "plugin_components": 32,
+        "random_draws": 32,
+        "snapshot_size_bytes": 203143,
+        "world_entities": 97
+      },
+      "scale": 32
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            89477000,
+            87985900,
+            87093500
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 89477000,
+            "elapsed_ns_median": 87985900,
+            "elapsed_ns_min": 87093500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            235000,
+            233500,
+            215000,
+            232500,
+            226400
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 235000,
+            "elapsed_ns_median": 232500,
+            "elapsed_ns_min": 215000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            13200,
+            32100,
+            14200,
+            13300,
+            14100
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 32100,
+            "elapsed_ns_median": 14100,
+            "elapsed_ns_min": 13200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            709000,
+            821000,
+            701700,
+            741600,
+            699300
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 821000,
+            "elapsed_ns_median": 709000,
+            "elapsed_ns_min": 699300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1059500,
+            802400,
+            798200,
+            833200,
+            860600
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 1059500,
+            "elapsed_ns_median": 833200,
+            "elapsed_ns_min": 798200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            181600,
+            178600,
+            178600,
+            181400,
+            188100
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 188100,
+            "elapsed_ns_median": 181400,
+            "elapsed_ns_min": 178600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            947100,
+            824400,
+            835600,
+            829200,
+            836200
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 947100,
+            "elapsed_ns_median": 835600,
+            "elapsed_ns_min": 824400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4060900,
+            4291400,
+            4285900,
+            4318800,
+            4039300
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 4318800,
+            "elapsed_ns_median": 4285900,
+            "elapsed_ns_min": 4039300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            127370700,
+            129353100,
+            128781400,
+            127631200,
+            128180000
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 129353100,
+            "elapsed_ns_median": 128180000,
+            "elapsed_ns_min": 127370700
+          }
+        }
+      ],
+      "history": {
+        "boundaries": 128,
+        "checkpoint_hash": "82fc6d29bd35e0cadc7d2659c60972b228468fc603a038a8f7f2ef2cdc5e47cb",
+        "command_attempts": 256,
+        "commands": 128,
+        "domain_records": 0,
+        "events": 384,
+        "ingress": 0,
+        "plugin_components": 128,
+        "random_draws": 128,
+        "snapshot_size_bytes": 787957,
+        "world_entities": 385
+      },
+      "scale": 128
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            1369583100,
+            1357087300,
+            1352342500
+          ],
+          "name": "history_growth",
+          "summary": {
+            "elapsed_ns_max": 1369583100,
+            "elapsed_ns_median": 1357087300,
+            "elapsed_ns_min": 1352342500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            802700,
+            959100,
+            842800,
+            821000,
+            827400
+          ],
+          "name": "accepted_command",
+          "summary": {
+            "elapsed_ns_max": 959100,
+            "elapsed_ns_median": 827400,
+            "elapsed_ns_min": 802700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            70700,
+            72500,
+            69500,
+            50700,
+            74700
+          ],
+          "name": "rejected_command",
+          "summary": {
+            "elapsed_ns_max": 74700,
+            "elapsed_ns_median": 70700,
+            "elapsed_ns_min": 50700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            3415400,
+            3424300,
+            5749600,
+            3310200,
+            3121900
+          ],
+          "name": "empty_boundary",
+          "summary": {
+            "elapsed_ns_max": 5749600,
+            "elapsed_ns_median": 3415400,
+            "elapsed_ns_min": 3121900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            5677000,
+            3755100,
+            3693200,
+            3809500,
+            4775500
+          ],
+          "name": "populated_boundary",
+          "summary": {
+            "elapsed_ns_max": 5677000,
+            "elapsed_ns_median": 3809500,
+            "elapsed_ns_min": 3693200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            934800,
+            736600,
+            929200,
+            762300,
+            935600
+          ],
+          "name": "snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 935600,
+            "elapsed_ns_median": 929200,
+            "elapsed_ns_min": 736600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            3757100,
+            3650800,
+            3644200,
+            3699900,
+            3604700
+          ],
+          "name": "snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 3757100,
+            "elapsed_ns_median": 3650800,
+            "elapsed_ns_min": 3604700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            18389900,
+            18597200,
+            18220300,
+            18180700,
+            18727700
+          ],
+          "name": "snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 18727700,
+            "elapsed_ns_median": 18389900,
+            "elapsed_ns_min": 18180700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            2218512300,
+            2137974500,
+            2163214500,
+            2133796400,
+            2185273100
+          ],
+          "name": "exact_replay",
+          "summary": {
+            "elapsed_ns_max": 2218512300,
+            "elapsed_ns_median": 2163214500,
+            "elapsed_ns_min": 2133796400
+          }
+        }
+      ],
+      "history": {
+        "boundaries": 512,
+        "checkpoint_hash": "2cff7dd66c89c93c6bfad0aa737621d9887914c3a26990d1139a4902b491f7ce",
+        "command_attempts": 1024,
+        "commands": 512,
+        "domain_records": 0,
+        "events": 1536,
+        "ingress": 0,
+        "plugin_components": 512,
+        "random_draws": 512,
+        "snapshot_size_bytes": 3139624,
+        "world_entities": 1537
+      },
+      "scale": 512
+    }
+  ],
+  "schema_version": 2,
+  "snapshot_format_version": 4,
+  "source": {
+    "commit": "e403e7028f82319615ffe5cb88c3b880d0d0507b",
+    "engine_source_dirty": true,
+    "source_file_hashes": {
+      "Cargo.lock": "02b271a5ec41537069f158592f21f940f92e94b2",
+      "Cargo.toml": "9ac66cd32ab80c97d76516e370f851439b05b5b8",
+      "benchmarks/performance-harness/Cargo.lock": "e5d668dc9d1bec684b5120300cdd0981a35b2b75",
+      "benchmarks/performance-harness/Cargo.toml": "10dcc4d2dcffd4cb43cc78a840234d3f3dca8ea7",
+      "benchmarks/performance-harness/src/main.rs": "ce45787ba775ab01c1a2ca5e11f0b8fb38dec15d",
+      "crates/canwu-api/Cargo.toml": "a184bcd6eabd31d7c118acd673f3bac871c2e290",
+      "crates/canwu-api/examples/move_army.rs": "3fdc22f53e9b1fe13f0791eecea0a0149a81b5a6",
+      "crates/canwu-api/examples/phased_boundary.rs": "837dfae7dc332805929a76ec4f22a85ffc5b405c",
+      "crates/canwu-api/examples/plugin.rs": "9506dc78d6fb38a7817c06380bada1a123f2292b",
+      "crates/canwu-api/src/lib.rs": "234599bbcce4b1b1b889999ce3097dc8f4eaa830",
+      "crates/canwu-core/Cargo.toml": "22d8a2b0ba8f31388c1b260b30c9ff87ac6678aa",
+      "crates/canwu-core/src/lib.rs": "8d656deb21d6e9ba77de6d98edfdfea99f776b8b",
+      "crates/canwu-debug/Cargo.toml": "526ff8aecf6c81b41f6a8605eff7ee995dd80506",
+      "crates/canwu-debug/src/main.rs": "a415bb3a0b5a75400ab863bb3bb1e3a994b06311",
+      "crates/canwu-event/Cargo.toml": "02d76b2bcbb48d60caa8513056568fc01731d14d",
+      "crates/canwu-event/src/lib.rs": "3f36952aa757cf84a63f0d375c134588b7220731",
+      "crates/canwu-knowledge/Cargo.toml": "f2c2ad8e67a8430a8d4476edc6497a9d90353df3",
+      "crates/canwu-knowledge/src/lib.rs": "e7ac804117ae5a232e7f82a1ad8649f00622325a",
+      "crates/canwu-sim/Cargo.toml": "b95365963611b5d32e370d8ad2fe3d50e4c45b86",
+      "crates/canwu-sim/src/boundary.rs": "5c47eae24bbfd765ea78404aa2f31498954562fc",
+      "crates/canwu-sim/src/ingress.rs": "670dff774973d4c1ebc3c6fec097fe40ee3817dc",
+      "crates/canwu-sim/src/lib.rs": "4ba5a6cabcc30cf9e11d5c0af093f23ae380a4d7",
+      "crates/canwu-sim/src/manifest.rs": "6896d750d9ef33df11e01e842eb445f818ec5124",
+      "crates/canwu-sim/src/policy.rs": "a2221c4ddb5ed3b626325351b70f65a2b8e97058",
+      "crates/canwu-sim/src/random.rs": "60182822f082f8f5aca2d8ebac5aa6951764318a",
+      "crates/canwu-sim/src/records.rs": "f86f9803d850d089b883144746d188126dcde28a",
+      "crates/canwu-time/Cargo.toml": "62afaf5f6b2e2087ba4dad1c6d830845dd42405d",
+      "crates/canwu-time/src/lib.rs": "f042bc7a79bc1583239756a9b2aac805fe4708c6",
+      "crates/canwu-world/Cargo.toml": "4a194aae6f3dc48ba8bbe9e0f9c2ba41555eb63e",
+      "crates/canwu-world/src/lib.rs": "9e261a63c5e043ad151bbba8b80fa4eb6abc9ded"
+    },
+    "working_tree_dirty": true
+  }
+}

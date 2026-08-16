@@ -3188,6 +3188,73 @@ impl CommandTransactionCheckpoint {
     }
 }
 
+struct BoundaryTransactionCheckpoint {
+    armies: BTreeMap<ArmyId, Army>,
+    knowledge: KnowledgeSnapshot,
+    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    scheduler: RuntimeScheduler,
+    counters: RuntimeCounters,
+    event_count: usize,
+    command_count: usize,
+    command_attempt_count: usize,
+    ingress_count: usize,
+    boundary_count: usize,
+    random_draw_count: usize,
+    plugin_registration_closed: bool,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl BoundaryTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            armies: state.current.armies.clone(),
+            knowledge: state.current.knowledge.clone(),
+            plugin_components: state.current.plugin_components.clone(),
+            domain_records: state.current.domain_records.clone(),
+            random_streams: state.current.random_streams.clone(),
+            scheduler: state.scheduler.clone(),
+            counters: state.counters.clone(),
+            event_count: state.evidence.events.len(),
+            command_count: state.evidence.commands.len(),
+            command_attempt_count: state.evidence.command_attempts.len(),
+            ingress_count: state.evidence.ingress.len(),
+            boundary_count: state.evidence.boundaries.len(),
+            random_draw_count: state.evidence.random_draws.len(),
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState) {
+        state.current.armies = self.armies;
+        state.current.knowledge = self.knowledge;
+        state.current.plugin_components = self.plugin_components;
+        state.current.domain_records = self.domain_records;
+        state.current.random_streams = self.random_streams;
+        state.scheduler = self.scheduler;
+        state.counters = self.counters;
+        state.evidence.events.truncate(self.event_count);
+        state.evidence.commands.truncate(self.command_count);
+        state
+            .evidence
+            .command_attempts
+            .truncate(self.command_attempt_count);
+        state.evidence.ingress.truncate(self.ingress_count);
+        state.evidence.boundaries.truncate(self.boundary_count);
+        state.evidence.random_draws.truncate(self.random_draw_count);
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
@@ -5054,11 +5121,11 @@ impl Simulation {
         request.cadences.sort();
         request.cadences.dedup();
 
-        let transaction_start = self.state.clone();
+        let transaction = BoundaryTransactionCheckpoint::capture(&self.state);
         match self.settle_boundary_inner(request) {
             Ok(receipt) => Ok(receipt),
             Err(error) => {
-                self.state = transaction_start;
+                transaction.restore(&mut self.state);
                 Err(error)
             }
         }
@@ -13708,7 +13775,7 @@ mod tests {
     }
 
     fn failure_random_stream() -> RandomStreamKey {
-        RandomStreamKey::new("boundary-failure", "rollback-proof", 1)
+        RandomStreamKey::new("boundary-rollback", "rollback-proof", 1)
     }
 
     fn roll_primary(
@@ -14021,60 +14088,60 @@ mod tests {
         }
     }
 
-    fn staged_failure(
+    fn stage_boundary_rollback_mutations(
         view: &SimulationView<'_>,
-        _context: &BoundaryContext,
+        context: &BoundaryContext,
     ) -> Result<BoundaryProposal, CanwuError> {
+        if context.boundary_id.get() != 2 {
+            return Ok(BoundaryProposal::default());
+        }
         let _ = view.random_range(&failure_random_stream(), 100, "rollback proof")?;
         Ok(BoundaryProposal {
-            directives: vec![BoundaryDirective::SetComponent {
-                state: StateKey::new("boundary-failure", "value"),
-                entity: EntityRef::Army(ArmyId::new(1)),
-                component: "value".to_owned(),
-                value: Value::Bool(true),
-                summary: "Stage a value before invariant failure".to_owned(),
-            }],
+            directives: vec![
+                BoundaryDirective::SetComponent {
+                    state: StateKey::new("boundary-rollback", "value"),
+                    entity: EntityRef::Army(ArmyId::new(1)),
+                    component: "value".to_owned(),
+                    value: Value::Bool(true),
+                    summary: "Stage a value before transaction failure".to_owned(),
+                },
+                BoundaryDirective::ScheduleIngress {
+                    after: SimDuration::hours(1),
+                    packet_type: "follow-up".to_owned(),
+                    priority: 0,
+                    payload: serde_json::json!({ "label": "rollback proof" }),
+                    affected: vec![EntityRef::Army(ArmyId::new(1))],
+                },
+            ],
             ..BoundaryProposal::default()
         })
     }
 
-    fn reject_boundary(
-        _view: &SimulationView<'_>,
-        _context: &BoundaryContext,
-    ) -> Result<BoundaryProposal, CanwuError> {
-        Err(CanwuError::new(
-            ErrorCode::InvalidBoundary,
-            "injected boundary invariant failure",
-        ))
-    }
+    struct BoundaryRollbackPlugin;
 
-    struct BoundaryFailurePlugin;
-
-    impl SimulationPlugin for BoundaryFailurePlugin {
+    impl SimulationPlugin for BoundaryRollbackPlugin {
         fn name(&self) -> &'static str {
-            "boundary-failure"
+            "boundary-rollback"
         }
 
         test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000011");
 
         fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "follow-up".to_owned(),
+                description: "A rollback fixture packet".to_owned(),
+                class: IngressClass::Information,
+                payload_schema: object_payload_schema("label"),
+            })?;
             let mut propose = BoundarySystemContract::new(
                 "propose",
                 BoundaryPhase::DomainDeltaProposal,
                 SystemCadence::Daily,
             );
-            propose.writes = vec![StateKey::new("boundary-failure", "value")];
+            propose.writes = vec![StateKey::new("boundary-rollback", "value")];
             propose.random_streams = vec![failure_random_stream()];
             propose.visibility = StateVisibility::SameBoundary;
-            registrar.register_boundary_system(propose, staged_failure)?;
-            registrar.register_boundary_system(
-                BoundarySystemContract::new(
-                    "reject",
-                    BoundaryPhase::InvariantValidation,
-                    SystemCadence::Daily,
-                ),
-                reject_boundary,
-            )
+            registrar.register_boundary_system(propose, stage_boundary_rollback_mutations)
         }
     }
 
@@ -17631,27 +17698,129 @@ mod tests {
     }
 
     #[test]
-    fn failed_phased_boundary_restores_ingress_time_state_and_identifiers() {
-        let (mut simulation, _) = Simulation::demo(35).expect("demo should load");
+    fn failed_phased_boundary_restores_every_writable_domain_and_retries_exactly() {
+        #[derive(Debug, Eq, PartialEq)]
+        struct CacheFingerprint {
+            journals: [String; 5],
+            domains: [Option<String>; 7],
+        }
+
+        fn cache_fingerprint(simulation: &Simulation) -> CacheFingerprint {
+            let cache = simulation
+                .state
+                .metadata
+                .commitment_cache
+                .as_ref()
+                .expect("current runtimes should maintain a commitment cache");
+            CacheFingerprint {
+                journals: [
+                    cache.commands.root(),
+                    cache.attempts.root(),
+                    cache.events.root(),
+                    cache.ingress.root(),
+                    cache.random_draws.root(),
+                ],
+                domains: [
+                    cache.world.clone(),
+                    cache.knowledge.clone(),
+                    cache.plugin_components.clone(),
+                    cache.domain_records.clone(),
+                    cache.scheduler.clone(),
+                    cache.random_streams.clone(),
+                    cache.identity.clone(),
+                ],
+            }
+        }
+
+        let (scenario, ids) = demo_scenario();
+        let record_plugin = RecordLifecyclePlugin;
+        let rollback_plugin = BoundaryRollbackPlugin;
+        let random_plugin = PrimaryRandomPlugin;
+        let mut simulation = Simulation::new(35, scenario).expect("rollback fixture should load");
         simulation
-            .register_plugin(&BoundaryFailurePlugin)
-            .expect("failure fixture should register");
+            .register_plugin(&record_plugin)
+            .expect("record fixture should register");
+        simulation
+            .register_plugin(&rollback_plugin)
+            .expect("rollback fixture should register");
+        simulation
+            .register_plugin(&random_plugin)
+            .expect("random fixture should register");
+        simulation
+            .enqueue_command(
+                SimTime::EPOCH,
+                0,
+                CommandRequest::new(
+                    CommandRequestId::new(1),
+                    simulation.revision(),
+                    move_order(&ids),
+                ),
+            )
+            .expect("the initial movement should queue");
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("the initial boundary should create records and schedule the arrival");
+        let arrival_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(18))
+            .expect("arrival time should be representable");
+        let return_order = CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::MoveArmy {
+                army: ids.army,
+                destination: ids.western_territory,
+            },
+        )
+        .at_time(arrival_at);
+        simulation
+            .enqueue_command(
+                arrival_at,
+                0,
+                CommandRequest::new(
+                    CommandRequestId::new(2),
+                    simulation.revision(),
+                    return_order,
+                ),
+            )
+            .expect("the equal-time return order should queue");
+
+        let baseline = simulation.snapshot();
+        let mut control = Simulation::from_snapshot_with_plugins(
+            baseline.clone(),
+            &[&record_plugin, &rollback_plugin, &random_plugin],
+        )
+        .expect("the pending rollback fixture should reload exactly");
+        let next_random_draw_id = simulation.state.counters.next_random_draw_id;
+        simulation.state.counters.next_random_draw_id = u64::MAX - 1;
+        let cache_before = cache_fingerprint(&simulation);
         let before = simulation
             .snapshot_json()
             .expect("snapshot should serialize");
         let error = simulation
-            .settle_boundary(
-                BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(1))
-                    .with_cadence(SystemCadence::Daily),
-            )
-            .expect_err("invariant rejection must abort the whole boundary");
-        assert_eq!(error.code, ErrorCode::InvalidBoundary);
+            .settle_boundary(BoundaryRequest::at(arrival_at).with_cadence(SystemCadence::Daily))
+            .expect_err("random-draw identifier exhaustion must abort the whole boundary");
+        assert_eq!(error.code, ErrorCode::IdentifierExhausted);
         assert_eq!(
             before,
             simulation
                 .snapshot_json()
                 .expect("failed settlement must restore every serialized field")
         );
+        assert_eq!(cache_fingerprint(&simulation), cache_before);
+
+        simulation.state.counters.next_random_draw_id = next_random_draw_id;
+        assert_eq!(simulation.snapshot(), baseline);
+        let retry = simulation
+            .settle_boundary(BoundaryRequest::at(arrival_at).with_cadence(SystemCadence::Daily))
+            .expect("the repaired boundary should settle");
+        let control_receipt = control
+            .settle_boundary(BoundaryRequest::at(arrival_at).with_cadence(SystemCadence::Daily))
+            .expect("the control boundary should settle");
+        assert_eq!(retry, control_receipt);
+        assert_eq!(simulation.snapshot(), control.snapshot());
+        assert!(retry.change_count > 0);
+        assert!(retry.record_change_count > 0);
+        assert!(!retry.generated_ingress.is_empty());
+        assert!(!retry.random_draws.is_empty());
     }
 
     #[test]
