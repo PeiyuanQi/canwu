@@ -613,3 +613,25 @@ moves from 0.063 to 0.072 ms (+15.5%) on a sub-0.1-ms case. These are treated as
 local timing noise. The milestone makes no runtime-performance claim; it gives
 authoritative validation a dedicated dependency surface while preserving every
 persisted and replayed invariant.
+
+## Migration-module extraction comparison
+
+The behavior-preserving migration extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-migration-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-migration-module-allocations.json) reports,
+using the validation-module milestone as its before baseline. It moves legacy
+snapshot normalization, revision and admission-cursor translation, boundary
+rehashing, format-3 conversion, and historical run-configuration inference into
+`canwu-sim/src/migration.rs`. Hash material and current commitment construction
+remain in `lib.rs` for a separate hashing milestone. `canwu-sim/src/lib.rs`
+falls from 14,101 to 13,452 lines, with 669 focused lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by -0.4%, empty boundaries -0.9%,
+populated boundaries +5.6%, snapshot creation -0.6%, load validation -3.9%, and
+exact replay +0.9%. The accepted-command median moves from 0.844 to 0.972 ms
+(+15.1%) on a sub-millisecond case. These are treated as local timing noise.
+The milestone makes no runtime-performance claim; it gives historical format
+interpretation a dedicated dependency surface while preserving deterministic
+migration and current-format validation.
