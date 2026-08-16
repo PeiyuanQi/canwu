@@ -15,25 +15,27 @@ pub use canwu_sim::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArtifactManifest, BoundaryChange, BoundaryContext,
     BoundaryDirective, BoundaryEmission, BoundaryEmissionKind, BoundaryIngressGeneration,
     BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
-    BoundarySystemContract, BoundarySystemHandler, COMMITMENT_FORMAT_VERSION, CanwuError, Command,
-    CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
-    CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
-    CommandRejection, CommandRequest, CommitmentRoots, ControllerPolicy, DecisionOrigin, DemoIds,
-    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
+    BoundarySystemContract, BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION,
+    COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal, Command, CommandAttemptOutcome,
+    CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope, CommandIngress,
+    CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection,
+    CommandRequest, CommitmentRoots, ControllerPolicy, DecisionOrigin, DemoIds, DomainRecord,
+    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
     DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
     DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
-    ErrorCode, IngressClass, IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy,
-    Issuer, ObservationPolicy, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginActionDescriptor, PluginCommandHandler, PluginDescriptor, PluginIngressDescriptor,
-    PluginIngressRequest, PluginRegistrar, PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION,
-    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer,
-    RandomDrawRecord, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, RunConfiguration,
-    RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
-    STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationPlugin,
-    SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemContract, SystemDirective, TracePolicy,
+    ErrorCode, EvidenceCursor, EvidenceJournalSegment, IngressClass, IngressPayload,
+    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty,
+    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
+    PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
+    PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RandomStreamState,
+    ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
+    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
+    ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
+    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
+    SimulationCheckpoint, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler,
+    SimulationView, StateKey, StateVisibility, SystemCadence, SystemContract, SystemDirective,
+    TracePolicy,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -251,6 +253,29 @@ impl Canwu {
         self.simulation.replay_journal()
     }
 
+    pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
+        self.simulation.evidence_cursor()
+    }
+
+    pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
+        self.simulation.checkpoint()
+    }
+
+    pub fn journal_segment_since(
+        &self,
+        start: EvidenceCursor,
+    ) -> Result<EvidenceJournalSegment, CanwuError> {
+        self.simulation.journal_segment_since(start)
+    }
+
+    pub fn checkpoint_journal(&self) -> Result<CheckpointJournal, CanwuError> {
+        self.simulation.checkpoint_journal()
+    }
+
+    pub fn checkpoint_journal_json(&self) -> Result<String, CanwuError> {
+        self.simulation.checkpoint_journal_json()
+    }
+
     pub fn register_plugin<P: SimulationPlugin + ?Sized>(
         &mut self,
         plugin: &P,
@@ -344,6 +369,45 @@ impl Canwu {
     ) -> Result<Self, CanwuError> {
         Ok(Self {
             simulation: Simulation::from_snapshot_json_with_plugins(json, plugins)?,
+        })
+    }
+
+    pub fn from_checkpoint_and_journal(
+        checkpoint: SimulationCheckpoint,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_checkpoint_and_journal(checkpoint, segments)?,
+        })
+    }
+
+    pub fn from_checkpoint_journal(bundle: CheckpointJournal) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_checkpoint_journal(bundle)?,
+        })
+    }
+
+    pub fn from_checkpoint_journal_with_plugins(
+        bundle: CheckpointJournal,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_checkpoint_journal_with_plugins(bundle, plugins)?,
+        })
+    }
+
+    pub fn from_checkpoint_journal_json(json: &str) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_checkpoint_journal_json(json)?,
+        })
+    }
+
+    pub fn from_checkpoint_journal_json_with_plugins(
+        json: &str,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_checkpoint_journal_json_with_plugins(json, plugins)?,
         })
     }
 
@@ -1250,5 +1314,38 @@ mod tests {
         );
         let explanation = canwu.explain(&ExplanationRequest::Event(receipt.emitted_events[0]));
         assert!(explanation.causal_chain.len() >= 2);
+    }
+
+    #[test]
+    fn public_checkpoint_journal_round_trip_is_exact() {
+        let mut canwu = Canwu::demo(35).expect("demo should load");
+        let ids = Canwu::demo_ids();
+        canwu
+            .submit(CommandEnvelope::new(
+                Issuer::Actor(ids.commander),
+                Command::MoveArmy {
+                    army: ids.army,
+                    destination: ids.eastern_territory,
+                },
+            ))
+            .expect("movement should be accepted");
+        canwu
+            .advance(SimDuration::days(1))
+            .expect("scheduled work should execute");
+
+        let checkpoint = canwu.checkpoint().expect("current state should checkpoint");
+        assert!(checkpoint.state.events.is_empty());
+        assert_eq!(
+            checkpoint.journal_end,
+            canwu
+                .evidence_cursor()
+                .expect("journal cursor should be representable")
+        );
+        let json = canwu
+            .checkpoint_journal_json()
+            .expect("checkpoint journal should serialize");
+        let restored = Canwu::from_checkpoint_journal_json(&json)
+            .expect("checkpoint journal should restore through the public facade");
+        assert_eq!(restored.snapshot(), canwu.snapshot());
     }
 }

@@ -366,6 +366,32 @@ operations and 620,677,980 requested bytes. Command, rejection, snapshot,
 serialization, and load-validation allocation counts are unchanged, and
 snapshot size remains 3,139,624 bytes.
 
+## Checkpoint-journal persistence comparison
+
+The incremental persistence foundation is recorded in separate
+[`elapsed`](baselines/2026-08-16-checkpoint-journal-elapsed.json) and
+[`allocation`](baselines/2026-08-16-checkpoint-journal-allocations.json) reports,
+using the boundary read-view milestone as the before baseline for the unchanged
+flat-snapshot cases. The new measurements separate current-state checkpoint
+creation and serialization from full and empty-tail evidence-segment export.
+
+At scale 512, current-state checkpoint creation takes 0.123 ms instead of 0.759
+ms for a flat snapshot (-83.8%), falls from 25,220 to 4,735 allocation operations
+(-81.2%), and requests 308,394 instead of 2,413,994 bytes (-87.2%). Pretty JSON
+serialization takes 0.523 ms instead of 3.692 ms (-85.8%) and requests 1,048,448
+instead of 8,388,480 bytes (-87.5%). The serialized current-state checkpoint is
+500,496 bytes, 84.1% smaller than the 3,139,624-byte flat snapshot. A one-time
+full evidence segment is 2,682,427 bytes and costs 20,485 allocation operations;
+exporting an unchanged tail takes a 300 ns median with zero allocations.
+
+The portable pretty-JSON `CheckpointJournal` convenience bundle is 3,698,799
+bytes, 17.8% larger than the flat snapshot because the explicit nested envelope
+adds indentation and field overhead. Its purpose is portability and validation,
+not single-file size reduction. Incremental stores obtain the scaling benefit by
+persisting the current-state checkpoint plus only newly appended journal
+segments. The live runtime still retains complete evidence in this milestone;
+sealed-segment eviction and compaction remain explicit later work.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted commands, individual

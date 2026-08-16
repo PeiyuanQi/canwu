@@ -252,10 +252,26 @@ and failed settlement restores them with the rest of the transaction.
 
 Append-only events, commands, command attempts, ingress, boundary records, and
 random draws have one internal owner, `RuntimeEvidence`, separate from mutable
-world/knowledge/plugin state. Public snapshots and replay journals deliberately
-retain their existing flat serialized shapes while this internal boundary is
-established; later segmented or checkpoint-plus-journal storage can replace the
-owner without spreading evidence mutation back through the runtime.
+world/knowledge/plugin state. Public flat snapshots and replay journals retain
+their existing serialized shapes. Checkpoint-journal format 1 adds a separate
+incremental persistence path: `SimulationCheckpoint` captures current state,
+scheduler, counters, metadata, and the already-computed full commitment roots
+while leaving every append-only evidence array empty. `EvidenceCursor` records
+the exact cut through all six journals, and `EvidenceJournalSegment` stores only
+the records after a prior cut. Loading requires segments to start at the global
+zero cut, remain contiguous, advance at least one journal, encode truthful end
+cursors, and finish exactly at the checkpoint cut. It then reconstructs the
+flat snapshot in memory and runs the existing migration and validation path, so
+the checkpoint roots, boundary chain, IDs, authority, causal evidence, and exact
+replay contract bind the archived records just as before. `CheckpointJournal`
+is a portable full-save convenience envelope; incremental stores should persist
+the smaller current-state checkpoint and only newly appended segments.
+
+This first storage milestone avoids cloning and serializing all accumulated
+history for every checkpoint, but the live runtime still retains its complete
+evidence owner and loading still materializes the complete validated prefix.
+Evicting sealed segments from a running simulation requires a later explicit
+archive/compaction contract; no evidence is discarded implicitly here.
 
 The remaining runtime bookkeeping is partitioned by responsibility rather than
 stored as unrelated fields on the authoritative world container.

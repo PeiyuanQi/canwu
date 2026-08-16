@@ -126,6 +126,18 @@ recomputed and compared independently before the outer checkpoint is accepted.
 Replay journals persist their commitment format; format-0 journals reproduce
 checkpoint v3 exactly, while current journals reproduce checkpoint v4.
 
+Checkpoint-journal format 1 is an additive persistence envelope separate from
+snapshot format 4. Its current-state checkpoint contains a current snapshot
+shell with empty event, command, command-attempt, ingress, boundary, and random-
+draw arrays plus the full evidence cursor and existing commitment roots.
+Contiguous evidence segments reconstruct those arrays before normal snapshot
+validation. Segment gaps, duplicates, non-advancing ranges, false end cursors,
+checkpoint-side evidence duplication, unsupported envelope formats, and any
+record tampering are rejected. Existing flat snapshots are neither relabeled
+nor migrated into this envelope implicitly; they remain readable through the
+existing snapshot APIs. Checkpoint-journal format 1 requires the current
+snapshot format and has no legacy interpretation.
+
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,
 controller, seat, observation, interaction, and trace policy do not alter

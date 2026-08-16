@@ -43,9 +43,11 @@ Snapshots contain deterministic state, clock, RNG state, scheduler sequence,
 pending serializable work, knowledge, event history, and command records. A
 snapshot also retains plugin descriptors and blocks continuation until matching
 stateless executable handlers are rehydrated. It can be forked into independent
-simulations. Future work may add:
+simulations. Current-state checkpoints and contiguous evidence-journal segments
+provide incremental persistence without changing the flat snapshot contract.
+Future work may add:
 
-- content-addressed snapshots and incremental storage
+- content-addressed sealed segments and live archive/compaction
 - replay from command/event journals
 - branch metadata and lineage
 - world and outcome comparison across branches

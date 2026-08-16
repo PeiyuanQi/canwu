@@ -2,9 +2,9 @@ use canwu_api::{
     Army, ArmyId, BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal,
     BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, Command, CommandEnvelope,
     CommandOutcome, CommandRequest, CommandRequestId, ENGINE_VERSION, EntityRef, ErrorCode,
-    Government, GovernmentId, Issuer, KnowledgeSnapshot, MapPoint, Person, PersonId,
-    RandomStreamKey, SNAPSHOT_FORMAT_VERSION, Scenario, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, Territory, TerritoryId, WorldSnapshot,
+    EvidenceCursor, Government, GovernmentId, Issuer, KnowledgeSnapshot, MapPoint, Person,
+    PersonId, RandomStreamKey, SNAPSHOT_FORMAT_VERSION, Scenario, SimulationPlugin, SimulationView,
+    StateKey, StateVisibility, SystemCadence, Territory, TerritoryId, WorldSnapshot,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -259,6 +259,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         validate_growth_counts(&fixture.simulation, scale)?;
         let snapshot = fixture.simulation.snapshot();
         let snapshot_json = fixture.simulation.snapshot_json()?;
+        let checkpoint = fixture.simulation.checkpoint()?;
+        let checkpoint_json = serde_json::to_string_pretty(&checkpoint)?;
+        let full_segment = fixture
+            .simulation
+            .journal_segment_since(EvidenceCursor::default())?;
+        let full_segment_json = serde_json::to_string_pretty(&full_segment)?;
+        let journal_end = fixture.simulation.evidence_cursor()?;
+        let checkpoint_journal_json = fixture.simulation.checkpoint_journal_json()?;
         let journal = fixture.simulation.replay_journal();
         let checkpoint_hash = fixture.simulation.checkpoint_hash().to_owned();
         let scenario = fixture.scenario.clone();
@@ -347,6 +355,34 @@ fn main() -> Result<(), Box<dyn Error>> {
             || Ok::<_, serde_json::Error>(snapshot.clone()),
             |snapshot| serde_json::to_string_pretty(snapshot),
         )?;
+        let checkpoint_create = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || restore(&snapshot_json),
+            |simulation| simulation.checkpoint(),
+        )?;
+        let checkpoint_serialize = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || Ok::<_, serde_json::Error>(checkpoint.clone()),
+            |checkpoint| serde_json::to_string_pretty(checkpoint),
+        )?;
+        let full_journal_segment = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || restore(&snapshot_json),
+            |simulation| simulation.journal_segment_since(EvidenceCursor::default()),
+        )?;
+        let empty_journal_segment = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || restore(&snapshot_json),
+            |simulation| simulation.journal_segment_since(journal_end),
+        )?;
         let snapshot_load_validate = measure_case(
             options.mode,
             options.warmup,
@@ -367,6 +403,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         scale_reports.push(json!({
             "scale": scale,
             "history": history_json(&snapshot, snapshot_json.len(), &checkpoint_hash),
+            "checkpoint_storage": {
+                "current_state_checkpoint_bytes": checkpoint_json.len(),
+                "full_journal_segment_bytes": full_segment_json.len(),
+                "full_checkpoint_journal_bytes": checkpoint_journal_json.len(),
+            },
             "cases": [
                 case_json("history_growth", &growth, options.mode),
                 case_json("accepted_command", &accepted, options.mode),
@@ -375,6 +416,10 @@ fn main() -> Result<(), Box<dyn Error>> {
                 case_json("populated_boundary", &populated_boundary, options.mode),
                 case_json("snapshot_create", &snapshot_create, options.mode),
                 case_json("snapshot_serialize_pretty", &snapshot_serialize, options.mode),
+                case_json("checkpoint_create", &checkpoint_create, options.mode),
+                case_json("checkpoint_serialize_pretty", &checkpoint_serialize, options.mode),
+                case_json("journal_segment_full", &full_journal_segment, options.mode),
+                case_json("journal_segment_empty_tail", &empty_journal_segment, options.mode),
                 case_json("snapshot_load_validate", &snapshot_load_validate, options.mode),
                 case_json("exact_replay", &exact_replay, options.mode),
             ],
