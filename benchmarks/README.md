@@ -313,6 +313,24 @@ operations and 676,593,500 requested bytes. Command, rejection, snapshot,
 serialization, and load-validation allocation counts are unchanged, and snapshot
 size remains 3,139,624 bytes.
 
+## Staged scheduled-transaction comparison
+
+The scheduled-advancement rollback replacement is recorded in separate
+[`elapsed`](baselines/2026-08-16-staged-scheduled-transactions-elapsed.json) and
+[`allocation`](baselines/2026-08-16-staged-scheduled-transactions-allocations.json)
+reports, using the staged boundary transaction as its before baseline. Each
+same-timestamp scheduled batch now checkpoints only its writable domains and
+journal cuts; a final clock-only advance checkpoints only time, registration
+state, and commitments.
+
+At scale 512, exact replay falls from 2,163.215 ms to 1,385.267 ms (-36.0%),
+from 36,413,190 allocation operations to 18,388,837, and from 4,614,215,568
+requested bytes to 2,981,522,168. History construction and every individual
+command, rejection, boundary, snapshot, serialization, and load-validation case
+retain identical allocation counts. History construction elapsed time changes
+by -0.1%, within normal local measurement noise, and snapshot size remains
+3,139,624 bytes.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
@@ -322,8 +340,8 @@ The allocation evidence identifies two distinct growth classes:
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
   fifteen times as long. At scale 512, growth requested 18,323,235 allocation
-  operations and 2,972,632,361 bytes; replay requested 36,413,190 operations and
-  4,614,215,568 bytes. These paths still exhibit approximately
+  operations and 2,972,632,361 bytes; replay requested 18,388,837 operations and
+  2,981,522,168 bytes. These paths still exhibit approximately
   quadratic growth.
 
 Those observations establish optimization targets; they do not change any

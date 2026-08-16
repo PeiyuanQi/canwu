@@ -369,14 +369,16 @@ Command application, each same-timestamp scheduled batch, and each phased
 settlement are transactional. If fallible event or plugin processing fails,
 state, time, queues, events, boundary records, random state, and ID counters
 return to the last successful transaction or timestamp boundary. Commands and
-phased boundaries use the explicit writable-domain checkpoints described above;
-scheduled batches retain their full-state rollback clone until the next staged
-transaction slice. After command rollback, any persisted rejection evidence uses
-the narrower rejection checkpoint. Plugin directives validate every referenced
-entity before mutation. Snapshot loading also proves that pending arrivals agree
-with army transit, move commands, order events, timestamps, and correlations,
-and that pending or completed report delivery agrees with its dispatch and
-arrival evidence.
+phased boundaries use the explicit writable-domain checkpoints described above.
+Scheduled batches checkpoint only armies, knowledge, plugin components, random
+streams, clock and scheduled actions, counters, event/random-draw tails,
+registration state, and commitments. A clock-only advance narrows that further
+to time, registration state, and commitments. After command rollback, any
+persisted rejection evidence uses the narrower rejection checkpoint. Plugin
+directives validate every referenced entity before mutation. Snapshot loading
+also proves that pending arrivals agree with army transit, move commands, order
+events, timestamps, and correlations, and that pending or completed report
+delivery agrees with its dispatch and arrival evidence.
 
 Executable handlers are not serialized. A snapshot stores validated plugin and
 system descriptors together with author-declared package versions and semantic

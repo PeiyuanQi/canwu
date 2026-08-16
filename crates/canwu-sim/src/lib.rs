@@ -3255,6 +3255,86 @@ impl BoundaryTransactionCheckpoint {
     }
 }
 
+struct ScheduledBatchTransactionCheckpoint {
+    armies: BTreeMap<ArmyId, Army>,
+    knowledge: KnowledgeSnapshot,
+    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+    now: SimTime,
+    scheduled_actions: BTreeMap<ScheduleKey, ScheduledAction>,
+    counters: RuntimeCounters,
+    event_count: usize,
+    random_draw_count: usize,
+    plugin_registration_closed: bool,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl ScheduledBatchTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            armies: state.current.armies.clone(),
+            knowledge: state.current.knowledge.clone(),
+            plugin_components: state.current.plugin_components.clone(),
+            random_streams: state.current.random_streams.clone(),
+            now: state.scheduler.now,
+            scheduled_actions: state.scheduler.actions.clone(),
+            counters: state.counters.clone(),
+            event_count: state.evidence.events.len(),
+            random_draw_count: state.evidence.random_draws.len(),
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState) {
+        state.current.armies = self.armies;
+        state.current.knowledge = self.knowledge;
+        state.current.plugin_components = self.plugin_components;
+        state.current.random_streams = self.random_streams;
+        state.scheduler.now = self.now;
+        state.scheduler.actions = self.scheduled_actions;
+        state.counters = self.counters;
+        state.evidence.events.truncate(self.event_count);
+        state.evidence.random_draws.truncate(self.random_draw_count);
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
+struct ClockTransactionCheckpoint {
+    now: SimTime,
+    plugin_registration_closed: bool,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl ClockTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            now: state.scheduler.now,
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState) {
+        state.scheduler.now = self.now;
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
@@ -6376,39 +6456,39 @@ impl Simulation {
         while let Some(boundary_time) = self.state.scheduler.actions.keys().next().map(|key| key.at)
             && boundary_time <= target
         {
-            let boundary_start = self.state.clone();
-            self.invalidate_commitments(CommitmentDomains::SCHEDULER);
-            self.state.scheduler.now = boundary_time;
-            while self
-                .state
-                .scheduler
-                .actions
-                .first_key_value()
-                .is_some_and(|(key, _)| key.at == boundary_time)
-            {
-                let (_, action) = self
+            let transaction = ScheduledBatchTransactionCheckpoint::capture(&self.state);
+            let result = (|| {
+                self.invalidate_commitments(CommitmentDomains::SCHEDULER);
+                self.state.scheduler.now = boundary_time;
+                while self
                     .state
                     .scheduler
                     .actions
-                    .pop_first()
-                    .expect("scheduler was checked as non-empty");
-                if let Err(error) = self.execute_scheduled(action) {
-                    self.state = boundary_start;
-                    return Err(error);
+                    .first_key_value()
+                    .is_some_and(|(key, _)| key.at == boundary_time)
+                {
+                    let (_, action) = self
+                        .state
+                        .scheduler
+                        .actions
+                        .pop_first()
+                        .expect("scheduler was checked as non-empty");
+                    self.execute_scheduled(action)?;
                 }
-            }
-            self.state.metadata.plugin_registration_closed = true;
-            if let Err(error) = self.refresh_checkpoint_hash() {
-                self.state = boundary_start;
+                self.state.metadata.plugin_registration_closed = true;
+                self.refresh_checkpoint_hash()
+            })();
+            if let Err(error) = result {
+                transaction.restore(&mut self.state);
                 return Err(error);
             }
         }
-        let target_start = self.state.clone();
+        let transaction = ClockTransactionCheckpoint::capture(&self.state);
         self.invalidate_commitments(CommitmentDomains::SCHEDULER);
         self.state.scheduler.now = target;
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
-            self.state = target_start;
+            transaction.restore(&mut self.state);
             return Err(error);
         }
         Ok(self.state.evidence.events[start..].to_vec())
@@ -13233,6 +13313,39 @@ mod tests {
 
     use super::*;
 
+    #[derive(Debug, Eq, PartialEq)]
+    struct CacheFingerprint {
+        journals: [String; 5],
+        domains: [Option<String>; 7],
+    }
+
+    fn cache_fingerprint(simulation: &Simulation) -> CacheFingerprint {
+        let cache = simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_ref()
+            .expect("current runtimes should maintain a commitment cache");
+        CacheFingerprint {
+            journals: [
+                cache.commands.root(),
+                cache.attempts.root(),
+                cache.events.root(),
+                cache.ingress.root(),
+                cache.random_draws.root(),
+            ],
+            domains: [
+                cache.world.clone(),
+                cache.knowledge.clone(),
+                cache.plugin_components.clone(),
+                cache.domain_records.clone(),
+                cache.scheduler.clone(),
+                cache.random_streams.clone(),
+                cache.identity.clone(),
+            ],
+        }
+    }
+
     macro_rules! test_plugin_identity {
         ($hash:literal) => {
             fn version(&self) -> &'static str {
@@ -17699,39 +17812,6 @@ mod tests {
 
     #[test]
     fn failed_phased_boundary_restores_every_writable_domain_and_retries_exactly() {
-        #[derive(Debug, Eq, PartialEq)]
-        struct CacheFingerprint {
-            journals: [String; 5],
-            domains: [Option<String>; 7],
-        }
-
-        fn cache_fingerprint(simulation: &Simulation) -> CacheFingerprint {
-            let cache = simulation
-                .state
-                .metadata
-                .commitment_cache
-                .as_ref()
-                .expect("current runtimes should maintain a commitment cache");
-            CacheFingerprint {
-                journals: [
-                    cache.commands.root(),
-                    cache.attempts.root(),
-                    cache.events.root(),
-                    cache.ingress.root(),
-                    cache.random_draws.root(),
-                ],
-                domains: [
-                    cache.world.clone(),
-                    cache.knowledge.clone(),
-                    cache.plugin_components.clone(),
-                    cache.domain_records.clone(),
-                    cache.scheduler.clone(),
-                    cache.random_streams.clone(),
-                    cache.identity.clone(),
-                ],
-            }
-        }
-
         let (scenario, ids) = demo_scenario();
         let record_plugin = RecordLifecyclePlugin;
         let rollback_plugin = BoundaryRollbackPlugin;
@@ -18321,27 +18401,42 @@ mod tests {
     }
 
     #[test]
-    fn failed_scheduled_boundary_restores_clock_queue_and_state() {
+    fn failed_scheduled_batch_restores_every_writable_domain() {
         let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
         simulation
             .register_plugin(&FailingPlugin)
             .expect("plugin should register");
         simulation
-            .submit(CommandEnvelope::new(
-                Issuer::Actor(ids.commander),
-                Command::Plugin {
+            .submit(move_order(&ids))
+            .expect("the arrival should schedule");
+        let arrival_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(18))
+            .expect("arrival time should be representable");
+        simulation
+            .schedule_at(
+                arrival_at,
+                ScheduledAction::PluginDirective {
                     plugin: "failing-test".to_owned(),
-                    command: "mutate".to_owned(),
-                    payload: serde_json::json!({ "scheduled": true }),
+                    directive: Box::new(SystemDirective::SetComponent {
+                        state: StateKey::new("failure-fixture", "flag"),
+                        entity: EntityRef::Army(ids.army),
+                        component: "flag".to_owned(),
+                        value: Value::Bool(true),
+                        summary: "Set a flag after the arrival mutates state".to_owned(),
+                    }),
+                    allowed_writes: vec![StateKey::new("failure-fixture", "flag")],
+                    cause: CauseRef::System("scheduled-rollback-fixture".to_owned()),
+                    correlation_id: 0,
                 },
-            ))
-            .expect("scheduling the valid directive should succeed");
+            )
+            .expect("the failing action should share the arrival timestamp");
+        let cache_before = cache_fingerprint(&simulation);
         let before_boundary = simulation
             .snapshot_json()
             .expect("snapshot should serialize");
         let error = simulation
-            .advance(SimDuration::days(1))
-            .expect_err("the scheduled boundary should fail");
+            .advance(SimDuration::hours(18))
+            .expect_err("the scheduled batch should fail after the arrival");
         assert_eq!(error.code, ErrorCode::InvalidDuration);
         assert_eq!(
             before_boundary,
@@ -18349,6 +18444,35 @@ mod tests {
                 .snapshot_json()
                 .expect("failed boundary must restore its clock, queue, state, events, and IDs")
         );
+        assert_eq!(cache_fingerprint(&simulation), cache_before);
+    }
+
+    #[test]
+    fn failed_clock_only_advance_restores_time_and_commitments() {
+        let (mut simulation, _) = Simulation::demo(35).expect("demo should load");
+        simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_mut()
+            .expect("current runtimes should maintain a commitment cache")
+            .events
+            .len = 2;
+        let cache_before = cache_fingerprint(&simulation);
+        let before = simulation
+            .snapshot_json()
+            .expect("snapshot should serialize");
+        let error = simulation
+            .advance(SimDuration::hours(1))
+            .expect_err("the corrupt cache must abort clock-only advancement");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert_eq!(
+            before,
+            simulation
+                .snapshot_json()
+                .expect("failed clock advancement must restore serialized state")
+        );
+        assert_eq!(cache_fingerprint(&simulation), cache_before);
     }
 
     #[test]
