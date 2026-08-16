@@ -147,6 +147,31 @@ tuple `(plugin, state key, entity, component)`; text separators cannot alias
 records. Executable order is always canonical and never depends on plugin
 registration order.
 
+Plugins may also register application-defined `DomainRecordSchema` values.
+Each schema owns one namespaced `DomainRecordKind`, declares whether instances
+are entity identities or non-entity records, validates payload fields, and
+defines typed reference roles with cardinality and retired-target rules.
+Instances use stable string `DomainRecordRef` identities and can be created,
+updated with an expected version, retired with an optional same-kind successor,
+or deleted only after retirement. Deletion retains a versioned tombstone so an
+identity cannot be silently reused. The kernel validates the complete mutation
+bundle, including cross-record references, schema ownership, successor state,
+and external live dependencies, before commit. A successor must be active when
+the retirement is admitted; later retirement of that successor can extend a
+stable succession chain without invalidating earlier links. Domain record
+collections are ordered and are queryable through both `Simulation` and
+`Canwu`. Scenarios that contain initial domain records must use a plugin-aware
+constructor such as `new_with_plugins`; ordinary constructors reject them
+instead of returning a half-configured runtime that could emit an unloadable
+snapshot.
+
+Domain record state is boundary-only: immediate reactors and commands cannot
+write a record kind as an untyped component. Boundary systems declare the
+record kind's `StateKey`, propose `MutateRecord` directives, and read current or
+invariant-candidate values through `domain_record` and
+`proposed_domain_record`. This keeps lifecycle changes inside the same atomic
+visibility and rollback contract as other authoritative domain changes.
+
 ## Phased settlement boundary
 
 `settle_boundary(BoundaryRequest)` is the authoritative extension path for new
@@ -168,17 +193,21 @@ Phase-seven changes are staged against the immutable boundary snapshot.
 Same-boundary values are exposed through the normal read-only overlay, while
 next-boundary values remain hidden from current-state reads until settlement has
 finished. Invariant systems can separately inspect every staged candidate with
-`proposed_component`, still subject to their declared read set. Ordinary changes
-commit at phase nine. Historical candidates stage a separate transition bundle
-for phase eleven. Strategic aggregation and perspective/report materialization
-use the same ownership and visibility rules. Any fatal error restores time,
-queues, state, journals, random state, counters, and boundary records to their
-pre-boundary values.
+`proposed_component` or `proposed_domain_record`, still subject to their declared
+read set. Ordinary changes commit at phase nine. Historical candidates stage a
+separate transition bundle for phase eleven. Strategic aggregation and
+perspective/report materialization use the same ownership and visibility rules.
+Any fatal error restores time, queues, state, journals, random state, counters,
+and boundary records to their pre-boundary values.
 
 Each successful boundary persists its ID, time, correlation, cadence set,
 admitted command attempts, accepted commands, and events, reservation evidence,
-allocations, random draws, field changes, exact plugin/system provenance, a
-deterministic state hash, and the previous and current boundary hashes.
+allocations, random draws, field changes, domain record lifecycle changes, exact
+plugin/system provenance, a deterministic state hash, and the previous and
+current boundary hashes. Every committed domain record change has one indexed,
+causally linked evidence event. Snapshot loading reconstructs the initial record
+store from this history, deterministically reapplies each commit stage, and
+requires the result to equal the persisted ordered store.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
 admission. Format 4 snapshots validate this evidence and require exact plugin

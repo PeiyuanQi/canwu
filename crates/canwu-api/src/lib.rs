@@ -3,8 +3,9 @@
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
 pub use canwu_core::{
-    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, EntityRef, EventId,
-    GovernmentId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
+    DomainRecordKind, DomainRecordRef, EntityRef, EventId, GovernmentId, PersonId, RandomDrawId,
+    RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 pub use canwu_event::{CauseRef, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -16,7 +17,10 @@ pub use canwu_sim::{
     BoundaryRequest, BoundarySystemContract, BoundarySystemHandler, CanwuError, Command,
     CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
     CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
-    CommandRejection, CommandRequest, ControllerPolicy, DecisionOrigin, DemoIds, ENGINE_VERSION,
+    CommandRejection, CommandRequest, ControllerPolicy, DecisionOrigin, DemoIds, DomainRecord,
+    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
+    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
+    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
     ErrorCode, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty, PayloadSchema,
     PayloadValueType, PluginActionDescriptor, PluginCommandHandler, PluginDescriptor,
     PluginRegistrar, PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
@@ -55,6 +59,16 @@ impl Canwu {
         })
     }
 
+    pub fn new_with_plugins(
+        seed: u64,
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new_with_plugins(seed, scenario, plugins)?,
+        })
+    }
+
     pub fn new_with_manifest(
         seed: u64,
         scenario: Scenario,
@@ -62,6 +76,22 @@ impl Canwu {
     ) -> Result<Self, CanwuError> {
         Ok(Self {
             simulation: Simulation::new_with_manifest(seed, scenario, run_manifest)?,
+        })
+    }
+
+    pub fn new_with_manifest_and_plugins(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new_with_manifest_and_plugins(
+                seed,
+                scenario,
+                run_manifest,
+                plugins,
+            )?,
         })
     }
 
@@ -77,6 +107,24 @@ impl Canwu {
                 scenario,
                 run_manifest,
                 run_configuration,
+            )?,
+        })
+    }
+
+    pub fn new_with_run_configuration_and_plugins(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        run_configuration: RunConfiguration,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::new_with_run_configuration_and_plugins(
+                seed,
+                scenario,
+                run_manifest,
+                run_configuration,
+                plugins,
             )?,
         })
     }
@@ -154,6 +202,15 @@ impl Canwu {
     #[must_use]
     pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
         self.simulation.command_attempts()
+    }
+
+    #[must_use]
+    pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+        self.simulation.domain_record(reference)
+    }
+
+    pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
+        self.simulation.domain_records()
     }
 
     #[must_use]
@@ -494,6 +551,7 @@ impl Canwu {
                 ])
             }
             EntityRef::Territory(_)
+            | EntityRef::Domain(_)
             | EntityRef::Government(_)
             | EntityRef::Route(_)
             | EntityRef::Organization(_)

@@ -469,6 +469,7 @@ fn selectable_entity(
 fn entity_type_name(entity: &EntityRef) -> &'static str {
     match entity {
         EntityRef::Army(_) => "army",
+        EntityRef::Domain(_) => "domain",
         EntityRef::Government(_) => "government",
         EntityRef::Organization(_) => "organization",
         EntityRef::Person(_) => "person",
@@ -485,7 +486,7 @@ fn entity_value(world: &WorldSnapshot, entity: &EntityRef) -> Option<Value> {
         EntityRef::Person(id) => world.person(*id).and_then(to_value),
         EntityRef::Route(id) => world.route(*id).and_then(to_value),
         EntityRef::Territory(id) => world.territory(*id).and_then(to_value),
-        EntityRef::Organization(_) | EntityRef::Resource(_) => None,
+        EntityRef::Domain(_) | EntityRef::Organization(_) | EntityRef::Resource(_) => None,
     }
 }
 

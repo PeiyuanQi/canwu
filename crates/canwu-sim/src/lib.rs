@@ -10,6 +10,7 @@ mod boundary;
 mod manifest;
 mod policy;
 mod random;
+mod records;
 
 pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
@@ -28,11 +29,16 @@ pub use random::{
     RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
     RandomStreamState,
 };
+pub use records::{
+    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
+    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
+    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
+};
 
 use canwu_core::{
-    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng, EntityRef,
-    EventId, FieldSchema, GovernmentId, PersonId, RandomDrawId, RouteId, SchemaRegistry,
-    TerritoryId, TypeSchema,
+    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng,
+    DomainRecordKind, DomainRecordRef, EntityRef, EventId, FieldSchema, GovernmentId, PersonId,
+    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
 };
 use canwu_event::{CauseRef, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -63,15 +69,21 @@ pub enum ErrorCode {
     ArmyNotFound,
     DestinationNotFound,
     DuplicateBoundaryWriter,
+    DuplicateDomainRecord,
+    DuplicateDomainRecordKind,
     DuplicatePlugin,
     DuplicatePluginCommand,
     DuplicatePluginSystem,
     DuplicateStateOwner,
     DuplicateReservationOfferer,
     EntityNotFound,
+    DomainRecordNotFound,
+    DomainRecordReferenced,
+    DomainRecordVersionConflict,
     InvalidAuthority,
     InvalidBoundary,
     InvalidDuration,
+    InvalidDomainRecord,
     IdempotencyConflict,
     InteractionReadOnly,
     InvalidPayload,
@@ -145,15 +157,21 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::ArmyNotFound => "army_not_found",
         ErrorCode::DestinationNotFound => "destination_not_found",
         ErrorCode::DuplicateBoundaryWriter => "duplicate_boundary_writer",
+        ErrorCode::DuplicateDomainRecord => "duplicate_domain_record",
+        ErrorCode::DuplicateDomainRecordKind => "duplicate_domain_record_kind",
         ErrorCode::DuplicatePlugin => "duplicate_plugin",
         ErrorCode::DuplicatePluginCommand => "duplicate_plugin_command",
         ErrorCode::DuplicatePluginSystem => "duplicate_plugin_system",
         ErrorCode::DuplicateStateOwner => "duplicate_state_owner",
         ErrorCode::DuplicateReservationOfferer => "duplicate_reservation_offerer",
         ErrorCode::EntityNotFound => "entity_not_found",
+        ErrorCode::DomainRecordNotFound => "domain_record_not_found",
+        ErrorCode::DomainRecordReferenced => "domain_record_referenced",
+        ErrorCode::DomainRecordVersionConflict => "domain_record_version_conflict",
         ErrorCode::InvalidAuthority => "invalid_authority",
         ErrorCode::InvalidBoundary => "invalid_boundary",
         ErrorCode::InvalidDuration => "invalid_duration",
+        ErrorCode::InvalidDomainRecord => "invalid_domain_record",
         ErrorCode::IdempotencyConflict => "idempotency_conflict",
         ErrorCode::InteractionReadOnly => "interaction_read_only",
         ErrorCode::InvalidPayload => "invalid_payload",
@@ -563,6 +581,8 @@ pub struct Scenario {
     pub start_time: SimTime,
     pub world: WorldSnapshot,
     pub knowledge: KnowledgeSnapshot,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domain_records: Vec<DomainRecord>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -685,6 +705,8 @@ pub struct PluginDescriptor {
     pub boundary_systems: Vec<BoundarySystemContract>,
     pub commands: Vec<PluginActionDescriptor>,
     pub schema_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_schemas: Vec<DomainRecordSchema>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -732,6 +754,8 @@ pub struct SimulationView<'a> {
     allowed_reads: Option<&'a [StateKey]>,
     component_overlay: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
+    record_overlay: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
+    proposed_records: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
     allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
     allowed_reservations: Option<&'a [ReservationRef]>,
     random_session: Option<RefCell<random::RandomSession>>,
@@ -781,6 +805,27 @@ impl SimulationView<'_> {
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
         Ok(self.state.events.iter().find(|event| event.id == id))
+    }
+
+    pub fn domain_record(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<&DomainRecord>, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.kind))?;
+        Ok(self
+            .record_overlay
+            .and_then(|overlay| overlay.get(reference))
+            .or_else(|| self.state.domain_records.get(reference)))
+    }
+
+    pub fn proposed_domain_record(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<&DomainRecord>, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.kind))?;
+        Ok(self
+            .proposed_records
+            .and_then(|records| records.get(reference)))
     }
 
     pub fn reservation(
@@ -925,6 +970,7 @@ pub struct PluginRegistry {
     boundary_writers: BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
     reservation_offerers: BTreeMap<StateKey, (String, String)>,
     random_stream_owners: BTreeMap<RandomStreamKey, (String, String)>,
+    record_schemas: records::DomainRecordSchemas,
 }
 
 #[derive(Clone)]
@@ -954,6 +1000,94 @@ pub struct PluginRegistrar<'a> {
 }
 
 impl PluginRegistrar<'_> {
+    pub fn register_record_schema(
+        &mut self,
+        mut schema: DomainRecordSchema,
+    ) -> Result<(), CanwuError> {
+        schema.canonicalize();
+        schema.validate().map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!("invalid domain record schema: {error}"),
+            )
+        })?;
+        let state = schema.state_key();
+        if state.namespace == CORE_STATE_NAMESPACE {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "plugins cannot register domain record kinds in the core namespace",
+            ));
+        }
+        if self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .is_some_and(|descriptor| {
+                descriptor
+                    .record_schemas
+                    .iter()
+                    .any(|candidate| candidate.kind == schema.kind)
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::DuplicateDomainRecordKind,
+                format!(
+                    "plugin {} registered record kind {} twice",
+                    self.plugin, schema.kind
+                ),
+            ));
+        }
+        if let Some((owner, existing)) = self.registry.record_schemas.get(&schema.kind) {
+            if owner != &self.plugin {
+                return Err(CanwuError::new(
+                    ErrorCode::DuplicateDomainRecordKind,
+                    format!(
+                        "domain record kind {} is already owned by plugin {owner}",
+                        schema.kind
+                    ),
+                ));
+            }
+            if existing != &schema {
+                return Err(CanwuError::new(
+                    ErrorCode::PluginManifestMismatch,
+                    format!(
+                        "plugin {} changed the stored schema for domain record kind {}",
+                        self.plugin, schema.kind
+                    ),
+                ));
+            }
+        }
+        let mut candidate = self.registry.clone();
+        if candidate.immediate_write_states.contains_key(&state) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "domain record kind {} is already exposed as immediate component state",
+                    schema.kind
+                ),
+            ));
+        }
+        register_state_owners(
+            &mut candidate.state_owners,
+            &self.plugin,
+            std::slice::from_ref(&state),
+        )?;
+        candidate
+            .record_schemas
+            .insert(schema.kind.clone(), (self.plugin.clone(), schema.clone()));
+        let descriptor = candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        descriptor.name.clone_from(&self.plugin);
+        descriptor.record_schemas.push(schema);
+        descriptor
+            .record_schemas
+            .sort_by(|left, right| left.kind.cmp(&right.kind));
+        *self.registry = candidate;
+        Ok(())
+    }
+
     pub fn register_schema(&mut self, schema: TypeSchema) -> Result<(), CanwuError> {
         validate_type_schema(&schema)?;
         let type_name = schema.type_name.clone();
@@ -1022,6 +1156,16 @@ impl PluginRegistrar<'_> {
             ));
         }
         let mut candidate = self.registry.clone();
+        if contract
+            .writes
+            .iter()
+            .any(|state| is_domain_record_state(&candidate.record_schemas, state))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "domain record kinds can only be mutated by phased boundary systems",
+            ));
+        }
         register_state_owners(&mut candidate.state_owners, &self.plugin, &contract.writes)?;
         register_immediate_write_states(
             &mut candidate.immediate_write_states,
@@ -1155,6 +1299,16 @@ impl PluginRegistrar<'_> {
             ));
         }
         let mut candidate = self.registry.clone();
+        if descriptor
+            .writes
+            .iter()
+            .any(|state| is_domain_record_state(&candidate.record_schemas, state))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "plugin commands cannot write domain record state directly",
+            ));
+        }
         register_state_owners(
             &mut candidate.state_owners,
             &self.plugin,
@@ -1267,6 +1421,7 @@ impl PluginRegistry {
             boundary_writers: BTreeMap::new(),
             reservation_offerers: BTreeMap::new(),
             random_stream_owners: BTreeMap::new(),
+            record_schemas: BTreeMap::new(),
         };
         let mut previous_plugin = None;
         for mut descriptor in descriptors {
@@ -1287,6 +1442,50 @@ impl PluginRegistry {
                 ));
             }
             if descriptor
+                .record_schemas
+                .windows(2)
+                .any(|pair| pair[0].kind >= pair[1].kind)
+            {
+                return invalid_snapshot("plugin record schemas are not in canonical order");
+            }
+            for schema in &mut descriptor.record_schemas {
+                let original = schema.clone();
+                schema.canonicalize();
+                schema.validate().map_err(|error| {
+                    invalid_snapshot_error(format!("invalid domain record schema: {error}"))
+                })?;
+                if *schema != original {
+                    return invalid_snapshot(
+                        "plugin record-schema declarations are not in canonical order",
+                    );
+                }
+                let state = schema.state_key();
+                if state.namespace == CORE_STATE_NAMESPACE {
+                    return invalid_snapshot(
+                        "plugin record schemas cannot use the reserved core namespace",
+                    );
+                }
+                if let Some((owner, _)) = registry.record_schemas.get(&schema.kind) {
+                    return invalid_snapshot(format!(
+                        "domain record kind {} is owned by both {owner} and {plugin}",
+                        schema.kind
+                    ));
+                }
+                register_state_owners(
+                    &mut registry.state_owners,
+                    &plugin,
+                    std::slice::from_ref(&state),
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid domain record state ownership descriptor: {error}"
+                    ))
+                })?;
+                registry
+                    .record_schemas
+                    .insert(schema.kind.clone(), (plugin.clone(), schema.clone()));
+            }
+            if descriptor
                 .systems
                 .windows(2)
                 .any(|pair| (pair[0].phase, &pair[0].name) >= (pair[1].phase, &pair[1].name))
@@ -1305,6 +1504,15 @@ impl PluginRegistry {
                 if *contract != original {
                     return invalid_snapshot(
                         "plugin system reads and writes are not in canonical order",
+                    );
+                }
+                if contract
+                    .writes
+                    .iter()
+                    .any(|state| is_domain_record_state(&registry.record_schemas, state))
+                {
+                    return invalid_snapshot(
+                        "plugin systems cannot expose domain records as immediate component state",
                     );
                 }
                 register_state_owners(&mut registry.state_owners, &plugin, &contract.writes)
@@ -1409,6 +1617,15 @@ impl PluginRegistry {
                 if *action != original {
                     return invalid_snapshot(
                         "plugin command reads and writes are not in canonical order",
+                    );
+                }
+                if action
+                    .writes
+                    .iter()
+                    .any(|state| is_domain_record_state(&registry.record_schemas, state))
+                {
+                    return invalid_snapshot(
+                        "plugin commands cannot expose domain records as immediate component state",
                     );
                 }
                 register_state_owners(&mut registry.state_owners, &plugin, &action.writes)
@@ -1812,6 +2029,15 @@ enum BoundaryWriteStage {
     Perspective,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum DomainRecordCommitStage {
+    Ordinary,
+    Transition,
+    Aggregation,
+    Perspective,
+    Deferred,
+}
+
 const fn boundary_write_stage(phase: BoundaryPhase) -> Option<BoundaryWriteStage> {
     match phase {
         BoundaryPhase::DomainDeltaProposal => Some(BoundaryWriteStage::Ordinary),
@@ -1829,6 +2055,32 @@ const fn boundary_write_stage(phase: BoundaryPhase) -> Option<BoundaryWriteStage
         | BoundaryPhase::ConditionalTransitionCommit
         | BoundaryPhase::SaveReplayAndDiagnosticHashing => None,
     }
+}
+
+const fn domain_record_commit_stage(
+    phase: BoundaryPhase,
+    visibility: StateVisibility,
+) -> Option<DomainRecordCommitStage> {
+    let stage = match phase {
+        BoundaryPhase::DomainDeltaProposal => DomainRecordCommitStage::Ordinary,
+        BoundaryPhase::HistoricalCandidateEvaluation => DomainRecordCommitStage::Transition,
+        BoundaryPhase::StrategicAggregation => DomainRecordCommitStage::Aggregation,
+        BoundaryPhase::PerspectiveAndReportMaterialization => DomainRecordCommitStage::Perspective,
+        BoundaryPhase::EventIngress
+        | BoundaryPhase::BoundarySnapshot
+        | BoundaryPhase::DerivedFieldSolve
+        | BoundaryPhase::PerceptionAndAttentionRefresh
+        | BoundaryPhase::DecisionAndAcceptedEffectIntake
+        | BoundaryPhase::ReservationAndAllocation
+        | BoundaryPhase::InvariantValidation
+        | BoundaryPhase::AtomicDomainCommit
+        | BoundaryPhase::ConditionalTransitionCommit
+        | BoundaryPhase::SaveReplayAndDiagnosticHashing => return None,
+    };
+    Some(match visibility {
+        StateVisibility::SameBoundary => stage,
+        StateVisibility::NextBoundary => DomainRecordCommitStage::Deferred,
+    })
 }
 
 fn register_reservation_offerers(
@@ -1943,7 +2195,7 @@ enum ScheduledAction {
     },
     PluginDirective {
         plugin: String,
-        directive: SystemDirective,
+        directive: Box<SystemDirective>,
         allowed_writes: Vec<StateKey>,
         cause: CauseRef,
         correlation_id: u64,
@@ -1973,9 +2225,18 @@ fn command_attempt_id_slice_is_empty(value: &&[CommandAttemptId]) -> bool {
     value.is_empty()
 }
 
+fn domain_record_slice_is_empty(value: &&[DomainRecord]) -> bool {
+    value.is_empty()
+}
+
+fn domain_record_change_slice_is_empty(value: &&[DomainRecordChange]) -> bool {
+    value.is_empty()
+}
+
 #[derive(Clone)]
 struct RuntimeState {
     initial_time: SimTime,
+    initial_scenario: Option<Scenario>,
     now: SimTime,
     run_manifest: RunManifest,
     run_manifest_hash: String,
@@ -1994,6 +2255,7 @@ struct RuntimeState {
     command_attempts: Vec<CommandAttemptRecord>,
     boundaries: Vec<BoundaryRecord>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
     root_seed: u64,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
     random_draws: Vec<RandomDrawRecord>,
@@ -2019,6 +2281,8 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub checkpoint_hash: String,
     pub initial_time: SimTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_scenario: Option<Scenario>,
     pub now: SimTime,
     pub plugin_registration_closed: bool,
     pub world: WorldSnapshot,
@@ -2030,6 +2294,8 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub boundaries: Vec<BoundaryRecord>,
     pub plugin_components: Vec<PluginComponentRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub domain_records: Vec<DomainRecord>,
     pub plugin_descriptors: Vec<PluginDescriptor>,
     pub schema: SchemaRegistry,
     #[serde(default)]
@@ -2127,8 +2393,25 @@ pub struct Simulation {
 impl Simulation {
     /// Creates a simulation after validating that scenario references are sound.
     pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
+        require_plugin_aware_initial_records(&scenario)?;
         let run_manifest = RunManifest::for_scenario("canwu.inline", "scenario", "1", &scenario)?;
-        Self::new_with_manifest(seed, scenario, run_manifest)
+        Self::new_with_configuration_snapshot(
+            seed,
+            scenario,
+            run_manifest,
+            RunConfigurationSnapshot::CompatibilityV1,
+        )
+    }
+
+    /// Creates a simulation and activates the plugins required by initial
+    /// application-defined records before returning a snapshot-capable runtime.
+    pub fn new_with_plugins(
+        seed: u64,
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        let run_manifest = RunManifest::for_scenario("canwu.inline", "scenario", "1", &scenario)?;
+        Self::new_with_manifest_and_plugins(seed, scenario, run_manifest, plugins)
     }
 
     /// Creates a simulation with an exact, persisted run environment identity.
@@ -2137,12 +2420,30 @@ impl Simulation {
         scenario: Scenario,
         run_manifest: RunManifest,
     ) -> Result<Self, CanwuError> {
+        require_plugin_aware_initial_records(&scenario)?;
         Self::new_with_configuration_snapshot(
             seed,
             scenario,
             run_manifest,
             RunConfigurationSnapshot::CompatibilityV1,
         )
+    }
+
+    /// Creates a manifested run and activates all initial domain packages before
+    /// the runtime can be observed or snapshotted.
+    pub fn new_with_manifest_and_plugins(
+        seed: u64,
+        scenario: Scenario,
+        run_manifest: RunManifest,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        let simulation = Self::new_with_configuration_snapshot(
+            seed,
+            scenario,
+            run_manifest,
+            RunConfigurationSnapshot::CompatibilityV1,
+        )?;
+        Self::activate_initial_plugins(simulation, plugins)
     }
 
     /// Creates a run whose six policy dimensions are persisted and bound to
@@ -2153,6 +2454,7 @@ impl Simulation {
         run_manifest: RunManifest,
         mut run_configuration: RunConfiguration,
     ) -> Result<Self, CanwuError> {
+        require_plugin_aware_initial_records(&scenario)?;
         run_configuration.canonicalize();
         Self::new_with_configuration_snapshot(
             seed,
@@ -2162,17 +2464,52 @@ impl Simulation {
         )
     }
 
-    fn new_with_configuration_snapshot(
+    /// Creates a declared-policy run and activates all initial domain packages
+    /// before the runtime can be observed or snapshotted.
+    pub fn new_with_run_configuration_and_plugins(
         seed: u64,
         scenario: Scenario,
+        run_manifest: RunManifest,
+        mut run_configuration: RunConfiguration,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        run_configuration.canonicalize();
+        let simulation = Self::new_with_configuration_snapshot(
+            seed,
+            scenario,
+            run_manifest,
+            RunConfigurationSnapshot::Declared(run_configuration),
+        )?;
+        Self::activate_initial_plugins(simulation, plugins)
+    }
+
+    fn activate_initial_plugins(
+        mut simulation: Self,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        simulation.ensure_runtime_ready()?;
+        Ok(simulation)
+    }
+
+    fn new_with_configuration_snapshot(
+        seed: u64,
+        mut scenario: Scenario,
         mut run_manifest: RunManifest,
         run_configuration: RunConfigurationSnapshot,
     ) -> Result<Self, CanwuError> {
+        canonicalize_scenario(&mut scenario);
         validate_scenario(&scenario)?;
         manifest::canonicalize(&mut run_manifest);
         manifest::validate(&run_manifest, Some(&scenario), false)?;
         manifest::validate_run_configuration(&run_manifest, &run_configuration)?;
-        validate_run_configuration_entities(&run_configuration, &scenario.world)?;
+        validate_run_configuration_entities(
+            &run_configuration,
+            &scenario.world,
+            &scenario.domain_records,
+        )?;
         let run_manifest_hash = manifest::hash(&run_manifest)?;
         if scenario
             .world
@@ -2188,9 +2525,11 @@ impl Simulation {
         let schema = base_schema();
         let plugins = PluginRegistry::default();
         let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
+        let initial_scenario = Some(scenario.clone());
         let mut simulation = Self {
             state: RuntimeState {
                 initial_time: scenario.start_time,
+                initial_scenario,
                 now: scenario.start_time,
                 run_manifest,
                 run_manifest_hash,
@@ -2234,6 +2573,11 @@ impl Simulation {
                 command_attempts: Vec::new(),
                 boundaries: Vec::new(),
                 plugin_components: BTreeMap::new(),
+                domain_records: scenario
+                    .domain_records
+                    .into_iter()
+                    .map(|record| (record.reference.clone(), record))
+                    .collect(),
                 root_seed: seed,
                 random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
                 random_draws: Vec::new(),
@@ -2314,10 +2658,8 @@ impl Simulation {
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
-        let mut simulation = Self::new_with_manifest(seed, scenario, run_manifest)?;
-        for plugin in plugins {
-            simulation.register_plugin(*plugin)?;
-        }
+        let simulation =
+            Self::new_with_manifest_and_plugins(seed, scenario, run_manifest, plugins)?;
         Self::replay_records(simulation, commands, &[], boundaries, final_time)
     }
 
@@ -2344,11 +2686,13 @@ impl Simulation {
                 "frozen replay attempts require an environment-bound replay journal",
             ));
         }
-        let mut simulation =
-            Self::new_with_run_configuration(seed, scenario, run_manifest, run_configuration)?;
-        for plugin in plugins {
-            simulation.register_plugin(*plugin)?;
-        }
+        let simulation = Self::new_with_run_configuration_and_plugins(
+            seed,
+            scenario,
+            run_manifest,
+            run_configuration,
+            plugins,
+        )?;
         Self::replay_records(
             simulation,
             commands,
@@ -2391,15 +2735,13 @@ impl Simulation {
             )
         })?;
 
-        let mut simulation = Self::new_with_configuration_snapshot(
+        let simulation = Self::new_with_configuration_snapshot(
             journal.root_seed,
             scenario,
             journal.run_manifest.clone(),
             journal.run_configuration.clone(),
         )?;
-        for plugin in plugins {
-            simulation.register_plugin(*plugin)?;
-        }
+        let simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
         if actual_descriptors != journal.plugin_descriptors {
             return Err(CanwuError::new(
@@ -2440,6 +2782,7 @@ impl Simulation {
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
     ) -> Result<Self, CanwuError> {
+        simulation.ensure_runtime_ready()?;
         if !attempts.is_empty() {
             return Self::replay_attempt_records(
                 simulation, commands, attempts, boundaries, final_time,
@@ -2598,6 +2941,19 @@ impl Simulation {
         let plugins_start = self.plugins.clone();
         let result = (|| {
             self.plugins.register(plugin, &mut self.schema)?;
+            if !self.plugins.record_schemas.is_empty() && self.state.initial_scenario.is_none() {
+                return Err(CanwuError::new(
+                    ErrorCode::UnsupportedSnapshotVersion,
+                    "this snapshot predates manifest-bound domain-record genesis and cannot activate record schemas",
+                ));
+            }
+            records::validate_records_for_owner(
+                &self.state.domain_records,
+                &self.plugins.record_schemas,
+                plugin_name,
+                self.state.now,
+                &|entity| runtime_entity_exists(&self.state, entity),
+            )?;
             for stream in self.plugins.random_stream_owners.keys() {
                 self.state
                     .random_streams
@@ -2615,6 +2971,34 @@ impl Simulation {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn ensure_runtime_ready(&self) -> Result<(), CanwuError> {
+        self.plugins.ensure_active()?;
+        records::validate_record_store(
+            &self.state.domain_records,
+            &self.plugins.record_schemas,
+            self.state.now,
+            &|entity| runtime_entity_exists(&self.state, entity),
+        )
+    }
+
+    fn domain_record_feature_enabled(&self) -> bool {
+        !self.plugins.record_schemas.is_empty()
+            || !self.state.domain_records.is_empty()
+            || self
+                .state
+                .boundaries
+                .iter()
+                .any(|boundary| !boundary.record_changes.is_empty())
+    }
+
+    fn bound_initial_scenario(&self) -> Option<&Scenario> {
+        if self.domain_record_feature_enabled() {
+            self.state.initial_scenario.as_ref()
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -2683,6 +3067,15 @@ impl Simulation {
     #[must_use]
     pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
         &self.state.command_attempts
+    }
+
+    #[must_use]
+    pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+        self.state.domain_records.get(reference)
+    }
+
+    pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
+        self.state.domain_records.values()
     }
 
     #[must_use]
@@ -2759,7 +3152,7 @@ impl Simulation {
         ingress: CommandIngress,
         record_attempt: bool,
     ) -> Result<CommandOutcome, CanwuError> {
-        self.plugins.ensure_active()?;
+        self.ensure_runtime_ready()?;
         self.ensure_command_ingress_family(ingress)?;
         if let Some(cached) =
             self.cached_command_outcome(request_id, expected_revision, &envelope)?
@@ -3042,7 +3435,7 @@ impl Simulation {
     }
 
     pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
-        self.plugins.ensure_active()?;
+        self.ensure_runtime_ready()?;
         if duration.is_negative() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDuration,
@@ -3059,7 +3452,7 @@ impl Simulation {
     }
 
     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
-        self.plugins.ensure_active()?;
+        self.ensure_runtime_ready()?;
         let Some(next_time) = self.state.scheduler.keys().next().map(|key| key.at) else {
             return Ok(Vec::new());
         };
@@ -3074,7 +3467,7 @@ impl Simulation {
     where
         F: FnMut(&Self) -> bool,
     {
-        self.plugins.ensure_active()?;
+        self.ensure_runtime_ready()?;
         if maximum.is_negative() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDuration,
@@ -3107,7 +3500,7 @@ impl Simulation {
         &mut self,
         mut request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
-        self.plugins.ensure_active()?;
+        self.ensure_runtime_ready()?;
         if request.at < self.state.now {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
@@ -3190,6 +3583,7 @@ impl Simulation {
         let boundary_snapshot = self.state.clone();
         let systems = self.plugins.boundary_systems.clone();
         let state_owners = self.plugins.state_owners.clone();
+        let record_schemas = self.plugins.record_schemas.clone();
         let mut allocations = BTreeMap::new();
         let mut allocation_records = Vec::new();
         let mut reservation_offer_records = Vec::new();
@@ -3200,10 +3594,13 @@ impl Simulation {
         let mut pending_random_draws = Vec::new();
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
+        let mut visible_record_overlay = BTreeMap::new();
+        let mut candidate_record_overlay = BTreeMap::new();
         let mut ordinary = Vec::new();
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
         let mut changes = Vec::new();
+        let mut record_changes = Vec::new();
         let mut emissions = Vec::new();
 
         for phase in BoundaryPhase::ALL {
@@ -3216,11 +3613,14 @@ impl Simulation {
                         correlation_id,
                         same_boundary,
                         &mut changes,
+                        &mut record_changes,
                         &mut emissions,
                     )?;
                     deferred.extend(next_boundary);
                     visible_overlay.clear();
                     candidate_overlay.clear();
+                    visible_record_overlay.clear();
+                    candidate_record_overlay.clear();
                 }
                 BoundaryPhase::ConditionalTransitionCommit => {
                     let (same_boundary, next_boundary) =
@@ -3230,10 +3630,12 @@ impl Simulation {
                         correlation_id,
                         same_boundary,
                         &mut changes,
+                        &mut record_changes,
                         &mut emissions,
                     )?;
                     deferred.extend(next_boundary);
                     visible_overlay.clear();
+                    visible_record_overlay.clear();
                 }
                 _ => {}
             }
@@ -3265,6 +3667,9 @@ impl Simulation {
                     component_overlay: Some(&visible_overlay),
                     proposed_components: (phase == BoundaryPhase::InvariantValidation)
                         .then_some(&candidate_overlay),
+                    record_overlay: Some(&visible_record_overlay),
+                    proposed_records: (phase == BoundaryPhase::InvariantValidation)
+                        .then_some(&candidate_record_overlay),
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
@@ -3296,6 +3701,8 @@ impl Simulation {
                     &registered.contract,
                     view_state,
                     &state_owners,
+                    &record_schemas,
+                    &visible_record_overlay,
                     &proposal,
                 )?;
                 let random_execution = view
@@ -3351,20 +3758,45 @@ impl Simulation {
                     reservation_request_records = result.requests;
                 }
                 BoundaryPhase::DomainDeltaProposal => {
+                    extend_boundary_record_candidate_overlay(
+                        &boundary_snapshot,
+                        &record_schemas,
+                        &mut candidate_record_overlay,
+                        &phase_directives,
+                    )?;
                     extend_boundary_candidate_overlay(
                         &boundary_snapshot,
+                        &candidate_record_overlay,
                         &mut candidate_overlay,
+                        &phase_directives,
+                    )?;
+                    extend_boundary_record_overlay(
+                        &boundary_snapshot,
+                        &record_schemas,
+                        &mut visible_record_overlay,
                         &phase_directives,
                     )?;
                     extend_boundary_overlay(
                         &boundary_snapshot,
+                        &visible_record_overlay,
                         &mut visible_overlay,
                         &phase_directives,
                     )?;
                     ordinary.extend(phase_directives);
                 }
                 BoundaryPhase::HistoricalCandidateEvaluation => {
-                    extend_boundary_overlay(&self.state, &mut visible_overlay, &phase_directives)?;
+                    extend_boundary_record_overlay(
+                        &self.state,
+                        &record_schemas,
+                        &mut visible_record_overlay,
+                        &phase_directives,
+                    )?;
+                    extend_boundary_overlay(
+                        &self.state,
+                        &visible_record_overlay,
+                        &mut visible_overlay,
+                        &phase_directives,
+                    )?;
                     transitions.extend(phase_directives);
                 }
                 BoundaryPhase::StrategicAggregation
@@ -3376,6 +3808,7 @@ impl Simulation {
                         correlation_id,
                         same_boundary,
                         &mut changes,
+                        &mut record_changes,
                         &mut emissions,
                     )?;
                     deferred.extend(next_boundary);
@@ -3395,6 +3828,7 @@ impl Simulation {
             correlation_id,
             deferred,
             &mut changes,
+            &mut record_changes,
             &mut emissions,
         )?;
         self.state.random_streams = random_overlay;
@@ -3419,6 +3853,7 @@ impl Simulation {
             allocations: allocation_records.clone(),
             random_draws: random_draws.clone(),
             changes: changes.clone(),
+            record_changes: record_changes.clone(),
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -3438,6 +3873,7 @@ impl Simulation {
             random_draws,
             boundary_hash,
             change_count: changes.len(),
+            record_change_count: record_changes.len(),
             allocations: allocation_records,
         })
     }
@@ -3445,6 +3881,7 @@ impl Simulation {
     fn compute_boundary_state_hash(&self) -> Result<String, CanwuError> {
         let world = self.world();
         let plugin_components: Vec<_> = self.state.plugin_components.values().cloned().collect();
+        let domain_records: Vec<_> = self.state.domain_records.values().cloned().collect();
         let plugin_descriptors: Vec<_> = self.plugins.descriptors().cloned().collect();
         let scheduled: Vec<_> = self
             .state
@@ -3461,12 +3898,14 @@ impl Simulation {
             &self.state.run_manifest_hash,
             &self.state.run_configuration,
         )?;
+        let initial_scenario = self.bound_initial_scenario();
         state_hash(&StateHashMaterial {
             engine_version: ENGINE_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             run_manifest: &authoritative_manifest,
             run_manifest_hash: &authoritative_manifest_hash,
             initial_time: self.state.initial_time,
+            initial_scenario,
             now: self.state.now,
             plugin_registration_closed: self.state.plugin_registration_closed,
             world: &world,
@@ -3475,6 +3914,7 @@ impl Simulation {
             commands: &self.state.commands,
             command_attempts: &self.state.command_attempts,
             plugin_components: &plugin_components,
+            domain_records: &domain_records,
             plugin_descriptors: &plugin_descriptors,
             schema: &self.schema,
             scheduled: &scheduled,
@@ -3512,6 +3952,7 @@ impl Simulation {
             run_configuration: Some(self.state.run_configuration.clone()),
             checkpoint_hash: self.state.checkpoint_hash.clone(),
             initial_time: self.state.initial_time,
+            initial_scenario: self.bound_initial_scenario().cloned(),
             now: self.state.now,
             plugin_registration_closed: self.state.plugin_registration_closed,
             world: self.world(),
@@ -3521,6 +3962,7 @@ impl Simulation {
             command_attempts: self.state.command_attempts.clone(),
             boundaries: self.state.boundaries.clone(),
             plugin_components: self.state.plugin_components.values().cloned().collect(),
+            domain_records: self.state.domain_records.values().cloned().collect(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
             root_seed: self.state.root_seed,
@@ -3561,12 +4003,31 @@ impl Simulation {
             start_time: snapshot.now,
             world: snapshot.world.clone(),
             knowledge: snapshot.knowledge.clone(),
+            domain_records: snapshot.domain_records.clone(),
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
         validate_snapshot(&snapshot, &plugins)?;
+        let initial_scenario = match snapshot.initial_scenario.clone() {
+            Some(initial_scenario) => Some(initial_scenario),
+            None if !snapshot.plugin_registration_closed => match snapshot.run_manifest.as_ref() {
+                Some(run_manifest @ RunManifest::Declared { .. }) => {
+                    let initial_scenario = Scenario {
+                        start_time: snapshot.initial_time,
+                        world: snapshot.world.clone(),
+                        knowledge: snapshot.knowledge.clone(),
+                        domain_records: snapshot.domain_records.clone(),
+                    };
+                    manifest::validate(run_manifest, Some(&initial_scenario), true)?;
+                    Some(initial_scenario)
+                }
+                _ => None,
+            },
+            None => None,
+        };
         let mut simulation = Self {
             state: RuntimeState {
                 initial_time: snapshot.initial_time,
+                initial_scenario,
                 now: snapshot.now,
                 run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
                     invalid_snapshot_error("snapshot is missing its run manifest")
@@ -3632,6 +4093,11 @@ impl Simulation {
                         )
                     })
                     .collect(),
+                domain_records: snapshot
+                    .domain_records
+                    .into_iter()
+                    .map(|record| (record.reference.clone(), record))
+                    .collect(),
                 root_seed: snapshot.root_seed,
                 random_streams: snapshot
                     .random_streams
@@ -3672,7 +4138,7 @@ impl Simulation {
         for plugin in plugins {
             simulation.register_plugin(*plugin)?;
         }
-        simulation.plugins.ensure_active()?;
+        simulation.ensure_runtime_ready()?;
         Ok(simulation)
     }
 
@@ -3843,6 +4309,7 @@ impl Simulation {
                     plugin,
                     &descriptor.writes,
                     &self.plugins.state_owners,
+                    &self.plugins.record_schemas,
                     &|entity| runtime_entity_exists(&self.state, entity),
                     &directives,
                 )?;
@@ -4036,11 +4503,12 @@ impl Simulation {
                 cause,
                 correlation_id,
             } => {
-                let directives = vec![directive];
+                let directives = vec![*directive];
                 validate_directives(
                     &plugin,
                     &allowed_writes,
                     &self.plugins.state_owners,
+                    &self.plugins.record_schemas,
                     &|entity| runtime_entity_exists(&self.state, entity),
                     &directives,
                 )?;
@@ -4234,6 +4702,7 @@ impl Simulation {
                 &registered.plugin,
                 &registered.contract.writes,
                 &self.plugins.state_owners,
+                &self.plugins.record_schemas,
                 &|entity| runtime_entity_exists(&self.state, entity),
                 &directives,
             )?;
@@ -4396,8 +4865,54 @@ impl Simulation {
         correlation_id: u64,
         directives: Vec<StagedBoundaryDirective>,
         changes: &mut Vec<BoundaryChange>,
+        record_changes: &mut Vec<DomainRecordChange>,
         emissions: &mut Vec<BoundaryEmission>,
     ) -> Result<(), CanwuError> {
+        let mutation_requests: Vec<_> = directives
+            .iter()
+            .filter_map(|staged| match &staged.directive {
+                BoundaryDirective::MutateRecord { mutation, summary } => {
+                    Some(records::DomainMutationRequest {
+                        plugin: &staged.plugin,
+                        system: &staged.system,
+                        visibility: staged.visibility,
+                        mutation,
+                        summary,
+                    })
+                }
+                BoundaryDirective::SetComponent { .. } | BoundaryDirective::Emit { .. } => None,
+            })
+            .collect();
+        let mut stage_record_changes = BTreeMap::new();
+        if !mutation_requests.is_empty() {
+            let (next_records, applied) = records::apply_mutation_bundle(
+                &self.state.domain_records,
+                &self.plugins.record_schemas,
+                self.state.now,
+                &|entity| runtime_entity_exists(&self.state, entity),
+                mutation_requests,
+            )?;
+            let first_index = record_changes.len();
+            for (offset, change) in applied.iter().enumerate() {
+                let index = first_index.checked_add(offset).ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::IdentifierExhausted,
+                        "boundary record-change index exceeds the persistent identifier space",
+                    )
+                })?;
+                let index = u64::try_from(index).map_err(|_| {
+                    CanwuError::new(
+                        ErrorCode::IdentifierExhausted,
+                        "boundary record-change index exceeds the persistent identifier space",
+                    )
+                })?;
+                stage_record_changes
+                    .insert(change.current.reference.clone(), (index, change.clone()));
+            }
+            self.state.domain_records = next_records;
+            record_changes.extend(applied);
+        }
+
         for staged in directives {
             match staged.directive {
                 BoundaryDirective::SetComponent {
@@ -4457,6 +4972,33 @@ impl Simulation {
                         kind: BoundaryEmissionKind::Change { change_index },
                     });
                 }
+                BoundaryDirective::MutateRecord { mutation, .. } => {
+                    let Some((change_index, change)) = stage_record_changes.get(mutation.target())
+                    else {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidBoundary,
+                            "record mutation is missing its committed change evidence",
+                        ));
+                    };
+                    let event = self.append_event(
+                        EventKind::Plugin {
+                            plugin: staged.plugin.clone(),
+                            event_type: change.operation.event_type().to_owned(),
+                        },
+                        record_change_affected_entities(change),
+                        change.summary.clone(),
+                        Some(CauseRef::Boundary(boundary_id)),
+                        correlation_id,
+                    )?;
+                    emissions.push(BoundaryEmission {
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        event: event.id,
+                        kind: BoundaryEmissionKind::RecordChange {
+                            change_index: *change_index,
+                        },
+                    });
+                }
                 BoundaryDirective::Emit {
                     event_type,
                     summary,
@@ -4481,6 +5023,7 @@ impl Simulation {
                 }
             }
         }
+        validate_runtime_domain_dependents(&self.state)?;
         Ok(())
     }
 
@@ -4550,7 +5093,7 @@ impl Simulation {
                         at,
                         ScheduledAction::PluginDirective {
                             plugin: plugin.to_owned(),
-                            directive: *directive,
+                            directive,
                             allowed_writes: allowed_writes.to_vec(),
                             cause: cause.clone(),
                             correlation_id,
@@ -4590,6 +5133,8 @@ impl Simulation {
             allowed_reads: Some(reads),
             component_overlay: None,
             proposed_components: None,
+            record_overlay: None,
+            proposed_records: None,
             allocations: None,
             allowed_reservations: None,
             random_session: None,
@@ -4758,6 +5303,8 @@ fn validate_boundary_proposal(
     contract: &BoundarySystemContract,
     state: &RuntimeState,
     state_owners: &BTreeMap<StateKey, String>,
+    record_schemas: &records::DomainRecordSchemas,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     proposal: &BoundaryProposal,
 ) -> Result<(), CanwuError> {
     if contract.phase != BoundaryPhase::ReservationAndAllocation
@@ -4772,9 +5319,12 @@ fn validate_boundary_proposal(
         ));
     }
 
+    let entity_exists = |entity: &EntityRef| {
+        proposal_entity_exists(state, record_schemas, record_overlay, proposal, entity)
+    };
     let mut offered_pools = BTreeSet::new();
     for offer in &proposal.offers {
-        validate_reservation_pool(&offer.pool, state)?;
+        validate_reservation_pool(&offer.pool, &entity_exists)?;
         if !contract.reservation_offers.contains(&offer.pool.state)
             || state_owners
                 .get(&offer.pool.state)
@@ -4801,7 +5351,7 @@ fn validate_boundary_proposal(
 
     let mut request_names = BTreeSet::new();
     for request in &proposal.requests {
-        validate_reservation_pool(&request.pool, state)?;
+        validate_reservation_pool(&request.pool, &entity_exists)?;
         if request.request.trim().is_empty()
             || request.request != request.request.trim()
             || request.tie_break.trim().is_empty()
@@ -4821,6 +5371,7 @@ fn validate_boundary_proposal(
     }
 
     let mut component_keys = BTreeSet::new();
+    let mut record_targets = BTreeSet::new();
     for directive in &proposal.directives {
         match directive {
             BoundaryDirective::SetComponent {
@@ -4835,6 +5386,7 @@ fn validate_boundary_proposal(
                     || state_owners
                         .get(state_key)
                         .is_none_or(|owner| owner != plugin)
+                    || is_domain_record_state(record_schemas, state_key)
                 {
                     return Err(CanwuError::new(
                         ErrorCode::UndeclaredStateWrite,
@@ -4844,7 +5396,7 @@ fn validate_boundary_proposal(
                         ),
                     ));
                 }
-                if !runtime_entity_exists(state, entity) {
+                if !entity_exists(entity) {
                     return Err(CanwuError::new(
                         ErrorCode::EntityNotFound,
                         format!(
@@ -4860,6 +5412,36 @@ fn validate_boundary_proposal(
                         ErrorCode::InvalidBoundary,
                         format!(
                             "boundary system {plugin}.{} wrote the same component twice",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
+            BoundaryDirective::MutateRecord { mutation, summary } => {
+                let target = mutation.target();
+                let state_key = records::record_state_key(&target.kind);
+                if !canonical_text(summary)
+                    || !contract.writes.contains(&state_key)
+                    || state_owners
+                        .get(&state_key)
+                        .is_none_or(|owner| owner != plugin)
+                    || record_schemas
+                        .get(&target.kind)
+                        .is_none_or(|(owner, _)| owner != plugin)
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::UndeclaredStateWrite,
+                        format!(
+                            "boundary system {plugin}.{} produced an undeclared record mutation",
+                            contract.name
+                        ),
+                    ));
+                }
+                if !record_targets.insert(target.clone()) {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        format!(
+                            "boundary system {plugin}.{} mutated the same record twice",
                             contract.name
                         ),
                     ));
@@ -4882,10 +5464,7 @@ fn validate_boundary_proposal(
                         ),
                     ));
                 }
-                if affected
-                    .iter()
-                    .any(|entity| !runtime_entity_exists(state, entity))
-                {
+                if affected.iter().any(|entity| !entity_exists(entity)) {
                     return Err(CanwuError::new(
                         ErrorCode::EntityNotFound,
                         format!(
@@ -4902,11 +5481,11 @@ fn validate_boundary_proposal(
 
 fn validate_reservation_pool(
     pool: &ReservationPoolKey,
-    state: &RuntimeState,
+    entity_exists: &dyn Fn(&EntityRef) -> bool,
 ) -> Result<(), CanwuError> {
     if pool.resource.trim().is_empty()
         || pool.resource != pool.resource.trim()
-        || !runtime_entity_exists(state, &pool.entity)
+        || !entity_exists(&pool.entity)
     {
         return Err(CanwuError::new(
             ErrorCode::InvalidBoundary,
@@ -4918,22 +5497,25 @@ fn validate_reservation_pool(
 
 fn extend_boundary_overlay(
     state: &RuntimeState,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_component_overlay(state, overlay, directives, false)
+    extend_boundary_component_overlay(state, record_overlay, overlay, directives, false)
 }
 
 fn extend_boundary_candidate_overlay(
     state: &RuntimeState,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_component_overlay(state, overlay, directives, true)
+    extend_boundary_component_overlay(state, record_overlay, overlay, directives, true)
 }
 
 fn extend_boundary_component_overlay(
     state: &RuntimeState,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
@@ -4956,7 +5538,7 @@ fn extend_boundary_component_overlay(
                     "multiple boundary proposals target the same component",
                 ));
             }
-            if !runtime_entity_exists(state, entity) {
+            if !runtime_entity_exists_with_record_overlay(state, record_overlay, entity) {
                 return Err(CanwuError::new(
                     ErrorCode::EntityNotFound,
                     format!("boundary proposal targeted missing entity {entity}"),
@@ -4973,6 +5555,72 @@ fn extend_boundary_component_overlay(
                 },
             );
         }
+    }
+    Ok(())
+}
+
+fn extend_boundary_record_overlay(
+    state: &RuntimeState,
+    schemas: &records::DomainRecordSchemas,
+    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    directives: &[StagedBoundaryDirective],
+) -> Result<(), CanwuError> {
+    extend_boundary_domain_record_overlay(state, schemas, overlay, directives, false)
+}
+
+fn extend_boundary_record_candidate_overlay(
+    state: &RuntimeState,
+    schemas: &records::DomainRecordSchemas,
+    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    directives: &[StagedBoundaryDirective],
+) -> Result<(), CanwuError> {
+    extend_boundary_domain_record_overlay(state, schemas, overlay, directives, true)
+}
+
+fn extend_boundary_domain_record_overlay(
+    state: &RuntimeState,
+    schemas: &records::DomainRecordSchemas,
+    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    directives: &[StagedBoundaryDirective],
+    include_next_boundary: bool,
+) -> Result<(), CanwuError> {
+    let mut base = state.domain_records.clone();
+    base.extend(
+        overlay
+            .iter()
+            .map(|(reference, record)| (reference.clone(), record.clone())),
+    );
+    let requests: Vec<_> = directives
+        .iter()
+        .filter(|staged| {
+            include_next_boundary || staged.visibility == StateVisibility::SameBoundary
+        })
+        .filter_map(|staged| match &staged.directive {
+            BoundaryDirective::MutateRecord { mutation, summary } => {
+                Some(records::DomainMutationRequest {
+                    plugin: &staged.plugin,
+                    system: &staged.system,
+                    visibility: staged.visibility,
+                    mutation,
+                    summary,
+                })
+            }
+            BoundaryDirective::SetComponent { .. } | BoundaryDirective::Emit { .. } => None,
+        })
+        .collect();
+    if requests.is_empty() {
+        return Ok(());
+    }
+    let (next, changes) = records::apply_mutation_bundle(
+        &base,
+        schemas,
+        state.now,
+        &|entity| runtime_entity_exists(state, entity),
+        requests,
+    )?;
+    validate_domain_dependents_with_records(state, &next)?;
+    for change in changes {
+        overlay.insert(change.current.reference.clone(), change.current);
     }
     Ok(())
 }
@@ -5073,6 +5721,7 @@ fn validate_directives(
     plugin: &str,
     allowed_writes: &[StateKey],
     state_owners: &BTreeMap<StateKey, String>,
+    record_schemas: &records::DomainRecordSchemas,
     entity_exists: &dyn Fn(&EntityRef) -> bool,
     directives: &[SystemDirective],
 ) -> Result<(), CanwuError> {
@@ -5106,6 +5755,12 @@ fn validate_directives(
                             "plugin {plugin} does not own state {}.{}",
                             state.namespace, state.name
                         ),
+                    ));
+                }
+                if is_domain_record_state(record_schemas, state) {
+                    return Err(CanwuError::new(
+                        ErrorCode::UndeclaredStateWrite,
+                        "domain record state cannot be written as an immediate component",
                     ));
                 }
                 if !entity_exists(entity) {
@@ -5143,6 +5798,7 @@ fn validate_directives(
                     plugin,
                     allowed_writes,
                     state_owners,
+                    record_schemas,
                     entity_exists,
                     std::slice::from_ref(directive),
                 )?;
@@ -5501,6 +6157,17 @@ fn component_key(
     }
 }
 
+fn record_change_affected_entities(change: &DomainRecordChange) -> Vec<EntityRef> {
+    (change.current.class == DomainRecordClass::Entity)
+        .then(|| EntityRef::Domain(change.current.reference.clone()))
+        .into_iter()
+        .collect()
+}
+
+fn is_domain_record_state(schemas: &records::DomainRecordSchemas, state: &StateKey) -> bool {
+    schemas.contains_key(&DomainRecordKind::new(&state.namespace, &state.name))
+}
+
 fn snapshot_command_attempt_preflight_error(
     snapshot: &SimulationSnapshot,
     attempt: &CommandAttemptRecord,
@@ -5523,7 +6190,7 @@ fn snapshot_command_attempt_preflight_error(
             revision_before: attempt.revision_before,
             ingress: attempt.ingress,
         },
-        &|entity| snapshot_entity_exists(&snapshot.world, entity),
+        &|entity| snapshot_entity_identity_exists(snapshot, entity),
     ) {
         return Some(error);
     }
@@ -5553,7 +6220,43 @@ fn validate_snapshot(
             "snapshot is missing its run manifest",
         ));
     };
-    manifest::validate(run_manifest, None, true)?;
+    let has_domain_feature = !plugins.record_schemas.is_empty()
+        || !snapshot.domain_records.is_empty()
+        || snapshot
+            .boundaries
+            .iter()
+            .any(|boundary| !boundary.record_changes.is_empty());
+    let initial_domain_records = if let Some(initial_scenario) = &snapshot.initial_scenario {
+        if !has_domain_feature {
+            return invalid_snapshot(
+                "record-free snapshots must omit the domain-record initial scenario",
+            );
+        }
+        let mut canonical = initial_scenario.clone();
+        canonicalize_scenario(&mut canonical);
+        if &canonical != initial_scenario || initial_scenario.start_time != snapshot.initial_time {
+            return invalid_snapshot("snapshot initial scenario is not canonical or time-aligned");
+        }
+        validate_scenario(initial_scenario).map_err(|error| {
+            invalid_snapshot_error(format!("snapshot initial scenario is invalid: {error}"))
+        })?;
+        manifest::validate(run_manifest, Some(initial_scenario), true)?;
+        Some(
+            initial_scenario
+                .domain_records
+                .iter()
+                .map(|record| (record.reference.clone(), record.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        )
+    } else {
+        manifest::validate(run_manifest, None, true)?;
+        if has_domain_feature {
+            return invalid_snapshot(
+                "domain-record snapshots require their manifest-bound initial scenario",
+            );
+        }
+        None
+    };
     if !is_canonical_hash(&snapshot.run_manifest_hash)
         || manifest::hash(run_manifest)? != snapshot.run_manifest_hash
     {
@@ -5569,7 +6272,11 @@ fn validate_snapshot(
         ));
     };
     manifest::validate_run_configuration(run_manifest, run_configuration)?;
-    validate_run_configuration_entities(run_configuration, &snapshot.world)?;
+    validate_run_configuration_entities(
+        run_configuration,
+        &snapshot.world,
+        &snapshot.domain_records,
+    )?;
     if matches!(run_configuration, RunConfigurationSnapshot::Declared(_))
         && !snapshot.commands.is_empty()
         && snapshot.command_attempts.is_empty()
@@ -5610,6 +6317,7 @@ fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.territories, |value| value.id, "territories")?;
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
+    let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
     let boundary_count = u64::try_from(snapshot.boundaries.len())
         .map_err(|_| invalid_snapshot_error("boundary count exceeds the revision range"))?;
     let mut boundaries_before_attempt = vec![boundary_count; snapshot.command_attempts.len()];
@@ -5767,7 +6475,7 @@ fn validate_snapshot(
         if event
             .affected_entities
             .iter()
-            .any(|entity| !snapshot_entity_exists(&snapshot.world, entity))
+            .any(|entity| !snapshot_entity_identity_exists(snapshot, entity))
         {
             return invalid_snapshot("event references an unknown entity");
         }
@@ -5827,7 +6535,12 @@ fn validate_snapshot(
             );
         }
     }
-    let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(snapshot, plugins)?;
+    let (max_boundary_id, max_boundary_correlation) = validate_boundary_records(
+        snapshot,
+        plugins,
+        &domain_records,
+        initial_domain_records.as_ref(),
+    )?;
     let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
     let current_state_hash = snapshot_state_hash(snapshot)?;
     let expected_checkpoint_hash = checkpoint_hash_for_configuration(
@@ -5862,8 +6575,9 @@ fn validate_snapshot(
         if record.plugin.trim().is_empty()
             || record.component.trim().is_empty()
             || !plugins.descriptors.contains_key(&record.plugin)
-            || !snapshot_entity_exists(&snapshot.world, &record.entity)
+            || !snapshot_entity_exists(snapshot, &record.entity)
             || plugins.state_owners.get(&record.state) != Some(&record.plugin)
+            || is_domain_record_state(&plugins.record_schemas, &record.state)
             || (!plugins.immediate_write_states.contains_key(&record.state)
                 && !plugins
                     .boundary_writers
@@ -6320,14 +7034,82 @@ fn validate_random_evidence(
     ))
 }
 
+fn validate_snapshot_domain_records(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<BTreeMap<DomainRecordRef, DomainRecord>, CanwuError> {
+    if snapshot
+        .domain_records
+        .windows(2)
+        .any(|pair| pair[0].reference >= pair[1].reference)
+    {
+        return invalid_snapshot("domain records are not in canonical stable-reference order");
+    }
+    let records: BTreeMap<_, _> = snapshot
+        .domain_records
+        .iter()
+        .map(|record| (record.reference.clone(), record.clone()))
+        .collect();
+    if records.len() != snapshot.domain_records.len() {
+        return invalid_snapshot("snapshot contains duplicate domain record references");
+    }
+    records::validate_record_store(&records, &plugins.record_schemas, snapshot.now, &|entity| {
+        core_world_entity_exists(&snapshot.world, entity)
+    })
+    .map_err(|error| {
+        invalid_snapshot_error(format!("snapshot domain-record state is invalid: {error}"))
+    })?;
+    Ok(records)
+}
+
 fn validate_boundary_records(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
+    final_domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    initial_domain_records: Option<&BTreeMap<DomainRecordRef, DomainRecord>>,
 ) -> Result<(u64, u64), CanwuError> {
     let mut boundary_ids = BTreeSet::new();
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
     let mut boundary_values = BTreeMap::new();
+    let mut domain_record_values = final_domain_records.clone();
+    for boundary in snapshot.boundaries.iter().rev() {
+        for change in boundary.record_changes.iter().rev() {
+            let reference = &change.current.reference;
+            if domain_record_values.get(reference) != Some(&change.current) {
+                return invalid_snapshot(
+                    "boundary domain-record history does not match its persisted successor",
+                );
+            }
+            if let Some(previous) = &change.previous {
+                domain_record_values.insert(reference.clone(), previous.clone());
+            } else {
+                domain_record_values.remove(reference);
+            }
+        }
+    }
+    let empty_initial_records = BTreeMap::new();
+    let expected_initial_records = initial_domain_records.unwrap_or(&empty_initial_records);
+    if &domain_record_values != expected_initial_records {
+        return invalid_snapshot(
+            "boundary domain-record history does not match the manifest-bound initial scenario",
+        );
+    }
+    let initial_world = snapshot
+        .initial_scenario
+        .as_ref()
+        .map_or(&snapshot.world, |scenario| &scenario.world);
+    records::validate_record_store(
+        &domain_record_values,
+        &plugins.record_schemas,
+        snapshot.initial_time,
+        &|entity| core_world_entity_exists(initial_world, entity),
+    )
+    .map_err(|error| {
+        invalid_snapshot_error(format!(
+            "initial domain-record state reconstructed from boundary evidence is invalid: {error}"
+        ))
+    })?;
     let mut next_attempt = 0;
     let mut next_command = 0;
     let mut next_event = 0;
@@ -6367,6 +7149,7 @@ fn validate_boundary_records(
         )?;
         validate_boundary_reservations(record, snapshot, plugins)?;
         validate_boundary_changes(record, snapshot, plugins)?;
+        validate_boundary_record_changes(record, snapshot, plugins, &mut domain_record_values)?;
         for change in &record.changes {
             let key = component_key(
                 &change.plugin,
@@ -6423,6 +7206,11 @@ fn validate_boundary_records(
     if persisted_boundary_values != boundary_values {
         return invalid_snapshot(
             "boundary changes do not materialize the persisted component state",
+        );
+    }
+    if &domain_record_values != final_domain_records {
+        return invalid_snapshot(
+            "boundary domain-record changes do not materialize the persisted record state",
         );
     }
     Ok((max_boundary_id, max_correlation_id))
@@ -6578,7 +7366,7 @@ fn validate_boundary_reservations(
     }
     let mut remaining = BTreeMap::new();
     for offered in &record.reservation_offers {
-        validate_snapshot_reservation_pool(&offered.offer.pool, &snapshot.world)?;
+        validate_snapshot_reservation_pool(&offered.offer.pool, snapshot)?;
         let Some(contract) = snapshot_boundary_contract(plugins, &offered.plugin, &offered.system)
         else {
             return invalid_snapshot("reservation offer references an unknown boundary system");
@@ -6610,7 +7398,7 @@ fn validate_boundary_reservations(
     }
     let mut request_refs = BTreeSet::new();
     for (requested, allocation) in record.reservation_requests.iter().zip(&record.allocations) {
-        validate_snapshot_reservation_pool(&requested.request.pool, &snapshot.world)?;
+        validate_snapshot_reservation_pool(&requested.request.pool, snapshot)?;
         let Some(contract) = snapshot_boundary_contract(
             plugins,
             &requested.reservation.plugin,
@@ -6676,11 +7464,11 @@ fn compare_reservation_request_records(
 
 fn validate_snapshot_reservation_pool(
     pool: &ReservationPoolKey,
-    world: &WorldSnapshot,
+    snapshot: &SimulationSnapshot,
 ) -> Result<(), CanwuError> {
     if pool.resource.trim().is_empty()
         || pool.resource != pool.resource.trim()
-        || !snapshot_entity_exists(world, &pool.entity)
+        || !snapshot_entity_identity_exists(snapshot, &pool.entity)
     {
         return invalid_snapshot("snapshot contains an invalid reservation pool");
     }
@@ -6716,7 +7504,7 @@ fn validate_boundary_changes(
         };
         if change.component.trim().is_empty()
             || change.component != change.component.trim()
-            || !snapshot_entity_exists(&snapshot.world, &change.entity)
+            || !snapshot_entity_exists(snapshot, &change.entity)
             || !contract.writes.contains(&change.state)
             || !boundary_system_due(
                 contract,
@@ -6741,6 +7529,99 @@ fn validate_boundary_changes(
     Ok(())
 }
 
+fn validate_boundary_record_changes(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    values: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+) -> Result<(), CanwuError> {
+    let mut by_stage = BTreeMap::<DomainRecordCommitStage, Vec<&DomainRecordChange>>::new();
+    let mut previous_order = None;
+    for change in &record.record_changes {
+        let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
+        else {
+            return invalid_snapshot("domain-record change references an unknown boundary system");
+        };
+        let Some(write_stage) = boundary_write_stage(contract.phase) else {
+            return invalid_snapshot("domain-record change references a non-writing phase");
+        };
+        let Some(commit_stage) = domain_record_commit_stage(contract.phase, change.visibility)
+        else {
+            return invalid_snapshot("domain-record change has no deterministic commit stage");
+        };
+        let reference = &change.current.reference;
+        let state = records::record_state_key(&reference.kind);
+        let order = (commit_stage, reference.clone());
+        if !canonical_text(&change.summary)
+            || previous_order
+                .as_ref()
+                .is_some_and(|previous| previous >= &order)
+            || change
+                .previous
+                .as_ref()
+                .is_some_and(|previous| previous.reference != *reference)
+            || !contract.writes.contains(&state)
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                !record.admitted_events.is_empty(),
+            )
+            || contract.visibility != change.visibility
+            || plugins.state_owners.get(&state) != Some(&change.plugin)
+            || plugins.boundary_writers.get(&(write_stage, state.clone()))
+                != Some(&(change.plugin.clone(), change.system.clone()))
+            || plugins
+                .record_schemas
+                .get(&reference.kind)
+                .is_none_or(|(owner, _)| owner != &change.plugin)
+        {
+            return invalid_snapshot(
+                "boundary domain-record change is unauthorized, duplicated, or noncanonical",
+            );
+        }
+        previous_order = Some(order);
+        by_stage.entry(commit_stage).or_default().push(change);
+    }
+
+    for changes in by_stage.values() {
+        let mutations: Vec<_> = changes
+            .iter()
+            .map(|change| records::mutation_from_change(change))
+            .collect();
+        let requests: Vec<_> = changes
+            .iter()
+            .zip(&mutations)
+            .map(|(change, mutation)| records::DomainMutationRequest {
+                plugin: &change.plugin,
+                system: &change.system,
+                visibility: change.visibility,
+                mutation,
+                summary: &change.summary,
+            })
+            .collect();
+        let (next, applied) = records::apply_mutation_bundle(
+            values,
+            &plugins.record_schemas,
+            record.at,
+            &|entity| core_world_entity_exists(&snapshot.world, entity),
+            requests,
+        )
+        .map_err(|error| {
+            invalid_snapshot_error(format!(
+                "boundary domain-record transition is invalid: {error}"
+            ))
+        })?;
+        let recorded: Vec<_> = changes.iter().map(|change| (*change).clone()).collect();
+        if applied != recorded {
+            return invalid_snapshot(
+                "boundary domain-record transition evidence disagrees with deterministic replay",
+            );
+        }
+        *values = next;
+    }
+    Ok(())
+}
+
 fn validate_boundary_emissions(
     record: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
@@ -6755,6 +7636,7 @@ fn validate_boundary_emissions(
         return invalid_snapshot("boundary emitted event IDs are not canonical");
     }
     let mut matched_changes = BTreeSet::new();
+    let mut matched_record_changes = BTreeSet::new();
     for emission in &record.emissions {
         let Some(event) = snapshot
             .events
@@ -6807,6 +7689,27 @@ fn validate_boundary_emissions(
                     return invalid_snapshot("boundary change evidence provenance is inconsistent");
                 }
             }
+            BoundaryEmissionKind::RecordChange { change_index } => {
+                let index = usize::try_from(change_index).map_err(|_| {
+                    invalid_snapshot_error("boundary record-change evidence index is out of range")
+                })?;
+                let Some(change) = record.record_changes.get(index) else {
+                    return invalid_snapshot(
+                        "boundary emission references an unknown domain record change",
+                    );
+                };
+                if !matched_record_changes.insert(change_index)
+                    || emission.plugin != change.plugin
+                    || emission.system != change.system
+                    || event.summary != change.summary
+                    || event.affected_entities != record_change_affected_entities(change)
+                    || event_type != change.operation.event_type()
+                {
+                    return invalid_snapshot(
+                        "boundary domain-record evidence provenance is inconsistent",
+                    );
+                }
+            }
             BoundaryEmissionKind::Explicit => {
                 if !contract.emits.contains(event_type) {
                     return invalid_snapshot(
@@ -6818,6 +7721,11 @@ fn validate_boundary_emissions(
     }
     if matched_changes.len() != record.changes.len() {
         return invalid_snapshot("boundary change is missing its emitted evidence event");
+    }
+    if matched_record_changes.len() != record.record_changes.len() {
+        return invalid_snapshot(
+            "boundary domain-record change is missing its emitted evidence event",
+        );
     }
     Ok(())
 }
@@ -6854,7 +7762,7 @@ fn validate_snapshot_command(
     }
     if let Some(authority) = &envelope.authority {
         validate_command_authority(authority, &|entity| {
-            snapshot_entity_exists(&snapshot.world, entity)
+            snapshot_entity_identity_exists(snapshot, entity)
         })
         .map_err(|error| {
             invalid_snapshot_error(format!("command authority is invalid: {error}"))
@@ -6960,7 +7868,7 @@ fn validate_event_kind(
                 && snapshot.world.territory(*known_location).is_some()
         }
         EventKind::DebugFieldChanged { entity, .. } => {
-            snapshot_entity_exists(&snapshot.world, entity)
+            snapshot_entity_identity_exists(snapshot, entity)
         }
         EventKind::Plugin { plugin, event_type } => {
             plugins.descriptors.contains_key(plugin) && !event_type.trim().is_empty()
@@ -7155,8 +8063,9 @@ fn validate_scheduled_action(
                 plugin,
                 allowed_writes,
                 &plugins.state_owners,
-                &|entity| snapshot_entity_exists(&snapshot.world, entity),
-                std::slice::from_ref(directive),
+                &plugins.record_schemas,
+                &|entity| snapshot_entity_exists(snapshot, entity),
+                std::slice::from_ref(directive.as_ref()),
             )
             .map_err(|error| {
                 CanwuError::new(
@@ -7228,6 +8137,7 @@ fn claim_counter(current: u64, label: &str) -> Result<(u64, u64), CanwuError> {
 fn validate_run_configuration_entities(
     run_configuration: &RunConfigurationSnapshot,
     world: &WorldSnapshot,
+    domain_records: &[DomainRecord],
 ) -> Result<(), CanwuError> {
     let Some(binding) = run_configuration
         .declared()
@@ -7241,7 +8151,7 @@ fn validate_run_configuration_entities(
         || binding
             .institution
             .as_ref()
-            .is_some_and(|institution| !snapshot_entity_exists(world, institution))
+            .is_some_and(|institution| !entity_exists_in_parts(world, domain_records, institution))
     {
         return Err(CanwuError::new(
             ErrorCode::InvalidRunConfiguration,
@@ -7251,25 +8161,158 @@ fn validate_run_configuration_entities(
     Ok(())
 }
 
-fn snapshot_entity_exists(world: &WorldSnapshot, entity: &EntityRef) -> bool {
+fn core_world_entity_exists(world: &WorldSnapshot, entity: &EntityRef) -> bool {
     match entity {
         EntityRef::Army(id) => world.army(*id).is_some(),
         EntityRef::Government(id) => world.government(*id).is_some(),
         EntityRef::Person(id) => world.person(*id).is_some(),
         EntityRef::Route(id) => world.route(*id).is_some(),
         EntityRef::Territory(id) => world.territory(*id).is_some(),
-        EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+        EntityRef::Domain(_) | EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+    }
+}
+
+fn entity_exists_in_parts(
+    world: &WorldSnapshot,
+    domain_records: &[DomainRecord],
+    entity: &EntityRef,
+) -> bool {
+    match entity {
+        EntityRef::Domain(reference) => domain_records.iter().any(|record| {
+            &record.reference == reference
+                && record.class == DomainRecordClass::Entity
+                && !record.is_deleted()
+        }),
+        _ => core_world_entity_exists(world, entity),
+    }
+}
+
+fn snapshot_entity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
+    entity_exists_in_parts(&snapshot.world, &snapshot.domain_records, entity)
+}
+
+fn snapshot_entity_identity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
+    match entity {
+        EntityRef::Domain(reference) => snapshot.domain_records.iter().any(|record| {
+            &record.reference == reference && record.class == DomainRecordClass::Entity
+        }),
+        _ => core_world_entity_exists(&snapshot.world, entity),
     }
 }
 
 fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
     match entity {
         EntityRef::Army(id) => state.armies.contains_key(id),
+        EntityRef::Domain(reference) => {
+            records::domain_entity_exists(&state.domain_records, reference)
+        }
         EntityRef::Government(id) => state.governments.contains_key(id),
         EntityRef::Person(id) => state.people.contains_key(id),
         EntityRef::Route(id) => state.routes.contains_key(id),
         EntityRef::Territory(id) => state.territories.contains_key(id),
         EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+    }
+}
+
+fn runtime_entity_exists_with_record_overlay(
+    state: &RuntimeState,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    entity: &EntityRef,
+) -> bool {
+    match entity {
+        EntityRef::Domain(reference) => record_overlay
+            .get(reference)
+            .or_else(|| state.domain_records.get(reference))
+            .is_some_and(|record| {
+                record.class == DomainRecordClass::Entity && !record.is_deleted()
+            }),
+        _ => runtime_entity_exists(state, entity),
+    }
+}
+
+fn proposal_entity_exists(
+    state: &RuntimeState,
+    schemas: &records::DomainRecordSchemas,
+    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    proposal: &BoundaryProposal,
+    entity: &EntityRef,
+) -> bool {
+    let EntityRef::Domain(reference) = entity else {
+        return runtime_entity_exists(state, entity);
+    };
+    if let Some(mutation) = proposal.directives.iter().rev().find_map(|directive| {
+        let BoundaryDirective::MutateRecord { mutation, .. } = directive else {
+            return None;
+        };
+        (mutation.target() == reference).then_some(mutation)
+    }) {
+        return match mutation {
+            DomainRecordMutation::Delete { .. } => false,
+            DomainRecordMutation::Create { .. }
+            | DomainRecordMutation::Update { .. }
+            | DomainRecordMutation::Retire { .. } => schemas
+                .get(&reference.kind)
+                .is_some_and(|(_, schema)| schema.class == DomainRecordClass::Entity),
+        };
+    }
+    runtime_entity_exists_with_record_overlay(state, record_overlay, entity)
+}
+
+fn validate_runtime_domain_dependents(state: &RuntimeState) -> Result<(), CanwuError> {
+    validate_domain_dependents_with_records(state, &state.domain_records)
+}
+
+fn validate_domain_dependents_with_records(
+    state: &RuntimeState,
+    domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+) -> Result<(), CanwuError> {
+    let unavailable = |entity: &EntityRef| matches!(entity, EntityRef::Domain(reference) if !records::domain_entity_exists(domain_records, reference));
+    if state
+        .plugin_components
+        .values()
+        .any(|component| unavailable(&component.entity))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordReferenced,
+            "a domain entity with persisted plugin components cannot be deleted",
+        ));
+    }
+    if state.scheduler.values().any(|action| match action {
+        ScheduledAction::PluginDirective { directive, .. } => {
+            system_directive_has_entity(directive, &unavailable)
+        }
+        ScheduledAction::ArmyArrival { .. } | ScheduledAction::KnowledgeReport { .. } => false,
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordReferenced,
+            "a domain entity referenced by future scheduled work cannot be deleted",
+        ));
+    }
+    if state
+        .run_configuration
+        .declared()
+        .and_then(|configuration| configuration.seat_binding.as_ref())
+        .and_then(|binding| binding.institution.as_ref())
+        .is_some_and(unavailable)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordReferenced,
+            "the institution bound to the active run seat cannot be deleted",
+        ));
+    }
+    Ok(())
+}
+
+fn system_directive_has_entity(
+    directive: &SystemDirective,
+    predicate: &dyn Fn(&EntityRef) -> bool,
+) -> bool {
+    match directive {
+        SystemDirective::SetComponent { entity, .. } => predicate(entity),
+        SystemDirective::Emit { affected, .. } => affected.iter().any(predicate),
+        SystemDirective::Schedule { directive, .. } => {
+            system_directive_has_entity(directive, predicate)
+        }
     }
 }
 
@@ -7330,7 +8373,9 @@ fn migrate_snapshot(mut snapshot: SimulationSnapshot) -> Result<SimulationSnapsh
 
 fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
     if snapshot.run_configuration.is_some()
+        || snapshot.initial_scenario.is_some()
         || !snapshot.command_attempts.is_empty()
+        || !snapshot.domain_records.is_empty()
         || snapshot.next_command_attempt_id != 1
         || snapshot
             .commands
@@ -7339,7 +8384,7 @@ fn validate_legacy_ingress_shape(snapshot: &SimulationSnapshot) -> Result<(), Ca
         || snapshot
             .boundaries
             .iter()
-            .any(|record| !record.admitted_attempts.is_empty())
+            .any(|record| !record.admitted_attempts.is_empty() || !record.record_changes.is_empty())
     {
         return invalid_snapshot(
             "legacy snapshots cannot contain current run-policy or command-attempt evidence",
@@ -7511,6 +8556,8 @@ struct StateHashMaterial<'a> {
     run_manifest: &'a RunManifest,
     run_manifest_hash: &'a str,
     initial_time: SimTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    initial_scenario: Option<&'a Scenario>,
     now: SimTime,
     plugin_registration_closed: bool,
     world: &'a WorldSnapshot,
@@ -7520,6 +8567,8 @@ struct StateHashMaterial<'a> {
     #[serde(skip_serializing_if = "command_attempt_slice_is_empty")]
     command_attempts: &'a [CommandAttemptRecord],
     plugin_components: &'a [PluginComponentRecord],
+    #[serde(skip_serializing_if = "domain_record_slice_is_empty")]
+    domain_records: &'a [DomainRecord],
     plugin_descriptors: &'a [PluginDescriptor],
     schema: &'a SchemaRegistry,
     scheduled: &'a [ScheduledRecord],
@@ -7602,6 +8651,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         run_manifest: &authoritative_manifest,
         run_manifest_hash: &authoritative_manifest_hash,
         initial_time: snapshot.initial_time,
+        initial_scenario: snapshot.initial_scenario.as_ref(),
         now: snapshot.now,
         plugin_registration_closed: snapshot.plugin_registration_closed,
         world: &snapshot.world,
@@ -7610,6 +8660,7 @@ fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<String, CanwuErr
         commands: &snapshot.commands,
         command_attempts: &snapshot.command_attempts,
         plugin_components: &snapshot.plugin_components,
+        domain_records: &snapshot.domain_records,
         plugin_descriptors: &snapshot.plugin_descriptors,
         schema: &snapshot.schema,
         scheduled: &snapshot.scheduled,
@@ -7726,6 +8777,8 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
         allocations: &'a [ReservationAllocation],
         random_draws: &'a [RandomDrawId],
         changes: &'a [BoundaryChange],
+        #[serde(skip_serializing_if = "domain_record_change_slice_is_empty")]
+        record_changes: &'a [DomainRecordChange],
         emissions: &'a [BoundaryEmission],
         state_hash: &'a Option<String>,
         previous_hash: &'a str,
@@ -7746,6 +8799,7 @@ fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> 
             allocations: &record.allocations,
             random_draws: &record.random_draws,
             changes: &record.changes,
+            record_changes: &record.record_changes,
             emissions: &record.emissions,
             state_hash: &record.state_hash,
             previous_hash: &record.previous_hash,
@@ -7780,6 +8834,27 @@ fn invalid_snapshot_error(message: impl Into<String>) -> CanwuError {
 
 fn invalid_snapshot<T>(message: impl Into<String>) -> Result<T, CanwuError> {
     Err(invalid_snapshot_error(message))
+}
+
+fn require_plugin_aware_initial_records(scenario: &Scenario) -> Result<(), CanwuError> {
+    if scenario.domain_records.is_empty() {
+        return Ok(());
+    }
+    Err(CanwuError::new(
+        ErrorCode::PluginNotActive,
+        "scenarios with initial domain records require a plugin-aware constructor",
+    ))
+}
+
+fn canonicalize_scenario(scenario: &mut Scenario) {
+    scenario.world.people.sort_by_key(|value| value.id);
+    scenario.world.governments.sort_by_key(|value| value.id);
+    scenario.world.territories.sort_by_key(|value| value.id);
+    scenario.world.routes.sort_by_key(|value| value.id);
+    scenario.world.armies.sort_by_key(|value| value.id);
+    scenario
+        .domain_records
+        .sort_by(|left, right| left.reference.cmp(&right.reference));
 }
 
 fn validate_scenario(scenario: &Scenario) -> Result<(), CanwuError> {
@@ -7866,6 +8941,9 @@ fn validate_scenario(scenario: &Scenario) -> Result<(), CanwuError> {
             ));
         }
     }
+    records::validate_initial_records(&scenario.domain_records, scenario.start_time, &|entity| {
+        core_world_entity_exists(&scenario.world, entity)
+    })?;
     for (actor_id, actor) in &scenario.knowledge.actors {
         if actor.actor != *actor_id || scenario.world.person(*actor_id).is_none() {
             return Err(CanwuError::new(
@@ -8138,6 +9216,7 @@ pub fn demo_scenario() -> (Scenario, DemoIds) {
             start_time: initial_time,
             world,
             knowledge,
+            domain_records: Vec::new(),
         },
         ids,
     )
@@ -9058,6 +10137,305 @@ mod tests {
                 ),
                 reject_boundary,
             )
+        }
+    }
+
+    struct RecordLifecyclePlugin;
+    struct RecordDeleteOnlyPlugin;
+
+    fn office_kind() -> DomainRecordKind {
+        DomainRecordKind::new("cm-fixture", "office")
+    }
+
+    fn obligation_kind() -> DomainRecordKind {
+        DomainRecordKind::new("cm-fixture", "obligation")
+    }
+
+    fn office_reference(id: &str) -> DomainRecordRef {
+        DomainRecordRef::new("cm-fixture", "office", id)
+    }
+
+    fn obligation_reference() -> DomainRecordRef {
+        DomainRecordRef::new("cm-fixture", "obligation", "standing-order")
+    }
+
+    fn object_payload_schema(field: &str) -> PayloadSchema {
+        PayloadSchema::Object {
+            properties: BTreeMap::from([(
+                field.to_owned(),
+                PayloadProperty {
+                    value_type: PayloadValueType::String,
+                    required: true,
+                },
+            )]),
+            allow_additional: false,
+        }
+    }
+
+    fn office_draft(id: &str, name: &str) -> DomainRecordDraft {
+        DomainRecordDraft {
+            reference: office_reference(id),
+            payload: serde_json::json!({ "name": name }),
+            references: vec![DomainReference {
+                role: "holder".to_owned(),
+                target: DomainReferenceTarget::Core(EntityRef::Person(PersonId::new(1))),
+            }],
+        }
+    }
+
+    fn obligation_draft(office: &str, status: &str) -> DomainRecordDraft {
+        DomainRecordDraft {
+            reference: obligation_reference(),
+            payload: serde_json::json!({ "status": status }),
+            references: vec![DomainReference {
+                role: "office".to_owned(),
+                target: DomainReferenceTarget::Domain(office_reference(office)),
+            }],
+        }
+    }
+
+    fn initial_record(
+        owner: &str,
+        class: DomainRecordClass,
+        draft: DomainRecordDraft,
+    ) -> DomainRecord {
+        DomainRecord {
+            reference: draft.reference,
+            owner: owner.to_owned(),
+            class,
+            version: 1,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: draft.payload,
+            references: draft.references,
+        }
+    }
+
+    fn record_lifecycle_proposal(context: &BoundaryContext, delete_only: bool) -> BoundaryProposal {
+        let directives = match context.boundary_id.get() {
+            1 => vec![
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Create {
+                        record: office_draft("office-a", "Grand Secretariat"),
+                    },
+                    summary: "Create the original office".to_owned(),
+                },
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Create {
+                        record: office_draft("office-b", "Successor Secretariat"),
+                    },
+                    summary: "Create the successor office".to_owned(),
+                },
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Create {
+                        record: office_draft("office-c", "Later Secretariat"),
+                    },
+                    summary: "Create the later successor office".to_owned(),
+                },
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Create {
+                        record: obligation_draft("office-a", "open"),
+                    },
+                    summary: "Create an obligation assigned to the original office".to_owned(),
+                },
+            ],
+            2 => vec![BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Retire {
+                    record: office_reference("office-a"),
+                    expected_version: 1,
+                    successor: Some(office_reference("office-b")),
+                },
+                summary: "Retire the original office with a stable successor".to_owned(),
+            }],
+            3 if delete_only => vec![BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Delete {
+                    record: office_reference("office-a"),
+                    expected_version: 2,
+                },
+                summary: "Attempt to delete a still-referenced office".to_owned(),
+            }],
+            3 => vec![BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Retire {
+                    record: office_reference("office-b"),
+                    expected_version: 1,
+                    successor: Some(office_reference("office-c")),
+                },
+                summary: "Extend the persisted office succession chain".to_owned(),
+            }],
+            4 => vec![
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Update {
+                        record: obligation_draft("office-c", "transferred"),
+                        expected_version: 1,
+                    },
+                    summary: "Transfer the obligation to the successor office".to_owned(),
+                },
+                BoundaryDirective::MutateRecord {
+                    mutation: DomainRecordMutation::Delete {
+                        record: office_reference("office-a"),
+                        expected_version: 2,
+                    },
+                    summary: "Delete the unreferenced retired office".to_owned(),
+                },
+            ],
+            5 => vec![BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Update {
+                    record: office_draft("office-c", "Stale Secretariat"),
+                    expected_version: 99,
+                },
+                summary: "Attempt a stale office update".to_owned(),
+            }],
+            _ => Vec::new(),
+        };
+        BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        }
+    }
+
+    fn apply_record_lifecycle(
+        _view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(record_lifecycle_proposal(context, false))
+    }
+
+    fn apply_invalid_record_delete(
+        _view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(record_lifecycle_proposal(context, true))
+    }
+
+    fn validate_record_lifecycle_view(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let original = view.domain_record(&office_reference("office-a"))?;
+        let proposed_successor = view.proposed_domain_record(&office_reference("office-b"))?;
+        let obligation = view.domain_record(&obligation_reference())?;
+        let valid = match context.boundary_id.get() {
+            1 => {
+                original.is_some_and(DomainRecord::is_active)
+                    && obligation.is_some_and(DomainRecord::is_active)
+            }
+            2 => original.is_some_and(|record| {
+                matches!(
+                    &record.lifecycle,
+                    DomainRecordLifecycle::Retired {
+                        successor: Some(successor),
+                        ..
+                    } if successor == &office_reference("office-b")
+                )
+            }),
+            3 => {
+                original.is_some_and(|record| {
+                    matches!(
+                        &record.lifecycle,
+                        DomainRecordLifecycle::Retired {
+                            successor: Some(successor),
+                            ..
+                        } if successor == &office_reference("office-b")
+                    )
+                }) && proposed_successor.is_some_and(|record| {
+                    matches!(
+                        &record.lifecycle,
+                        DomainRecordLifecycle::Retired {
+                            successor: Some(successor),
+                            ..
+                        } if successor == &office_reference("office-c")
+                    )
+                })
+            }
+            4 => {
+                original.is_some_and(DomainRecord::is_deleted)
+                    && obligation.is_some_and(|record| {
+                        record.references.iter().any(|reference| {
+                            reference.target
+                                == DomainReferenceTarget::Domain(office_reference("office-c"))
+                        })
+                    })
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "invariant systems did not receive the deterministic domain-record proposal",
+            ));
+        }
+        Ok(BoundaryProposal::default())
+    }
+
+    fn register_record_fixture(
+        registrar: &mut PluginRegistrar<'_>,
+        handler: BoundarySystemHandler,
+    ) -> Result<(), CanwuError> {
+        let mut office = DomainRecordSchema::new(office_kind(), DomainRecordClass::Entity);
+        office.payload_schema = object_payload_schema("name");
+        office.references = vec![DomainReferenceSchema {
+            role: "holder".to_owned(),
+            targets: vec![DomainReferenceTargetKind::Core(
+                canwu_core::CoreEntityKind::Person,
+            )],
+            required: true,
+            multiple: false,
+            allow_retired: false,
+        }];
+        let office_state = office.state_key();
+        registrar.register_record_schema(office)?;
+
+        let mut obligation = DomainRecordSchema::new(obligation_kind(), DomainRecordClass::Record);
+        obligation.payload_schema = object_payload_schema("status");
+        obligation.references = vec![DomainReferenceSchema {
+            role: "office".to_owned(),
+            targets: vec![DomainReferenceTargetKind::Domain(office_kind())],
+            required: true,
+            multiple: false,
+            allow_retired: true,
+        }];
+        let obligation_state = obligation.state_key();
+        registrar.register_record_schema(obligation)?;
+
+        let writes = vec![office_state, obligation_state];
+        let mut lifecycle = BoundarySystemContract::new(
+            "lifecycle",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        lifecycle.writes.clone_from(&writes);
+        lifecycle.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(lifecycle, handler)?;
+
+        let mut invariant = BoundarySystemContract::new(
+            "validate-lifecycle",
+            BoundaryPhase::InvariantValidation,
+            SystemCadence::Daily,
+        );
+        invariant.reads = writes;
+        registrar.register_boundary_system(invariant, validate_record_lifecycle_view)
+    }
+
+    impl SimulationPlugin for RecordLifecyclePlugin {
+        fn name(&self) -> &'static str {
+            "cm-record-lifecycle"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000021");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            register_record_fixture(registrar, apply_record_lifecycle)
+        }
+    }
+
+    impl SimulationPlugin for RecordDeleteOnlyPlugin {
+        fn name(&self) -> &'static str {
+            "cm-record-delete-only"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000022");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            register_record_fixture(registrar, apply_invalid_record_delete)
         }
     }
 
@@ -10522,6 +11900,246 @@ mod tests {
             .expect("completed boundaries cannot retain due ingress");
         assert_eq!(error.code, ErrorCode::InvalidSnapshot);
         assert!(error.message.contains("future-dated"));
+    }
+
+    #[test]
+    fn domain_record_lifecycle_is_atomic_replayable_and_tamper_evident() {
+        let (scenario, _) = demo_scenario();
+        let mut record_free = Simulation::new(87, scenario.clone())
+            .expect("record-free compatibility fixture should load");
+        let record_free_snapshot = record_free.snapshot();
+        assert!(
+            record_free_snapshot.initial_scenario.is_none(),
+            "record-free format-4 state must retain its prior additive shape"
+        );
+        let mut redundant_initial_scenario = record_free_snapshot.clone();
+        redundant_initial_scenario.initial_scenario = Some(scenario.clone());
+        redundant_initial_scenario.checkpoint_hash =
+            snapshot_checkpoint_hash(&redundant_initial_scenario)
+                .expect("redundant record-free genesis should still hash coherently");
+        let error = Simulation::from_snapshot(redundant_initial_scenario)
+            .err()
+            .expect("record-free snapshots must not carry ignored genesis state");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        let mut record_free_restored = Simulation::from_snapshot(record_free_snapshot)
+            .expect("a pristine record-free snapshot should restore");
+        record_free
+            .register_plugin(&RecordLifecyclePlugin)
+            .expect("the original pristine runtime should accept record schemas");
+        record_free_restored
+            .register_plugin(&RecordLifecyclePlugin)
+            .expect("a restored pristine runtime must retain record-schema capability");
+        assert_eq!(record_free.snapshot(), record_free_restored.snapshot());
+        let mut initial_scenario = scenario.clone();
+        initial_scenario.domain_records = vec![
+            initial_record(
+                "cm-record-lifecycle",
+                DomainRecordClass::Entity,
+                office_draft("office-a", "Grand Secretariat"),
+            ),
+            initial_record(
+                "cm-record-lifecycle",
+                DomainRecordClass::Entity,
+                office_draft("office-b", "Successor Secretariat"),
+            ),
+            initial_record(
+                "cm-record-lifecycle",
+                DomainRecordClass::Record,
+                obligation_draft("office-a", "open"),
+            ),
+        ];
+        let error = Simulation::new(88, initial_scenario.clone())
+            .err()
+            .expect("initial domain records must not create a half-configured runtime");
+        assert_eq!(error.code, ErrorCode::PluginNotActive);
+        let initial = Simulation::new_with_plugins(88, initial_scenario, &[&RecordLifecyclePlugin])
+            .expect("plugin-aware construction should validate initial domain records");
+        let initial_json = initial
+            .snapshot_json()
+            .expect("configured initial record state should serialize");
+        let initial_restored =
+            Simulation::from_snapshot_json_with_plugins(&initial_json, &[&RecordLifecyclePlugin])
+                .expect("configured initial record state should reload immediately");
+        assert_eq!(initial.snapshot(), initial_restored.snapshot());
+
+        let mut simulation =
+            Simulation::new(89, scenario.clone()).expect("record fixture should load");
+        simulation
+            .register_plugin(&RecordLifecyclePlugin)
+            .expect("record lifecycle plugin should register");
+        let request = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
+        let created = simulation
+            .settle_boundary(request.clone())
+            .expect("record creation boundary should settle");
+        let retired = simulation
+            .settle_boundary(request.clone())
+            .expect("record retirement boundary should settle");
+        let succession = simulation
+            .settle_boundary(request.clone())
+            .expect("a later successor should retire without invalidating its predecessor");
+        let deleted = simulation
+            .settle_boundary(request)
+            .expect("atomic reference transfer and deletion should settle");
+        assert_eq!(created.record_change_count, 4);
+        assert_eq!(retired.record_change_count, 1);
+        assert_eq!(succession.record_change_count, 1);
+        assert_eq!(deleted.record_change_count, 2);
+        assert_eq!(
+            created.change_count
+                + retired.change_count
+                + succession.change_count
+                + deleted.change_count,
+            0
+        );
+
+        let original = simulation
+            .domain_record(&office_reference("office-a"))
+            .expect("deleted office tombstone should remain addressable");
+        assert!(original.is_deleted());
+        assert_eq!(original.version, 3);
+        let obligation = simulation
+            .domain_record(&obligation_reference())
+            .expect("transferred obligation should remain present");
+        assert_eq!(obligation.version, 2);
+        assert!(obligation.references.iter().any(|reference| {
+            reference.target == DomainReferenceTarget::Domain(office_reference("office-c"))
+        }));
+        assert!(matches!(
+            &simulation
+                .domain_record(&office_reference("office-b"))
+                .expect("the intermediate successor should remain addressable")
+                .lifecycle,
+            DomainRecordLifecycle::Retired {
+                successor: Some(successor),
+                ..
+            } if successor == &office_reference("office-c")
+        ));
+        assert!(simulation.boundaries().iter().all(|boundary| {
+            boundary.record_changes.len()
+                == boundary
+                    .emissions
+                    .iter()
+                    .filter(|emission| {
+                        matches!(emission.kind, BoundaryEmissionKind::RecordChange { .. })
+                    })
+                    .count()
+        }));
+
+        let before_stale_update = simulation
+            .snapshot_json()
+            .expect("pre-conflict record state should serialize");
+        let conflict = simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect_err("stale record versions must reject before commit");
+        assert_eq!(conflict.code, ErrorCode::DomainRecordVersionConflict);
+        assert_eq!(
+            before_stale_update,
+            simulation
+                .snapshot_json()
+                .expect("version conflicts must roll back the complete boundary")
+        );
+
+        let json = simulation
+            .snapshot_json()
+            .expect("domain-record snapshot should serialize");
+        let restored =
+            Simulation::from_snapshot_json_with_plugins(&json, &[&RecordLifecyclePlugin])
+                .expect("domain-record evidence should restore with exact plugin code");
+        assert_eq!(simulation.snapshot(), restored.snapshot());
+
+        let plugins: &[&dyn SimulationPlugin] = &[&RecordLifecyclePlugin];
+        let replayed = Simulation::replay_with_boundaries(
+            89,
+            scenario,
+            plugins,
+            simulation.command_log(),
+            simulation.boundaries(),
+            simulation.time(),
+        )
+        .expect("domain-record boundary evidence should replay exactly");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+
+        let mut corrupted = simulation.snapshot();
+        corrupted.boundaries[1].record_changes[0].system = "forged-system".to_owned();
+        let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
+        for boundary in &mut corrupted.boundaries {
+            boundary.previous_hash.clone_from(&previous_hash);
+            boundary.hash =
+                compute_boundary_hash(boundary).expect("tampered boundary should still hash");
+            previous_hash.clone_from(&boundary.hash);
+        }
+        corrupted.checkpoint_hash = snapshot_checkpoint_hash(&corrupted)
+            .expect("tampered snapshot should still have a coherent outer commitment");
+        let error = Simulation::from_snapshot_with_plugins(corrupted, plugins)
+            .err()
+            .expect("forged domain-record provenance must not load");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut shifted_to_genesis = simulation.snapshot();
+        let forged_initial_records = shifted_to_genesis.domain_records.clone();
+        shifted_to_genesis
+            .initial_scenario
+            .as_mut()
+            .expect("new snapshots retain their manifest-bound initial scenario")
+            .domain_records
+            .clone_from(&forged_initial_records);
+        shifted_to_genesis.boundaries.clear();
+        shifted_to_genesis.events.clear();
+        shifted_to_genesis.plugin_registration_closed = false;
+        shifted_to_genesis.next_event_id = 1;
+        shifted_to_genesis.next_boundary_id = 1;
+        shifted_to_genesis.next_correlation_id = 1;
+        shifted_to_genesis.checkpoint_hash = snapshot_checkpoint_hash(&shifted_to_genesis)
+            .expect("history-shift forgery should have a coherent outer commitment");
+        let error = Simulation::from_snapshot_with_plugins(shifted_to_genesis, plugins)
+            .err()
+            .expect("record creations cannot be relabeled as manifest-bound genesis state");
+        assert_eq!(error.code, ErrorCode::InvalidRunManifest);
+
+        let mut stripped_feature = simulation.snapshot();
+        stripped_feature.initial_scenario = None;
+        stripped_feature.domain_records.clear();
+        stripped_feature.boundaries.clear();
+        stripped_feature.events.clear();
+        stripped_feature.plugin_registration_closed = false;
+        stripped_feature.next_event_id = 1;
+        stripped_feature.next_boundary_id = 1;
+        stripped_feature.next_correlation_id = 1;
+        stripped_feature.checkpoint_hash = snapshot_checkpoint_hash(&stripped_feature)
+            .expect("feature-strip forgery should have a coherent outer commitment");
+        let error = Simulation::from_snapshot_with_plugins(stripped_feature, plugins)
+            .err()
+            .expect("record schemas cannot downgrade to an unbound old-v4 snapshot shape");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn domain_record_delete_rejects_live_references_and_rolls_back() {
+        let (scenario, _) = demo_scenario();
+        let mut simulation = Simulation::new(90, scenario).expect("record fixture should load");
+        simulation
+            .register_plugin(&RecordDeleteOnlyPlugin)
+            .expect("invalid-delete fixture should register");
+        let request = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
+        simulation
+            .settle_boundary(request.clone())
+            .expect("record creation should settle");
+        simulation
+            .settle_boundary(request.clone())
+            .expect("record retirement should settle");
+        let before = simulation
+            .snapshot_json()
+            .expect("pre-failure state should serialize");
+        let error = simulation
+            .settle_boundary(request)
+            .expect_err("a referenced record cannot be deleted");
+        assert_eq!(error.code, ErrorCode::DomainRecordReferenced);
+        assert_eq!(
+            before,
+            simulation
+                .snapshot_json()
+                .expect("failed deletion must restore every persisted field")
+        );
     }
 
     #[test]

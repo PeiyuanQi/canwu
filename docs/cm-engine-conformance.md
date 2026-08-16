@@ -240,20 +240,30 @@ causally linked core random draw, and authoritative scheduling rejects time
 overflow rather than saturating. Current-format checkpoints also require an
 exact engine-version match unless an explicit migration rewrites their
 commitments.
+CM-E01 now has a public generic storage contract: plugins register namespaced
+entity or record kinds with payload and typed-reference schemas; boundary
+systems atomically create, expected-version update, retire, successor-link, and
+delete versioned records; deleted identities remain tombstones; live references
+and external dependencies block unsafe deletion; and current/proposed records
+are available through declared immutable reads. Boundary evidence records every
+lifecycle transition and its causal event. A CM-shaped office/obligation fixture
+proves atomic reference transfer, rejected referenced deletion with full
+rollback, canonical save/load, exact replay, provenance-tamper rejection, and
+manifest-bound protection against shifting created records into genesis state.
 Compatible handler-free format 2 and 3 saves migrate with explicit legacy
 provenance for continuation and explicitly reject unsupported exact replay.
-These are substantial but still partial implementations of CM-E02, CM-E04
-through CM-E09, and CM-E11 through CM-E13.
+These complete the current CM-E01 contract and are substantial but still partial
+implementations of CM-E02, CM-E04 through CM-E09, and CM-E11 through CM-E13.
 
-Canwu is not yet CM-conformant. The major remaining gaps include generic domain
-entity/record lifecycles; authority scopes that prevent human/AI double control,
-institution/advisor permission semantics, experiment lineage, and the remaining
-canonical run-configuration identity fields; unified command,
+Canwu is not yet CM-conformant. The major remaining gaps include authority scopes
+that prevent human/AI double control, institution/advisor permission semantics,
+experiment lineage, and the remaining canonical run-configuration identity
+fields; unified command,
 communication/acknowledgement, and automatic calendar ingress; released,
 carried, and lost reservation outcomes plus atomic conservation bundles;
 field-level provenance and structured report facts; immutable generation-tagged
 actor projections; a general migration registry, replay environment discovery,
 fork lineage, and branch comparison; constrained data/rule packages;
 binding-oriented batch APIs; and a versioned deterministic solver boundary.
-Final conformance still requires the public CM-shaped integration fixture and
-the requirement-by-requirement audit.
+Final conformance still requires the full cross-requirement CM-shaped integration
+fixture and the requirement-by-requirement audit.

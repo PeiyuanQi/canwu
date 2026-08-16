@@ -1,5 +1,6 @@
 use crate::{
-    CanwuError, RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
+    CanwuError, DomainRecordChange, DomainRecordMutation, RandomStreamKey, SimulationView,
+    StateKey, StateVisibility, SystemCadence,
 };
 use canwu_core::{BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, RandomDrawId};
 use canwu_time::SimTime;
@@ -100,6 +101,10 @@ pub enum BoundaryDirective {
         entity: EntityRef,
         component: String,
         value: Value,
+        summary: String,
+    },
+    MutateRecord {
+        mutation: DomainRecordMutation,
         summary: String,
     },
     Emit {
@@ -210,6 +215,7 @@ pub struct BoundaryChange {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BoundaryEmissionKind {
     Change { change_index: u64 },
+    RecordChange { change_index: u64 },
     Explicit,
 }
 
@@ -237,6 +243,8 @@ pub struct BoundaryRecord {
     #[serde(default)]
     pub random_draws: Vec<RandomDrawId>,
     pub changes: Vec<BoundaryChange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub record_changes: Vec<DomainRecordChange>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     pub state_hash: Option<String>,
@@ -254,5 +262,6 @@ pub struct BoundaryReceipt {
     pub random_draws: Vec<RandomDrawId>,
     pub boundary_hash: String,
     pub change_count: usize,
+    pub record_change_count: usize,
     pub allocations: Vec<ReservationAllocation>,
 }

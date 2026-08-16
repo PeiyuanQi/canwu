@@ -78,6 +78,25 @@ legacy provenance. They may continue, but exact replay returns
 descriptors are rejected because their handler semantic identities cannot be
 recovered safely.
 
+Format 4 also permits additive application-defined domain record schemas,
+ordered record stores, and boundary `record_changes`. These fields are omitted
+when empty, preserving the serialized and hashed shape of earlier format-4
+state. A record change carries its plugin/system owner, operation, previous and
+current versioned values, visibility, and summary; its boundary emission points
+back to the exact change index. Loading validates schemas and live references,
+reverse-reconstructs the initial record store, reapplies lifecycle bundles in
+canonical commit-stage order, and compares the result with the persisted store.
+Format 2 and 3 inputs reject these fields rather than interpreting new lifecycle
+semantics under a legacy identity. Format-4 snapshots with declared domain
+record schemas also retain the canonical initial scenario and verify it against
+the scenario artifact in the run manifest. Record history reconstructed in
+reverse must equal that bound genesis, so a rehashed snapshot cannot relabel
+created records as initial state. Record-free format-4 snapshots omit this
+additive field and retain their prior serialized and hashed shape. A pristine,
+registration-open declared snapshot can reconstruct and manifest-validate that
+genesis before activating record schemas; execution-closed or migrated-legacy
+snapshots cannot gain that capability without an explicit migration.
+
 Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
 emission provenance, command and event admission, reservation offers, requests,
 allocations, committed component changes, boundary causes, and the next boundary

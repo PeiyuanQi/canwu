@@ -275,6 +275,9 @@ fn scenario_semantic_hash(scenario: &Scenario) -> Result<String, CanwuError> {
     canonical.world.territories.sort_by_key(|value| value.id);
     canonical.world.routes.sort_by_key(|value| value.id);
     canonical.world.armies.sort_by_key(|value| value.id);
+    canonical
+        .domain_records
+        .sort_by(|left, right| left.reference.cmp(&right.reference));
     canonical_hash("canwu.scenario.v1", &canonical)
 }
 

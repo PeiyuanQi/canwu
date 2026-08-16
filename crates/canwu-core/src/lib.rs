@@ -56,11 +56,75 @@ define_id!(ResourceId);
 define_id!(RouteId);
 define_id!(TerritoryId);
 
+/// Stable application-defined record kind. Namespaces and names are validated
+/// by the simulation package registry before authoritative use.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DomainRecordKind {
+    pub namespace: String,
+    pub name: String,
+}
+
+impl DomainRecordKind {
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+        }
+    }
+}
+
+impl Display for DomainRecordKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}", self.namespace, self.name)
+    }
+}
+
+/// Stable string identity for an application-defined entity or record.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DomainRecordRef {
+    pub kind: DomainRecordKind,
+    pub id: String,
+}
+
+impl DomainRecordRef {
+    #[must_use]
+    pub fn new(
+        namespace: impl Into<String>,
+        kind: impl Into<String>,
+        id: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: DomainRecordKind::new(namespace, kind),
+            id: id.into(),
+        }
+    }
+}
+
+impl Display for DomainRecordRef {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{}", self.kind, self.id)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoreEntityKind {
+    Army,
+    Government,
+    Organization,
+    Person,
+    Resource,
+    Route,
+    Territory,
+}
+
 /// Serializable entity reference used by events, queries, and generic tools.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum EntityRef {
     Army(ArmyId),
+    Domain(DomainRecordRef),
     Government(GovernmentId),
     Organization(OrganizationId),
     Person(PersonId),
@@ -73,12 +137,29 @@ impl Display for EntityRef {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Army(id) => write!(formatter, "army:{id}"),
+            Self::Domain(reference) => write!(formatter, "domain:{reference}"),
             Self::Government(id) => write!(formatter, "government:{id}"),
             Self::Organization(id) => write!(formatter, "organization:{id}"),
             Self::Person(id) => write!(formatter, "person:{id}"),
             Self::Resource(id) => write!(formatter, "resource:{id}"),
             Self::Route(id) => write!(formatter, "route:{id}"),
             Self::Territory(id) => write!(formatter, "territory:{id}"),
+        }
+    }
+}
+
+impl EntityRef {
+    #[must_use]
+    pub const fn core_kind(&self) -> Option<CoreEntityKind> {
+        match self {
+            Self::Army(_) => Some(CoreEntityKind::Army),
+            Self::Domain(_) => None,
+            Self::Government(_) => Some(CoreEntityKind::Government),
+            Self::Organization(_) => Some(CoreEntityKind::Organization),
+            Self::Person(_) => Some(CoreEntityKind::Person),
+            Self::Resource(_) => Some(CoreEntityKind::Resource),
+            Self::Route(_) => Some(CoreEntityKind::Route),
+            Self::Territory(_) => Some(CoreEntityKind::Territory),
         }
     }
 }
