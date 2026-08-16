@@ -797,7 +797,7 @@ pub struct SimulationView<'a> {
 impl SimulationView<'_> {
     #[must_use]
     pub const fn time(&self) -> SimTime {
-        self.state.now
+        self.state.scheduler.now
     }
 
     pub fn army(&self, id: ArmyId) -> Result<Option<&Army>, CanwuError> {
@@ -2721,28 +2721,15 @@ struct RuntimeEvidence {
 }
 
 #[derive(Clone)]
-struct RuntimeState {
+struct RuntimeScheduler {
     initial_time: SimTime,
-    initial_scenario: Option<Scenario>,
     now: SimTime,
-    run_manifest: RunManifest,
-    run_manifest_hash: String,
-    run_configuration: RunConfigurationSnapshot,
-    checkpoint_hash: String,
-    plugin_registration_closed: bool,
-    people: BTreeMap<PersonId, Person>,
-    governments: BTreeMap<GovernmentId, Government>,
-    territories: BTreeMap<TerritoryId, Territory>,
-    routes: BTreeMap<RouteId, Route>,
-    armies: BTreeMap<ArmyId, Army>,
-    knowledge: KnowledgeSnapshot,
-    scheduler: BTreeMap<ScheduleKey, ScheduledAction>,
-    evidence: RuntimeEvidence,
+    actions: BTreeMap<ScheduleKey, ScheduledAction>,
     pending_ingress: BTreeSet<IngressQueueKey>,
-    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
-    root_seed: u64,
-    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
+}
+
+#[derive(Clone)]
+struct RuntimeCounters {
     next_event_id: u64,
     next_command_id: u64,
     next_command_attempt_id: u64,
@@ -2752,10 +2739,38 @@ struct RuntimeState {
     next_schedule_sequence: u64,
     next_correlation_id: u64,
     state_revision: u64,
-    replay_revision_format_version: u32,
     admitted_attempt_count: u64,
     admitted_command_count: u64,
     admitted_event_count: u64,
+}
+
+#[derive(Clone)]
+struct RuntimeMetadata {
+    initial_scenario: Option<Scenario>,
+    run_manifest: RunManifest,
+    run_manifest_hash: String,
+    run_configuration: RunConfigurationSnapshot,
+    checkpoint_hash: String,
+    plugin_registration_closed: bool,
+    replay_revision_format_version: u32,
+}
+
+#[derive(Clone)]
+struct RuntimeState {
+    scheduler: RuntimeScheduler,
+    counters: RuntimeCounters,
+    metadata: RuntimeMetadata,
+    people: BTreeMap<PersonId, Person>,
+    governments: BTreeMap<GovernmentId, Government>,
+    territories: BTreeMap<TerritoryId, Territory>,
+    routes: BTreeMap<RouteId, Route>,
+    armies: BTreeMap<ArmyId, Army>,
+    knowledge: KnowledgeSnapshot,
+    evidence: RuntimeEvidence,
+    plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    root_seed: u64,
+    random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -3058,14 +3073,35 @@ impl Simulation {
         let initial_scenario = Some(scenario.clone());
         let mut simulation = Self {
             state: RuntimeState {
-                initial_time: scenario.start_time,
-                initial_scenario,
-                now: scenario.start_time,
-                run_manifest,
-                run_manifest_hash,
-                run_configuration,
-                checkpoint_hash: String::new(),
-                plugin_registration_closed: false,
+                scheduler: RuntimeScheduler {
+                    initial_time: scenario.start_time,
+                    now: scenario.start_time,
+                    actions: BTreeMap::new(),
+                    pending_ingress: BTreeSet::new(),
+                },
+                counters: RuntimeCounters {
+                    next_event_id: 1,
+                    next_command_id: 1,
+                    next_command_attempt_id: 1,
+                    next_ingress_id: 1,
+                    next_boundary_id: 1,
+                    next_random_draw_id: 1,
+                    next_schedule_sequence: 1,
+                    next_correlation_id: 1,
+                    state_revision: 0,
+                    admitted_attempt_count: 0,
+                    admitted_command_count: 0,
+                    admitted_event_count: 0,
+                },
+                metadata: RuntimeMetadata {
+                    initial_scenario,
+                    run_manifest,
+                    run_manifest_hash,
+                    run_configuration,
+                    checkpoint_hash: String::new(),
+                    plugin_registration_closed: false,
+                    replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
+                },
                 people: scenario
                     .world
                     .people
@@ -3097,7 +3133,6 @@ impl Simulation {
                     .map(|value| (value.id, value))
                     .collect(),
                 knowledge: scenario.knowledge,
-                scheduler: BTreeMap::new(),
                 evidence: RuntimeEvidence {
                     events: Vec::new(),
                     commands: Vec::new(),
@@ -3106,7 +3141,6 @@ impl Simulation {
                     boundaries: Vec::new(),
                     random_draws: Vec::new(),
                 },
-                pending_ingress: BTreeSet::new(),
                 plugin_components: BTreeMap::new(),
                 domain_records: scenario
                     .domain_records
@@ -3115,19 +3149,6 @@ impl Simulation {
                     .collect(),
                 root_seed: seed,
                 random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
-                next_event_id: 1,
-                next_command_id: 1,
-                next_command_attempt_id: 1,
-                next_ingress_id: 1,
-                next_boundary_id: 1,
-                next_random_draw_id: 1,
-                next_schedule_sequence: 1,
-                next_correlation_id: 1,
-                state_revision: 0,
-                replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
-                admitted_attempt_count: 0,
-                admitted_command_count: 0,
-                admitted_event_count: 0,
             },
             schema,
             plugins,
@@ -3322,10 +3343,14 @@ impl Simulation {
             &normalized.boundaries,
             normalized.final_time,
         )?;
-        if normalized.plugin_registration_closed && !simulation.state.plugin_registration_closed {
+        if normalized.plugin_registration_closed
+            && !simulation.state.metadata.plugin_registration_closed
+        {
             simulation.advance(SimDuration::ZERO)?;
         }
-        if simulation.state.plugin_registration_closed != normalized.plugin_registration_closed {
+        if simulation.state.metadata.plugin_registration_closed
+            != normalized.plugin_registration_closed
+        {
             return Err(CanwuError::new(
                 ErrorCode::ReplayMismatch,
                 "replayed plugin-registration lifecycle does not match the recorded journal",
@@ -3555,7 +3580,7 @@ impl Simulation {
         }
         let rehydrating = self.plugins.descriptors.contains_key(plugin_name)
             && !self.plugins.active_plugins.contains(plugin_name);
-        if self.state.plugin_registration_closed && !rehydrating {
+        if self.state.metadata.plugin_registration_closed && !rehydrating {
             return Err(CanwuError::new(
                 ErrorCode::PluginRegistrationClosed,
                 "new plugins must be registered before authoritative execution begins",
@@ -3566,7 +3591,9 @@ impl Simulation {
         let plugins_start = self.plugins.clone();
         let result = (|| {
             self.plugins.register(plugin, &mut self.schema)?;
-            if !self.plugins.record_schemas.is_empty() && self.state.initial_scenario.is_none() {
+            if !self.plugins.record_schemas.is_empty()
+                && self.state.metadata.initial_scenario.is_none()
+            {
                 return Err(CanwuError::new(
                     ErrorCode::UnsupportedSnapshotVersion,
                     "this snapshot predates manifest-bound domain-record genesis and cannot activate record schemas",
@@ -3576,7 +3603,7 @@ impl Simulation {
                 &self.state.domain_records,
                 &self.plugins.record_schemas,
                 plugin_name,
-                self.state.now,
+                self.state.scheduler.now,
                 &|entity| runtime_entity_exists(&self.state, entity),
             )?;
             for stream in self.plugins.random_stream_owners.keys() {
@@ -3603,7 +3630,7 @@ impl Simulation {
         records::validate_record_store(
             &self.state.domain_records,
             &self.plugins.record_schemas,
-            self.state.now,
+            self.state.scheduler.now,
             &|entity| runtime_entity_exists(&self.state, entity),
         )
     }
@@ -3621,7 +3648,7 @@ impl Simulation {
 
     fn bound_initial_scenario(&self) -> Option<&Scenario> {
         if self.domain_record_feature_enabled() {
-            self.state.initial_scenario.as_ref()
+            self.state.metadata.initial_scenario.as_ref()
         } else {
             None
         }
@@ -3629,17 +3656,17 @@ impl Simulation {
 
     #[must_use]
     pub const fn time(&self) -> SimTime {
-        self.state.now
+        self.state.scheduler.now
     }
 
     #[must_use]
     pub const fn run_manifest(&self) -> &RunManifest {
-        &self.state.run_manifest
+        &self.state.metadata.run_manifest
     }
 
     #[must_use]
     pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
-        &self.state.run_configuration
+        &self.state.metadata.run_configuration
     }
 
     #[must_use]
@@ -3651,17 +3678,17 @@ impl Simulation {
     /// setup do not advance it; use the expected-time guard with external
     /// commands to detect clock and scheduled-work advancement.
     pub const fn revision(&self) -> u64 {
-        self.state.state_revision
+        self.state.counters.state_revision
     }
 
     #[must_use]
     pub fn run_manifest_hash(&self) -> &str {
-        &self.state.run_manifest_hash
+        &self.state.metadata.run_manifest_hash
     }
 
     #[must_use]
     pub fn checkpoint_hash(&self) -> &str {
-        &self.state.checkpoint_hash
+        &self.state.metadata.checkpoint_hash
     }
 
     /// Hash of simulated state and causal evidence. Run-purpose, controller,
@@ -3750,19 +3777,19 @@ impl Simulation {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             root_seed: self.state.root_seed,
-            run_manifest: self.state.run_manifest.clone(),
-            run_manifest_hash: self.state.run_manifest_hash.clone(),
-            run_configuration: self.state.run_configuration.clone(),
+            run_manifest: self.state.metadata.run_manifest.clone(),
+            run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
+            run_configuration: self.state.metadata.run_configuration.clone(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
-            plugin_registration_closed: self.state.plugin_registration_closed,
+            plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             commands: self.state.evidence.commands.clone(),
             command_attempts: self.state.evidence.command_attempts.clone(),
             ingress: self.state.evidence.ingress.clone(),
             boundaries: self.state.evidence.boundaries.clone(),
-            final_time: self.state.now,
-            checkpoint_hash: self.state.checkpoint_hash.clone(),
-            revision_format_version: self.state.replay_revision_format_version,
-            final_revision: self.state.state_revision,
+            final_time: self.state.scheduler.now,
+            checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
+            revision_format_version: self.state.metadata.replay_revision_format_version,
+            final_revision: self.state.counters.state_revision,
         }
     }
 
@@ -3852,6 +3879,7 @@ impl Simulation {
         self.ensure_canonical_ingress_can_start()?;
         if self
             .state
+            .metadata
             .run_configuration
             .declared()
             .is_some_and(|configuration| configuration.interaction == InteractionPolicy::ReadOnly)
@@ -3951,17 +3979,17 @@ impl Simulation {
         cause: Option<CauseRef>,
         after_current_boundary: bool,
     ) -> Result<IngressReceipt, CanwuError> {
-        if due_at < self.state.now {
+        if due_at < self.state.scheduler.now {
             return Err(CanwuError::new(
                 ErrorCode::LateIngress,
                 format!(
                     "ingress due at {due_at} cannot be queued after committed time {}",
-                    self.state.now
+                    self.state.scheduler.now
                 ),
             ));
         }
         let transaction_start = self.state.clone();
-        let (id, next_id) = claim_counter(self.state.next_ingress_id, "ingress ID")?;
+        let (id, next_id) = claim_counter(self.state.counters.next_ingress_id, "ingress ID")?;
         let boundary_count = u64::try_from(self.state.evidence.boundaries.len()).map_err(|_| {
             CanwuError::new(
                 ErrorCode::IdentifierExhausted,
@@ -3980,7 +4008,7 @@ impl Simulation {
         };
         let record = IngressRecord {
             id: IngressId::new(id),
-            issued_at: self.state.now,
+            issued_at: self.state.scheduler.now,
             eligible_boundary_count,
             due_at,
             class,
@@ -3988,12 +4016,13 @@ impl Simulation {
             payload,
             cause,
         };
-        self.state.next_ingress_id = next_id;
+        self.state.counters.next_ingress_id = next_id;
         self.state
+            .scheduler
             .pending_ingress
             .insert(IngressQueueKey::from_record(&record));
         self.state.evidence.ingress.push(record.clone());
-        self.state.plugin_registration_closed = true;
+        self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
             self.state = transaction_start;
             return Err(error);
@@ -4050,8 +4079,10 @@ impl Simulation {
             ingress,
         };
         let attempt_id = if record_attempt {
-            let (value, _) =
-                claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
+            let (value, _) = claim_counter(
+                self.state.counters.next_command_attempt_id,
+                "command attempt ID",
+            )?;
             CommandAttemptId::new(value)
         } else {
             CommandAttemptId::default()
@@ -4070,13 +4101,13 @@ impl Simulation {
             return Err(error);
         }
         if let Some(expected_time) = envelope.expected_time
-            && expected_time != self.state.now
+            && expected_time != self.state.scheduler.now
         {
             let error = CanwuError::new(
                 ErrorCode::SimulationTimeConflict,
                 format!(
                     "command expected time {expected_time}, but simulation is at {}",
-                    self.state.now
+                    self.state.scheduler.now
                 ),
             );
             if record_attempt {
@@ -4086,20 +4117,20 @@ impl Simulation {
         }
 
         let (command_id_value, next_command_id) =
-            claim_counter(self.state.next_command_id, "command ID")?;
+            claim_counter(self.state.counters.next_command_id, "command ID")?;
         let (correlation_id, next_correlation_id) =
-            claim_counter(self.state.next_correlation_id, "correlation ID")?;
+            claim_counter(self.state.counters.next_correlation_id, "correlation ID")?;
         let command_id = CommandId::new(command_id_value);
         let context = CommandContext {
             issuer: envelope.issuer.clone(),
             authority,
-            run_policy: self.state.run_configuration.command_policy(),
+            run_policy: self.state.metadata.run_configuration.command_policy(),
             ingress: admission.ingress,
             attempt_id: record_attempt.then_some(attempt_id),
             command_id,
             request_id: admission.request_id,
             revision: admission.revision_before,
-            simulation_time: self.state.now,
+            simulation_time: self.state.scheduler.now,
             expected_revision: admission.expected_revision,
             expected_time: envelope.expected_time,
         };
@@ -4112,8 +4143,8 @@ impl Simulation {
         };
         let transaction_start = self.state.clone();
         let event_start = self.state.evidence.events.len();
-        self.state.next_command_id = next_command_id;
-        self.state.next_correlation_id = next_correlation_id;
+        self.state.counters.next_command_id = next_command_id;
+        self.state.counters.next_correlation_id = next_correlation_id;
 
         if let Err(error) = self.apply_prepared(prepared, command_id, correlation_id) {
             self.state = transaction_start;
@@ -4126,11 +4157,11 @@ impl Simulation {
             .iter()
             .map(|event| event.id)
             .collect();
-        self.state.plugin_registration_closed = true;
+        self.state.metadata.plugin_registration_closed = true;
         self.state.evidence.commands.push(CommandRecord {
             id: command_id,
             attempt_id: record_attempt.then_some(attempt_id),
-            accepted_at: self.state.now,
+            accepted_at: self.state.scheduler.now,
             envelope: envelope.clone(),
             emitted_events: if record_attempt {
                 emitted_events.clone()
@@ -4139,15 +4170,17 @@ impl Simulation {
             },
         });
         if record_attempt {
-            let (_, next_attempt_id) =
-                claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
-            self.state.next_command_attempt_id = next_attempt_id;
+            let (_, next_attempt_id) = claim_counter(
+                self.state.counters.next_command_attempt_id,
+                "command attempt ID",
+            )?;
+            self.state.counters.next_command_attempt_id = next_attempt_id;
             self.state
                 .evidence
                 .command_attempts
                 .push(CommandAttemptRecord {
                     id: attempt_id,
-                    at: self.state.now,
+                    at: self.state.scheduler.now,
                     revision_before: admission.revision_before,
                     ingress: admission.ingress,
                     request_id: admission.request_id,
@@ -4174,7 +4207,7 @@ impl Simulation {
                 command_id,
                 request_id: admission.request_id,
                 revision,
-                accepted_at: self.state.now,
+                accepted_at: self.state.scheduler.now,
                 emitted_events,
             },
         })
@@ -4234,7 +4267,7 @@ impl Simulation {
                     attempt_id: None,
                     request_id: Some(request_id),
                     retained_revision: self.revision(),
-                    rejected_at: self.state.now,
+                    rejected_at: self.state.scheduler.now,
                     error: CanwuError::new(
                         ErrorCode::IdempotencyConflict,
                         "this command request ID was already used for different input",
@@ -4292,22 +4325,24 @@ impl Simulation {
         error: CanwuError,
     ) -> Result<CommandOutcome, CanwuError> {
         let transaction_start = self.state.clone();
-        let (claimed_id, next_attempt_id) =
-            claim_counter(self.state.next_command_attempt_id, "command attempt ID")?;
+        let (claimed_id, next_attempt_id) = claim_counter(
+            self.state.counters.next_command_attempt_id,
+            "command attempt ID",
+        )?;
         if claimed_id != attempt_id.get() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "command attempt allocation changed during rejection",
             ));
         }
-        self.state.next_command_attempt_id = next_attempt_id;
-        self.state.plugin_registration_closed = true;
+        self.state.counters.next_command_attempt_id = next_attempt_id;
+        self.state.metadata.plugin_registration_closed = true;
         self.state
             .evidence
             .command_attempts
             .push(CommandAttemptRecord {
                 id: attempt_id,
-                at: self.state.now,
+                at: self.state.scheduler.now,
                 revision_before: admission.revision_before,
                 ingress: admission.ingress,
                 request_id: admission.request_id,
@@ -4333,7 +4368,7 @@ impl Simulation {
                 attempt_id: Some(attempt_id),
                 request_id: admission.request_id,
                 retained_revision: revision,
-                rejected_at: self.state.now,
+                rejected_at: self.state.scheduler.now,
                 error,
             },
         })
@@ -4346,7 +4381,7 @@ impl Simulation {
         admission: CommandAdmission,
     ) -> Result<(), CanwuError> {
         validate_command_ingress_policy(
-            &self.state.run_configuration,
+            &self.state.metadata.run_configuration,
             issuer,
             authority,
             admission,
@@ -4365,20 +4400,25 @@ impl Simulation {
                 "canonical simulation time cannot advance by a negative duration",
             ));
         }
-        let target = self.state.now.checked_add(duration).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDuration,
-                "canonical simulation target time exceeds the supported range",
-            )
-        })?;
+        let target = self
+            .state
+            .scheduler
+            .now
+            .checked_add(duration)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDuration,
+                    "canonical simulation target time exceeds the supported range",
+                )
+            })?;
         let mut receipts = Vec::new();
         while let Some(next_due) = self.next_canonical_due_time()
             && next_due <= target
         {
-            let at = next_due.max(self.state.now);
+            let at = next_due.max(self.state.scheduler.now);
             receipts.push(self.settle_boundary(BoundaryRequest::at(at))?);
         }
-        if self.state.now < target {
+        if self.state.scheduler.now < target {
             self.advance_to(target)?;
         }
         Ok(receipts)
@@ -4389,13 +4429,18 @@ impl Simulation {
         let Some(next_due) = self.next_canonical_due_time() else {
             return Ok(None);
         };
-        self.settle_boundary(BoundaryRequest::at(next_due.max(self.state.now)))
+        self.settle_boundary(BoundaryRequest::at(next_due.max(self.state.scheduler.now)))
             .map(Some)
     }
 
     fn next_canonical_due_time(&self) -> Option<SimTime> {
-        let scheduled = self.state.scheduler.keys().next().map(|key| key.at);
-        let ingress = self.state.pending_ingress.first().map(|key| key.due_at);
+        let scheduled = self.state.scheduler.actions.keys().next().map(|key| key.at);
+        let ingress = self
+            .state
+            .scheduler
+            .pending_ingress
+            .first()
+            .map(|key| key.due_at);
         match (scheduled, ingress) {
             (Some(left), Some(right)) => Some(left.min(right)),
             (Some(value), None) | (None, Some(value)) => Some(value),
@@ -4407,12 +4452,14 @@ impl Simulation {
         let mut admitted = Vec::new();
         while self
             .state
+            .scheduler
             .pending_ingress
             .first()
             .is_some_and(|key| key.due_at <= at)
         {
             let key = self
                 .state
+                .scheduler
                 .pending_ingress
                 .pop_first()
                 .expect("pending ingress was checked as non-empty");
@@ -4429,25 +4476,30 @@ impl Simulation {
                 "simulation time cannot advance by a negative duration",
             ));
         }
-        let target = self.state.now.checked_add(duration).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDuration,
-                "simulation target time exceeds the supported range",
-            )
-        })?;
+        let target = self
+            .state
+            .scheduler
+            .now
+            .checked_add(duration)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDuration,
+                    "simulation target time exceeds the supported range",
+                )
+            })?;
         self.ensure_legacy_advance_does_not_cross_ingress(target)?;
         self.advance_to(target)
     }
 
     pub fn step(&mut self) -> Result<Vec<SimEvent>, CanwuError> {
         self.ensure_runtime_ready()?;
-        if self.state.pending_ingress.first().is_some() {
+        if self.state.scheduler.pending_ingress.first().is_some() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
                 "pending canonical ingress requires step_canonical",
             ));
         }
-        let Some(next_time) = self.state.scheduler.keys().next().map(|key| key.at) else {
+        let Some(next_time) = self.state.scheduler.actions.keys().next().map(|key| key.at) else {
             return Ok(Vec::new());
         };
         self.advance_to(next_time)
@@ -4468,18 +4520,24 @@ impl Simulation {
                 "advance_until maximum cannot be negative",
             ));
         }
-        let target = self.state.now.checked_add(maximum).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDuration,
-                "advance_until target time exceeds the supported range",
-            )
-        })?;
+        let target = self
+            .state
+            .scheduler
+            .now
+            .checked_add(maximum)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDuration,
+                    "advance_until target time exceeds the supported range",
+                )
+            })?;
         self.ensure_legacy_advance_does_not_cross_ingress(target)?;
         let start = self.state.evidence.events.len();
-        while self.state.now < target && !condition(self) {
+        while self.state.scheduler.now < target && !condition(self) {
             let next_time = self
                 .state
                 .scheduler
+                .actions
                 .keys()
                 .next()
                 .map_or(target, |key| key.at.min(target));
@@ -4497,6 +4555,7 @@ impl Simulation {
     ) -> Result<(), CanwuError> {
         if self
             .state
+            .scheduler
             .pending_ingress
             .first()
             .is_some_and(|key| key.due_at <= target)
@@ -4514,7 +4573,7 @@ impl Simulation {
         mut request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.ensure_runtime_ready()?;
-        if request.at < self.state.now {
+        if request.at < self.state.scheduler.now {
             return Err(CanwuError::new(
                 ErrorCode::InvalidBoundary,
                 "a settlement boundary cannot precede committed simulation time",
@@ -4522,6 +4581,7 @@ impl Simulation {
         }
         if self
             .state
+            .scheduler
             .pending_ingress
             .first()
             .is_some_and(|key| key.due_at < request.at)
@@ -4610,16 +4670,16 @@ impl Simulation {
             })?;
         let admitted_event_count = u64::try_from(self.state.evidence.events.len())
             .map_err(|_| invalid_snapshot_error("event journal exceeds admission cursor range"))?;
-        let admitted_attempt_start =
-            usize::try_from(self.state.admitted_attempt_count).map_err(|_| {
+        let admitted_attempt_start = usize::try_from(self.state.counters.admitted_attempt_count)
+            .map_err(|_| {
                 invalid_snapshot_error("runtime attempt admission cursor exceeds platform range")
             })?;
-        let admitted_command_start =
-            usize::try_from(self.state.admitted_command_count).map_err(|_| {
+        let admitted_command_start = usize::try_from(self.state.counters.admitted_command_count)
+            .map_err(|_| {
                 invalid_snapshot_error("runtime command admission cursor exceeds platform range")
             })?;
-        let admitted_event_start =
-            usize::try_from(self.state.admitted_event_count).map_err(|_| {
+        let admitted_event_start = usize::try_from(self.state.counters.admitted_event_count)
+            .map_err(|_| {
                 invalid_snapshot_error("runtime event admission cursor exceeds platform range")
             })?;
         let admitted_attempts: Vec<_> = self
@@ -4657,11 +4717,13 @@ impl Simulation {
             .collect();
 
         let (boundary_id_value, next_boundary_id) =
-            claim_counter(self.state.next_boundary_id, "boundary ID")?;
-        let (correlation_id, next_correlation_id) =
-            claim_counter(self.state.next_correlation_id, "boundary correlation ID")?;
-        self.state.next_boundary_id = next_boundary_id;
-        self.state.next_correlation_id = next_correlation_id;
+            claim_counter(self.state.counters.next_boundary_id, "boundary ID")?;
+        let (correlation_id, next_correlation_id) = claim_counter(
+            self.state.counters.next_correlation_id,
+            "boundary correlation ID",
+        )?;
+        self.state.counters.next_boundary_id = next_boundary_id;
+        self.state.counters.next_correlation_id = next_correlation_id;
         let boundary_id = BoundaryId::new(boundary_id_value);
 
         let boundary_snapshot = self.state.clone();
@@ -4916,7 +4978,7 @@ impl Simulation {
         self.state.random_streams = random_overlay;
         let random_draws =
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
-        self.state.plugin_registration_closed = true;
+        self.state.metadata.plugin_registration_closed = true;
         let state_hash = self.compute_boundary_state_hash()?;
         let previous_hash = self.state.evidence.boundaries.last().map_or_else(
             || GENESIS_BOUNDARY_HASH.to_owned(),
@@ -4946,9 +5008,9 @@ impl Simulation {
         record.hash = compute_boundary_hash(&record)?;
         let boundary_hash = record.hash.clone();
         self.state.evidence.boundaries.push(record);
-        self.state.admitted_attempt_count = admitted_attempt_count;
-        self.state.admitted_command_count = admitted_command_count;
-        self.state.admitted_event_count = admitted_event_count;
+        self.state.counters.admitted_attempt_count = admitted_attempt_count;
+        self.state.counters.admitted_command_count = admitted_command_count;
+        self.state.counters.admitted_event_count = admitted_event_count;
         self.advance_state_revision()?;
         self.refresh_checkpoint_hash()?;
         Ok(BoundaryReceipt {
@@ -4978,6 +5040,7 @@ impl Simulation {
         let scheduled: Vec<_> = self
             .state
             .scheduler
+            .actions
             .iter()
             .map(|(key, action)| ScheduledRecord {
                 key: key.clone(),
@@ -4986,9 +5049,9 @@ impl Simulation {
             .collect();
         let random_streams: Vec<_> = self.state.random_streams.values().cloned().collect();
         let (authoritative_manifest, authoritative_manifest_hash) = authoritative_run_identity(
-            &self.state.run_manifest,
-            &self.state.run_manifest_hash,
-            &self.state.run_configuration,
+            &self.state.metadata.run_manifest,
+            &self.state.metadata.run_manifest_hash,
+            &self.state.metadata.run_configuration,
         )?;
         let initial_scenario = self.bound_initial_scenario();
         state_hash(&StateHashMaterial {
@@ -4996,10 +5059,10 @@ impl Simulation {
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             run_manifest: &authoritative_manifest,
             run_manifest_hash: &authoritative_manifest_hash,
-            initial_time: self.state.initial_time,
+            initial_time: self.state.scheduler.initial_time,
             initial_scenario,
-            now: self.state.now,
-            plugin_registration_closed: self.state.plugin_registration_closed,
+            now: self.state.scheduler.now,
+            plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             world: &world,
             knowledge: &self.state.knowledge,
             events: &self.state.evidence.events,
@@ -5014,39 +5077,39 @@ impl Simulation {
             root_seed: self.state.root_seed,
             random_streams: &random_streams,
             random_draws: &self.state.evidence.random_draws,
-            next_event_id: self.state.next_event_id,
-            next_command_id: self.state.next_command_id,
-            next_command_attempt_id: self.state.next_command_attempt_id,
-            next_ingress_id: self.state.next_ingress_id,
-            next_boundary_id: self.state.next_boundary_id,
-            next_random_draw_id: self.state.next_random_draw_id,
-            next_schedule_sequence: self.state.next_schedule_sequence,
-            next_correlation_id: self.state.next_correlation_id,
+            next_event_id: self.state.counters.next_event_id,
+            next_command_id: self.state.counters.next_command_id,
+            next_command_attempt_id: self.state.counters.next_command_attempt_id,
+            next_ingress_id: self.state.counters.next_ingress_id,
+            next_boundary_id: self.state.counters.next_boundary_id,
+            next_random_draw_id: self.state.counters.next_random_draw_id,
+            next_schedule_sequence: self.state.counters.next_schedule_sequence,
+            next_correlation_id: self.state.counters.next_correlation_id,
         })
     }
 
     fn refresh_checkpoint_hash(&mut self) -> Result<(), CanwuError> {
         let state_hash = self.compute_boundary_state_hash()?;
-        self.state.checkpoint_hash = checkpoint_hash_for_configuration(
+        self.state.metadata.checkpoint_hash = checkpoint_hash_for_configuration(
             &state_hash,
             self.boundary_head_hash(),
-            &self.state.run_manifest_hash,
-            &self.state.run_configuration,
+            &self.state.metadata.run_manifest_hash,
+            &self.state.metadata.run_configuration,
             STATE_REVISION_FORMAT_VERSION,
-            self.state.state_revision,
-            self.state.replay_revision_format_version,
+            self.state.counters.state_revision,
+            self.state.metadata.replay_revision_format_version,
         )?;
         Ok(())
     }
 
     fn advance_state_revision(&mut self) -> Result<u64, CanwuError> {
-        let Some(next) = self.state.state_revision.checked_add(1) else {
+        let Some(next) = self.state.counters.state_revision.checked_add(1) else {
             return Err(CanwuError::new(
                 ErrorCode::IdentifierExhausted,
                 "authoritative state revision space is exhausted",
             ));
         };
-        self.state.state_revision = next;
+        self.state.counters.state_revision = next;
         Ok(next)
     }
 
@@ -5055,21 +5118,21 @@ impl Simulation {
         SimulationSnapshot {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
-            run_manifest: Some(self.state.run_manifest.clone()),
-            run_manifest_hash: self.state.run_manifest_hash.clone(),
-            run_configuration: Some(self.state.run_configuration.clone()),
-            checkpoint_hash: self.state.checkpoint_hash.clone(),
+            run_manifest: Some(self.state.metadata.run_manifest.clone()),
+            run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
+            run_configuration: Some(self.state.metadata.run_configuration.clone()),
+            checkpoint_hash: self.state.metadata.checkpoint_hash.clone(),
             revision_format_version: STATE_REVISION_FORMAT_VERSION,
-            state_revision: self.state.state_revision,
-            replay_revision_format_version: self.state.replay_revision_format_version,
+            state_revision: self.state.counters.state_revision,
+            replay_revision_format_version: self.state.metadata.replay_revision_format_version,
             admission_cursor_format_version: ADMISSION_CURSOR_FORMAT_VERSION,
-            admitted_attempt_count: self.state.admitted_attempt_count,
-            admitted_command_count: self.state.admitted_command_count,
-            admitted_event_count: self.state.admitted_event_count,
-            initial_time: self.state.initial_time,
+            admitted_attempt_count: self.state.counters.admitted_attempt_count,
+            admitted_command_count: self.state.counters.admitted_command_count,
+            admitted_event_count: self.state.counters.admitted_event_count,
+            initial_time: self.state.scheduler.initial_time,
             initial_scenario: self.bound_initial_scenario().cloned(),
-            now: self.state.now,
-            plugin_registration_closed: self.state.plugin_registration_closed,
+            now: self.state.scheduler.now,
+            plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             world: self.world(),
             knowledge: self.state.knowledge.clone(),
             events: self.state.evidence.events.clone(),
@@ -5087,6 +5150,7 @@ impl Simulation {
             scheduled: self
                 .state
                 .scheduler
+                .actions
                 .iter()
                 .map(|(key, action)| ScheduledRecord {
                     key: key.clone(),
@@ -5094,14 +5158,14 @@ impl Simulation {
                 })
                 .collect(),
             legacy_rng: None,
-            next_event_id: self.state.next_event_id,
-            next_command_id: self.state.next_command_id,
-            next_command_attempt_id: self.state.next_command_attempt_id,
-            next_ingress_id: self.state.next_ingress_id,
-            next_boundary_id: self.state.next_boundary_id,
-            next_random_draw_id: self.state.next_random_draw_id,
-            next_schedule_sequence: self.state.next_schedule_sequence,
-            next_correlation_id: self.state.next_correlation_id,
+            next_event_id: self.state.counters.next_event_id,
+            next_command_id: self.state.counters.next_command_id,
+            next_command_attempt_id: self.state.counters.next_command_attempt_id,
+            next_ingress_id: self.state.counters.next_ingress_id,
+            next_boundary_id: self.state.counters.next_boundary_id,
+            next_random_draw_id: self.state.counters.next_random_draw_id,
+            next_schedule_sequence: self.state.counters.next_schedule_sequence,
+            next_correlation_id: self.state.counters.next_correlation_id,
         }
     }
 
@@ -5154,18 +5218,43 @@ impl Simulation {
         };
         let mut simulation = Self {
             state: RuntimeState {
-                initial_time: snapshot.initial_time,
-                initial_scenario,
-                now: snapshot.now,
-                run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
-                    invalid_snapshot_error("snapshot is missing its run manifest")
-                })?,
-                run_manifest_hash: snapshot.run_manifest_hash.clone(),
-                run_configuration: snapshot.run_configuration.clone().ok_or_else(|| {
-                    invalid_snapshot_error("snapshot is missing its run configuration")
-                })?,
-                checkpoint_hash: snapshot.checkpoint_hash.clone(),
-                plugin_registration_closed: snapshot.plugin_registration_closed,
+                scheduler: RuntimeScheduler {
+                    initial_time: snapshot.initial_time,
+                    now: snapshot.now,
+                    actions: snapshot
+                        .scheduled
+                        .into_iter()
+                        .map(|record| (record.key, record.action))
+                        .collect(),
+                    pending_ingress,
+                },
+                counters: RuntimeCounters {
+                    next_event_id: snapshot.next_event_id,
+                    next_command_id: snapshot.next_command_id,
+                    next_command_attempt_id: snapshot.next_command_attempt_id,
+                    next_ingress_id: snapshot.next_ingress_id,
+                    next_boundary_id: snapshot.next_boundary_id,
+                    next_random_draw_id: snapshot.next_random_draw_id,
+                    next_schedule_sequence: snapshot.next_schedule_sequence,
+                    next_correlation_id: snapshot.next_correlation_id,
+                    state_revision: snapshot.state_revision,
+                    admitted_attempt_count: snapshot.admitted_attempt_count,
+                    admitted_command_count: snapshot.admitted_command_count,
+                    admitted_event_count: snapshot.admitted_event_count,
+                },
+                metadata: RuntimeMetadata {
+                    initial_scenario,
+                    run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
+                        invalid_snapshot_error("snapshot is missing its run manifest")
+                    })?,
+                    run_manifest_hash: snapshot.run_manifest_hash.clone(),
+                    run_configuration: snapshot.run_configuration.clone().ok_or_else(|| {
+                        invalid_snapshot_error("snapshot is missing its run configuration")
+                    })?,
+                    checkpoint_hash: snapshot.checkpoint_hash.clone(),
+                    plugin_registration_closed: snapshot.plugin_registration_closed,
+                    replay_revision_format_version: snapshot.replay_revision_format_version,
+                },
                 people: snapshot
                     .world
                     .people
@@ -5197,11 +5286,6 @@ impl Simulation {
                     .map(|value| (value.id, value))
                     .collect(),
                 knowledge: snapshot.knowledge,
-                scheduler: snapshot
-                    .scheduled
-                    .into_iter()
-                    .map(|record| (record.key, record.action))
-                    .collect(),
                 evidence: RuntimeEvidence {
                     events: snapshot.events,
                     commands: snapshot.commands,
@@ -5210,7 +5294,6 @@ impl Simulation {
                     boundaries: snapshot.boundaries,
                     random_draws: snapshot.random_draws,
                 },
-                pending_ingress,
                 plugin_components: snapshot
                     .plugin_components
                     .into_iter()
@@ -5237,19 +5320,6 @@ impl Simulation {
                     .into_iter()
                     .map(|state| (state.key.clone(), state))
                     .collect(),
-                next_event_id: snapshot.next_event_id,
-                next_command_id: snapshot.next_command_id,
-                next_command_attempt_id: snapshot.next_command_attempt_id,
-                next_ingress_id: snapshot.next_ingress_id,
-                next_boundary_id: snapshot.next_boundary_id,
-                next_random_draw_id: snapshot.next_random_draw_id,
-                next_schedule_sequence: snapshot.next_schedule_sequence,
-                next_correlation_id: snapshot.next_correlation_id,
-                state_revision: snapshot.state_revision,
-                replay_revision_format_version: snapshot.replay_revision_format_version,
-                admitted_attempt_count: snapshot.admitted_attempt_count,
-                admitted_command_count: snapshot.admitted_command_count,
-                admitted_event_count: snapshot.admitted_event_count,
             },
             schema: snapshot.schema,
             plugins,
@@ -5367,6 +5437,7 @@ impl Simulation {
                     })?;
                 let arrival_at = self
                     .state
+                    .scheduler
                     .now
                     .checked_add(SimDuration::minutes(route.travel_minutes))
                     .ok_or_else(|| {
@@ -5480,7 +5551,7 @@ impl Simulation {
                 army_state.transit = Some(TransitState {
                     from,
                     to: destination,
-                    departed_at: self.state.now,
+                    departed_at: self.state.scheduler.now,
                     arrives_at: arrival_at,
                 });
                 let event = self.emit(
@@ -5556,20 +5627,22 @@ impl Simulation {
 
     fn advance_to(&mut self, target: SimTime) -> Result<Vec<SimEvent>, CanwuError> {
         let start = self.state.evidence.events.len();
-        while let Some(boundary_time) = self.state.scheduler.keys().next().map(|key| key.at)
+        while let Some(boundary_time) = self.state.scheduler.actions.keys().next().map(|key| key.at)
             && boundary_time <= target
         {
             let boundary_start = self.state.clone();
-            self.state.now = boundary_time;
+            self.state.scheduler.now = boundary_time;
             while self
                 .state
                 .scheduler
+                .actions
                 .first_key_value()
                 .is_some_and(|(key, _)| key.at == boundary_time)
             {
                 let (_, action) = self
                     .state
                     .scheduler
+                    .actions
                     .pop_first()
                     .expect("scheduler was checked as non-empty");
                 if let Err(error) = self.execute_scheduled(action) {
@@ -5577,15 +5650,15 @@ impl Simulation {
                     return Err(error);
                 }
             }
-            self.state.plugin_registration_closed = true;
+            self.state.metadata.plugin_registration_closed = true;
             if let Err(error) = self.refresh_checkpoint_hash() {
                 self.state = boundary_start;
                 return Err(error);
             }
         }
         let target_start = self.state.clone();
-        self.state.now = target;
-        self.state.plugin_registration_closed = true;
+        self.state.scheduler.now = target;
+        self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
             self.state = target_start;
             return Err(error);
@@ -5594,13 +5667,13 @@ impl Simulation {
     }
 
     fn advance_to_before_boundary(&mut self, target: SimTime) -> Result<(), CanwuError> {
-        while let Some(next) = self.state.scheduler.keys().next().map(|key| key.at)
+        while let Some(next) = self.state.scheduler.actions.keys().next().map(|key| key.at)
             && next < target
         {
             self.advance_to(next)?;
         }
-        self.state.now = target;
-        self.state.plugin_registration_closed = true;
+        self.state.scheduler.now = target;
+        self.state.metadata.plugin_registration_closed = true;
         self.refresh_checkpoint_hash()
     }
 
@@ -5608,12 +5681,14 @@ impl Simulation {
         while self
             .state
             .scheduler
+            .actions
             .first_key_value()
             .is_some_and(|(key, _)| key.at == at)
         {
             let (_, action) = self
                 .state
                 .scheduler
+                .actions
                 .pop_first()
                 .expect("scheduler was checked as non-empty");
             self.execute_scheduled(action)?;
@@ -5713,7 +5788,7 @@ impl Simulation {
             commander,
             army,
             destination,
-            self.state.now,
+            self.state.scheduler.now,
             KnowledgeSource::CommandResponsibility,
             1000,
         );
@@ -5751,6 +5826,7 @@ impl Simulation {
                 i64::try_from(jitter).expect("report jitter is bounded to a small integer");
             let arrives_at = self
                 .state
+                .scheduler
                 .now
                 .checked_add(SimDuration::hours(36))
                 .and_then(|time| time.checked_add(SimDuration::minutes(jitter_minutes)))
@@ -5786,7 +5862,7 @@ impl Simulation {
                     recipient,
                     army,
                     location: destination,
-                    observed_at: self.state.now,
+                    observed_at: self.state.scheduler.now,
                     dispatch_event,
                     correlation_id,
                 },
@@ -5828,7 +5904,7 @@ impl Simulation {
                     maximum: strength.saturating_mul(11) / 10,
                 },
                 observed_at,
-                learned_at: self.state.now,
+                learned_at: self.state.scheduler.now,
                 confidence_per_mille,
                 source,
             },
@@ -5891,12 +5967,13 @@ impl Simulation {
         cause: Option<CauseRef>,
         correlation_id: u64,
     ) -> Result<SimEvent, CanwuError> {
-        let (event_id, next_event_id) = claim_counter(self.state.next_event_id, "event ID")?;
+        let (event_id, next_event_id) =
+            claim_counter(self.state.counters.next_event_id, "event ID")?;
         let id = EventId::new(event_id);
-        self.state.next_event_id = next_event_id;
+        self.state.counters.next_event_id = next_event_id;
         let event = SimEvent {
             id,
-            timestamp: self.state.now,
+            timestamp: self.state.scheduler.now,
             kind,
             affected_entities,
             summary,
@@ -5927,7 +6004,7 @@ impl Simulation {
             ));
         }
         let (draw_id, next_random_draw_id) =
-            claim_counter(self.state.next_random_draw_id, "random draw ID")?;
+            claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
         let state = self.state.random_streams.get_mut(stream).ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidRandomStream,
@@ -5948,11 +6025,11 @@ impl Simulation {
         let value = generator.range(upper_exclusive);
         state.position = next_position;
         state.generator_state = generator.state();
-        self.state.next_random_draw_id = next_random_draw_id;
+        self.state.counters.next_random_draw_id = next_random_draw_id;
         let id = RandomDrawId::new(draw_id);
         self.state.evidence.random_draws.push(RandomDrawRecord {
             id,
-            at: self.state.now,
+            at: self.state.scheduler.now,
             stream: stream.clone(),
             position,
             upper_exclusive,
@@ -6001,12 +6078,12 @@ impl Simulation {
         let mut ids = Vec::with_capacity(draws.len());
         for pending in draws {
             let (draw_id, next_random_draw_id) =
-                claim_counter(self.state.next_random_draw_id, "random draw ID")?;
+                claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
             let id = RandomDrawId::new(draw_id);
-            self.state.next_random_draw_id = next_random_draw_id;
+            self.state.counters.next_random_draw_id = next_random_draw_id;
             self.state.evidence.random_draws.push(RandomDrawRecord {
                 id,
-                at: self.state.now,
+                at: self.state.scheduler.now,
                 stream: pending.draw.stream,
                 position: pending.draw.position,
                 upper_exclusive: pending.draw.upper_exclusive,
@@ -6059,7 +6136,7 @@ impl Simulation {
             let (next_records, applied) = records::apply_mutation_bundle(
                 &self.state.domain_records,
                 &self.plugins.record_schemas,
-                self.state.now,
+                self.state.scheduler.now,
                 &|entity| runtime_entity_exists(&self.state, entity),
                 mutation_requests,
             )?;
@@ -6242,7 +6319,7 @@ impl Simulation {
                     descriptor.payload_schema.validate(&payload)?;
                     affected.sort();
                     affected.dedup();
-                    let due_at = self.state.now.checked_add(after).ok_or_else(|| {
+                    let due_at = self.state.scheduler.now.checked_add(after).ok_or_else(|| {
                         CanwuError::new(
                             ErrorCode::InvalidDuration,
                             "boundary-generated ingress exceeds the supported time range",
@@ -6331,7 +6408,7 @@ impl Simulation {
                     )?;
                 }
                 SystemDirective::Schedule { after, directive } => {
-                    let at = self.state.now.checked_add(after).ok_or_else(|| {
+                    let at = self.state.scheduler.now.checked_add(after).ok_or_else(|| {
                         CanwuError::new(
                             ErrorCode::InvalidDuration,
                             "plugin scheduled time exceeds the supported range",
@@ -6354,17 +6431,19 @@ impl Simulation {
     }
 
     fn schedule_at(&mut self, at: SimTime, action: ScheduledAction) -> Result<(), CanwuError> {
-        if at <= self.state.now {
+        if at <= self.state.scheduler.now {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDuration,
                 "scheduled work must target a strictly future simulation time",
             ));
         }
-        let (sequence, next_sequence) =
-            claim_counter(self.state.next_schedule_sequence, "schedule sequence")?;
+        let (sequence, next_sequence) = claim_counter(
+            self.state.counters.next_schedule_sequence,
+            "schedule sequence",
+        )?;
         let key = ScheduleKey { at, sequence };
-        self.state.next_schedule_sequence = next_sequence;
-        if self.state.scheduler.insert(key, action).is_some() {
+        self.state.counters.next_schedule_sequence = next_sequence;
+        if self.state.scheduler.actions.insert(key, action).is_some() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "the runtime attempted to reuse a schedule key",
@@ -6855,7 +6934,7 @@ fn validate_boundary_proposal(
                             ),
                         )
                     })?;
-                if after.is_negative() || state.now.checked_add(*after).is_none() {
+                if after.is_negative() || state.scheduler.now.checked_add(*after).is_none() {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidDuration,
                         "boundary-generated ingress requires a nonnegative supported delay",
@@ -7021,7 +7100,7 @@ fn extend_boundary_domain_record_overlay(
     let (next, changes) = records::apply_mutation_bundle(
         &base,
         schemas,
-        state.now,
+        state.scheduler.now,
         &|entity| runtime_entity_exists(state, entity),
         requests,
     )?;
@@ -10420,7 +10499,7 @@ fn validate_domain_dependents_with_records(
             "a domain entity with persisted plugin components cannot be deleted",
         ));
     }
-    if state.scheduler.values().any(|action| match action {
+    if state.scheduler.actions.values().any(|action| match action {
         ScheduledAction::PluginDirective { directive, .. } => {
             system_directive_has_entity(directive, &unavailable)
         }
@@ -10432,6 +10511,7 @@ fn validate_domain_dependents_with_records(
         ));
     }
     if state
+        .metadata
         .run_configuration
         .declared()
         .and_then(|configuration| configuration.seat_binding.as_ref())
@@ -14643,6 +14723,67 @@ mod tests {
                 .location,
             ids.eastern_territory
         );
+    }
+
+    #[test]
+    fn internal_runtime_partitions_preserve_flat_persistence_contracts() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(35, scenario.clone()).expect("the demo scenario should load");
+        simulation
+            .submit(move_order(&ids))
+            .expect("the move should populate evidence and scheduled work");
+        simulation
+            .advance(SimDuration::days(1))
+            .expect("the scheduled move should complete");
+
+        let snapshot = simulation.snapshot();
+        let snapshot_value =
+            serde_json::to_value(&snapshot).expect("the snapshot should become JSON");
+        let snapshot_object = snapshot_value
+            .as_object()
+            .expect("snapshot JSON should remain a flat object");
+        for public_field in [
+            "checkpoint_hash",
+            "state_revision",
+            "next_event_id",
+            "admission_cursor_format_version",
+            "events",
+            "commands",
+            "scheduled",
+        ] {
+            assert!(
+                snapshot_object.contains_key(public_field),
+                "snapshot should retain flat field {public_field}"
+            );
+        }
+        for internal_owner in ["metadata", "counters", "evidence", "scheduler"] {
+            assert!(
+                !snapshot_object.contains_key(internal_owner),
+                "private owner {internal_owner} must not enter the snapshot wire shape"
+            );
+        }
+
+        let json = serde_json::to_string(&snapshot).expect("the snapshot should serialize");
+        let restored =
+            Simulation::from_snapshot_json(&json).expect("the flat snapshot should restore");
+        assert_eq!(restored.snapshot(), snapshot);
+
+        let journal = restored.replay_journal();
+        let journal_value =
+            serde_json::to_value(&journal).expect("the replay journal should become JSON");
+        let journal_object = journal_value
+            .as_object()
+            .expect("replay journal JSON should remain a flat object");
+        for internal_owner in ["metadata", "counters", "evidence", "scheduler"] {
+            assert!(
+                !journal_object.contains_key(internal_owner),
+                "private owner {internal_owner} must not enter the journal wire shape"
+            );
+        }
+        let replayed = Simulation::replay_from_journal(scenario, &[], &journal)
+            .expect("the flat replay journal should remain exact");
+        assert_eq!(replayed.snapshot(), snapshot);
     }
 
     #[test]

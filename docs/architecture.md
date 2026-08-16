@@ -257,6 +257,17 @@ retain their existing flat serialized shapes while this internal boundary is
 established; later segmented or checkpoint-plus-journal storage can replace the
 owner without spreading evidence mutation back through the runtime.
 
+The remaining runtime bookkeeping is partitioned by responsibility rather than
+stored as unrelated fields on the authoritative world container.
+`RuntimeScheduler` owns the committed clock, scheduled actions, and pending
+canonical ingress; `RuntimeCounters` owns monotonic identifiers, the
+authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns
+the initial scenario binding, run identity, plugin-registration state, replay
+revision provenance, and current checkpoint commitment. These owners are
+private implementation boundaries. Snapshot and replay formats remain flat,
+and a transaction clone still captures every partition together until staged
+transactions replace full-state rollback.
+
 Every snapshot also stores a recomputed checkpoint hash over the complete
 current deterministic state plus the current boundary-chain head. Snapshot
 loading therefore rejects state, queue, knowledge, plugin-state, random, or

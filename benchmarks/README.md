@@ -158,6 +158,22 @@ identical at every measured scale. At scale 512, elapsed medians range from
 consistent with local wall-time noise and confirm that the ownership boundary is
 behavior- and cost-neutral before segmented storage is introduced.
 
+## Runtime-partition ownership comparison
+
+The scheduler, counter, and persistence-metadata ownership refactor is recorded
+in separate
+[`elapsed`](baselines/2026-08-16-runtime-partitions-elapsed.json) and
+[`allocation`](baselines/2026-08-16-runtime-partitions-allocations.json) reports,
+using the runtime-evidence reports as its before baseline. It adds private
+runtime owners without changing snapshot/replay fields, checkpoint inputs, or
+algorithms.
+
+Allocation operations, allocated bytes, and snapshot sizes are identical at
+every scale. At scale 512 the 3,138,540-byte snapshot is unchanged; history
+growth is +3.8%, exact replay is +3.9%, and individual operations range from
+-3.1% to +5.0%. With identical allocation curves and no algorithmic change,
+these elapsed differences remain consistent with local measurement noise.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
