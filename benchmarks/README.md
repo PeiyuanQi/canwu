@@ -659,3 +659,27 @@ noise. The milestone makes no runtime-performance claim; it gives every
 authoritative commitment and historical hash format one explicit dependency
 surface while preserving deterministic, insertion-order-independent roots and
 legacy migration behavior.
+
+## Settlement-module extraction comparison
+
+The behavior-preserving settlement extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-settlement-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-settlement-module-allocations.json) reports,
+using the hashing-module milestone as its before baseline. It moves boundary
+orchestration, phase visibility, reservation allocation, boundary mutation and
+emission application, generated ingress, and settlement-specific proposal
+validation into `canwu-sim/src/settlement.rs`. Shared scheduling, command/event
+directive validation, persistence, replay, and hashing remain in their existing
+modules. `canwu-sim/src/lib.rs` falls from 12,645 to 11,286 nonblank source
+lines, with 1,381 nonblank source lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. At scale 512, history growth changes by +1.2%, empty boundaries -2.1%,
+populated boundaries -0.8%, snapshot creation +5.6%, load validation +5.3%, and
+exact replay +0.7%. The accepted-command median moves from 0.823 to 0.860 ms
+(+4.6%), and the rejected-command median moves from 0.064 to 0.070 ms (+10.2%)
+on a sub-0.1-ms case. These are treated as local timing noise. The milestone
+makes no runtime-performance claim; it gives atomic settlement and its
+visibility/allocation rules a dedicated dependency surface while preserving
+the sequential reference path and exact evidence contract.
