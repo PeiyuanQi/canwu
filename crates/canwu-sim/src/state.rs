@@ -1,21 +1,59 @@
 use super::{
-    Army, ArmyId, BoundaryRecord, CanwuError, CommandAttemptRecord, CommandRecord, CommitmentRoots,
-    DomainRecord, DomainRecordRef, ErrorCode, Government, GovernmentId, IngressQueueKey,
-    IngressRecord, KnowledgeSnapshot, Person, PersonId, PluginComponentKey, PluginComponentRecord,
-    RandomDrawRecord, RandomStreamKey, RandomStreamState, Route, RouteId, RunConfigurationSnapshot,
-    RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    Army, ArmyId, BoundaryRecord, CanwuError, CommandAttemptRecord, CommandOutcome, CommandRecord,
+    CommandRequestId, CommitmentRoots, DomainRecord, DomainRecordRef, ErrorCode, EvidenceCursor,
+    Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord, KnowledgeSnapshot,
+    Person, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
+    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
+    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone)]
 pub(super) struct RuntimeEvidence {
+    pub(super) archived: EvidenceCursor,
+    pub(super) archived_boundary_head: Option<String>,
+    pub(super) archived_legacy_commands: bool,
+    pub(super) archived_tracked_attempts: bool,
+    pub(super) archived_unqueued_command_history: bool,
+    pub(super) archived_command_requests: BTreeMap<CommandRequestId, ArchivedCommandRequestOutcome>,
+    pub(super) archived_ingress_requests: BTreeMap<CommandRequestId, ArchivedIngressRequest>,
     pub(super) events: Vec<SimEvent>,
     pub(super) commands: Vec<CommandRecord>,
     pub(super) command_attempts: Vec<CommandAttemptRecord>,
     pub(super) ingress: Vec<IngressRecord>,
     pub(super) boundaries: Vec<BoundaryRecord>,
     pub(super) random_draws: Vec<RandomDrawRecord>,
+}
+
+#[derive(Clone)]
+pub(super) struct ArchivedCommandRequestOutcome {
+    pub(super) input_hash: String,
+    pub(super) outcome: CommandOutcome,
+}
+
+#[derive(Clone)]
+pub(super) struct ArchivedIngressRequest {
+    pub(super) input_hash: String,
+    pub(super) receipt: IngressReceipt,
+}
+
+impl RuntimeEvidence {
+    pub(super) fn retained_ingress(&self, id: super::IngressId) -> Option<&IngressRecord> {
+        let index = id
+            .get()
+            .checked_sub(self.archived.ingress_count)?
+            .checked_sub(1)
+            .and_then(|value| usize::try_from(value).ok())?;
+        self.ingress.get(index).filter(|record| record.id == id)
+    }
+
+    pub(super) fn boundary_head_hash(&self) -> Option<&str> {
+        self.boundaries
+            .last()
+            .map(|record| record.hash.as_str())
+            .or(self.archived_boundary_head.as_deref())
+    }
 }
 
 #[derive(Clone)]
@@ -68,14 +106,27 @@ impl OrderedCommitmentAccumulator {
         Ok(())
     }
 
-    fn sync_tail<T: Serialize>(&mut self, values: &[T]) -> Result<(), CanwuError> {
-        if self.len > values.len() {
+    fn sync_tail<T: Serialize>(&mut self, archived: u64, values: &[T]) -> Result<(), CanwuError> {
+        let archived = usize::try_from(archived).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "archived evidence cursor is not representable on this platform",
+            )
+        })?;
+        if self.len < archived {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
-                "append-only commitment cache exceeds its evidence journal",
+                "append-only commitment cache precedes its archived evidence cursor",
             ));
         }
-        for value in &values[self.len..] {
+        let retained = self.len - archived;
+        if retained > values.len() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "append-only commitment cache exceeds its retained evidence journal",
+            ));
+        }
+        for value in &values[retained..] {
             self.append(value)?;
         }
         Ok(())
@@ -143,11 +194,18 @@ impl RuntimeCommitmentCache {
     }
 
     pub(super) fn sync(&mut self, evidence: &RuntimeEvidence) -> Result<(), CanwuError> {
-        self.commands.sync_tail(&evidence.commands)?;
-        self.attempts.sync_tail(&evidence.command_attempts)?;
-        self.events.sync_tail(&evidence.events)?;
-        self.ingress.sync_tail(&evidence.ingress)?;
-        self.random_draws.sync_tail(&evidence.random_draws)?;
+        self.commands
+            .sync_tail(evidence.archived.command_count, &evidence.commands)?;
+        self.attempts.sync_tail(
+            evidence.archived.command_attempt_count,
+            &evidence.command_attempts,
+        )?;
+        self.events
+            .sync_tail(evidence.archived.event_count, &evidence.events)?;
+        self.ingress
+            .sync_tail(evidence.archived.ingress_count, &evidence.ingress)?;
+        self.random_draws
+            .sync_tail(evidence.archived.random_draw_count, &evidence.random_draws)?;
         Ok(())
     }
 

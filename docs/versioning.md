@@ -151,6 +151,14 @@ nor migrated into this envelope implicitly; they remain readable through the
 existing snapshot APIs. Checkpoint-journal format 1 requires the current
 snapshot format and has no legacy interpretation.
 
+Live journal sealing is an in-memory continuation policy over the same format-1
+cursor and segment contract. `CompactedSimulation` moves a completed retained
+tail into a caller-owned segment, preserves the total cursor and incremental
+commitment prefix internally, and requires the sealed prefix for later full
+snapshot or replay reconstruction. It introduces no new serialized format and
+requires no snapshot migration. Ordinary flat snapshots and replay journals
+retain their existing full-history semantics.
+
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,
 controller, seat, observation, interaction, and trace policy do not alter

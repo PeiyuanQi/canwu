@@ -1,9 +1,13 @@
 use super::{
-    ADMISSION_CURSOR_FORMAT_VERSION, BoundaryRecord, CanwuError, CommandAttemptRecord,
-    CommandRecord, ENGINE_VERSION, ErrorCode, IngressRecord, RandomDrawRecord, RuntimeEvidence,
-    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, ScheduledRecord, SimEvent, Simulation,
-    SimulationPlugin, SimulationSnapshot, invalid_snapshot_error,
+    ADMISSION_CURSOR_FORMAT_VERSION, BoundaryReceipt, BoundaryRecord, BoundaryRequest, CanwuError,
+    CommandAttemptRecord, CommandEnvelope, CommandOutcome, CommandReceipt, CommandRecord,
+    CommandRequest, ENGINE_VERSION, ErrorCode, IngressPayload, IngressReceipt, IngressRecord,
+    KnowledgeSnapshot, PluginIngressRequest, RandomDrawRecord, ReplayJournal, RuntimeEvidence,
+    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, ScheduledRecord, SimDuration, SimEvent,
+    SimTime, Simulation, SimulationPlugin, SimulationSnapshot, SystemCadence, WorldSnapshot,
+    has_unqueued_command_history, invalid_snapshot_error,
 };
+use crate::state::{ArchivedCommandRequestOutcome, ArchivedIngressRequest};
 use serde::{Deserialize, Serialize};
 
 /// Version of current-state checkpoints plus append-only evidence segments.
@@ -31,16 +35,45 @@ impl EvidenceCursor {
             })
         };
         Ok(Self {
-            event_count: count(evidence.events.len(), "event")?,
-            command_count: count(evidence.commands.len(), "command")?,
-            command_attempt_count: count(evidence.command_attempts.len(), "command-attempt")?,
-            ingress_count: count(evidence.ingress.len(), "ingress")?,
-            boundary_count: count(evidence.boundaries.len(), "boundary")?,
-            random_draw_count: count(evidence.random_draws.len(), "random-draw")?,
+            event_count: evidence
+                .archived
+                .event_count
+                .checked_add(count(evidence.events.len(), "event")?)
+                .ok_or_else(|| invalid_snapshot_error("event journal cursor is exhausted"))?,
+            command_count: evidence
+                .archived
+                .command_count
+                .checked_add(count(evidence.commands.len(), "command")?)
+                .ok_or_else(|| invalid_snapshot_error("command journal cursor is exhausted"))?,
+            command_attempt_count: evidence
+                .archived
+                .command_attempt_count
+                .checked_add(count(evidence.command_attempts.len(), "command-attempt")?)
+                .ok_or_else(|| {
+                    invalid_snapshot_error("command-attempt journal cursor is exhausted")
+                })?,
+            ingress_count: evidence
+                .archived
+                .ingress_count
+                .checked_add(count(evidence.ingress.len(), "ingress")?)
+                .ok_or_else(|| invalid_snapshot_error("ingress journal cursor is exhausted"))?,
+            boundary_count: evidence
+                .archived
+                .boundary_count
+                .checked_add(count(evidence.boundaries.len(), "boundary")?)
+                .ok_or_else(|| invalid_snapshot_error("boundary journal cursor is exhausted"))?,
+            random_draw_count: evidence
+                .archived
+                .random_draw_count
+                .checked_add(count(evidence.random_draws.len(), "random-draw")?)
+                .ok_or_else(|| invalid_snapshot_error("random-draw journal cursor is exhausted"))?,
         })
     }
 
-    fn checked_advance(self, segment: &EvidenceJournalSegment) -> Result<Self, CanwuError> {
+    pub(super) fn checked_advance(
+        self,
+        segment: &EvidenceJournalSegment,
+    ) -> Result<Self, CanwuError> {
         let advance = |value: u64, len: usize, label: &str| {
             value
                 .checked_add(u64::try_from(len).map_err(|_| {
@@ -112,7 +145,432 @@ pub struct CheckpointJournal {
     pub segments: Vec<EvidenceJournalSegment>,
 }
 
+/// A live simulation whose sealed evidence prefixes are owned by the caller.
+///
+/// This opt-in runtime preserves current authoritative state, deterministic
+/// commitments, idempotency, and continuation behavior while retaining only
+/// the evidence appended since the most recent seal. Every returned segment is
+/// part of the permanent replay record and must be stored contiguously by the
+/// caller.
+pub struct CompactedSimulation {
+    simulation: Simulation,
+}
+
+impl CompactedSimulation {
+    /// Returns the monotonic cut through sealed and retained evidence.
+    pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
+        self.simulation.evidence_cursor()
+    }
+
+    /// Captures current state and the total journal cut without cloning sealed evidence.
+    pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
+        self.simulation.checkpoint()
+    }
+
+    /// Seals and releases the current retained evidence tail.
+    ///
+    /// The runtime changes only after the segment is fully constructed and its
+    /// continuation indexes are prepared. An empty retained tail returns
+    /// `None`. The caller owns persistence and must keep all non-empty segments
+    /// in exact cursor order for save restoration or replay.
+    pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
+        self.simulation.seal_retained_evidence()
+    }
+
+    #[must_use]
+    pub const fn time(&self) -> SimTime {
+        self.simulation.time()
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.simulation.revision()
+    }
+
+    #[must_use]
+    pub fn checkpoint_hash(&self) -> &str {
+        self.simulation.checkpoint_hash()
+    }
+
+    #[must_use]
+    pub fn boundary_head_hash(&self) -> Option<&str> {
+        self.simulation.boundary_head_hash()
+    }
+
+    #[must_use]
+    pub fn world(&self) -> WorldSnapshot {
+        self.simulation.world()
+    }
+
+    #[must_use]
+    pub fn knowledge(&self) -> &KnowledgeSnapshot {
+        self.simulation.knowledge()
+    }
+
+    pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
+        self.simulation.submit(envelope)
+    }
+
+    pub fn process_command(
+        &mut self,
+        request: CommandRequest,
+    ) -> Result<CommandOutcome, CanwuError> {
+        self.simulation.process_command(request)
+    }
+
+    pub fn enqueue_command(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: CommandRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_command(due_at, priority, request)
+    }
+
+    pub fn enqueue_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn schedule_calendar_boundary(
+        &mut self,
+        due_at: SimTime,
+        cadences: Vec<SystemCadence>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.schedule_calendar_boundary(due_at, cadences)
+    }
+
+    pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
+        self.simulation.advance(duration)
+    }
+
+    pub fn advance_canonical(
+        &mut self,
+        duration: SimDuration,
+    ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
+        self.simulation.advance_canonical(duration)
+    }
+
+    pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
+        self.simulation.step_canonical()
+    }
+
+    pub fn settle_boundary(
+        &mut self,
+        request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.simulation.settle_boundary(request)
+    }
+
+    /// Reconstructs a validated full snapshot from the supplied sealed prefix
+    /// plus the currently retained tail.
+    pub fn snapshot_with_segments(
+        &self,
+        mut segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<SimulationSnapshot, CanwuError> {
+        let tail = self
+            .simulation
+            .journal_segment_since(self.simulation.state.evidence.archived)?;
+        if tail.start != tail.end {
+            segments.push(tail);
+        }
+        let snapshot =
+            Simulation::snapshot_from_checkpoint_and_journal(self.checkpoint()?, segments)?;
+        Simulation::from_snapshot(snapshot.clone())?;
+        Ok(snapshot)
+    }
+
+    /// Produces the ordinary exact-replay journal after validating the supplied archive.
+    pub fn replay_journal_with_segments(
+        &self,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<ReplayJournal, CanwuError> {
+        let snapshot = self.snapshot_with_segments(segments)?;
+        let simulation = Simulation::from_snapshot(snapshot)?;
+        Ok(simulation.replay_journal())
+    }
+
+    /// Restores and validates a checkpoint plus its archive, then enters the
+    /// compact interface with that evidence retained until the caller seals it.
+    pub fn from_checkpoint_and_journal(
+        checkpoint: SimulationCheckpoint,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Simulation::from_checkpoint_and_journal(checkpoint, segments)?.into_compacted()
+    }
+
+    /// Restores a compact runtime and rehydrates its exact executable plugins.
+    pub fn from_checkpoint_and_journal_with_plugins(
+        checkpoint: SimulationCheckpoint,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        let mut simulation = Simulation::from_checkpoint_and_journal(checkpoint, segments)?;
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        simulation.ensure_runtime_ready()?;
+        simulation.into_compacted()
+    }
+}
+
 impl Simulation {
+    /// Converts this runtime into the opt-in compact journal interface.
+    ///
+    /// Conversion itself preserves the complete retained history. Call
+    /// [`CompactedSimulation::seal_evidence`] to release a validated segment
+    /// explicitly.
+    pub fn into_compacted(self) -> Result<CompactedSimulation, CanwuError> {
+        self.ensure_runtime_ready()?;
+        Ok(CompactedSimulation { simulation: self })
+    }
+
+    fn ensure_retained_evidence_is_sealable(&self) -> Result<(), CanwuError> {
+        if !self.state.scheduler.pending_ingress.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence can be sealed only when the canonical ingress queue is empty",
+            ));
+        }
+        let reads_archived_evidence = |reads: &[super::StateKey]| {
+            reads.iter().any(|state| {
+                state == &super::StateKey::core_commands()
+                    || state == &super::StateKey::core_events()
+                    || state == &super::StateKey::core_ingress()
+            })
+        };
+        if self.plugins.descriptors().any(|descriptor| {
+            descriptor
+                .systems
+                .iter()
+                .any(|contract| reads_archived_evidence(&contract.reads))
+                || descriptor
+                    .boundary_systems
+                    .iter()
+                    .any(|contract| reads_archived_evidence(&contract.reads))
+                || descriptor
+                    .commands
+                    .iter()
+                    .any(|contract| reads_archived_evidence(&contract.reads))
+        }) {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence sealing requires plugins whose declared reads use current state rather than historical command, event, or ingress records",
+            ));
+        }
+
+        let admitted_attempts: std::collections::BTreeSet<_> = self
+            .state
+            .evidence
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_attempts.iter().copied())
+            .collect();
+        if admitted_attempts.len() != self.state.evidence.command_attempts.len()
+            || self
+                .state
+                .evidence
+                .command_attempts
+                .iter()
+                .any(|attempt| !admitted_attempts.contains(&attempt.id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence sealing requires every retained command attempt to belong to a completed boundary",
+            ));
+        }
+        let admitted_commands: std::collections::BTreeSet<_> = self
+            .state
+            .evidence
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_commands.iter().copied())
+            .collect();
+        if admitted_commands.len() != self.state.evidence.commands.len()
+            || self
+                .state
+                .evidence
+                .commands
+                .iter()
+                .any(|command| !admitted_commands.contains(&command.id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence sealing requires every retained command to belong to a completed boundary",
+            ));
+        }
+        let admitted_ingress: std::collections::BTreeSet<_> = self
+            .state
+            .evidence
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_ingress.iter().copied())
+            .collect();
+        if admitted_ingress.len() != self.state.evidence.ingress.len()
+            || self
+                .state
+                .evidence
+                .ingress
+                .iter()
+                .any(|record| !admitted_ingress.contains(&record.id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence sealing requires every retained ingress record to belong to a completed boundary",
+            ));
+        }
+        let admitted_events: std::collections::BTreeSet<_> = self
+            .state
+            .evidence
+            .boundaries
+            .iter()
+            .flat_map(|record| record.admitted_events.iter().copied())
+            .collect();
+        if self.state.counters.admitted_event_count
+            != self
+                .state
+                .evidence
+                .archived
+                .event_count
+                .checked_add(
+                    u64::try_from(self.state.evidence.events.len()).map_err(|_| {
+                        CanwuError::new(
+                            ErrorCode::ArchiveNotReady,
+                            "retained event count exceeds the live archive cursor range",
+                        )
+                    })?,
+                )
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::ArchiveNotReady,
+                        "retained event cursor is exhausted",
+                    )
+                })?
+            || admitted_events.len() != self.state.evidence.events.len()
+            || self
+                .state
+                .evidence
+                .events
+                .iter()
+                .any(|event| !admitted_events.contains(&event.id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                "live evidence sealing requires every retained event to be admitted by a later completed boundary",
+            ));
+        }
+        Ok(())
+    }
+
+    fn seal_retained_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
+        let start = self.state.evidence.archived;
+        let end = self.evidence_cursor()?;
+        if start == end {
+            return Ok(None);
+        }
+        self.ensure_retained_evidence_is_sealable()?;
+        let checkpoint_hash = self.state.metadata.checkpoint_hash.clone();
+        let commitment_roots = self.state.metadata.commitment_roots.clone();
+        let commitment_cache = self.state.metadata.commitment_cache.clone();
+        let prepared = (|| {
+            self.refresh_checkpoint_hash()?;
+
+            let mut archived_command_requests = Vec::new();
+            for attempt in &self.state.evidence.command_attempts {
+                let Some(request_id) = attempt.request_id else {
+                    continue;
+                };
+                let outcome = self.command_outcome_from_attempt(attempt)?;
+                archived_command_requests.push((
+                    request_id,
+                    ArchivedCommandRequestOutcome {
+                        input_hash: super::canonical_hash(
+                            "canwu.archive.command.request.v1",
+                            &(attempt.expected_revision, &attempt.envelope),
+                        )?,
+                        outcome,
+                    },
+                ));
+            }
+
+            let mut archived_ingress_requests = Vec::new();
+            for record in &self.state.evidence.ingress {
+                let IngressPayload::Command { request } = &record.payload else {
+                    continue;
+                };
+                archived_ingress_requests.push((
+                    request.request_id,
+                    ArchivedIngressRequest {
+                        input_hash: super::canonical_hash(
+                            "canwu.archive.ingress.command.v1",
+                            &(record.due_at, record.priority, request.as_ref()),
+                        )?,
+                        receipt: IngressReceipt {
+                            ingress_id: record.id,
+                            issued_at: record.issued_at,
+                            due_at: record.due_at,
+                        },
+                    },
+                ));
+            }
+            Ok::<_, CanwuError>((archived_command_requests, archived_ingress_requests))
+        })();
+        let (archived_command_requests, archived_ingress_requests) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.state.metadata.checkpoint_hash = checkpoint_hash;
+                self.state.metadata.commitment_roots = commitment_roots;
+                self.state.metadata.commitment_cache = commitment_cache;
+                return Err(error);
+            }
+        };
+
+        self.state.evidence.archived_boundary_head = self
+            .state
+            .evidence
+            .boundaries
+            .last()
+            .map(|record| record.hash.clone())
+            .or_else(|| self.state.evidence.archived_boundary_head.clone());
+        self.state.evidence.archived_legacy_commands |= self
+            .state
+            .evidence
+            .commands
+            .iter()
+            .any(|record| record.attempt_id.is_none());
+        self.state.evidence.archived_tracked_attempts |=
+            !self.state.evidence.command_attempts.is_empty()
+                || !self.state.evidence.ingress.is_empty();
+        self.state.evidence.archived_unqueued_command_history |= has_unqueued_command_history(
+            &self.state.evidence.commands,
+            &self.state.evidence.command_attempts,
+            &self.state.evidence.ingress,
+        );
+        self.state
+            .evidence
+            .archived_command_requests
+            .extend(archived_command_requests);
+        self.state
+            .evidence
+            .archived_ingress_requests
+            .extend(archived_ingress_requests);
+        self.state.evidence.archived = end;
+        let segment = EvidenceJournalSegment {
+            format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
+            start,
+            end,
+            events: std::mem::take(&mut self.state.evidence.events),
+            commands: std::mem::take(&mut self.state.evidence.commands),
+            command_attempts: std::mem::take(&mut self.state.evidence.command_attempts),
+            ingress: std::mem::take(&mut self.state.evidence.ingress),
+            boundaries: std::mem::take(&mut self.state.evidence.boundaries),
+            random_draws: std::mem::take(&mut self.state.evidence.random_draws),
+        };
+        Ok(Some(segment))
+    }
+
     pub(super) fn checkpoint_state(&self) -> SimulationSnapshot {
         SimulationSnapshot {
             engine_version: ENGINE_VERSION.to_owned(),
@@ -208,7 +666,13 @@ impl Simulation {
         start: EvidenceCursor,
     ) -> Result<EvidenceJournalSegment, CanwuError> {
         let end = self.evidence_cursor()?;
-        let cut = |value: u64, len: usize, label: &str| {
+        let cut = |value: u64, archived: u64, len: usize, label: &str| {
+            let value = value.checked_sub(archived).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    format!("{label} journal cursor precedes the retained live evidence window"),
+                )
+            })?;
             let value = usize::try_from(value).map_err(|_| {
                 CanwuError::new(
                     ErrorCode::InvalidSnapshot,
@@ -223,29 +687,40 @@ impl Simulation {
             }
             Ok(value)
         };
-        let event_start = cut(start.event_count, self.state.evidence.events.len(), "event")?;
+        let archived = self.state.evidence.archived;
+        let event_start = cut(
+            start.event_count,
+            archived.event_count,
+            self.state.evidence.events.len(),
+            "event",
+        )?;
         let command_start = cut(
             start.command_count,
+            archived.command_count,
             self.state.evidence.commands.len(),
             "command",
         )?;
         let attempt_start = cut(
             start.command_attempt_count,
+            archived.command_attempt_count,
             self.state.evidence.command_attempts.len(),
             "command-attempt",
         )?;
         let ingress_start = cut(
             start.ingress_count,
+            archived.ingress_count,
             self.state.evidence.ingress.len(),
             "ingress",
         )?;
         let boundary_start = cut(
             start.boundary_count,
+            archived.boundary_count,
             self.state.evidence.boundaries.len(),
             "boundary",
         )?;
         let draw_start = cut(
             start.random_draw_count,
+            archived.random_draw_count,
             self.state.evidence.random_draws.len(),
             "random-draw",
         )?;
@@ -264,6 +739,12 @@ impl Simulation {
 
     /// Builds a portable full-save bundle with one segment from genesis.
     pub fn checkpoint_journal(&self) -> Result<CheckpointJournal, CanwuError> {
+        if self.state.evidence.archived != EvidenceCursor::default() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "a compact live runtime requires its previously sealed evidence segments to build a portable save",
+            ));
+        }
         let segment = self.journal_segment_since(EvidenceCursor::default())?;
         Ok(CheckpointJournal {
             checkpoint: self.checkpoint()?,

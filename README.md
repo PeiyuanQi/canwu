@@ -18,7 +18,8 @@ use Canwu through its public APIs.
 Canwu is built for simulations that need more than a mutable game-state object.
 It provides deterministic time, validated authority-aware commands, atomic
 settlement, actor-relative knowledge, typed extension points, causal evidence,
-save/load validation, and exact replay. The engine remains domain-neutral:
+save/load validation, exact replay, and explicit live evidence sealing. The
+engine remains domain-neutral:
 applications define their own rules and content through public contracts rather
 than adding application-specific types to the kernel.
 

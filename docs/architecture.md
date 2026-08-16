@@ -267,14 +267,39 @@ replay contract bind the archived records just as before. `CheckpointJournal`
 is a portable full-save convenience envelope; incremental stores should persist
 the smaller current-state checkpoint and only newly appended segments.
 
-This first storage milestone avoids cloning and serializing all accumulated
-history for every checkpoint, but the live runtime still retains its complete
-evidence owner and loading still materializes the complete validated prefix.
-Evicting sealed segments from a running simulation requires a later explicit
-archive/compaction contract; no evidence is discarded implicitly here.
-The checkpoint/journal wire types, cursor logic, export, and reconstruction
-helpers live in the dedicated `canwu-sim` persistence module so later storage
-work does not expand the settlement and command orchestration surface again.
+`CompactedSimulation` and the public `CompactedCanwu` facade add the explicit
+live archive contract. Entering compact mode preserves the retained history;
+`seal_evidence` then moves one fully settled, contiguous tail into a caller-owned
+`EvidenceJournalSegment` and advances the private retained-window cursor. The
+caller keeps every returned segment in exact cursor order. Current-state
+checkpoints continue to carry the total cut, while full snapshot and replay
+materialization require the sealed prefix to be supplied again. Segment gaps,
+tampering, and checkpoint mismatches therefore reach the same validator as a
+flat snapshot.
+
+Sealing is intentionally conservative. The canonical ingress queue must be
+empty, every retained command, attempt, ingress record, and event must belong to
+a completed causal prefix, and registered plugins must use current state rather than
+declare historical command/event/ingress reads. The runtime keeps only compact
+canonical request commitments and original outcomes/receipts for exact
+idempotency, plus the prior boundary-chain head and evidence-family flags needed
+for safe continuation. Commitment accumulators keep their already-validated
+prefix state and consume only the new retained tail. Ordinary `Simulation`
+history slices, flat snapshots, and replay journals keep their original full-
+history behavior; compaction is available only through the dedicated type, so
+evidence never disappears implicitly. This runtime feature reuses checkpoint-
+journal format 1 and snapshot format 4 without reinterpreting either wire
+contract.
+
+Boundary emissions enter the next boundary's admission cut, so an emitting
+boundary remains retained until a later completed boundary admits those events.
+This preserves the global causal-prefix invariant across every seal; the same
+rule keeps generated ingress retained through its own later admission.
+
+The checkpoint/journal wire types, cursor logic, live sealing, compact
+continuation indexes, export, and reconstruction helpers live in the dedicated
+`canwu-sim` persistence module so storage work stays outside settlement and
+command orchestration.
 
 The remaining runtime bookkeeping is partitioned by responsibility rather than
 stored as unrelated fields on the authoritative world container.

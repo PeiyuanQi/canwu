@@ -29,8 +29,8 @@ pub use ingress::{
 };
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use persistence::{
-    CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal, EvidenceCursor, EvidenceJournalSegment,
-    SimulationCheckpoint,
+    CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal, CompactedSimulation, EvidenceCursor,
+    EvidenceJournalSegment, SimulationCheckpoint,
 };
 pub use policy::{
     CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
@@ -113,6 +113,7 @@ pub struct CommitmentRoots {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     ActorNotFound,
+    ArchiveNotReady,
     ArmyNotFound,
     DestinationNotFound,
     DuplicateBoundaryWriter,
@@ -203,6 +204,7 @@ impl Error for CanwuError {}
 const fn error_code_name(code: &ErrorCode) -> &'static str {
     match code {
         ErrorCode::ActorNotFound => "actor_not_found",
+        ErrorCode::ArchiveNotReady => "archive_not_ready",
         ErrorCode::ArmyNotFound => "army_not_found",
         ErrorCode::DestinationNotFound => "destination_not_found",
         ErrorCode::DuplicateBoundaryWriter => "duplicate_boundary_writer",
@@ -926,12 +928,7 @@ impl SimulationView<'_> {
         {
             return Ok(None);
         }
-        let record = id
-            .get()
-            .checked_sub(1)
-            .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.state.evidence().ingress.get(index))
-            .filter(|record| record.id == id);
+        let record = self.state.evidence().retained_ingress(id);
         if let (Some(owner), Some(record)) = (self.ingress_plugin, record)
             && !matches!(
                 &record.payload,
@@ -3186,6 +3183,13 @@ impl Simulation {
                     replay_revision_format_version: STATE_REVISION_FORMAT_VERSION,
                 },
                 evidence: RuntimeEvidence {
+                    archived: EvidenceCursor::default(),
+                    archived_boundary_head: None,
+                    archived_legacy_commands: false,
+                    archived_tracked_attempts: false,
+                    archived_unqueued_command_history: false,
+                    archived_command_requests: BTreeMap::new(),
+                    archived_ingress_requests: BTreeMap::new(),
                     events: Vec::new(),
                     commands: Vec::new(),
                     command_attempts: Vec::new(),
@@ -3840,11 +3844,7 @@ impl Simulation {
 
     #[must_use]
     pub fn boundary_head_hash(&self) -> Option<&str> {
-        self.state
-            .evidence
-            .boundaries
-            .last()
-            .map(|record| record.hash.as_str())
+        self.state.evidence.boundary_head_hash()
     }
 
     #[must_use]
@@ -3895,6 +3895,27 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
         self.ensure_command_ingress_family(CommandIngress::LiveRequest)?;
+        if let Some(existing) = self
+            .state
+            .evidence
+            .archived_ingress_requests
+            .get(&request.request_id)
+        {
+            let input_hash = canonical_hash(
+                "canwu.archive.ingress.command.v1",
+                &(due_at, priority, &request),
+            )?;
+            if existing.input_hash == input_hash {
+                return Ok(existing.receipt.clone());
+            }
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                format!(
+                    "command request {} is already queued with different ingress content",
+                    request.request_id
+                ),
+            ));
+        }
         for record in &self.state.evidence.ingress {
             let IngressPayload::Command { request: existing } = &record.payload else {
                 continue;
@@ -3926,6 +3947,11 @@ impl Simulation {
             .command_attempts
             .iter()
             .any(|attempt| attempt.request_id == Some(request.request_id))
+            || self
+                .state
+                .evidence
+                .archived_command_requests
+                .contains_key(&request.request_id)
         {
             return Err(CanwuError::new(
                 ErrorCode::IdempotencyConflict,
@@ -4076,12 +4102,25 @@ impl Simulation {
         }
         let transaction = IngressTransactionCheckpoint::capture(&self.state);
         let (id, next_id) = claim_counter(self.state.counters.next_ingress_id, "ingress ID")?;
-        let boundary_count = u64::try_from(self.state.evidence.boundaries.len()).map_err(|_| {
-            CanwuError::new(
-                ErrorCode::IdentifierExhausted,
-                "boundary count exceeds the ingress journal range",
+        let boundary_count = self
+            .state
+            .evidence
+            .archived
+            .boundary_count
+            .checked_add(
+                u64::try_from(self.state.evidence.boundaries.len()).map_err(|_| {
+                    CanwuError::new(
+                        ErrorCode::IdentifierExhausted,
+                        "boundary count exceeds the ingress journal range",
+                    )
+                })?,
             )
-        })?;
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "boundary count exceeds the ingress journal range",
+                )
+            })?;
         let eligible_boundary_count = if after_current_boundary {
             boundary_count.checked_add(1).ok_or_else(|| {
                 CanwuError::new(
@@ -4123,7 +4162,9 @@ impl Simulation {
         request: CommandRequest,
     ) -> Result<CommandOutcome, CanwuError> {
         self.ensure_runtime_ready()?;
-        if !self.state.evidence.ingress.is_empty() {
+        if self.state.evidence.archived.ingress_count != 0
+            || !self.state.evidence.ingress.is_empty()
+        {
             return Err(CanwuError::new(
                 ErrorCode::MixedCommandIngress,
                 "direct command requests cannot bypass an active canonical ingress journal",
@@ -4305,13 +4346,15 @@ impl Simulation {
     }
 
     fn ensure_command_ingress_family(&self, ingress: CommandIngress) -> Result<(), CanwuError> {
-        let has_legacy_commands = self
-            .state
-            .evidence
-            .commands
-            .iter()
-            .any(|record| record.attempt_id.is_none());
-        let has_tracked_attempts = !self.state.evidence.command_attempts.is_empty()
+        let has_legacy_commands = self.state.evidence.archived_legacy_commands
+            || self
+                .state
+                .evidence
+                .commands
+                .iter()
+                .any(|record| record.attempt_id.is_none());
+        let has_tracked_attempts = self.state.evidence.archived_tracked_attempts
+            || !self.state.evidence.command_attempts.is_empty()
             || !self.state.evidence.ingress.is_empty();
         if (ingress == CommandIngress::LegacyDirect && has_tracked_attempts)
             || (ingress != CommandIngress::LegacyDirect && has_legacy_commands)
@@ -4343,6 +4386,32 @@ impl Simulation {
         let Some(request_id) = request_id else {
             return Ok(None);
         };
+        if let Some(cached) = self
+            .state
+            .evidence
+            .archived_command_requests
+            .get(&request_id)
+        {
+            let input_hash = canonical_hash(
+                "canwu.archive.command.request.v1",
+                &(expected_revision, envelope),
+            )?;
+            if cached.input_hash != input_hash {
+                return Ok(Some(CommandOutcome::Rejected {
+                    rejection: CommandRejection {
+                        attempt_id: None,
+                        request_id: Some(request_id),
+                        retained_revision: self.revision(),
+                        rejected_at: self.state.scheduler.now,
+                        error: CanwuError::new(
+                            ErrorCode::IdempotencyConflict,
+                            "this command request ID was already used for different input",
+                        ),
+                    },
+                }));
+            }
+            return Ok(Some(cached.outcome.clone()));
+        }
         let Some(attempt) = self
             .state
             .evidence
@@ -4366,45 +4435,66 @@ impl Simulation {
                 },
             }));
         }
+        Ok(Some(self.command_outcome_from_attempt(attempt)?))
+    }
+
+    fn command_outcome_from_attempt(
+        &self,
+        attempt: &CommandAttemptRecord,
+    ) -> Result<CommandOutcome, CanwuError> {
+        let request_id = attempt.request_id.ok_or_else(|| {
+            invalid_snapshot_error("tracked command attempt is missing its request ID")
+        })?;
+        let committed_revision = attempt.revision_before.checked_add(1).ok_or_else(|| {
+            invalid_snapshot_error("cached command attempt revision is exhausted")
+        })?;
         match &attempt.outcome {
             CommandAttemptOutcome::Accepted { command_id } => {
+                let retained_number = command_id
+                    .get()
+                    .checked_sub(self.state.evidence.archived.command_count)
+                    .and_then(|value| value.checked_sub(1))
+                    .ok_or_else(|| {
+                        invalid_snapshot_error(
+                            "accepted command attempt references archived command evidence",
+                        )
+                    })?;
+                let index = usize::try_from(retained_number).map_err(|_| {
+                    invalid_snapshot_error(
+                        "accepted command attempt exceeds the retained command index space",
+                    )
+                })?;
                 let record = self
                     .state
                     .evidence
                     .commands
-                    .iter()
-                    .find(|record| record.id == *command_id)
+                    .get(index)
+                    .filter(|record| record.id == *command_id)
                     .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidSnapshot,
+                        invalid_snapshot_error(
                             "accepted command attempt references a missing command",
                         )
                     })?;
-                Ok(Some(CommandOutcome::Accepted {
+                Ok(CommandOutcome::Accepted {
                     receipt: CommandReceipt {
                         attempt_id: Some(attempt.id),
                         command_id: *command_id,
                         request_id: Some(request_id),
-                        revision: attempt.revision_before + 1,
+                        revision: committed_revision,
                         accepted_at: record.accepted_at,
                         emitted_events: record.emitted_events.clone(),
                     },
-                }))
+                })
             }
-            CommandAttemptOutcome::Rejected { error } => Ok(Some(CommandOutcome::Rejected {
+            CommandAttemptOutcome::Rejected { error } => Ok(CommandOutcome::Rejected {
                 rejection: CommandRejection {
                     attempt_id: Some(attempt.id),
                     request_id: Some(request_id),
-                    retained_revision: attempt.revision_before.checked_add(1).ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidSnapshot,
-                            "cached command attempt revision is exhausted",
-                        )
-                    })?,
+                    retained_revision: committed_revision,
                     rejected_at: attempt.at,
                     error: error.clone(),
                 },
-            })),
+            }),
         }
     }
 
@@ -4712,17 +4802,10 @@ impl Simulation {
         let admitted_ingress = self.take_due_ingress(request.at);
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
         for ingress_id in &admitted_ingress {
-            let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
-                CanwuError::new(
-                    ErrorCode::InvalidSnapshot,
-                    "ingress ID exceeds the platform index range",
-                )
-            })?;
             let record = self
                 .state
                 .evidence
-                .ingress
-                .get(index)
+                .retained_ingress(*ingress_id)
                 .cloned()
                 .ok_or_else(|| {
                     CanwuError::new(
@@ -4753,28 +4836,72 @@ impl Simulation {
         request.cadences.sort();
         request.cadences.dedup();
 
-        let admitted_attempt_count = u64::try_from(self.state.evidence.command_attempts.len())
-            .map_err(|_| {
-                invalid_snapshot_error("attempt journal exceeds admission cursor range")
+        let admitted_attempt_count = self
+            .state
+            .evidence
+            .archived
+            .command_attempt_count
+            .checked_add(
+                u64::try_from(self.state.evidence.command_attempts.len()).map_err(|_| {
+                    invalid_snapshot_error("attempt journal exceeds admission cursor range")
+                })?,
+            )
+            .ok_or_else(|| invalid_snapshot_error("attempt journal cursor is exhausted"))?;
+        let admitted_command_count = self
+            .state
+            .evidence
+            .archived
+            .command_count
+            .checked_add(
+                u64::try_from(self.state.evidence.commands.len()).map_err(|_| {
+                    invalid_snapshot_error("command journal exceeds admission cursor range")
+                })?,
+            )
+            .ok_or_else(|| invalid_snapshot_error("command journal cursor is exhausted"))?;
+        let admitted_event_count = self
+            .state
+            .evidence
+            .archived
+            .event_count
+            .checked_add(
+                u64::try_from(self.state.evidence.events.len()).map_err(|_| {
+                    invalid_snapshot_error("event journal exceeds admission cursor range")
+                })?,
+            )
+            .ok_or_else(|| invalid_snapshot_error("event journal cursor is exhausted"))?;
+        let admitted_attempt_start = self
+            .state
+            .counters
+            .admitted_attempt_count
+            .checked_sub(self.state.evidence.archived.command_attempt_count)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime attempt admission cursor precedes live evidence")
             })?;
-        let admitted_command_count =
-            u64::try_from(self.state.evidence.commands.len()).map_err(|_| {
-                invalid_snapshot_error("command journal exceeds admission cursor range")
+        let admitted_attempt_start = usize::try_from(admitted_attempt_start).map_err(|_| {
+            invalid_snapshot_error("runtime attempt admission cursor exceeds platform range")
+        })?;
+        let admitted_command_start = self
+            .state
+            .counters
+            .admitted_command_count
+            .checked_sub(self.state.evidence.archived.command_count)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime command admission cursor precedes live evidence")
             })?;
-        let admitted_event_count = u64::try_from(self.state.evidence.events.len())
-            .map_err(|_| invalid_snapshot_error("event journal exceeds admission cursor range"))?;
-        let admitted_attempt_start = usize::try_from(self.state.counters.admitted_attempt_count)
-            .map_err(|_| {
-                invalid_snapshot_error("runtime attempt admission cursor exceeds platform range")
+        let admitted_command_start = usize::try_from(admitted_command_start).map_err(|_| {
+            invalid_snapshot_error("runtime command admission cursor exceeds platform range")
+        })?;
+        let admitted_event_start = self
+            .state
+            .counters
+            .admitted_event_count
+            .checked_sub(self.state.evidence.archived.event_count)
+            .ok_or_else(|| {
+                invalid_snapshot_error("runtime event admission cursor precedes live evidence")
             })?;
-        let admitted_command_start = usize::try_from(self.state.counters.admitted_command_count)
-            .map_err(|_| {
-                invalid_snapshot_error("runtime command admission cursor exceeds platform range")
-            })?;
-        let admitted_event_start = usize::try_from(self.state.counters.admitted_event_count)
-            .map_err(|_| {
-                invalid_snapshot_error("runtime event admission cursor exceeds platform range")
-            })?;
+        let admitted_event_start = usize::try_from(admitted_event_start).map_err(|_| {
+            invalid_snapshot_error("runtime event admission cursor exceeds platform range")
+        })?;
         let admitted_attempts: Vec<_> = self
             .state
             .evidence
@@ -5091,10 +5218,11 @@ impl Simulation {
             self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
         self.state.metadata.plugin_registration_closed = true;
         let state_hash = self.compute_boundary_state_hash_for(state_hash_format)?;
-        let previous_hash = self.state.evidence.boundaries.last().map_or_else(
-            || GENESIS_BOUNDARY_HASH.to_owned(),
-            |record| record.hash.clone(),
-        );
+        let previous_hash = self
+            .state
+            .evidence
+            .boundary_head_hash()
+            .map_or_else(|| GENESIS_BOUNDARY_HASH.to_owned(), str::to_owned);
         let mut record = BoundaryRecord {
             id: boundary_id,
             at: request.at,
@@ -5614,6 +5742,13 @@ impl Simulation {
                     replay_revision_format_version: snapshot.replay_revision_format_version,
                 },
                 evidence: RuntimeEvidence {
+                    archived: EvidenceCursor::default(),
+                    archived_boundary_head: None,
+                    archived_legacy_commands: false,
+                    archived_tracked_attempts: false,
+                    archived_unqueued_command_history: false,
+                    archived_command_requests: BTreeMap::new(),
+                    archived_ingress_requests: BTreeMap::new(),
                     events: snapshot.events,
                     commands: snapshot.commands,
                     command_attempts: snapshot.command_attempts,
@@ -10735,11 +10870,12 @@ fn runtime_current_entity_identity_exists(
 }
 
 fn runtime_has_unqueued_command_history(state: &RuntimeState) -> bool {
-    has_unqueued_command_history(
-        &state.evidence.commands,
-        &state.evidence.command_attempts,
-        &state.evidence.ingress,
-    )
+    state.evidence.archived_unqueued_command_history
+        || has_unqueued_command_history(
+            &state.evidence.commands,
+            &state.evidence.command_attempts,
+            &state.evidence.ingress,
+        )
 }
 
 fn has_unqueued_command_history(
@@ -10764,17 +10900,9 @@ fn has_unqueued_command_history(
 
 fn validate_runtime_cause(state: &RuntimeState, cause: &CauseRef) -> Result<(), CanwuError> {
     let valid = match cause {
-        CauseRef::Boundary(id) => state
-            .evidence
-            .boundaries
-            .iter()
-            .any(|record| record.id == *id),
-        CauseRef::Command(id) => state
-            .evidence
-            .commands
-            .iter()
-            .any(|record| record.id == *id),
-        CauseRef::Event(id) => state.evidence.events.iter().any(|event| event.id == *id),
+        CauseRef::Boundary(id) => id.get() != 0 && id.get() < state.counters.next_boundary_id,
+        CauseRef::Command(id) => id.get() != 0 && id.get() < state.counters.next_command_id,
+        CauseRef::Event(id) => id.get() != 0 && id.get() < state.counters.next_event_id,
         CauseRef::System(name) => canonical_text(name),
     };
     if valid {
@@ -13140,6 +13268,40 @@ mod tests {
                 },
                 no_op_command,
             )
+        }
+    }
+
+    fn emit_archive_probe(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::Emit {
+                event_type: "archive_probe".to_owned(),
+                summary: "Emit evidence across the archive admission frontier".to_owned(),
+                affected: vec![EntityRef::Person(PersonId::new(1))],
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    struct ArchiveEmissionPlugin;
+
+    impl SimulationPlugin for ArchiveEmissionPlugin {
+        fn name(&self) -> &'static str {
+            "archive-emission"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000031");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            let mut contract = BoundarySystemContract::new(
+                "emit",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            contract.emits = vec!["archive_probe".to_owned()];
+            registrar.register_boundary_system(contract, emit_archive_probe)
         }
     }
 
@@ -16579,6 +16741,198 @@ mod tests {
         let empty_restored = Simulation::from_checkpoint_journal(empty_bundle)
             .expect("an empty journal prefix should restore without a synthetic segment");
         assert_eq!(empty_restored.snapshot(), empty.snapshot());
+    }
+
+    #[test]
+    fn compacted_live_journals_preserve_continuation_idempotency_and_exact_replay() {
+        let (scenario, _) = demo_scenario();
+        let plugins: &[&dyn SimulationPlugin] = &[&JournalCommandPlugin];
+        let command = |request_id, revision| {
+            CommandRequest::new(
+                CommandRequestId::new(request_id),
+                revision,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::Plugin {
+                        plugin: "journal-command".to_owned(),
+                        command: "noop".to_owned(),
+                        payload: Value::Null,
+                    },
+                ),
+            )
+        };
+
+        let mut simulation =
+            Simulation::new(41, scenario.clone()).expect("compact fixture should load");
+        simulation
+            .register_plugin(&JournalCommandPlugin)
+            .expect("compact fixture plugin should register");
+        let first_request = command(1, 0);
+        let first_ingress = simulation
+            .enqueue_command(SimTime::EPOCH, 0, first_request.clone())
+            .expect("the first compact fixture command should queue");
+        simulation
+            .step_canonical()
+            .expect("the first compact fixture boundary should settle")
+            .expect("queued work should produce a boundary");
+        let first_hash = simulation.checkpoint_hash().to_owned();
+        let first_cursor = simulation
+            .evidence_cursor()
+            .expect("the first compact cursor should be representable");
+
+        let mut compact = simulation
+            .into_compacted()
+            .expect("the complete runtime should enter compact mode");
+        let first_segment = compact
+            .seal_evidence()
+            .expect("the first live tail should seal")
+            .expect("the first live tail should contain evidence");
+        assert_eq!(first_segment.start, EvidenceCursor::default());
+        assert_eq!(first_segment.end, first_cursor);
+        assert_eq!(compact.checkpoint_hash(), first_hash);
+        assert_eq!(
+            compact
+                .enqueue_command(SimTime::EPOCH, 0, first_request.clone())
+                .expect("an archived ingress retry should remain idempotent"),
+            first_ingress
+        );
+
+        let second_request = command(2, compact.revision());
+        compact
+            .enqueue_command(SimTime::EPOCH, 0, second_request)
+            .expect("a new request should queue after sealing");
+        compact
+            .step_canonical()
+            .expect("continuation after sealing should settle")
+            .expect("the new request should produce a boundary");
+        let second_segment = compact
+            .seal_evidence()
+            .expect("the continuation tail should seal")
+            .expect("the continuation tail should contain evidence");
+        assert_eq!(second_segment.start, first_cursor);
+        assert_eq!(second_segment.end, compact.evidence_cursor().unwrap());
+        assert!(
+            compact
+                .checkpoint()
+                .expect("compacted current state should checkpoint")
+                .state
+                .events
+                .is_empty()
+        );
+
+        compact
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect("calendar work should remain available after compaction");
+        compact
+            .step_canonical()
+            .expect("calendar continuation should settle")
+            .expect("scheduled calendar work should produce a boundary");
+        let calendar_segment = compact
+            .seal_evidence()
+            .expect("calendar continuation evidence should seal")
+            .expect("calendar continuation should produce a segment");
+        assert_eq!(calendar_segment.start, second_segment.end);
+
+        let segments = vec![
+            first_segment.clone(),
+            second_segment.clone(),
+            calendar_segment.clone(),
+        ];
+        let snapshot = compact
+            .snapshot_with_segments(segments.clone())
+            .expect("the external archive should reconstruct a full snapshot");
+        let restored = Simulation::from_snapshot_with_plugins(snapshot.clone(), plugins)
+            .expect("the reconstructed snapshot should continue with exact plugins");
+        assert_eq!(restored.snapshot(), snapshot);
+        let replayed = Simulation::replay_from_journal(
+            scenario.clone(),
+            plugins,
+            &compact
+                .replay_journal_with_segments(segments.clone())
+                .expect("the external archive should produce an exact replay journal"),
+        )
+        .expect("the compact archive should replay exactly");
+        assert_eq!(replayed.snapshot(), snapshot);
+
+        let mut tampered = segments;
+        tampered[0].commands[0].envelope.expected_time = Some(SimTime::from_minutes(1));
+        let error = compact
+            .snapshot_with_segments(tampered)
+            .expect_err("tampered sealed evidence must fail checkpoint validation");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut emitting =
+            Simulation::new(42, scenario.clone()).expect("emitting compact fixture should load");
+        emitting
+            .register_plugin(&ArchiveEmissionPlugin)
+            .expect("emitting compact fixture plugin should register");
+        emitting
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("the emitting boundary should settle");
+        let mut emitting = emitting
+            .into_compacted()
+            .expect("the emitting runtime should enter compact mode");
+        let error = emitting
+            .seal_evidence()
+            .expect_err("new boundary emissions remain pending admission");
+        assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+        emitting
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("a later boundary should admit the emitted event");
+        let first_emitting_segment = emitting
+            .seal_evidence()
+            .expect("admitted emitting evidence should seal")
+            .expect("admitted emitting evidence should produce a segment");
+        emitting
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("an emitting runtime should continue after sealing");
+        let error = emitting
+            .seal_evidence()
+            .expect_err("the new emission should retain the admission frontier");
+        assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+        emitting
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("the next boundary should admit the second emission");
+        let second_emitting_segment = emitting
+            .seal_evidence()
+            .expect("the second admitted tail should seal")
+            .expect("the second admitted tail should produce a segment");
+        assert_eq!(second_emitting_segment.start, first_emitting_segment.end);
+        emitting
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("post-seal continuation should preserve the event cursor");
+
+        let mut direct = Simulation::new(43, scenario).expect("direct compact fixture should load");
+        direct
+            .register_plugin(&JournalCommandPlugin)
+            .expect("direct compact fixture plugin should register");
+        let direct_request = command(11, 0);
+        let direct_outcome = direct
+            .process_command(direct_request.clone())
+            .expect("the direct request should commit");
+        let revision = direct.revision();
+        let mut direct = direct
+            .into_compacted()
+            .expect("the direct runtime should enter compact mode");
+        let error = direct
+            .seal_evidence()
+            .expect_err("unsettled command evidence should remain retained");
+        assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+        assert_eq!(direct.revision(), revision);
+        direct
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("the retained direct command should settle");
+        direct
+            .seal_evidence()
+            .expect("settled direct evidence should seal")
+            .expect("settled direct evidence should be returned");
+        assert_eq!(
+            direct
+                .process_command(direct_request)
+                .expect("an archived direct request retry should stay exact"),
+            direct_outcome
+        );
+        assert_eq!(direct.revision(), revision + 1);
     }
 
     #[test]

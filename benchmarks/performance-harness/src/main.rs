@@ -399,6 +399,61 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Canwu::replay_from_journal(scenario.clone(), &[&ProfilePlugin], journal)
             },
         )?;
+        let live_archive_seal = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || prepare_live_archive(&snapshot_json).map(Some),
+            |simulation| {
+                let simulation = simulation
+                    .take()
+                    .ok_or_else(|| benchmark_error("live archive setup was already consumed"))?;
+                let mut compact = simulation.into_compacted()?;
+                let segment = compact
+                    .seal_evidence()?
+                    .ok_or_else(|| benchmark_error("populated live evidence tail was empty"))?;
+                Ok((compact, segment))
+            },
+        )?;
+        let live_archive_segment_release = measure_case(
+            options.mode,
+            options.warmup,
+            options.samples,
+            || {
+                let mut compact = prepare_live_archive(&snapshot_json)?.into_compacted()?;
+                let segment = compact
+                    .seal_evidence()?
+                    .ok_or_else(|| benchmark_error("populated live evidence tail was empty"))?;
+                Ok((compact, Some(segment)))
+            },
+            |(_, segment)| {
+                drop(segment.take().ok_or_else(|| {
+                    benchmark_error("live archive segment setup was already consumed")
+                })?);
+                Ok::<(), CanwuError>(())
+            },
+        )?;
+        let live_archive_cycle_growth = measure_case(
+            options.mode,
+            options.warmup,
+            options.growth_samples,
+            || Ok(()),
+            |_| build_compacted_growth(scale),
+        )?;
+        let live_archive_repeated_seal = measure_case(
+            options.mode,
+            options.warmup,
+            options.growth_samples,
+            || Ok(()),
+            |_| build_repeated_seal_fixture(scale),
+        )?;
+        let mut compact_storage = prepare_live_archive(&snapshot_json)?.into_compacted()?;
+        let compact_segment = compact_storage
+            .seal_evidence()?
+            .ok_or_else(|| benchmark_error("populated live evidence tail was empty"))?;
+        let compact_checkpoint = compact_storage.checkpoint()?;
+        let compact_checkpoint_json = serde_json::to_string_pretty(&compact_checkpoint)?;
+        let compact_segment_json = serde_json::to_string_pretty(&compact_segment)?;
 
         scale_reports.push(json!({
             "scale": scale,
@@ -407,6 +462,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "current_state_checkpoint_bytes": checkpoint_json.len(),
                 "full_journal_segment_bytes": full_segment_json.len(),
                 "full_checkpoint_journal_bytes": checkpoint_journal_json.len(),
+                "compacted_current_checkpoint_bytes": compact_checkpoint_json.len(),
+                "released_archive_segment_bytes": compact_segment_json.len(),
             },
             "cases": [
                 case_json("history_growth", &growth, options.mode),
@@ -422,6 +479,14 @@ fn main() -> Result<(), Box<dyn Error>> {
                 case_json("journal_segment_empty_tail", &empty_journal_segment, options.mode),
                 case_json("snapshot_load_validate", &snapshot_load_validate, options.mode),
                 case_json("exact_replay", &exact_replay, options.mode),
+                case_json("live_archive_seal", &live_archive_seal, options.mode),
+                case_json(
+                    "live_archive_segment_release",
+                    &live_archive_segment_release,
+                    options.mode,
+                ),
+                case_json("live_archive_cycle_growth", &live_archive_cycle_growth, options.mode),
+                case_json("live_archive_repeated_seal", &live_archive_repeated_seal, options.mode),
             ],
         }));
     }
@@ -472,6 +537,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn restore(snapshot_json: &str) -> Result<Canwu, CanwuError> {
     Canwu::from_snapshot_json_with_plugins(snapshot_json, &[&ProfilePlugin])
+}
+
+fn prepare_live_archive(snapshot_json: &str) -> Result<Canwu, CanwuError> {
+    let mut simulation = restore(snapshot_json)?;
+    simulation.settle_boundary(BoundaryRequest::at(simulation.time()))?;
+    Ok(simulation)
 }
 
 fn benchmark_error(message: &str) -> CanwuError {
@@ -534,6 +605,101 @@ fn build_growth_fixture(scale: usize) -> Result<GrowthFixture, Box<dyn Error>> {
         simulation,
         scenario,
     })
+}
+
+fn build_compacted_growth(scale: usize) -> Result<(), Box<dyn Error>> {
+    let scenario = profile_scenario(scale)?;
+    let mut simulation = Canwu::new(PROFILE_SEED, scenario)?;
+    simulation.register_plugin(&ProfilePlugin)?;
+    let mut simulation = simulation.into_compacted()?;
+    for index in 0..scale {
+        let accepted_id = checked_u64(
+            index
+                .checked_mul(2)
+                .and_then(|value| value.checked_add(1))
+                .ok_or("accepted request ID overflow")?,
+            "request ID",
+        )?;
+        let rejected_id = checked_u64(
+            index
+                .checked_mul(2)
+                .and_then(|value| value.checked_add(2))
+                .ok_or("rejected request ID overflow")?,
+            "request ID",
+        )?;
+        let army = ArmyId::new(checked_u64(
+            index.checked_add(1).ok_or("army ID overflow")?,
+            "army ID",
+        )?);
+        let accepted = simulation.process_command(CommandRequest::new(
+            CommandRequestId::new(accepted_id),
+            simulation.revision(),
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army,
+                    morale: u16::try_from(index % 101)?,
+                },
+            ),
+        ))?;
+        if !matches!(accepted, CommandOutcome::Accepted { .. }) {
+            return Err(format!("compacted accepted command {index} was rejected").into());
+        }
+        let rejected = simulation.process_command(CommandRequest::new(
+            CommandRequestId::new(rejected_id),
+            simulation.revision(),
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale { army, morale: 101 },
+            ),
+        ))?;
+        if !matches!(rejected, CommandOutcome::Rejected { .. }) {
+            return Err(format!("compacted rejected command {index} was accepted").into());
+        }
+        simulation.settle_boundary(
+            BoundaryRequest::at(simulation.time()).with_cadence(SystemCadence::Daily),
+        )?;
+        simulation.settle_boundary(BoundaryRequest::at(simulation.time()))?;
+        let segment = simulation
+            .seal_evidence()?
+            .ok_or_else(|| benchmark_error("compacted growth tail was empty"))?;
+        black_box(&segment);
+        drop(segment);
+    }
+    Ok(())
+}
+
+fn build_repeated_seal_fixture(scale: usize) -> Result<(), Box<dyn Error>> {
+    let scenario = profile_scenario(1)?;
+    let simulation = Canwu::new(PROFILE_SEED, scenario)?;
+    let mut simulation = simulation.into_compacted()?;
+    for index in 0..scale {
+        let request_id = checked_u64(
+            index.checked_add(1).ok_or("request ID overflow")?,
+            "request ID",
+        )?;
+        let outcome = simulation.process_command(CommandRequest::new(
+            CommandRequestId::new(request_id),
+            simulation.revision(),
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ArmyId::new(1),
+                    morale: u16::try_from(index % 101)?,
+                },
+            ),
+        ))?;
+        if !matches!(outcome, CommandOutcome::Accepted { .. }) {
+            return Err(format!("repeated-seal command {index} was rejected").into());
+        }
+        simulation.settle_boundary(BoundaryRequest::at(simulation.time()))?;
+        let segment = simulation
+            .seal_evidence()?
+            .ok_or_else(|| benchmark_error("repeated-seal tail was empty"))?;
+        black_box(&segment);
+        drop(segment);
+    }
+    Ok(())
 }
 
 fn profile_scenario(scale: usize) -> Result<Scenario, Box<dyn Error>> {
@@ -767,6 +933,13 @@ fn case_json(name: &str, measurements: &CaseMeasurements, mode: MetricMode) -> V
                 .iter()
                 .map(|sample| sample.allocated_bytes)
                 .collect();
+            let net_retained_bytes_delta: Vec<_> = measurements
+                .allocations
+                .iter()
+                .map(|sample| {
+                    i128::from(sample.allocated_bytes) - i128::from(sample.deallocated_bytes)
+                })
+                .collect();
             json!({
                 "name": name,
                 "summary": {
@@ -774,6 +947,7 @@ fn case_json(name: &str, measurements: &CaseMeasurements, mode: MetricMode) -> V
                     "realloc_calls_median": median(&realloc_calls),
                     "allocation_operations_median": median(&allocation_operations),
                     "allocated_bytes_median": median(&allocated_bytes),
+                    "net_retained_bytes_delta_median": median_i128(&net_retained_bytes_delta),
                 },
                 "allocation_samples": measurements.allocations.iter().map(|sample| json!({
                     "alloc_calls": sample.alloc_calls,
@@ -782,6 +956,7 @@ fn case_json(name: &str, measurements: &CaseMeasurements, mode: MetricMode) -> V
                     "dealloc_calls": sample.dealloc_calls,
                     "allocated_bytes": sample.allocated_bytes,
                     "deallocated_bytes": sample.deallocated_bytes,
+                    "net_retained_bytes_delta": i128::from(sample.allocated_bytes) - i128::from(sample.deallocated_bytes),
                 })).collect::<Vec<_>>(),
             })
         }
@@ -814,6 +989,12 @@ fn history_json(
 }
 
 fn median(values: &[u64]) -> u64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).copied().unwrap_or(0)
+}
+
+fn median_i128(values: &[i128]) -> i128 {
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
     sorted.get(sorted.len() / 2).copied().unwrap_or(0)

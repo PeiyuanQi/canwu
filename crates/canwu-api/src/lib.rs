@@ -19,13 +19,13 @@ pub use canwu_sim::{
     COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal, Command, CommandAttemptOutcome,
     CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope, CommandIngress,
     CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection,
-    CommandRequest, CommitmentRoots, ControllerPolicy, DecisionOrigin, DemoIds, DomainRecord,
-    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
-    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
-    ErrorCode, EvidenceCursor, EvidenceJournalSegment, IngressClass, IngressPayload,
-    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, ObservationPolicy, PayloadProperty,
-    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
+    CommandRequest, CommitmentRoots, CompactedSimulation, ControllerPolicy, DecisionOrigin,
+    DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft,
+    DomainRecordLifecycle, DomainRecordMutation, DomainRecordOperation, DomainRecordSchema,
+    DomainReference, DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
+    ENGINE_VERSION, ErrorCode, EvidenceCursor, EvidenceJournalSegment, IngressClass,
+    IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy, Issuer, ObservationPolicy,
+    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
     PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
     PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm,
     RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RandomStreamState,
@@ -52,6 +52,11 @@ pub struct Canwu {
     simulation: Simulation,
 }
 
+/// Public facade for a live runtime whose sealed evidence segments are stored by the caller.
+pub struct CompactedCanwu {
+    simulation: CompactedSimulation,
+}
+
 impl Canwu {
     #[must_use]
     pub const fn version() -> &'static str {
@@ -61,6 +66,13 @@ impl Canwu {
     pub fn new(seed: u64, scenario: Scenario) -> Result<Self, CanwuError> {
         Ok(Self {
             simulation: Simulation::new(seed, scenario)?,
+        })
+    }
+
+    /// Enters the explicit compact-journal interface without discarding evidence.
+    pub fn into_compacted(self) -> Result<CompactedCanwu, CanwuError> {
+        Ok(CompactedCanwu {
+            simulation: self.simulation.into_compacted()?,
         })
     }
 
@@ -852,6 +864,142 @@ impl Canwu {
     }
 }
 
+impl CompactedCanwu {
+    pub fn from_checkpoint_and_journal(
+        checkpoint: SimulationCheckpoint,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_checkpoint_and_journal(checkpoint, segments)?,
+        })
+    }
+
+    pub fn from_checkpoint_and_journal_with_plugins(
+        checkpoint: SimulationCheckpoint,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+                checkpoint, segments, plugins,
+            )?,
+        })
+    }
+
+    pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
+        self.simulation.evidence_cursor()
+    }
+
+    pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
+        self.simulation.checkpoint()
+    }
+
+    pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
+        self.simulation.seal_evidence()
+    }
+
+    pub fn snapshot_with_segments(
+        &self,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<SimulationSnapshot, CanwuError> {
+        self.simulation.snapshot_with_segments(segments)
+    }
+
+    pub fn replay_journal_with_segments(
+        &self,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<ReplayJournal, CanwuError> {
+        self.simulation.replay_journal_with_segments(segments)
+    }
+
+    #[must_use]
+    pub const fn time(&self) -> SimTime {
+        self.simulation.time()
+    }
+
+    #[must_use]
+    pub const fn revision(&self) -> u64 {
+        self.simulation.revision()
+    }
+
+    #[must_use]
+    pub fn checkpoint_hash(&self) -> &str {
+        self.simulation.checkpoint_hash()
+    }
+
+    #[must_use]
+    pub fn boundary_head_hash(&self) -> Option<&str> {
+        self.simulation.boundary_head_hash()
+    }
+
+    #[must_use]
+    pub fn world(&self) -> WorldSnapshot {
+        self.simulation.world()
+    }
+
+    #[must_use]
+    pub fn knowledge(&self) -> &KnowledgeSnapshot {
+        self.simulation.knowledge()
+    }
+
+    pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
+        self.simulation.submit(envelope)
+    }
+
+    pub fn process_command(
+        &mut self,
+        request: CommandRequest,
+    ) -> Result<CommandOutcome, CanwuError> {
+        self.simulation.process_command(request)
+    }
+
+    pub fn enqueue_command(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: CommandRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_command(due_at, priority, request)
+    }
+
+    pub fn enqueue_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn schedule_calendar_boundary(
+        &mut self,
+        due_at: SimTime,
+        cadences: Vec<SystemCadence>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.schedule_calendar_boundary(due_at, cadences)
+    }
+
+    pub fn advance(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
+        self.simulation.advance(duration)
+    }
+
+    pub fn advance_canonical(
+        &mut self,
+        duration: SimDuration,
+    ) -> Result<Vec<BoundaryReceipt>, CanwuError> {
+        self.simulation.advance_canonical(duration)
+    }
+
+    pub fn step_canonical(&mut self) -> Result<Option<BoundaryReceipt>, CanwuError> {
+        self.simulation.step_canonical()
+    }
+
+    pub fn settle_boundary(
+        &mut self,
+        request: BoundaryRequest,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        self.simulation.settle_boundary(request)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueryEntity {
@@ -1347,5 +1495,35 @@ mod tests {
         let restored = Canwu::from_checkpoint_journal_json(&json)
             .expect("checkpoint journal should restore through the public facade");
         assert_eq!(restored.snapshot(), canwu.snapshot());
+
+        canwu
+            .settle_boundary(BoundaryRequest::at(canwu.time()))
+            .expect("a public boundary should complete the live evidence tail");
+        let expected = canwu.snapshot();
+        let mut compact = canwu
+            .into_compacted()
+            .expect("the public facade should enter compact mode");
+        let segment = compact
+            .seal_evidence()
+            .expect("the public compact facade should seal evidence")
+            .expect("the public compact facade should return a segment");
+        let compact_checkpoint = compact
+            .checkpoint()
+            .expect("the public compact facade should checkpoint");
+        assert_eq!(
+            compact
+                .snapshot_with_segments(vec![segment.clone()])
+                .expect("the public compact facade should reconstruct its snapshot"),
+            expected
+        );
+        let restored_compact =
+            CompactedCanwu::from_checkpoint_and_journal(compact_checkpoint, vec![segment])
+                .expect("the public compact facade should restore from its archive");
+        assert_eq!(
+            restored_compact
+                .snapshot_with_segments(Vec::new())
+                .expect("the restored compact facade should retain validated evidence"),
+            expected
+        );
     }
 }

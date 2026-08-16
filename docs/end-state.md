@@ -45,9 +45,12 @@ snapshot also retains plugin descriptors and blocks continuation until matching
 stateless executable handlers are rehydrated. It can be forked into independent
 simulations. Current-state checkpoints and contiguous evidence-journal segments
 provide incremental persistence without changing the flat snapshot contract.
+The opt-in compact runtime can seal completed live tails into caller-owned
+segments while preserving continuation, exact idempotency, commitments, and
+reconstruction through that same contract.
 Future work may add:
 
-- content-addressed sealed segments and live archive/compaction
+- content-addressed archive adapters and indexed historical lookup
 - replay from command/event journals
 - branch metadata and lineage
 - world and outcome comparison across branches

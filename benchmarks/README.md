@@ -15,14 +15,19 @@ scoped random draws together. It measures:
 - one empty and one populated boundary;
 - snapshot creation and pretty JSON serialization;
 - snapshot JSON loading plus full validation; and
-- environment-bound exact replay.
+- environment-bound exact replay;
+- explicit live evidence sealing and hot-state release.
 
 Elapsed time and allocation traffic are collected in separate release builds.
 Elapsed mode uses Rust's default system allocator with no counting wrapper.
 Allocation mode enables a thread-local counting allocator and does not report
 wall time. Both reports keep raw samples and summary medians; setup and
 post-measurement drops are outside each sample. Snapshot byte size and exact
-history counts are recorded beside every scale.
+history counts are recorded beside every scale. Allocation reports also record
+the signed difference between bytes allocated and deallocated during each
+operation. Separate live-archive cases measure the sealing API and destruction
+of its returned segment, keeping API latency distinct from caller-owned archive
+release.
 
 Run it from the repository root with an optimized build:
 
@@ -498,3 +503,49 @@ The allocation evidence identifies two distinct growth classes:
 
 Those observations establish optimization targets; they do not change any
 runtime contract or claim that one subsystem alone is the cause.
+
+## Live journal archival comparison
+
+The explicit live-archive milestone is recorded in frozen-source before reports
+for [`elapsed`](baselines/2026-08-16-live-archive-before-elapsed.json) and
+[`allocations`](baselines/2026-08-16-live-archive-before-allocations.json), plus
+the implementation reports for
+[`elapsed`](baselines/2026-08-16-live-archive-after-elapsed.json) and
+[`allocations`](baselines/2026-08-16-live-archive-after-allocations.json).
+`CompactedCanwu::seal_evidence` moves a fully settled live tail into one
+caller-owned contiguous segment, retains compact idempotency commitments and
+outcomes, and continues from the same global cursors and incremental roots.
+
+At scale 512, sealing 513 completed boundaries, 512 accepted commands, 1,024
+attempts, 1,536 admitted events, 512 random draws, and their ingress evidence
+takes 0.582 ms and 3,628 allocation operations. The API call allocates 876,856
+bytes for compact continuation indexes and retains a net 349,592 bytes across
+the compact runtime plus returned segment. Releasing that caller-owned segment
+is measured separately at 0.233 ms, performs zero allocation operations, and
+changes retained bytes by -3,339,747; together the two operations change
+retained bytes by -2,990,155. The segment serializes to 2,684,578 bytes; the
+current-state checkpoint remains 500,496 bytes. Sealing moves the existing
+journal buffers into the segment, so the handoff itself does not clone the full
+evidence payload. Outcome reconstruction indexes each retained attempt directly
+from the monotonic command cursor. From scale 128 to 512, a single seal grows
+from 0.156 to 0.582 ms (3.73x) and from 975 to 3,628 allocation operations
+(3.72x) for four times as much retained evidence.
+
+The ordinary full-history runtime paths keep identical allocation-operation
+counts before and after at every scale. At scale 512, history growth changes
+from 517.318 to 513.184 ms, exact replay from 522.558 to 520.223 ms, and load
+validation from 17.413 to 16.450 ms. Individual command, boundary, and snapshot
+medians move within local sub-millisecond timing noise. Compaction is opt-in;
+the existing flat snapshot, full-history slice, and replay-journal APIs retain
+their prior behavior.
+
+The isolated repeated-seal workload uses one fixed entity, admits one command
+at one boundary, and seals after every cycle. From scale 128 to 512, elapsed
+time grows from 5.538 to 22.552 ms (4.07x) and allocation operations from
+50,203 to 200,026 (3.98x) for four times as many cycles. This is an observed
+near-linear cumulative curve across the measured range; each seal hashes and
+inserts only its new request entries into ordered continuation indexes. The
+broader compacted growth workload still grows superlinearly because it
+intentionally retains the original workload's expanding entity/component state
+and adds an admission boundary per cycle; the isolated result separates that
+existing current-state cost from archive-index maintenance.
