@@ -3136,6 +3136,38 @@ impl RejectionTransactionCheckpoint {
     }
 }
 
+struct IngressTransactionCheckpoint {
+    next_ingress_id: u64,
+    ingress_count: usize,
+    plugin_registration_closed: bool,
+    checkpoint_hash: String,
+    commitment_roots: Option<CommitmentRoots>,
+    commitment_cache: Option<RuntimeCommitmentCache>,
+}
+
+impl IngressTransactionCheckpoint {
+    fn capture(state: &RuntimeState) -> Self {
+        Self {
+            next_ingress_id: state.counters.next_ingress_id,
+            ingress_count: state.evidence.ingress.len(),
+            plugin_registration_closed: state.metadata.plugin_registration_closed,
+            checkpoint_hash: state.metadata.checkpoint_hash.clone(),
+            commitment_roots: state.metadata.commitment_roots.clone(),
+            commitment_cache: state.metadata.commitment_cache.clone(),
+        }
+    }
+
+    fn restore(self, state: &mut RuntimeState, queue_key: &IngressQueueKey) {
+        state.counters.next_ingress_id = self.next_ingress_id;
+        state.scheduler.pending_ingress.remove(queue_key);
+        state.evidence.ingress.truncate(self.ingress_count);
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
 struct CommandTransactionCheckpoint {
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
@@ -4589,7 +4621,7 @@ impl Simulation {
                 ),
             ));
         }
-        let transaction_start = self.state.clone();
+        let transaction = IngressTransactionCheckpoint::capture(&self.state);
         let (id, next_id) = claim_counter(self.state.counters.next_ingress_id, "ingress ID")?;
         let boundary_count = u64::try_from(self.state.evidence.boundaries.len()).map_err(|_| {
             CanwuError::new(
@@ -4617,15 +4649,13 @@ impl Simulation {
             payload,
             cause,
         };
+        let queue_key = IngressQueueKey::from_record(&record);
         self.state.counters.next_ingress_id = next_id;
-        self.state
-            .scheduler
-            .pending_ingress
-            .insert(IngressQueueKey::from_record(&record));
+        self.state.scheduler.pending_ingress.insert(queue_key);
         self.state.evidence.ingress.push(record.clone());
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {
-            self.state = transaction_start;
+            transaction.restore(&mut self.state, &queue_key);
             return Err(error);
         }
         Ok(IngressReceipt {
@@ -16542,6 +16572,57 @@ mod tests {
             Some(
                 snapshot_commitment_roots(&snapshot)
                     .expect("the repaired rejection should independently reproduce its roots")
+            )
+        );
+    }
+
+    #[test]
+    fn ingress_transaction_restores_queue_and_private_commitments_after_hash_failure() {
+        let (scenario, _) = demo_scenario();
+        let mut simulation =
+            Simulation::new(108, scenario).expect("ingress rollback fixture should load");
+        let before = simulation.snapshot();
+        simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_mut()
+            .expect("current runtimes should maintain a commitment cache")
+            .ingress
+            .len = 2;
+        let cache_before = cache_fingerprint(&simulation);
+
+        let error = simulation
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect_err("a fatal commitment-cache mismatch must abort ingress insertion");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert_eq!(simulation.snapshot(), before);
+        assert_eq!(cache_fingerprint(&simulation), cache_before);
+        let restored_cache = simulation
+            .state
+            .metadata
+            .commitment_cache
+            .as_ref()
+            .expect("rollback should restore the private cache");
+        assert_eq!(restored_cache.ingress.len, 2);
+        assert!(simulation.ingress_log().is_empty());
+        assert!(simulation.state.scheduler.pending_ingress.is_empty());
+        assert_eq!(simulation.state.counters.next_ingress_id, 1);
+
+        simulation.state.metadata.commitment_cache = None;
+        simulation
+            .refresh_checkpoint_hash()
+            .expect("discarding the injected corrupt cache should rebuild it from evidence");
+        let receipt = simulation
+            .schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])
+            .expect("the repaired runtime should queue the same calendar boundary");
+        assert_eq!(receipt.ingress_id, IngressId::new(1));
+        let snapshot = simulation.snapshot();
+        assert_eq!(
+            snapshot.commitment_roots,
+            Some(
+                snapshot_commitment_roots(&snapshot)
+                    .expect("the repaired ingress should independently reproduce its roots")
             )
         );
     }

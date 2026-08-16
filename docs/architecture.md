@@ -272,14 +272,15 @@ domains. Commands capture armies, actor knowledge, plugin components, scheduled
 actions, counters, the event/command/attempt tails, registration state, and
 commitments. Boundaries additionally capture generic records, random streams,
 the complete scheduler and ingress queue, and every append-only journal cut.
-Neither rollback checkpoint clones immutable core maps or accumulated journal
-contents. Phased settlement still takes a separate full-state snapshot for
-stable early-phase reads, so a boundary retains one linear-in-history clone
-until that read view is replaced. When an expected rejection is detected before
-mutable command application, its evidence transaction is narrower again: it
-preflights identifiers and revision, then checkpoints only the attempt tail,
-affected counters and registration flag, commitment cache and roots, and
-checkpoint hash.
+Ingress insertion checkpoints only its next identifier, evidence tail, exact
+pending-queue entry, registration state, and commitments. None of these rollback
+checkpoints clones immutable core maps or unrelated accumulated journals. Phased
+settlement still takes a separate full-state snapshot for stable early-phase
+reads, so a boundary retains one linear-in-history clone until that read view is
+replaced. When an expected rejection is detected before mutable command
+application, its evidence transaction is narrower again: it preflights
+identifiers and revision, then checkpoints only the attempt tail, affected
+counters and registration flag, commitment cache and roots, and checkpoint hash.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,

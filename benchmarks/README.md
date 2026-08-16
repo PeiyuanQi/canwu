@@ -331,6 +331,22 @@ retain identical allocation counts. History construction elapsed time changes
 by -0.1%, within normal local measurement noise, and snapshot size remains
 3,139,624 bytes.
 
+## Staged ingress-transaction comparison
+
+The ingress-insertion rollback replacement is recorded in separate
+[`elapsed`](baselines/2026-08-16-staged-ingress-transaction-elapsed.json) and
+[`allocation`](baselines/2026-08-16-staged-ingress-transaction-allocations.json)
+reports, using the staged scheduled transaction as its before baseline. A failed
+append now restores only the ingress identifier, evidence tail, exact pending
+queue entry, registration state, and commitments.
+
+The current growth fixture records zero ingress entries at every scale, so this
+report does not claim an ingress-path speedup. Every allocation summary is
+exactly identical to the before report, checkpoint hashes and snapshot sizes are
+unchanged, and elapsed differences are treated as local measurement noise. A
+future harness extension must add growing populated ingress history before
+quantifying this path directly.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
