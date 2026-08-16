@@ -275,12 +275,15 @@ the complete scheduler and ingress queue, and every append-only journal cut.
 Ingress insertion checkpoints only its next identifier, evidence tail, exact
 pending-queue entry, registration state, and commitments. None of these rollback
 checkpoints clones immutable core maps or unrelated accumulated journals. Phased
-settlement still takes a separate full-state snapshot for stable early-phase
-reads, so a boundary retains one linear-in-history clone until that read view is
-replaced. When an expected rejection is detected before mutable command
-application, its evidence transaction is narrower again: it preflights
-identifiers and revision, then checkpoints only the attempt tail, affected
-counters and registration flag, commitment cache and roots, and checkpoint hash.
+settlement now snapshots only current authoritative state for stable early-phase
+reads; each system view borrows command, event, and ingress evidence for the
+duration of its handler call. Later phases read the committed current state, so
+same-boundary visibility remains unchanged without duplicating accumulated
+history, scheduler, counters, or metadata. When an expected rejection is
+detected before mutable command application, its evidence transaction is
+narrower again: it preflights identifiers and revision, then checkpoints only
+the attempt tail, affected counters and registration flag, commitment cache and
+roots, and checkpoint hash.
 
 Every current snapshot stores commitment format 1 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,

@@ -347,17 +347,38 @@ unchanged, and elapsed differences are treated as local measurement noise. A
 future harness extension must add growing populated ingress history before
 quantifying this path directly.
 
+## Boundary read-view comparison
+
+The boundary phase-read replacement is recorded in separate
+[`elapsed`](baselines/2026-08-16-boundary-read-view-elapsed.json) and
+[`allocation`](baselines/2026-08-16-boundary-read-view-allocations.json) reports,
+using the staged ingress transaction as its before baseline. Early phases now
+snapshot only current authoritative state and borrow evidence during each
+handler call instead of cloning the complete runtime and its accumulated
+journals.
+
+At scale 512, empty boundaries fall from 3.455 ms to 2.273 ms (-34.2%) and
+populated boundaries from 3.832 ms to 2.757 ms (-28.1%). Each removes 20,515
+allocation operations and 2,107,225 requested bytes. History growth falls from
+1,372.994 ms to 1,053.365 ms (-23.3%) and exact replay from 1,370.399 ms to
+1,039.289 ms (-24.2%). Each end-to-end path removes 6,567,422 allocation
+operations and 620,677,980 requested bytes. Command, rejection, snapshot,
+serialization, and load-validation allocation counts are unchanged, and
+snapshot size remains 3,139,624 bytes.
+
 The allocation evidence identifies two distinct growth classes:
 
-- A fourfold increase from scale 128 to 512 makes accepted/rejected commands,
-  individual boundaries, snapshot creation, and snapshot loading request about
-  four times as many allocation operations. These operations are linear in
-  retained history in the current implementation.
+- A fourfold increase from scale 128 to 512 makes accepted commands, individual
+  boundaries, snapshot creation, and snapshot loading request about four times
+  as many allocation operations. These operations are linear in retained
+  history in the current implementation. Rejected commands remain at 69
+  allocation operations while requested bytes grow from 242,903 to 943,319,
+  showing a separate retained-capacity cost rather than operation-count growth.
 - The same increase makes end-to-end history construction and exact replay
   request about sixteen times as many allocation operations and take about
-  fifteen times as long. At scale 512, growth requested 18,323,235 allocation
-  operations and 2,972,632,361 bytes; replay requested 18,388,837 operations and
-  2,981,522,168 bytes. These paths still exhibit approximately
+  fifteen times as long. At scale 512, growth requested 11,755,813 allocation
+  operations and 2,351,954,381 bytes; replay requested 11,821,415 operations and
+  2,360,844,188 bytes. These paths still exhibit approximately
   quadratic growth.
 
 Those observations establish optimization targets; they do not change any

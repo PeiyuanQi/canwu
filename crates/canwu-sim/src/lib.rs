@@ -797,8 +797,40 @@ pub enum SystemDirective {
     },
 }
 
+enum SimulationViewState<'a> {
+    Runtime(&'a RuntimeState),
+    Boundary {
+        current: &'a RuntimeCurrentState,
+        now: SimTime,
+        evidence: &'a RuntimeEvidence,
+    },
+}
+
+impl SimulationViewState<'_> {
+    const fn current(&self) -> &RuntimeCurrentState {
+        match self {
+            Self::Runtime(state) => &state.current,
+            Self::Boundary { current, .. } => current,
+        }
+    }
+
+    const fn now(&self) -> SimTime {
+        match self {
+            Self::Runtime(state) => state.scheduler.now,
+            Self::Boundary { now, .. } => *now,
+        }
+    }
+
+    const fn evidence(&self) -> &RuntimeEvidence {
+        match self {
+            Self::Runtime(state) => &state.evidence,
+            Self::Boundary { evidence, .. } => evidence,
+        }
+    }
+}
+
 pub struct SimulationView<'a> {
-    state: &'a RuntimeState,
+    state: SimulationViewState<'a>,
     state_owners: &'a BTreeMap<StateKey, String>,
     reader: Option<&'a str>,
     allowed_reads: Option<&'a [StateKey]>,
@@ -816,44 +848,44 @@ pub struct SimulationView<'a> {
 impl SimulationView<'_> {
     #[must_use]
     pub const fn time(&self) -> SimTime {
-        self.state.scheduler.now
+        self.state.now()
     }
 
     pub fn army(&self, id: ArmyId) -> Result<Option<&Army>, CanwuError> {
         self.require_read(&StateKey::core_armies())?;
-        Ok(self.state.current.armies.get(&id))
+        Ok(self.state.current().armies.get(&id))
     }
 
     pub fn person(&self, id: PersonId) -> Result<Option<&Person>, CanwuError> {
         self.require_read(&StateKey::core_people())?;
-        Ok(self.state.current.people.get(&id))
+        Ok(self.state.current().people.get(&id))
     }
 
     pub fn government(&self, id: GovernmentId) -> Result<Option<&Government>, CanwuError> {
         self.require_read(&StateKey::core_governments())?;
-        Ok(self.state.current.governments.get(&id))
+        Ok(self.state.current().governments.get(&id))
     }
 
     pub fn territory(&self, id: TerritoryId) -> Result<Option<&Territory>, CanwuError> {
         self.require_read(&StateKey::core_territories())?;
-        Ok(self.state.current.territories.get(&id))
+        Ok(self.state.current().territories.get(&id))
     }
 
     pub fn route(&self, id: RouteId) -> Result<Option<&Route>, CanwuError> {
         self.require_read(&StateKey::core_routes())?;
-        Ok(self.state.current.routes.get(&id))
+        Ok(self.state.current().routes.get(&id))
     }
 
     pub fn actor_knowledge(&self, actor: PersonId) -> Result<Option<&ActorKnowledge>, CanwuError> {
         self.require_read(&StateKey::core_knowledge())?;
-        Ok(self.state.current.knowledge.for_actor(actor))
+        Ok(self.state.current().knowledge.for_actor(actor))
     }
 
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
         Ok(self
             .state
-            .evidence
+            .evidence()
             .commands
             .iter()
             .find(|record| record.id == id))
@@ -863,7 +895,7 @@ impl SimulationView<'_> {
         self.require_read(&StateKey::core_events())?;
         Ok(self
             .state
-            .evidence
+            .evidence()
             .events
             .iter()
             .find(|event| event.id == id))
@@ -881,7 +913,7 @@ impl SimulationView<'_> {
             .get()
             .checked_sub(1)
             .and_then(|index| usize::try_from(index).ok())
-            .and_then(|index| self.state.evidence.ingress.get(index))
+            .and_then(|index| self.state.evidence().ingress.get(index))
             .filter(|record| record.id == id);
         if let (Some(owner), Some(record)) = (self.ingress_plugin, record)
             && !matches!(
@@ -902,7 +934,7 @@ impl SimulationView<'_> {
         Ok(self
             .record_overlay
             .and_then(|overlay| overlay.get(reference))
-            .or_else(|| self.state.current.domain_records.get(reference)))
+            .or_else(|| self.state.current().domain_records.get(reference)))
     }
 
     pub fn proposed_domain_record(
@@ -973,7 +1005,7 @@ impl SimulationView<'_> {
         Ok(self
             .component_overlay
             .and_then(|overlay| overlay.get(&key))
-            .or_else(|| self.state.current.plugin_components.get(&key))
+            .or_else(|| self.state.current().plugin_components.get(&key))
             .map(|record| &record.value))
     }
 
@@ -5357,7 +5389,8 @@ impl Simulation {
         self.state.counters.next_correlation_id = next_correlation_id;
         let boundary_id = BoundaryId::new(boundary_id_value);
 
-        let boundary_snapshot = self.state.clone();
+        let boundary_snapshot = self.state.current.clone();
+        let boundary_time = self.state.scheduler.now;
         let systems = self.plugins.boundary_systems.clone();
         let state_owners = self.plugins.state_owners.clone();
         let record_schemas = self.plugins.record_schemas.clone();
@@ -5367,7 +5400,7 @@ impl Simulation {
         let mut reservation_request_records = Vec::new();
         let mut offers = Vec::new();
         let mut requests = Vec::new();
-        let mut random_overlay = boundary_snapshot.current.random_streams.clone();
+        let mut random_overlay = boundary_snapshot.random_streams.clone();
         let mut pending_random_draws = Vec::new();
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
@@ -5421,17 +5454,21 @@ impl Simulation {
                     )
             }) {
                 let reader = format!("{}.{}", registered.plugin, registered.contract.name);
-                let view_state = if phase <= BoundaryPhase::InvariantValidation {
-                    &boundary_snapshot
+                let (view_current, view_now) = if phase <= BoundaryPhase::InvariantValidation {
+                    (&boundary_snapshot, boundary_time)
                 } else {
-                    &self.state
+                    (&self.state.current, self.state.scheduler.now)
                 };
                 let random_session = random::RandomSession::new(
                     &random_overlay,
                     &registered.contract.random_streams,
                 )?;
                 let view = SimulationView {
-                    state: view_state,
+                    state: SimulationViewState::Boundary {
+                        current: view_current,
+                        now: view_now,
+                        evidence: &self.state.evidence,
+                    },
                     state_owners: &state_owners,
                     reader: Some(&reader),
                     allowed_reads: Some(&registered.contract.reads),
@@ -5477,7 +5514,8 @@ impl Simulation {
                 validate_boundary_proposal(
                     &registered.plugin,
                     &registered.contract,
-                    view_state,
+                    view_current,
+                    view_now,
                     &self.plugins,
                     &visible_record_overlay,
                     &proposal,
@@ -5536,9 +5574,15 @@ impl Simulation {
                     reservation_request_records = result.requests;
                 }
                 BoundaryPhase::DomainDeltaProposal => {
+                    let record_context = BoundaryRecordOverlayContext {
+                        current: &boundary_snapshot,
+                        now: boundary_time,
+                        scheduled_actions: &self.state.scheduler.actions,
+                        run_configuration: &self.state.metadata.run_configuration,
+                        schemas: &record_schemas,
+                    };
                     extend_boundary_record_candidate_overlay(
-                        &boundary_snapshot,
-                        &record_schemas,
+                        &record_context,
                         &mut candidate_record_overlay,
                         &phase_directives,
                     )?;
@@ -5549,8 +5593,7 @@ impl Simulation {
                         &phase_directives,
                     )?;
                     extend_boundary_record_overlay(
-                        &boundary_snapshot,
-                        &record_schemas,
+                        &record_context,
                         &mut visible_record_overlay,
                         &phase_directives,
                     )?;
@@ -5563,14 +5606,20 @@ impl Simulation {
                     ordinary.extend(phase_directives);
                 }
                 BoundaryPhase::HistoricalCandidateEvaluation => {
+                    let record_context = BoundaryRecordOverlayContext {
+                        current: &self.state.current,
+                        now: self.state.scheduler.now,
+                        scheduled_actions: &self.state.scheduler.actions,
+                        run_configuration: &self.state.metadata.run_configuration,
+                        schemas: &record_schemas,
+                    };
                     extend_boundary_record_overlay(
-                        &self.state,
-                        &record_schemas,
+                        &record_context,
                         &mut visible_record_overlay,
                         &phase_directives,
                     )?;
                     extend_boundary_overlay(
-                        &self.state,
+                        &self.state.current,
                         &visible_record_overlay,
                         &mut visible_overlay,
                         &phase_directives,
@@ -7337,7 +7386,7 @@ impl Simulation {
 
     fn plugin_view<'a>(&'a self, reader: &'a str, reads: &'a [StateKey]) -> SimulationView<'a> {
         SimulationView {
-            state: &self.state,
+            state: SimulationViewState::Runtime(&self.state),
             state_owners: &self.plugins.state_owners,
             reader: Some(reader),
             allowed_reads: Some(reads),
@@ -7637,7 +7686,8 @@ fn boundary_has_event_ingress(record: &BoundaryRecord) -> bool {
 fn validate_boundary_proposal(
     plugin: &str,
     contract: &BoundarySystemContract,
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
+    now: SimTime,
     plugins: &PluginRegistry,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     proposal: &BoundaryProposal,
@@ -7656,7 +7706,7 @@ fn validate_boundary_proposal(
 
     let entity_exists = |entity: &EntityRef| {
         proposal_entity_exists(
-            state,
+            current,
             &plugins.record_schemas,
             record_overlay,
             proposal,
@@ -7838,7 +7888,7 @@ fn validate_boundary_proposal(
                             ),
                         )
                     })?;
-                if after.is_negative() || state.scheduler.now.checked_add(*after).is_none() {
+                if after.is_negative() || now.checked_add(*after).is_none() {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidDuration,
                         "boundary-generated ingress requires a nonnegative supported delay",
@@ -7847,7 +7897,7 @@ fn validate_boundary_proposal(
                 descriptor.payload_schema.validate(payload)?;
                 if affected.iter().any(|entity| {
                     !proposal_entity_identity_exists(
-                        state,
+                        current,
                         &plugins.record_schemas,
                         proposal,
                         entity,
@@ -7884,25 +7934,25 @@ fn validate_reservation_pool(
 }
 
 fn extend_boundary_overlay(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_component_overlay(state, record_overlay, overlay, directives, false)
+    extend_boundary_component_overlay(current, record_overlay, overlay, directives, false)
 }
 
 fn extend_boundary_candidate_overlay(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_component_overlay(state, record_overlay, overlay, directives, true)
+    extend_boundary_component_overlay(current, record_overlay, overlay, directives, true)
 }
 
 fn extend_boundary_component_overlay(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
@@ -7926,7 +7976,7 @@ fn extend_boundary_component_overlay(
                     "multiple boundary proposals target the same component",
                 ));
             }
-            if !runtime_entity_exists_with_record_overlay(state, record_overlay, entity) {
+            if !runtime_entity_exists_with_record_overlay(current, record_overlay, entity) {
                 return Err(CanwuError::new(
                     ErrorCode::EntityNotFound,
                     format!("boundary proposal targeted missing entity {entity}"),
@@ -7948,31 +7998,36 @@ fn extend_boundary_component_overlay(
 }
 
 fn extend_boundary_record_overlay(
-    state: &RuntimeState,
-    schemas: &records::DomainRecordSchemas,
+    context: &BoundaryRecordOverlayContext<'_>,
     overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_domain_record_overlay(state, schemas, overlay, directives, false)
+    extend_boundary_domain_record_overlay(context, overlay, directives, false)
 }
 
 fn extend_boundary_record_candidate_overlay(
-    state: &RuntimeState,
-    schemas: &records::DomainRecordSchemas,
+    context: &BoundaryRecordOverlayContext<'_>,
     overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_domain_record_overlay(state, schemas, overlay, directives, true)
+    extend_boundary_domain_record_overlay(context, overlay, directives, true)
+}
+
+struct BoundaryRecordOverlayContext<'a> {
+    current: &'a RuntimeCurrentState,
+    now: SimTime,
+    scheduled_actions: &'a BTreeMap<ScheduleKey, ScheduledAction>,
+    run_configuration: &'a RunConfigurationSnapshot,
+    schemas: &'a records::DomainRecordSchemas,
 }
 
 fn extend_boundary_domain_record_overlay(
-    state: &RuntimeState,
-    schemas: &records::DomainRecordSchemas,
+    context: &BoundaryRecordOverlayContext<'_>,
     overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
 ) -> Result<(), CanwuError> {
-    let mut base = state.current.domain_records.clone();
+    let mut base = context.current.domain_records.clone();
     base.extend(
         overlay
             .iter()
@@ -8003,12 +8058,17 @@ fn extend_boundary_domain_record_overlay(
     }
     let (next, changes) = records::apply_mutation_bundle(
         &base,
-        schemas,
-        state.scheduler.now,
-        &|entity| runtime_entity_exists(state, entity),
+        context.schemas,
+        context.now,
+        &|entity| runtime_current_entity_exists(context.current, entity),
         requests,
     )?;
-    validate_domain_dependents_with_records(state, &next)?;
+    validate_domain_dependents_with_records(
+        &context.current.plugin_components,
+        context.scheduled_actions,
+        context.run_configuration,
+        &next,
+    )?;
     for change in changes {
         overlay.insert(change.current.reference.clone(), change.current);
     }
@@ -11236,27 +11296,37 @@ fn snapshot_entity_identity_exists(snapshot: &SimulationSnapshot, entity: &Entit
 }
 
 fn runtime_entity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
+    runtime_current_entity_exists(&state.current, entity)
+}
+
+fn runtime_current_entity_exists(current: &RuntimeCurrentState, entity: &EntityRef) -> bool {
     match entity {
-        EntityRef::Army(id) => state.current.armies.contains_key(id),
+        EntityRef::Army(id) => current.armies.contains_key(id),
         EntityRef::Domain(reference) => {
-            records::domain_entity_exists(&state.current.domain_records, reference)
+            records::domain_entity_exists(&current.domain_records, reference)
         }
-        EntityRef::Government(id) => state.current.governments.contains_key(id),
-        EntityRef::Person(id) => state.current.people.contains_key(id),
-        EntityRef::Route(id) => state.current.routes.contains_key(id),
-        EntityRef::Territory(id) => state.current.territories.contains_key(id),
+        EntityRef::Government(id) => current.governments.contains_key(id),
+        EntityRef::Person(id) => current.people.contains_key(id),
+        EntityRef::Route(id) => current.routes.contains_key(id),
+        EntityRef::Territory(id) => current.territories.contains_key(id),
         EntityRef::Organization(_) | EntityRef::Resource(_) => false,
     }
 }
 
 fn runtime_entity_identity_exists(state: &RuntimeState, entity: &EntityRef) -> bool {
+    runtime_current_entity_identity_exists(&state.current, entity)
+}
+
+fn runtime_current_entity_identity_exists(
+    current: &RuntimeCurrentState,
+    entity: &EntityRef,
+) -> bool {
     match entity {
-        EntityRef::Domain(reference) => state
-            .current
+        EntityRef::Domain(reference) => current
             .domain_records
             .get(reference)
             .is_some_and(|record| record.class == DomainRecordClass::Entity),
-        _ => runtime_entity_exists(state, entity),
+        _ => runtime_current_entity_exists(current, entity),
     }
 }
 
@@ -11314,30 +11384,30 @@ fn validate_runtime_cause(state: &RuntimeState, cause: &CauseRef) -> Result<(), 
 }
 
 fn runtime_entity_exists_with_record_overlay(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     entity: &EntityRef,
 ) -> bool {
     match entity {
         EntityRef::Domain(reference) => record_overlay
             .get(reference)
-            .or_else(|| state.current.domain_records.get(reference))
+            .or_else(|| current.domain_records.get(reference))
             .is_some_and(|record| {
                 record.class == DomainRecordClass::Entity && !record.is_deleted()
             }),
-        _ => runtime_entity_exists(state, entity),
+        _ => runtime_current_entity_exists(current, entity),
     }
 }
 
 fn proposal_entity_exists(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     schemas: &records::DomainRecordSchemas,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     proposal: &BoundaryProposal,
     entity: &EntityRef,
 ) -> bool {
     let EntityRef::Domain(reference) = entity else {
-        return runtime_entity_exists(state, entity);
+        return runtime_current_entity_exists(current, entity);
     };
     if let Some(mutation) = proposal.directives.iter().rev().find_map(|directive| {
         let BoundaryDirective::MutateRecord { mutation, .. } = directive else {
@@ -11354,20 +11424,19 @@ fn proposal_entity_exists(
                 .is_some_and(|(_, schema)| schema.class == DomainRecordClass::Entity),
         };
     }
-    runtime_entity_exists_with_record_overlay(state, record_overlay, entity)
+    runtime_entity_exists_with_record_overlay(current, record_overlay, entity)
 }
 
 fn proposal_entity_identity_exists(
-    state: &RuntimeState,
+    current: &RuntimeCurrentState,
     schemas: &records::DomainRecordSchemas,
     proposal: &BoundaryProposal,
     entity: &EntityRef,
 ) -> bool {
     let EntityRef::Domain(reference) = entity else {
-        return runtime_entity_identity_exists(state, entity);
+        return runtime_current_entity_identity_exists(current, entity);
     };
-    if state
-        .current
+    if current
         .domain_records
         .get(reference)
         .is_some_and(|record| record.class == DomainRecordClass::Entity)
@@ -11390,17 +11459,22 @@ fn proposal_entity_identity_exists(
 }
 
 fn validate_runtime_domain_dependents(state: &RuntimeState) -> Result<(), CanwuError> {
-    validate_domain_dependents_with_records(state, &state.current.domain_records)
+    validate_domain_dependents_with_records(
+        &state.current.plugin_components,
+        &state.scheduler.actions,
+        &state.metadata.run_configuration,
+        &state.current.domain_records,
+    )
 }
 
 fn validate_domain_dependents_with_records(
-    state: &RuntimeState,
+    plugin_components: &BTreeMap<PluginComponentKey, PluginComponentRecord>,
+    scheduled_actions: &BTreeMap<ScheduleKey, ScheduledAction>,
+    run_configuration: &RunConfigurationSnapshot,
     domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
 ) -> Result<(), CanwuError> {
     let unavailable = |entity: &EntityRef| matches!(entity, EntityRef::Domain(reference) if !records::domain_entity_exists(domain_records, reference));
-    if state
-        .current
-        .plugin_components
+    if plugin_components
         .values()
         .any(|component| unavailable(&component.entity))
     {
@@ -11409,7 +11483,7 @@ fn validate_domain_dependents_with_records(
             "a domain entity with persisted plugin components cannot be deleted",
         ));
     }
-    if state.scheduler.actions.values().any(|action| match action {
+    if scheduled_actions.values().any(|action| match action {
         ScheduledAction::PluginDirective { directive, .. } => {
             system_directive_has_entity(directive, &unavailable)
         }
@@ -11420,9 +11494,7 @@ fn validate_domain_dependents_with_records(
             "a domain entity referenced by future scheduled work cannot be deleted",
         ));
     }
-    if state
-        .metadata
-        .run_configuration
+    if run_configuration
         .declared()
         .and_then(|configuration| configuration.seat_binding.as_ref())
         .and_then(|binding| binding.institution.as_ref())
@@ -14799,6 +14871,42 @@ mod tests {
         view: &SimulationView<'_>,
         context: &BoundaryContext,
     ) -> Result<BoundaryProposal, CanwuError> {
+        for command_id in &context.admitted_commands {
+            if view.command(*command_id)?.is_none() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "boundary systems must resolve every admitted command",
+                ));
+            }
+        }
+        for event_id in &context.admitted_events {
+            if view.event(*event_id)?.is_none() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "boundary systems must resolve every admitted event",
+                ));
+            }
+        }
+        if !context.emitted_events.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "pre-commit boundary systems must not observe uncommitted emissions",
+            ));
+        }
+        if context.boundary_id.get() == 1
+            && view
+                .component(
+                    &StateKey::new("ingress-fixture", "received"),
+                    &EntityRef::Person(PersonId::new(1)),
+                    "canonical-order",
+                )?
+                .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "pre-commit boundary systems must read the stable current-state snapshot",
+            ));
+        }
         for value in 1..=32 {
             let id = IngressId::new(value);
             if !context.admitted_ingress.contains(&id) && view.ingress(id)?.is_some() {
@@ -14842,6 +14950,38 @@ mod tests {
             }],
             ..BoundaryProposal::default()
         })
+    }
+
+    fn validate_committed_canonical_evidence(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let received = view.component(
+            &StateKey::new("ingress-fixture", "received"),
+            &EntityRef::Person(PersonId::new(1)),
+            "canonical-order",
+        )?;
+        if received.is_none() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "post-commit boundary systems must observe committed current state",
+            ));
+        }
+        if context.emitted_events.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                "post-commit boundary systems must observe committed emission identifiers",
+            ));
+        }
+        for event_id in &context.emitted_events {
+            if view.event(*event_id)?.is_none() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "post-commit boundary systems must resolve committed emissions",
+                ));
+            }
+        }
+        Ok(BoundaryProposal::default())
     }
 
     fn mark_daily_calendar(
@@ -14897,10 +15037,26 @@ mod tests {
                 BoundaryPhase::DomainDeltaProposal,
                 SystemCadence::EventDriven,
             );
-            consumer.reads = vec![StateKey::core_ingress()];
+            consumer.reads = vec![
+                StateKey::core_commands(),
+                StateKey::core_events(),
+                StateKey::core_ingress(),
+                StateKey::new("ingress-fixture", "received"),
+            ];
             consumer.writes = vec![StateKey::new("ingress-fixture", "received")];
             consumer.visibility = StateVisibility::SameBoundary;
             registrar.register_boundary_system(consumer, consume_canonical_ingress)?;
+
+            let mut committed = BoundarySystemContract::new(
+                "validate-committed-evidence",
+                BoundaryPhase::HistoricalCandidateEvaluation,
+                SystemCadence::EventDriven,
+            );
+            committed.reads = vec![
+                StateKey::core_events(),
+                StateKey::new("ingress-fixture", "received"),
+            ];
+            registrar.register_boundary_system(committed, validate_committed_canonical_evidence)?;
 
             let mut calendar = BoundarySystemContract::new(
                 "daily-calendar",
