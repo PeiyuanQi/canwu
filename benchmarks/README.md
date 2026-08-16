@@ -549,3 +549,23 @@ broader compacted growth workload still grows superlinearly because it
 intentionally retains the original workload's expanding entity/component state
 and adds an admission boundary per cycle; the isolated result separates that
 existing current-state cost from archive-index maintenance.
+
+## Plugin-module extraction comparison
+
+The behavior-preserving plugin-registration extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-plugins-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-plugins-module-allocations.json) reports,
+using the final live-archive reports as its before baseline. It moves registrar
+methods, registry hydration, plugin contract validation, and ownership-index
+construction into `canwu-sim/src/plugins.rs` without changing public types,
+serialized state, replay behavior, or registration rules. `canwu-sim/src/lib.rs`
+falls from 18,668 to 17,503 lines, with 1,178 focused lines in the new module.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at scales 8, 32,
+128, and 512. At scale 512, elapsed medians change by +0.0% for history growth,
++1.4% for accepted commands, -1.1% for empty boundaries, +1.3% for populated
+boundaries, -0.3% for load validation, and -0.8% for exact replay. These are
+treated as local timing noise. The milestone makes no runtime-performance
+claim; it gives plugin registration and descriptor hydration a dedicated
+ownership surface while preserving the persistence and execution contracts.
