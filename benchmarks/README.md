@@ -392,6 +392,25 @@ persisting the current-state checkpoint plus only newly appended journal
 segments. The live runtime still retains complete evidence in this milestone;
 sealed-segment eviction and compaction remain explicit later work.
 
+## Persistence-module extraction comparison
+
+The behavior-preserving persistence extraction is recorded in separate
+[`elapsed`](baselines/2026-08-16-persistence-module-elapsed.json) and
+[`allocation`](baselines/2026-08-16-persistence-module-allocations.json) reports,
+using the checkpoint-journal milestone as its before baseline. It moves the
+checkpoint/journal constant, public wire types, cursors, export path, and load
+helpers into `canwu-sim/src/persistence.rs` without changing their bodies or
+public re-exports. `canwu-sim/src/lib.rs` falls from 19,053 to 18,680 lines, with
+381 focused lines in the new module.
+
+Every measured allocation summary, history count, checkpoint hash, checkpoint-
+storage size, and flat snapshot size is identical at scales 8, 32, 128, and 512.
+At scale 512, representative elapsed differences range from -2.3% for flat
+snapshot creation to +3.4% for load validation; history growth is -0.6% and exact
+replay +0.8%. These are treated as local timing noise. The milestone makes no
+runtime-performance claim; it establishes a narrower ownership surface for later
+storage work.
+
 The allocation evidence identifies two distinct growth classes:
 
 - A fourfold increase from scale 128 to 512 makes accepted commands, individual

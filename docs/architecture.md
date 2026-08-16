@@ -272,6 +272,9 @@ history for every checkpoint, but the live runtime still retains its complete
 evidence owner and loading still materializes the complete validated prefix.
 Evicting sealed segments from a running simulation requires a later explicit
 archive/compaction contract; no evidence is discarded implicitly here.
+The checkpoint/journal wire types, cursor logic, export, and reconstruction
+helpers live in the dedicated `canwu-sim` persistence module so later storage
+work does not expand the settlement and command orchestration surface again.
 
 The remaining runtime bookkeeping is partitioned by responsibility rather than
 stored as unrelated fields on the authoritative world container.
