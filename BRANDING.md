@@ -9,12 +9,28 @@ variant is available as an editable SVG for distribution and as a PNG fallback:
   [PNG](assets/branding/canwu-logo-zh-cn.png)
 - Symbol-only mark: [SVG](assets/branding/canwu-logo-mark.svg) ·
   [PNG](assets/branding/canwu-logo-mark.png)
+- English repository banner: [PNG](assets/branding/canwu-banner-en.png)
+- Chinese repository banner: [PNG](assets/branding/canwu-banner-zh-cn.png)
 
 Use the wordmarked version that best matches the language of the audience. Use
 the symbol-only mark for compact square placements such as application icons,
-avatars, and badges. All supplied assets are square images with a white
-background. Keep enough surrounding space for the mark and text to remain easy
-to read.
+avatars, and badges. The three logo files are square; the repository banners are
+wide. All supplied assets use a white background. Keep enough surrounding space
+for the mark and text to remain easy to read.
+
+## Mark design
+
+The official symbol is an angular, brush-written `35` inside a separate circular
+ink frame. Its middle horizontal strokes remain continuous while losing ink into
+flying-white bristle texture. From a distance, the three-level solid, pale, solid
+rhythm suggests a doubled Li trigram motif. It is a modern brand interpretation,
+not formal hexagram or divination notation.
+
+The circular frame must remain visibly separate from both digits. Do not close
+the flying-white texture into solid bars, cut it into hard rectangular gaps, or
+join the frame to the `35`. Use the supplied symbol asset at 32 pixels or larger
+when the mark needs to remain identifiable. Website favicon, Apple touch, PWA,
+and maskable variants are maintained in `website/public/brand/`.
 
 ## Optional attribution and trademark use
 

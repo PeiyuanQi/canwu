@@ -89,8 +89,10 @@ const navItems = (variant: typeof variants[number]) => [
     <link rel="alternate" hreflang="zh-CN" href={new URL(zhPath, Astro.site)} />
     <link rel="alternate" hreflang="en" href={new URL(enPath, Astro.site)} />
     <link rel="alternate" hreflang="x-default" href={new URL(zhPath, Astro.site)} />
-    <link rel="icon" href="/brand/canwu-mark.png" />
-    <link rel="apple-touch-icon" href="/brand/canwu-mark.png" />
+    <link rel="icon" type="image/svg+xml" href="/brand/canwu-mark.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/brand/canwu-mark-32.png" />
+    <link rel="icon" href="/brand/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/brand/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Canwu Engine" />
@@ -99,9 +101,12 @@ const navItems = (variant: typeof variants[number]) => [
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={new URL("/brand/canwu-mark.png", Astro.site)} />
+    <meta property="og:image:alt" content="Canwu circular 35 mark" />
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={new URL("/brand/canwu-mark.png", Astro.site)} />
     <title>{title}</title>
     {isAuto && <script is:inline>
       const englishPath = location.pathname === "/en" || location.pathname.startsWith("/en/");
@@ -114,7 +119,7 @@ const navItems = (variant: typeof variants[number]) => [
     <header class="site-header">
       {variants.map((variant) => (
         <a class="brand" data-locale-content={isAuto ? variant.locale : undefined} href={variant.locale === "en" ? "/en/" : "/"} aria-label={variant.ui.homeLabel}>
-          <img src="/brand/canwu-mark.png" width="48" height="48" alt="" />
+          <img src="/brand/canwu-mark.svg" width="48" height="48" alt="" />
           <span><b>参伍引擎</b><small>Canwu Engine</small></span>
         </a>
       ))}

@@ -9,9 +9,22 @@
   "theme_color": "#11100d",
   "icons": [
     {
-      "src": "/brand/canwu-mark.png",
-      "sizes": "1024x1024",
-      "type": "image/png"
+      "src": "/brand/canwu-mark-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/canwu-mark-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/brand/canwu-mark-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
