@@ -1,17 +1,16 @@
-# Celestial Mandate Engine Conformance Profile
+# Reusable Simulation Engine Conformance Profile
 
 Status: normative Canwu development target
-Source baseline: Celestial Mandate SOT amended through 2026-08-13
 
-This profile defines the reusable engine capabilities that Canwu must provide
-before it can host the authoritative simulation for Celestial Mandate (CM).
-It deliberately excludes CM-specific historical entities, formulas, scenarios,
-settlement rules, candidates, transitions, content, and player-interface design.
-Those remain application or plugin code.
+This profile defines the reusable capabilities Canwu provides for authoritative
+historical simulation. It deliberately excludes application-specific entities,
+formulas, scenarios, settlement rules, candidates, transitions, content, and
+player-interface design. Those remain application or plugin code.
 
 Passing the current movement demo does not imply conformance. Conformance is
 proved only when every requirement below has executable verification and the
-CM-shaped reference fixture passes without adding CM rules to Canwu core.
+representative reference fixture passes without adding application rules to
+Canwu core.
 
 ## Boundary and dependency rules
 
@@ -29,7 +28,7 @@ CM-shaped reference fixture passes without adding CM rules to Canwu core.
 
 ## Required engine contracts
 
-### CM-E01: Stable identity and extensible domain storage
+### E01: Stable identity and extensible domain storage
 
 - Typed or schema-validated stable IDs must support application-defined entity
   and record kinds.
@@ -39,7 +38,7 @@ CM-shaped reference fixture passes without adding CM rules to Canwu core.
 - References, lifecycle state, and deletions must be validated before commit.
 - Deterministic state uses ordered collections and canonical serialization.
 
-### CM-E02: Authority-aware command ingress
+### E02: Authority-aware command ingress
 
 - Every command handler receives the authenticated issuer, simulation time,
   run policy, command identity, and relevant actor/seat authority context.
@@ -49,7 +48,7 @@ CM-shaped reference fixture passes without adding CM rules to Canwu core.
 - Human, AI, institutional, replay, system, debug, and experiment origins remain
   distinguishable in command and causal records.
 
-### CM-E03: Deterministic event and communication scheduling
+### E03: Deterministic event and communication scheduling
 
 - Work is ordered by simulation timestamp, canonical event class/priority, and
   explicit sequence or another documented stable tie-break key.
@@ -59,7 +58,7 @@ CM-shaped reference fixture passes without adding CM rules to Canwu core.
   events share one canonical ingress path.
 - Late inputs never rewrite an already committed boundary.
 
-### CM-E04: Canonical fourteen-phase settlement boundary
+### E04: Canonical fourteen-phase settlement boundary
 
 Every authoritative boundary uses this order, even when a phase has no work:
 
@@ -80,7 +79,7 @@ Every authoritative boundary uses this order, even when a phase has no work:
 
 The kernel owns ordering and visibility. Domain packages own their rules.
 
-### CM-E05: Immutable reads, ownership, and visibility
+### E05: Immutable reads, ownership, and visibility
 
 - Proposal-producing systems read one immutable boundary snapshot plus only the
   explicitly admitted same-boundary inputs for their phase.
@@ -91,7 +90,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Duplicate writers and unresolved registration-order dependencies reject the
   configuration instead of choosing a winner by insertion order.
 
-### CM-E06: Reservation, allocation, and conservation
+### E06: Reservation, allocation, and conservation
 
 - Competing claims are collected before dependent proposals execute.
 - Allocation uses stable priorities and tie-break keys and records partial,
@@ -99,7 +98,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Conserved transfers and cross-domain bundles validate as a whole.
 - Rejected work cannot leak a reservation or consume another proposal's stock.
 
-### CM-E07: Atomic commit and failure recovery
+### E07: Atomic commit and failure recovery
 
 - Ordinary domain changes are staged and validated before one atomic commit.
 - Conditional transitions use separately staged atomic bundles after ordinary
@@ -110,7 +109,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Expected domain rejection remains structured evidence rather than an engine
   exception or partial mutation.
 
-### CM-E08: Scoped deterministic randomness
+### E08: Scoped deterministic randomness
 
 - Random streams have stable identities, versions, seeds, and positions.
 - Draws are deterministic and recorded with enough evidence to replay material
@@ -118,7 +117,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Rejected proposals and unrelated domains cannot perturb another stream.
 - Parallel execution, when used, merges identically to canonical logical order.
 
-### CM-E09: Causality, reports, and explanation evidence
+### E09: Causality, reports, and explanation evidence
 
 - Commands, events, effects, proposals, rejections, commits, transitions,
   aggregates, knowledge updates, and report facts carry stable causal links.
@@ -127,7 +126,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Field-level provenance and structured facts support domain-specific causal
   explanations without giving narration authority over simulation.
 
-### CM-E10: Actor-scoped knowledge and immutable presentation
+### E10: Actor-scoped knowledge and immutable presentation
 
 - World truth, actor knowledge, inferred belief, recorded/archival state, and
   presentation state remain distinct.
@@ -138,7 +137,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - A complete actor projection is built and validated before authoritative save
   publication, then installed through an infallible generation-tagged swap.
 
-### CM-E11: Controller, seat, and run-policy separation
+### E11: Controller, seat, and run-policy separation
 
 - Run purpose, controller policy, seat policy, observation policy, interaction
   policy, and trace policy are orthogonal, versioned inputs.
@@ -147,7 +146,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Read-only observers cannot issue authoritative commands, and changing only
   observation or presentation cannot change authoritative hashes or RNG state.
 
-### CM-E12: Persistence, replay, migration, and lineage
+### E12: Persistence, replay, migration, and lineage
 
 - Checkpoints preserve all deterministic state needed for exact continuation:
   queues, accumulators, commands/effects, reservations, transitions, knowledge,
@@ -162,7 +161,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Forks create a new lineage with parent and boundary identity. Comparison and
   export never mutate either branch.
 
-### CM-E13: Package, plugin, and rules governance
+### E13: Package, plugin, and rules governance
 
 - Registration is atomic, deterministic, namespaced, versioned, and validated.
 - Executable handlers are paired with serializable manifests and semantic
@@ -173,7 +172,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - A package cannot write another owner's state except through a declared,
   validated cross-domain proposal/transition contract.
 
-### CM-E14: Binding-safe public interfaces
+### E14: Binding-safe public interfaces
 
 - In-process Rust is first-class. Public request/response types are owned,
   serializable, versioned, batch-friendly, and suitable for future C, Python,
@@ -183,7 +182,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Queries have deterministic ordering, bounded result sizes, explicit schemas,
   and no hidden authority escalation.
 
-### CM-E15: Solver and performance extension boundary
+### E15: Solver and performance extension boundary
 
 - A deterministic CPU reference implementation exists before an optimized
   solver backend is accepted.
@@ -191,7 +190,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - GPU/native acceleration is optional, replaceable, and cannot own canonical
   gameplay state or change results outside a declared tolerance contract.
 
-### CM-E16: Portability and operability
+### E16: Portability and operability
 
 - Headless engine crates support Windows, macOS, and Linux.
 - Runtime behavior does not depend on path separators, shell conventions,
@@ -205,7 +204,7 @@ Each requirement must have all of the following before it is marked complete:
 1. a public contract in architecture/API documentation;
 2. implementation reachable through supported APIs;
 3. focused invariant tests;
-4. a CM-shaped integration fixture using only public extension points;
+4. a representative integration fixture using only public extension points;
 5. save/load and replay coverage where state is involved;
 6. cross-platform CI coverage where platform behavior can differ.
 
@@ -224,8 +223,8 @@ exact plugin/system provenance. Snapshot format 4 adds random draw journals,
 state and boundary hash chains, a current-state checkpoint commitment, hashed
 run/content/source manifests, exact plugin version and semantic identities, and
 an environment-bound replay journal that also verifies command-only and
-registration-closure-only runs. Declared runs now also bind the six orthogonal
-CM policy dimensions. Their supported request path distinguishes human, AI,
+registration-closure-only runs. Declared runs now also bind six orthogonal
+run-policy dimensions. Their supported request path distinguishes human, AI,
 institutional, replay, system, debug, experiment, and compatibility actor
 origins; validates explicit decision/seat authority before mutation; enforces
 idempotency and mandatory expected revision/time pairs for declared external
@@ -240,13 +239,13 @@ causally linked core random draw, and authoritative scheduling rejects time
 overflow rather than saturating. Current-format checkpoints also require an
 exact engine-version match unless an explicit migration rewrites their
 commitments.
-CM-E01 now has a public generic storage contract: plugins register namespaced
+E01 now has a public generic storage contract: plugins register namespaced
 entity or record kinds with payload and typed-reference schemas; boundary
 systems atomically create, expected-version update, retire, successor-link, and
 delete versioned records; deleted identities remain tombstones; live references
 and external dependencies block unsafe deletion; and current/proposed records
 are available through declared immutable reads. Boundary evidence records every
-lifecycle transition and its causal event. A CM-shaped office/obligation fixture
+lifecycle transition and its causal event. A representative office/obligation fixture
 proves atomic reference transfer, rejected referenced deletion with full
 rollback, cycle-free succession, canonical save/load, exact replay,
 provenance-tamper rejection, historical-cut rejection for pre-creation and
@@ -254,10 +253,10 @@ post-deletion evidence, rejection of cross-system same-stage creation use, and
 manifest-bound protection against shifting created records into genesis state.
 Compatible handler-free format 2 and 3 saves migrate with explicit legacy
 provenance for continuation and explicitly reject unsupported exact replay.
-These complete the current CM-E01 contract and are substantial but still partial
-implementations of CM-E02, CM-E04 through CM-E09, and CM-E11 through CM-E13.
+These complete the current E01 contract and are substantial but still partial
+implementations of E02, E04 through E09, and E11 through E13.
 
-CM-E03 now has one persisted host-ingress queue for typed commands,
+E03 now has one persisted host-ingress queue for typed commands,
 plugin-declared communication, acknowledgement, and information packets, and
 explicit calendar work. Its stable order is due time, class, descending
 priority, issue time, then ingress ID. Canonical advancement selects the earlier of internal scheduled work
@@ -267,24 +266,32 @@ is eligible only for a second boundary at the same simulation time. Live late
 input and live plugin ingress in declared read-only runs fail without mutation;
 save/load validates issue cuts, entity identity, payload schemas, generation
 provenance, and queue order; exact replay must reproduce plugin-generated
-packets from the recorded system environment. The CM-shaped ingress fixture
+packets from the recorded system environment. The representative ingress fixture
 mixes command, communication, acknowledgement, information, and daily calendar
 work, proves priority/class ordering, command precedence over equal-time
 internal scheduled continuations, and late-input rollback, and continues an
 automatic acknowledgement through save/load and replay. This implements the
-canonical external-ingress portion of CM-E03. Full CM-E03 conformance remains
+canonical external-ingress portion of E03. Full E03 conformance remains
 open until recurring calendar policy and all internal scheduled continuation
 sources are represented by one versioned persistence abstraction.
 
-Canwu is not yet CM-conformant. The major remaining gaps include authority scopes
-that prevent human/AI double control, institution/advisor permission semantics,
-experiment lineage, and the remaining canonical run-configuration identity
-fields; recurring calendar policy and unified persistence for internal scheduled
-continuations; released, carried, and lost reservation
-outcomes plus atomic conservation bundles;
-field-level provenance and structured report facts; immutable generation-tagged
-actor projections; a general migration registry, replay environment discovery,
-fork lineage, and branch comparison; constrained data/rule packages;
-binding-oriented batch APIs; and a versioned deterministic solver boundary.
-Final conformance still requires the full cross-requirement CM-shaped integration
-fixture and the requirement-by-requirement audit.
+The public-only
+[`representative_conformance`](../crates/canwu-api/tests/representative_conformance.rs)
+fixture now composes independent domain packages, authority-aware commands and
+persisted rejection evidence, competing reservations, same- and next-boundary
+visibility, a conditional record transition, actor-relative knowledge, scoped
+randomness, save/load, exact replay, forking, rollback, tamper detection, and
+package-identity rejection. It proves those implemented architecture boundaries
+without adding application-specific types or rules to the kernel.
+
+The complete profile remains in progress. The major remaining gaps include
+authority scopes that prevent human/AI double control, institution/advisor
+permission semantics, experiment lineage, and the remaining canonical
+run-configuration identity fields; recurring calendar policy and unified
+persistence for internal scheduled continuations; released, carried, and lost
+reservation outcomes plus atomic conservation bundles; field-level provenance
+and structured report facts; immutable generation-tagged actor projections; a
+general migration registry, replay environment discovery, fork lineage, and
+branch comparison; constrained data/rule packages; binding-oriented batch APIs;
+and a versioned deterministic solver boundary. Final conformance requires those
+contracts, their executable evidence, and a requirement-by-requirement audit.

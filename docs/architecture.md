@@ -459,8 +459,8 @@ hashes. Continuation is blocked until every required plugin is rehydrated, and
 registration must reproduce the exact stored identity and descriptor before
 its handlers become active. `RunManifest` separately binds scenario, rules,
 content, localization-sensitive contracts, run configuration, and source
-provenance. A declared `RunConfigurationSnapshot` carries the six orthogonal CM
-policy dimensions and is validated against that manifest. Authoritative state
+provenance. A declared `RunConfigurationSnapshot` carries six orthogonal
+run-policy dimensions and is validated against that manifest. Authoritative state
 and boundary hashes normalize admission and presentation policy so changing
 only observation or trace policy cannot change simulation-result identity or
 RNG state. The checkpoint remains a save-container commitment and additionally
@@ -510,18 +510,13 @@ All first-party crates share one SemVer version from the workspace manifest.
 Persistent snapshots additionally carry an independent format version so engine
 releases and storage migrations do not have to move in lockstep.
 
-## Celestial Mandate conformance
+## Reusable-engine conformance
 
-Canwu's first complete external-engine target is the reusable engine boundary
-required by Celestial Mandate. The normative engine-neutral capability profile
-is maintained in [`cm-engine-conformance.md`](cm-engine-conformance.md).
-
-That profile does not move Celestial Mandate rules into Canwu. Instead, it
-requires Canwu to provide the deterministic settlement, authority, ownership,
-transaction, knowledge, persistence, lineage, package, and publication
-contracts through public extension points. The current v0.4 runtime adds scoped
-randomness, run/plugin identity, boundary hash evidence, typed run policy,
-replayable authority-aware requests, and a canonical
-command/communication/calendar ingress journal to the v0.3 phased settlement
-foundation. It is still only a partial conformance result; the remaining gaps
-are tracked in the profile itself.
+Canwu is developed against the normative engine-neutral capability profile in
+[`engine-conformance.md`](engine-conformance.md). It requires deterministic
+settlement, authority, ownership, transactions, knowledge, persistence,
+lineage, packages, and publication through public extension points. Current
+coverage and remaining gaps are tracked in the profile itself. The public-only
+[`representative_conformance`](../crates/canwu-api/tests/representative_conformance.rs)
+fixture composes independent packages across authority, settlement, typed
+records, knowledge, randomness, persistence, replay, forking, and rollback.

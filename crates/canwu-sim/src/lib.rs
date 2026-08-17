@@ -5009,19 +5009,19 @@ mod tests {
     struct RecordSeatDeletionPlugin;
 
     fn office_kind() -> DomainRecordKind {
-        DomainRecordKind::new("cm-fixture", "office")
+        DomainRecordKind::new("fixture.governance", "office")
     }
 
     fn obligation_kind() -> DomainRecordKind {
-        DomainRecordKind::new("cm-fixture", "obligation")
+        DomainRecordKind::new("fixture.governance", "obligation")
     }
 
     fn office_reference(id: &str) -> DomainRecordRef {
-        DomainRecordRef::new("cm-fixture", "office", id)
+        DomainRecordRef::new("fixture.governance", "office", id)
     }
 
     fn obligation_reference() -> DomainRecordRef {
-        DomainRecordRef::new("cm-fixture", "obligation", "standing-order")
+        DomainRecordRef::new("fixture.governance", "obligation", "standing-order")
     }
 
     fn object_payload_schema(field: &str) -> PayloadSchema {
@@ -5107,13 +5107,13 @@ mod tests {
             1 => vec![
                 BoundaryDirective::MutateRecord {
                     mutation: DomainRecordMutation::Create {
-                        record: office_draft("office-a", "Grand Secretariat"),
+                        record: office_draft("office-a", "Primary Office"),
                     },
                     summary: "Create the original office".to_owned(),
                 },
                 BoundaryDirective::MutateRecord {
                     mutation: DomainRecordMutation::Create {
-                        record: office_draft("office-b", "Successor Secretariat"),
+                        record: office_draft("office-b", "Successor Office"),
                     },
                     summary: "Create the successor office".to_owned(),
                 },
@@ -5124,7 +5124,7 @@ mod tests {
                     summary: "Create an obligation assigned to the original office".to_owned(),
                 },
                 BoundaryDirective::SetComponent {
-                    state: StateKey::new("cm-fixture", "marker"),
+                    state: StateKey::new("fixture.governance", "marker"),
                     entity: EntityRef::Domain(office_reference("office-b")),
                     component: "status".to_owned(),
                     value: Value::String("created".to_owned()),
@@ -5134,7 +5134,7 @@ mod tests {
             2 => vec![
                 BoundaryDirective::MutateRecord {
                     mutation: DomainRecordMutation::Create {
-                        record: office_draft("office-c", "Later Secretariat"),
+                        record: office_draft("office-c", "Later Office"),
                     },
                     summary: "Create the later successor office".to_owned(),
                 },
@@ -5180,7 +5180,7 @@ mod tests {
             ],
             5 => vec![BoundaryDirective::MutateRecord {
                 mutation: DomainRecordMutation::Update {
-                    record: office_draft("office-c", "Stale Secretariat"),
+                    record: office_draft("office-c", "Stale Office"),
                     expected_version: 99,
                 },
                 summary: "Attempt a stale office update".to_owned(),
@@ -5290,7 +5290,7 @@ mod tests {
         handler: BoundarySystemHandler,
     ) -> Result<(), CanwuError> {
         let mut writes = register_record_schemas(registrar)?;
-        writes.push(StateKey::new("cm-fixture", "marker"));
+        writes.push(StateKey::new("fixture.governance", "marker"));
 
         let mut lifecycle = BoundarySystemContract::new(
             "lifecycle",
@@ -5353,7 +5353,7 @@ mod tests {
 
     impl SimulationPlugin for RecordLifecyclePlugin {
         fn name(&self) -> &'static str {
-            "cm-record-lifecycle"
+            "fixture-record-lifecycle"
         }
 
         test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000021");
@@ -5365,7 +5365,7 @@ mod tests {
 
     impl SimulationPlugin for RecordDeleteOnlyPlugin {
         fn name(&self) -> &'static str {
-            "cm-record-delete-only"
+            "fixture-record-delete-only"
         }
 
         test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000022");
@@ -5422,7 +5422,7 @@ mod tests {
 
     impl SimulationPlugin for RecordCyclePlugin {
         fn name(&self) -> &'static str {
-            "cm-record-cycle"
+            "fixture-record-cycle"
         }
 
         test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000023");
@@ -5475,7 +5475,7 @@ mod tests {
 
     impl SimulationPlugin for RecordSeatDeletionPlugin {
         fn name(&self) -> &'static str {
-            "cm-record-seat-deletion"
+            "fixture-record-seat-deletion"
         }
 
         test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000024");
@@ -5809,11 +5809,15 @@ mod tests {
         configuration: &RunConfiguration,
     ) -> RunManifest {
         let scenario_manifest =
-            ArtifactManifest::for_scenario("cm", "policy-fixture", "1", scenario)
+            ArtifactManifest::for_scenario("fixture", "policy-fixture", "1", scenario)
                 .expect("scenario identity should hash");
-        let configuration_manifest =
-            ArtifactManifest::for_run_configuration("cm", "run-configuration", "1", configuration)
-                .expect("run configuration identity should hash");
+        let configuration_manifest = ArtifactManifest::for_run_configuration(
+            "fixture",
+            "run-configuration",
+            "1",
+            configuration,
+        )
+        .expect("run configuration identity should hash");
         RunManifest::declared(scenario_manifest, configuration_manifest)
     }
 
@@ -8728,17 +8732,17 @@ mod tests {
         let mut initial_scenario = scenario.clone();
         initial_scenario.domain_records = vec![
             initial_record(
-                "cm-record-lifecycle",
+                "fixture-record-lifecycle",
                 DomainRecordClass::Entity,
-                office_draft("office-a", "Grand Secretariat"),
+                office_draft("office-a", "Primary Office"),
             ),
             initial_record(
-                "cm-record-lifecycle",
+                "fixture-record-lifecycle",
                 DomainRecordClass::Entity,
-                office_draft("office-b", "Successor Secretariat"),
+                office_draft("office-b", "Successor Office"),
             ),
             initial_record(
-                "cm-record-lifecycle",
+                "fixture-record-lifecycle",
                 DomainRecordClass::Record,
                 obligation_draft("office-a", "open"),
             ),
@@ -8963,7 +8967,7 @@ mod tests {
             id: event_id,
             timestamp: last_boundary_at,
             kind: EventKind::Plugin {
-                plugin: "cm-record-lifecycle".to_owned(),
+                plugin: "fixture-record-lifecycle".to_owned(),
                 event_type: "record_probe".to_owned(),
             },
             affected_entities: vec![EntityRef::Domain(office_reference("office-a"))],
@@ -8977,7 +8981,7 @@ mod tests {
             .expect("the fixture should retain its boundary head")
             .emissions
             .push(BoundaryEmission {
-                plugin: "cm-record-lifecycle".to_owned(),
+                plugin: "fixture-record-lifecycle".to_owned(),
                 system: "lifecycle".to_owned(),
                 event: event_id,
                 kind: BoundaryEmissionKind::Explicit,
@@ -9073,7 +9077,7 @@ mod tests {
         let (scenario, _) = demo_scenario();
         let mut cyclic_genesis = scenario.clone();
         let mut first = initial_record(
-            "cm-record-cycle",
+            "fixture-record-cycle",
             DomainRecordClass::Entity,
             office_draft("office-a", "First Office"),
         );
@@ -9082,7 +9086,7 @@ mod tests {
             successor: Some(office_reference("office-b")),
         };
         let mut second = initial_record(
-            "cm-record-cycle",
+            "fixture-record-cycle",
             DomainRecordClass::Entity,
             office_draft("office-b", "Second Office"),
         );
@@ -9124,7 +9128,7 @@ mod tests {
         let (scenario, _) = demo_scenario();
         let mut initial_scenario = scenario;
         initial_scenario.domain_records = vec![initial_record(
-            "cm-record-seat-deletion",
+            "fixture-record-seat-deletion",
             DomainRecordClass::Entity,
             office_draft("office-a", "Bound Office"),
         )];
@@ -9415,12 +9419,16 @@ mod tests {
     fn run_and_plugin_manifests_bind_continuation_and_replay() {
         let (scenario, _) = demo_scenario();
         let scenario_manifest =
-            ArtifactManifest::for_scenario("cm", "reference-scenario", "1", &scenario)
+            ArtifactManifest::for_scenario("fixture", "reference-scenario", "1", &scenario)
                 .expect("scenario identity should hash");
         let run_configuration = RunConfiguration::read_only_observer();
-        let run_configuration_manifest =
-            ArtifactManifest::for_run_configuration("cm", "run-policy", "1", &run_configuration)
-                .expect("run configuration should hash");
+        let run_configuration_manifest = ArtifactManifest::for_run_configuration(
+            "fixture",
+            "run-policy",
+            "1",
+            &run_configuration,
+        )
+        .expect("run configuration should hash");
         let mut run_manifest = RunManifest::declared(scenario_manifest, run_configuration_manifest);
         let RunManifest::Declared {
             rules,
@@ -9433,21 +9441,21 @@ mod tests {
             unreachable!("the fixture creates a declared manifest");
         };
         rules.extend([
-            ArtifactManifest::from_bytes("cm", "zeta-rules", "1", b"zeta")
+            ArtifactManifest::from_bytes("fixture", "zeta-rules", "1", b"zeta")
                 .expect("rule identity should hash"),
-            ArtifactManifest::from_bytes("cm", "alpha-rules", "1", b"alpha")
+            ArtifactManifest::from_bytes("fixture", "alpha-rules", "1", b"alpha")
                 .expect("rule identity should hash"),
         ]);
         content.push(
-            ArtifactManifest::from_bytes("cm", "historical-content", "1", b"content")
+            ArtifactManifest::from_bytes("fixture", "historical-content", "1", b"content")
                 .expect("content identity should hash"),
         );
         localization_contracts.push(
-            ArtifactManifest::from_bytes("cm", "localization-contract", "1", b"keys-v1")
+            ArtifactManifest::from_bytes("fixture", "localization-contract", "1", b"keys-v1")
                 .expect("localization identity should hash"),
         );
         sources.push(
-            ArtifactManifest::from_bytes("cm", "source-ledger", "1", b"sources")
+            ArtifactManifest::from_bytes("fixture", "source-ledger", "1", b"sources")
                 .expect("source identity should hash"),
         );
 

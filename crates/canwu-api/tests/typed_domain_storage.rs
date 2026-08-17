@@ -77,7 +77,7 @@ impl SimulationPlugin for GovernancePlugin {
 fn typed_domain_storage_is_binding_safe_across_save_and_load() {
     let office = TypedDomainRecordRef::<Office>::new("secretariat");
     let payload = OfficePayload {
-        title: "Secretariat".to_owned(),
+        title: "Council Office".to_owned(),
         capacity: 12,
     };
     let draft = DomainRecordDraft::from_typed(office.clone(), &payload)

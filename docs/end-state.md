@@ -3,9 +3,9 @@
 This document is the source of truth for architectural direction beyond the
 initial movement vertical slice.
 
-The concrete reusable-engine acceptance target for Celestial Mandate is defined
-in [`cm-engine-conformance.md`](cm-engine-conformance.md). Its requirements are
-part of the Canwu end state; period- and game-specific mechanics remain external
+The concrete reusable-engine acceptance target is defined in
+[`engine-conformance.md`](engine-conformance.md). Its requirements are part of
+the Canwu end state; period- and application-specific mechanics remain external
 domain packages.
 
 ## Product surfaces

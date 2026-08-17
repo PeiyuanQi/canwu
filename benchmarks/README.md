@@ -757,3 +757,37 @@ sub-0.1-ms case, while caller-owned segment release moves from 0.268 to 0.237 ms
 milestone makes no runtime-performance claim; it adds compile-time package
 binding while preserving the authoritative storage, hashing, migration, and
 replay contracts.
+
+## Representative-conformance comparison
+
+The engine-neutral public conformance fixture and fixture-identity cleanup are
+recorded in separate
+[`elapsed`](baselines/2026-08-16-representative-conformance-elapsed.json) and
+[`allocation`](baselines/2026-08-16-representative-conformance-allocations.json)
+reports, using the typed-domain milestone as the before baseline. The release
+runtime path is unchanged; this milestone adds one public integration fixture,
+updates architecture documentation, and gives internal fixtures domain-neutral
+identities.
+
+Every measured allocation sample and summary, history count, checkpoint hash,
+checkpoint-storage size, and flat snapshot size is identical at all four
+scales. Both reports contain 42 raw build-affecting source fingerprints matching
+the measured tree. At scale 512, history growth changes by +1.1%, accepted
+commands +0.7%, empty boundaries +1.2%, populated boundaries +0.9%, snapshot
+creation -4.8%, load validation -2.7%, and exact replay -0.4%. Caller-owned
+segment release moves from 0.237 to 0.257 ms (+8.2%) on a sub-0.3-ms case.
+These are treated as local timing noise. The milestone makes no runtime-
+performance claim.
+
+## Deterministic parallelism decision
+
+The final profile measures an empty boundary at 0.454 ms and a populated
+boundary at 0.777 ms at scale 512, while complete retained-history construction
+takes 518.231 ms and exact replay takes 517.693 ms. Allocation evidence is also
+unchanged from the typed-domain baseline. These measurements justify deferring
+concurrency, but they do not isolate proposal execution from the other work in
+a boundary. Deterministic parallel proposal execution remains deferred until a
+dedicated proposal-only profile shows that it materially dominates after the
+remaining sequential costs are addressed. The sequential reference path remains
+the canonical implementation and the future equivalence oracle for any parallel
+backend.
