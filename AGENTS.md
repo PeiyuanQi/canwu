@@ -37,9 +37,10 @@
 6. For public API, persistence, replay, migration, authority, determinism, or
    performance changes, obtain an independent review before committing. Resolve
    every blocking finding and re-run the affected checks.
-7. When explicitly asked to commit or push, stage explicit paths only, use a
-   conventional commit, push without force, and report remaining uncommitted
-   work separately.
+7. Keep implementation and verification uncommitted until the requested change
+   set is complete. When explicitly asked to commit or push, follow the commit
+   economy rules below, stage explicit paths only, use a conventional commit,
+   push without force, and report remaining uncommitted work separately.
 
 <details>
 <summary><strong>Project hierarchy and change-surface map</strong></summary>
@@ -96,6 +97,20 @@ contracts, never the reverse.
 - Prefer git worktrees for parallel or unrelated agent work so multiple agents
   can develop concurrently without colliding. `.worktrees/` is ignored.
 - Treat existing uncommitted changes as user-owned unless told otherwise.
+- Minimize commit count. Do not create a commit per agent, turn, phase, file,
+  test pass, or review iteration, and do not use checkpoint, progress, WIP,
+  test-fix, or review-fix commits as agent state.
+- Unless the user requests a different boundary, keep a normal task uncommitted
+  through implementation and verification. When a commit is requested, produce
+  one coherent final commit for the requested change set.
+- If the same task already has an unpublished agent-owned commit, amend it
+  instead of appending another commit. If temporary local fixups already exist,
+  squash them before handoff. Never rewrite commits that predate the task, are
+  user-owned, or have been pushed or shared unless explicitly authorized.
+- Use multiple commits only when parts genuinely require independent review,
+  rollback, or release. In multi-agent work, the integrating agent owns the
+  final commit; delegated workers leave changes uncommitted unless assigned an
+  explicit commit boundary.
 - Prefer rebase-based conflict resolution unless a task requires a merge.
 
 ## Coding Rules

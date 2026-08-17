@@ -11,6 +11,11 @@ below before submitting work.
 - Keep the simulation headless and preserve the validated command boundary.
 - Preserve Windows, macOS, and Linux support.
 - Keep changes focused and document user-visible or architectural behavior.
+- Minimize commit count: keep work uncommitted while iterating, avoid
+  checkpoint, WIP, per-agent, test-fix, and review-fix commits, and normally
+  submit one coherent commit per reviewable change. Split only for parts that
+  genuinely need independent review, rollback, or release; amend unpublished
+  task commits instead of stacking more and never rewrite shared history.
 - Treat tests as durable evidence. Commit a test only when it is necessary,
   reusable, very likely to fail under a plausible future change, and
   non-trivial: it exercises a multi-step invariant, public contract,
