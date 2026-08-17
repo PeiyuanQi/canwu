@@ -53,10 +53,11 @@ cargo run -p canwu-api --example phased_boundary
 - `canwu-api`: public APIs for programs, agents, explanations, and debugging
 - `canwu-debug`: a small reference client built only on the public API
 
-The `docs` directory contains the architectural contracts. `agent-interface`
-contains skills for engine users and repository maintainers; these are tooling,
-not runtime simulation plugins. The `website` and `assets` directories contain
-the community site and project media.
+The [documentation index](docs/README.md) links the architectural contracts,
+community guidance, and legal notices. `agent-interface` contains skills for
+engine users and repository maintainers; these are tooling, not runtime
+simulation plugins. The `website` and `assets` directories contain the
+community site and project media.
 
 Read [the architecture](docs/architecture.md) and
 [end-state design](docs/end-state.md) before changing boundaries.
@@ -143,10 +144,11 @@ Canwu is open-source software licensed under the
 open-source or proprietary products without royalties or revenue reporting.
 Distributed copies must comply with the Apache License and preserve applicable
 license and [NOTICE](NOTICE) material. The Apache License does not require a
-Canwu logo or public acknowledgement; [BRANDING.md](BRANDING.md) explains
-optional, non-endorsing use of the project marks. Third-party dependencies
-remain under their own licenses; see
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+Canwu logo or public acknowledgement; the
+[branding guide](docs/community/branding.md) explains optional, non-endorsing
+use of the project marks. Third-party dependencies remain under their own
+licenses; see the
+[third-party license inventory](docs/legal/third-party-licenses.md).
 
 ## Supported platforms
 

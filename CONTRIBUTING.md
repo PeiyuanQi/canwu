@@ -26,7 +26,8 @@ below before submitting work.
   in the pull request. Do not submit material that cannot be distributed under
   the project and contributor terms.
 - When adding or updating a dependency, update `Cargo.lock` and review
-  `THIRD_PARTY_LICENSES.md` so the dependency inventory stays accurate.
+  `docs/legal/third-party-licenses.md` so the dependency inventory stays
+  accurate.
 
 ## Local development
 

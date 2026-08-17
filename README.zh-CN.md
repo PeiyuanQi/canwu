@@ -48,9 +48,9 @@ cargo run -p canwu-api --example phased_boundary
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
 - `canwu-debug`：只使用公开 API 的小型参考客户端
 
-`docs` 保存架构契约。`agent-interface` 保存供引擎使用者和仓库维护者使用的
-技能工具，它们不是运行时模拟插件。`website` 和 `assets` 保存社区网站与项目
-素材。
+[文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。
+`agent-interface` 保存供引擎使用者和仓库维护者使用的技能工具，它们不是运行时
+模拟插件。`website` 和 `assets` 保存社区网站与项目素材。
 
 修改架构边界前，请先阅读[架构说明](docs/architecture.md)和
 [最终设计](docs/end-state.md)。
@@ -131,9 +131,9 @@ Canwu 是按照 [Apache License 2.0](LICENSE) 发布的开源软件。任何人�
 时必须遵守 Apache 许可证，并保留适用的许可证和 [NOTICE](NOTICE) 材料。
 
 Apache 许可证不要求产品显示 Canwu 标志或公开鸣谢；如自愿使用项目标志，
-请遵循 [BRANDING.md](BRANDING.md) 中关于避免暗示背书的说明。第三方依赖继续
-使用各自的许可证，详见
-[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
+请遵循[品牌指南](docs/community/branding.md)中关于避免暗示背书的说明。第三方
+依赖继续使用各自的许可证，详见
+[第三方许可证清单](docs/legal/third-party-licenses.md)。
 
 ## 支持的平台
 

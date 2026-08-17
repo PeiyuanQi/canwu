@@ -1,7 +1,7 @@
 # Additional Third-Party Notices
 
 This file contains upstream notices that are not included automatically in
-`THIRD_PARTY_NOTICES.html`.
+`third-party-notices.html`.
 
 ## `cfg_aliases` 0.2.2
 

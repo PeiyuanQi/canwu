@@ -6,8 +6,8 @@ description: Prepare and verify Canwu releases, packages, tags, and release arti
 # Release Canwu
 
 Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
-`docs/versioning.md`, `LICENSE`, `NOTICE`, `BRANDING.md`, and
-`THIRD_PARTY_LICENSES.md` before changing release state.
+`docs/versioning.md`, `LICENSE`, `NOTICE`, `docs/community/branding.md`, and
+`docs/legal/third-party-licenses.md` before changing release state.
 
 ## Prepare
 
@@ -47,7 +47,8 @@ the complete third-party notice bundle.
 - Do not add royalties, revenue thresholds, field-of-use limits, mandatory
   product displays, or other custom restrictions to the Apache license.
 - Treat Canwu logo use as optional and separate from the copyright license.
-  `BRANDING.md` controls truthful, non-endorsing use of project marks.
+  `docs/community/branding.md` controls truthful, non-endorsing use of project
+  marks.
 - Confirm third-party materials remain under their upstream licenses and are
   not presented as first-party Apache-2.0 material.
 - Preserve the inbound-equals-outbound Apache-2.0 contribution terms.
@@ -58,18 +59,19 @@ Use the pinned tool:
 
 ```text
 cargo install cargo-about --version 0.8.4 --locked
-cargo about generate --workspace --all-features --locked about.hbs --output-file THIRD_PARTY_NOTICES.html
+cargo about generate --workspace --all-features --locked --config tools/licenses/about.toml tools/licenses/about.hbs --output-file docs/legal/third-party-notices.html
 ```
 
-Review the generated diff. Also review `THIRD_PARTY_NOTICES_EXTRA.md`; the
-generator does not collect every upstream NOTICE file.
+Review the generated diff. Also review
+`docs/legal/third-party-notices-extra.md`; the generator does not collect every
+upstream NOTICE file.
 
 Check that the output includes:
 
 - Apache, MIT, BSD, Unicode, ISC, Boost, font, and other selected license text;
 - `epaint_default_fonts` plus SIL Open Font License and Ubuntu Font Licence;
 - the emoji font MIT notice and Hack/Bitstream Vera notice from
-  `THIRD_PARTY_NOTICES_EXTRA.md`; and
+  `docs/legal/third-party-notices-extra.md`; and
 - every external crate in the release dependency graph.
 
 Warnings, missing text, or unaccepted licenses for any package must be resolved
@@ -80,8 +82,8 @@ must not produce missing-license warnings.
 
 - `Cargo.lock` lists packages but does not contain their full license or
   copyright notices.
-- `THIRD_PARTY_LICENSES.md` is an inventory, not a substitute for the generated
-  and additional notice files.
+- `docs/legal/third-party-licenses.md` is an inventory, not a substitute for the
+  generated and additional notice files.
 - An SPDX `OR` allows a license choice; `AND` requires every listed license.
 - The debug client's `default_fonts` feature embeds font assets with separate
   OFL and Ubuntu Font Licence terms.
@@ -89,7 +91,7 @@ must not produce missing-license warnings.
   Hack font also carries Bitstream Vera terms and the emoji font has a named MIT
   copyright notice.
 - Windows, macOS, and Linux select different target dependencies. Review the
-  complete target set in `about.toml`.
+  complete target set in `tools/licenses/about.toml`.
 - Upstream NOTICE files such as `cfg_aliases/NOTICES.md` require separate
   preservation.
 - Regenerating notices online can change harvested text even when `Cargo.lock`
@@ -99,9 +101,10 @@ must not produce missing-license warnings.
 
 ## Assemble and report
 
-Include `LICENSE`, `NOTICE`, `THIRD_PARTY_LICENSES.md`,
-`THIRD_PARTY_NOTICES.html`, and `THIRD_PARTY_NOTICES_EXTRA.md` with compiled
-releases. Include `BRANDING.md` and logo assets when the release uses those
-marks. Report the version, targets, verification commands, notice changes,
-package contents, and exact files included. Do not tag, publish, upload, or push
-unless the user authorized that external state change.
+Include `LICENSE`, `NOTICE`, `docs/legal/third-party-licenses.md`,
+`docs/legal/third-party-notices.html`, and
+`docs/legal/third-party-notices-extra.md` with compiled releases. Include
+`docs/community/branding.md` and logo assets when the release uses those marks.
+Report the version, targets, verification commands, notice changes, package
+contents, and exact files included. Do not tag, publish, upload, or push unless
+the user authorized that external state change.

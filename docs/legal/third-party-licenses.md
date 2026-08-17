@@ -8,9 +8,9 @@ This file is a readable inventory and release checklist. It does not replace
 the copyright notices, license files, or attribution requirements supplied by
 the dependency authors.
 
-The generated [THIRD_PARTY_NOTICES.html](THIRD_PARTY_NOTICES.html) contains the
-full license texts and package attribution discovered by `cargo-about`.
-[THIRD_PARTY_NOTICES_EXTRA.md](THIRD_PARTY_NOTICES_EXTRA.md) preserves upstream
+The generated [third-party notices](third-party-notices.html) contain the full
+license texts and package attribution discovered by `cargo-about`.
+[Additional third-party notices](third-party-notices-extra.md) preserve upstream
 notices that the generator does not collect.
 
 ## Current dependency set
@@ -50,7 +50,7 @@ licenses. An `AND` means all listed terms apply to the relevant code or assets.
 | `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
 
 The first-party `canwu-*` crates are not third-party dependencies. They use the
-root [Apache License 2.0](LICENSE).
+root [Apache License 2.0](../../LICENSE).
 
 ## Bundled fonts
 
@@ -65,7 +65,8 @@ Binary releases of the debug client must preserve the applicable font license
 and attribution material as well as the Rust crate notices. Package-level SPDX
 metadata does not expose every embedded font notice: the emoji font has its own
 MIT copyright notice, and Hack includes Source Foundry, DejaVu, and Bitstream
-Vera terms. Those notices are preserved in `THIRD_PARTY_NOTICES_EXTRA.md`.
+Vera terms. Those notices are preserved in
+`docs/legal/third-party-notices-extra.md`.
 
 ## Release requirements
 
@@ -77,11 +78,12 @@ must:
 2. install the pinned generator with
    `cargo install cargo-about --version 0.8.4 --locked`;
 3. regenerate the notice file with
-   `cargo about generate --workspace --all-features --locked about.hbs
-   --output-file THIRD_PARTY_NOTICES.html`;
+   `cargo about generate --workspace --all-features --locked --config
+   tools/licenses/about.toml tools/licenses/about.hbs --output-file
+   docs/legal/third-party-notices.html`;
 4. update this file when `Cargo.lock` or enabled features change the inventory;
 5. preserve additional upstream NOTICE files in
-   `THIRD_PARTY_NOTICES_EXTRA.md`; and
+   `docs/legal/third-party-notices-extra.md`; and
 6. include `LICENSE`, `NOTICE`, this inventory, and both third-party notice
    files in every compiled release package; include branding assets only when
    the release itself uses them.

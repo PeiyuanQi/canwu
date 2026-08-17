@@ -57,7 +57,10 @@
   plugins, records, persistence, validation, hashing, migration, and replay.
 - `crates/canwu-api`: the supported public facade and re-export boundary.
 - `crates/canwu-debug`: reference client; it may depend on `canwu-api` only.
-- `docs`: architecture, end-state, versioning, and compatibility contracts.
+- `docs`: architecture, end-state, versioning, conformance, community, and
+  legal documentation.
+- `tools/licenses`: `cargo-about` configuration and template inputs for the
+  generated third-party notice bundle.
 - `benchmarks`: deterministic non-CI performance harnesses and recorded
   baselines; measurement tooling, not authoritative runtime code.
 - `agent-interface`: Codex plugin packages and skills. Follow its nested
@@ -81,8 +84,8 @@
 | Performance or scaling behavior | `benchmarks`; affected runtime paths; deterministic workload counts; allocation, elapsed-time, snapshot-size, and growth evidence before and after |
 | Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes |
 | Agent skills or plugin packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; plugin validation |
-| Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; notices/license inventory; contribution/release docs; packaged plugin notices |
-| Website or branding | `website`; `assets`; `BRANDING.md`; community-facing README links; site-specific checks |
+| Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; `docs/legal`; `tools/licenses`; contribution/release docs; packaged plugin notices |
+| Website or branding | `website`; `assets`; `docs/community/branding.md`; community-facing README links; site-specific checks |
 | Community README or onboarding structure | Keep `README.md` and `README.zh-CN.md` equivalent in claims, sections, commands, links, and folded development flow; update related website/docs links when needed |
 
 If a change crosses several rows, treat that as one architectural milestone and
