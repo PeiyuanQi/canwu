@@ -30,7 +30,6 @@ const ui = {
     navLabel: "Primary navigation",
     docs: "Docs",
     tutorials: "Tutorials",
-    quickstart: "Get Started",
     architecture: "Architecture",
     integrations: "Integrations",
     contribute: "Contribute",
@@ -49,7 +48,6 @@ const ui = {
     navLabel: "主导航",
     docs: "文档",
     tutorials: "使用教程",
-    quickstart: "快速开始",
     architecture: "架构",
     integrations: "集成",
     contribute: "参与贡献",
@@ -74,7 +72,6 @@ const variants = isAuto
 const navItems = (variant: typeof variants[number]) => [
   { href: `${variant.prefix}/tutorials/`, label: variant.ui.tutorials },
   { href: "https://github.com/PeiyuanQi/canwu/tree/main/docs", label: variant.ui.docs },
-  { href: `${variant.prefix}/#quickstart`, label: variant.ui.quickstart },
   { href: `${variant.prefix}/#architecture`, label: variant.ui.architecture },
   { href: `${variant.prefix}/showcase/`, label: variant.ui.integrations },
   { href: "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md", label: variant.ui.contribute },
@@ -138,12 +135,43 @@ const navItems = (variant: typeof variants[number]) => [
           <summary>{variant.ui.menu}</summary>
           <div>
             {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
-            <a href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
+            <a class="mobile-menu-language" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
             <a class="github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
           </div>
         </details>
       ))}
     </header>
+    <script is:inline>
+      const mobileMenus = document.querySelectorAll("details.mobile-menu");
+
+      mobileMenus.forEach((menu) => {
+        menu.addEventListener("toggle", () => {
+          if (!menu.open) return;
+          mobileMenus.forEach((otherMenu) => {
+            if (otherMenu !== menu) otherMenu.removeAttribute("open");
+          });
+        });
+
+        menu.querySelectorAll("a").forEach((link) => {
+          link.addEventListener("click", () => menu.removeAttribute("open"));
+        });
+      });
+
+      document.addEventListener("click", (event) => {
+        mobileMenus.forEach((menu) => {
+          if (menu.open && !menu.contains(event.target)) menu.removeAttribute("open");
+        });
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        mobileMenus.forEach((menu) => {
+          if (!menu.open) return;
+          menu.removeAttribute("open");
+          menu.querySelector("summary")?.focus();
+        });
+      });
+    </script>
     <main id="content"><slot /></main>
     {variants.map((variant) => (
       <footer class="site-footer" data-locale-content={isAuto ? variant.locale : undefined}>
