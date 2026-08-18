@@ -11,6 +11,10 @@ coding agents.
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
 
+## Integration guides
+
+- [Continuous-time / proportional-time game loop](continuous-game-loop.md)
+
 ## Community
 
 - [Branding](community/branding.md)

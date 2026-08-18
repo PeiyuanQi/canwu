@@ -1,0 +1,42 @@
+---
+title: 阶段边界与资源分配
+description: 在同一确定性边界中声明供给、需求、分配与最终状态变化。
+sidebar:
+  order: 5
+  label: 阶段边界与分配
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/phased_boundary.rs" icon="external">
+  打开 phased_boundary.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  浏览示例目录
+</LinkButton>
+
+这个示例展示两个插件如何在每日边界上竞争同一批粮食，同时留下可检查的预留与分配证据。
+
+## 运行
+
+```shell
+cargo run -p canwu-api --example phased_boundary
+```
+
+## 三阶段协作
+
+<Steps>
+1. `SupplyPlugin` 在 `ReservationAndAllocation` 阶段声明粮食池和容量。
+2. `DemandPlugin` 在同一阶段声明数量、优先级和确定性 tie-break。
+3. Canwu 完成分配后，`DomainDeltaProposal` 阶段通过 `SimulationView::reservation()` 读取授予结果。
+4. 插件返回组件更新与领域事件，Canwu 在边界中统一应用并记录证据。
+</Steps>
+
+## 为什么使用分阶段边界
+
+- 供给和竞争需求先声明，再由引擎确定性结算。
+- 后续阶段读取的是已结算的分配证据，而不是隐含的插件执行顺序。
+- 契约明确执行频率、读写范围、事件和预留依赖。
+- 示例验证需求得到 6 单位粮食，并产生预期的边界产出。
+
+这适合日结、回合结算或其他需要多个系统在同一时间边界协作的场景；普通单一玩家动作仍可直接使用命令/行动 API。

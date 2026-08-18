@@ -1,0 +1,47 @@
+---
+title: 使用教程
+description: 从最小可运行示例开始，学习如何通过公开 canwu-api 驱动确定性历史模拟。
+template: splash
+sidebar:
+  order: 1
+  label: 教程总览
+hero:
+  tagline: 面向游戏和模拟开发者的可运行教程。每篇教程都对应仓库中的公开 Rust 示例。
+  actions:
+    - text: 从移动军队开始
+      link: /tutorials/move-army/
+      icon: right-arrow
+    - text: 浏览 GitHub 示例
+      link: https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples
+      variant: secondary
+      icon: external
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+## 选择一个起点
+
+<CardGrid>
+  <LinkCard
+    title="移动军队：最小垂直切片"
+    href="/tutorials/move-army/"
+    description="提交经过验证的行动、推进时间，并比较不同角色知道的信息。"
+  />
+  <LinkCard
+    title="连续时间游戏循环"
+    href="/tutorials/continuous-game-loop/"
+    description="解耦墙钟时间、模拟时间与表现时间，并证明结果不依赖 FPS。"
+  />
+  <LinkCard
+    title="命令插件"
+    href="/tutorials/command-plugin/"
+    description="注册带载荷结构校验、权限检查和声明式读写边界的插件命令。"
+  />
+  <LinkCard
+    title="阶段边界与资源分配"
+    href="/tutorials/phased-boundary/"
+    description="通过分阶段结算声明供给、竞争需求与可审计的分配结果。"
+  />
+</CardGrid>
+
+这些教程只依赖 `canwu-api`。渲染、窗口、输入设备和游戏框架仍由宿主程序选择。

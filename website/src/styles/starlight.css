@@ -1,0 +1,61 @@
+:root {
+  --sl-color-accent-low: #35211b;
+  --sl-color-accent: #d86c4a;
+  --sl-color-accent-high: #ffd5c7;
+  --sl-color-white: #f3efe7;
+  --sl-color-gray-1: #dfd9ce;
+  --sl-color-gray-2: #aaa298;
+  --sl-color-gray-3: #827b73;
+  --sl-color-gray-4: #504b46;
+  --sl-color-gray-5: #37332f;
+  --sl-color-gray-6: #272421;
+  --sl-color-black: #11100d;
+  --sl-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --sl-font-mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+:root[data-theme="light"] {
+  --sl-color-accent-low: #f9ded5;
+  --sl-color-accent: #a53e24;
+  --sl-color-accent-high: #502012;
+  --sl-color-white: #171512;
+  --sl-color-gray-1: #312e29;
+  --sl-color-gray-2: #5b554d;
+  --sl-color-gray-3: #777067;
+  --sl-color-gray-4: #aaa299;
+  --sl-color-gray-5: #d3ccc1;
+  --sl-color-gray-6: #e8e2d9;
+  --sl-color-gray-7: #f5f1ea;
+  --sl-color-black: #fffdfa;
+}
+
+.site-title {
+  font-weight: 760;
+  letter-spacing: -0.025em;
+}
+
+.hero h1 {
+  letter-spacing: -0.045em;
+}
+
+.sl-markdown-content a:not(.sl-link-button) {
+  text-underline-offset: 0.2em;
+}
+
+.sl-link-card {
+  transition: border-color 140ms ease, transform 140ms ease, background-color 140ms ease;
+}
+
+.sl-link-card:hover {
+  transform: translateY(-2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sl-link-card {
+    transition: none;
+  }
+
+  .sl-link-card:hover {
+    transform: none;
+  }
+}

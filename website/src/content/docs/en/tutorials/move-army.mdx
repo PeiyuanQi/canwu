@@ -1,0 +1,43 @@
+---
+title: "Move an army: the smallest vertical slice"
+description: Learn semantic actions, deterministic time advancement, and actor-relative knowledge.
+sidebar:
+  order: 2
+  label: Move an army
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs" icon="external">
+  Open move_army.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  Browse the example folder
+</LinkButton>
+
+This is the shortest path through Canwu's public API: commands do not mutate the world directly, the host advances time explicitly, and reads can be actor-relative.
+
+## Run it
+
+```shell
+cargo run -p canwu-api --example move_army
+```
+
+## Flow
+
+<Steps>
+1. Create a deterministic demo world with `Canwu::demo(35)`.
+2. Call `act()` as the commander with `SemanticAction::MoveArmy`.
+3. Advance simulation time so the scheduled arrival can execute.
+4. Call `observe()` for the commander and observer to compare their knowledge records.
+</Steps>
+
+## What to notice
+
+- The commander learns the new location as soon as the army arrives.
+- The observer retains stale information until a report is delivered.
+- Every world change enters through the public command/action boundary, never a mutable world reference.
+
+## Next
+
+Hosts that run continuously should continue with the [continuous-time game loop](/en/tutorials/continuous-game-loop/).

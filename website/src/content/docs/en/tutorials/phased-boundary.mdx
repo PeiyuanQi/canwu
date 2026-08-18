@@ -1,0 +1,42 @@
+---
+title: Phased boundary and allocation
+description: Declare supply, demand, allocation, and resulting state changes within one deterministic boundary.
+sidebar:
+  order: 5
+  label: Phased boundary and allocation
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/phased_boundary.rs" icon="external">
+  Open phased_boundary.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  Browse the example folder
+</LinkButton>
+
+This example shows two plugins coordinating at a daily boundary while preserving inspectable reservation and allocation evidence for a shared grain pool.
+
+## Run it
+
+```shell
+cargo run -p canwu-api --example phased_boundary
+```
+
+## Three-phase collaboration
+
+<Steps>
+1. `SupplyPlugin` declares a grain pool and its capacity in `ReservationAndAllocation`.
+2. `DemandPlugin` declares quantity, priority, and a deterministic tie-break in the same phase.
+3. After Canwu settles allocation, `DomainDeltaProposal` reads the grant through `SimulationView::reservation()`.
+4. The plugin returns a component update and domain event; Canwu applies both and records boundary evidence.
+</Steps>
+
+## Why use a phased boundary
+
+- Supply and competing demand are declared before deterministic settlement.
+- Later phases read settled allocation evidence instead of relying on implicit plugin execution order.
+- Contracts make cadence, state access, emissions, and reservation dependencies explicit.
+- The example verifies a grant of 6 grain and the expected boundary emissions.
+
+This pattern fits daily settlement, turn resolution, and other cases where several systems must coordinate at one time boundary. A single player action can continue to use the ordinary command/action API.

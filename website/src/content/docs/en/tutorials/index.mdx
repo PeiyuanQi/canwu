@@ -1,0 +1,47 @@
+---
+title: Tutorials
+description: Learn Canwu's public API through small, runnable examples for game and simulation developers.
+template: splash
+sidebar:
+  order: 1
+  label: Tutorial overview
+hero:
+  tagline: Runnable guides for game and simulation developers. Every tutorial maps to a public Rust example in the repository.
+  actions:
+    - text: Start with army movement
+      link: /en/tutorials/move-army/
+      icon: right-arrow
+    - text: Browse GitHub examples
+      link: https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples
+      variant: secondary
+      icon: external
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+## Pick a starting point
+
+<CardGrid>
+  <LinkCard
+    title="Move an army: the smallest vertical slice"
+    href="/en/tutorials/move-army/"
+    description="Submit a validated action, advance time, and compare what different actors know."
+  />
+  <LinkCard
+    title="Continuous-time game loop"
+    href="/en/tutorials/continuous-game-loop/"
+    description="Separate wall, simulation, and presentation clocks and prove FPS independence."
+  />
+  <LinkCard
+    title="Command plugin"
+    href="/en/tutorials/command-plugin/"
+    description="Register a schema-validated command with authority checks and declared state access."
+  />
+  <LinkCard
+    title="Phased boundary and allocation"
+    href="/en/tutorials/phased-boundary/"
+    description="Declare supply, competing demand, and auditable allocation through phased settlement."
+  />
+</CardGrid>
+
+These tutorials depend only on `canwu-api`. Rendering, windowing, input, and game-framework choices remain in the host application.

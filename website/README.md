@@ -1,11 +1,14 @@
 # Canwu website
 
 The public website for [canwu.org](https://canwu.org) is a static Astro site
-deployed through GitHub Pages.
+deployed through GitHub Pages. Its Markdown tutorial area uses Astro Starlight
+inside the same build rather than a separate documentation application.
 
 Chinese is the default language at `/`, `/showcase/`, and `/credits/`. English
 uses matching routes under `/en/`, including `/en/showcase/` and
 `/en/credits/`. Each page emits canonical and `hreflang` alternate metadata.
+Tutorial indexes are available at `/tutorials/` and `/en/tutorials/`; their
+Markdown and MDX sources live in `src/content/docs/`.
 
 ## Local development
 
@@ -19,6 +22,8 @@ pnpm build
 
 Astro telemetry is disabled by every package script through
 `ASTRO_TELEMETRY_DISABLED=1`. The GitHub Pages workflow sets the same variable.
+The tutorial UI stores only local presentation preferences such as color theme
+and transient sidebar state; it does not add analytics or account tracking.
 
 ## GitHub Pages and custom domain
 

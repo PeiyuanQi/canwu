@@ -1,0 +1,43 @@
+---
+title: 移动军队：最小垂直切片
+description: 用最小示例了解语义行动、确定性时间推进与角色知识差异。
+sidebar:
+  order: 2
+  label: 移动军队
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs" icon="external">
+  查看 move_army.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  浏览示例目录
+</LinkButton>
+
+这是理解 Canwu 公开 API 的最短路径：命令不直接修改世界状态，时间由宿主显式推进，读取可以是角色相对的。
+
+## 运行
+
+```shell
+cargo run -p canwu-api --example move_army
+```
+
+## 执行流程
+
+<Steps>
+1. 用 `Canwu::demo(35)` 创建确定性的演示世界。
+2. 调用 `act()`，以指挥官身份提交 `SemanticAction::MoveArmy`。
+3. 用 `advance()` 推进模拟时间，让已计划的到达工作发生。
+4. 分别调用 `observe()`，比较指挥官与观察者的知识记录。
+</Steps>
+
+## 应该观察什么
+
+- 指挥官在军队到达后立即知道新位置。
+- 观察者在报告送达前仍保留旧位置认知。
+- 任何世界变化都来自公开的命令/行动边界，而不是可变世界引用。
+
+## 下一步
+
+实时或连续运行的游戏宿主应继续阅读[连续时间游戏循环](/tutorials/continuous-game-loop/)。

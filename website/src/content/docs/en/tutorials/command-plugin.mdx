@@ -1,0 +1,43 @@
+---
+title: Command plugin
+description: Register a plugin command with schema validation, authority checks, and declared state access.
+sidebar:
+  order: 4
+  label: Command plugin
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/plugin.rs" icon="external">
+  Open plugin.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  Browse the example folder
+</LinkButton>
+
+This example registers a `set_stance` command so a plugin can add a semantic action while preserving Canwu's validation, authority, and audit boundaries.
+
+## Run it
+
+```shell
+cargo run -p canwu-api --example plugin
+```
+
+## Flow
+
+<Steps>
+1. Implement `SimulationPlugin` with a stable name, version, and semantic hash.
+2. Use `PluginActionDescriptor` to declare the payload schema and the `StateKey` values the command reads and writes.
+3. Query the army through the read-only `SimulationView` and verify that the issuer is its commander.
+4. Return `SystemDirective::SetComponent`; the plugin never receives a mutable world reference.
+5. Submit the action through public `Command::Plugin` and `CommandEnvelope` values.
+</Steps>
+
+## What to notice
+
+- The payload is schema-validated before the handler runs.
+- Authority is checked from command context, not assumed from the UI.
+- Declared reads and writes are part of the plugin contract and can be audited.
+- The handler describes an intended change; Canwu remains responsible for applying it.
+
+For systems that coordinate at a shared simulation boundary, continue with [phased boundary and allocation](/en/tutorials/phased-boundary/).

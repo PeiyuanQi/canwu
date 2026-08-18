@@ -1,0 +1,56 @@
+---
+title: Continuous-time game loop
+description: Separate wall, simulation, and presentation clocks in a continuously rendered strategy game.
+sidebar:
+  order: 3
+  label: Continuous-time game loop
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/continuous_game_loop.rs" icon="external">
+  Open continuous_game_loop.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples" variant="secondary" icon="external">
+  Browse the example folder
+</LinkButton>
+
+This reference implementation targets continuously running strategy games with pause and speed controls. The host owns wall time, game speed, the sub-minute accumulator, and presentation state; Canwu receives only representable deterministic simulation time.
+
+## Run it
+
+```shell
+cargo run -p canwu-api --example continuous_game_loop
+```
+
+## Three clocks
+
+- **Wall clock:** frame durations from the renderer or game framework. The example uses predefined 60 FPS-ish and 30 FPS-ish sequences, never the real clock or `sleep()`.
+- **Simulation clock:** Canwu's authoritative integer-minute time. The host calls `advance_canonical()` only after at least one minute has accumulated.
+- **Presentation clock:** Canwu time plus the host's retained sub-minute remainder, used only for visual interpolation.
+
+<Steps>
+1. Scale each frame duration by the host's base calendar rate and `Paused`, `1x`, `5x`, or `20x` game speed.
+2. Accumulate the result as high-precision integer nanoseconds, retaining any fraction smaller than one `SimDuration` minute.
+3. For every completed simulation quantum, call `advance_canonical(SimDuration::minutes(1))`.
+4. Copy transit data from the public `WorldSnapshot` into presentation state and calculate read-only movement progress.
+</Steps>
+
+## FPS-independent command ordering
+
+The player order enters through `enqueue_command()`. The example defines one frame-independent ceiling policy for between-minute input: a command captured at half a minute is due at the next representable Canwu minute. That timestamp policy belongs to the host and must not depend on which render frame happened to poll input.
+
+At the end, the two render profiles compare Canwu time, world state, commands, events, authoritative state hash, checkpoint hash, and canonical boundary count. Their frame counts differ; their authoritative results are identical.
+
+## Smooth presentation stays outside simulation
+
+The public snapshot exposes transit `from`, `to`, `departed_at`, and `arrives_at`. The presentation layer computes:
+
+```text
+visual_progress =
+  (presentation_time - departed_at) / (arrives_at - departed_at)
+```
+
+This floating-point value never feeds back into Canwu. During pause, render frames continue while simulation time, the retained remainder, and visual progress all remain unchanged.
+
+See the [full continuous-time integration note on GitHub](https://github.com/PeiyuanQi/canwu/blob/main/docs/continuous-game-loop.md) for the host-policy details.
