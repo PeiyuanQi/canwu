@@ -15,6 +15,13 @@ coding agents.
 
 - [Continuous-time / proportional-time game loop](continuous-game-loop.md)
 
+## Agent access
+
+When the `canwu-engine` agent plugin is installed, invoke
+[`$canwu-engine-docs`](../agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
+to locate and explain the relevant tutorial, design contract, public API source,
+or runnable example without loading the entire documentation set.
+
 ## Community
 
 - [Branding](community/branding.md)

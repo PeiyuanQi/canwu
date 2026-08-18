@@ -107,9 +107,11 @@ The detailed project hierarchy and change-surface map live in
 ## Agent skills
 
 Agent-facing integrations live under [`agent-interface`](agent-interface/).
-External users can use the
-[`canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-skill. Contributors and maintainers use skills under
+External users can invoke
+[`$canwu-engine-docs`](agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
+to find and explain official tutorials and design documents, then use
+[`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
+for implementation guidance. Contributors and maintainers use skills under
 [`canwu-developer`](agent-interface/plugins/canwu-developer/skills/); the release
 workflow is
 [`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md).

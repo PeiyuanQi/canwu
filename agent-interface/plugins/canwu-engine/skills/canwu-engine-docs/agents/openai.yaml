@@ -1,0 +1,4 @@
+interface:
+  display_name: "Read Canwu Docs"
+  short_description: "Find and explain Canwu tutorials and design docs"
+  default_prompt: "Use $canwu-engine-docs to answer my Canwu question from the relevant tutorial or design document."

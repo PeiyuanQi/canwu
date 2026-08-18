@@ -94,9 +94,11 @@ cargo run -p canwu-api --example phased_boundary
 ## 智能体技能
 
 智能体接口和技能位于 [`agent-interface`](agent-interface/) 目录。外部使用者可以
-使用
-[`canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-技能。贡献者和维护者使用
+调用
+[`$canwu-engine-docs`](agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
+查找并解读官方教程与设计文档，再使用
+[`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
+获得实现指导。贡献者和维护者使用
 [`canwu-developer`](agent-interface/plugins/canwu-developer/skills/) 下的技能；发布
 流程使用
 [`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md)。
