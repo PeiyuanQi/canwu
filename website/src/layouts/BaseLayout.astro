@@ -46,7 +46,7 @@ const ui = {
     skip: "跳到正文",
     homeLabel: "参伍引擎首页",
     navLabel: "主导航",
-    docs: "文档",
+    docs: "文档（英文）",
     tutorials: "使用教程",
     architecture: "架构",
     integrations: "集成",
@@ -71,7 +71,7 @@ const variants = isAuto
 
 const navItems = (variant: typeof variants[number]) => [
   { href: `${variant.prefix}/tutorials/`, label: variant.ui.tutorials },
-  { href: "https://github.com/PeiyuanQi/canwu/tree/main/docs", label: variant.ui.docs },
+  { href: "/en/docs/", label: variant.ui.docs },
   { href: `${variant.prefix}/#architecture`, label: variant.ui.architecture },
   { href: `${variant.prefix}/showcase/`, label: variant.ui.integrations },
   { href: "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md", label: variant.ui.contribute },
@@ -180,7 +180,7 @@ const navItems = (variant: typeof variants[number]) => [
           <p>{variant.ui.footerSub}</p>
         </div>
         <div class="footer-links">
-          <a href="https://github.com/PeiyuanQi/canwu/tree/main/docs">{variant.ui.docs} ↗</a>
+          <a href="/en/docs/">{variant.ui.docs} →</a>
           <a href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples">{variant.ui.examples} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">{variant.ui.contribute} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/issues">{variant.ui.issues} ↗</a>

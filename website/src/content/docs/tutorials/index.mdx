@@ -11,10 +11,14 @@ hero:
     - text: 从移动军队开始
       link: /tutorials/move-army/
       icon: right-arrow
-    - text: 浏览 GitHub 示例
-      link: https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples
+    - text: 项目文档（英文）
+      link: /en/docs/
       variant: secondary
-      icon: external
+      icon: open-book
+    - text: English tutorials
+      link: /en/tutorials/
+      variant: minimal
+      icon: translate
 ---
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
@@ -45,3 +49,18 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 </CardGrid>
 
 这些教程只依赖 `canwu-api`。渲染、窗口、输入设备和游戏框架仍由宿主程序选择。
+
+## 更多资源
+
+<CardGrid>
+  <LinkCard
+    title="项目文档（英文）"
+    href="/en/docs/"
+    description="在站内阅读架构、引擎约定、集成指南、社区与发布文档。"
+  />
+  <LinkCard
+    title="GitHub 示例"
+    href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"
+    description="直接查看每篇教程对应的公开 Rust 示例源码。"
+  />
+</CardGrid>

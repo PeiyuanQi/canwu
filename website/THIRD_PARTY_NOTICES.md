@@ -11,10 +11,11 @@ project remains subject to its own license.
 | @astrojs/check | 0.9.10 | Astro and TypeScript validation | MIT |
 | TypeScript | 5.9.3 | Type checking | Apache-2.0 |
 | Font Awesome Free | 7.3.1 | GitHub brand icon | CC BY 4.0 and MIT |
+| Mermaid | 11.16.1 | In-page architecture diagram rendering | MIT |
 | cross-env | 10.1.0 | Cross-platform environment variables | MIT |
 | pnpm | 11.19.0 | Package management | MIT |
 
 Astro uses Vite and esbuild in its build pipeline. The generated website uses
-project-owned Canwu branding and HTML/CSS-authored diagrams. The site does not
-ship hosted font files or copied assets from the engine websites referenced
-during design research.
+project-owned Canwu branding and locally bundled diagram rendering. The site
+does not ship hosted font files, load script CDNs, or copy assets from the
+engine websites referenced during design research.

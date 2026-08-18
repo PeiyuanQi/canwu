@@ -37,3 +37,57 @@ import { Icon } from "@astrojs/starlight/components";
   <Icon name="moon" class="dark" />
   <Icon name="laptop" class="auto" />
 </template>
+
+<script>
+  let mermaidModule: Promise<typeof import("mermaid")> | undefined;
+  let renderQueue = Promise.resolve();
+
+  function renderMermaidDiagrams() {
+    renderQueue = renderQueue.then(async () => {
+      const figures = Array.from(document.querySelectorAll<HTMLElement>(".mermaid-figure"));
+      if (figures.length === 0) return;
+
+      mermaidModule ??= import("mermaid");
+      const { default: mermaid } = await mermaidModule;
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        suppressErrorRendering: true,
+        theme: document.documentElement.dataset.theme === "light" ? "neutral" : "dark",
+        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+      });
+
+      for (const figure of figures) {
+        const diagram = figure.querySelector<HTMLElement>(".mermaid");
+        const definition = figure.querySelector<HTMLScriptElement>(".mermaid-definition");
+        const sourceCode = figure.querySelector<HTMLElement>(".mermaid-source-code");
+        if (!diagram || !definition || !sourceCode) continue;
+
+        const source = JSON.parse(definition.textContent ?? '""') as string;
+        sourceCode.textContent = source;
+        diagram.textContent = source;
+        diagram.removeAttribute("data-processed");
+        diagram.setAttribute("aria-busy", "true");
+        figure.classList.remove("render-failed");
+
+        try {
+          await mermaid.run({ nodes: [diagram] });
+        } catch {
+          diagram.textContent = source;
+          diagram.removeAttribute("data-processed");
+          figure.classList.add("render-failed");
+        } finally {
+          diagram.setAttribute("aria-busy", "false");
+        }
+      }
+    });
+  }
+
+  renderMermaidDiagrams();
+
+  new MutationObserver((mutations) => {
+    if (mutations.some((mutation) => mutation.attributeName === "data-theme")) {
+      renderMermaidDiagrams();
+    }
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+</script>

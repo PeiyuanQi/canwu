@@ -11,10 +11,14 @@ hero:
     - text: Start with army movement
       link: /en/tutorials/move-army/
       icon: right-arrow
-    - text: Browse GitHub examples
-      link: https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples
+    - text: Project docs
+      link: /en/docs/
       variant: secondary
-      icon: external
+      icon: open-book
+    - text: 中文教程
+      link: /tutorials/
+      variant: minimal
+      icon: translate
 ---
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
@@ -45,3 +49,18 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 </CardGrid>
 
 These tutorials depend only on `canwu-api`. Rendering, windowing, input, and game-framework choices remain in the host application.
+
+## More resources
+
+<CardGrid>
+  <LinkCard
+    title="Project documentation"
+    href="/en/docs/"
+    description="Read architecture, engine contracts, integration guides, community resources, and release references in place."
+  />
+  <LinkCard
+    title="GitHub examples"
+    href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"
+    description="Browse the public Rust source that accompanies each tutorial."
+  />
+</CardGrid>

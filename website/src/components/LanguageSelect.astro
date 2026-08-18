@@ -1,0 +1,37 @@
+---
+import DefaultLanguageSelect from "@astrojs/starlight/components/LanguageSelect.astro";
+import { Icon } from "@astrojs/starlight/components";
+
+const entryId = Astro.locals.starlightRoute.entry.id;
+const isRepositoryDoc = entryId === "en/docs" || entryId.startsWith("en/docs/");
+---
+
+{
+  isRepositoryDoc ? (
+    <span
+      class="repository-language"
+      title="These project documents are currently available in English only."
+    >
+      <Icon name="translate" />
+      English only
+    </span>
+  ) : (
+    <DefaultLanguageSelect />
+  )
+}
+
+<style>
+  .repository-language {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-sm);
+    white-space: nowrap;
+  }
+
+  .repository-language :global(svg) {
+    width: 1rem;
+    height: 1rem;
+  }
+</style>
