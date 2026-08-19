@@ -39,12 +39,29 @@ pub(super) struct ArchivedIngressRequest {
 }
 
 impl RuntimeEvidence {
-    pub(super) fn retained_ingress(&self, id: super::IngressId) -> Option<&IngressRecord> {
-        let index = id
-            .get()
-            .checked_sub(self.archived.ingress_count)?
+    fn retained_index(id: u64, archived_count: u64) -> Option<usize> {
+        id.checked_sub(archived_count)?
             .checked_sub(1)
-            .and_then(|value| usize::try_from(value).ok())?;
+            .and_then(|value| usize::try_from(value).ok())
+    }
+
+    pub(super) fn retained_event(&self, id: super::EventId) -> Option<&SimEvent> {
+        let index = Self::retained_index(id.get(), self.archived.event_count)?;
+        self.events.get(index).filter(|event| event.id == id)
+    }
+
+    pub(super) fn retained_command(&self, id: super::CommandId) -> Option<&CommandRecord> {
+        let index = Self::retained_index(id.get(), self.archived.command_count)?;
+        self.commands.get(index).filter(|record| record.id == id)
+    }
+
+    pub(super) fn retained_boundary(&self, id: super::BoundaryId) -> Option<&BoundaryRecord> {
+        let index = Self::retained_index(id.get(), self.archived.boundary_count)?;
+        self.boundaries.get(index).filter(|record| record.id == id)
+    }
+
+    pub(super) fn retained_ingress(&self, id: super::IngressId) -> Option<&IngressRecord> {
+        let index = Self::retained_index(id.get(), self.archived.ingress_count)?;
         self.ingress.get(index).filter(|record| record.id == id)
     }
 

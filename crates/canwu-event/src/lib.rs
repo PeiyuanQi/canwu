@@ -60,6 +60,21 @@ impl EventKind {
             Self::Plugin { .. } => "plugin",
         }
     }
+
+    /// Returns the stable, display-oriented type identity for this event.
+    ///
+    /// Built-in event kinds retain the same snake-case labels returned by
+    /// [`Self::event_type`]. Plugin events are qualified with their registered
+    /// plugin name and event type, separated by a dot. The two plugin-provided
+    /// components are preserved as registered; no case folding or additional
+    /// normalization is applied.
+    #[must_use]
+    pub fn qualified_event_type(&self) -> String {
+        match self {
+            Self::Plugin { plugin, event_type } => format!("{plugin}.{event_type}"),
+            _ => self.event_type().to_owned(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,4 +86,40 @@ pub struct SimEvent {
     pub summary: String,
     pub cause: Option<CauseRef>,
     pub correlation_id: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKind;
+    use canwu_core::{ArmyId, TerritoryId};
+
+    #[test]
+    fn qualified_event_type_preserves_legacy_labels_and_disambiguates_plugins() {
+        let built_in = EventKind::ArmyArrived {
+            army: ArmyId::new(1),
+            territory: TerritoryId::new(2),
+        };
+        assert_eq!(built_in.event_type(), "army_arrived");
+        assert_eq!(built_in.qualified_event_type(), "army_arrived");
+
+        let supply = EventKind::Plugin {
+            plugin: "example-supply".to_owned(),
+            event_type: "grain_allocated".to_owned(),
+        };
+        let demand = EventKind::Plugin {
+            plugin: "example-demand".to_owned(),
+            event_type: "grain_allocated".to_owned(),
+        };
+
+        assert_eq!(supply.event_type(), "plugin");
+        assert_eq!(
+            supply.qualified_event_type(),
+            "example-supply.grain_allocated"
+        );
+        assert_eq!(
+            demand.qualified_event_type(),
+            "example-demand.grain_allocated"
+        );
+        assert_ne!(supply.qualified_event_type(), demand.qualified_event_type());
+    }
 }

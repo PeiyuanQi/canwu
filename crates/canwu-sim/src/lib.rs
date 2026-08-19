@@ -103,12 +103,14 @@ use transactions::{
     ScheduledBatchTransactionCheckpoint,
 };
 use validation::{
-    claim_counter, core_world_entity_exists, has_unqueued_command_history, proposal_entity_exists,
-    proposal_entity_identity_exists, runtime_current_entity_exists, runtime_entity_exists,
+    RuntimeValidationContext, claim_counter, core_world_entity_exists,
+    has_unqueued_command_history, proposal_entity_exists, proposal_entity_identity_exists,
+    runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
     runtime_has_unqueued_command_history, snapshot_entity_exists_in_history,
-    validate_domain_dependents_with_records, validate_run_configuration_entities,
-    validate_runtime_cause, validate_runtime_domain_dependents, validate_snapshot,
+    validate_directives_with_context, validate_domain_dependents_with_records,
+    validate_run_configuration_entities, validate_runtime_cause,
+    validate_runtime_domain_dependents, validate_snapshot,
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -931,24 +933,22 @@ impl SimulationView<'_> {
         Ok(self.state.current().knowledge.for_actor(actor))
     }
 
+    /// Resolves an exact command ID from the retained runtime journal in O(1).
+    ///
+    /// A command that has already been sealed into a live archive is not
+    /// available through this view and returns `None`.
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
-        Ok(self
-            .state
-            .evidence()
-            .commands
-            .iter()
-            .find(|record| record.id == id))
+        Ok(self.state.evidence().retained_command(id))
     }
 
+    /// Resolves an exact event ID from the retained runtime journal in O(1).
+    ///
+    /// An event that has already been sealed into a live archive is not
+    /// available through this view and returns `None`.
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
-        Ok(self
-            .state
-            .evidence()
-            .events
-            .iter()
-            .find(|event| event.id == id))
+        Ok(self.state.evidence().retained_event(id))
     }
 
     pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
@@ -2978,12 +2978,12 @@ impl Simulation {
                         format!("plugin command {plugin}.{command} panicked"),
                     )
                 })??;
-                validate_directives(
+                validate_directives_with_context(
+                    &RuntimeValidationContext::new(&self.state),
                     plugin,
                     &descriptor.writes,
                     &self.plugins.state_owners,
                     &self.plugins.record_schemas,
-                    &|entity| runtime_entity_exists(&self.state, entity),
                     &directives,
                 )?;
                 Ok(PreparedCommand::Plugin {
@@ -7009,6 +7009,124 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_rejects_event_correlation_drift() {
+        let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
+        simulation
+            .submit(move_order(&ids))
+            .expect("movement command should commit");
+        simulation
+            .advance(SimDuration::hours(18))
+            .expect("arrival work should execute");
+
+        let mut tampered = simulation.snapshot();
+        let child_index = tampered
+            .events
+            .iter()
+            .position(|event| matches!(event.cause, Some(CauseRef::Event(_))))
+            .expect("the movement timeline should contain a child event");
+        tampered.events[child_index].correlation_id = tampered.events[child_index]
+            .correlation_id
+            .checked_add(1)
+            .expect("the fixture correlation should remain representable");
+        refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+
+        let Err(error) = Simulation::from_snapshot(tampered) else {
+            panic!("an event child cannot silently change correlation chains");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("correlation"));
+    }
+
+    #[test]
+    fn snapshot_rejects_correlation_reuse_across_command_roots() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation = Simulation::new(35, scenario).expect("demo should load");
+        let debug_command = |morale| {
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            )
+        };
+        simulation
+            .submit(debug_command(61))
+            .expect("the first command should commit");
+        simulation
+            .submit(debug_command(62))
+            .expect("the second command should commit");
+
+        let mut tampered = simulation.snapshot();
+        tampered.events[1].correlation_id = tampered.events[0].correlation_id;
+        refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+
+        let Err(error) = Simulation::from_snapshot(tampered) else {
+            panic!("one correlation cannot identify two command roots");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("unrelated causal roots"));
+    }
+
+    #[test]
+    fn snapshot_rejects_scheduled_plugin_correlation_drift() {
+        let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
+        simulation
+            .register_plugin(&FailingPlugin)
+            .expect("the scheduling fixture plugin should register");
+        simulation
+            .submit(move_order(&ids))
+            .expect("the movement command should commit");
+        simulation
+            .submit(CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale: 61,
+                },
+            ))
+            .expect("a second command should provide another committed correlation");
+
+        let order_event = simulation
+            .events()
+            .iter()
+            .find(|event| matches!(event.kind, EventKind::MoveOrdered { .. }))
+            .expect("the movement order event should exist");
+        let arrival_at = SimTime::EPOCH
+            .checked_add(SimDuration::hours(18))
+            .expect("arrival time should be representable");
+        simulation
+            .schedule_at(
+                arrival_at,
+                ScheduledAction::PluginDirective {
+                    plugin: "failing-test".to_owned(),
+                    directive: Box::new(SystemDirective::SetComponent {
+                        state: StateKey::new("failure-fixture", "flag"),
+                        entity: EntityRef::Army(ids.army),
+                        component: "flag".to_owned(),
+                        value: Value::Bool(true),
+                        summary: "A scheduled directive with forged provenance".to_owned(),
+                    }),
+                    allowed_writes: vec![StateKey::new("failure-fixture", "flag")],
+                    cause: CauseRef::Event(order_event.id),
+                    correlation_id: order_event
+                        .correlation_id
+                        .checked_add(1)
+                        .expect("the fixture correlation should remain representable"),
+                },
+            )
+            .expect("the future directive should be accepted into the scheduler");
+
+        let mut tampered = simulation.snapshot();
+        refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+        let Err(error) = Simulation::from_snapshot_with_plugins(tampered, &[&FailingPlugin]) else {
+            panic!("a scheduled directive must retain its cause correlation");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+        assert!(error.message.contains("event correlation"));
+    }
+
+    #[test]
     fn internal_runtime_partitions_preserve_flat_persistence_contracts() {
         let (scenario, ids) = demo_scenario();
         let mut simulation =
@@ -7978,6 +8096,147 @@ mod tests {
             direct_outcome
         );
         assert_eq!(direct.revision(), revision + 1);
+    }
+
+    #[test]
+    fn simulation_view_resolves_retained_commands_and_events_by_id() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation = Simulation::new(44, scenario).expect("lookup fixture should load");
+        let debug_command = |morale| {
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            )
+        };
+        let first = simulation
+            .submit(debug_command(61))
+            .expect("the first lookup command should commit");
+        let second = simulation
+            .submit(debug_command(62))
+            .expect("the second lookup command should commit");
+        let reads = [StateKey::core_commands(), StateKey::core_events()];
+        let view = simulation.plugin_view("lookup", &reads);
+
+        assert_eq!(
+            view.command(first.command_id).unwrap().unwrap().id,
+            first.command_id
+        );
+        assert_eq!(
+            view.command(second.command_id).unwrap().unwrap().id,
+            second.command_id
+        );
+        let first_event = *first
+            .emitted_events
+            .first()
+            .expect("the first command should emit an event");
+        let second_event = *second
+            .emitted_events
+            .first()
+            .expect("the second command should emit an event");
+        assert_eq!(view.event(first_event).unwrap().unwrap().id, first_event);
+        assert_eq!(view.event(second_event).unwrap().unwrap().id, second_event);
+        assert!(view.command(CommandId::new(0)).unwrap().is_none());
+        assert!(view.event(EventId::new(0)).unwrap().is_none());
+        assert!(view.command(CommandId::new(3)).unwrap().is_none());
+        assert!(view.event(EventId::new(3)).unwrap().is_none());
+    }
+
+    #[test]
+    fn simulation_view_excludes_archived_ids_after_compaction() {
+        let (scenario, ids) = demo_scenario();
+        let mut simulation =
+            Simulation::new(45, scenario).expect("archive lookup fixture should load");
+        let debug_command = |morale| {
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            )
+        };
+        let archived = simulation
+            .submit(debug_command(63))
+            .expect("the archived lookup command should commit");
+        let retained = simulation
+            .submit(debug_command(64))
+            .expect("the retained lookup command should commit");
+        let retained_command = simulation
+            .state
+            .evidence
+            .commands
+            .pop()
+            .expect("the retained command should be in the live tail");
+        let retained_event = simulation
+            .state
+            .evidence
+            .events
+            .pop()
+            .expect("the retained event should be in the live tail");
+        simulation.state.evidence.archived.command_count = 1;
+        simulation.state.evidence.archived.event_count = 1;
+        simulation.state.evidence.commands.clear();
+        simulation.state.evidence.events.clear();
+        simulation.state.evidence.commands.push(retained_command);
+        simulation.state.evidence.events.push(retained_event);
+        let reads = [StateKey::core_commands(), StateKey::core_events()];
+        let view = simulation.plugin_view("lookup", &reads);
+
+        assert!(view.command(archived.command_id).unwrap().is_none());
+        assert!(view.event(archived.emitted_events[0]).unwrap().is_none());
+        assert_eq!(
+            view.command(retained.command_id).unwrap().unwrap().id,
+            retained.command_id
+        );
+        assert_eq!(
+            view.event(retained.emitted_events[0]).unwrap().unwrap().id,
+            retained.emitted_events[0]
+        );
+        assert!(view.command(CommandId::new(3)).unwrap().is_none());
+        assert!(view.event(EventId::new(3)).unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_and_snapshot_validation_contexts_share_cause_and_directive_rules() {
+        let (scenario, _) = demo_scenario();
+        let simulation = Simulation::new(46, scenario).expect("validation fixture should load");
+        let snapshot = simulation.snapshot();
+        let runtime_context = validation::RuntimeValidationContext::new(&simulation.state);
+        let snapshot_context = validation::SnapshotValidationContext::new(&snapshot);
+        let missing_cause = CauseRef::Event(EventId::new(1));
+
+        assert!(validation::validate_cause_reference(&runtime_context, &missing_cause).is_err());
+        assert!(validation::validate_cause_reference(&snapshot_context, &missing_cause).is_err());
+
+        let directives = [SystemDirective::Emit {
+            event_type: " marker ".to_owned(),
+            summary: "invalid event type".to_owned(),
+            affected: Vec::new(),
+        }];
+        let runtime_error = validation::validate_directives_with_context(
+            &runtime_context,
+            "fixture",
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &directives,
+        )
+        .expect_err("runtime validation must reject a non-canonical directive");
+        let snapshot_error = validation::validate_directives_with_context(
+            &snapshot_context,
+            "fixture",
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &directives,
+        )
+        .expect_err("snapshot validation must reject a non-canonical directive");
+        assert_eq!(runtime_error.code, ErrorCode::InvalidPayload);
+        assert_eq!(snapshot_error.code, runtime_error.code);
+        assert_eq!(snapshot_error.message, runtime_error.message);
     }
 
     #[test]

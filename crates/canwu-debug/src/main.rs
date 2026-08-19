@@ -308,7 +308,11 @@ impl DebugApp {
             .show(ui, |ui| {
                 for event in self.canwu.events().iter().rev().take(100).rev() {
                     ui.horizontal_wrapped(|ui| {
-                        ui.monospace(format!("{} · {}", event.timestamp, event.kind.event_type()));
+                        ui.monospace(format!(
+                            "{} · {}",
+                            event.timestamp,
+                            event.kind.qualified_event_type()
+                        ));
                         ui.label(&event.summary);
                         if let Some(cause) = &event.cause {
                             ui.weak(format!("cause: {cause:?}"));

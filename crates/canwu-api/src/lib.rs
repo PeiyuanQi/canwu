@@ -802,7 +802,8 @@ impl Canwu {
 
     fn explain_event(&self, event_id: EventId) -> Explanation {
         let mut chain = Vec::new();
-        let mut current = self.events().iter().find(|event| event.id == event_id);
+        let events = self.events();
+        let mut current = event_by_id(events, event_id);
         while let Some(event) = current {
             chain.push(ExplanationStep {
                 label: event.summary.clone(),
@@ -816,10 +817,7 @@ impl Canwu {
                     });
                     None
                 }
-                Some(CauseRef::Event(parent)) => self
-                    .events()
-                    .iter()
-                    .find(|candidate| candidate.id == *parent),
+                Some(CauseRef::Event(parent)) => event_by_id(events, *parent),
                 Some(CauseRef::Command(command)) => {
                     chain.push(ExplanationStep {
                         label: format!("Accepted command {command}"),
@@ -872,6 +870,11 @@ impl Canwu {
             |event| self.explain_event(event.id),
         )
     }
+}
+
+fn event_by_id(events: &[SimEvent], event_id: EventId) -> Option<&SimEvent> {
+    let index = usize::try_from(event_id.get().checked_sub(1)?).ok()?;
+    events.get(index).filter(|event| event.id == event_id)
 }
 
 impl CompactedCanwu {

@@ -168,6 +168,35 @@ state requires the command, event, correlation, and queue evidence carried by a
 runtime snapshot. Scenario admission also rejects non-finite map coordinates so
 every accepted state can round-trip through the JSON persistence format.
 
+An event's `correlation_id` identifies one authoritative causal root, not an
+arbitrary time bucket. Event children must retain their parent's correlation;
+boundary emissions must match their boundary's correlation; and one
+correlation cannot be reused by unrelated command, boundary, system, or root
+event chains. Snapshot validation pre-indexes boundary-emission ownership,
+resolves parent IDs by their contiguous journal position, and carries the
+resolved root forward in one pass. The correlation-specific work is
+`O(E log C + M)` over raw input, where `M` is the number of recorded boundary
+emissions; for a valid journal `M <= E`. It uses `O(E + C)` auxiliary storage
+instead of recursively rescanning each parent chain or each boundary's
+emissions. Runtime views use the same contiguous-ID rule for retained tails;
+archived IDs deliberately return no record until an archive adapter is
+supplied.
+
+Runtime and snapshot validation share a `ValidationContext` evidence boundary.
+The runtime backend resolves the retained tail and marks older, valid IDs as
+archived; the snapshot backend resolves the complete journal. Cause and
+directive rules are implemented once against that interface, while backend
+availability determines only whether a historical record can be inspected.
+This keeps compaction from silently changing the meaning of a valid reference
+and makes malformed runtime input and malformed snapshot evidence follow the
+same canonical checks.
+
+For a plugin event, `EventKind::event_type()` remains the compatibility kind
+label `"plugin"`. Consumers that need the actual namespaced identity should use
+`EventKind::qualified_event_type()`, which returns `plugin_name.event_type`;
+the structured `plugin` and `event_type` fields remain the authoritative
+serialized values.
+
 ```mermaid
 sequenceDiagram
     participant Client

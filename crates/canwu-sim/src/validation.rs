@@ -1,17 +1,17 @@
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArmyId, BoundaryDirective, BoundaryDomainEntityCuts,
-    BoundaryEmissionKind, BoundaryPhase, BoundaryProposal, BoundaryRecord, BoundarySystemContract,
-    COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef, Command, CommandAttemptOutcome,
-    CommandAttemptRecord, CommandEnvelope, CommandId, CommandIngress, CommandRecord,
-    DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange, DomainRecordClass,
-    DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation, DomainRecordRef, EntityRef,
-    ErrorCode, EventId, EventKind, GENESIS_BOUNDARY_HASH, IngressClass, IngressPayload,
-    IngressQueueKey, IngressRecord, InteractionPolicy, Issuer, PersistedAdmissionCursors,
-    PluginComponentKey, PluginComponentRecord, PluginRegistry, RandomDrawOutcome,
-    RandomDrawProducer, ReservationAllocation, ReservationDisposition, ReservationPoolKey,
-    ReservationRequestRecord, RunConfigurationSnapshot, RunManifest, RuntimeCurrentState,
-    RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration,
-    SimEvent, SimulationSnapshot, SystemCadence, SystemDirective, WorldSnapshot,
+    BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
+    BoundarySystemContract, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef, Command,
+    CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId, CommandIngress,
+    CommandRecord, DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange,
+    DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation,
+    DomainRecordRef, EntityRef, ErrorCode, EventId, EventKind, GENESIS_BOUNDARY_HASH, IngressClass,
+    IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
+    PersistedAdmissionCursors, PluginComponentKey, PluginComponentRecord, PluginRegistry,
+    RandomDrawOutcome, RandomDrawProducer, ReservationAllocation, ReservationDisposition,
+    ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
+    RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
+    SimDuration, SimEvent, SimulationSnapshot, SystemCadence, SystemDirective, WorldSnapshot,
     authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
     boundary_write_stage, canonical_text, canonicalize_scenario, commitment_roots_are_canonical,
@@ -24,6 +24,172 @@ use super::{
     validate_scenario, validate_strict_id_order, validate_type_schema,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Describes how an evidence reference can be resolved by a validation backend.
+///
+/// Runtime state can retain only a suffix of the evidence journals. An
+/// archived reference is still valid evidence, but its record is unavailable
+/// to the live process until an archive adapter is supplied. Snapshot state,
+/// by contrast, normally resolves every record as retained.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EvidenceLookup<'a, T> {
+    Missing,
+    Archived,
+    Retained(&'a T),
+}
+
+/// Shared semantic view used by runtime and snapshot validation.
+///
+/// The validation rules operate on this interface instead of knowing whether
+/// evidence came from the retained runtime tail or a complete snapshot. The
+/// two backends therefore differ only in evidence availability, not in the
+/// meaning of a cause or directive.
+pub(super) trait ValidationContext {
+    fn event(&self, id: EventId) -> EvidenceLookup<'_, SimEvent>;
+    fn command(&self, id: CommandId) -> EvidenceLookup<'_, CommandRecord>;
+    fn boundary(&self, id: BoundaryId) -> EvidenceLookup<'_, BoundaryRecord>;
+    fn entity_exists(&self, entity: &EntityRef) -> bool;
+}
+
+pub(super) struct RuntimeValidationContext<'a> {
+    state: &'a RuntimeState,
+}
+
+impl<'a> RuntimeValidationContext<'a> {
+    pub(super) const fn new(state: &'a RuntimeState) -> Self {
+        Self { state }
+    }
+
+    fn runtime_lookup<T>(
+        id: u64,
+        next_id: u64,
+        archived_count: u64,
+        retained: Option<&T>,
+    ) -> EvidenceLookup<'_, T> {
+        if id == 0 || id >= next_id {
+            EvidenceLookup::Missing
+        } else if id <= archived_count {
+            EvidenceLookup::Archived
+        } else if let Some(record) = retained {
+            EvidenceLookup::Retained(record)
+        } else {
+            EvidenceLookup::Missing
+        }
+    }
+}
+
+impl ValidationContext for RuntimeValidationContext<'_> {
+    fn event(&self, id: EventId) -> EvidenceLookup<'_, SimEvent> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_event_id,
+            self.state.evidence.archived.event_count,
+            self.state.evidence.retained_event(id),
+        )
+    }
+
+    fn command(&self, id: CommandId) -> EvidenceLookup<'_, CommandRecord> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_command_id,
+            self.state.evidence.archived.command_count,
+            self.state.evidence.retained_command(id),
+        )
+    }
+
+    fn boundary(&self, id: BoundaryId) -> EvidenceLookup<'_, BoundaryRecord> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_boundary_id,
+            self.state.evidence.archived.boundary_count,
+            self.state.evidence.retained_boundary(id),
+        )
+    }
+
+    fn entity_exists(&self, entity: &EntityRef) -> bool {
+        runtime_entity_exists(self.state, entity)
+    }
+}
+
+pub(super) struct SnapshotValidationContext<'a> {
+    snapshot: &'a SimulationSnapshot,
+}
+
+impl<'a> SnapshotValidationContext<'a> {
+    pub(super) const fn new(snapshot: &'a SimulationSnapshot) -> Self {
+        Self { snapshot }
+    }
+}
+
+impl ValidationContext for SnapshotValidationContext<'_> {
+    fn event(&self, id: EventId) -> EvidenceLookup<'_, SimEvent> {
+        snapshot_event_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn command(&self, id: CommandId) -> EvidenceLookup<'_, CommandRecord> {
+        snapshot_command_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn boundary(&self, id: BoundaryId) -> EvidenceLookup<'_, BoundaryRecord> {
+        snapshot_boundary_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn entity_exists(&self, entity: &EntityRef) -> bool {
+        snapshot_entity_exists(self.snapshot, entity)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CauseValidationError {
+    MissingEvidence,
+    NonCanonicalSystem,
+}
+
+pub(super) fn validate_cause_reference<C: ValidationContext>(
+    context: &C,
+    cause: &CauseRef,
+) -> Result<(), CauseValidationError> {
+    let available = match cause {
+        CauseRef::Boundary(id) => !matches!(context.boundary(*id), EvidenceLookup::Missing),
+        CauseRef::Command(id) => !matches!(context.command(*id), EvidenceLookup::Missing),
+        CauseRef::Event(id) => !matches!(context.event(*id), EvidenceLookup::Missing),
+        CauseRef::System(name) => canonical_text(name),
+    };
+    match cause {
+        CauseRef::System(_) if !available => Err(CauseValidationError::NonCanonicalSystem),
+        _ if !available => Err(CauseValidationError::MissingEvidence),
+        _ => Ok(()),
+    }
+}
+
+pub(super) fn validate_directives_with_context<C: ValidationContext>(
+    context: &C,
+    plugin: &str,
+    allowed_writes: &[super::StateKey],
+    state_owners: &BTreeMap<super::StateKey, String>,
+    record_schemas: &records::DomainRecordSchemas,
+    directives: &[SystemDirective],
+) -> Result<(), CanwuError> {
+    validate_directives(
+        plugin,
+        allowed_writes,
+        state_owners,
+        record_schemas,
+        &|entity| context.entity_exists(entity),
+        directives,
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EventCorrelationRoot {
+    Command(CommandId),
+    Boundary(BoundaryId),
+    System(String),
+    Event(EventId),
+}
 
 pub(super) fn validate_snapshot(
     snapshot: &SimulationSnapshot,
@@ -329,15 +495,29 @@ pub(super) fn validate_snapshot(
         previous_command = Some((record.accepted_at, record.id));
     }
 
-    let mut event_ids = BTreeSet::new();
+    let mut boundary_event_owners = vec![None; snapshot.events.len()];
+    for boundary in &snapshot.boundaries {
+        for emission in &boundary.emissions {
+            if let Some(owner) =
+                event_index(emission.event).and_then(|index| boundary_event_owners.get_mut(index))
+            {
+                owner.get_or_insert(boundary.id);
+            }
+        }
+    }
+    let mut event_command_roots = Vec::<Option<CommandId>>::with_capacity(snapshot.events.len());
+    let mut event_correlation_roots =
+        Vec::<EventCorrelationRoot>::with_capacity(snapshot.events.len());
+    let mut correlation_roots = BTreeMap::<u64, EventCorrelationRoot>::new();
+    let mut command_emitted_events = BTreeMap::<CommandId, Vec<EventId>>::new();
+    let snapshot_context = SnapshotValidationContext::new(snapshot);
     let mut previous_event = None;
     for (index, event) in snapshot.events.iter().enumerate() {
         let expected_id = u64::try_from(index)
             .ok()
             .and_then(|value| value.checked_add(1))
             .ok_or_else(|| invalid_snapshot_error("event index exceeds identifier space"))?;
-        if event.id.get() != expected_id || event.correlation_id == 0 || !event_ids.insert(event.id)
-        {
+        if event.id.get() != expected_id || event.correlation_id == 0 {
             return invalid_snapshot("event IDs must be contiguous, unique, and nonzero");
         }
         if event.timestamp < snapshot.initial_time
@@ -346,19 +526,104 @@ pub(super) fn validate_snapshot(
         {
             return invalid_snapshot("events are not in canonical timestamp and ID order");
         }
+        if let Some(cause) = &event.cause {
+            validate_cause_reference(&snapshot_context, cause).map_err(|error| {
+                invalid_snapshot_error(match error {
+                    CauseValidationError::MissingEvidence => {
+                        "event references unavailable evidence"
+                    }
+                    CauseValidationError::NonCanonicalSystem => {
+                        "event system cause is not canonical"
+                    }
+                })
+            })?;
+        }
+
+        let (command_root, correlation_root) = match &event.cause {
+            Some(CauseRef::Command(command_id)) => {
+                let Some(command) =
+                    journal_record_by_id(&snapshot.commands, command_id.get(), |record| {
+                        record.id.get()
+                    })
+                else {
+                    return invalid_snapshot("event references an unknown command cause");
+                };
+                if command.accepted_at > event.timestamp {
+                    return invalid_snapshot("event references a future command cause");
+                }
+                (
+                    Some(*command_id),
+                    EventCorrelationRoot::Command(*command_id),
+                )
+            }
+            Some(CauseRef::Event(parent_id)) => {
+                let parent_index = event_index(*parent_id).ok_or_else(|| {
+                    invalid_snapshot_error("event cause chain references an invalid event ID")
+                })?;
+                if parent_index >= index {
+                    return invalid_snapshot("event references an invalid parent event");
+                }
+                let parent = &snapshot.events[parent_index];
+                if parent.correlation_id != event.correlation_id {
+                    return invalid_snapshot("event parent and child must share a correlation ID");
+                }
+                (
+                    event_command_roots[parent_index],
+                    event_correlation_roots[parent_index].clone(),
+                )
+            }
+            Some(CauseRef::Boundary(boundary_id)) => {
+                let Some(boundary) =
+                    journal_record_by_id(&snapshot.boundaries, boundary_id.get(), |record| {
+                        record.id.get()
+                    })
+                else {
+                    return invalid_snapshot("event references an unknown boundary cause");
+                };
+                if boundary.at != event.timestamp
+                    || boundary.correlation_id != event.correlation_id
+                    || boundary_event_owners[index] != Some(*boundary_id)
+                {
+                    return invalid_snapshot(
+                        "event boundary cause does not own the event or correlation",
+                    );
+                }
+                (None, EventCorrelationRoot::Boundary(*boundary_id))
+            }
+            Some(CauseRef::System(name)) => {
+                if !canonical_text(name) {
+                    return invalid_snapshot("event system cause is not canonical");
+                }
+                (None, EventCorrelationRoot::System(name.clone()))
+            }
+            None => (None, EventCorrelationRoot::Event(event.id)),
+        };
+        if let Some(existing) = correlation_roots.get(&event.correlation_id) {
+            if existing != &correlation_root {
+                return invalid_snapshot("correlation ID is shared by unrelated causal roots");
+            }
+        } else {
+            correlation_roots.insert(event.correlation_id, correlation_root.clone());
+        }
+        if let Some(command_id) = command_root {
+            let command = journal_record_by_id(&snapshot.commands, command_id.get(), |record| {
+                record.id.get()
+            })
+            .ok_or_else(|| invalid_snapshot_error("event references an unknown command root"))?;
+            if event.timestamp == command.accepted_at {
+                command_emitted_events
+                    .entry(command_id)
+                    .or_default()
+                    .push(event.id);
+            }
+        }
         let event_entities = if matches!(event.cause, Some(CauseRef::Boundary(_))) {
             None
-        } else if let Some(command_id) = event_command_root(&snapshot.events, event.id)
-            .ok()
-            .flatten()
-        {
-            let command = snapshot
-                .commands
-                .iter()
-                .find(|command| command.id == command_id)
-                .ok_or_else(|| {
-                    invalid_snapshot_error("event references an unknown command root")
-                })?;
+        } else if let Some(command_id) = command_root {
+            let command = journal_record_by_id(&snapshot.commands, command_id.get(), |record| {
+                record.id.get()
+            })
+            .ok_or_else(|| invalid_snapshot_error("event references an unknown command root"))?;
             if event.timestamp == command.accepted_at {
                 let boundaries_before =
                     if let Some(count) = command_boundary_counts.get(&command_id) {
@@ -387,56 +652,18 @@ pub(super) fn validate_snapshot(
             return invalid_snapshot("event references an unknown entity");
         }
         validate_event_kind(snapshot, plugins, event, &entity_exists)?;
+        event_command_roots.push(command_root);
+        event_correlation_roots.push(correlation_root);
         previous_event = Some((event.timestamp, event.id));
-    }
-    for event in &snapshot.events {
-        match &event.cause {
-            Some(CauseRef::Boundary(id)) => {
-                let Some(boundary) = snapshot.boundaries.iter().find(|record| record.id == *id)
-                else {
-                    return invalid_snapshot("event references an unknown boundary cause");
-                };
-                if boundary.at != event.timestamp
-                    || !boundary
-                        .emissions
-                        .iter()
-                        .any(|emission| emission.event == event.id)
-                {
-                    return invalid_snapshot("event boundary cause does not own the event");
-                }
-            }
-            Some(CauseRef::Command(id)) => {
-                let Some(command) = snapshot.commands.iter().find(|record| record.id == *id) else {
-                    return invalid_snapshot("event references an unknown command cause");
-                };
-                if command.accepted_at > event.timestamp {
-                    return invalid_snapshot("event references a future command cause");
-                }
-            }
-            Some(CauseRef::Event(id)) if !event_ids.contains(id) || id.get() >= event.id.get() => {
-                return invalid_snapshot("event references an invalid parent event");
-            }
-            Some(CauseRef::System(name)) if name.trim().is_empty() => {
-                return invalid_snapshot("event system cause cannot be empty");
-            }
-            Some(CauseRef::Event(_) | CauseRef::System(_)) | None => {}
-        }
     }
     for command in &snapshot.commands {
         if snapshot.command_attempts.is_empty() {
             continue;
         }
-        let mut expected_events = Vec::new();
-        for event in snapshot
-            .events
-            .iter()
-            .filter(|event| event.timestamp == command.accepted_at)
-        {
-            if event_command_root(&snapshot.events, event.id)? == Some(command.id) {
-                expected_events.push(event.id);
-            }
-        }
-        if command.emitted_events != expected_events {
+        let expected_events = command_emitted_events
+            .get(&command.id)
+            .map_or(&[][..], Vec::as_slice);
+        if command.emitted_events.as_slice() != expected_events {
             return invalid_snapshot(
                 "command receipt events do not match their synchronous causal evidence",
             );
@@ -486,8 +713,8 @@ pub(super) fn validate_snapshot(
     let mut component_keys = BTreeSet::new();
     let mut previous_component = None;
     for record in &snapshot.plugin_components {
-        if record.plugin.trim().is_empty()
-            || record.component.trim().is_empty()
+        if !canonical_text(&record.plugin)
+            || !canonical_text(&record.component)
             || !plugins.descriptors.contains_key(&record.plugin)
             || !snapshot_entity_exists(snapshot, &record.entity)
             || plugins.state_owners.get(&record.state) != Some(&record.plugin)
@@ -586,7 +813,7 @@ pub(super) fn validate_snapshot(
             }
             ScheduledAction::PluginDirective { .. } => {}
         }
-        validate_scheduled_action(snapshot, plugins, &event_ids, &record.key, &record.action)?;
+        validate_scheduled_action(snapshot, plugins, &record.key, &record.action)?;
     }
     for army in &snapshot.world.armies {
         let pending = pending_arrivals.get(&army.id).copied().unwrap_or(0);
@@ -612,7 +839,7 @@ pub(super) fn validate_snapshot(
         let Some(CauseRef::Event(arrival_id)) = dispatch.cause else {
             return invalid_snapshot("report dispatch must be caused by an army arrival");
         };
-        let Some(arrival) = snapshot.events.iter().find(|event| event.id == arrival_id) else {
+        let Some(arrival) = snapshot_event_by_id(snapshot, arrival_id) else {
             return invalid_snapshot("report dispatch references a missing army arrival");
         };
         let EventKind::ArmyArrived {
@@ -840,11 +1067,7 @@ fn validate_random_evidence(
                 plugin,
                 system,
             } => {
-                let Some(record) = snapshot
-                    .boundaries
-                    .iter()
-                    .find(|record| record.id == *boundary)
-                else {
+                let Some(record) = snapshot_boundary_by_id(snapshot, *boundary) else {
                     return invalid_snapshot("random draw references an unknown boundary");
                 };
                 let Some(contract) = snapshot_boundary_contract(plugins, plugin, system) else {
@@ -871,7 +1094,7 @@ fn validate_random_evidence(
                 let CauseRef::Event(cause) = draw.cause else {
                     return invalid_snapshot("core random draw lacks an event cause");
                 };
-                let Some(event) = snapshot.events.iter().find(|event| event.id == cause) else {
+                let Some(event) = snapshot_event_by_id(snapshot, cause) else {
                     return invalid_snapshot("core random draw references an unknown event");
                 };
                 let EventKind::ArmyArrived {
@@ -889,11 +1112,7 @@ fn validate_random_evidence(
                 else {
                     return invalid_snapshot("core random draw lacks report-delivery evidence");
                 };
-                let Some(dispatch) = snapshot
-                    .events
-                    .iter()
-                    .find(|candidate| candidate.id == *dispatch_event)
-                else {
+                let Some(dispatch) = snapshot_event_by_id(snapshot, *dispatch_event) else {
                     return invalid_snapshot("core random draw outcome references a missing event");
                 };
                 let expected_arrives_at = draw
@@ -1264,23 +1483,31 @@ fn validate_snapshot_ingress_cause(
     snapshot: &SimulationSnapshot,
     record: &IngressRecord,
 ) -> Result<(), CanwuError> {
+    let context = SnapshotValidationContext::new(snapshot);
+    if let Some(cause) = &record.cause {
+        validate_cause_reference(&context, cause).map_err(|error| {
+            invalid_snapshot_error(match error {
+                CauseValidationError::MissingEvidence => {
+                    "ingress cause references unavailable or future evidence"
+                }
+                CauseValidationError::NonCanonicalSystem => "ingress system cause is not canonical",
+            })
+        })?;
+    }
     let valid = match &record.cause {
         None => true,
         Some(CauseRef::Boundary(id)) => {
-            journal_record_by_id(&snapshot.boundaries, id.get(), |value| value.id.get())
-                .is_some_and(|boundary| {
+            matches!(context.boundary(*id), EvidenceLookup::Retained(boundary) if {
                     boundary.id == *id
                         && boundary.at <= record.issued_at
                         && id.get() <= record.eligible_boundary_count
-                })
+            })
         }
         Some(CauseRef::Command(id)) => {
-            journal_record_by_id(&snapshot.commands, id.get(), |value| value.id.get())
-                .is_some_and(|command| command.accepted_at <= record.issued_at)
+            matches!(context.command(*id), EvidenceLookup::Retained(command) if command.accepted_at <= record.issued_at)
         }
         Some(CauseRef::Event(id)) => {
-            journal_record_by_id(&snapshot.events, id.get(), |value| value.id.get())
-                .is_some_and(|event| event.timestamp <= record.issued_at)
+            matches!(context.event(*id), EvidenceLookup::Retained(event) if event.timestamp <= record.issued_at)
         }
         Some(CauseRef::System(name)) => canonical_text(name),
     };
@@ -1299,6 +1526,21 @@ fn journal_record_by_id<T>(
     let index = usize::try_from(id.checked_sub(1)?).ok()?;
     let record = records.get(index)?;
     (record_id(record) == id).then_some(record)
+}
+
+fn snapshot_event_by_id(snapshot: &SimulationSnapshot, id: EventId) -> Option<&SimEvent> {
+    journal_record_by_id(&snapshot.events, id.get(), |event| event.id.get())
+}
+
+fn snapshot_command_by_id(snapshot: &SimulationSnapshot, id: CommandId) -> Option<&CommandRecord> {
+    journal_record_by_id(&snapshot.commands, id.get(), |command| command.id.get())
+}
+
+fn snapshot_boundary_by_id(
+    snapshot: &SimulationSnapshot,
+    id: BoundaryId,
+) -> Option<&BoundaryRecord> {
+    journal_record_by_id(&snapshot.boundaries, id.get(), |boundary| boundary.id.get())
 }
 
 fn validate_boundary_records(
@@ -2001,11 +2243,7 @@ fn validate_boundary_emissions(
     let mut matched_changes = BTreeSet::new();
     let mut matched_record_changes = BTreeSet::new();
     for emission in &record.emissions {
-        let Some(event) = snapshot
-            .events
-            .iter()
-            .find(|event| event.id == emission.event)
-        else {
+        let Some(event) = snapshot_event_by_id(snapshot, emission.event) else {
             return invalid_snapshot("boundary references an unknown emitted event");
         };
         if event.timestamp != record.at
@@ -2145,8 +2383,8 @@ fn validate_snapshot_command(
         Issuer::Actor(actor) if snapshot.world.person(*actor).is_none() => {
             return invalid_snapshot("command issuer actor is missing");
         }
-        Issuer::System(name) if name.trim().is_empty() => {
-            return invalid_snapshot("system command issuer cannot be empty");
+        Issuer::System(name) if !canonical_text(name) => {
+            return invalid_snapshot("system command issuer ID is not canonical");
         }
         Issuer::Human(name)
         | Issuer::Ai(name)
@@ -2210,29 +2448,11 @@ fn validate_snapshot_command(
     Ok(())
 }
 
-fn event_command_root(
-    events: &[SimEvent],
-    mut event_id: EventId,
-) -> Result<Option<CommandId>, CanwuError> {
-    for _ in 0..events.len() {
-        let index = event_id
-            .get()
-            .checked_sub(1)
-            .and_then(|value| usize::try_from(value).ok())
-            .ok_or_else(|| invalid_snapshot_error("event cause chain contains an invalid ID"))?;
-        let event = events
-            .get(index)
-            .filter(|event| event.id == event_id)
-            .ok_or_else(|| {
-                invalid_snapshot_error("event cause chain references an unknown event")
-            })?;
-        match event.cause.as_ref() {
-            Some(CauseRef::Command(command)) => return Ok(Some(*command)),
-            Some(CauseRef::Event(parent)) => event_id = *parent,
-            Some(CauseRef::Boundary(_) | CauseRef::System(_)) | None => return Ok(None),
-        }
-    }
-    invalid_snapshot("event cause chain contains a cycle")
+fn event_index(event_id: EventId) -> Option<usize> {
+    event_id
+        .get()
+        .checked_sub(1)
+        .and_then(|value| usize::try_from(value).ok())
 }
 
 fn validate_event_kind(
@@ -2276,7 +2496,9 @@ fn validate_event_kind(
         }
         EventKind::DebugFieldChanged { entity, .. } => entity_exists(entity),
         EventKind::Plugin { plugin, event_type } => {
-            plugins.descriptors.contains_key(plugin) && !event_type.trim().is_empty()
+            plugins.descriptors.contains_key(plugin)
+                && canonical_text(plugin)
+                && canonical_text(event_type)
         }
     };
     if valid {
@@ -2289,7 +2511,6 @@ fn validate_event_kind(
 fn validate_scheduled_action(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
-    event_ids: &BTreeSet<EventId>,
     key: &ScheduleKey,
     action: &ScheduledAction,
 ) -> Result<(), CanwuError> {
@@ -2306,11 +2527,7 @@ fn validate_scheduled_action(
             let Some(transit) = &army_state.transit else {
                 return invalid_snapshot("scheduled arrival has no matching army transit");
             };
-            let Some(order) = snapshot
-                .events
-                .iter()
-                .find(|event| event.id == *order_event)
-            else {
+            let Some(order) = snapshot_event_by_id(snapshot, *order_event) else {
                 return invalid_snapshot("scheduled arrival references an unknown order event");
             };
             let EventKind::MoveOrdered {
@@ -2365,11 +2582,7 @@ fn validate_scheduled_action(
             {
                 return invalid_snapshot("scheduled knowledge report is invalid");
             }
-            let Some(dispatch) = snapshot
-                .events
-                .iter()
-                .find(|event| event.id == *dispatch_event)
-            else {
+            let Some(dispatch) = snapshot_event_by_id(snapshot, *dispatch_event) else {
                 return invalid_snapshot("scheduled report references an unknown dispatch event");
             };
             let EventKind::ReportDispatched {
@@ -2385,11 +2598,7 @@ fn validate_scheduled_action(
             let Some(CauseRef::Event(arrival_event_id)) = dispatch.cause else {
                 return invalid_snapshot("report dispatch does not reference an arrival event");
             };
-            let Some(arrival) = snapshot
-                .events
-                .iter()
-                .find(|event| event.id == arrival_event_id)
-            else {
+            let Some(arrival) = snapshot_event_by_id(snapshot, arrival_event_id) else {
                 return invalid_snapshot("report dispatch references an unknown arrival event");
             };
             let EventKind::ArmyArrived {
@@ -2419,8 +2628,19 @@ fn validate_scheduled_action(
             directive,
             allowed_writes,
             cause,
-            ..
+            correlation_id,
         } => {
+            let context = SnapshotValidationContext::new(snapshot);
+            validate_cause_reference(&context, cause).map_err(|error| {
+                invalid_snapshot_error(match error {
+                    CauseValidationError::MissingEvidence => {
+                        "scheduled directive has an unavailable cause"
+                    }
+                    CauseValidationError::NonCanonicalSystem => {
+                        "scheduled directive has a non-canonical system cause"
+                    }
+                })
+            })?;
             let Some(descriptor) = plugins.descriptors.get(plugin) else {
                 return invalid_snapshot("scheduled directive references an unknown plugin");
             };
@@ -2443,33 +2663,61 @@ fn validate_scheduled_action(
                 );
             }
             match cause {
-                CauseRef::Boundary(id)
-                    if !snapshot.boundaries.iter().any(|record| record.id == *id) =>
-                {
-                    return invalid_snapshot("scheduled directive has an unknown boundary cause");
+                CauseRef::Boundary(id) => {
+                    let Some(boundary) = snapshot_boundary_by_id(snapshot, *id) else {
+                        return invalid_snapshot(
+                            "scheduled directive has an unknown boundary cause",
+                        );
+                    };
+                    if boundary.at > key.at || boundary.correlation_id != *correlation_id {
+                        return invalid_snapshot(
+                            "scheduled directive disagrees with its boundary correlation",
+                        );
+                    }
                 }
-                CauseRef::Command(id)
-                    if !snapshot.commands.iter().any(|record| record.id == *id) =>
-                {
-                    return invalid_snapshot("scheduled directive has an unknown command cause");
+                CauseRef::Command(id) => {
+                    let Some(command) = snapshot_command_by_id(snapshot, *id) else {
+                        return invalid_snapshot(
+                            "scheduled directive has an unknown command cause",
+                        );
+                    };
+                    if command.accepted_at > key.at {
+                        return invalid_snapshot(
+                            "scheduled directive references a future command cause",
+                        );
+                    }
+                    if command.emitted_events.iter().any(|event_id| {
+                        snapshot_event_by_id(snapshot, *event_id)
+                            .is_none_or(|event| event.correlation_id != *correlation_id)
+                    }) {
+                        return invalid_snapshot(
+                            "scheduled directive disagrees with its command correlation",
+                        );
+                    }
                 }
-                CauseRef::Event(id) if !event_ids.contains(id) => {
-                    return invalid_snapshot("scheduled directive has an unknown event cause");
+                CauseRef::Event(id) => {
+                    let Some(event) = snapshot_event_by_id(snapshot, *id) else {
+                        return invalid_snapshot("scheduled directive has an unknown event cause");
+                    };
+                    if event.timestamp > key.at || event.correlation_id != *correlation_id {
+                        return invalid_snapshot(
+                            "scheduled directive disagrees with its event correlation",
+                        );
+                    }
                 }
-                CauseRef::System(name) if name.trim().is_empty() => {
-                    return invalid_snapshot("scheduled directive has an empty system cause");
+                CauseRef::System(name) if !canonical_text(name) => {
+                    return invalid_snapshot(
+                        "scheduled directive has a non-canonical system cause",
+                    );
                 }
-                CauseRef::Boundary(_)
-                | CauseRef::Command(_)
-                | CauseRef::Event(_)
-                | CauseRef::System(_) => {}
+                CauseRef::System(_) => {}
             }
-            validate_directives(
+            validate_directives_with_context(
+                &context,
                 plugin,
                 allowed_writes,
                 &plugins.state_owners,
                 &plugins.record_schemas,
-                &|entity| snapshot_entity_exists(snapshot, entity),
                 std::slice::from_ref(directive.as_ref()),
             )
             .map_err(|error| {
@@ -2738,20 +2986,12 @@ pub(super) fn validate_runtime_cause(
     state: &RuntimeState,
     cause: &CauseRef,
 ) -> Result<(), CanwuError> {
-    let valid = match cause {
-        CauseRef::Boundary(id) => id.get() != 0 && id.get() < state.counters.next_boundary_id,
-        CauseRef::Command(id) => id.get() != 0 && id.get() < state.counters.next_command_id,
-        CauseRef::Event(id) => id.get() != 0 && id.get() < state.counters.next_event_id,
-        CauseRef::System(name) => canonical_text(name),
-    };
-    if valid {
-        Ok(())
-    } else {
-        Err(CanwuError::new(
+    validate_cause_reference(&RuntimeValidationContext::new(state), cause).map_err(|_| {
+        CanwuError::new(
             ErrorCode::InvalidPayload,
             "ingress cause does not reference canonical committed evidence",
-        ))
-    }
+        )
+    })
 }
 
 pub(super) fn runtime_entity_exists_with_record_overlay(

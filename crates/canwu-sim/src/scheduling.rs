@@ -3,9 +3,10 @@ use super::{
     CauseRef, ClockTransactionCheckpoint, CommitmentDomains, DeterministicRng, EntityRef,
     ErrorCode, EstimateRange, EventId, EventKind, KnowledgeSource, PendingBoundaryRandomDraw,
     PersonId, RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
-    RandomStreamKey, ScheduleKey, ScheduledAction, ScheduledBatchTransactionCheckpoint,
-    SimDuration, SimEvent, SimTime, Simulation, SimulationView, SimulationViewState, StateKey,
-    TerritoryId, catch_unwind, claim_counter, random, runtime_entity_exists, validate_directives,
+    RandomStreamKey, RuntimeValidationContext, ScheduleKey, ScheduledAction,
+    ScheduledBatchTransactionCheckpoint, SimDuration, SimEvent, SimTime, Simulation,
+    SimulationView, SimulationViewState, StateKey, TerritoryId, catch_unwind, claim_counter,
+    random, validate_directives_with_context,
 };
 
 impl Simulation {
@@ -241,12 +242,12 @@ impl Simulation {
                 correlation_id,
             } => {
                 let directives = vec![*directive];
-                validate_directives(
+                validate_directives_with_context(
+                    &RuntimeValidationContext::new(&self.state),
                     &plugin,
                     &allowed_writes,
                     &self.plugins.state_owners,
                     &self.plugins.record_schemas,
-                    &|entity| runtime_entity_exists(&self.state, entity),
                     &directives,
                 )?;
                 self.apply_directives(&plugin, directives, &allowed_writes, &cause, correlation_id)
@@ -440,12 +441,12 @@ impl Simulation {
                     ),
                 )
             })??;
-            validate_directives(
+            validate_directives_with_context(
+                &RuntimeValidationContext::new(&self.state),
                 &registered.plugin,
                 &registered.contract.writes,
                 &self.plugins.state_owners,
                 &self.plugins.record_schemas,
-                &|entity| runtime_entity_exists(&self.state, entity),
                 &directives,
             )?;
             self.apply_directives(

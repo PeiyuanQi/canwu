@@ -348,7 +348,7 @@ impl GameHost {
                 println!(
                     "EVENT: at={} type={} {}",
                     event.timestamp,
-                    event.kind.event_type(),
+                    event.kind.qualified_event_type(),
                     event.summary,
                 );
             }
@@ -506,15 +506,15 @@ fn assert_expected_outcome(outcome: &RunOutcome) {
     let event_timeline = outcome
         .events
         .iter()
-        .map(|event| (event.kind.event_type(), event.timestamp))
+        .map(|event| (event.kind.qualified_event_type(), event.timestamp))
         .collect::<Vec<_>>();
     assert_eq!(
         event_timeline,
         vec![
-            ("move_ordered", command_at),
-            ("army_arrived", arrival_at),
-            ("knowledge_updated", arrival_at),
-            ("report_dispatched", arrival_at),
+            ("move_ordered".to_owned(), command_at),
+            ("army_arrived".to_owned(), arrival_at),
+            ("knowledge_updated".to_owned(), arrival_at),
+            ("report_dispatched".to_owned(), arrival_at),
         ],
         "the expected command and scheduled-arrival event timeline changed"
     );
