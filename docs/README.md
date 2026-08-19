@@ -1,5 +1,13 @@
 # Canwu Documentation
 
+> **Recommended route: send in an agent first.** Tell your coding agent,
+> “I want to build `[your goal]` with Canwu. Find the right contract, runnable
+> example, and public API, then teach me while implementing it.” If the
+> `canwu-engine` plugin is installed, have it invoke
+> [`$canwu-engine-docs`](../agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md).
+> Reading every page by hand is still legal; we just assumed your scroll wheel
+> had other plans.
+
 This directory keeps project documentation grouped by purpose so the repository
 root remains limited to files expected by Cargo, GitHub, licensing tools, and
 coding agents.

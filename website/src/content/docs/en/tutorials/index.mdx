@@ -6,7 +6,7 @@ sidebar:
   order: 1
   label: Get started
 hero:
-  tagline: Start with a five-minute vertical slice, then go deeper into game loops, plugins, and phased settlement. Every tutorial maps to a public Rust example in the repository.
+  tagline: Do not train yourself to become a Markdown parser just yet. Give your goal to a coding agent, let it start from a runnable example, and save the manual archaeology for later.
   actions:
     - text: Start with army movement
       link: /en/tutorials/move-army/
@@ -22,6 +22,10 @@ hero:
 ---
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+> **Recommended route: send in an agent first.** Give your coding agent this prompt:
+> “Build the smallest runnable Canwu simulation that can move an army and advance time. Explain each important contract as we go.”
+> Have it use this tutorial, the project docs, and the public examples; if the `canwu-engine` plugin is installed, have it invoke `$canwu-engine-docs`. Reading everything by hand is still allowed—your scroll wheel simply did not apply for an archaeology internship.
 
 ## Pick a starting point
 
