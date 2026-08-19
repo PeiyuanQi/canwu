@@ -7,21 +7,18 @@ sidebar:
   label: Architecture overview
 hero:
   tagline: "The complete path from client to authoritative runtime: a narrow public API, deterministic settlement, causal events, and replayable randomness."
-  actions:
-    - text: Read settlement
-      link: /en/architecture/settlement/
-      icon: right-arrow
-    - text: Explore the event system
-      link: /en/architecture/events/
-      variant: secondary
-      icon: open-book
-    - text: 中文架构
-      link: /architecture/
-      variant: minimal
-      icon: translate
 ---
 
 import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
+
+<nav class="architecture-links" aria-label="Architecture overview navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/settlement/">Read settlement</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/events/">Explore the event system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/">中文架构</a>
+</nav>
 
 Canwu is a headless historical simulation core. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
 

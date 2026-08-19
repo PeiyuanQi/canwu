@@ -42,6 +42,37 @@
   text-underline-offset: 0.2em;
 }
 
+.architecture-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.7rem;
+  margin: 0 0 2.75rem;
+  color: var(--sl-color-gray-3);
+  font-size: var(--sl-text-sm);
+}
+
+.architecture-links-label {
+  color: var(--sl-color-gray-2);
+  font-weight: 600;
+}
+
+.architecture-links a {
+  color: var(--sl-color-accent);
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+.architecture-links a:hover,
+.architecture-links a:focus-visible {
+  color: var(--sl-color-accent-high);
+}
+
+.architecture-links-separator {
+  color: var(--sl-color-gray-4);
+}
+
 .sl-link-card {
   transition: border-color 140ms ease, transform 140ms ease, background-color 140ms ease;
 }

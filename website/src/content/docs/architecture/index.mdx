@@ -7,21 +7,18 @@ sidebar:
   label: 架构总览
 hero:
   tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重演的边界内协作。"
-  actions:
-    - text: 阅读结算系统
-      link: /architecture/settlement/
-      icon: right-arrow
-    - text: 浏览事件系统
-      link: /architecture/events/
-      variant: secondary
-      icon: open-book
-    - text: English architecture
-      link: /en/architecture/
-      variant: minimal
-      icon: translate
 ---
 
 import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
+
+<nav class="architecture-links" aria-label="架构总览导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/settlement/">阅读结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/events/">浏览事件系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/">English architecture</a>
+</nav>
 
 Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless core）。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
 
