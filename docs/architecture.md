@@ -38,6 +38,10 @@ flowchart TB
    operation applies inside its own transaction and either commits completely
    or rolls back completely. It remains the compatibility path for the existing
    movement slice and legacy event reactors.
+   Synchronous reactors are therefore compatibility-only: nested event
+   re-entry is bounded by `MAX_SYNCHRONOUS_REACTION_DEPTH`, and a limit breach
+   rolls back the enclosing transaction. New mechanics should use phased
+   boundary systems, which collect proposals before one deterministic commit.
 2. **Deterministic reservation and allocation** is a calculation primitive, not
    a state-write path. Systems publish capacity and competing claims; the
    kernel sorts them by pool, descending priority, explicit tie-break key, and
@@ -65,6 +69,9 @@ foundations rather than introducing fourteen separate settlement models.
 1. **立即事务写入**是命令或事件的直接处理路径。操作在自己的事务中
    执行，要么完整提交，要么完整回滚。它仍是既有移动逻辑和旧式事件
    reactor 的兼容路径。
+   因此，同步 reactor 只保留为兼容能力：嵌套事件重入受
+   `MAX_SYNCHRONOUS_REACTION_DEPTH` 限制，超过限制会回滚整个外层事务。
+   新机制应使用分阶段 boundary system，先收集提案，再统一确定性提交。
 2. **确定性资源仲裁与分配**是一种计算原语，不是状态写入路径。系统先
    发布资源容量和竞争性申请；内核再按资源池、优先级（降序）、显式
    tie-break 键和 reservation identity（预留标识）进行排序，得出“满足、部分

@@ -180,6 +180,9 @@ impl PluginRegistrar<'_> {
         mut contract: SystemContract,
         handler: SimulationSystemHandler,
     ) -> Result<(), CanwuError> {
+        // This registration path is retained for the movement slice and
+        // legacy plugins. New mechanics should register a phased boundary
+        // system so their writes are staged and committed atomically.
         validate_system_contract(&self.plugin, &mut contract)?;
         if self
             .registry

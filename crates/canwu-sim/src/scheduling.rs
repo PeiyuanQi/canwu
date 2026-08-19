@@ -420,6 +420,30 @@ impl Simulation {
         cause: Option<CauseRef>,
         correlation_id: u64,
     ) -> Result<EventId, CanwuError> {
+        let previous_depth = self.sync_reaction_depth;
+        if previous_depth >= super::MAX_SYNCHRONOUS_REACTION_DEPTH {
+            return Err(CanwuError::new(
+                ErrorCode::SynchronousReactionLimit,
+                format!(
+                    "synchronous event reactors exceeded the maximum nested depth of {}",
+                    super::MAX_SYNCHRONOUS_REACTION_DEPTH
+                ),
+            ));
+        }
+        self.sync_reaction_depth = previous_depth + 1;
+        let result = self.emit_immediate(kind, affected_entities, summary, cause, correlation_id);
+        self.sync_reaction_depth = previous_depth;
+        result
+    }
+
+    fn emit_immediate(
+        &mut self,
+        kind: EventKind,
+        affected_entities: Vec<EntityRef>,
+        summary: String,
+        cause: Option<CauseRef>,
+        correlation_id: u64,
+    ) -> Result<EventId, CanwuError> {
         let event = self.append_event(kind, affected_entities, summary, cause, correlation_id)?;
         let id = event.id;
 

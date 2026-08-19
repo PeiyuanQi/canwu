@@ -121,6 +121,11 @@ pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
 pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 1;
 /// Version of the domain-separated checkpoint commitment contract.
 pub const COMMITMENT_FORMAT_VERSION: u32 = 1;
+/// Maximum nested depth of the compatibility synchronous event-reactor path.
+///
+/// New plugin mechanics should use phased boundary systems instead of relying
+/// on recursively emitted immediate events.
+pub const MAX_SYNCHRONOUS_REACTION_DEPTH: usize = 32;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -190,6 +195,7 @@ pub enum ErrorCode {
     ReplayEnvironmentMismatch,
     SimulationRevisionConflict,
     SimulationTimeConflict,
+    SynchronousReactionLimit,
     UndeclaredRandomStream,
     UndeclaredStateRead,
     UndeclaredStateWrite,
@@ -281,6 +287,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::ReplayEnvironmentMismatch => "replay_environment_mismatch",
         ErrorCode::SimulationRevisionConflict => "simulation_revision_conflict",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
+        ErrorCode::SynchronousReactionLimit => "synchronous_reaction_limit",
         ErrorCode::UndeclaredRandomStream => "undeclared_random_stream",
         ErrorCode::UndeclaredStateRead => "undeclared_state_read",
         ErrorCode::UndeclaredStateWrite => "undeclared_state_write",
@@ -1120,6 +1127,12 @@ impl SimulationView<'_> {
     }
 }
 
+/// Compatibility-only synchronous event reactor.
+///
+/// The handler runs inside the event's current transaction. Emitting another
+/// event from its directives re-enters the same reactor graph and is bounded
+/// by [`MAX_SYNCHRONOUS_REACTION_DEPTH`]. New mechanics should use a phased
+/// [`BoundarySystemHandler`] instead.
 pub type SimulationSystemHandler =
     fn(&SimulationView<'_>, &SimEvent) -> Result<Vec<SystemDirective>, CanwuError>;
 
@@ -1826,6 +1839,7 @@ pub struct Simulation {
     state: RuntimeState,
     schema: SchemaRegistry,
     plugins: PluginRegistry,
+    sync_reaction_depth: usize,
 }
 
 impl Simulation {
@@ -2057,6 +2071,7 @@ impl Simulation {
             },
             schema,
             plugins,
+            sync_reaction_depth: 0,
         };
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
@@ -2809,6 +2824,7 @@ impl Simulation {
             },
             schema: snapshot.schema,
             plugins,
+            sync_reaction_depth: 0,
         };
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
@@ -2855,6 +2871,7 @@ impl Simulation {
             state: self.state.clone(),
             schema: self.schema.clone(),
             plugins: self.plugins.clone(),
+            sync_reaction_depth: 0,
         }
     }
 
@@ -4193,6 +4210,48 @@ mod tests {
             );
             contract.writes.clone_from(&self.writes);
             registrar.register_system(contract, marker_system)
+        }
+    }
+
+    struct RecursivePlugin;
+
+    fn recursive_system(
+        _view: &SimulationView<'_>,
+        event: &SimEvent,
+    ) -> Result<Vec<SystemDirective>, CanwuError> {
+        let should_recurse = match &event.kind {
+            EventKind::MoveOrdered { .. } => true,
+            EventKind::Plugin { plugin, event_type } => {
+                plugin == "recursive-test" && event_type == "loop"
+            }
+            _ => false,
+        };
+        if should_recurse {
+            Ok(vec![SystemDirective::Emit {
+                event_type: "loop".to_owned(),
+                summary: "recursive compatibility event".to_owned(),
+                affected: Vec::new(),
+            }])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    impl SimulationPlugin for RecursivePlugin {
+        fn name(&self) -> &'static str {
+            "recursive-test"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000004");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_system(
+                SystemContract::event_driven(
+                    "recursive-reactor",
+                    BoundaryPhase::PerspectiveAndReportMaterialization,
+                ),
+                recursive_system,
+            )
         }
     }
 
@@ -8736,6 +8795,29 @@ mod tests {
                 .expect_err("new plugins cannot appear after execution begins")
                 .code,
             ErrorCode::PluginRegistrationClosed
+        );
+    }
+
+    #[test]
+    fn synchronous_reactor_depth_is_bounded_and_rolls_back() {
+        let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
+        simulation
+            .register_plugin(&RecursivePlugin)
+            .expect("recursive compatibility plugin should register");
+        let before = simulation
+            .snapshot_json()
+            .expect("snapshot should serialize before the rejected cascade");
+
+        let error = simulation
+            .submit(move_order(&ids))
+            .expect_err("recursive immediate reactions must be bounded");
+        assert_eq!(error.code, ErrorCode::SynchronousReactionLimit);
+        assert!(error.message.contains("maximum nested depth"));
+        assert_eq!(
+            before,
+            simulation
+                .snapshot_json()
+                .expect("bounded cascade must roll back the entire transaction")
         );
     }
 
