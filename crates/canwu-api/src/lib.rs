@@ -9,7 +9,7 @@ pub use canwu_core::{
     IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
     TypedDomainRecordRef,
 };
-pub use canwu_event::{CauseRef, EventKind, SimEvent};
+pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
 };
@@ -564,11 +564,69 @@ impl Canwu {
         ))
     }
 
+    /// Builds an authorized viewer context from the persisted run policy.
+    ///
+    /// Callers cannot select a stronger observation policy through an
+    /// observation request; the run configuration is the input-control
+    /// boundary for actor-relative versus research projections.
+    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+        if self.world().person(actor).is_none() {
+            return Err(CanwuError::new(
+                ErrorCode::ActorNotFound,
+                format!("actor {actor} was not found"),
+            ));
+        }
+        let observation = match self.run_configuration().declared() {
+            Some(configuration) => {
+                if configuration.observation == ObservationPolicy::ActorBound
+                    && configuration
+                        .seat_binding
+                        .as_ref()
+                        .and_then(|binding| binding.actor)
+                        != Some(actor)
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidAuthority,
+                        format!("actor {actor} is not bound to the active observation seat"),
+                    ));
+                }
+                configuration.observation
+            }
+            None => ObservationPolicy::ActorBound,
+        };
+        Ok(ViewerContext { actor, observation })
+    }
+
     pub fn observe(
         &self,
         actor: PersonId,
         request: &ObserveRequest,
     ) -> Result<AgentContext, CanwuError> {
+        let viewer = self.viewer_context(actor)?;
+        self.observe_with_viewer(&viewer, request)
+    }
+
+    /// Projects the simulation for a previously authorized viewer context.
+    ///
+    /// The context controls only the player-facing projection. Plugin system
+    /// subscriptions and state read permissions remain enforced by the
+    /// simulation runtime and are not widened by this method.
+    pub fn observe_with_viewer(
+        &self,
+        viewer: &ViewerContext,
+        request: &ObserveRequest,
+    ) -> Result<AgentContext, CanwuError> {
+        let authorized = self.viewer_context(viewer.actor)?;
+        if authorized != *viewer {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                format!(
+                    "actor {} is not authorized for this observation context",
+                    viewer.actor
+                ),
+            ));
+        }
+        let actor = viewer.actor;
         let world = self.world();
         let person = world.person(actor).ok_or_else(|| {
             CanwuError::new(
@@ -589,7 +647,10 @@ impl Canwu {
             self.events()
                 .iter()
                 .filter(|event| event.timestamp > since)
-                .filter_map(|event| visible_change(actor, event))
+                .filter_map(|event| {
+                    let audience = self.simulation.event_audience(event);
+                    visible_change(viewer, event, &audience)
+                })
                 .collect()
         });
         let pending_actions = world
@@ -1204,6 +1265,27 @@ pub enum ObservationFocus {
     Changes,
 }
 
+/// An observation identity authorized by the run's persisted observation
+/// policy. This type is intentionally constructed through
+/// [`Canwu::viewer_context`] so an observation request cannot self-escalate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ViewerContext {
+    actor: PersonId,
+    observation: ObservationPolicy,
+}
+
+impl ViewerContext {
+    #[must_use]
+    pub const fn actor(self) -> PersonId {
+        self.actor
+    }
+
+    #[must_use]
+    pub const fn observation(self) -> ObservationPolicy {
+        self.observation
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObserveRequest {
     pub focus: ObservationFocus,
@@ -1265,22 +1347,48 @@ pub struct VisibleChange {
     pub source_event: EventId,
 }
 
-fn visible_change(actor: PersonId, event: &SimEvent) -> Option<VisibleChange> {
-    let visible = match event.kind {
+fn visible_change(
+    viewer: &ViewerContext,
+    event: &SimEvent,
+    plugin_audience: &EventAudience,
+) -> Option<VisibleChange> {
+    let actor = viewer.actor;
+    let visible = match &event.kind {
         EventKind::MoveOrdered { .. } => {
             event.affected_entities.contains(&EntityRef::Person(actor))
         }
-        EventKind::KnowledgeUpdated { recipient, .. } => recipient == actor,
+        EventKind::KnowledgeUpdated { recipient, .. } => *recipient == actor,
         EventKind::ArmyArrived { .. }
         | EventKind::ReportDispatched { .. }
-        | EventKind::DebugFieldChanged { .. }
-        | EventKind::Plugin { .. } => false,
+        | EventKind::DebugFieldChanged { .. } => matches!(
+            viewer.observation,
+            ObservationPolicy::ResearchFull | ObservationPolicy::DeveloperDiagnostic
+        ),
+        EventKind::Plugin { .. } => event_visible_to(viewer, event, plugin_audience),
     };
     visible.then(|| VisibleChange {
         timestamp: event.timestamp,
         summary: event.summary.clone(),
         source_event: event.id,
     })
+}
+
+fn event_visible_to(viewer: &ViewerContext, event: &SimEvent, audience: &EventAudience) -> bool {
+    if matches!(
+        viewer.observation,
+        ObservationPolicy::ResearchFull | ObservationPolicy::DeveloperDiagnostic
+    ) {
+        return true;
+    }
+    match audience {
+        EventAudience::Public => true,
+        EventAudience::Actor(actor) => *actor == viewer.actor,
+        EventAudience::Actors(actors) => actors.binary_search(&viewer.actor).is_ok(),
+        EventAudience::AffectedActors => event
+            .affected_entities
+            .contains(&EntityRef::Person(viewer.actor)),
+        EventAudience::Private => false,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1388,6 +1496,168 @@ pub struct CapabilityDescription {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct VisibilityPlugin {
+        audience: EventAudience,
+    }
+
+    #[allow(clippy::unnecessary_wraps)]
+    fn visibility_system(
+        _view: &SimulationView<'_>,
+        event: &SimEvent,
+    ) -> Result<Vec<SystemDirective>, CanwuError> {
+        if !matches!(event.kind, EventKind::MoveOrdered { .. }) {
+            return Ok(Vec::new());
+        }
+        Ok(vec![SystemDirective::Emit {
+            event_type: "notice".to_owned(),
+            summary: "a plugin visibility notice".to_owned(),
+            affected: vec![EntityRef::Person(PersonId::new(1))],
+        }])
+    }
+
+    impl SimulationPlugin for VisibilityPlugin {
+        fn name(&self) -> &'static str {
+            "visibility-test"
+        }
+
+        fn version(&self) -> &'static str {
+            "test-v1"
+        }
+
+        fn semantic_hash(&self) -> &'static str {
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_event_audience("notice", self.audience.clone())?;
+            registrar.register_system(
+                SystemContract::event_driven(
+                    "emit-notice",
+                    BoundaryPhase::PerspectiveAndReportMaterialization,
+                ),
+                visibility_system,
+            )
+        }
+    }
+
+    #[test]
+    fn plugin_event_visibility_respects_public_actor_and_private_audiences() {
+        let ids = Canwu::demo_ids();
+        let event = SimEvent {
+            id: EventId::new(1),
+            timestamp: SimTime::EPOCH,
+            kind: EventKind::Plugin {
+                plugin: "visibility-test".to_owned(),
+                event_type: "notice".to_owned(),
+            },
+            affected_entities: vec![EntityRef::Person(ids.commander)],
+            summary: "notice".to_owned(),
+            cause: None,
+            correlation_id: 1,
+        };
+        let actor = ViewerContext {
+            actor: ids.commander,
+            observation: ObservationPolicy::ActorBound,
+        };
+        let observer = ViewerContext {
+            actor: ids.observer,
+            observation: ObservationPolicy::ActorBound,
+        };
+        let public_observer = ViewerContext {
+            actor: ids.observer,
+            observation: ObservationPolicy::PublicObserver,
+        };
+        let research = ViewerContext {
+            actor: ids.observer,
+            observation: ObservationPolicy::ResearchFull,
+        };
+
+        assert!(visible_change(&actor, &event, &EventAudience::Public).is_some());
+        assert!(visible_change(&public_observer, &event, &EventAudience::Public).is_some());
+        assert!(visible_change(&actor, &event, &EventAudience::Actor(ids.commander)).is_some());
+        assert!(visible_change(&observer, &event, &EventAudience::Actor(ids.commander)).is_none());
+        assert!(visible_change(&observer, &event, &EventAudience::Private).is_none());
+        assert!(visible_change(&research, &event, &EventAudience::Private).is_some());
+    }
+
+    #[test]
+    fn observe_changes_since_uses_persisted_plugin_audience() {
+        let ids = Canwu::demo_ids();
+        let mut canwu = Canwu::demo(35).expect("demo should load");
+        canwu
+            .register_plugin(&VisibilityPlugin {
+                audience: EventAudience::Public,
+            })
+            .expect("visibility plugin should register");
+        let since = SimTime::from_minutes(-1);
+        canwu
+            .act(
+                ids.commander,
+                SemanticAction::MoveArmy {
+                    army: ids.army,
+                    destination: ids.eastern_territory,
+                },
+            )
+            .expect("movement should emit plugin notice");
+
+        let observer = canwu
+            .observe(
+                ids.observer,
+                &ObserveRequest {
+                    focus: ObservationFocus::Changes,
+                    since: Some(since),
+                },
+            )
+            .expect("observer should be authorized");
+        assert!(
+            observer
+                .changes_since
+                .iter()
+                .any(|change| change.summary == "a plugin visibility notice")
+        );
+
+        let snapshot_json = canwu
+            .snapshot_json()
+            .expect("audience declaration should serialize");
+        let restored = Canwu::from_snapshot_json_with_plugins(
+            &snapshot_json,
+            &[&VisibilityPlugin {
+                audience: EventAudience::Public,
+            }],
+        )
+        .expect("audience declaration should survive snapshot loading");
+        let restored_observer = restored
+            .observe(
+                ids.observer,
+                &ObserveRequest {
+                    focus: ObservationFocus::Changes,
+                    since: Some(since),
+                },
+            )
+            .expect("restored observer should be authorized");
+        assert!(
+            restored_observer
+                .changes_since
+                .iter()
+                .any(|change| change.summary == "a plugin visibility notice")
+        );
+    }
+
+    #[test]
+    fn observe_with_viewer_revalidates_input_control_context() {
+        let ids = Canwu::demo_ids();
+        let canwu = Canwu::demo(35).expect("demo should load");
+        let escalated = ViewerContext {
+            actor: ids.observer,
+            observation: ObservationPolicy::ResearchFull,
+        };
+
+        let error = canwu
+            .observe_with_viewer(&escalated, &ObserveRequest::default())
+            .expect_err("a caller cannot self-escalate the observation policy");
+        assert_eq!(error.code, ErrorCode::InvalidAuthority);
+    }
 
     #[test]
     fn actor_relative_observation_does_not_leak_arrival() {

@@ -197,6 +197,18 @@ label `"plugin"`. Consumers that need the actual namespaced identity should use
 the structured `plugin` and `event_type` fields remain the authoritative
 serialized values.
 
+Player-facing event projection reuses the same deterministic resolver for
+built-in and plugin events. A plugin may register an `EventAudience` for an
+event type (`public`, one or more actors, `affected_actors`, or `private`) in
+its persisted `PluginDescriptor`; an undeclared plugin event is private by
+default. `Canwu::viewer_context` derives the authorized actor and observation
+policy from the run configuration, and `observe_with_viewer` accepts only that
+context plus the normal time/focus input. The input cannot upgrade a private
+event to public. This audience policy governs player projections only; plugin
+system subscriptions and declared state reads remain separate runtime
+permissions. Because the declaration is persisted with the plugin descriptor,
+snapshot loading and replay use the same visibility rule.
+
 ```mermaid
 sequenceDiagram
     participant Client

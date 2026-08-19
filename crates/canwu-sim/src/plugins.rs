@@ -5,10 +5,11 @@ use super::{
     PluginRegistrar, PluginRegistry, RandomStreamKey, RegisteredBoundarySystem, RegisteredCommand,
     RegisteredSystem, ReservationRef, SchemaRegistry, SimulationPlugin, SimulationSystemHandler,
     StateKey, StateVisibility, SystemCadence, SystemContract, TypeSchema, boundary_write_stage,
-    invalid_snapshot, invalid_snapshot_error, is_canonical_hash, is_domain_record_state,
-    validate_type_schema,
+    canonical_text, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
+    is_domain_record_state, validate_type_schema,
 };
 use crate::records::DomainRecordSchema;
+use canwu_event::EventAudience;
 use std::collections::{BTreeMap, BTreeSet};
 
 impl PluginRegistrar<'_> {
@@ -135,6 +136,42 @@ impl PluginRegistrar<'_> {
         descriptor.schema_types.sort();
         *self.schema = candidate_schema;
         *self.registry = candidate_registry;
+        Ok(())
+    }
+
+    /// Declares the player-facing audience for one emitted plugin event type.
+    ///
+    /// This policy is persisted in the plugin descriptor and is independent
+    /// from the plugin system subscription graph. Event types without a
+    /// declaration remain private to player-facing projections.
+    pub fn register_event_audience(
+        &mut self,
+        event_type: impl Into<String>,
+        audience: EventAudience,
+    ) -> Result<(), CanwuError> {
+        let event_type = event_type.into();
+        validate_event_audience_name(&event_type)?;
+        validate_event_audience(&audience)?;
+        let mut candidate = self.registry.clone();
+        let descriptor = candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        descriptor.name.clone_from(&self.plugin);
+        if descriptor
+            .event_audiences
+            .insert(event_type.clone(), audience)
+            .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "plugin {} already declared event audience for {event_type}",
+                    self.plugin
+                ),
+            ));
+        }
+        *self.registry = candidate;
         Ok(())
     }
 
@@ -475,6 +512,14 @@ impl PluginRegistry {
         self.descriptors.values()
     }
 
+    pub(super) fn event_audience(&self, plugin: &str, event_type: &str) -> EventAudience {
+        self.descriptors
+            .get(plugin)
+            .and_then(|descriptor| descriptor.event_audiences.get(event_type))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(super) fn from_descriptors(descriptors: Vec<PluginDescriptor>) -> Result<Self, CanwuError> {
         let mut registry = Self {
             descriptors: BTreeMap::new(),
@@ -731,6 +776,14 @@ impl PluginRegistry {
                 {
                     return invalid_snapshot("plugin descriptor has duplicate ingress types");
                 }
+            }
+            for (event_type, audience) in &descriptor.event_audiences {
+                validate_event_audience_name(event_type).map_err(|error| {
+                    invalid_snapshot_error(format!("invalid plugin event audience: {error}"))
+                })?;
+                validate_event_audience(audience).map_err(|error| {
+                    invalid_snapshot_error(format!("invalid plugin event audience: {error}"))
+                })?;
             }
             let schema_types: BTreeSet<_> = descriptor.schema_types.iter().collect();
             if schema_types.len() != descriptor.schema_types.len()
@@ -1022,6 +1075,43 @@ fn validate_canonical_names(values: &mut Vec<String>, label: &str) -> Result<(),
     }
     let unique: BTreeSet<_> = values.drain(..).collect();
     values.extend(unique);
+    Ok(())
+}
+
+fn validate_event_audience_name(event_type: &str) -> Result<(), CanwuError> {
+    if !canonical_text(event_type) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin event audience names must be non-empty and canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_event_audience(audience: &EventAudience) -> Result<(), CanwuError> {
+    match audience {
+        EventAudience::Actor(actor) if actor.get() == 0 => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "plugin event audience actors must use positive actor IDs",
+            ));
+        }
+        EventAudience::Actors(actors) => {
+            if actors.is_empty() || actors.iter().any(|actor| actor.get() == 0) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    "plugin event audience actor lists must contain positive actor IDs",
+                ));
+            }
+            if actors.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    "plugin event audience actor lists must be sorted and unique",
+                ));
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 

@@ -60,7 +60,7 @@ use canwu_core::{
     GovernmentId, IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId,
     TypeSchema, TypedDomainRecordRef,
 };
-use canwu_event::{CauseRef, EventKind, SimEvent};
+pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
 };
@@ -800,6 +800,10 @@ pub struct PluginDescriptor {
     pub version: String,
     #[serde(default)]
     pub semantic_hash: String,
+    /// Declarative visibility policies for emitted plugin event types.
+    /// Unlisted event types are private to player-facing projections.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub event_audiences: BTreeMap<String, EventAudience>,
     pub systems: Vec<SystemContract>,
     #[serde(default)]
     pub boundary_systems: Vec<BoundarySystemContract>,
@@ -2273,6 +2277,25 @@ impl Simulation {
 
     pub fn plugin_descriptors(&self) -> impl Iterator<Item = &PluginDescriptor> {
         self.plugins.descriptors()
+    }
+
+    /// Returns the persisted audience declaration for a plugin event.
+    ///
+    /// Built-in event visibility remains part of the public actor-relative
+    /// projection. Unlisted plugin event types deliberately resolve to
+    /// [`EventAudience::Private`].
+    #[must_use]
+    pub fn event_audience(&self, event: &SimEvent) -> EventAudience {
+        match &event.kind {
+            EventKind::Plugin { plugin, event_type } => {
+                self.plugins.event_audience(plugin, event_type)
+            }
+            EventKind::MoveOrdered { .. }
+            | EventKind::ArmyArrived { .. }
+            | EventKind::ReportDispatched { .. }
+            | EventKind::KnowledgeUpdated { .. }
+            | EventKind::DebugFieldChanged { .. } => EventAudience::Private,
+        }
     }
 
     #[must_use]

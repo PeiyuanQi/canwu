@@ -48,6 +48,25 @@ pub enum EventKind {
     },
 }
 
+/// Declarative audience for a persisted event projection.
+///
+/// This is intentionally separate from plugin-to-plugin dispatch permissions:
+/// it controls only whether a trusted viewer may receive the event through a
+/// player-facing observation projection. `Private` is the safe default for
+/// plugin events that do not declare an audience.
+#[derive(Clone, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum EventAudience {
+    Public,
+    Actor(PersonId),
+    Actors(Vec<PersonId>),
+    /// The event is visible to actors represented by `EntityRef::Person` in
+    /// the event's affected-entity list.
+    AffectedActors,
+    #[default]
+    Private,
+}
+
 impl EventKind {
     #[must_use]
     pub const fn event_type(&self) -> &'static str {
