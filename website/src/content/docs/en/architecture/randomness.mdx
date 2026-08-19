@@ -1,0 +1,67 @@
+---
+title: Random generation
+description: Understand Canwu's named random streams, SplitMix64, draw evidence, and exact replay.
+sidebar:
+  order: 4
+  label: Random generation
+---
+
+Canwu does not treat randomness as one global, untraceable black box. Randomness belongs to named, versioned streams with explicit owners; every draw leaves enough evidence for the same run environment to produce the same result again.
+
+## Stream identity
+
+A `RandomStreamKey` contains a `namespace`, `name`, and `version`, for example:
+
+```text
+canwu.core / knowledge-report-delay / 1
+```
+
+The kernel derives an independent seed from the run root seed and stream identity. Separate domains use separate streams, so adding a report-delay draw cannot shift an unrelated system's sequence. Stream state stores the algorithm, initial seed, position, and generator state.
+
+The current algorithm is tagged `SplitMix64V1`. Algorithm name and version are part of the persistence contract; a future algorithm change should use a new version instead of silently changing an old stream's meaning.
+
+## Declare before drawing
+
+A phased system may use only streams declared and owned in `BoundarySystemContract.random_streams`. When a random session starts, the kernel copies the allowed stream states; undeclared streams are rejected.
+
+Every range draw requires:
+
+- a positive upper bound;
+- a non-empty, canonical `purpose` string;
+- a stream position that can be incremented safely.
+
+A plugin receives a bounded integer, not the global generator state.
+
+## Draw evidence
+
+Every draw records:
+
+| Field | Meaning |
+| --- | --- |
+| Stream and position | Which versioned stream and which draw number |
+| Bound and value | Requested range and returned value |
+| `purpose` | Semantic reason for the draw |
+| `producer` | Boundary system or core system |
+| `outcome` | For example a boundary decision or report delivery |
+| cause / correlation | Causal source and processing-chain correlation |
+
+Draw records and stream state enter snapshots, boundary evidence, and hashes. On rollback, stream positions and draw records roll back together, so a failed attempt cannot consume randomness and alter later results.
+
+## Guidance for plugin authors
+
+1. Give each independent domain mechanic a stable named stream; do not reuse an unscoped shared stream.
+2. Put the semantic reason in `purpose` so debug and replay output can explain the result.
+3. Review stream declarations with the plugin version and semantic hash.
+4. Never use wall-clock time, thread order, or container iteration order as a seed or tie-break.
+
+## Replay contract
+
+Exact replay requires stream identity, algorithm version, root seed, positions, every draw, and final outcomes to match. When loading a snapshot, the kernel verifies that stream state equals the initial seed advanced by the recorded number of draws; boundary replay also compares producer, purpose, cause, and correlation for each draw.
+
+## Continue reading
+
+- [Architecture overview](/en/architecture/)
+- [Settlement system](/en/architecture/settlement/)
+- [Event system](/en/architecture/events/)
+- [Engine conformance profile](/en/docs/engine-conformance/)
+- [Phased boundary tutorial](/en/tutorials/phased-boundary/)

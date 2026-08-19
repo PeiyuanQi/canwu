@@ -1,0 +1,73 @@
+---
+title: 结算系统
+description: 了解 Canwu 的十四阶段边界、资源分配、可见性、原子提交和失败回滚。
+sidebar:
+  order: 2
+  label: 结算系统
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+`settle_boundary(BoundaryRequest)` 是扩展领域机制的权威入口。它把一次模拟边界变成一个可验证的事务：先确定应该被纳入的工作，再按固定阶段运行系统，最后一次性提交或完整回滚。
+
+## 一次边界的生命周期
+
+<Steps>
+1. 处理请求时间之前已经到期的内部计划工作，并按规范化顺序吸收入站输入。
+2. 建立本边界的准入集合：命令尝试、已接受命令、规范化输入、已发生事件和适用的日历节奏。
+3. 取得不可变边界快照，让早期阶段读取同一个基线，而不是读取插件执行顺序造成的中间状态。
+4. 依次执行十四个阶段；同一阶段内按 `(plugin name, system name)` 排序。
+5. 通过原子提交、条件转移、视角/报告物化和保存/重演哈希完成边界记录。
+6. 若任一不可恢复错误发生，恢复时间、队列、状态、日志、随机流、计数器和边界记录。
+</Steps>
+
+## 十四个阶段
+
+| 顺序 | 阶段 | 作用 |
+| ---: | --- | --- |
+| 1 | `EventIngress` | 接纳到期命令、事件和插件输入 |
+| 2 | `BoundarySnapshot` | 固定本边界的读取基线 |
+| 3 | `DerivedFieldSolve` | 计算声明的派生字段 |
+| 4 | `PerceptionAndAttentionRefresh` | 更新角色注意力与感知输入 |
+| 5 | `DecisionAndAcceptedEffectIntake` | 接收决策与已验证效果 |
+| 6 | `ReservationAndAllocation` | 提供资源、提出需求并确定分配 |
+| 7 | `DomainDeltaProposal` | 提出组件、记录和事件变化 |
+| 8 | `InvariantValidation` | 检查候选变化是否满足不变量 |
+| 9 | `AtomicDomainCommit` | 原子提交普通领域变化 |
+| 10 | `HistoricalCandidateEvaluation` | 评估历史候选转移 |
+| 11 | `ConditionalTransitionCommit` | 提交满足条件的历史转移 |
+| 12 | `StrategicAggregation` | 形成战略层聚合结果 |
+| 13 | `PerspectiveAndReportMaterialization` | 生成角色视角和报告物化结果 |
+| 14 | `SaveReplayAndDiagnosticHashing` | 保存证据并更新重演与诊断哈希 |
+
+## 资源分配
+
+第六阶段的系统先声明供给和竞争需求，再由内核统一分配。排序键为：资源池、降序优先级、显式 tie-break key，最后是预留身份。结果会区分满足、部分满足和拒绝；只有在契约中声明 `reservation_reads` 的系统，才能读取分配结果。
+
+这种设计把“谁先运行”与“谁得到资源”分开。插件不能通过注册顺序、哈希表遍历顺序或隐藏的共享可变状态影响结果。
+
+## 可见性与提交
+
+第七阶段的变化以边界快照为基线。`SameBoundary` 变化可以进入本边界的只读覆盖层；`NextBoundary` 变化在结算完成前不会污染当前状态读取。不变量系统可以通过 `proposed_component` 或 `proposed_domain_record` 查看候选值，但仍受声明的读取集合限制。
+
+普通变化在第九阶段提交，历史候选在第十一阶段提交。边界产生的事件不会调用旧式即时 reactor，而是进入下一个边界的正常事件准入，因此不会回写已经完成的边界。
+
+## 插件契约
+
+一个 `BoundarySystemContract` 声明：
+
+- 所属阶段与执行节奏；
+- 读取和写入的 `StateKey`；
+- 资源供给、需求与分配读取；
+- 自己拥有的随机流；
+- 可发出的事件、领域记录和可见性。
+
+内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重演都要求契约身份、版本和语义哈希一致。
+
+## 继续阅读
+
+- [架构总览](/architecture/)
+- [事件系统](/architecture/events/)
+- [随机生成方法](/architecture/randomness/)
+- [阶段边界教程](/tutorials/phased-boundary/)
+- [完整结算规范（英文）](/en/docs/engine-conformance/)

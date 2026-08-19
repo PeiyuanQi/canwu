@@ -1,0 +1,93 @@
+---
+title: 架构总览
+description: 了解 Canwu 如何用公开边界、确定性结算和可检查证据组织历史模拟运行时。
+template: splash
+sidebar:
+  order: 1
+  label: 架构总览
+hero:
+  tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重演的边界内协作。"
+  actions:
+    - text: 阅读结算系统
+      link: /architecture/settlement/
+      icon: right-arrow
+    - text: 浏览事件系统
+      link: /architecture/events/
+      variant: secondary
+      icon: open-book
+    - text: English architecture
+      link: /en/architecture/
+      variant: minimal
+      icon: translate
+---
+
+import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
+
+Canwu 是一个无头的历史模拟内核。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
+
+## 从客户端到内核
+
+| 层 | 责任 | 公开承诺 |
+| --- | --- | --- |
+| 客户端 | 地图、渲染、输入、研究工作流与智能体循环 | 自由选择界面，不拥有权威状态 |
+| `canwu-api` | 程序 API、查询、语义行动、事件与快照 | 通过验证后的命令和查询工作 |
+| `canwu-sim` | 调度、插件、结算、持久化与重演 | 唯一持有实时可变模拟状态 |
+| 基础 crate | ID、时间、事件、世界与角色知识模型 | 提供可序列化、跨平台的基础类型 |
+
+## 五条架构边界
+
+1. **命令边界**：外部改变必须进入验证过的命令、语义行动或规范化输入；客户端不能直接改写世界。
+2. **读取边界**：程序 API 返回脱离运行时的快照，语义 API 根据角色知识生成观察结果。
+3. **确定性边界**：时间、队列、插件执行顺序、资源分配和随机流都有明确的规范排序。
+4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
+5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重演的记录。
+
+## 三个深入页面
+
+<CardGrid>
+  <LinkCard
+    title="结算系统"
+    href="/architecture/settlement/"
+    description="了解十四个结算阶段、资源分配、可见性、原子提交与失败回滚。"
+  />
+  <LinkCard
+    title="事件系统"
+    href="/architecture/events/"
+    description="了解事件类型、因果引用、调度队列、角色知识和边界事件的生命周期。"
+  />
+  <LinkCard
+    title="随机生成方法"
+    href="/architecture/randomness/"
+    description="了解带命名版本的随机流、SplitMix64、抽样证据和精确重演。"
+  />
+</CardGrid>
+
+## 一次行动如何穿过系统
+
+<Steps>
+1. 客户端通过 `canwu-api` 提交命令或语义行动；内核验证权限、前置条件和请求身份。
+2. 接受的行动产生带因果引用的事件，并按可表示的模拟时间安排后续工作。
+3. 到达结算边界后，内核切出准入集合和不可变边界快照，按固定阶段运行插件系统。
+4. 系统提出资源申请、状态变化、领域记录和事件；内核验证声明范围并原子提交。
+5. 结算记录保存事件、随机抽样、分配、变化、生产者和哈希，客户端再读取快照或角色视角的观察结果。
+</Steps>
+
+## 工作区 crate
+
+| crate | 核心职责 |
+| --- | --- |
+| `canwu-core` | 类型化 ID、确定性随机工具和模式元数据 |
+| `canwu-time` | 历史时间戳与经过检查的时长运算 |
+| `canwu-event` | 可序列化事件与紧凑因果来源 |
+| `canwu-world` | 历史实体和只读快照 |
+| `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
+| `canwu-sim` | 私有运行时、调度、插件和结算 |
+| `canwu-api` | 程序接口与语义接口 |
+| `canwu-debug` | 只依赖公开 API 的参考客户端 |
+
+## 延伸阅读
+
+- [引擎一致性规范（英文）](/en/docs/engine-conformance/)
+- [完整架构规范（英文）](/en/docs/architecture/)
+- [版本与兼容性（英文）](/en/docs/versioning/)
+- [使用教程](/tutorials/)

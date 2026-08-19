@@ -81,7 +81,7 @@ const c = isEnglish
       usesLabel: "Integration patterns", usesTitle: "Choose a client; keep one simulation model", uses: [["Grand strategy games", "Embed authoritative simulation beneath any map or renderer."], ["Historical research", "Run repeatable scenarios, counterfactual branches, and inspectable comparisons."], ["Agent environments", "Give multiple actors distinct knowledge, authority, and semantic actions."], ["Education and public history", "Build timelines, maps, exhibits, and classroom tools on replayable state."]], allUses: "Compare integration patterns →",
       projectLabel: "Participate", projectTitle: "Help build the deterministic simulation stack", projectCopy: "Start with the architecture and contribution guide, then propose a focused improvement to the public API, documentation, tests, or reference scenarios.",
       licenseTitle: "Open-source license", licenseCopy: "Canwu is licensed under Apache License 2.0. Commercial and proprietary use, modification, and redistribution are royalty-free; distributed copies preserve applicable license and notice material.",
-      projectLinks: [["Architecture", "/en/docs/architecture/"], ["API examples", "https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "/LICENSE"]],
+      projectLinks: [["Architecture", "/en/architecture/"], ["API examples", "https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "/LICENSE"]],
     }
   : {
       title: "参伍引擎 — 智能体原生历史模拟内核",
@@ -110,7 +110,7 @@ const c = isEnglish
       apps: "客户端", appItems: ["Rust 游戏客户端", "研究工具", "自主智能体", "调试客户端", "规划中的语言绑定"],
       publicApi: "canwu-api", publicDetails: "命令 · 查询 · 事件 · 快照 · 语义行动",
       sim: "canwu-sim", simDetails: "私有可变运行时 · 调度 · 插件 · 结算",
-      foundation: "基础 crate", foundationDetails: "core · time · event · world · knowledge", architectureLink: "阅读架构文档（英文） →",
+      foundation: "基础 crate", foundationDetails: "core · time · event · world · knowledge", architectureLink: "阅读架构文档 →",
       archNotes: ["命令 / 查询 / 事件边界", "事务式状态变更", "有序且确定的数据集合", "角色视角语义读取", "明确的插件身份与契约"],
       cratesLabel: "工作区 crate", cratesTitle: "每个 crate 只承担一类核心职责",
       crates: [["canwu-core", "类型化 ID、确定性随机工具与模式元数据"], ["canwu-time", "历史时间戳与经过检查的时长"], ["canwu-event", "存储事件与因果关系"], ["canwu-world", "历史实体与只读快照"], ["canwu-knowledge", "角色知识、可信度、来源与时效"], ["canwu-sim", "私有模拟状态、调度与插件"], ["canwu-api", "公开程序接口与语义接口"], ["canwu-debug", "仅使用公开 API 的参考客户端"]],
@@ -119,7 +119,7 @@ const c = isEnglish
       usesLabel: "集成模式", usesTitle: "选择客户端，共用一套模拟模型", uses: [["大战略游戏", "在任意地图或渲染器之下嵌入权威模拟。"], ["历史研究", "运行可重复场景、反事实分支与可检查比较。"], ["智能体环境", "为多个行动者提供不同的知识、权限与语义行动。"], ["教育与公共史", "在可重演状态之上构建时间线、地图、展览与课堂工具。"]], allUses: "比较集成模式 →",
       projectLabel: "参与项目", projectTitle: "一起完善确定性模拟基础设施", projectCopy: "从架构说明与贡献指南开始，再针对公开 API、文档、测试与参考场景提出范围明确的改进。",
       licenseTitle: "开源许可证", licenseCopy: "Canwu 按照 Apache License 2.0 发布。商业或专有使用、修改和再分发均为免版税；分发副本保留适用的许可证与声明材料。",
-      projectLinks: [["架构（英文）", "/en/docs/architecture/"], ["API 示例", "https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"], ["贡献指南", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["许可证", "/LICENSE"]],
+      projectLinks: [["架构", "/architecture/"], ["API 示例", "https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"], ["贡献指南", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["许可证", "/LICENSE"]],
     };
 ---
 
@@ -129,7 +129,7 @@ const c = isEnglish
       <p class="version-line"><span></span>{c.status}</p>
       <div class="hero-title"><img src="/brand/canwu-mark.svg" width="112" height="112" alt="" /><div><h1>{c.name}</h1><p>{c.nativeName}</p></div></div>
       <h2>{c.summary}</h2><p class="hero-intro">{c.intro}</p>
-      <div class="action-row"><a class="button primary" href="#quickstart">{c.getStarted}</a><a class="button" href="https://github.com/PeiyuanQi/canwu">{c.repository} ↗</a><a class="text-action" href="/en/docs/architecture/">{c.docs} →</a></div>
+      <div class="action-row"><a class="button primary" href="#quickstart">{c.getStarted}</a><a class="button" href="https://github.com/PeiyuanQi/canwu">{c.repository} ↗</a><a class="text-action" href={`${prefix}/architecture/`}>{c.docs} →</a></div>
       <dl class="fact-row">{c.facts.map(([term, value]) => <div><dt>{term}</dt><dd>{value}</dd></div>)}</dl>
     </div>
     <div class="hero-evidence"><div class="code-panel hero-code"><div class="code-title"><span>{c.example}</span><code>move_army.rs</code></div><pre><code>{rustExample}</code></pre></div><a href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs">{c.source} ↗</a></div>
@@ -139,7 +139,7 @@ const c = isEnglish
 
   <section class="tech-section page-width" id="quickstart"><header class="section-heading"><p>{c.quickLabel}</p><h2>{c.quickTitle}</h2><span>{c.quickIntro}</span></header><div class="quick-grid"><div><h3>{c.clone}</h3><div class="code-panel command"><pre><code>{cliExample}</code></pre></div><h3 class="output-heading">{c.output}</h3><div class="code-panel output"><pre><code>{outputExample}</code></pre></div><a class="button quick-tutorial-link" href={`${prefix}/tutorials/move-army/`}>{c.quickTutorial}</a></div><aside class="status-box"><span>{c.status}</span><h3>{c.statusTitle}</h3><p>{c.statusCopy}</p><div class="status-columns"><div><h4>{c.availableTitle}</h4><ul class="technical-list">{c.availableItems.map((item) => <li>{item}</li>)}</ul></div><div><h4>{c.evolvingTitle}</h4><ul class="technical-list">{c.evolvingItems.map((item) => <li>{item}</li>)}</ul></div></div><p>{c.platforms}</p><a href="https://github.com/PeiyuanQi/canwu/blob/main/README.md">README ↗</a></aside></div></section>
 
-  <section class="tech-section page-width" id="architecture"><header class="section-heading"><p>{c.architectureLabel}</p><h2>{c.architectureTitle}</h2><span>{c.architectureIntro}</span></header><div class="architecture-grid"><div class="architecture-diagram"><div class="arch-apps"><strong>{c.apps}</strong><div>{c.appItems.map((item) => <span>{item}</span>)}</div></div><div class="arch-arrow">↓</div><div class="arch-layer public"><code>{c.publicApi}</code><span>{c.publicDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer runtime"><code>{c.sim}</code><span>{c.simDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer foundation"><strong>{c.foundation}</strong><span>{c.foundationDetails}</span></div></div><div class="arch-notes"><ul class="technical-list">{c.archNotes.map((item) => <li>{item}</li>)}</ul><a class="button" href="/en/docs/architecture/">{c.architectureLink}</a></div></div></section>
+  <section class="tech-section page-width" id="architecture"><header class="section-heading"><p>{c.architectureLabel}</p><h2>{c.architectureTitle}</h2><span>{c.architectureIntro}</span></header><div class="architecture-grid"><div class="architecture-diagram"><div class="arch-apps"><strong>{c.apps}</strong><div>{c.appItems.map((item) => <span>{item}</span>)}</div></div><div class="arch-arrow">↓</div><div class="arch-layer public"><code>{c.publicApi}</code><span>{c.publicDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer runtime"><code>{c.sim}</code><span>{c.simDetails}</span></div><div class="arch-arrow">↓</div><div class="arch-layer foundation"><strong>{c.foundation}</strong><span>{c.foundationDetails}</span></div></div><div class="arch-notes"><ul class="technical-list">{c.archNotes.map((item) => <li>{item}</li>)}</ul><a class="button" href={`${prefix}/architecture/`}>{c.architectureLink}</a></div></div></section>
 
   <section class="tech-section page-width"><header class="section-heading"><p>{c.cratesLabel}</p><h2>{c.cratesTitle}</h2></header><div class="crate-grid">{c.crates.map(([name, copy]) => <article><code>{name}</code><p>{copy}</p></article>)}</div></section>
 

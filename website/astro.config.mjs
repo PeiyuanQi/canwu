@@ -70,11 +70,16 @@ export default defineConfig({
           items: [{ autogenerate: { directory: "tutorials" } }],
         },
         {
+          label: "架构",
+          translations: { en: "Architecture" },
+          items: [{ autogenerate: { directory: "architecture" } }],
+        },
+        {
           label: "项目文档（英文）",
           translations: { en: "Project docs" },
           items: [
             { label: "文档索引", translations: { en: "Overview" }, link: "/docs/" },
-            { label: "架构", translations: { en: "Architecture" }, link: "/docs/architecture/" },
+            { label: "完整架构规范", translations: { en: "Architecture reference" }, link: "/docs/architecture/" },
             { label: "最终设计", translations: { en: "End-state design" }, link: "/docs/end-state/" },
             { label: "引擎一致性", translations: { en: "Engine conformance" }, link: "/docs/engine-conformance/" },
             { label: "版本与兼容性", translations: { en: "Versioning" }, link: "/docs/versioning/" },

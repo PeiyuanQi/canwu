@@ -1,0 +1,73 @@
+---
+title: Settlement system
+description: Understand Canwu's fourteen-phase boundary, resource allocation, visibility, atomic commit, and rollback.
+sidebar:
+  order: 2
+  label: Settlement system
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+`settle_boundary(BoundaryRequest)` is the authoritative extension path for new domain mechanics. It turns a simulation boundary into a verifiable transaction: admit the work, run systems in fixed phases, then commit everything once or roll it back completely.
+
+## Boundary lifecycle
+
+<Steps>
+1. Execute internal scheduled work that is due before the requested time, then admit canonical ingress in its normalized order.
+2. Build the boundary admission set: command attempts, accepted commands, ingress, admitted events, and applicable calendar cadences.
+3. Capture an immutable boundary snapshot so early phases read one baseline instead of plugin-order-dependent intermediate state.
+4. Execute all fourteen phases; systems within a phase are ordered by `(plugin name, system name)`.
+5. Persist the boundary evidence, atomic commits, conditional transitions, perspective materialization, and replay/diagnostic hashes.
+6. If a fatal error occurs, restore time, queues, state, journals, random streams, counters, and boundary records.
+</Steps>
+
+## Fourteen phases
+
+| # | Phase | Purpose |
+| ---: | --- | --- |
+| 1 | `EventIngress` | Admit due commands, events, and plugin input |
+| 2 | `BoundarySnapshot` | Fix the read baseline for this boundary |
+| 3 | `DerivedFieldSolve` | Compute declared derived fields |
+| 4 | `PerceptionAndAttentionRefresh` | Refresh actor perception and attention |
+| 5 | `DecisionAndAcceptedEffectIntake` | Intake decisions and accepted effects |
+| 6 | `ReservationAndAllocation` | Offer resources, request capacity, and allocate |
+| 7 | `DomainDeltaProposal` | Propose component, record, and event changes |
+| 8 | `InvariantValidation` | Validate candidate changes against invariants |
+| 9 | `AtomicDomainCommit` | Commit ordinary domain changes atomically |
+| 10 | `HistoricalCandidateEvaluation` | Evaluate historical transition candidates |
+| 11 | `ConditionalTransitionCommit` | Commit eligible historical transitions |
+| 12 | `StrategicAggregation` | Produce strategic-level aggregates |
+| 13 | `PerspectiveAndReportMaterialization` | Materialize actor perspectives and reports |
+| 14 | `SaveReplayAndDiagnosticHashing` | Persist evidence and update replay/diagnostic hashes |
+
+## Resource allocation
+
+Phase six systems first declare supply and competing demand; the kernel performs the allocation. Ordering is by pool, descending priority, explicit tie-break key, and reservation identity. Results distinguish fulfilled, partial, and rejected requests. Only systems that declare `reservation_reads` may consume an allocation.
+
+This separates “who runs first” from “who receives resources.” Registration order, hash-map iteration, and hidden shared mutation cannot influence the result.
+
+## Visibility and commit
+
+Phase-seven changes are staged against the boundary snapshot. `SameBoundary` changes can appear in the read-only overlay for the current boundary; `NextBoundary` changes remain hidden from current-state reads until settlement completes. Invariant systems may inspect candidate values through `proposed_component` or `proposed_domain_record`, still subject to their declared read set.
+
+Ordinary changes commit in phase nine, while historical candidates commit in phase eleven. Events emitted by a boundary enter the next boundary's normal admission path instead of invoking legacy immediate reactors.
+
+## Plugin contract
+
+A `BoundarySystemContract` declares:
+
+- its phase and cadence;
+- the `StateKey` values it reads and writes;
+- reservation offers, requests, and allocation reads;
+- the random streams it owns;
+- emitted events, domain records, and visibility.
+
+The kernel rejects undeclared reads, writes, reservation reads, and random draws. Plugin registration, snapshot rehydration, and exact replay require matching package identity, version, and semantic hash.
+
+## Continue reading
+
+- [Architecture overview](/en/architecture/)
+- [Event system](/en/architecture/events/)
+- [Random generation](/en/architecture/randomness/)
+- [Phased boundary tutorial](/en/tutorials/phased-boundary/)
+- [Full conformance profile](/en/docs/engine-conformance/)

@@ -1,0 +1,69 @@
+---
+title: 事件系统
+description: 了解 Canwu 如何记录事件、因果关系、调度工作和角色视角。
+sidebar:
+  order: 3
+  label: 事件系统
+---
+
+Canwu 的事件是可序列化、可检查的因果记录。事件不是 UI 通知，也不是可以被客户端任意修改的日志；它们属于权威运行时的证据链，并参与快照、边界记录和精确重演。
+
+## 一个事件包含什么
+
+每个 `SimEvent` 都包含：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 单调分配的稳定事件身份 |
+| `timestamp` | 事件发生的模拟时间 |
+| `kind` | 结构化事件类型与载荷 |
+| `affected_entities` | 受事件影响的实体集合 |
+| `summary` | 面向工具和调试界面的简短说明 |
+| `cause` | 产生事件的命令、事件、边界或系统 |
+| `correlation_id` | 将同一处理链中的证据关联起来 |
+
+核心事件类型包括 `MoveOrdered`、`ArmyArrived`、`ReportDispatched`、`KnowledgeUpdated`、`DebugFieldChanged` 和插件事件。插件可以扩展事件类型，但必须通过注册契约声明来源和边界。
+
+## 因果链
+
+`CauseRef` 用四类来源表达事件为什么发生：
+
+- `Command`：由外部命令或语义行动接受后产生；
+- `Event`：由已经记录的事件触发；
+- `Boundary`：由某个结算边界中的系统产生；
+- `System`：由内核系统或受控插件系统产生。
+
+一个移动示例的证据链可以是：
+
+```text
+MoveArmy command
+  └─ MoveOrdered event
+       └─ scheduled ArmyArrival work
+            ├─ ArmyArrived event
+            └─ ReportDispatched event
+                 └─ KnowledgeUpdated event
+```
+
+链上的每一项都保留时间、实体、原因和关联 ID，因此调试界面可以解释“发生了什么”，重演器也可以检查“为什么以这个顺序发生”。
+
+## 调度与准入
+
+内部计划工作按 `(simulation timestamp, insertion sequence)` 排序。面向宿主的规范化输入队列按到期时间、输入类别、降序优先级、签发时间和输入 ID 排序；类别顺序固定为命令、通信、确认、信息和计划系统。
+
+迟到输入不会被插入已经提交的边界之后。零延迟的边界生成输入也要等到当前准入切点结束后，进入同一模拟时间的下一个边界。
+
+## 事件与角色知识
+
+世界真相和角色知识是两套不同的存储。比如军队抵达后，指挥官可以立即拥有新位置；远方角色则可能先收到 `ReportDispatched`，再在报告到达时产生 `KnowledgeUpdated`。语义 API 只返回请求角色可见的事件变化和知识记录，不把全知状态泄露给客户端。
+
+## 边界事件与重演
+
+边界系统产生的事件进入下一边界的事件准入，不调用旧式即时 reactor。每个成功边界保存其事件、命令、输入、随机抽样、变化、生产者、阶段、可见性和哈希；恢复或重演时，内核重新计算并比较完整证据。
+
+## 继续阅读
+
+- [架构总览](/architecture/)
+- [结算系统](/architecture/settlement/)
+- [随机生成方法](/architecture/randomness/)
+- [移动军队教程](/tutorials/move-army/)
+- [事件与因果规范（英文）](/en/docs/architecture/)
