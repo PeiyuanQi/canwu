@@ -1,7 +1,7 @@
 {
   "name": "参伍引擎 Canwu Engine",
   "short_name": "Canwu",
-  "description": "无头、智能体原生的历史模拟引擎。",
+  "description": "不负责渲染和用户界面的智能体原生历史模拟引擎。",
   "lang": "zh-CN",
   "start_url": "/",
   "display": "standalone",
