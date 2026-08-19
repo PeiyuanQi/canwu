@@ -7,8 +7,43 @@ sidebar:
 ---
 
 import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 `settle_boundary(BoundaryRequest)` is the authoritative extension path for new domain mechanics. It turns a simulation boundary into a verifiable transaction: admit the work, run systems in fixed phases, then commit everything once or roll it back completely.
+
+## Four settlement foundations
+
+The fourteen phases define a fixed execution order, not fourteen independent settlement algorithms. At the lowest level, Canwu combines two state-write paths, one deterministic allocation primitive, and one visibility policy attached to staged writes:
+
+<MermaidDiagram
+  label="Four settlement foundations: two write paths, one allocation primitive, and one visibility policy"
+  definition={`flowchart TB
+    Inputs["Commands / events / scheduled work"]
+    Claims["Offers + competing claims"]
+    subgraph Writes["State-write paths"]
+      Immediate["1. Immediate transactional write"]
+      Boundary["3. Staged atomic boundary commit"]
+    end
+    Allocation["2. Deterministic reservation and allocation"]
+    Visibility["4. Visibility policy (sidecar attribute)"]
+    State["Authoritative state"]
+    Evidence["Evidence, replay, and hashes"]
+    Inputs --> Immediate
+    Inputs --> Boundary
+    Claims --> Allocation
+    Allocation -. "allocation result" .-> Boundary
+    Visibility -. "SameBoundary / NextBoundary" .-> Boundary
+    Immediate --> State
+    Boundary --> State
+    Boundary --> Evidence`}
+/>
+
+1. **Immediate transactional write** handles the direct effect of a command or event; it either commits completely or rolls back completely.
+2. **Deterministic reservation and allocation** computes how a finite resource is distributed among competing claims. It does not, by itself, write the world state.
+3. **Staged atomic boundary commit** gathers proposals from multiple systems, validates them together, and writes them as one atomic bundle. Allocation results often land here, but changes without resource competition can use the same path.
+4. **Visibility policy** is not a fourth settlement algorithm. It is a cross-cutting attribute on staged writes: `SameBoundary` makes a result readable to later systems in the current boundary, while `NextBoundary` keeps it hidden until the next boundary.
+
+The practical classification is: **1 and 3 write state, 2 computes an allocation result, and 4 controls when a staged result becomes readable**.
 
 ## Boundary lifecycle
 

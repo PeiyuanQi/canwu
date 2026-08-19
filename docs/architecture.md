@@ -1,5 +1,88 @@
 # Canwu Architecture
 
+## Settlement foundations / 结算系统底层构成
+
+Canwu exposes fourteen ordered settlement phases, but those phases are not
+fourteen independent algorithms. At the lowest level, the runtime combines two
+state-write paths, one deterministic allocation primitive, and one
+cross-cutting visibility policy:
+
+```mermaid
+flowchart TB
+    Inputs["Commands / events / scheduled work<br/>命令 / 事件 / 调度工作"]
+    Claims["Offers + competing claims<br/>供给 + 竞争性申请"]
+
+    subgraph Writes["State-write paths / 状态写入路径"]
+        Immediate["1. Immediate transaction<br/>立即事务写入"]
+        Boundary["3. Staged atomic boundary commit<br/>分阶段批量原子提交"]
+    end
+
+    Allocation["2. Deterministic reservation and allocation<br/>确定性资源仲裁与分配"]
+    Visibility["4. Visibility policy (sidecar)<br/>可见性策略（附加属性）"]
+    State["Authoritative state<br/>权威状态"]
+    Evidence["Evidence, replay, and hashes<br/>证据、重演与哈希"]
+
+    Inputs --> Immediate
+    Inputs --> Boundary
+    Claims --> Allocation
+    Allocation -. "allocation result / 分配结果" .-> Boundary
+    Visibility -. "SameBoundary / NextBoundary" .-> Boundary
+    Immediate --> State
+    Boundary --> State
+    Boundary --> Evidence
+```
+
+### English
+
+1. **Immediate transactional write** is the direct command/event path. The
+   operation applies inside its own transaction and either commits completely
+   or rolls back completely. It remains the compatibility path for the existing
+   movement slice and legacy event reactors.
+2. **Deterministic reservation and allocation** is a calculation primitive, not
+   a state-write path. Systems publish capacity and competing claims; the
+   kernel sorts them by pool, descending priority, explicit tie-break key, and
+   reservation identity, then records a fulfilled, partial, or rejected result.
+3. **Staged atomic boundary commit** is the authoritative batch-write path for
+   new domain mechanics. Systems propose changes against one immutable boundary
+   snapshot; the kernel validates the combined proposal and commits it as an
+   atomic bundle, or restores the entire boundary on failure. Allocation results
+   often feed this step, but it can also commit changes that do not use
+   reservations.
+4. **Visibility policy** is not a fourth settlement algorithm. It is a
+   cross-cutting attribute attached to staged writes: `SameBoundary` exposes a
+   value to later systems in the current boundary, while `NextBoundary` keeps it
+   out of current-state reads until the boundary has finished. In other words,
+   it is a sidecar-like policy on the staged commit path, not an independent
+   writer or solver.
+
+The practical classification is therefore: **1 and 3 are write mechanisms; 2
+computes a result; 4 controls when a staged result becomes readable**. The
+fourteen phases provide ordering, validation, evidence, and replay around these
+foundations rather than introducing fourteen separate settlement models.
+
+### 中文
+
+1. **立即事务写入**是命令或事件的直接处理路径。操作在自己的事务中
+   执行，要么完整提交，要么完整回滚。它仍是既有移动逻辑和旧式事件
+   reactor 的兼容路径。
+2. **确定性资源仲裁与分配**是一种计算原语，不是状态写入路径。系统先
+   发布资源容量和竞争性申请；内核再按资源池、优先级（降序）、显式
+   tie-break 键和 reservation identity（预留标识）进行排序，得出“满足、部分
+   满足或拒绝”的分配结果。
+3. **分阶段批量原子提交**是新领域机制使用的权威批量写入路径。各系统
+   基于同一份不可变边界快照提出变更；内核统一校验整组提案，然后
+   作为一个原子批次提交。任何致命错误都会恢复整个边界。资源分配结果
+   经常在这里落地，但没有资源仲裁的变更也可以直接使用这条路径。
+4. **可见性策略**不是第四种独立的结算算法，而是附着在分阶段写入上的
+   横切属性：`SameBoundary` 让当前边界后续阶段可以读取结果；
+   `NextBoundary` 则把结果隔离到本边界结束之后，下一边界才能从当前状态
+   读到。也就是说，它类似 sidecar 的策略元数据，而不是独立的写入器或
+   求解器。
+
+因此最实用的分类是：**1 和 3 负责写入；2 负责计算分配结果；4 负责控制
+   分阶段结果何时可读**。十四个阶段负责把这些底层机制组织成确定的顺序、
+   校验、证据和重演流程，而不是提供十四种彼此独立的结算算法。
+
 ## Boundary
 
 ```mermaid

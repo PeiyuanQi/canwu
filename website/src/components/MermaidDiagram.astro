@@ -1,0 +1,27 @@
+---
+interface Props {
+  definition: string;
+  label: string;
+}
+
+const { definition, label } = Astro.props;
+const encodedDefinition = JSON.stringify(definition)
+  .replaceAll("&", "\\u0026")
+  .replaceAll("<", "\\u003c")
+  .replaceAll(">", "\\u003e");
+---
+
+<figure class="mermaid-figure">
+  <figcaption class="sr-only">{label}. A text-source fallback is available below.</figcaption>
+  <div class="mermaid" role="img" aria-label={label} aria-busy="true">Rendering diagram…</div>
+  <details class="mermaid-source">
+    <summary>View diagram source</summary>
+    <pre><code class="mermaid-source-code">Diagram source loads with the preview.</code></pre>
+  </details>
+  <script is:inline type="application/json" class="mermaid-definition" set:html={encodedDefinition}></script>
+  <noscript>
+    <p class="mermaid-noscript">
+      JavaScript is required for the diagram preview; the text-source fallback remains available above.
+    </p>
+  </noscript>
+</figure>

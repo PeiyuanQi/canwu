@@ -7,18 +7,53 @@ sidebar:
 ---
 
 import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 `settle_boundary(BoundaryRequest)` 是扩展领域机制的权威入口。它把一次模拟边界变成一个可验证的事务：先确定应该被纳入的工作，再按固定阶段运行系统，最后一次性提交或完整回滚。
+
+## 结算系统的四个底层构成
+
+十四个阶段构成固定的执行顺序，但不是十四种彼此独立的结算算法。最底层可以归纳为两种状态写入路径、一个确定性的资源仲裁与分配原语，以及附着在分阶段写入上的一项可见性策略：
+
+<MermaidDiagram
+  label="结算系统四个底层构成：两种写入路径、一种资源分配计算和一种可见性策略"
+  definition={`flowchart TB
+    Inputs["命令 / 事件 / 调度工作"]
+    Claims["供给 + 竞争性申请"]
+    subgraph Writes["状态写入路径"]
+      Immediate["1. 立即事务写入"]
+      Boundary["3. 分阶段批量原子提交"]
+    end
+    Allocation["2. 确定性资源仲裁与分配"]
+    Visibility["4. 可见性策略（附加属性）"]
+    State["权威状态"]
+    Evidence["证据、重演与哈希"]
+    Inputs --> Immediate
+    Inputs --> Boundary
+    Claims --> Allocation
+    Allocation -. "分配结果" .-> Boundary
+    Visibility -. "SameBoundary / NextBoundary" .-> Boundary
+    Immediate --> State
+    Boundary --> State
+    Boundary --> Evidence`}
+/>
+
+1. **立即事务写入**处理命令或事件的直接效果；操作要么完整提交，要么完整回滚。
+2. **确定性资源仲裁与分配**只负责算出有限资源如何分给竞争者，不负责单独写入世界状态。
+3. **分阶段批量原子提交**收集多个系统的提案，统一校验后作为一个原子批次一次性写入；资源分配结果通常在这里落地，但没有资源竞争的变更也可以直接使用它。
+4. **可见性策略**不是第四种结算算法，而是附着在第 3 类写入上的横切属性：`SameBoundary` 让本边界后续阶段可读，`NextBoundary` 将结果隔离到下一边界才可读。
+
+因此，最实用的分类是：**1 和 3 负责写入，2 负责计算，4 负责控制何时可读**。
 
 ## 一次边界的生命周期
 
 <Steps>
 1. 处理请求时间之前已经到期的内部计划工作，并按规范化顺序吸收入站输入。
-2. 建立本边界的准入集合：命令尝试、已接受命令、规范化输入、已发生事件和适用的日历节奏。
+2. 建立本边界的准入集合：命令尝试、已接受命令、已准入的入站输入和事件，以及适用的日历节奏。
 3. 取得不可变边界快照，让早期阶段读取同一个基线，而不是读取插件执行顺序造成的中间状态。
 4. 依次执行十四个阶段；同一阶段内按 `(plugin name, system name)` 排序。
-5. 通过原子提交、条件转移、视角/报告物化和保存/重演哈希完成边界记录。
-6. 若任一不可恢复错误发生，恢复时间、队列、状态、日志、随机流、计数器和边界记录。
+5. 持久化边界证据、原子提交、条件转移、视角/报告物化结果以及重演/诊断哈希。
+6. 若发生任何致命错误，则恢复时间、队列、状态、日志、随机流、计数器和边界记录。
 </Steps>
 
 ## 十四个阶段
@@ -29,7 +64,7 @@ import { Steps } from "@astrojs/starlight/components";
 | 2 | `BoundarySnapshot` | 固定本边界的读取基线 |
 | 3 | `DerivedFieldSolve` | 计算声明的派生字段 |
 | 4 | `PerceptionAndAttentionRefresh` | 更新角色注意力与感知输入 |
-| 5 | `DecisionAndAcceptedEffectIntake` | 接收决策与已验证效果 |
+| 5 | `DecisionAndAcceptedEffectIntake` | 接收决策与已接受效果 |
 | 6 | `ReservationAndAllocation` | 提供资源、提出需求并确定分配 |
 | 7 | `DomainDeltaProposal` | 提出组件、记录和事件变化 |
 | 8 | `InvariantValidation` | 检查候选变化是否满足不变量 |
@@ -42,13 +77,13 @@ import { Steps } from "@astrojs/starlight/components";
 
 ## 资源分配
 
-第六阶段的系统先声明供给和竞争需求，再由内核统一分配。排序键为：资源池、降序优先级、显式 tie-break key，最后是预留身份。结果会区分满足、部分满足和拒绝；只有在契约中声明 `reservation_reads` 的系统，才能读取分配结果。
+第六阶段的系统先声明供给和竞争需求，再由内核统一分配。排序键为：资源池、降序优先级、显式平局决胜键（tie-break key），最后按 reservation 标识（reservation identity）排序。结果会区分满足、部分满足和拒绝；只有在契约中声明 `reservation_reads` 的系统，才能读取分配结果。
 
 这种设计把“谁先运行”与“谁得到资源”分开。插件不能通过注册顺序、哈希表遍历顺序或隐藏的共享可变状态影响结果。
 
 ## 可见性与提交
 
-第七阶段的变化以边界快照为基线。`SameBoundary` 变化可以进入本边界的只读覆盖层；`NextBoundary` 变化在结算完成前不会污染当前状态读取。不变量系统可以通过 `proposed_component` 或 `proposed_domain_record` 查看候选值，但仍受声明的读取集合限制。
+第七阶段的变化以边界快照为基线进行暂存。`SameBoundary` 变化可以进入本边界的只读覆盖层；`NextBoundary` 变化在结算完成前对当前状态读取保持不可见。不变量系统可以通过 `proposed_component` 或 `proposed_domain_record` 查看候选值，但仍受声明的读取集合限制。
 
 普通变化在第九阶段提交，历史候选在第十一阶段提交。边界产生的事件不会调用旧式即时 reactor，而是进入下一个边界的正常事件准入，因此不会回写已经完成的边界。
 
@@ -62,7 +97,7 @@ import { Steps } from "@astrojs/starlight/components";
 - 自己拥有的随机流；
 - 可发出的事件、领域记录和可见性。
 
-内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重演都要求契约身份、版本和语义哈希一致。
+内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重演都要求包标识、版本和语义哈希匹配。
 
 ## 继续阅读
 
