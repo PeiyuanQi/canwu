@@ -22,10 +22,28 @@ Canwu 面向的不只是一个可随意修改的游戏状态对象。它提供�
 项目仍在积极开发。公开示例有意保持小而清晰，方便开发者检查、测试，并把
 这些保证复用到更大型的游戏、研究环境和智能体驱动模拟中。
 
+## 作为依赖使用
+
+Rust 应用应依赖受支持的公开门面，而不是直接依赖实现 crate：
+
+```toml
+[dependencies]
+canwu-api = "0.4.0"
+```
+
+需要持久化 Canwu 存档的应用应精确固定引擎版本，并且只在同时提供明确存档
+迁移时升级：
+
+```toml
+canwu-api = "=0.4.0"
+```
+
+其他 `canwu-*` crate 会一并发布，以便 Cargo 解析公开门面的依赖图；它们不是
+供应用代码分别依赖的独立兼容性表面。
+
 ## 快速开始
 
-安装满足根目录 `Cargo.toml` 中 `rust-version` 要求的 Rust 工具链，然后运行
-无界面移动示例：
+安装 Rust 1.88 或更高版本，然后运行无界面移动示例：
 
 ```text
 cargo run -p canwu-api --example move_army
@@ -102,6 +120,8 @@ cargo run -p canwu-api --example phased_boundary
 [`canwu-developer`](agent-interface/plugins/canwu-developer/skills/) 下的技能；发布
 流程使用
 [`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md)。
+面向维护者的软件包与 registry 操作步骤见
+[`docs/releasing.md`](docs/releasing.md)。
 
 ## 最小 API 示例
 
@@ -141,4 +161,5 @@ Apache 许可证不要求产品显示 Canwu 标志或公开鸣谢；如自愿使
 
 Canwu 支持 Windows、macOS 和 Linux。模拟相关 crate 不依赖具体平台。参考
 调试客户端通过 `eframe` 使用 OpenGL，并在 Linux 上支持 Wayland 和 X11。
-持续集成会检查这三个操作系统。
+持续集成会检查这三个操作系统。整个 workspace 和已发布 crate 均要求 Rust
+1.88 或更高版本。

@@ -1,14 +1,20 @@
 [package]
 name = "canwu-knowledge"
+description = "Actor-relative knowledge and observation state for Canwu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 rust-version.workspace = true
+publish = ["crates-io"]
 
 [dependencies]
-canwu-core = { path = "../canwu-core" }
-canwu-time = { path = "../canwu-time" }
+canwu-core.workspace = true
+canwu-time.workspace = true
 serde.workspace = true
 
 [lints]

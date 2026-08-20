@@ -27,10 +27,30 @@ The project is under active development. The public examples are small on
 purpose: they make the engine's guarantees easy to inspect, test, and reuse in
 larger games, research environments, and agent-driven simulations.
 
+## Use Canwu as a dependency
+
+Rust applications should depend on the supported public facade rather than the
+implementation crates:
+
+```toml
+[dependencies]
+canwu-api = "0.4.0"
+```
+
+Applications that persist Canwu snapshots should pin the exact engine release
+and upgrade only alongside an explicit save migration:
+
+```toml
+canwu-api = "=0.4.0"
+```
+
+The other `canwu-*` crates are published so Cargo can resolve the facade's
+dependency graph. They are not separate compatibility surfaces for application
+code.
+
 ## Quick start
 
-Install a Rust toolchain compatible with the `rust-version` in `Cargo.toml`,
-then run the headless movement example:
+Install Rust 1.88 or newer, then run the headless movement example:
 
 ```text
 cargo run -p canwu-api --example move_army
@@ -115,6 +135,8 @@ for implementation guidance. Contributors and maintainers use skills under
 [`canwu-developer`](agent-interface/plugins/canwu-developer/skills/); the release
 workflow is
 [`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md).
+The human-readable package and registry procedure is documented in
+[`docs/releasing.md`](docs/releasing.md).
 
 ## Minimal API example
 
@@ -157,4 +179,5 @@ licenses; see the
 The supported operating systems are Windows, macOS, and Linux. The simulation
 crates are headless and platform-neutral; the reference debug client uses
 OpenGL through `eframe`, with Wayland and X11 enabled on Linux. The CI matrix
-checks all three operating systems.
+checks all three operating systems. The workspace and published crates require
+Rust 1.88 or newer.

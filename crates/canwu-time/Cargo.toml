@@ -1,10 +1,16 @@
 [package]
 name = "canwu-time"
+description = "Deterministic simulation time and duration types for Canwu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 rust-version.workspace = true
+publish = ["crates-io"]
 
 [dependencies]
 serde.workspace = true

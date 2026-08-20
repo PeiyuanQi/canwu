@@ -37,6 +37,7 @@ or runnable example without loading the entire documentation set.
 
 ## Legal and release
 
+- [Release procedure](releasing.md)
 - [Third-party license inventory](legal/third-party-licenses.md)
 - [Generated third-party notices](legal/third-party-notices.html)
 - [Additional third-party notices](legal/third-party-notices-extra.md)
