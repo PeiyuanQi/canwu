@@ -1,13 +1,19 @@
 [package]
 name = "canwu-debug"
+description = "Reference debug client for the Canwu simulation engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 rust-version.workspace = true
+publish = false
 
 [dependencies]
-canwu-api = { path = "../canwu-api" }
+canwu-api.workspace = true
 eframe.workspace = true
 image.workspace = true
 serde.workspace = true

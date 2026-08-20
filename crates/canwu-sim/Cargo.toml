@@ -1,18 +1,24 @@
 [package]
 name = "canwu-sim"
+description = "Deterministic simulation runtime, scheduling, persistence, replay, and plugins for Canwu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 rust-version.workspace = true
+publish = ["crates-io"]
 
 [dependencies]
 blake3.workspace = true
-canwu-core = { path = "../canwu-core" }
-canwu-event = { path = "../canwu-event" }
-canwu-knowledge = { path = "../canwu-knowledge" }
-canwu-time = { path = "../canwu-time" }
-canwu-world = { path = "../canwu-world" }
+canwu-core.workspace = true
+canwu-event.workspace = true
+canwu-knowledge.workspace = true
+canwu-time.workspace = true
+canwu-world.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
