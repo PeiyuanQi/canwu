@@ -332,6 +332,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-society"
+version = "0.4.0"
+dependencies = [
+ "canwu-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-time"
 version = "0.4.0"
 dependencies = [

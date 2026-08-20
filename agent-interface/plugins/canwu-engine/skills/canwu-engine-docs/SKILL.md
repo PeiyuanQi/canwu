@@ -1,6 +1,6 @@
 ---
 name: canwu-engine-docs
-description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, follow a foundation tutorial or scenario case, understand a public canwu-api example, implement DecisionTicket/controller/policy workflows, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
+description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, follow a foundation tutorial or scenario case, understand a public canwu-api example or official experimental extension, implement DecisionTicket/controller/policy workflows, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
 ---
 
 # Read Canwu Documentation
@@ -57,7 +57,9 @@ not silently combine incompatible statements.
 
 ## Preserve Canwu boundaries
 
-- Recommend only public `canwu-api` entry points to engine users.
+- Recommend public `canwu-api` entry points for kernel capabilities. An official
+  experimental extension may be used only when its documentation explicitly
+  says it is built on `canwu-api`; preserve its unpublished and unstable status.
 - Keep rendering, wall time, input devices, audio, and presentation state in
   the host application.
 - Use actor-relative reads for actor-facing workflows. Do not replace missing

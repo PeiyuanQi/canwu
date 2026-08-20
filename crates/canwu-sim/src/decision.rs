@@ -399,6 +399,7 @@ impl Simulation {
             .trace
             .as_ref()
             .and_then(|trace| decisions.controller(&trace.controller_id));
+        let decision_controller_id = controller.map(|controller| controller.id.clone());
         match (&prepared.action, &request.command) {
             (Some(DecisionAction::Command { command }), Some(request)) => {
                 let expected: Command = match serde_json::from_value(command.clone()) {
@@ -483,6 +484,7 @@ impl Simulation {
             Some(expected_revision),
             envelope,
             CommandIngress::LiveRequest,
+            decision_controller_id,
             true,
         )
         .map(Some)

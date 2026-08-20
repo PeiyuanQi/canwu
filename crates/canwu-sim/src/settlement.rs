@@ -101,6 +101,7 @@ impl Simulation {
                         Some(expected_revision),
                         envelope,
                         CommandIngress::LiveRequest,
+                        None,
                         true,
                     )?;
                 }

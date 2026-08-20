@@ -38,8 +38,9 @@ canwu-api = "0.4.0"
 canwu-api = "=0.4.0"
 ```
 
-其他 `canwu-*` crate 会一并发布，以便 Cargo 解析公开门面的依赖图；它们不是
-供应用代码分别依赖的独立兼容性表面。
+`canwu-api` 依赖图中的 crate 会一并发布，以便 Cargo 解析公开门面；它们不是
+供应用代码分别依赖的独立兼容性表面。`canwu-society` 等实验性工作区扩展暂不
+发布，在单独完成稳定化之前只能从仓库使用。
 
 ## 快速开始
 
@@ -62,6 +63,12 @@ cargo run -p canwu-api --example phased_boundary
 cargo run -p canwu-api --example decision_ticket
 ```
 
+如需运行唯一的中性聚合社会传播教程：
+
+```text
+cargo run -p canwu-society --example local_community_diffusion
+```
+
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
@@ -73,6 +80,7 @@ cargo run -p canwu-api --example decision_ticket
 - `canwu-sim`：不公开的模拟状态、命令、调度和插件
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
 - `canwu-debug`：只使用公开 API 的小型参考客户端
+- `canwu-society`：建立在 `canwu-api` 之上的未发布聚合社会传播参考扩展
 
 [文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。
 `agent-interface` 保存供引擎使用者和仓库维护者使用的技能工具，它们不是运行时

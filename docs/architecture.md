@@ -182,7 +182,10 @@ authoritative action payload. Human, External, and LLM responses bind the
 ticket version, so a response computed before `ReplaceOptions` is rejected as
 stale. The controller binding, not the policy, derives command issuer, decision
 origin, seat, permission profile, and command subject. Normal command admission
-then validates that derived authority before any command mutation.
+then validates that derived authority before any command mutation. A command
+handler can also require `CommandContext::decision_controller_id`; the engine
+sets it only for the nested command of validated decision ingress, so callers
+cannot manufacture DecisionTicket provenance with `CommandEnvelope::with_authority`.
 
 Registration, opening, option replacement, resolution, and cancellation enter
 the runtime through `DecisionIngressRequest`. They use request IDs, revision
@@ -202,6 +205,57 @@ nonzero and globally collision-checked before persistence. Decision state has
 its own optional commitment root. Exact replay replays recorded decision ingress
 and verifies the resulting attempts, state, and traces; it deliberately does not
 rerun a possibly external, human, or nondeterministic policy.
+
+## Experimental social diffusion extension
+
+`canwu-society` is an unpublished reference extension built on `canwu-api`; it
+is not a dependency of `canwu-api` and is not a new kernel subsystem. It models
+the reusable part of population-scale belief and affiliation change without
+introducing religion, doctrine, ritual, historical era, rebellion, or war
+types into Canwu core.
+
+Its authoritative root record contains ordered, sparse state for:
+
+- cohorts with integer headcounts and application-defined classifications;
+- active cohort/affiliation disposition distributions across separate
+  awareness, private assent, practice, public alignment, organization tie,
+  mobilization, and visibility dimensions;
+- social influence edges and bounded organization topology;
+- institutional alignments and orthogonal policy pressures;
+- stable integer transition remainders, aggregates, mobilization candidates,
+  and authorized observer estimates.
+
+Daily transition rules execute in canonical key order with integer rates and
+persisted per-rule remainders. Every active cohort/target distribution must
+conserve the cohort headcount. Missing pairs are materialized only when a rule
+actually addresses them, so runtime state grows with active relationships and
+edges rather than a dense territory/cohort/target/channel product.
+
+The extension deliberately separates this chain:
+
+```text
+information exposure != awareness != private assent != public alignment
+    != organization tie != mobilization candidate != political conflict
+```
+
+Institutional choices use ordinary `DecisionTicket` controllers and a
+validated plugin command. The command records a pending policy component; the
+next social boundary applies it to institutional alignment before proposing
+population transitions. A ruler or policy therefore cannot directly set a
+population belief percentage. Phase 10 produces mobilization candidates only;
+downstream political or conflict packages decide what, if anything, follows.
+
+Actor-facing queries require a valid `ViewerContext` and return only a
+previously materialized projection for that actor. Absence is an authorization
+error, never a request to decode the authoritative society record. Generic
+snapshot validation checks the plugin manifest, record schema, commitments,
+and referenced core-entity existence. The extension-level
+`from_society_snapshot_json` boundary additionally recomputes the society
+payload-to-reference binding and every persisted aggregate, mobilization
+candidate, actor projection, and pending institutional-policy component before
+the restored simulation is returned. Optional materialization timestamps keep
+`SimTime::EPOCH` and negative simulation times available as real boundary
+times. Fork and exact replay use the same serialized authoritative state.
 
 ## World, time, and events
 

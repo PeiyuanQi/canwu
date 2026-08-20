@@ -390,6 +390,10 @@ impl CommandAuthority {
 pub struct CommandContext {
     pub issuer: Issuer,
     pub authority: CommandAuthority,
+    /// Present only when the engine admitted this command as the selected
+    /// action of a validated `DecisionTicket` controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_controller_id: Option<String>,
     pub run_policy: CommandPolicyContext,
     pub ingress: CommandIngress,
     pub attempt_id: Option<CommandAttemptId>,
@@ -6987,6 +6991,7 @@ mod tests {
                 Some(0),
                 replay_envelope,
                 CommandIngress::FrozenReplay,
+                None,
                 true,
             )
             .expect("the trusted replay path should consume frozen input");

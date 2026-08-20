@@ -1,0 +1,118 @@
+---
+title: 本地社区传播与制度回应
+description: 用稀疏人口分布、社会影响、制度决策和角色相对估计实现一个中性社会传播案例。
+sidebar:
+  order: 3
+  label: 社区传播与制度回应
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-society/examples/local_community_diffusion.rs" icon="external">
+  打开唯一的示例源码
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-society/tests/framework.rs" variant="secondary" icon="external">
+  查看持久化与确定性测试
+</LinkButton>
+
+这是 `canwu-society` 的唯一教程案例。它使用完全中性的“新观念”，不实现传教士、
+白莲教或宗教改革，也不生成叛乱、战争或其他政治结果。三个历史过程只用于检验
+抽象设计，没有被制作成 fixture 或附加案例。
+
+## 运行
+
+```shell
+cargo run -p canwu-society --example local_community_diffusion
+```
+
+示例建立市场与村庄两个 cohort。市场中已有少量支持者；市场接触和本地组织给
+村庄提供传播机会。第一天先产生 awareness 与少量 private assent。随后地方机构
+通过 `DecisionTicket` 选择公开政策，第二天才由社会边界应用制度输入。
+
+## 数据流
+
+```text
+cohort + affiliation target
+  -> sparse disposition distribution
+  -> influence / organization / institution signals
+  -> deterministic integer transitions + persisted remainder
+  -> aggregate truth
+  -> authorized observer estimate
+```
+
+<Steps>
+1. 为两个 cohort 创建整数人口，并只为实际参与的 `(cohort, target)` 组合保存分布。
+2. 分别表示 awareness、private assent、practice、public alignment、organization tie、mobilization 与 visibility。
+3. 用有界的 influence edge 和 organization topology 计算传播压力。
+4. 让具名 controller 从已有 policy options 中选择一个，并通过普通插件命令记录待应用政策。
+5. 在下一次 daily boundary 中应用制度输入，再按稳定规则 ID 和 cohort ID 结算整数人口转移。
+6. 为授权观察者物化有误差的估计；没有 projection 的角色会收到错误，而不是 ground-truth fallback。
+7. 保存、恢复、fork，并从 journal 精确重放相同结果。
+</Steps>
+
+## 1. 人口不是一个“接受度”标量
+
+每个 active `(cohort, target)` 保存多个 `DispositionBucket`。一个 profile 同时包含：
+
+```rust
+DispositionProfile {
+    awareness,
+    assent,
+    practice,
+    public_alignment,
+    organizational_tie,
+    mobilization,
+    visibility,
+}
+```
+
+所有 bucket 的 `headcount` 必须恰好等于 cohort 人口。不同 target 拥有独立分布，
+因此不会错误地假设所有社会身份都互斥。不存在的 pair 也不会预先分配成巨大的
+`territory * cohort * target * channel` 矩阵。
+
+## 2. 传播机会不等于转化
+
+`SocialInfluenceEdge` 只提供 reach 与 trust。来源可以是 cohort、organization 或
+institutional alignment。下游配置的 `TransitionRule` 再决定这些信号如何影响某个
+profile 到另一个 profile 的迁移。
+
+迁移只使用整数。小于一人的期望量保存在稳定的 `TransitionRemainder` 中，在后续
+边界继续累计；存档与重放不会丢失它。
+
+## 3. 制度政策不会瞬间重写私人认同
+
+示例的 controller 代表一名获授权人物，并生成两个既有 option。Utility policy 只
+选择 option ID。选中的 option 通过 `set_institutional_policy` 命令写入待应用组件：
+
+```text
+DecisionTicket -> controller-derived authority -> plugin command
+    -> pending policy component -> next daily society boundary
+```
+
+示例在命令完成后立即断言人口分布完全未变。到第二天，制度 enforcement 可以让
+public alignment 比 private assent 更快变化，但它仍不能直接指定“多少人真心相信”。
+
+## 4. 观察结果不是 ground truth
+
+`projection_for_viewer()` 要求 Canwu 签发的 `ViewerContext`，并且只返回 phase 13
+已为该 actor 物化的 `SocietyProjection`。检测率、遮蔽和 false positive 会让估计与
+真实 aggregate 不同。没有 observer profile 的角色不会自动获得社会根记录。
+
+示例通过 `from_society_snapshot_json()` 恢复存档。这个扩展入口会在 Canwu 的通用
+存档检查之后，重新核对社会 payload 使用的核心实体引用和所有已物化派生值，然后
+示例再验证 fork 与 journal replay 得到完全相同的权威状态。
+
+## 5. 系统只产出动员候选
+
+`MobilizationBand::Active` 可以产生带人口、组织能力和政策压力证据的
+`MobilizationCandidate`。它不是冲突事件。抗议、镇压、迁移、暴乱、结盟或战争
+必须由独立的政治与安全扩展判断。
+
+## 扩展边界
+
+可复用的引擎部分是 cohort、稀疏多维分布、确定性迁移、影响边、组织拓扑、制度
+输入、政策压力、候选输出和角色估计。历史教义、礼仪、人物、文化兼容性、政策
+名称、具体冲突资格与叙事都属于下游领域包。
+
+`canwu-society` 当前 `publish = false`，也没有被 `canwu-api` 重新导出。它是用来
+验证公开插件契约的实验扩展，不是已经冻结的通用宗教 API。

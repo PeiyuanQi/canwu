@@ -567,6 +567,7 @@ fn replay_command_record(
         None,
         record.envelope.clone(),
         CommandIngress::LegacyDirect,
+        None,
         false,
     )?
     else {
@@ -603,6 +604,7 @@ fn replay_attempt_record(
         record.expected_revision,
         record.envelope.clone(),
         record.ingress,
+        None,
         true,
     )?;
     if simulation.command_attempts().last() != Some(record) {

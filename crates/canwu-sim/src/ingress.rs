@@ -150,7 +150,14 @@ impl IngressQueueKey {
 
 impl Simulation {
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
-        match self.admit_command(None, None, envelope, CommandIngress::LegacyDirect, false)? {
+        match self.admit_command(
+            None,
+            None,
+            envelope,
+            CommandIngress::LegacyDirect,
+            None,
+            false,
+        )? {
             CommandOutcome::Accepted { receipt } => Ok(receipt),
             CommandOutcome::Rejected { rejection } => Err(rejection.error),
         }
@@ -434,6 +441,7 @@ impl Simulation {
             Some(request.expected_revision),
             request.envelope,
             CommandIngress::LiveRequest,
+            None,
             true,
         )
     }
@@ -444,6 +452,7 @@ impl Simulation {
         expected_revision: Option<u64>,
         envelope: CommandEnvelope,
         ingress: CommandIngress,
+        decision_controller_id: Option<String>,
         record_attempt: bool,
     ) -> Result<CommandOutcome, CanwuError> {
         self.ensure_runtime_ready()?;
@@ -508,6 +517,7 @@ impl Simulation {
         let context = CommandContext {
             issuer: envelope.issuer.clone(),
             authority,
+            decision_controller_id,
             run_policy: self.state.metadata.run_configuration.command_policy(),
             ingress: admission.ingress,
             attempt_id: record_attempt.then_some(attempt_id),

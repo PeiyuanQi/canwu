@@ -23,6 +23,11 @@ coding agents.
 
 - [Continuous-time / proportional-time game loop](continuous-game-loop.md)
 
+## Experimental extensions
+
+- [Social belief and institutional diffusion framework](proposals/social-belief-framework.md)
+- [Social framework implementation checklist](proposals/social-belief-framework-todo.md)
+
 ## Agent access
 
 When the `canwu-engine` agent plugin is installed, invoke

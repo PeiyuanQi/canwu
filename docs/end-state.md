@@ -125,6 +125,20 @@ diplomacy, migration, disease, and climate should remain separately testable
 plugins. The core may standardize broadly shared primitives only after at least
 two concrete systems need them.
 
+The first reference implementation of population-scale social diffusion is the
+unpublished `canwu-society` extension. It keeps cohort distributions, influence
+edges, organization topology, institutional alignment, policy pressure,
+transition remainders, mobilization candidates, and actor estimates outside the
+kernel. Historical labels and meanings remain downstream data. It is evidence
+for the plugin/domain-record/decision/knowledge contracts, not a declaration
+that its current types are stable public Canwu primitives.
+
+Promotion from this extension into core requires an independently implemented
+second domain system needing the same primitive, evidence that the abstraction
+is not specific to belief or religion, and a separate compatibility and
+migration decision. Until then, `canwu-api` must not depend on or re-export
+`canwu-society`.
+
 ## Debug client
 
 The first-party client remains a reference consumer. It should prioritize world
