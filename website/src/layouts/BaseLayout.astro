@@ -34,6 +34,7 @@ const ui = {
     architecture: "Architecture",
     integrations: "Integrations",
     contribute: "Contribute",
+    download: "Download",
     credits: "Credits",
     issues: "Issues",
     examples: "Examples",
@@ -53,6 +54,7 @@ const ui = {
     architecture: "架构",
     integrations: "集成",
     contribute: "参与贡献",
+    download: "下载",
     credits: "鸣谢",
     issues: "议题",
     examples: "示例",
@@ -146,6 +148,7 @@ const isCurrent = (href: string) =>
             </div>
           </details>
           {navItems(variant).map((item) => <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>)}
+          <a class="nav-download" href={`${variant.prefix}/#install`}>{variant.ui.download}</a>
           <a class="language-switch" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
           <a class="nav-github github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
         </nav>
@@ -165,6 +168,7 @@ const isCurrent = (href: string) =>
               </div>
             </details>
             {navItems(variant).map((item) => <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>)}
+            <a class="mobile-download-link" href={`${variant.prefix}/#install`}>{variant.ui.download}</a>
             <a class="mobile-menu-language" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
             <a class="github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
           </div>

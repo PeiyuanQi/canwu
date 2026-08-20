@@ -5,6 +5,8 @@ interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const prefix = isEnglish ? "/en" : "";
+const installCommand = "cargo add canwu-api@=0.4.0";
+const releaseUrl = "https://github.com/PeiyuanQi/canwu/releases/tag/v0.4.0";
 
 const rustExample = `use canwu_api::{Canwu, ObserveRequest, SemanticAction, SimDuration};
 
@@ -53,6 +55,7 @@ const c = isEnglish
       summary: "An agent-native, deterministic Rust core for historical simulation.",
       intro: "Advance historical, social, and strategy worlds through commands, causal events, actor knowledge, and snapshots. Agents are first-class clients; choose your own renderer, interface, and content stack across regions and eras.",
       getStarted: "Run the example", repository: "View source", docs: "Read the architecture",
+      installLabel: "Install", installTitle: "Add Canwu to your Rust project", installIntro: "Install the supported canwu-api facade from crates.io. Rust 1.88 or newer is required.", installCommandLabel: "One-line install", release: "View Canwu 0.4.0 release",
       facts: [["Replay", "Exact continuation from a recorded environment"], ["Knowledge", "Scoped to each actor"], ["Rendering", "Bring your own client"], ["Agents", "Native semantic API"]],
       example: "Excerpt from the real example", source: "Open the complete move_army.rs",
       featuresLabel: "Why Canwu", featuresTitle: "One world model, multiple kinds of client", featuresIntro: "Canwu owns simulation truth and exposes a narrow public boundary. Games, research tools, and agents share the same deterministic world while choosing their own renderer and interface.",
@@ -91,6 +94,7 @@ const c = isEnglish
       summary: "为智能体提供原生语义 API 的确定性 Rust 历史模拟内核。",
       intro: "参伍通过命令、因果事件、角色知识与快照推进历史、社会和策略模拟。渲染器、交互界面与内容系统由客户端自行选择；核心面向跨地区、跨时代场景。",
       getStarted: "运行示例", repository: "查看源码", docs: "阅读架构（英文）",
+      installLabel: "下载安装", installTitle: "一行命令接入 Canwu", installIntro: "从 crates.io 安装受支持的 canwu-api 公开入口，需要 Rust 1.88 或更高版本。", installCommandLabel: "一行安装", release: "查看 Canwu 0.4.0 发布页",
       facts: [["重演", "同一记录环境可精确继续"], ["知识", "限定到具体角色"], ["渲染", "由客户端选择"], ["智能体", "原生语义 API"]],
       example: "真实示例代码摘录", source: "打开完整 move_army.rs",
       featuresLabel: "为什么选择参伍", featuresTitle: "一套世界模型，接入多种客户端", featuresIntro: "参伍维护模拟真相，并通过窄而明确的公开边界提供能力。游戏、研究工具与智能体共享同一个确定性世界，同时自由选择渲染器与交互界面。",
@@ -133,6 +137,11 @@ const c = isEnglish
       <dl class="fact-row">{c.facts.map(([term, value]) => <div><dt>{term}</dt><dd>{value}</dd></div>)}</dl>
     </div>
     <div class="hero-evidence"><div class="code-panel hero-code"><div class="code-title"><span>{c.example}</span><code>move_army.rs</code></div><pre><code>{rustExample}</code></pre></div><a href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs">{c.source} ↗</a></div>
+  </section>
+
+  <section class="install-section page-width" id="install">
+    <div class="install-copy"><p>{c.installLabel}</p><h2>{c.installTitle}</h2><span>{c.installIntro}</span></div>
+    <div class="install-actions"><div class="install-command"><span>{c.installCommandLabel}</span><code>{installCommand}</code></div><a class="button" href={releaseUrl}>{c.release} ↗</a></div>
   </section>
 
   <section class="tech-section page-width" id="features"><header class="section-heading"><p>{c.featuresLabel}</p><h2>{c.featuresTitle}</h2><span>{c.featuresIntro}</span></header><div class="feature-grid focused">{c.features.map(([key, title, copy]) => <article><code>{key}</code><h3>{title}</h3><p>{copy}</p></article>)}</div><aside class="scope-strip"><p>{c.scopeLabel}</p><div><h3>{c.scopeTitle}</h3><span>{c.scopeCopy}</span></div></aside></section>
