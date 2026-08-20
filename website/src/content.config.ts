@@ -45,6 +45,7 @@ function canwuDocsLoader(): Loader {
     pattern: [
       "website/src/content/docs/**/[^_]*.{markdown,mdown,mkdn,mkd,mdwn,md,mdx}",
       "docs/**/[^_]*.md",
+      "!docs/proposals/**",
     ],
     generateId: ({ entry }) => contentId(entry),
   });

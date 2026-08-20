@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
 const repositoryDocsRoot = resolve(repositoryRoot, "docs");
+const repositoryProposalsRoot = resolve(repositoryDocsRoot, "proposals");
 const repositoryOverviewPath = resolve(repositoryDocsRoot, "README.md");
 const githubBlobBase = "https://github.com/PeiyuanQi/canwu/blob/main/";
 const githubRawBase = "https://raw.githubusercontent.com/PeiyuanQi/canwu/main/";
@@ -51,7 +52,11 @@ function rewriteUrl(url, currentSourcePath, nodeType) {
   const { path, suffix } = splitUrl(url);
   const targetPath = resolve(dirname(currentSourcePath), decodeURI(path));
 
-  if (isInside(repositoryDocsRoot, targetPath) && /\.md$/i.test(targetPath)) {
+  if (
+    isInside(repositoryDocsRoot, targetPath) &&
+    !isInside(repositoryProposalsRoot, targetPath) &&
+    /\.md$/i.test(targetPath)
+  ) {
     return `${repositoryDocRoute(targetPath)}${suffix}`;
   }
 
@@ -126,6 +131,17 @@ function repositoryDocsPlugin() {
       });
     },
     link(node, context) {
+      if (
+        sourcePath(context) === repositoryOverviewPath &&
+        node.url.startsWith("proposals/") && node.url.endsWith("-todo.md")
+      ) {
+        const paragraph = context.parent(node);
+        const listItem = paragraph ? context.parent(paragraph) : undefined;
+        if (listItem?.type === "listItem") {
+          context.removeNode(listItem);
+          return;
+        }
+      }
       rewriteNodeUrl(node, context, "link");
     },
     image(node, context) {
