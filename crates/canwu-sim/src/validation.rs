@@ -3,15 +3,17 @@ use super::{
     BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
     BoundarySystemContract, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef, Command,
     CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId, CommandIngress,
-    CommandRecord, DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange,
-    DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation,
-    DomainRecordRef, EntityRef, ErrorCode, EventId, EventKind, GENESIS_BOUNDARY_HASH, IngressClass,
-    IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
-    PersistedAdmissionCursors, PluginComponentKey, PluginComponentRecord, PluginRegistry,
-    RandomDrawOutcome, RandomDrawProducer, ReservationAllocation, ReservationDisposition,
-    ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
-    RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
-    SimDuration, SimEvent, SimulationSnapshot, SystemCadence, SystemDirective, WorldSnapshot,
+    CommandRecord, DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome,
+    DecisionAttemptRecord, DecisionAuthority, DecisionMutation, DecisionState, DecisionTraceId,
+    DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange, DomainRecordClass,
+    DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation, DomainRecordRef, EntityRef,
+    ErrorCode, EventId, EventKind, GENESIS_BOUNDARY_HASH, IngressClass, IngressPayload,
+    IngressQueueKey, IngressRecord, InteractionPolicy, Issuer, PersistedAdmissionCursors,
+    PluginComponentKey, PluginComponentRecord, PluginRegistry, RandomDrawOutcome,
+    RandomDrawProducer, ReservationAllocation, ReservationDisposition, ReservationPoolKey,
+    ReservationRequestRecord, RunConfigurationSnapshot, RunManifest, RuntimeCurrentState,
+    RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration,
+    SimEvent, SimulationSnapshot, SystemCadence, SystemDirective, WorldSnapshot,
     authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
     boundary_write_stage, canonical_text, canonicalize_scenario, commitment_roots_are_canonical,
@@ -319,7 +321,9 @@ pub(super) fn validate_snapshot(
         || snapshot.next_boundary_id != 1
         || snapshot.next_random_draw_id != 1
         || snapshot.next_schedule_sequence != 1
-        || snapshot.next_correlation_id != 1;
+        || snapshot.next_correlation_id != 1
+        || !snapshot.decisions.is_empty()
+        || snapshot.next_decision_trace_id != 1;
     if has_execution_evidence && !snapshot.plugin_registration_closed {
         return invalid_snapshot(
             "snapshot execution evidence requires plugin registration to remain closed",
@@ -347,6 +351,7 @@ pub(super) fn validate_snapshot(
         );
     }
     let max_ingress_id = validate_ingress_records(snapshot, plugins, &domain_history)?;
+    validate_decision_state(snapshot)?;
     let boundaries_before_attempt =
         boundaries_before_attempts(snapshot.command_attempts.len(), &snapshot.boundaries)?;
     let mut request_ids = BTreeSet::new();
@@ -1210,6 +1215,304 @@ fn validate_snapshot_domain_records(
     Ok(records)
 }
 
+fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+    snapshot.decisions.validate().map_err(|error| {
+        invalid_snapshot_error(format!("snapshot decision state is invalid: {error}"))
+    })?;
+    for controller in snapshot.decisions.controllers.values() {
+        let authority_exists = match &controller.authority {
+            DecisionAuthority::Actor { actor } => snapshot.world.person(*actor).is_some(),
+            DecisionAuthority::Institution {
+                institution,
+                responsible_actor,
+            } => {
+                snapshot_entity_identity_exists(snapshot, institution)
+                    && responsible_actor.is_none_or(|actor| snapshot.world.person(actor).is_some())
+            }
+            DecisionAuthority::Council { .. } | DecisionAuthority::NoResponsibleActor { .. } => {
+                true
+            }
+        };
+        if !authority_exists
+            || controller
+                .command_subject
+                .as_ref()
+                .is_some_and(|entity| !snapshot_entity_identity_exists(snapshot, entity))
+        {
+            return invalid_snapshot(
+                "decision controller authority or subject references an unknown entity",
+            );
+        }
+    }
+    if snapshot
+        .decisions
+        .tickets
+        .values()
+        .any(|ticket| !snapshot_entity_identity_exists(snapshot, &ticket.decision_maker))
+    {
+        return invalid_snapshot("decision ticket references an unknown decision maker");
+    }
+    let expected_next_trace_id = u64::try_from(snapshot.decisions.traces.len())
+        .ok()
+        .and_then(|value| value.checked_add(1))
+        .ok_or_else(|| invalid_snapshot_error("decision trace journal exceeds identifier space"))?;
+    if snapshot.next_decision_trace_id != expected_next_trace_id {
+        return invalid_snapshot("decision trace counter does not follow its journal");
+    }
+
+    let command_attempts_by_request: BTreeMap<_, _> = snapshot
+        .command_attempts
+        .iter()
+        .filter_map(|attempt| attempt.request_id.map(|request| (request, attempt)))
+        .collect();
+    let mut reconstructed = DecisionState::default();
+    let mut next_trace_id = 1_u64;
+    let mut next_attempt = 0_usize;
+    let mut current_revision = 0_u64;
+    for boundary in &snapshot.boundaries {
+        for ingress_id in &boundary.admitted_ingress {
+            let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
+                invalid_snapshot_error("decision ingress ID exceeds platform range")
+            })?;
+            let Some(record) = snapshot.ingress.get(index) else {
+                return invalid_snapshot("boundary admits an unknown ingress record");
+            };
+            match &record.payload {
+                IngressPayload::Command { request } => {
+                    let attempt = command_attempts_by_request
+                        .get(&request.request_id)
+                        .ok_or_else(|| {
+                            invalid_snapshot_error(
+                                "admitted command ingress lacks its command attempt",
+                            )
+                        })?;
+                    if attempt.revision_before != current_revision {
+                        return invalid_snapshot(
+                            "command admission and decision revision chronology disagree",
+                        );
+                    }
+                    current_revision = current_revision.checked_add(1).ok_or_else(|| {
+                        invalid_snapshot_error("authoritative revision range is exhausted")
+                    })?;
+                    continue;
+                }
+                IngressPayload::Decision { .. }
+                | IngressPayload::Plugin { .. }
+                | IngressPayload::Calendar { .. } => {}
+            }
+            let IngressPayload::Decision { request } = &record.payload else {
+                continue;
+            };
+            let persisted_attempt =
+                snapshot
+                    .decisions
+                    .attempts
+                    .get(next_attempt)
+                    .ok_or_else(|| {
+                        invalid_snapshot_error(
+                            "admitted decision ingress lacks its decision attempt",
+                        )
+                    })?;
+            let base_attempt = |outcome| DecisionAttemptRecord {
+                request_id: request.request_id,
+                at: boundary.at,
+                revision_before: current_revision,
+                expected_revision: request.expected_revision,
+                outcome,
+            };
+            let expected_attempt = if request.expected_revision != current_revision {
+                base_attempt(DecisionAttemptOutcome::Rejected {
+                    code: DecisionAttemptErrorCode::SimulationRevisionConflict,
+                    message: format!(
+                        "decision request {} expected revision {}, current revision is {}",
+                        request.request_id, request.expected_revision, current_revision
+                    ),
+                })
+            } else if let Some(message) =
+                snapshot_decision_entity_error(snapshot, &request.mutation)
+            {
+                base_attempt(DecisionAttemptOutcome::Rejected {
+                    code: DecisionAttemptErrorCode::EntityUnavailable,
+                    message,
+                })
+            } else {
+                let trace_id = matches!(request.mutation, DecisionMutation::Resolve { .. })
+                    .then(|| DecisionTraceId::new(next_trace_id));
+                let mut candidate = reconstructed.clone();
+                match candidate.apply(request.mutation.clone(), boundary.at, trace_id) {
+                    Err(error) => base_attempt(DecisionAttemptOutcome::Rejected {
+                        code: error.code.into(),
+                        message: error.message,
+                    }),
+                    Ok(prepared) => {
+                        let invalid_command = match (&prepared.action, &request.command) {
+                            (Some(DecisionAction::Command { command }), Some(command_request)) => {
+                                match serde_json::from_value::<Command>(command.clone()) {
+                                    Err(error) => Some(format!(
+                                        "decision option contains an invalid command: {error}"
+                                    )),
+                                    Ok(expected) => {
+                                        let controller = prepared
+                                            .trace
+                                            .as_ref()
+                                            .and_then(|trace| {
+                                                candidate.controller(&trace.controller_id)
+                                            })
+                                            .ok_or_else(|| {
+                                                invalid_snapshot_error(
+                                                    "decision command trace lacks its controller binding",
+                                                )
+                                            })?;
+                                        (command_request.envelope.command != expected
+                                            || command_request.expected_revision
+                                                != current_revision
+                                            || prepared
+                                                .trace
+                                                .as_ref()
+                                                .and_then(|trace| trace.command_request_id)
+                                                != Some(command_request.request_id))
+                                        .then_some(
+                                            "nested command does not match the selected decision option"
+                                                .to_owned(),
+                                        )
+                                        .or_else(|| {
+                                            (command_request.envelope.issuer
+                                                != super::decision::controller_issuer(controller)
+                                                || command_request.envelope.authority.as_ref()
+                                                    != Some(
+                                                        &super::decision::controller_authority(
+                                                            controller,
+                                                        ),
+                                                    )
+                                                || command_request.envelope.expected_time
+                                                    != Some(boundary.at))
+                                            .then_some("nested command issuer, authority, or time guard was not derived from the decision controller".to_owned())
+                                        })
+                                    }
+                                }
+                            }
+                            (Some(DecisionAction::None) | None, None) => None,
+                            _ => Some("decision action and nested command disagree".to_owned()),
+                        };
+                        if let Some(message) = invalid_command {
+                            base_attempt(DecisionAttemptOutcome::Rejected {
+                                code: DecisionAttemptErrorCode::InvalidDecision,
+                                message,
+                            })
+                        } else {
+                            if trace_id.is_some() {
+                                next_trace_id = next_trace_id.checked_add(1).ok_or_else(|| {
+                                    invalid_snapshot_error(
+                                        "decision trace identifier space is exhausted",
+                                    )
+                                })?;
+                            }
+                            let command_request_id =
+                                request.command.as_ref().map(|request| request.request_id);
+                            let accepted = base_attempt(DecisionAttemptOutcome::Accepted {
+                                trace_id,
+                                command_request_id,
+                            });
+                            candidate.attempts.push(accepted.clone());
+                            reconstructed = candidate;
+                            if let Some(command_request_id) = command_request_id {
+                                let command_attempt = command_attempts_by_request
+                                    .get(&command_request_id)
+                                    .ok_or_else(|| {
+                                        invalid_snapshot_error(
+                                            "accepted decision command lacks its command attempt",
+                                        )
+                                    })?;
+                                if command_attempt.revision_before != current_revision {
+                                    return invalid_snapshot(
+                                        "decision command attempt and revision chronology disagree",
+                                    );
+                                }
+                                current_revision =
+                                    current_revision.checked_add(1).ok_or_else(|| {
+                                        invalid_snapshot_error(
+                                            "authoritative revision range is exhausted",
+                                        )
+                                    })?;
+                            }
+                            accepted
+                        }
+                    }
+                }
+            };
+            if &expected_attempt != persisted_attempt {
+                return invalid_snapshot(
+                    "persisted decision attempt does not match deterministic admission",
+                );
+            }
+            if matches!(
+                expected_attempt.outcome,
+                DecisionAttemptOutcome::Rejected { .. }
+            ) {
+                reconstructed.attempts.push(expected_attempt);
+            }
+            next_attempt += 1;
+        }
+        reconstructed.advance_time(boundary.at).map_err(|error| {
+            invalid_snapshot_error(format!("decision deadline state is invalid: {error}"))
+        })?;
+        current_revision = current_revision
+            .checked_add(1)
+            .ok_or_else(|| invalid_snapshot_error("authoritative revision range is exhausted"))?;
+    }
+    if reconstructed != snapshot.decisions
+        || next_trace_id != snapshot.next_decision_trace_id
+        || next_attempt != snapshot.decisions.attempts.len()
+    {
+        return invalid_snapshot(
+            "decision ingress history does not reconstruct the persisted decision state",
+        );
+    }
+    Ok(())
+}
+
+fn snapshot_decision_entity_error(
+    snapshot: &SimulationSnapshot,
+    mutation: &DecisionMutation,
+) -> Option<String> {
+    let entity_exists = |entity: &EntityRef| snapshot_entity_identity_exists(snapshot, entity);
+    match mutation {
+        DecisionMutation::RegisterController { controller } => {
+            let authority_exists = match &controller.authority {
+                DecisionAuthority::Actor { actor } => entity_exists(&EntityRef::Person(*actor)),
+                DecisionAuthority::Institution {
+                    institution,
+                    responsible_actor,
+                } => {
+                    entity_exists(institution)
+                        && responsible_actor
+                            .is_none_or(|actor| entity_exists(&EntityRef::Person(actor)))
+                }
+                DecisionAuthority::Council { .. }
+                | DecisionAuthority::NoResponsibleActor { .. } => true,
+            };
+            if !authority_exists {
+                Some("decision controller authority references an unknown entity".to_owned())
+            } else if controller
+                .command_subject
+                .as_ref()
+                .is_some_and(|entity| !entity_exists(entity))
+            {
+                Some("decision controller command subject references an unknown entity".to_owned())
+            } else {
+                None
+            }
+        }
+        DecisionMutation::Open { ticket } if !entity_exists(&ticket.decision_maker) => {
+            Some("decision maker references an unknown entity".to_owned())
+        }
+        DecisionMutation::Open { .. }
+        | DecisionMutation::ReplaceOptions { .. }
+        | DecisionMutation::Resolve { .. }
+        | DecisionMutation::Cancel { .. } => None,
+    }
+}
+
 fn validate_ingress_records(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
@@ -1262,6 +1565,7 @@ fn validate_ingress_records(
     }
     let mut previous_issue = None;
     let mut command_request_ids = BTreeSet::new();
+    let mut decision_request_ids = BTreeSet::new();
     for (index, record) in snapshot.ingress.iter().enumerate() {
         let expected_id = u64::try_from(index)
             .ok()
@@ -1377,6 +1681,35 @@ fn validate_ingress_records(
                     return invalid_snapshot("calendar ingress is not canonical");
                 }
             }
+            IngressPayload::Decision { request } => {
+                if record.class != IngressClass::Decision
+                    || request.request_id.get() == 0
+                    || !decision_request_ids.insert(request.request_id)
+                    || record.cause.is_some()
+                {
+                    return invalid_snapshot("queued decision ingress is not canonical");
+                }
+                if snapshot
+                    .run_configuration
+                    .as_ref()
+                    .and_then(RunConfigurationSnapshot::declared)
+                    .is_some_and(|configuration| {
+                        configuration.interaction == InteractionPolicy::ReadOnly
+                    })
+                {
+                    return invalid_snapshot(
+                        "declared read-only runs cannot contain newly authored decision ingress",
+                    );
+                }
+                if let Some(command) = &request.command
+                    && (command.request_id.get() == 0
+                        || !command_request_ids.insert(command.request_id)
+                        || command.expected_revision != request.expected_revision
+                        || command.envelope.expected_time != Some(record.due_at))
+                {
+                    return invalid_snapshot("queued decision command request is not canonical");
+                }
+            }
         }
         previous_issue = Some((record.eligible_boundary_count, record.issued_at, record.id));
     }
@@ -1385,6 +1718,12 @@ fn validate_ingress_records(
         .command_attempts
         .iter()
         .filter_map(|attempt| attempt.request_id.map(|request| (request, attempt)))
+        .collect();
+    let decision_attempts_by_request: BTreeMap<_, _> = snapshot
+        .decisions
+        .attempts
+        .iter()
+        .map(|attempt| (attempt.request_id, attempt))
         .collect();
     let mut pending = BTreeSet::new();
     let mut cursor = 0;
@@ -1440,8 +1779,54 @@ fn validate_ingress_records(
                 if let CommandAttemptOutcome::Accepted { command_id } = attempt.outcome {
                     expected_commands.push(command_id);
                 }
-            } else if let IngressPayload::Calendar { cadences } = &record.payload {
-                expected_cadences.extend(cadences.iter().cloned());
+            } else {
+                match &record.payload {
+                    IngressPayload::Decision { request } => {
+                        if let Some(request) = &request.command {
+                            let decision_request_id = match &record.payload {
+                                IngressPayload::Decision { request } => request.request_id,
+                                _ => unreachable!(),
+                            };
+                            let accepted_command = decision_attempts_by_request
+                                .get(&decision_request_id)
+                                .is_some_and(|attempt| {
+                                    matches!(
+                                        attempt.outcome,
+                                        DecisionAttemptOutcome::Accepted {
+                                            command_request_id: Some(command_request_id),
+                                            ..
+                                        } if command_request_id == request.request_id
+                                    )
+                                });
+                            if !accepted_command {
+                                continue;
+                            }
+                            let Some(attempt) = attempts_by_request.get(&request.request_id) else {
+                                return invalid_snapshot(
+                                    "admitted decision command is missing its deterministic attempt outcome",
+                                );
+                            };
+                            if attempt.at != boundary.at
+                                || attempt.envelope != request.envelope
+                                || attempt.expected_revision != Some(request.expected_revision)
+                                || attempt.ingress != CommandIngress::LiveRequest
+                            {
+                                return invalid_snapshot(
+                                    "decision command, attempt outcome, and boundary admission disagree",
+                                );
+                            }
+                            expected_attempts.push(attempt.id);
+                            if let CommandAttemptOutcome::Accepted { command_id } = attempt.outcome
+                            {
+                                expected_commands.push(command_id);
+                            }
+                        }
+                    }
+                    IngressPayload::Calendar { cadences } => {
+                        expected_cadences.extend(cadences.iter().cloned());
+                    }
+                    IngressPayload::Plugin { .. } | IngressPayload::Command { .. } => {}
+                }
             }
             pending.remove(&IngressQueueKey::from_record(record));
         }
@@ -2971,6 +3356,9 @@ pub(super) fn has_unqueued_command_history(
         .iter()
         .filter_map(|record| match &record.payload {
             IngressPayload::Command { request } => Some(request.request_id),
+            IngressPayload::Decision { request } => {
+                request.command.as_ref().map(|command| command.request_id)
+            }
             IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
         })
         .collect();

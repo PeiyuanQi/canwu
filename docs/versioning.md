@@ -78,9 +78,32 @@ requires plugin systems to reproduce boundary-generated records. Declared read-o
 plugin ingress. Format 2 and 3 inputs reject all of these fields rather than
 interpreting canonical-ingress semantics under a legacy identity.
 
+Format 4 also permits additive decision state and decision ingress. Empty
+controller, ticket, attempt, and trace collections plus the default next-trace counter
+are omitted, preserving the serialized and hashed shape of decision-free
+format-4 snapshots. Decision ingress persists registration, ticket opening,
+version-guarded option replacement, resolution, and cancellation. Loading
+validates referenced entity identities, controller/policy bindings, ticket,
+attempt, and trace continuity, nested command equality and derived authority,
+then reconstructs both accepted and expected-rejected outcomes from admitted
+ingress. Expected revision, ticket-version, closed-ticket, and related admission
+conflicts are persisted as rejected `DecisionAttemptRecord` values rather than
+rolling back and poisoning the queue. Decision and nested command request IDs
+must be nonzero and globally unique across their ingress families. Declared
+read-only runs reject newly authored decision ingress. Exact replay re-enqueues
+the recorded decision mutations and commands; it never invokes the original
+Utility, Rule, Human, External, or LLM policy. Consequently policy output is
+part of replay evidence, while executable policy implementations are not a
+serialized replay dependency.
+
+Accepted and rejected decision attempts do not independently advance the
+authoritative revision. Their containing completed boundary advances it once;
+an admitted nested command still contributes its own accepted-command or
+expected-command-rejection revision transaction.
+
 Format 4 also has a separately versioned authoritative-revision sub-contract.
 Revision format 1 persists a monotonic value that advances exactly once for each
-accepted command, persisted expected rejection, or completed settlement
+accepted command, persisted expected command rejection, or completed settlement
 boundary. Failed transactions, exact retries, request-ID collisions, bare clock
 movement, queued but unadmitted ingress, and plugin setup do not advance it;
 expected simulation time remains the independent guard for clock and scheduled
@@ -114,7 +137,7 @@ this optimization does not reinterpret existing simulation-result commitments.
 
 Format 4 also permits commitment format 1. Current snapshots persist
 domain-separated canonical roots for world, knowledge, plugin components,
-generic records, scheduler state, commands and attempts, events, ingress,
+generic records, decisions, scheduler state, commands and attempts, events, ingress,
 random state and draws, the boundary chain, authoritative run/plugin identity,
 and runtime control counters. Each unordered collection is sorted by stable
 identity before hashing. Checkpoint domain `canwu.checkpoint.v4` binds those

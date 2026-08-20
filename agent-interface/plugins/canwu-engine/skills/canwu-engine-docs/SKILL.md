@@ -1,6 +1,6 @@
 ---
 name: canwu-engine-docs
-description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, choose or follow the move-army, continuous-game-loop, command-plugin, or phased-boundary tutorials, understand a public canwu-api example, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
+description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, follow a foundation tutorial or scenario case, understand a public canwu-api example, implement DecisionTicket/controller/policy workflows, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
 ---
 
 # Read Canwu Documentation

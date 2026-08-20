@@ -7,6 +7,7 @@
 )]
 
 mod boundary;
+mod decision;
 mod hashing;
 mod ingress;
 mod manifest;
@@ -30,6 +31,20 @@ pub use boundary::{
     ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
     ReservationRequest, ReservationRequestRecord,
 };
+pub use canwu_decision::{
+    ControllerDecision, DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome,
+    DecisionAttemptRecord, DecisionAuthority, DecisionContext, DecisionController,
+    DecisionControllerBinding, DecisionError, DecisionErrorCode, DecisionExternalEvidence,
+    DecisionFactorContribution, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
+    DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule,
+    DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace,
+    ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy,
+    HumanDecisionResponse, HumanPolicy, LlmModelIdentity, LlmPolicy, OrderedRulePolicy,
+    PolicyDecision, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice,
+    RulePolicy, UtilityEvaluator, UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator,
+    WeightedUtilityPolicy,
+};
+pub use decision::{DecisionEvaluation, DecisionIngressRequest, PreparedDecisionIngress};
 pub use ingress::{
     IngressClass, IngressPayload, IngressReceipt, IngressRecord, PluginIngressDescriptor,
     PluginIngressRequest,
@@ -55,10 +70,10 @@ pub use records::{
 };
 
 use canwu_core::{
-    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DeterministicRng,
-    DomainRecordKind, DomainRecordRef, DomainRecordType, EntityRef, EventId, FieldSchema,
-    GovernmentId, IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId,
-    TypeSchema, TypedDomainRecordRef,
+    ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId,
+    DecisionTicketId, DecisionTraceId, DeterministicRng, DomainRecordKind, DomainRecordRef,
+    DomainRecordType, EntityRef, EventId, FieldSchema, GovernmentId, IngressId, PersonId,
+    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 use canwu_knowledge::{
@@ -80,11 +95,11 @@ use hashing::{
     ControlCommitmentMaterial, StateHashMaterial, authoritative_run_identity,
     boundary_state_hash_for_commitments, canonical_hash, checkpoint_hash_for_commitments,
     checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash,
-    domain_record_commitment_root, identity_commitment_root, is_canonical_hash,
-    knowledge_commitment_root, plugin_component_commitment_root, random_stream_commitment_root,
-    runtime_commitment_roots, scheduler_commitment_root, snapshot_boundary_head_state_hash,
-    snapshot_checkpoint_hash, snapshot_commitment_roots, snapshot_is_at_boundary_head,
-    snapshot_state_hash, state_hash, world_commitment_root,
+    decision_commitment_root, domain_record_commitment_root, identity_commitment_root,
+    is_canonical_hash, knowledge_commitment_root, plugin_component_commitment_root,
+    random_stream_commitment_root, runtime_commitment_roots, scheduler_commitment_root,
+    snapshot_boundary_head_state_hash, snapshot_checkpoint_hash, snapshot_commitment_roots,
+    snapshot_is_at_boundary_head, snapshot_state_hash, state_hash, world_commitment_root,
 };
 use ingress::IngressQueueKey;
 use migration::{
@@ -137,6 +152,8 @@ pub struct CommitmentRoots {
     pub knowledge: String,
     pub plugin_components: String,
     pub domain_records: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub decisions: String,
     pub scheduler: String,
     pub commands: String,
     pub events: String,
@@ -169,6 +186,7 @@ pub enum ErrorCode {
     DomainRecordVersionConflict,
     InvalidAuthority,
     InvalidBoundary,
+    InvalidDecision,
     InvalidDuration,
     InvalidDomainRecord,
     IdempotencyConflict,
@@ -261,6 +279,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::DomainRecordVersionConflict => "domain_record_version_conflict",
         ErrorCode::InvalidAuthority => "invalid_authority",
         ErrorCode::InvalidBoundary => "invalid_boundary",
+        ErrorCode::InvalidDecision => "invalid_decision",
         ErrorCode::InvalidDuration => "invalid_duration",
         ErrorCode::InvalidDomainRecord => "invalid_domain_record",
         ErrorCode::IdempotencyConflict => "idempotency_conflict",
@@ -1725,6 +1744,8 @@ pub struct SimulationSnapshot {
     pub plugin_components: Vec<PluginComponentRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_records: Vec<DomainRecord>,
+    #[serde(default, skip_serializing_if = "DecisionState::is_empty")]
+    pub decisions: DecisionState,
     pub plugin_descriptors: Vec<PluginDescriptor>,
     pub schema: SchemaRegistry,
     #[serde(default)]
@@ -1748,6 +1769,8 @@ pub struct SimulationSnapshot {
     next_random_draw_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
+    #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
+    next_decision_trace_id: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2018,6 +2041,7 @@ impl Simulation {
                         .into_iter()
                         .map(|record| (record.reference.clone(), record))
                         .collect(),
+                    decisions: DecisionState::default(),
                     root_seed: seed,
                     random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
                 },
@@ -2036,6 +2060,7 @@ impl Simulation {
                     next_random_draw_id: 1,
                     next_schedule_sequence: 1,
                     next_correlation_id: 1,
+                    next_decision_trace_id: 1,
                     state_revision: 0,
                     admitted_attempt_count: 0,
                     admitted_command_count: 0,
@@ -2061,6 +2086,8 @@ impl Simulation {
                     archived_unqueued_command_history: false,
                     archived_command_requests: BTreeMap::new(),
                     archived_ingress_requests: BTreeMap::new(),
+                    archived_decision_requests: BTreeMap::new(),
+                    archived_decision_command_requests: BTreeSet::new(),
                     events: Vec::new(),
                     commands: Vec::new(),
                     command_attempts: Vec::new(),
@@ -2406,6 +2433,7 @@ impl Simulation {
             ingress: &self.state.evidence.ingress,
             plugin_components: &plugin_components,
             domain_records: &domain_records,
+            decisions: &self.state.current.decisions,
             plugin_descriptors: &plugin_descriptors,
             schema: &self.schema,
             scheduled: &scheduled,
@@ -2420,6 +2448,7 @@ impl Simulation {
             next_random_draw_id: self.state.counters.next_random_draw_id,
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
+            next_decision_trace_id: self.state.counters.next_decision_trace_id,
         })
     }
 
@@ -2460,6 +2489,10 @@ impl Simulation {
                     .collect();
                 domain_record_commitment_root(&values)
             })
+            .transpose()?;
+        let decisions = needs
+            .contains(CommitmentDomains::DECISIONS)
+            .then(|| decision_commitment_root(&self.state.current.decisions))
             .transpose()?;
         let scheduler = needs
             .contains(CommitmentDomains::SCHEDULER)
@@ -2515,6 +2548,7 @@ impl Simulation {
             knowledge,
             plugin_components,
             domain_records,
+            decisions,
             scheduler,
             random_streams,
             identity,
@@ -2564,6 +2598,7 @@ impl Simulation {
             next_random_draw_id: self.state.counters.next_random_draw_id,
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
+            next_decision_trace_id: self.state.counters.next_decision_trace_id,
         };
         let (domain_roots, journal_roots) = {
             let cache = self
@@ -2759,6 +2794,7 @@ impl Simulation {
                         .into_iter()
                         .map(|record| (record.reference.clone(), record))
                         .collect(),
+                    decisions: snapshot.decisions,
                     root_seed: snapshot.root_seed,
                     random_streams: snapshot
                         .random_streams
@@ -2785,6 +2821,7 @@ impl Simulation {
                     next_random_draw_id: snapshot.next_random_draw_id,
                     next_schedule_sequence: snapshot.next_schedule_sequence,
                     next_correlation_id: snapshot.next_correlation_id,
+                    next_decision_trace_id: snapshot.next_decision_trace_id,
                     state_revision: snapshot.state_revision,
                     admitted_attempt_count: snapshot.admitted_attempt_count,
                     admitted_command_count: snapshot.admitted_command_count,
@@ -2814,6 +2851,8 @@ impl Simulation {
                     archived_unqueued_command_history: false,
                     archived_command_requests: BTreeMap::new(),
                     archived_ingress_requests: BTreeMap::new(),
+                    archived_decision_requests: BTreeMap::new(),
+                    archived_decision_command_requests: BTreeSet::new(),
                     events: snapshot.events,
                     commands: snapshot.commands,
                     command_attempts: snapshot.command_attempts,
@@ -5589,6 +5628,7 @@ mod tests {
             IngressClass::Acknowledgement => "acknowledgement",
             IngressClass::Information => "information",
             IngressClass::ScheduledSystem => "scheduled_system",
+            IngressClass::Decision => "decision",
         }
     }
 
@@ -6647,7 +6687,9 @@ mod tests {
                 .iter()
                 .filter_map(|record| match &record.payload {
                     IngressPayload::Command { request } => Some(request.expected_revision),
-                    IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+                    IngressPayload::Decision { .. }
+                    | IngressPayload::Plugin { .. }
+                    | IngressPayload::Calendar { .. } => None,
                 })
                 .collect::<Vec<_>>(),
             vec![0, 2, 4]

@@ -4,10 +4,10 @@
 
 pub use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
-    DomainEntityKindClass, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
-    DomainRecordType, DomainValueKindClass, DomainValueType, EntityRef, EventId, GovernmentId,
-    IngressId, PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
-    TypedDomainRecordRef,
+    DecisionRequestId, DecisionTicketId, DecisionTraceId, DomainEntityKindClass, DomainEntityType,
+    DomainKindClass, DomainRecordKind, DomainRecordRef, DomainRecordType, DomainValueKindClass,
+    DomainValueType, EntityRef, EventId, GovernmentId, IngressId, PersonId, RandomDrawId, RouteId,
+    SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -21,23 +21,34 @@ pub use canwu_sim::{
     COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal, Command, CommandAttemptOutcome,
     CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope, CommandIngress,
     CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection,
-    CommandRequest, CommitmentRoots, CompactedSimulation, ControllerPolicy, DecisionOrigin,
-    DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft,
-    DomainRecordLifecycle, DomainRecordMutation, DomainRecordOperation, DomainRecordSchema,
-    DomainReference, DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
-    ENGINE_VERSION, ErrorCode, EvidenceCursor, EvidenceJournalSegment, IngressClass,
-    IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy, Issuer, ObservationPolicy,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
+    CommandRequest, CommitmentRoots, CompactedSimulation, ControllerDecision, ControllerPolicy,
+    DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord,
+    DecisionAuthority, DecisionContext, DecisionController, DecisionControllerBinding,
+    DecisionError, DecisionErrorCode, DecisionEvaluation, DecisionExternalEvidence,
+    DecisionFactorContribution, DecisionIngressRequest, DecisionMutation, DecisionOption,
+    DecisionOptionEvaluation, DecisionOrigin, DecisionOutcome, DecisionPolicy,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule, DecisionState, DecisionTicket,
+    DecisionTicketDraft, DecisionTicketState, DecisionTrace, DemoIds, DomainRecord,
+    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
+    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
+    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
+    ErrorCode, EvidenceCursor, EvidenceJournalSegment, ExternalDecisionOption,
+    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
+    HumanPolicy, IngressClass, IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy,
+    Issuer, LlmModelIdentity, LlmPolicy, ObservationPolicy, OrderedRulePolicy, PayloadProperty,
+    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
     PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
-    PluginRegistry, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm,
-    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RandomStreamState,
-    ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
-    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
-    ReservationRequestRecord, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
-    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
-    SimulationCheckpoint, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler,
-    SimulationView, StateKey, StateVisibility, SystemCadence, SystemContract, SystemDirective,
-    TracePolicy,
+    PluginRegistry, PolicyDecision, PreparedDecisionIngress, QueuedExternalPolicy,
+    QueuedHumanPolicy, QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
+    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer,
+    RandomDrawRecord, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
+    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
+    ReservationRef, ReservationRequest, ReservationRequestRecord, RuleChoice, RulePolicy,
+    RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
+    STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationCheckpoint,
+    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy, UtilityEvaluator,
+    UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator, WeightedUtilityPolicy,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -252,6 +263,26 @@ impl Canwu {
     }
 
     #[must_use]
+    pub const fn decision_state(&self) -> &DecisionState {
+        self.simulation.decision_state()
+    }
+
+    #[must_use]
+    pub fn decision_ticket(&self, id: DecisionTicketId) -> Option<&DecisionTicket> {
+        self.simulation.decision_ticket(id)
+    }
+
+    #[must_use]
+    pub fn decision_traces(&self) -> &[DecisionTrace] {
+        self.simulation.decision_traces()
+    }
+
+    #[must_use]
+    pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
+        self.simulation.decision_attempts()
+    }
+
+    #[must_use]
     pub fn random_draws(&self) -> &[RandomDrawRecord] {
         self.simulation.random_draws()
     }
@@ -330,6 +361,62 @@ impl Canwu {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn prepare_decision(
+        &self,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation
+            .prepare_decision(decision_request_id, command_request_id, ticket_id, policy)
+    }
+
+    pub fn prepare_decision_at(
+        &self,
+        due_at: SimTime,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation.prepare_decision_at(
+            due_at,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
+    }
+
+    pub fn enqueue_decision(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: DecisionIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_decision(due_at, priority, request)
+    }
+
+    pub fn drive_decision(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation.drive_decision(
+            due_at,
+            priority,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
     }
 
     pub fn schedule_calendar_boundary(
@@ -1029,6 +1116,26 @@ impl CompactedCanwu {
         self.simulation.typed_domain_record(reference)
     }
 
+    #[must_use]
+    pub const fn decision_state(&self) -> &DecisionState {
+        self.simulation.decision_state()
+    }
+
+    #[must_use]
+    pub fn decision_ticket(&self, id: DecisionTicketId) -> Option<&DecisionTicket> {
+        self.simulation.decision_ticket(id)
+    }
+
+    #[must_use]
+    pub fn decision_traces(&self) -> &[DecisionTrace] {
+        self.simulation.decision_traces()
+    }
+
+    #[must_use]
+    pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
+        self.simulation.decision_attempts()
+    }
+
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
         self.simulation.submit(envelope)
     }
@@ -1054,6 +1161,62 @@ impl CompactedCanwu {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn prepare_decision(
+        &self,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation
+            .prepare_decision(decision_request_id, command_request_id, ticket_id, policy)
+    }
+
+    pub fn prepare_decision_at(
+        &self,
+        due_at: SimTime,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation.prepare_decision_at(
+            due_at,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
+    }
+
+    pub fn enqueue_decision(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        request: DecisionIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_decision(due_at, priority, request)
+    }
+
+    pub fn drive_decision(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        decision_request_id: DecisionRequestId,
+        command_request_id: Option<CommandRequestId>,
+        ticket_id: DecisionTicketId,
+        policy: &dyn DecisionPolicy,
+    ) -> Result<DecisionEvaluation, CanwuError> {
+        self.simulation.drive_decision(
+            due_at,
+            priority,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
     }
 
     pub fn schedule_calendar_boundary(

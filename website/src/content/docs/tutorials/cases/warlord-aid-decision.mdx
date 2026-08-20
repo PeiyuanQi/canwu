@@ -1,0 +1,194 @@
+---
+title: 军阀请求邻军援助
+description: 用可持久化、可解释、可精确重放的决策链处理一场进行中战役的援军请求。
+sidebar:
+  order: 2
+  label: 军阀援军决策
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/decision_ticket.rs" icon="external">
+  打开 decision_ticket.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/tests/decision_framework.rs" variant="secondary" icon="external">
+  查看持久化与重放测试
+</LinkButton>
+
+这个案例使用一个抽象的北洋军阀时期情境：军阀甲正在交战，请求相邻的军阀乙
+派出军队。案例不对应具体历史人物，重点是展示领域事实、决策、权限和命令之间
+的引擎边界。
+
+## 运行
+
+```shell
+cargo run -p canwu-api --example decision_ticket
+```
+
+输出是一条完整 `DecisionTrace`。Utility policy 会选择 `send-aid`，trace 会记录
+每个 option 的总分和逐项贡献；随后示例验证存档恢复与 exact replay 得到完全
+相同的快照。
+
+## 整体流程
+
+```text
+军阀乙可见的事实
+  -> 打开 DecisionTicket
+  -> 新情报到达，ReplaceOptions
+  -> Utility policy 只选择已有 option ID
+  -> controller 派生 issuer 与 authority
+  -> 普通 Command 验证和执行
+  -> 持久化 DecisionTrace
+```
+
+<Steps>
+1. 注册 `warlord-b-ai` controller，并把它绑定到明确的 policy identity、负责人物和可控制军队。
+2. 打开援军请求 ticket。最初补给路线尚未确认，因此只有“拒绝援助”可选。
+3. 路线确认后，通过 `DecisionMutation::ReplaceOptions` 更新 context，并加入 `send-aid`。
+4. `WeightedUtilityPolicy` 对当前 options 计算确定性整数分数。
+5. `drive_decision()` 生成 resolution ingress；下一次 canonical boundary 持久化 trace，并把选中的 `MoveArmy` 交给正常命令入口。
+6. 保存快照、重新加载并执行 exact replay，证明 replay 不需要再次运行 policy。
+</Steps>
+
+## 1. Controller 绑定决策身份与行动权限
+
+```rust
+let controller = DecisionControllerBinding::new(
+    "warlord-b-ai",
+    DecisionPolicyIdentity::new(
+        DecisionPolicyKind::Utility,
+        "aid-utility",
+        "1",
+    ),
+    DecisionAuthority::Actor { actor: ids.commander },
+)
+.with_command_subject(EntityRef::Army(ids.army));
+```
+
+Controller 不是领域 AI 大脑。它持久化“由谁作决定、使用哪个 policy、选中 option
+后可以代表谁控制什么”。Policy 本身不会获得 issuer、seat、permission profile
+或可变世界引用。
+
+## 2. Ticket 保存一次明确的决策问题
+
+`DecisionTicketDraft` 包含稳定定义、decision maker、controller、截止时间、显式
+context 和当前 options。示例最初只提供 `decline`：
+
+```rust
+DecisionMutation::Open {
+    ticket: DecisionTicketDraft {
+        id: DecisionTicketId::new(1),
+        definition: "beiyang.request-military-aid".to_owned(),
+        decision_maker: EntityRef::Person(ids.commander),
+        assigned_controller: "warlord-b-ai".to_owned(),
+        summary: "Neighboring warlord requests immediate military aid".to_owned(),
+        context: DecisionContext::new(
+            "beiyang.aid-request.v1",
+            json!({ "common_enemy": true }),
+        ),
+        options: vec![DecisionOption::new("decline", "Decline aid")],
+        deadline: Some(now + SimDuration::days(2)),
+    },
+}
+```
+
+正式应用应从军阀乙的 knowledge/observation 构建 context，而不是把 omniscient
+world state 直接交给 policy。
+
+## 3. 新情报通过动态 options 进入
+
+路线确认是新的权威事实，因此应用提交一个带 `expected_version` 的 option
+replacement：
+
+```rust
+DecisionMutation::ReplaceOptions {
+    ticket_id: DecisionTicketId::new(1),
+    expected_version: 1,
+    context: DecisionContext::new(
+        "beiyang.aid-request.v1",
+        json!({ "common_enemy": true, "route_confirmed": true }),
+    ),
+    options: vec![decline, send_aid],
+}
+```
+
+更新后 ticket version 增加。此前发给 Human、External 或 LLM policy 的回答会因
+版本不匹配而被拒绝，避免旧回答选择已经变化的 option 集合。
+
+`send-aid` option 可以保存序列化的既有 Canwu command，但 policy 只能返回它的
+option ID：
+
+```rust
+DecisionOption::new("send-aid", "Send the neighboring army").with_command(
+    serde_json::to_value(Command::MoveArmy {
+        army: ids.army,
+        destination: ids.eastern_territory,
+    })?,
+)
+```
+
+## 4. Utility evaluator 解释军阀乙为什么出兵
+
+```rust
+let policy = WeightedUtilityPolicy::new(
+    "aid-utility",
+    "1",
+    UtilityProfile {
+        weights: BTreeMap::from([
+            ("alliance".to_owned(), 3),
+            ("home_defense".to_owned(), 1),
+        ]),
+    },
+);
+```
+
+每个 option 提供领域定义的整数输入。通用 evaluator 计算
+`value * weight`，使用稳定 option ID 处理平分，并把逐项贡献写入 trace。引擎不
+理解“同盟信誉”或“本土防御”的历史语义；这些含义和权重属于领域或 policy。
+
+## 5. Policy 选择，controller 行动
+
+```rust
+canwu.drive_decision(
+    canwu.time(),
+    0,
+    DecisionRequestId::new(4),
+    Some(CommandRequestId::new(1)),
+    DecisionTicketId::new(1),
+    &policy,
+)?;
+canwu.step_canonical()?;
+```
+
+这里有两道边界：
+
+- Policy 只能选择 ticket 中已有且未 blocked 的 option。
+- Controller 根据持久化 binding 派生 command authority；命令仍必须通过 Canwu
+  的普通权限、revision、time 和领域验证。
+
+因此即使换成 Human、External 或 LLM policy，也不会获得任意生成命令或伪造
+军阀乙权限的能力。
+
+## 6. Trace、存档与重放
+
+`decision_attempts()` 返回每次 canonical admission 的接受或拒绝结果；例如旧的
+revision、旧 ticket version 或已经关闭的 ticket 会形成持久化 rejection，而不会
+让同一个 ingress 永久回滚并卡住模拟。`decision_traces()` 则返回成功 resolution 的
+选择结果、ticket version、policy identity、utility breakdown、外部证据和 command
+request ID。Snapshot 会保存 controller、ticket、当前 options、deadline、attempts
+与 traces。
+
+Exact replay 重放已经记录的 decision ingress、decision attempt 和 command attempt，不会再次询问
+人类、外部服务或模型。若要在反事实分支中换一套 policy，应从 snapshot fork
+后产生新的 decision ingress，而不是把它称为 exact replay。
+
+## 可以替换哪些决策方式
+
+- `WeightedUtilityPolicy`：确定性评分，适合战略 AI、人物性格和 doctrine 参数化。
+- `OrderedRulePolicy`：按规则顺序选择或 defer。
+- `QueuedHumanPolicy`：等待 UI 或玩家提交绑定 ticket version 的选择。
+- `QueuedExternalPolicy`：通过宿主适配器调用外部决策服务。
+- `QueuedLlmPolicy`：把 context 和 option descriptors 交给模型，但不暴露 command action。
+
+下一步可阅读[决策框架架构契约](/en/docs/architecture/#decision-framework)和
+[最终态中的 Decisions and controllers](/en/docs/end-state/#decisions-and-controllers)。

@@ -53,6 +53,8 @@
 - `crates/canwu-event`: causal event types and evidence references.
 - `crates/canwu-world`: authoritative world entities and immutable snapshots.
 - `crates/canwu-knowledge`: actor-relative knowledge and observation state.
+- `crates/canwu-decision`: persisted decision contracts, controller bindings,
+  utility evaluation, traces, and policy SDK adapters.
 - `crates/canwu-sim`: authoritative state, ingress, settlement, scheduling,
   plugins, records, persistence, validation, hashing, migration, and replay.
 - `crates/canwu-api`: the supported public facade and re-export boundary.
@@ -76,6 +78,7 @@
 | Stable IDs, generic references, or schemas | `canwu-core`; owning world/event/record types; `canwu-api` re-exports; serialization and migration tests |
 | World entity shape or lifecycle | `canwu-world`; `canwu-knowledge`; simulation validation/persistence/replay; public queries; debug projections |
 | Actor-relative knowledge or visibility | `canwu-knowledge`; `SimulationView`; `canwu-api`; information-flow and replay tests |
+| Decision tickets, controllers, options, evaluators, or policies | `canwu-decision`; `canwu-sim` decision ingress/persistence/validation/replay; core decision IDs; `canwu-api`; architecture/versioning docs; stale-option, authority, and replay tests |
 | Commands, authority, run policy, or ingress | `canwu-sim` policy/ingress/validation; core request IDs; `canwu-api`; snapshot/replay/versioning docs; stale/idempotency/rollback tests |
 | Settlement phases, reservations, or scheduling | `canwu-sim` boundary/scheduling code; architecture docs; API-only examples; atomicity, ordering, and exact-replay tests |
 | Random algorithms, streams, or draws | `canwu-core` deterministic generator; `canwu-sim` random ownership, journals, persistence, hashing, validation, migration, and replay; statistical-boundary and tamper tests |
@@ -146,7 +149,8 @@ contracts, never the reverse.
 - Public examples when APIs or behavior change:
   `cargo run -p canwu-api --example move_army`,
   `cargo run -p canwu-api --example phased_boundary`, and
-  `cargo run -p canwu-api --example plugin`.
+  `cargo run -p canwu-api --example plugin`, and
+  `cargo run -p canwu-api --example decision_ticket`.
 - Rust documentation when public types or docs change:
   `cargo doc --workspace --no-deps`.
 - Standalone performance harness when its workload or reporting changes:

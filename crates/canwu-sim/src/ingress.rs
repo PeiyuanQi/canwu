@@ -18,6 +18,7 @@ pub enum IngressClass {
     Communication,
     Acknowledgement,
     Information,
+    Decision,
     ScheduledSystem,
 }
 
@@ -93,6 +94,9 @@ pub enum IngressPayload {
     },
     Calendar {
         cadences: Vec<SystemCadence>,
+    },
+    Decision {
+        request: Box<super::DecisionIngressRequest>,
     },
 }
 
@@ -207,22 +211,11 @@ impl Simulation {
                 ),
             ));
         }
-        if self
-            .state
-            .evidence
-            .command_attempts
-            .iter()
-            .any(|attempt| attempt.request_id == Some(request.request_id))
-            || self
-                .state
-                .evidence
-                .archived_command_requests
-                .contains_key(&request.request_id)
-        {
+        if self.command_request_id_is_in_use(request.request_id) {
             return Err(CanwuError::new(
                 ErrorCode::IdempotencyConflict,
                 format!(
-                    "command request {} was already processed outside canonical ingress",
+                    "command request {} is already reserved or processed",
                     request.request_id
                 ),
             ));

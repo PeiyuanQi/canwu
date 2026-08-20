@@ -106,8 +106,17 @@ impl Simulation {
                 }
                 IngressPayload::Calendar { cadences } => request.cadences.extend(cadences),
                 IngressPayload::Plugin { .. } => {}
+                IngressPayload::Decision { request } => {
+                    self.apply_decision_request(*request)?;
+                }
             }
         }
+        self.state
+            .current
+            .decisions
+            .advance_time(request.at)
+            .map_err(super::decision::decision_error)?;
+        self.invalidate_commitments(CommitmentDomains::DECISIONS);
         self.execute_scheduled_at(request.at)?;
         request.cadences.sort();
         request.cadences.dedup();

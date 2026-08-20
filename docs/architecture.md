@@ -128,6 +128,7 @@ flowchart LR
     event[canwu-event]
     world[canwu-world]
     knowledge[canwu-knowledge]
+    decision[canwu-decision]
     sim[canwu-sim]
     api[canwu-api]
     debug[canwu-debug]
@@ -138,11 +139,14 @@ flowchart LR
     world --> time
     knowledge --> core
     knowledge --> time
+    decision --> core
+    decision --> time
     sim --> core
     sim --> time
     sim --> event
     sim --> world
     sim --> knowledge
+    sim --> decision
     api --> sim
     api --> world
     api --> knowledge
@@ -153,15 +157,62 @@ flowchart LR
 read-only snapshots, not a public mutable world store. This makes the command
 boundary a structural property instead of a UI convention.
 
+## Decision framework
+
+`canwu-decision` is the official headless decision SDK. It defines persisted
+decision tickets, versioned dynamic options, controller bindings, persisted
+decision attempts and traces, a reusable weighted utility evaluator, and Utility, Rule, Human,
+External, and LLM policy contracts. Domain packages still define when a
+decision exists, what its context means, which options are legal, and which
+domain command an option represents.
+
+The authoritative flow is:
+
+```text
+actor-relative facts -> DecisionTicket -> policy selects an existing option ID
+    -> canonical decision ingress -> DecisionAttempt -> DecisionTrace
+    -> validated command ingress
+```
+
+Policies do not receive mutable simulation state or command authority. A local
+policy evaluates the explicit ticket projection and can select only an option
+already present on that ticket. External and LLM adapters serialize an even
+narrower request containing context and available option descriptors but no
+authoritative action payload. Human, External, and LLM responses bind the
+ticket version, so a response computed before `ReplaceOptions` is rejected as
+stale. The controller binding, not the policy, derives command issuer, decision
+origin, seat, permission profile, and command subject. Normal command admission
+then validates that derived authority before any command mutation.
+
+Registration, opening, option replacement, resolution, and cancellation enter
+the runtime through `DecisionIngressRequest`. They use request IDs, revision
+guards, deterministic queue order, transactional settlement, and exact-retry
+semantics. A selected command option carries a serialized existing Canwu
+command; it must exactly match the nested command request admitted with the
+resolution. Decisions cannot bypass the command boundary or invent a new
+authority envelope.
+
+Decision state is authoritative persisted state. Snapshots retain controller
+bindings, tickets, deadlines, versions, admission attempts, and traces; loading
+validates entity identities and reconstructs accepted and rejected outcomes from
+admitted decision ingress. Revision, ticket-version, closed-ticket, and similar
+expected conflicts become persisted rejected attempts, so one bad request cannot
+poison the canonical ingress queue. Decision and nested command request IDs are
+nonzero and globally collision-checked before persistence. Decision state has
+its own optional commitment root. Exact replay replays recorded decision ingress
+and verifies the resulting attempts, state, and traces; it deliberately does not
+rerun a possibly external, human, or nondeterministic policy.
+
 ## World, time, and events
 
 A validated command produces an event and optional scheduled work. Internal
 scheduled continuations are ordered by `(simulation timestamp, insertion
 sequence)`. Host-facing work uses one persisted ingress queue for commands,
-plugin-defined communication/acknowledgement/information packets, and calendar work. Queue
+plugin-defined communication/acknowledgement/information packets, decision
+mutations, and calendar work. Queue
 order is `(due time, class, descending priority, issue time, ingress ID)`, with
-classes ordered command, communication, acknowledgement, information, then
-scheduled system. Late input is rejected rather than inserted behind a
+classes ordered command, communication, acknowledgement, information,
+decision, then scheduled system. Late input is rejected rather than inserted behind a
 committed boundary. A boundary system may schedule a typed follow-up packet;
 even a zero-delay packet becomes eligible only after the current admission cut,
 so it settles at a second boundary at the same simulation timestamp instead of
@@ -330,8 +381,8 @@ Caller-supplied cadence categories are
 canonicalized; event-driven systems are selected when admitted events or
 ingress exist. `advance_canonical` and `step_canonical` select the earlier of
 internal scheduled work and canonical ingress so hosts cannot step past due
-work. Equal-time command ingress is processed before internal scheduled
-continuations, preserving the declared command-before-scheduled-system order. A
+work. Equal-time host ingress is processed before internal scheduled
+continuations, preserving the declared ingress-before-scheduled-system order. A
 system that declares `canwu.core.ingress` read access can resolve only the
 admitted plugin packets owned by its own plugin; future, command, calendar,
 and other-plugin payloads remain unavailable through that view. Systems within a
@@ -447,7 +498,8 @@ command orchestration.
 The remaining runtime bookkeeping is partitioned by responsibility rather than
 stored as unrelated fields on the authoritative world container.
 `RuntimeCurrentState` owns the mutable core world, actor-relative knowledge,
-plugin components, generic domain records, and scoped random-stream positions.
+plugin components, generic domain records, decision state, and scoped
+random-stream positions.
 `RuntimeScheduler` owns the committed clock, scheduled actions, and pending
 canonical ingress; `RuntimeCounters` owns monotonic identifiers, the
 authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns
@@ -533,12 +585,14 @@ expected simulation time, typed issuer, and explicit seat/authority context.
 Natural-clock hosts enqueue that request with `enqueue_command` and settle it
 through `advance_canonical` or `step_canonical`; plugin packets use
 `enqueue_plugin_ingress`, and explicit calendar work uses
-`schedule_calendar_boundary`. Accepted and expected-rejected attempts are
+`schedule_calendar_boundary`. Decision hosts use `enqueue_decision` for
+controller/ticket/option lifecycle changes, or `drive_decision` to evaluate a
+bound policy and enqueue an authoritative resolution. Accepted and expected-rejected command attempts are
 persisted, hashed, admitted at a boundary, restored by save/load, and regenerated
 by exact replay. Exact retries return the original outcome without new mutation;
 request-ID collisions are fail-closed without creating evidence. The persisted
 authoritative revision advances exactly once for every accepted command,
-persisted expected rejection, and published settlement boundary. Failed
+persisted expected command rejection, and published settlement boundary. Failed
 transactions and exact retries do not advance it. Bare clock movement, queued but
 unadmitted ingress, and plugin setup do not create a revision transaction;
 expected simulation time independently detects clock and scheduled-work

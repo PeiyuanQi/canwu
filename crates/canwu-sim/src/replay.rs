@@ -352,6 +352,9 @@ impl Simulation {
             .iter()
             .filter_map(|record| match &record.payload {
                 IngressPayload::Command { request } => Some(request.request_id),
+                IngressPayload::Decision { request } => {
+                    request.command.as_ref().map(|command| command.request_id)
+                }
                 IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
             })
             .collect();
@@ -527,6 +530,11 @@ fn enqueue_replay_ingress_cut(
             IngressPayload::Calendar { cadences } => {
                 simulation.schedule_calendar_boundary(record.due_at, cadences.clone())?
             }
+            IngressPayload::Decision { request } => simulation.enqueue_decision(
+                record.due_at,
+                record.priority,
+                request.as_ref().clone(),
+            )?,
         };
         if receipt.ingress_id != record.id
             || simulation.state.evidence.ingress.last() != Some(record)

@@ -11,6 +11,9 @@ Tutorial indexes are available at `/tutorials/` and `/en/tutorials/`; their
 Markdown and MDX sources live in `src/content/docs/`. The repository's
 canonical English Markdown under `../docs/` is rendered directly at
 `/en/docs/` and remains the single source of truth for those project documents.
+Scenario-driven tutorials live under `tutorials/cases/` in each locale. The
+Starlight sidebar keeps them in one collapsed, auto-generated Cases group so
+new cases do not expand the top-level tutorial navigation.
 
 ## Local development
 

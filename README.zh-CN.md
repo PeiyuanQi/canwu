@@ -55,9 +55,17 @@ cargo run -p canwu-api --example move_army
 cargo run -p canwu-api --example phased_boundary
 ```
 
+如需查看包含动态选项、效用评估、由 controller 权限派生命令、决策 trace、
+存档与精确重放的 DecisionTicket 示例：
+
+```text
+cargo run -p canwu-api --example decision_ticket
+```
+
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
+- `canwu-decision`：DecisionTicket、controller、trace、通用效用评估器和 policy SDK 契约
 - `canwu-time`：不依赖画面帧率的历史时间
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
 - `canwu-world`：历史实体和只读世界快照

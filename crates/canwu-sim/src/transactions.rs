@@ -1,5 +1,5 @@
 use super::{
-    Army, ArmyId, CommitmentRoots, DomainRecord, DomainRecordRef, IngressQueueKey,
+    Army, ArmyId, CommitmentRoots, DecisionState, DomainRecord, DomainRecordRef, IngressQueueKey,
     KnowledgeSnapshot, PluginComponentKey, PluginComponentRecord, RandomStreamKey,
     RandomStreamState, RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState,
     ScheduleKey, ScheduledAction, SimTime,
@@ -132,6 +132,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    decisions: DecisionState,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
     scheduler: RuntimeScheduler,
     counters: RuntimeCounters,
@@ -154,6 +155,7 @@ impl BoundaryTransactionCheckpoint {
             knowledge: state.current.knowledge.clone(),
             plugin_components: state.current.plugin_components.clone(),
             domain_records: state.current.domain_records.clone(),
+            decisions: state.current.decisions.clone(),
             random_streams: state.current.random_streams.clone(),
             scheduler: state.scheduler.clone(),
             counters: state.counters.clone(),
@@ -175,6 +177,7 @@ impl BoundaryTransactionCheckpoint {
         state.current.knowledge = self.knowledge;
         state.current.plugin_components = self.plugin_components;
         state.current.domain_records = self.domain_records;
+        state.current.decisions = self.decisions;
         state.current.random_streams = self.random_streams;
         state.scheduler = self.scheduler;
         state.counters = self.counters;

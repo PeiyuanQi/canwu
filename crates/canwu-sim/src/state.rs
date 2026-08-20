@@ -1,10 +1,11 @@
 use super::{
     Army, ArmyId, BoundaryRecord, CanwuError, CommandAttemptRecord, CommandOutcome, CommandRecord,
-    CommandRequestId, CommitmentRoots, DomainRecord, DomainRecordRef, ErrorCode, EvidenceCursor,
-    Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord, KnowledgeSnapshot,
-    Person, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
-    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
-    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    CommandRequestId, CommitmentRoots, DecisionRequestId, DecisionState, DomainRecord,
+    DomainRecordRef, ErrorCode, EvidenceCursor, Government, GovernmentId, IngressQueueKey,
+    IngressReceipt, IngressRecord, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
+    PluginComponentRecord, RandomDrawRecord, RandomStreamKey, RandomStreamState, Route, RouteId,
+    RunConfigurationSnapshot, RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent,
+    SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,6 +19,8 @@ pub(super) struct RuntimeEvidence {
     pub(super) archived_unqueued_command_history: bool,
     pub(super) archived_command_requests: BTreeMap<CommandRequestId, ArchivedCommandRequestOutcome>,
     pub(super) archived_ingress_requests: BTreeMap<CommandRequestId, ArchivedIngressRequest>,
+    pub(super) archived_decision_requests: BTreeMap<DecisionRequestId, ArchivedIngressRequest>,
+    pub(super) archived_decision_command_requests: BTreeSet<CommandRequestId>,
     pub(super) events: Vec<SimEvent>,
     pub(super) commands: Vec<CommandRecord>,
     pub(super) command_attempts: Vec<CommandAttemptRecord>,
@@ -167,6 +170,7 @@ pub(super) struct RuntimeCommitmentCache {
     pub(super) knowledge: Option<String>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
+    pub(super) decisions: Option<String>,
     pub(super) scheduler: Option<String>,
     pub(super) random_streams: Option<String>,
     pub(super) identity: Option<String>,
@@ -204,6 +208,7 @@ impl RuntimeCommitmentCache {
             knowledge: None,
             plugin_components: None,
             domain_records: None,
+            decisions: None,
             scheduler: None,
             random_streams: None,
             identity: None,
@@ -249,6 +254,7 @@ impl RuntimeCommitmentCache {
                 self.domain_records.is_none(),
                 CommitmentDomains::DOMAIN_RECORDS,
             ),
+            (self.decisions.is_none(), CommitmentDomains::DECISIONS),
             (self.scheduler.is_none(), CommitmentDomains::SCHEDULER),
             (
                 self.random_streams.is_none(),
@@ -276,6 +282,9 @@ impl RuntimeCommitmentCache {
         if domains.contains(CommitmentDomains::DOMAIN_RECORDS) {
             self.domain_records = None;
         }
+        if domains.contains(CommitmentDomains::DECISIONS) {
+            self.decisions = None;
+        }
         if domains.contains(CommitmentDomains::SCHEDULER) {
             self.scheduler = None;
         }
@@ -299,6 +308,9 @@ impl RuntimeCommitmentCache {
         }
         if let Some(root) = updates.domain_records {
             self.domain_records = Some(root);
+        }
+        if let Some(root) = updates.decisions {
+            self.decisions = Some(root);
         }
         if let Some(root) = updates.scheduler {
             self.scheduler = Some(root);
@@ -325,6 +337,7 @@ impl RuntimeCommitmentCache {
             knowledge: required(&self.knowledge, "knowledge")?,
             plugin_components: required(&self.plugin_components, "plugin-component")?,
             domain_records: required(&self.domain_records, "domain-record")?,
+            decisions: required(&self.decisions, "decision")?,
             scheduler: required(&self.scheduler, "scheduler")?,
             random_streams: required(&self.random_streams, "random-stream")?,
             identity: required(&self.identity, "identity")?,
@@ -342,7 +355,7 @@ pub(super) struct JournalCommitmentRoots {
 }
 
 #[derive(Clone, Copy, Default)]
-pub(super) struct CommitmentDomains(u8);
+pub(super) struct CommitmentDomains(u16);
 
 impl CommitmentDomains {
     pub(super) const WORLD: Self = Self(1 << 0);
@@ -352,6 +365,7 @@ impl CommitmentDomains {
     pub(super) const SCHEDULER: Self = Self(1 << 4);
     pub(super) const RANDOM_STREAMS: Self = Self(1 << 5);
     pub(super) const IDENTITY: Self = Self(1 << 6);
+    pub(super) const DECISIONS: Self = Self(1 << 7);
 
     pub(super) const fn contains(self, domain: Self) -> bool {
         self.0 & domain.0 == domain.0
@@ -376,6 +390,7 @@ pub(super) struct RuntimeCommitmentRootUpdates {
     pub(super) knowledge: Option<String>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
+    pub(super) decisions: Option<String>,
     pub(super) scheduler: Option<String>,
     pub(super) random_streams: Option<String>,
     pub(super) identity: Option<String>,
@@ -387,6 +402,7 @@ pub(super) struct RuntimeDomainCommitmentRoots {
     pub(super) knowledge: String,
     pub(super) plugin_components: String,
     pub(super) domain_records: String,
+    pub(super) decisions: String,
     pub(super) scheduler: String,
     pub(super) random_streams: String,
     pub(super) identity: String,
@@ -410,6 +426,7 @@ pub(super) struct RuntimeCounters {
     pub(super) next_random_draw_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
+    pub(super) next_decision_trace_id: u64,
     pub(super) state_revision: u64,
     pub(super) admitted_attempt_count: u64,
     pub(super) admitted_command_count: u64,
@@ -440,6 +457,7 @@ pub(super) struct RuntimeCurrentState {
     pub(super) knowledge: KnowledgeSnapshot,
     pub(super) plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     pub(super) domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    pub(super) decisions: DecisionState,
     pub(super) root_seed: u64,
     pub(super) random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
 }

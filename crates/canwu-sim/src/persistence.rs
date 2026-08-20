@@ -214,6 +214,26 @@ impl CompactedSimulation {
     }
 
     #[must_use]
+    pub const fn decision_state(&self) -> &super::DecisionState {
+        self.simulation.decision_state()
+    }
+
+    #[must_use]
+    pub fn decision_ticket(&self, id: super::DecisionTicketId) -> Option<&super::DecisionTicket> {
+        self.simulation.decision_ticket(id)
+    }
+
+    #[must_use]
+    pub fn decision_traces(&self) -> &[super::DecisionTrace] {
+        self.simulation.decision_traces()
+    }
+
+    #[must_use]
+    pub fn decision_attempts(&self) -> &[super::DecisionAttemptRecord] {
+        self.simulation.decision_attempts()
+    }
+
+    #[must_use]
     pub fn typed_domain_record<T: DomainRecordType>(
         &self,
         reference: &TypedDomainRecordRef<T>,
@@ -246,6 +266,62 @@ impl CompactedSimulation {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn prepare_decision(
+        &self,
+        decision_request_id: super::DecisionRequestId,
+        command_request_id: Option<super::CommandRequestId>,
+        ticket_id: super::DecisionTicketId,
+        policy: &dyn super::DecisionPolicy,
+    ) -> Result<super::DecisionEvaluation, CanwuError> {
+        self.simulation
+            .prepare_decision(decision_request_id, command_request_id, ticket_id, policy)
+    }
+
+    pub fn prepare_decision_at(
+        &self,
+        due_at: super::SimTime,
+        decision_request_id: super::DecisionRequestId,
+        command_request_id: Option<super::CommandRequestId>,
+        ticket_id: super::DecisionTicketId,
+        policy: &dyn super::DecisionPolicy,
+    ) -> Result<super::DecisionEvaluation, CanwuError> {
+        self.simulation.prepare_decision_at(
+            due_at,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
+    }
+
+    pub fn enqueue_decision(
+        &mut self,
+        due_at: super::SimTime,
+        priority: i32,
+        request: super::DecisionIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.enqueue_decision(due_at, priority, request)
+    }
+
+    pub fn drive_decision(
+        &mut self,
+        due_at: super::SimTime,
+        priority: i32,
+        decision_request_id: super::DecisionRequestId,
+        command_request_id: Option<super::CommandRequestId>,
+        ticket_id: super::DecisionTicketId,
+        policy: &dyn super::DecisionPolicy,
+    ) -> Result<super::DecisionEvaluation, CanwuError> {
+        self.simulation.drive_decision(
+            due_at,
+            priority,
+            decision_request_id,
+            command_request_id,
+            ticket_id,
+            policy,
+        )
     }
 
     pub fn schedule_calendar_boundary(
@@ -510,28 +586,58 @@ impl Simulation {
             }
 
             let mut archived_ingress_requests = Vec::new();
+            let mut archived_decision_requests = Vec::new();
+            let mut archived_decision_command_requests = Vec::new();
             for record in &self.state.evidence.ingress {
-                let IngressPayload::Command { request } = &record.payload else {
-                    continue;
+                let receipt = IngressReceipt {
+                    ingress_id: record.id,
+                    issued_at: record.issued_at,
+                    due_at: record.due_at,
                 };
-                archived_ingress_requests.push((
-                    request.request_id,
-                    ArchivedIngressRequest {
-                        input_hash: super::canonical_hash(
-                            "canwu.archive.ingress.command.v1",
-                            &(record.due_at, record.priority, request.as_ref()),
-                        )?,
-                        receipt: IngressReceipt {
-                            ingress_id: record.id,
-                            issued_at: record.issued_at,
-                            due_at: record.due_at,
-                        },
-                    },
-                ));
+                match &record.payload {
+                    IngressPayload::Command { request } => {
+                        archived_ingress_requests.push((
+                            request.request_id,
+                            ArchivedIngressRequest {
+                                input_hash: super::canonical_hash(
+                                    "canwu.archive.ingress.command.v1",
+                                    &(record.due_at, record.priority, request.as_ref()),
+                                )?,
+                                receipt,
+                            },
+                        ));
+                    }
+                    IngressPayload::Decision { request } => {
+                        if let Some(command) = &request.command {
+                            archived_decision_command_requests.push(command.request_id);
+                        }
+                        archived_decision_requests.push((
+                            request.request_id,
+                            ArchivedIngressRequest {
+                                input_hash: super::canonical_hash(
+                                    "canwu.ingress.decision-request.v1",
+                                    &(record.due_at, record.priority, request.as_ref()),
+                                )?,
+                                receipt,
+                            },
+                        ));
+                    }
+                    IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => {}
+                }
             }
-            Ok::<_, CanwuError>((archived_command_requests, archived_ingress_requests))
+            Ok::<_, CanwuError>((
+                archived_command_requests,
+                archived_ingress_requests,
+                archived_decision_requests,
+                archived_decision_command_requests,
+            ))
         })();
-        let (archived_command_requests, archived_ingress_requests) = match prepared {
+        let (
+            archived_command_requests,
+            archived_ingress_requests,
+            archived_decision_requests,
+            archived_decision_command_requests,
+        ) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.state.metadata.checkpoint_hash = checkpoint_hash;
@@ -570,6 +676,14 @@ impl Simulation {
             .evidence
             .archived_ingress_requests
             .extend(archived_ingress_requests);
+        self.state
+            .evidence
+            .archived_decision_requests
+            .extend(archived_decision_requests);
+        self.state
+            .evidence
+            .archived_decision_command_requests
+            .extend(archived_decision_command_requests);
         self.state.evidence.archived = end;
         let segment = EvidenceJournalSegment {
             format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
@@ -627,6 +741,7 @@ impl Simulation {
                 .values()
                 .cloned()
                 .collect(),
+            decisions: self.state.current.decisions.clone(),
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
             root_seed: self.state.current.root_seed,
@@ -657,6 +772,7 @@ impl Simulation {
             next_random_draw_id: self.state.counters.next_random_draw_id,
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
+            next_decision_trace_id: self.state.counters.next_decision_trace_id,
         }
     }
 

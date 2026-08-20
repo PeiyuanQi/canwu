@@ -259,6 +259,7 @@ name = "canwu-api"
 version = "0.4.0"
 dependencies = [
  "canwu-core",
+ "canwu-decision",
  "canwu-event",
  "canwu-knowledge",
  "canwu-sim",
@@ -288,6 +289,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-decision"
+version = "0.4.0"
+dependencies = [
+ "canwu-core",
+ "canwu-time",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-event"
 version = "0.4.0"
 dependencies = [
@@ -311,6 +322,7 @@ version = "0.4.0"
 dependencies = [
  "blake3",
  "canwu-core",
+ "canwu-decision",
  "canwu-event",
  "canwu-knowledge",
  "canwu-time",

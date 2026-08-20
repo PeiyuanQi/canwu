@@ -67,7 +67,19 @@ export default defineConfig({
         {
           label: "使用教程",
           translations: { en: "Tutorials" },
-          items: [{ autogenerate: { directory: "tutorials" } }],
+          items: [
+            { slug: "tutorials" },
+            { slug: "tutorials/move-army" },
+            { slug: "tutorials/continuous-game-loop" },
+            { slug: "tutorials/command-plugin" },
+            { slug: "tutorials/phased-boundary" },
+            {
+              label: "案例",
+              translations: { en: "Cases" },
+              collapsed: true,
+              items: [{ autogenerate: { directory: "tutorials/cases" } }],
+            },
+          ],
         },
         {
           label: "架构",

@@ -21,6 +21,7 @@ Resolve local paths from the Canwu repository root, not from this skill folder.
 | Pause, speed controls, FPS independence, wall/simulation/presentation clocks, or interpolation | Chinese: `website/src/content/docs/tutorials/continuous-game-loop.mdx`; English: `website/src/content/docs/en/tutorials/continuous-game-loop.mdx` | `docs/continuous-game-loop.md` and `crates/canwu-api/examples/continuous_game_loop.rs` |
 | Schema-validated plugin commands, issuer checks, or declared state access | Chinese: `website/src/content/docs/tutorials/command-plugin.mdx`; English: `website/src/content/docs/en/tutorials/command-plugin.mdx` | `crates/canwu-api/examples/plugin.rs` |
 | Daily or turn boundaries, supply and demand, reservation, allocation, or multi-system settlement | Chinese: `website/src/content/docs/tutorials/phased-boundary.mdx`; English: `website/src/content/docs/en/tutorials/phased-boundary.mdx` | `crates/canwu-api/examples/phased_boundary.rs` |
+| DecisionTicket, controller binding, dynamic options, utility evaluation, Human/External/LLM policy boundaries, decision traces, or a neighboring warlord's military-aid request | Chinese: `website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx`; English: `website/src/content/docs/en/tutorials/cases/warlord-aid-decision.mdx` | `crates/canwu-api/examples/decision_ticket.rs` and `crates/canwu-api/tests/decision_framework.rs` |
 
 When no checkout is available, follow links from the corresponding official
 tutorial index or open the example under
@@ -31,7 +32,7 @@ tutorial index or open the example under
 | Topic | Primary source | Useful sections or companion source |
 | --- | --- | --- |
 | Headless boundary, dependency direction, world/time/events, public interfaces, knowledge, plugins, settlement, renderer integration | `docs/architecture.md` | Match the section heading to the user's term; inspect `crates/canwu-api` for exact APIs |
-| Intended product surfaces, historical state, causality, persistence, counterfactuals, geography, plugins, debug client | `docs/end-state.md` | Use for design intent and destination, then confirm implemented behavior in current sources |
+| Intended product surfaces, historical state, causality, decisions/controllers, persistence, counterfactuals, geography, plugins, debug client | `docs/end-state.md` | Use for design intent and destination, then confirm implemented behavior in current sources |
 | Named engine requirements and acceptable evidence | `docs/engine-conformance.md` | Requirements E01-E16 and the conformance evidence section |
 | SemVer, snapshot formats, migrations, hashing, replay, and supported platforms | `docs/versioning.md` | Use for compatibility claims; do not infer compatibility from examples |
 

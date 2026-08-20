@@ -62,9 +62,19 @@ For a phased, API-only plugin example:
 cargo run -p canwu-api --example phased_boundary
 ```
 
+For a persisted decision-ticket example with dynamic options, utility
+evaluation, authority-derived command execution, trace output, and exact
+replay:
+
+```text
+cargo run -p canwu-api --example decision_ticket
+```
+
 ## How the repository fits together
 
 - `canwu-core`: stable IDs, repeatable random numbers, and schema metadata
+- `canwu-decision`: decision tickets, controllers, traces, utility evaluation,
+  and policy SDK contracts
 - `canwu-time`: historical time that is independent of rendering speed
 - `canwu-event`: stored events and links between causes and effects
 - `canwu-world`: historical entities and read-only world snapshots

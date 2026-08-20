@@ -2,8 +2,8 @@ use super::{
     ArtifactManifest, BOUNDARY_STATE_HASH_V1_PREFIX, BoundaryChange, BoundaryEmission, BoundaryId,
     BoundaryIngressGeneration, BoundaryRecord, BoundaryStateHashFormat, COMMITMENT_FORMAT_VERSION,
     CanwuError, CommandAttemptId, CommandAttemptRecord, CommandId, CommandRecord, CommitmentRoots,
-    DomainRecord, DomainRecordChange, ErrorCode, EventId, GENESIS_BOUNDARY_HASH, IngressId,
-    IngressRecord, JournalCommitmentRoots, KnowledgeSnapshot, PluginComponentRecord,
+    DecisionState, DomainRecord, DomainRecordChange, ErrorCode, EventId, GENESIS_BOUNDARY_HASH,
+    IngressId, IngressRecord, JournalCommitmentRoots, KnowledgeSnapshot, PluginComponentRecord,
     PluginDescriptor, RandomDrawId, RandomDrawRecord, RandomStreamState, ReservationAllocation,
     ReservationOfferRecord, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
     RuntimeDomainCommitmentRoots, STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledRecord,
@@ -38,6 +38,8 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) plugin_components: &'a [PluginComponentRecord],
     #[serde(skip_serializing_if = "domain_record_slice_is_empty")]
     pub(super) domain_records: &'a [DomainRecord],
+    #[serde(skip_serializing_if = "DecisionState::is_empty")]
+    pub(super) decisions: &'a DecisionState,
     pub(super) plugin_descriptors: &'a [PluginDescriptor],
     pub(super) schema: &'a SchemaRegistry,
     pub(super) scheduled: &'a [ScheduledRecord],
@@ -54,6 +56,8 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) next_random_draw_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    pub(super) next_decision_trace_id: u64,
 }
 
 #[derive(Serialize)]
@@ -108,6 +112,8 @@ pub(super) struct ControlCommitmentMaterial {
     pub(super) next_random_draw_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    pub(super) next_decision_trace_id: u64,
 }
 
 #[derive(Serialize)]
@@ -227,6 +233,13 @@ pub(super) fn domain_record_commitment_root(
     })
 }
 
+pub(super) fn decision_commitment_root(decisions: &DecisionState) -> Result<String, CanwuError> {
+    if decisions.is_empty() {
+        return Ok(String::new());
+    }
+    canonical_hash("canwu.commitment.decisions.v1", decisions)
+}
+
 pub(super) fn scheduler_commitment_root(
     now: SimTime,
     scheduled: &[ScheduledRecord],
@@ -291,6 +304,7 @@ fn commitment_roots(
     let knowledge = knowledge_commitment_root(material.knowledge)?;
     let plugin_components = plugin_component_commitment_root(material.plugin_components)?;
     let domain_records = domain_record_commitment_root(material.domain_records)?;
+    let decisions = decision_commitment_root(material.decisions)?;
     let scheduler = scheduler_commitment_root(material.now, material.scheduled)?;
     let command_root = match journal_roots {
         Some(roots) => roots.commands.clone(),
@@ -370,6 +384,7 @@ fn commitment_roots(
             next_random_draw_id: material.next_random_draw_id,
             next_schedule_sequence: material.next_schedule_sequence,
             next_correlation_id: material.next_correlation_id,
+            next_decision_trace_id: material.next_decision_trace_id,
         },
     )?;
     Ok(CommitmentRoots {
@@ -377,6 +392,7 @@ fn commitment_roots(
         knowledge,
         plugin_components,
         domain_records,
+        decisions,
         scheduler,
         commands,
         events,
@@ -415,6 +431,7 @@ pub(super) fn runtime_commitment_roots(
         knowledge: domain.knowledge.clone(),
         plugin_components: domain.plugin_components.clone(),
         domain_records: domain.domain_records.clone(),
+        decisions: domain.decisions.clone(),
         scheduler: domain.scheduler.clone(),
         commands,
         events: journal.events.clone(),
@@ -498,6 +515,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         ingress: &snapshot.ingress,
         plugin_components: &snapshot.plugin_components,
         domain_records: &snapshot.domain_records,
+        decisions: &snapshot.decisions,
         plugin_descriptors: &snapshot.plugin_descriptors,
         schema: &snapshot.schema,
         scheduled: &snapshot.scheduled,
@@ -512,6 +530,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         next_random_draw_id: snapshot.next_random_draw_id,
         next_schedule_sequence: snapshot.next_schedule_sequence,
         next_correlation_id: snapshot.next_correlation_id,
+        next_decision_trace_id: snapshot.next_decision_trace_id,
     })
 }
 
@@ -579,6 +598,7 @@ pub(super) fn snapshot_commitment_roots(
             ingress: &snapshot.ingress,
             plugin_components: &snapshot.plugin_components,
             domain_records: &snapshot.domain_records,
+            decisions: &snapshot.decisions,
             plugin_descriptors: &snapshot.plugin_descriptors,
             schema: &snapshot.schema,
             scheduled: &snapshot.scheduled,
@@ -593,6 +613,7 @@ pub(super) fn snapshot_commitment_roots(
             next_random_draw_id: snapshot.next_random_draw_id,
             next_schedule_sequence: snapshot.next_schedule_sequence,
             next_correlation_id: snapshot.next_correlation_id,
+            next_decision_trace_id: snapshot.next_decision_trace_id,
         },
         snapshot
             .boundaries
@@ -884,4 +905,5 @@ pub(super) fn commitment_roots_are_canonical(roots: &CommitmentRoots) -> bool {
     ]
     .into_iter()
     .all(|root| is_canonical_hash(root))
+        && (roots.decisions.is_empty() || is_canonical_hash(&roots.decisions))
 }

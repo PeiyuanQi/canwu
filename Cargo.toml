@@ -2,6 +2,7 @@
 members = [
     "crates/canwu-api",
     "crates/canwu-core",
+    "crates/canwu-decision",
     "crates/canwu-debug",
     "crates/canwu-event",
     "crates/canwu-knowledge",
@@ -26,6 +27,7 @@ rust-version = "1.88"
 blake3 = "1"
 canwu-api = { path = "crates/canwu-api", version = "=0.4.0" }
 canwu-core = { path = "crates/canwu-core", version = "=0.4.0" }
+canwu-decision = { path = "crates/canwu-decision", version = "=0.4.0" }
 canwu-event = { path = "crates/canwu-event", version = "=0.4.0" }
 canwu-knowledge = { path = "crates/canwu-knowledge", version = "=0.4.0" }
 canwu-sim = { path = "crates/canwu-sim", version = "=0.4.0" }
