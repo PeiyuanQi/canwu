@@ -75,7 +75,7 @@ export default defineConfig({
             { slug: "tutorials/phased-boundary" },
             {
               label: "案例",
-              translations: { en: "Cases" },
+              translations: { en: "Examples" },
               collapsed: true,
               items: [{ autogenerate: { directory: "tutorials/cases" } }],
             },
