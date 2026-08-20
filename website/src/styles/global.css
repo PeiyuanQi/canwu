@@ -40,23 +40,40 @@ code, pre { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
 .brand b { font-size: .95rem; letter-spacing: .02em; }
 .brand small { margin-top: .3rem; color: var(--muted); font-size: .62rem; letter-spacing: .14em; text-transform: uppercase; }
 .site-header nav { display: flex; align-items: center; gap: 1.25rem; }
-.site-header nav a { color: var(--muted); font-size: .8rem; font-weight: 600; text-decoration: none; }
-.site-header nav a:hover, .site-header nav a[aria-current="page"] { color: var(--text); }
+.site-header nav > a, .nav-docs > summary { color: var(--muted); font-size: .8rem; font-weight: 600; text-decoration: none; }
+.site-header nav > a:hover, .site-header nav > a[aria-current="page"], .nav-docs > summary:hover, .nav-docs > summary[aria-current="page"], .nav-docs[open] > summary { color: var(--text); }
 .site-header .language-switch { color: var(--green); }
 .github-link { display: inline-flex; align-items: center; gap: .45rem; }
 .github-icon { width: 1.05em; height: 1.05em; flex: 0 0 auto; }
 .nav-github { padding: .55rem .8rem; color: var(--text) !important; border: 1px solid var(--border); border-radius: 5px; }
 .nav-github:hover { border-color: var(--muted); background: var(--surface); }
+.nav-docs { position: relative; }
+.nav-docs > summary { display: flex; align-items: center; gap: .45rem; cursor: pointer; list-style: none; }
+.nav-docs > summary::-webkit-details-marker { display: none; }
+.nav-docs > summary::after { content: ""; width: .38rem; height: .38rem; margin-top: -.2rem; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg); transition: transform 160ms ease, margin 160ms ease; }
+.nav-docs[open] > summary::after { margin-top: .2rem; transform: rotate(225deg); }
+.nav-docs-popover { position: absolute; top: 100%; left: -.75rem; z-index: 30; min-width: 190px; padding-top: .7rem; }
+.nav-docs-popover > div { display: grid; gap: .1rem; padding: .45rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 18px 45px #0009; }
+.site-header nav .nav-docs-popover a { min-height: 40px; display: flex; align-items: center; padding: .6rem .7rem; color: var(--muted); border-radius: 4px; font-size: .8rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.site-header nav .nav-docs-popover a:hover, .site-header nav .nav-docs-popover a[aria-current="page"] { color: var(--text); background: var(--surface-2); }
 .mobile-menu { display: none; position: relative; }
-.mobile-menu summary { min-height: 44px; display: flex; align-items: center; gap: .65rem; cursor: pointer; list-style: none; padding: .55rem .75rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; font-size: .8rem; font-weight: 700; }
-.mobile-menu summary::-webkit-details-marker { display: none; }
-.mobile-menu summary::after { content: "+"; color: var(--muted); font-size: 1rem; font-weight: 500; line-height: 1; }
-.mobile-menu[open] summary { border-color: var(--muted); background: var(--surface-2); }
-.mobile-menu[open] summary::after { content: "−"; }
+.mobile-menu > summary { min-height: 44px; display: flex; align-items: center; gap: .65rem; cursor: pointer; list-style: none; padding: .55rem .75rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 5px; font-size: .8rem; font-weight: 700; }
+.mobile-menu > summary::-webkit-details-marker { display: none; }
+.mobile-menu > summary::after { content: "+"; color: var(--muted); font-size: 1rem; font-weight: 500; line-height: 1; }
+.mobile-menu[open] > summary { border-color: var(--muted); background: var(--surface-2); }
+.mobile-menu[open] > summary::after { content: "−"; }
 .mobile-menu > div { position: absolute; right: 0; top: calc(100% + .55rem); z-index: 20; width: min(280px, calc(100vw - 2rem)); padding: .5rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 18px 45px #0009; }
 .mobile-menu a { min-height: 44px; display: flex; align-items: center; padding: .7rem .75rem; color: var(--muted); border-radius: 4px; text-decoration: none; font-size: .85rem; }
 .mobile-menu .mobile-menu-language { margin-top: .35rem; border-top: 1px solid var(--border); border-radius: 0 0 4px 4px; }
-.mobile-menu a:hover { color: var(--text); background: var(--surface-2); }
+.mobile-menu a:hover, .mobile-menu a[aria-current="page"] { color: var(--text); background: var(--surface-2); }
+.mobile-docs-menu { border-bottom: 1px solid var(--border); }
+.mobile-docs-menu > summary { min-height: 44px; display: flex; align-items: center; justify-content: space-between; cursor: pointer; list-style: none; padding: .7rem .75rem; color: var(--muted); border-radius: 4px; font-size: .85rem; font-weight: 650; }
+.mobile-docs-menu > summary::-webkit-details-marker { display: none; }
+.mobile-docs-menu > summary::after { content: "+"; color: var(--muted); font-size: 1rem; font-weight: 500; line-height: 1; }
+.mobile-docs-menu[open] > summary, .mobile-docs-menu > summary[aria-current="page"] { color: var(--text); background: var(--surface-2); }
+.mobile-docs-menu[open] > summary::after { content: "−"; }
+.mobile-docs-menu > div { display: grid; padding: .15rem 0 .45rem .65rem; }
+.mobile-docs-menu a { min-height: 40px; font-size: .8rem; }
 
 .tech-hero { display: grid; grid-template-columns: 1fr .95fr; gap: clamp(3rem, 7vw, 7rem); align-items: center; padding-block: 5.5rem 5rem; }
 .version-line { display: flex; align-items: center; gap: .6rem; margin: 0 0 1.8rem; color: var(--green); font: 650 .72rem/1.2 "Cascadia Code", monospace; letter-spacing: .05em; }

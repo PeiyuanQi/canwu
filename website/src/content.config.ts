@@ -71,6 +71,7 @@ function canwuDocsLoader(): Loader {
               description: isOverview
                 ? "Explore Canwu architecture, engine contracts, integration guides, community resources, and release references."
                 : options.data.description,
+              ...(isOverview ? { template: "doc" } : {}),
               editUrl: `https://github.com/PeiyuanQi/canwu/edit/main/${repositoryPath}`,
             },
           });

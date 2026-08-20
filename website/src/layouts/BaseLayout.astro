@@ -29,6 +29,7 @@ const ui = {
     homeLabel: "Canwu home",
     navLabel: "Primary navigation",
     docs: "Docs",
+    projectDocs: "Project docs",
     tutorials: "Tutorials",
     architecture: "Architecture",
     integrations: "Integrations",
@@ -46,7 +47,8 @@ const ui = {
     skip: "跳到正文",
     homeLabel: "参伍引擎首页",
     navLabel: "主导航",
-    docs: "文档（英文）",
+    docs: "文档",
+    projectDocs: "文档（英文）",
     tutorials: "使用教程",
     architecture: "架构",
     integrations: "集成",
@@ -69,13 +71,19 @@ const variants = isAuto
     ]
   : [{ locale: documentLocale, ui: isEnglish ? ui.en : ui.zh, prefix: isEnglish ? "/en" : "", languageHref: isEnglish ? zhPath : enPath }];
 
-const navItems = (variant: typeof variants[number]) => [
+const documentationItems = (variant: typeof variants[number]) => [
   { href: `${variant.prefix}/tutorials/`, label: variant.ui.tutorials },
-  { href: "/en/docs/", label: variant.ui.docs },
+  { href: "/en/docs/", label: variant.ui.projectDocs },
   { href: `${variant.prefix}/architecture/`, label: variant.ui.architecture },
+];
+
+const navItems = (variant: typeof variants[number]) => [
   { href: `${variant.prefix}/showcase/`, label: variant.ui.integrations },
   { href: "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md", label: variant.ui.contribute },
 ];
+
+const isCurrent = (href: string) =>
+  !href.startsWith("http") && (currentPath === href || currentPath.startsWith(href));
 ---
 
 <!doctype html>
@@ -125,7 +133,19 @@ const navItems = (variant: typeof variants[number]) => [
       ))}
       {variants.map((variant) => (
         <nav data-locale-content={isAuto ? variant.locale : undefined} aria-label={variant.ui.navLabel}>
-          {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
+          <details class="nav-docs">
+            <summary aria-current={documentationItems(variant).some((item) => isCurrent(item.href)) ? "page" : undefined}>
+              {variant.ui.docs}
+            </summary>
+            <div class="nav-docs-popover">
+              <div>
+                {documentationItems(variant).map((item) => (
+                  <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>
+                ))}
+              </div>
+            </div>
+          </details>
+          {navItems(variant).map((item) => <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>)}
           <a class="language-switch" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
           <a class="nav-github github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
         </nav>
@@ -134,7 +154,17 @@ const navItems = (variant: typeof variants[number]) => [
         <details class="mobile-menu" data-locale-content={isAuto ? variant.locale : undefined}>
           <summary>{variant.ui.menu}</summary>
           <div>
-            {navItems(variant).map((item) => <a href={item.href} aria-current={currentPath === item.href ? "page" : undefined}>{item.label}</a>)}
+            <details class="mobile-docs-menu">
+              <summary aria-current={documentationItems(variant).some((item) => isCurrent(item.href)) ? "page" : undefined}>
+                {variant.ui.docs}
+              </summary>
+              <div>
+                {documentationItems(variant).map((item) => (
+                  <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>
+                ))}
+              </div>
+            </details>
+            {navItems(variant).map((item) => <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>)}
             <a class="mobile-menu-language" href={variant.languageHref} hreflang={variant.locale === "en" ? "zh-CN" : "en"}>{variant.ui.language}</a>
             <a class="github-link" href="https://github.com/PeiyuanQi/canwu"><GitHubIcon />GitHub</a>
           </div>
@@ -142,11 +172,43 @@ const navItems = (variant: typeof variants[number]) => [
       ))}
     </header>
     <script is:inline>
+      const desktopDocsMenus = document.querySelectorAll("details.nav-docs");
       const mobileMenus = document.querySelectorAll("details.mobile-menu");
+
+      desktopDocsMenus.forEach((menu) => {
+        menu.addEventListener("pointerenter", (event) => {
+          if (event.pointerType !== "mouse" || menu.open) return;
+          menu.dataset.hoverOpen = "true";
+          menu.setAttribute("open", "");
+        });
+
+        menu.addEventListener("pointerleave", (event) => {
+          if (event.pointerType !== "mouse" || menu.dataset.hoverOpen !== "true") return;
+          if (menu.contains(document.activeElement)) return;
+          menu.removeAttribute("open");
+          delete menu.dataset.hoverOpen;
+        });
+
+        menu.querySelector(":scope > summary")?.addEventListener("click", (event) => {
+          if (!(event instanceof MouseEvent) || event.detail === 0 || menu.dataset.hoverOpen !== "true") return;
+          event.preventDefault();
+          delete menu.dataset.hoverOpen;
+        });
+
+        menu.querySelectorAll("a").forEach((link) => {
+          link.addEventListener("click", () => {
+            menu.removeAttribute("open");
+            delete menu.dataset.hoverOpen;
+          });
+        });
+      });
 
       mobileMenus.forEach((menu) => {
         menu.addEventListener("toggle", () => {
-          if (!menu.open) return;
+          if (!menu.open) {
+            menu.querySelectorAll("details.mobile-docs-menu").forEach((submenu) => submenu.removeAttribute("open"));
+            return;
+          }
           mobileMenus.forEach((otherMenu) => {
             if (otherMenu !== menu) otherMenu.removeAttribute("open");
           });
@@ -158,6 +220,11 @@ const navItems = (variant: typeof variants[number]) => [
       });
 
       document.addEventListener("click", (event) => {
+        desktopDocsMenus.forEach((menu) => {
+          if (!menu.open || menu.contains(event.target)) return;
+          menu.removeAttribute("open");
+          delete menu.dataset.hoverOpen;
+        });
         mobileMenus.forEach((menu) => {
           if (menu.open && !menu.contains(event.target)) menu.removeAttribute("open");
         });
@@ -165,6 +232,12 @@ const navItems = (variant: typeof variants[number]) => [
 
       document.addEventListener("keydown", (event) => {
         if (event.key !== "Escape") return;
+        desktopDocsMenus.forEach((menu) => {
+          if (!menu.open) return;
+          menu.querySelector("summary")?.focus();
+          menu.removeAttribute("open");
+          delete menu.dataset.hoverOpen;
+        });
         mobileMenus.forEach((menu) => {
           if (!menu.open) return;
           menu.removeAttribute("open");
@@ -180,7 +253,7 @@ const navItems = (variant: typeof variants[number]) => [
           <p>{variant.ui.footerSub}</p>
         </div>
         <div class="footer-links">
-          <a href="/en/docs/">{variant.ui.docs} →</a>
+          <a href="/en/docs/">{variant.ui.projectDocs} →</a>
           <a href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples">{variant.ui.examples} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">{variant.ui.contribute} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/issues">{variant.ui.issues} ↗</a>
