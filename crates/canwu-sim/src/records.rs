@@ -1,7 +1,7 @@
 use crate::{CanwuError, ErrorCode, PayloadSchema, StateKey, StateVisibility};
 use canwu_core::{
     CoreEntityKind, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
-    DomainRecordType, DomainValueType, EntityRef, TypedDomainRecordRef,
+    DomainRecordType, DomainValueType, EntityRef, KnowledgeHolderPolicy, TypedDomainRecordRef,
 };
 use canwu_time::SimTime;
 use serde::de::DeserializeOwned;
@@ -21,6 +21,7 @@ pub enum DomainRecordClass {
 pub enum DomainReferenceTargetKind {
     Core(CoreEntityKind),
     Domain(DomainRecordKind),
+    AnyEntity,
 }
 
 impl DomainReferenceTargetKind {
@@ -39,10 +40,22 @@ pub struct DomainReferenceSchema {
     pub allow_retired: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DomainRecordMutationPolicy {
+    #[default]
+    Versioned,
+    CreateOnly,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DomainRecordSchema {
     pub kind: DomainRecordKind,
     pub class: DomainRecordClass,
+    #[serde(default)]
+    pub holder_policy: KnowledgeHolderPolicy,
+    #[serde(default)]
+    pub mutation_policy: DomainRecordMutationPolicy,
     pub payload_schema: PayloadSchema,
     pub references: Vec<DomainReferenceSchema>,
 }
@@ -53,6 +66,8 @@ impl DomainRecordSchema {
         Self {
             kind,
             class,
+            holder_policy: KnowledgeHolderPolicy::Disallowed,
+            mutation_policy: DomainRecordMutationPolicy::Versioned,
             payload_schema: PayloadSchema::Any,
             references: Vec::new(),
         }
@@ -94,6 +109,11 @@ impl DomainRecordSchema {
 
     pub(crate) fn validate(&self) -> Result<(), CanwuError> {
         validate_kind(&self.kind)?;
+        if self.holder_policy == KnowledgeHolderPolicy::Allowed
+            && self.class != DomainRecordClass::Entity
+        {
+            return invalid_record("only domain entity schemas may allow knowledge holders");
+        }
         if let PayloadSchema::Object { properties, .. } = &self.payload_schema
             && properties.keys().any(|name| !canonical_text(name))
         {
@@ -486,6 +506,11 @@ pub(crate) fn apply_mutation_bundle(
                 ),
             ));
         }
+        if schema.mutation_policy == DomainRecordMutationPolicy::CreateOnly
+            && !matches!(request.mutation, DomainRecordMutation::Create { .. })
+        {
+            return invalid_record(format!("domain record kind {} is create-only", target.kind));
+        }
 
         let (operation, previous, current) = match request.mutation {
             DomainRecordMutation::Create { record } => {
@@ -721,7 +746,7 @@ fn validate_reference_target(
     core_exists: &dyn Fn(&EntityRef) -> bool,
     source: &DomainRecordRef,
 ) -> Result<(), CanwuError> {
-    let kind = match target {
+    let (kind, is_entity) = match target {
         DomainReferenceTarget::Core(entity) => {
             let Some(kind) = entity.core_kind() else {
                 return invalid_record(
@@ -733,7 +758,7 @@ fn validate_reference_target(
                     "domain record {source} references missing core entity {entity}"
                 ));
             }
-            DomainReferenceTargetKind::Core(kind)
+            (DomainReferenceTargetKind::Core(kind), true)
         }
         DomainReferenceTarget::Domain(reference) => {
             let target_record = records.get(reference).ok_or_else(|| {
@@ -748,10 +773,18 @@ fn validate_reference_target(
                     format!("domain record {source} references unavailable record {reference}"),
                 ));
             }
-            DomainReferenceTargetKind::Domain(reference.kind.clone())
+            (
+                DomainReferenceTargetKind::Domain(reference.kind.clone()),
+                target_record.class == DomainRecordClass::Entity,
+            )
         }
     };
-    if !schema.targets.contains(&kind) {
+    if !(schema.targets.contains(&kind)
+        || is_entity
+            && schema
+                .targets
+                .contains(&DomainReferenceTargetKind::AnyEntity))
+    {
         return invalid_record(format!(
             "domain record {source} reference target does not match role {}",
             schema.role
@@ -958,4 +991,135 @@ fn canonical_text(value: &str) -> bool {
 
 fn invalid_record<T>(message: impl Into<String>) -> Result<T, CanwuError> {
     Err(CanwuError::new(ErrorCode::InvalidDomainRecord, message))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixture_kind(name: &str) -> DomainRecordKind {
+        DomainRecordKind::new("fixture.records", name)
+    }
+
+    fn fixture_record(reference: DomainRecordRef, class: DomainRecordClass) -> DomainRecord {
+        DomainRecord {
+            reference,
+            owner: "fixture".to_owned(),
+            class,
+            version: 1,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: json!(null),
+            references: vec![],
+        }
+    }
+
+    fn mutation_request(mutation: &DomainRecordMutation) -> DomainMutationRequest<'_> {
+        DomainMutationRequest {
+            plugin: "fixture",
+            system: "fixture-system",
+            visibility: StateVisibility::NextBoundary,
+            mutation,
+            summary: "fixture mutation",
+        }
+    }
+
+    #[test]
+    fn create_only_policy_rejects_raw_mutations_and_preserves_create() {
+        let kind = fixture_kind("immutable");
+        let existing_ref = DomainRecordRef::new(&kind.namespace, &kind.name, "existing");
+        let existing = fixture_record(existing_ref.clone(), DomainRecordClass::Record);
+        let records = BTreeMap::from([(existing_ref.clone(), existing.clone())]);
+        let mut schema = DomainRecordSchema::new(kind.clone(), DomainRecordClass::Record);
+        schema.mutation_policy = DomainRecordMutationPolicy::CreateOnly;
+        let schemas = BTreeMap::from([(kind.clone(), ("fixture".to_owned(), schema))]);
+        let core_exists = |_: &EntityRef| true;
+
+        let update = DomainRecordMutation::Update {
+            record: DomainRecordDraft::new(existing_ref.clone(), json!("changed")),
+            expected_version: 1,
+        };
+        let retire = DomainRecordMutation::Retire {
+            record: existing_ref.clone(),
+            expected_version: 1,
+            successor: None,
+        };
+        let delete = DomainRecordMutation::Delete {
+            record: existing_ref.clone(),
+            expected_version: 1,
+        };
+        for mutation in [&update, &retire, &delete] {
+            let error = apply_mutation_bundle(
+                &records,
+                &schemas,
+                SimTime::EPOCH,
+                &core_exists,
+                vec![mutation_request(mutation)],
+            )
+            .expect_err("create-only kinds must reject non-create raw mutations");
+            assert_eq!(error.code, ErrorCode::InvalidDomainRecord);
+            assert_eq!(records.get(&existing_ref), Some(&existing));
+        }
+
+        let new_ref = DomainRecordRef::new(&kind.namespace, &kind.name, "new");
+        let create = DomainRecordMutation::Create {
+            record: DomainRecordDraft::new(new_ref.clone(), json!(null)),
+        };
+        let (next, changes) = apply_mutation_bundle(
+            &records,
+            &schemas,
+            SimTime::EPOCH,
+            &core_exists,
+            vec![mutation_request(&create)],
+        )
+        .expect("create-only kinds must still accept creates");
+        assert!(next.contains_key(&new_ref));
+        assert_eq!(changes[0].operation, DomainRecordOperation::Created);
+    }
+
+    #[test]
+    fn any_entity_domain_reference_is_typed_by_registered_record_class() {
+        let entity_kind = fixture_kind("future-entity");
+        let value_kind = fixture_kind("future-value");
+        let entity_ref = DomainRecordRef::new(&entity_kind.namespace, &entity_kind.name, "one");
+        let value_ref = DomainRecordRef::new(&value_kind.namespace, &value_kind.name, "one");
+        let records = BTreeMap::from([
+            (
+                entity_ref.clone(),
+                fixture_record(entity_ref.clone(), DomainRecordClass::Entity),
+            ),
+            (
+                value_ref.clone(),
+                fixture_record(value_ref.clone(), DomainRecordClass::Record),
+            ),
+        ]);
+        let schema = DomainReferenceSchema {
+            role: "target".to_owned(),
+            targets: vec![DomainReferenceTargetKind::AnyEntity],
+            required: true,
+            multiple: false,
+            allow_retired: false,
+        };
+        let source = DomainRecordRef::new("fixture.records", "source", "one");
+
+        assert!(
+            validate_reference_target(
+                &DomainReferenceTarget::Domain(entity_ref),
+                &schema,
+                &records,
+                &|_: &EntityRef| false,
+                &source,
+            )
+            .is_ok()
+        );
+        let error = validate_reference_target(
+            &DomainReferenceTarget::Domain(value_ref),
+            &schema,
+            &records,
+            &|_: &EntityRef| false,
+            &source,
+        )
+        .expect_err("AnyEntity must reject domain value records");
+        assert_eq!(error.code, ErrorCode::InvalidDomainRecord);
+    }
 }

@@ -1,8 +1,9 @@
 use super::{
-    Army, ArmyId, BoundaryRecord, CanwuError, CommandAttemptRecord, CommandOutcome, CommandRecord,
-    CommandRequestId, CommitmentRoots, DecisionRequestId, DecisionState, DomainRecord,
-    DomainRecordRef, ErrorCode, EvidenceCursor, Government, GovernmentId, IngressQueueKey,
-    IngressReceipt, IngressRecord, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
+    ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army, ArmyId, BoundaryRecord, CanwuError,
+    CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
+    DecisionRequestId, DecisionState, DomainRecord, DomainRecordRef, ErrorCode, EvidenceCursor,
+    EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
+    KeyedDrawReservation, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
     PluginComponentRecord, RandomDrawRecord, RandomStreamKey, RandomStreamState, Route, RouteId,
     RunConfigurationSnapshot, RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent,
     SimTime, Territory, TerritoryId,
@@ -27,6 +28,9 @@ pub(super) struct RuntimeEvidence {
     pub(super) ingress: Vec<IngressRecord>,
     pub(super) boundaries: Vec<BoundaryRecord>,
     pub(super) random_draws: Vec<RandomDrawRecord>,
+    pub(super) archived_segment_headers: Vec<ArchivedSegmentHeader>,
+    pub(super) archived_evidence_receipts: BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
+    pub(super) keyed_draw_reservations: Vec<KeyedDrawReservation>,
 }
 
 #[derive(Clone)]
@@ -58,6 +62,16 @@ impl RuntimeEvidence {
         self.commands.get(index).filter(|record| record.id == id)
     }
 
+    pub(super) fn retained_command_attempt(
+        &self,
+        id: super::CommandAttemptId,
+    ) -> Option<&CommandAttemptRecord> {
+        let index = Self::retained_index(id.get(), self.archived.command_attempt_count)?;
+        self.command_attempts
+            .get(index)
+            .filter(|record| record.id == id)
+    }
+
     pub(super) fn retained_boundary(&self, id: super::BoundaryId) -> Option<&BoundaryRecord> {
         let index = Self::retained_index(id.get(), self.archived.boundary_count)?;
         self.boundaries.get(index).filter(|record| record.id == id)
@@ -66,6 +80,16 @@ impl RuntimeEvidence {
     pub(super) fn retained_ingress(&self, id: super::IngressId) -> Option<&IngressRecord> {
         let index = Self::retained_index(id.get(), self.archived.ingress_count)?;
         self.ingress.get(index).filter(|record| record.id == id)
+    }
+
+    pub(super) fn retained_random_draw(
+        &self,
+        id: super::RandomDrawId,
+    ) -> Option<&RandomDrawRecord> {
+        let index = Self::retained_index(id.get(), self.archived.random_draw_count)?;
+        self.random_draws
+            .get(index)
+            .filter(|record| record.id == id)
     }
 
     pub(super) fn boundary_head_hash(&self) -> Option<&str> {
@@ -424,6 +448,7 @@ pub(super) struct RuntimeCounters {
     pub(super) next_ingress_id: u64,
     pub(super) next_boundary_id: u64,
     pub(super) next_random_draw_id: u64,
+    pub(super) next_knowledge_record_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
     pub(super) next_decision_trace_id: u64,

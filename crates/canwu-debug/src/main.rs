@@ -3,7 +3,8 @@
 #![allow(clippy::module_name_repetitions)]
 
 use canwu_api::{
-    Canwu, Command, CommandEnvelope, DemoIds, EntityRef, Issuer, SimDuration, WorldSnapshot,
+    Canwu, Command, CommandEnvelope, DemoIds, EntityRef, Issuer, KnowledgeHolderRef,
+    KnowledgeQuery, SimDuration, WorldSnapshot,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use serde_json::Value;
@@ -276,6 +277,28 @@ impl DebugApp {
                     }
                 }
             });
+
+        if let EntityRef::Person(person) = selected {
+            ui.separator();
+            ui.label("Trusted debug knowledge projection");
+            match self.canwu.admin_query_knowledge(
+                KnowledgeHolderRef::Person(person),
+                &KnowledgeQuery::default(),
+            ) {
+                Ok(result) => {
+                    ui.monospace(format!("{} current record(s)", result.records.len()));
+                    for record in result.records {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.strong(record.schema.kind.to_string());
+                            ui.monospace(compact_value(&record.payload));
+                        });
+                    }
+                }
+                Err(error) => {
+                    ui.colored_label(Color32::LIGHT_RED, error.to_string());
+                }
+            }
+        }
 
         if let EntityRef::Army(army) = selected {
             ui.separator();

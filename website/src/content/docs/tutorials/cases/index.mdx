@@ -1,6 +1,6 @@
 ---
 title: 案例
-description: 从完整历史情境出发，学习如何组合 Canwu 的公开引擎能力。
+description: 从完整、情境驱动的案例出发，学习如何组合 Canwu 的公开引擎能力。
 sidebar:
   order: 1
   label: 案例总览
@@ -11,8 +11,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 这里收录情境驱动的完整案例。案例会把多个基础契约组合起来，展示领域包、
 controller、policy、权威命令与持久化证据如何协作。
 
-每篇案例都按“要解决的问题、实现方法、代码链接”三部分展开。你可以先理解
-使用情境，再沿着系统边界完成实现，最后直接打开可运行源码和验证测试。
+每篇案例都会说明使用情境、所验证的通用机制，以及可运行源码与验证证据的位置。
 
 <CardGrid>
   <LinkCard
@@ -25,8 +24,18 @@ controller、policy、权威命令与持久化证据如何协作。
     href="/tutorials/cases/local-community-diffusion/"
     description="使用实验性 canwu-society 组合稀疏人口分布、社会影响、DecisionTicket 制度政策、角色估计、存档与精确重放。"
   />
+  <LinkCard
+    title="机密副本与定向发布"
+    href="/tutorials/cases/confidential-copy-release/"
+    description="使用 canwu-information 验证访问、副本衍生、冻结受众、定向发布、撤回和已获知识保留。"
+  />
+  <LinkCard
+    title="编码传递与中途截取"
+    href="/tutorials/cases/encoded-interception/"
+    description="使用 canwu-information 分离 representation copy、access 与 interpretation，并比较失败和成功解读。"
+  />
 </CardGrid>
 
 基础案例只使用公开 `canwu-api`；社会传播案例使用建立在公开 API 之上的未发布
-`canwu-society` 扩展。具体历史规则、人物性格、情报投影和选项生成仍由应用或
-领域插件定义。
+`canwu-society` 扩展；两个信息流案例使用未发布的 `canwu-information` 中立模型。
+具体领域规则、角色属性、信息投影和选项生成仍由应用或领域插件定义。

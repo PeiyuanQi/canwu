@@ -1,8 +1,8 @@
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryRecord, COMMITMENT_FORMAT_VERSION, CanwuError,
     CauseRef, CommandAttemptOutcome, CommandAttemptRecord, DeterministicRng, ENGINE_VERSION,
-    ErrorCode, EventKind, GENESIS_BOUNDARY_HASH, IngressPayload, IngressRecord, RandomDrawId,
-    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamState,
+    ErrorCode, EventKind, GENESIS_BOUNDARY_HASH, IngressPayload, IngressRecord, RandomDrawAddress,
+    RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamState,
     RunConfigurationSnapshot, RunManifest, SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION,
     SimDuration, SimulationSnapshot, canonical_hash, compute_boundary_hash, invalid_snapshot,
     invalid_snapshot_error, is_canonical_hash, manifest, policy, random, snapshot_checkpoint_hash,
@@ -25,7 +25,7 @@ pub(super) fn migrate_snapshot(
                 ));
             }
             if snapshot.legacy_rng.is_some() {
-                return invalid_snapshot("format 4 snapshots cannot contain the legacy global RNG");
+                return invalid_snapshot("format 5 snapshots cannot contain the legacy global RNG");
             }
             hydrate_snapshot_run_configuration(&mut snapshot)?;
             migrate_snapshot_revision(&mut snapshot)?;
@@ -590,7 +590,10 @@ fn migrate_format_3_snapshot(
             id: RandomDrawId::new(id_value),
             at: event.timestamp,
             stream: core_key.clone(),
-            position: id_value - 1,
+            address: RandomDrawAddress::Sequential {
+                position: id_value - 1,
+            },
+            operation_evidence: None,
             upper_exclusive: 12 * 60,
             value,
             purpose: "knowledge report delivery jitter".to_owned(),

@@ -56,7 +56,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 ## 案例
 
-案例把多项基础能力组合成完整历史情境，并统一收纳在侧栏中默认折叠的“案例”
+案例把多项基础能力组合成完整、情境驱动的练习，并统一收纳在侧栏中默认折叠的“案例”
 分组里。
 
 <CardGrid>
@@ -69,6 +69,16 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
     title="本地社区传播与制度回应"
     href="/tutorials/cases/local-community-diffusion/"
     description="用一个中性案例组合稀疏人口分布、社会影响、制度决策、角色估计和精确重放。"
+  />
+  <LinkCard
+    title="机密副本与定向发布"
+    href="/tutorials/cases/confidential-copy-release/"
+    description="用中立信息生命周期组合访问、副本衍生、冻结受众、发布撤回与已获知识保留。"
+  />
+  <LinkCard
+    title="编码传递与中途截取"
+    href="/tutorials/cases/encoded-interception/"
+    description="分离 representation copy、access 与 interpretation，并对比不同能力的解读结果。"
   />
   <LinkCard
     title="浏览全部案例"
@@ -87,7 +97,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
   />
   <LinkCard
     title="GitHub 示例"
-    href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples"
-    description="直接查看每篇教程对应的公开 Rust 示例源码。"
+    href="https://github.com/PeiyuanQi/canwu/tree/main/crates"
+    description="查看 canwu-api 与实验扩展随教程提供的 Rust 示例源码。"
   />
 </CardGrid>

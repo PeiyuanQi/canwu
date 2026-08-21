@@ -3,8 +3,10 @@ use crate::{
     StateKey, StateVisibility, SystemCadence,
 };
 use canwu_core::{
-    BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, IngressId, RandomDrawId,
+    BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, IngressId, KnowledgeHolderRef,
+    KnowledgeSchemaId, RandomDrawId,
 };
+use canwu_knowledge::{KnowledgeRecord, KnowledgeRecordDraft};
 use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -121,6 +123,21 @@ pub enum BoundaryDirective {
         payload: Value,
         affected: Vec<EntityRef>,
     },
+    SchedulePluginIngress {
+        target_plugin: String,
+        after: SimDuration,
+        packet_type: String,
+        priority: i32,
+        payload: Value,
+        affected: Vec<EntityRef>,
+    },
+    PublishKnowledge {
+        holder: KnowledgeHolderRef,
+        visibility: StateVisibility,
+        producer_correlation: Option<String>,
+        records: Vec<KnowledgeRecordDraft>,
+        summary: String,
+    },
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -128,6 +145,18 @@ pub struct BoundaryProposal {
     pub offers: Vec<ReservationOffer>,
     pub requests: Vec<ReservationRequest>,
     pub directives: Vec<BoundaryDirective>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KnowledgeWriteGrant {
+    pub schema: KnowledgeSchemaId,
+    pub visibilities: Vec<StateVisibility>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct PluginIngressTarget {
+    pub target_plugin: String,
+    pub packet_type: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -143,6 +172,10 @@ pub struct BoundarySystemContract {
     pub reservation_reads: Vec<ReservationRef>,
     #[serde(default)]
     pub random_streams: Vec<RandomStreamKey>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_writes: Vec<KnowledgeWriteGrant>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_ingress_targets: Vec<PluginIngressTarget>,
     pub visibility: StateVisibility,
 }
 
@@ -164,6 +197,8 @@ impl BoundarySystemContract {
             reservation_requests: Vec::new(),
             reservation_reads: Vec::new(),
             random_streams: Vec::new(),
+            knowledge_writes: Vec::new(),
+            plugin_ingress_targets: Vec::new(),
             visibility: StateVisibility::NextBoundary,
         }
     }
@@ -226,6 +261,7 @@ pub struct BoundaryChange {
 pub enum BoundaryEmissionKind {
     Change { change_index: u64 },
     RecordChange { change_index: u64 },
+    KnowledgeChange { change_index: u64 },
     Explicit,
 }
 
@@ -244,6 +280,18 @@ pub struct BoundaryIngressGeneration {
     pub system: String,
     pub phase: crate::BoundaryPhase,
     pub visibility: StateVisibility,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct BoundaryKnowledgeChange {
+    pub plugin: String,
+    pub system: String,
+    pub phase: crate::BoundaryPhase,
+    pub holder: KnowledgeHolderRef,
+    pub producer_correlation: Option<String>,
+    pub records: Vec<KnowledgeRecord>,
+    pub visibility: StateVisibility,
+    pub summary: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -268,6 +316,8 @@ pub struct BoundaryRecord {
     pub changes: Vec<BoundaryChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_changes: Vec<DomainRecordChange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_changes: Vec<BoundaryKnowledgeChange>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     /// Untagged legacy full-state hash or a `v1:` incremental state commitment.
@@ -288,5 +338,7 @@ pub struct BoundaryReceipt {
     pub boundary_hash: String,
     pub change_count: usize,
     pub record_change_count: usize,
+    pub knowledge_batch_count: usize,
+    pub knowledge_record_count: usize,
     pub allocations: Vec<ReservationAllocation>,
 }

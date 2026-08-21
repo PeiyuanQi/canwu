@@ -1,6 +1,8 @@
 //! Inspectable, serializable events with compact causal provenance.
 
-use canwu_core::{ArmyId, BoundaryId, CommandId, EntityRef, EventId, PersonId, TerritoryId};
+use canwu_core::{
+    ArmyId, BoundaryId, CommandId, EntityRef, EventId, KnowledgeHolderRef, PersonId, TerritoryId,
+};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +38,10 @@ pub enum EventKind {
         army: ArmyId,
         known_location: TerritoryId,
     },
+    KnowledgePublished {
+        holder: KnowledgeHolderRef,
+        record_count: u32,
+    },
     DebugFieldChanged {
         entity: EntityRef,
         field: String,
@@ -60,6 +66,7 @@ pub enum EventAudience {
     Public,
     Actor(PersonId),
     Actors(Vec<PersonId>),
+    KnowledgeHolder(KnowledgeHolderRef),
     /// The event is visible to actors represented by `EntityRef::Person` in
     /// the event's affected-entity list.
     AffectedActors,
@@ -75,6 +82,7 @@ impl EventKind {
             Self::ArmyArrived { .. } => "army_arrived",
             Self::ReportDispatched { .. } => "report_dispatched",
             Self::KnowledgeUpdated { .. } => "knowledge_updated",
+            Self::KnowledgePublished { .. } => "knowledge_published",
             Self::DebugFieldChanged { .. } => "debug_field_changed",
             Self::Plugin { .. } => "plugin",
         }

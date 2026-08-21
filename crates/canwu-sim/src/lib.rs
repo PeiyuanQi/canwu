@@ -10,6 +10,8 @@ mod boundary;
 mod decision;
 mod hashing;
 mod ingress;
+mod knowledge;
+mod legacy_v4;
 mod manifest;
 mod migration;
 mod persistence;
@@ -24,12 +26,20 @@ mod state;
 mod transactions;
 mod validation;
 
+pub use hashing::{canonical_byte_hash, canonical_hash};
+
 pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryIngressGeneration, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
-    BoundarySystemContract, BoundarySystemHandler, ReservationAllocation, ReservationDisposition,
+    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryProposal, BoundaryReceipt,
+    BoundaryRecord, BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
+    KnowledgeWriteGrant, PluginIngressTarget, ReservationAllocation, ReservationDisposition,
     ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
     ReservationRequest, ReservationRequestRecord,
+};
+pub use canwu_core::{
+    DomainRecordVersionRef, DomainRecordVersionSource, EvidenceRef, HolderKnowledgeRecordId,
+    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind,
+    KnowledgeSchemaId,
 };
 pub use canwu_decision::{
     ControllerDecision, DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome,
@@ -49,10 +59,19 @@ pub use ingress::{
     IngressClass, IngressPayload, IngressReceipt, IngressRecord, PluginIngressDescriptor,
     PluginIngressRequest,
 };
+pub use knowledge::{
+    KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
+};
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use persistence::{
-    CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal, CompactedSimulation, EvidenceCursor,
-    EvidenceJournalSegment, SimulationCheckpoint,
+    ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, ArchivedEvidenceLocator,
+    ArchivedEvidenceReceipt, ArchivedSegmentHeader, CHECKPOINT_JOURNAL_FORMAT_VERSION,
+    CheckpointJournal, CompactedSimulation, EvidenceArchiveIndex, EvidenceCursor,
+    EvidenceDependency, EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind,
+    EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator, EvidenceRequirement,
+    EvidenceSealToken, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadRequiredEvidenceContinuationV1,
+    PreparedEvidenceSeal, SimulationCheckpoint, payload_required_evidence_continuation_property_v1,
 };
 pub use policy::{
     CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
@@ -60,13 +79,14 @@ pub use policy::{
     SeatBinding, SeatPolicy, TracePolicy,
 };
 pub use random::{
-    RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
-    RandomStreamState,
+    KeyedDrawReservation, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
+    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
+    RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
-    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
+    DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation, DomainRecordSchema,
+    DomainReference, DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
 };
 
 use canwu_core::{
@@ -76,8 +96,11 @@ use canwu_core::{
     RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
-use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
+pub use canwu_knowledge::{
+    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
+    KnowledgeOrigin, KnowledgeQuery, KnowledgeReadCut, KnowledgeRecord, KnowledgeRecordDraft,
+    KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject,
+    KnowledgeSubjectTarget,
 };
 use canwu_time::{SimDuration, SimTime};
 use canwu_world::{
@@ -93,7 +116,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use hashing::{
     ControlCommitmentMaterial, StateHashMaterial, authoritative_run_identity,
-    boundary_state_hash_for_commitments, canonical_hash, checkpoint_hash_for_commitments,
+    boundary_state_hash_for_commitments, checkpoint_hash_for_commitments,
     checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash,
     decision_commitment_root, domain_record_commitment_root, identity_commitment_root,
     is_canonical_hash, knowledge_commitment_root, plugin_component_commitment_root,
@@ -129,7 +152,7 @@ use validation::{
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 4;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
 /// Version of the independently migrated authoritative revision commitment.
 pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
 /// Version of persisted monotonic boundary-admission cursors.
@@ -185,10 +208,24 @@ pub enum ErrorCode {
     DomainRecordReferenced,
     DomainRecordVersionConflict,
     InvalidAuthority,
+    InvalidArchive,
     InvalidBoundary,
     InvalidDecision,
     InvalidDuration,
     InvalidDomainRecord,
+    InvalidKnowledgeHolder,
+    InvalidKnowledgeRecord,
+    InvalidKnowledgeSchema,
+    InvalidKnowledgeAuthority,
+    KnowledgeLimitExceeded,
+    KnowledgeReadCutUnavailable,
+    KnowledgeRecordNotFound,
+    UndeclaredKnowledgeWrite,
+    EvidenceUnavailable,
+    EvidenceContentUnavailable,
+    DuplicateKnowledgeRecordKind,
+    InvalidRandomOperationEvidence,
+    RandomOperationConflict,
     IdempotencyConflict,
     InteractionReadOnly,
     InvalidPayload,
@@ -213,11 +250,13 @@ pub enum ErrorCode {
     ReplayEnvironmentMismatch,
     SimulationRevisionConflict,
     SimulationTimeConflict,
+    StaleSealToken,
     SynchronousReactionLimit,
     UndeclaredRandomStream,
     UndeclaredStateRead,
     UndeclaredStateWrite,
     UnsupportedSnapshotVersion,
+    UnsupportedRandomDrawAddress,
     ValueOutOfRange,
 }
 
@@ -278,10 +317,24 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::DomainRecordReferenced => "domain_record_referenced",
         ErrorCode::DomainRecordVersionConflict => "domain_record_version_conflict",
         ErrorCode::InvalidAuthority => "invalid_authority",
+        ErrorCode::InvalidArchive => "invalid_archive",
         ErrorCode::InvalidBoundary => "invalid_boundary",
         ErrorCode::InvalidDecision => "invalid_decision",
         ErrorCode::InvalidDuration => "invalid_duration",
         ErrorCode::InvalidDomainRecord => "invalid_domain_record",
+        ErrorCode::InvalidKnowledgeHolder => "invalid_knowledge_holder",
+        ErrorCode::InvalidKnowledgeRecord => "invalid_knowledge_record",
+        ErrorCode::InvalidKnowledgeSchema => "invalid_knowledge_schema",
+        ErrorCode::InvalidKnowledgeAuthority => "invalid_knowledge_authority",
+        ErrorCode::KnowledgeLimitExceeded => "knowledge_limit_exceeded",
+        ErrorCode::KnowledgeReadCutUnavailable => "knowledge_read_cut_unavailable",
+        ErrorCode::KnowledgeRecordNotFound => "knowledge_record_not_found",
+        ErrorCode::UndeclaredKnowledgeWrite => "undeclared_knowledge_write",
+        ErrorCode::EvidenceUnavailable => "evidence_unavailable",
+        ErrorCode::EvidenceContentUnavailable => "evidence_content_unavailable",
+        ErrorCode::DuplicateKnowledgeRecordKind => "duplicate_knowledge_record_kind",
+        ErrorCode::InvalidRandomOperationEvidence => "invalid_random_operation_evidence",
+        ErrorCode::RandomOperationConflict => "random_operation_conflict",
         ErrorCode::IdempotencyConflict => "idempotency_conflict",
         ErrorCode::InteractionReadOnly => "interaction_read_only",
         ErrorCode::InvalidPayload => "invalid_payload",
@@ -306,11 +359,13 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::ReplayEnvironmentMismatch => "replay_environment_mismatch",
         ErrorCode::SimulationRevisionConflict => "simulation_revision_conflict",
         ErrorCode::SimulationTimeConflict => "simulation_time_conflict",
+        ErrorCode::StaleSealToken => "stale_seal_token",
         ErrorCode::SynchronousReactionLimit => "synchronous_reaction_limit",
         ErrorCode::UndeclaredRandomStream => "undeclared_random_stream",
         ErrorCode::UndeclaredStateRead => "undeclared_state_read",
         ErrorCode::UndeclaredStateWrite => "undeclared_state_write",
         ErrorCode::UnsupportedSnapshotVersion => "unsupported_snapshot_version",
+        ErrorCode::UnsupportedRandomDrawAddress => "unsupported_random_draw_address",
         ErrorCode::ValueOutOfRange => "value_out_of_range",
     }
 }
@@ -843,6 +898,8 @@ pub struct PluginDescriptor {
     pub schema_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_schemas: Vec<DomainRecordSchema>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub knowledge_schemas: Vec<PluginKnowledgeSchema>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -881,6 +938,15 @@ pub enum SystemDirective {
         after: SimDuration,
         directive: Box<SystemDirective>,
     },
+    /// Queues ingress for the issuing plugin. A zero delay is still admitted
+    /// only at the next boundary cut.
+    EnqueuePluginIngress {
+        after: SimDuration,
+        packet_type: String,
+        priority: i32,
+        payload: Value,
+        affected: Vec<EntityRef>,
+    },
 }
 
 enum SimulationViewState<'a> {
@@ -888,7 +954,7 @@ enum SimulationViewState<'a> {
     Boundary {
         current: &'a RuntimeCurrentState,
         now: SimTime,
-        evidence: &'a RuntimeEvidence,
+        runtime: &'a RuntimeState,
     },
 }
 
@@ -910,7 +976,13 @@ impl SimulationViewState<'_> {
     const fn evidence(&self) -> &RuntimeEvidence {
         match self {
             Self::Runtime(state) => &state.evidence,
-            Self::Boundary { evidence, .. } => evidence,
+            Self::Boundary { runtime, .. } => &runtime.evidence,
+        }
+    }
+
+    const fn runtime(&self) -> &RuntimeState {
+        match self {
+            Self::Runtime(state) | Self::Boundary { runtime: state, .. } => state,
         }
     }
 }
@@ -926,6 +998,10 @@ pub struct SimulationView<'a> {
     proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     record_overlay: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
     proposed_records: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
+    boundary_id: Option<BoundaryId>,
+    proposal_evidence: Option<&'a BTreeSet<EvidenceRef>>,
+    knowledge_overlay:
+        Option<&'a BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>>,
     allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
     allowed_reservations: Option<&'a [ReservationRef]>,
     random_session: Option<RefCell<random::RandomSession>>,
@@ -967,22 +1043,93 @@ impl SimulationView<'_> {
         Ok(self.state.current().knowledge.for_actor(actor))
     }
 
+    /// Queries holder-relative records for an omniscient plugin system.
+    ///
+    /// This enforces the declared `canwu.core.knowledge` read and returns an
+    /// owned projection. It is not an actor-facing authorization API.
+    pub fn knowledge_records(
+        &self,
+        holder: KnowledgeHolderRef,
+        query: &KnowledgeQuery,
+    ) -> Result<canwu_knowledge::KnowledgeQueryResult, CanwuError> {
+        self.require_read(&StateKey::core_knowledge())?;
+        let result = if let Some(overlay) = self.knowledge_overlay {
+            self.state.current().knowledge.query_with_overlay(
+                holder,
+                query,
+                self.boundary_id,
+                overlay,
+            )
+        } else {
+            self.state
+                .current()
+                .knowledge
+                .query_current(holder, query, self.boundary_id)
+        };
+        result.map_err(|error| match error {
+            canwu_knowledge::KnowledgeQueryError::ReadCutUnavailable => CanwuError::new(
+                ErrorCode::KnowledgeReadCutUnavailable,
+                "knowledge cursor read cut is no longer available",
+            ),
+            canwu_knowledge::KnowledgeQueryError::InvalidLimit => CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "knowledge query page size is outside the supported range",
+            ),
+            canwu_knowledge::KnowledgeQueryError::InvalidCursor
+            | canwu_knowledge::KnowledgeQueryError::InvalidLedger
+            | canwu_knowledge::KnowledgeQueryError::Encoding => CanwuError::new(
+                ErrorCode::InvalidKnowledgeRecord,
+                "knowledge query, cursor, or ledger is invalid",
+            ),
+        })
+    }
+
     /// Resolves an exact command ID from the retained runtime journal in O(1).
     ///
-    /// A command that has already been sealed into a live archive is not
-    /// available through this view and returns `None`.
+    /// An archived command remains valid identity evidence, but its payload is
+    /// no longer available through this view: lookup returns
+    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means the ID has
+    /// neither retained content nor a committed archive receipt.
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
-        Ok(self.state.evidence().retained_command(id))
+        let retained = self.state.evidence().retained_command(id);
+        if retained.is_none()
+            && self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Command(id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "command identity is archived; payload inspection requires an archive provider",
+            ));
+        }
+        Ok(retained)
     }
 
     /// Resolves an exact event ID from the retained runtime journal in O(1).
     ///
-    /// An event that has already been sealed into a live archive is not
-    /// available through this view and returns `None`.
+    /// An archived event remains valid identity evidence, but its payload is
+    /// no longer available through this view: lookup returns
+    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means the ID has
+    /// neither retained content nor a committed archive receipt.
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
-        Ok(self.state.evidence().retained_event(id))
+        let retained = self.state.evidence().retained_event(id);
+        if retained.is_none()
+            && self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Event(id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "event identity is archived; payload inspection requires an archive provider",
+            ));
+        }
+        Ok(retained)
     }
 
     pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
@@ -994,6 +1141,18 @@ impl SimulationView<'_> {
             return Ok(None);
         }
         let record = self.state.evidence().retained_ingress(id);
+        if record.is_none()
+            && self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Ingress(id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "ingress identity is archived; payload inspection requires an archive provider",
+            ));
+        }
         if let (Some(owner), Some(record)) = (self.ingress_plugin, record)
             && !matches!(
                 &record.payload,
@@ -1040,6 +1199,165 @@ impl SimulationView<'_> {
         self.proposed_domain_record(reference.as_untyped())
     }
 
+    /// Returns the exact evidence reference assigned to a domain-record
+    /// version proposed earlier in the current boundary.
+    pub fn proposed_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.kind))?;
+        Ok(self.proposal_evidence.and_then(|evidence| {
+            evidence.iter().find_map(|item| match item {
+                EvidenceRef::DomainRecordVersion(version) if version.record == *reference => {
+                    Some(version.clone())
+                }
+                _ => None,
+            })
+        }))
+    }
+
+    /// Returns whether an exact domain-record version reference is valid at
+    /// this proposal-visible cut.
+    ///
+    /// This validates both the record identity/version and its establishment
+    /// source. Earlier same-boundary proposals are considered before retained
+    /// or archived runtime evidence.
+    pub fn domain_record_version_evidence_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<bool, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.record.kind))?;
+        if let Some(proposed) = self.proposed_domain_record_version(&reference.record)? {
+            return Ok(proposed == *reference);
+        }
+        Ok(!matches!(
+            validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(self.state.runtime()),
+                &EvidenceRef::DomainRecordVersion(reference.clone()),
+            ),
+            validation::EvidenceAvailability::Missing
+        ))
+    }
+
+    /// Returns a bounded, deterministic projection of records of one kind.
+    ///
+    /// Same-boundary overlays take precedence over current state. Records are
+    /// ordered by their canonical reference, so result order is replay stable.
+    pub fn domain_records_of_kind(
+        &self,
+        kind: &DomainRecordKind,
+        limit: usize,
+    ) -> Result<Vec<DomainRecord>, CanwuError> {
+        self.domain_records_of_kind_after(kind, None, limit)
+    }
+
+    /// Returns one bounded deterministic page of records after a canonical
+    /// record-reference cursor.
+    ///
+    /// The cursor is exclusive and must name the same kind. This keeps plugin
+    /// scans bounded without imposing a 10,000-record lifetime ceiling on a
+    /// domain kind. Same-boundary overlays retain the same precedence as
+    /// [`Self::domain_records_of_kind`].
+    pub fn domain_records_of_kind_after(
+        &self,
+        kind: &DomainRecordKind,
+        after: Option<&DomainRecordRef>,
+        limit: usize,
+    ) -> Result<Vec<DomainRecord>, CanwuError> {
+        const MAX_DOMAIN_RECORD_QUERY_LIMIT: usize = 10_000;
+        self.require_read(&records::record_state_key(kind))?;
+        if limit == 0 || limit > MAX_DOMAIN_RECORD_QUERY_LIMIT {
+            return Err(CanwuError::new(
+                ErrorCode::ValueOutOfRange,
+                format!(
+                    "domain-record query limit must be between 1 and {MAX_DOMAIN_RECORD_QUERY_LIMIT}"
+                ),
+            ));
+        }
+        if after.is_some_and(|cursor| cursor.kind != *kind) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "domain-record page cursor has the wrong kind",
+            ));
+        }
+
+        let mut records = BTreeMap::new();
+        for (reference, record) in &self.state.current().domain_records {
+            if reference.kind == *kind {
+                records.insert(reference.clone(), record.clone());
+            }
+        }
+        for overlay in [self.record_overlay, self.proposed_records]
+            .into_iter()
+            .flatten()
+        {
+            for (reference, record) in overlay {
+                if reference.kind == *kind {
+                    records.insert(reference.clone(), record.clone());
+                }
+            }
+        }
+        Ok(records
+            .into_iter()
+            .filter(|(reference, _)| after.is_none_or(|cursor| reference > cursor))
+            .map(|(_, record)| record)
+            .take(limit)
+            .collect())
+    }
+
+    /// Finds committed knowledge changes produced with an exact correlation.
+    ///
+    /// This supports next-boundary operation finalization without granting a
+    /// plugin unrestricted access to unrelated knowledge payloads.
+    pub fn knowledge_changes_by_correlation(
+        &self,
+        plugin: &str,
+        producer_correlation: &str,
+    ) -> Result<Vec<BoundaryKnowledgeChange>, CanwuError> {
+        self.require_read(&StateKey::core_knowledge())?;
+        Ok(self
+            .state
+            .evidence()
+            .boundaries
+            .iter()
+            .flat_map(|boundary| &boundary.knowledge_changes)
+            .filter(|change| {
+                change.plugin == plugin
+                    && change.producer_correlation.as_deref() == Some(producer_correlation)
+            })
+            .cloned()
+            .collect())
+    }
+
+    /// Finds committed knowledge changes whose producer correlation begins
+    /// with a deterministic operation prefix.
+    ///
+    /// The prefix remains plugin-scoped. This is intended for bounded
+    /// multi-holder operation finalization where every holder batch must keep
+    /// a unique full correlation value.
+    pub fn knowledge_changes_by_correlation_prefix(
+        &self,
+        plugin: &str,
+        producer_correlation_prefix: &str,
+    ) -> Result<Vec<BoundaryKnowledgeChange>, CanwuError> {
+        self.require_read(&StateKey::core_knowledge())?;
+        Ok(self
+            .state
+            .evidence()
+            .boundaries
+            .iter()
+            .flat_map(|boundary| &boundary.knowledge_changes)
+            .filter(|change| {
+                change.plugin == plugin
+                    && change
+                        .producer_correlation
+                        .as_deref()
+                        .is_some_and(|value| value.starts_with(producer_correlation_prefix))
+            })
+            .cloned()
+            .collect())
+    }
+
     pub fn reservation(
         &self,
         reservation: &ReservationRef,
@@ -1076,6 +1394,52 @@ impl SimulationView<'_> {
             ));
         };
         session.borrow_mut().range(stream, upper_exclusive, purpose)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn random_range_for_operation(
+        &self,
+        stream: &RandomStreamKey,
+        evidence: EvidenceRef,
+        operation_kind: &str,
+        application_operation_id: &str,
+        target: RandomOperationTarget,
+        draw_slot: u32,
+        upper_exclusive: u64,
+        purpose: &str,
+    ) -> Result<u64, CanwuError> {
+        let available = self
+            .proposal_evidence
+            .is_some_and(|values| values.contains(&evidence))
+            || validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(self.state.runtime()),
+                &evidence,
+            ) == validation::EvidenceAvailability::Retained;
+        if !available {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomOperationEvidence,
+                "operation-keyed random draw references unavailable evidence",
+            ));
+        }
+        let Some(session) = &self.random_session else {
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredRandomStream,
+                format!(
+                    "system {} has no declared random streams",
+                    self.reader.unwrap_or("unscoped caller")
+                ),
+            ));
+        };
+        session.borrow_mut().range_for_operation(
+            stream,
+            evidence,
+            operation_kind,
+            application_operation_id,
+            target,
+            draw_slot,
+            upper_exclusive,
+            purpose,
+        )
     }
 
     pub fn component(
@@ -1190,6 +1554,8 @@ pub struct PluginRegistry {
     reservation_offerers: BTreeMap<StateKey, (String, String)>,
     random_stream_owners: BTreeMap<RandomStreamKey, (String, String)>,
     record_schemas: records::DomainRecordSchemas,
+    knowledge_schemas: knowledge::KnowledgeSchemas,
+    knowledge_kind_owners: knowledge::KnowledgeKindOwners,
 }
 
 #[derive(Clone)]
@@ -1771,6 +2137,8 @@ pub struct SimulationSnapshot {
     next_boundary_id: u64,
     #[serde(default)]
     next_random_draw_id: u64,
+    #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
+    next_knowledge_record_id: u64,
     next_schedule_sequence: u64,
     next_correlation_id: u64,
     #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
@@ -1803,7 +2171,8 @@ pub struct ReplayJournal {
     pub final_revision: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct ReplayJournalWire {
     engine_version: String,
     snapshot_format_version: u32,
@@ -1835,30 +2204,8 @@ impl<'de> Deserialize<'de> for ReplayJournal {
     where
         D: serde::Deserializer<'de>,
     {
-        let wire = ReplayJournalWire::deserialize(deserializer)?;
-        let run_configuration = wire
-            .run_configuration
-            .map_or_else(|| inferred_run_configuration(&wire.run_manifest), Ok)
-            .map_err(serde::de::Error::custom)?;
-        Ok(Self {
-            engine_version: wire.engine_version,
-            snapshot_format_version: wire.snapshot_format_version,
-            root_seed: wire.root_seed,
-            run_manifest: wire.run_manifest,
-            run_manifest_hash: wire.run_manifest_hash,
-            run_configuration,
-            plugin_descriptors: wire.plugin_descriptors,
-            plugin_registration_closed: wire.plugin_registration_closed,
-            commands: wire.commands,
-            command_attempts: wire.command_attempts,
-            ingress: wire.ingress,
-            boundaries: wire.boundaries,
-            final_time: wire.final_time,
-            checkpoint_hash: wire.checkpoint_hash,
-            commitment_format_version: wire.commitment_format_version,
-            revision_format_version: wire.revision_format_version,
-            final_revision: wire.final_revision,
-        })
+        let value = Value::deserialize(deserializer)?;
+        legacy_v4::deserialize_replay_value(&value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -2062,6 +2409,7 @@ impl Simulation {
                     next_ingress_id: 1,
                     next_boundary_id: 1,
                     next_random_draw_id: 1,
+                    next_knowledge_record_id: 1,
                     next_schedule_sequence: 1,
                     next_correlation_id: 1,
                     next_decision_trace_id: 1,
@@ -2098,6 +2446,9 @@ impl Simulation {
                     ingress: Vec::new(),
                     boundaries: Vec::new(),
                     random_draws: Vec::new(),
+                    archived_segment_headers: Vec::new(),
+                    archived_evidence_receipts: BTreeMap::new(),
+                    keyed_draw_reservations: Vec::new(),
                 },
             },
             schema,
@@ -2336,6 +2687,9 @@ impl Simulation {
             EventKind::Plugin { plugin, event_type } => {
                 self.plugins.event_audience(plugin, event_type)
             }
+            EventKind::KnowledgePublished { holder, .. } => {
+                EventAudience::KnowledgeHolder(holder.clone())
+            }
             EventKind::MoveOrdered { .. }
             | EventKind::ArmyArrived { .. }
             | EventKind::ReportDispatched { .. }
@@ -2450,6 +2804,7 @@ impl Simulation {
             next_ingress_id: self.state.counters.next_ingress_id,
             next_boundary_id: self.state.counters.next_boundary_id,
             next_random_draw_id: self.state.counters.next_random_draw_id,
+            next_knowledge_record_id: self.state.counters.next_knowledge_record_id,
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
             next_decision_trace_id: self.state.counters.next_decision_trace_id,
@@ -2600,6 +2955,7 @@ impl Simulation {
             next_ingress_id: self.state.counters.next_ingress_id,
             next_boundary_id: self.state.counters.next_boundary_id,
             next_random_draw_id: self.state.counters.next_random_draw_id,
+            next_knowledge_record_id: self.state.counters.next_knowledge_record_id,
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
             next_decision_trace_id: self.state.counters.next_decision_trace_id,
@@ -2707,8 +3063,18 @@ impl Simulation {
     }
 
     pub fn from_snapshot(snapshot: SimulationSnapshot) -> Result<Self, CanwuError> {
+        if snapshot.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
+            || snapshot.engine_version != ENGINE_VERSION
+        {
+            return Err(CanwuError::new(
+                ErrorCode::UnsupportedSnapshotVersion,
+                format!(
+                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; legacy format-4 JSON must use the strict JSON loader"
+                ),
+            ));
+        }
         let snapshot = migrate_snapshot(snapshot)?;
-        validate_scenario(&Scenario {
+        validate_scenario_state(&Scenario {
             start_time: snapshot.now,
             world: snapshot.world.clone(),
             knowledge: snapshot.knowledge.clone(),
@@ -2823,6 +3189,7 @@ impl Simulation {
                     next_ingress_id: snapshot.next_ingress_id,
                     next_boundary_id: snapshot.next_boundary_id,
                     next_random_draw_id: snapshot.next_random_draw_id,
+                    next_knowledge_record_id: snapshot.next_knowledge_record_id,
                     next_schedule_sequence: snapshot.next_schedule_sequence,
                     next_correlation_id: snapshot.next_correlation_id,
                     next_decision_trace_id: snapshot.next_decision_trace_id,
@@ -2863,6 +3230,9 @@ impl Simulation {
                     ingress: snapshot.ingress,
                     boundaries: snapshot.boundaries,
                     random_draws: snapshot.random_draws,
+                    archived_segment_headers: Vec::new(),
+                    archived_evidence_receipts: BTreeMap::new(),
+                    keyed_draw_reservations: Vec::new(),
                 },
             },
             schema: snapshot.schema,
@@ -2874,12 +3244,7 @@ impl Simulation {
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
-        let snapshot = serde_json::from_str(json).map_err(|error| {
-            CanwuError::new(
-                ErrorCode::InvalidSnapshot,
-                format!("could not deserialize snapshot: {error}"),
-            )
-        })?;
+        let snapshot = legacy_v4::deserialize_snapshot_json(json)?;
         Self::from_snapshot(snapshot)
     }
 
@@ -2899,12 +3264,7 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let snapshot = serde_json::from_str(json).map_err(|error| {
-            CanwuError::new(
-                ErrorCode::InvalidSnapshot,
-                format!("could not deserialize snapshot: {error}"),
-            )
-        })?;
+        let snapshot = legacy_v4::deserialize_snapshot_json(json)?;
         Self::from_snapshot_with_plugins(snapshot, plugins)
     }
 
@@ -3300,6 +3660,31 @@ fn validate_directives(
                     entity_exists,
                     std::slice::from_ref(directive),
                 )?;
+            }
+            SystemDirective::EnqueuePluginIngress {
+                after,
+                packet_type,
+                affected,
+                ..
+            } => {
+                if packet_type.trim().is_empty() || packet_type != packet_type.trim() {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        "plugin ingress type must be non-empty and canonical",
+                    ));
+                }
+                if *after < SimDuration::ZERO {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidDuration,
+                        "plugin command ingress delay cannot be negative",
+                    ));
+                }
+                if affected.iter().any(|entity| !entity_exists(entity)) {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!("plugin {plugin} queued ingress for a missing entity"),
+                    ));
+                }
             }
             SystemDirective::Emit { .. } => {}
         }
@@ -3737,6 +4122,16 @@ fn canonicalize_scenario(scenario: &mut Scenario) {
 }
 
 fn validate_scenario(scenario: &Scenario) -> Result<(), CanwuError> {
+    if !scenario.knowledge.records.is_empty() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidKnowledgeRecord,
+            "scenario authors cannot preselect generic knowledge IDs, times, or origins",
+        ));
+    }
+    validate_scenario_state(scenario)
+}
+
+fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
     validate_unique_ids(&scenario.world.people, |value| value.id, "person")?;
     validate_unique_ids(&scenario.world.governments, |value| value.id, "government")?;
     validate_unique_ids(&scenario.world.territories, |value| value.id, "territory")?;
@@ -4107,6 +4502,48 @@ mod tests {
 
     use super::*;
 
+    #[derive(Default)]
+    struct TestArchive {
+        segments: RefCell<BTreeMap<String, EvidenceJournalSegment>>,
+    }
+
+    impl ArchiveProvider for TestArchive {
+        fn load_evidence_segment(
+            &self,
+            segment_id: &str,
+        ) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
+            Ok(self.segments.borrow().get(segment_id).cloned())
+        }
+    }
+
+    impl ArchiveStore for TestArchive {
+        fn store_evidence_segment(
+            &self,
+            segment: &EvidenceJournalSegment,
+        ) -> Result<ArchiveStoreOutcome, CanwuError> {
+            let segment_id = segment
+                .archive
+                .as_ref()
+                .ok_or_else(|| CanwuError::new(ErrorCode::InvalidArchive, "missing archive index"))?
+                .header
+                .segment_id
+                .clone();
+            let mut segments = self.segments.borrow_mut();
+            if let Some(existing) = segments.get(&segment_id) {
+                return if existing == segment {
+                    Ok(ArchiveStoreOutcome::AlreadyPresent)
+                } else {
+                    Err(CanwuError::new(
+                        ErrorCode::InvalidArchive,
+                        "content-addressed segment ID is already bound to different bytes",
+                    ))
+                };
+            }
+            segments.insert(segment_id, segment.clone());
+            Ok(ArchiveStoreOutcome::Stored)
+        }
+    }
+
     #[derive(Debug, Eq, PartialEq)]
     struct CacheFingerprint {
         journals: [String; 5],
@@ -4150,6 +4587,511 @@ mod tests {
                 $hash
             }
         };
+    }
+
+    struct KnowledgePublicationPlugin;
+
+    fn fixture_knowledge_schema() -> KnowledgeSchemaId {
+        KnowledgeSchemaId::new(KnowledgeRecordKind::new("fixture.knowledge", "notice"), 1)
+    }
+
+    fn fixture_knowledge_draft(value: i64) -> KnowledgeRecordDraft {
+        KnowledgeRecordDraft {
+            schema: fixture_knowledge_schema(),
+            subjects: Vec::new(),
+            payload: serde_json::json!({ "value": value }),
+            as_of: None,
+            confidence_per_mille: 900,
+            origin: KnowledgeOrigin {
+                method: "observation".to_owned(),
+                evidence: Vec::new(),
+            },
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+        }
+    }
+
+    fn phase4_publish_knowledge(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![
+                BoundaryDirective::PublishKnowledge {
+                    holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                    visibility: StateVisibility::SameBoundary,
+                    producer_correlation: Some("phase4-visible".to_owned()),
+                    records: vec![fixture_knowledge_draft(1)],
+                    summary: "Publish a same-boundary observation".to_owned(),
+                },
+                BoundaryDirective::PublishKnowledge {
+                    holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                    visibility: StateVisibility::NextBoundary,
+                    producer_correlation: Some("phase4-deferred".to_owned()),
+                    records: vec![fixture_knowledge_draft(2)],
+                    summary: "Publish a deferred observation".to_owned(),
+                },
+            ],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn phase13_publish_knowledge(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::PublishKnowledge {
+                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: Some("phase13-visible".to_owned()),
+                records: vec![fixture_knowledge_draft(3)],
+                summary: "Publish a same-boundary projection".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn expect_holder_knowledge(
+        view: &SimulationView<'_>,
+        expected: usize,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let result = view.knowledge_records(
+            KnowledgeHolderRef::Person(PersonId::new(1)),
+            &KnowledgeQuery {
+                view: KnowledgeHistoryView::FullHistory,
+                ..KnowledgeQuery::default()
+            },
+        )?;
+        if result.records.len() != expected {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidBoundary,
+                format!(
+                    "knowledge phase view expected {expected} records but observed {}",
+                    result.records.len()
+                ),
+            ));
+        }
+        Ok(BoundaryProposal::default())
+    }
+
+    fn phase4_peer(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        expect_holder_knowledge(view, 0)
+    }
+
+    fn phase5_observer(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        expect_holder_knowledge(view, 1)
+    }
+
+    fn phase13_peer(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        expect_holder_knowledge(view, 1)
+    }
+
+    fn phase14_observer(
+        view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        expect_holder_knowledge(view, 2)
+    }
+
+    impl SimulationPlugin for KnowledgePublicationPlugin {
+        fn name(&self) -> &'static str {
+            "fixture-knowledge-publication"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000030");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_knowledge_schema(PluginKnowledgeSchema {
+                id: fixture_knowledge_schema(),
+                schema_hash: "1000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: Vec::new(),
+            })?;
+            let grant = KnowledgeWriteGrant {
+                schema: fixture_knowledge_schema(),
+                visibilities: vec![StateVisibility::SameBoundary, StateVisibility::NextBoundary],
+            };
+            let mut phase4 = BoundarySystemContract::new(
+                "a-phase4-publisher",
+                BoundaryPhase::PerceptionAndAttentionRefresh,
+                SystemCadence::Daily,
+            );
+            phase4.knowledge_writes = vec![grant.clone()];
+            registrar.register_boundary_system(phase4, phase4_publish_knowledge)?;
+
+            let mut phase4_peer_contract = BoundarySystemContract::new(
+                "z-phase4-peer",
+                BoundaryPhase::PerceptionAndAttentionRefresh,
+                SystemCadence::Daily,
+            );
+            phase4_peer_contract.reads = vec![StateKey::core_knowledge()];
+            registrar.register_boundary_system(phase4_peer_contract, phase4_peer)?;
+
+            let mut phase5 = BoundarySystemContract::new(
+                "phase5-observer",
+                BoundaryPhase::DecisionAndAcceptedEffectIntake,
+                SystemCadence::Daily,
+            );
+            phase5.reads = vec![StateKey::core_knowledge()];
+            registrar.register_boundary_system(phase5, phase5_observer)?;
+
+            let mut phase13 = BoundarySystemContract::new(
+                "a-phase13-publisher",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            phase13.knowledge_writes = vec![KnowledgeWriteGrant {
+                schema: fixture_knowledge_schema(),
+                visibilities: vec![StateVisibility::SameBoundary],
+            }];
+            registrar.register_boundary_system(phase13, phase13_publish_knowledge)?;
+
+            let mut phase13_peer_contract = BoundarySystemContract::new(
+                "z-phase13-peer",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            phase13_peer_contract.reads = vec![StateKey::core_knowledge()];
+            registrar.register_boundary_system(phase13_peer_contract, phase13_peer)?;
+
+            let mut diagnostic_observer = BoundarySystemContract::new(
+                "phase14-observer",
+                BoundaryPhase::SaveReplayAndDiagnosticHashing,
+                SystemCadence::Daily,
+            );
+            diagnostic_observer.reads = vec![StateKey::core_knowledge()];
+            registrar.register_boundary_system(diagnostic_observer, phase14_observer)
+        }
+    }
+
+    struct PendingEvidencePublicationPlugin;
+
+    struct ArchivedEvidencePublicationPlugin;
+
+    fn publish_from_archived_boundary(
+        _view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        if context.boundary_id != BoundaryId::new(2) {
+            return Ok(BoundaryProposal::default());
+        }
+        let mut draft = fixture_knowledge_draft(8);
+        draft.origin.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::PublishKnowledge {
+                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: Some("archived-boundary-evidence".to_owned()),
+                records: vec![draft],
+                summary: "Publish from a verified archived boundary identity".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for ArchivedEvidencePublicationPlugin {
+        fn name(&self) -> &'static str {
+            "fixture-archived-evidence-publication"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000033");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_knowledge_schema(PluginKnowledgeSchema {
+                id: fixture_knowledge_schema(),
+                schema_hash: "3000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: Vec::new(),
+            })?;
+            let mut phase13 = BoundarySystemContract::new(
+                "publish-archived-evidence",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            phase13.knowledge_writes = vec![KnowledgeWriteGrant {
+                schema: fixture_knowledge_schema(),
+                visibilities: vec![StateVisibility::SameBoundary],
+            }];
+            registrar.register_boundary_system(phase13, publish_from_archived_boundary)
+        }
+    }
+
+    fn pending_evidence_record_ref() -> DomainRecordRef {
+        DomainRecordRef {
+            kind: DomainRecordKind::new("fixture.evidence", "marker"),
+            id: "primary".to_owned(),
+        }
+    }
+
+    fn phase7_create_pending_evidence(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Create {
+                    record: DomainRecordDraft {
+                        reference: pending_evidence_record_ref(),
+                        payload: serde_json::json!({ "code": "alpha" }),
+                        references: Vec::new(),
+                    },
+                },
+                summary: "Create proposal-visible evidence".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn phase13_publish_pending_evidence(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let record = view
+            .domain_record(&pending_evidence_record_ref())?
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::EvidenceUnavailable,
+                    "phase-7 evidence record is unavailable",
+                )
+            })?;
+        let mut draft = fixture_knowledge_draft(7);
+        draft.origin.evidence = vec![EvidenceRef::DomainRecordVersion(DomainRecordVersionRef {
+            record: record.reference.clone(),
+            version: record.version,
+            established_by: DomainRecordVersionSource::BoundaryChange {
+                boundary: context.boundary_id,
+                change_index: 0,
+            },
+        })];
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::PublishKnowledge {
+                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: Some("pending-evidence".to_owned()),
+                records: vec![draft],
+                summary: "Publish from an earlier committed stage".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for PendingEvidencePublicationPlugin {
+        fn name(&self) -> &'static str {
+            "fixture-pending-evidence-publication"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000031");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_record_schema(DomainRecordSchema::new(
+                pending_evidence_record_ref().kind,
+                DomainRecordClass::Record,
+            ))?;
+            registrar.register_knowledge_schema(PluginKnowledgeSchema {
+                id: fixture_knowledge_schema(),
+                schema_hash: "2000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: Vec::new(),
+            })?;
+            let mut phase7 = BoundarySystemContract::new(
+                "phase7-create-evidence",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            );
+            phase7.writes = vec![records::record_state_key(
+                &pending_evidence_record_ref().kind,
+            )];
+            phase7.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(phase7, phase7_create_pending_evidence)?;
+
+            let mut phase13 = BoundarySystemContract::new(
+                "phase13-publish-evidence",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            );
+            phase13.reads = vec![records::record_state_key(
+                &pending_evidence_record_ref().kind,
+            )];
+            phase13.knowledge_writes = vec![KnowledgeWriteGrant {
+                schema: fixture_knowledge_schema(),
+                visibilities: vec![StateVisibility::SameBoundary],
+            }];
+            registrar.register_boundary_system(phase13, phase13_publish_pending_evidence)
+        }
+    }
+
+    struct KeyedRandomPlugin;
+
+    fn keyed_fixture_stream() -> RandomStreamKey {
+        RandomStreamKey::new("fixture-keyed-random", "resolution", 1)
+    }
+
+    fn keyed_rollback_stream() -> RandomStreamKey {
+        RandomStreamKey::new("fixture-keyed-rollback", "resolution", 1)
+    }
+
+    fn keyed_random_operations(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        for id in &context.admitted_ingress {
+            let Some(record) = view.ingress(*id)? else {
+                continue;
+            };
+            let IngressPayload::Plugin { payload, .. } = &record.payload else {
+                continue;
+            };
+            let operation = payload
+                .get("operation")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    CanwuError::new(ErrorCode::InvalidPayload, "operation code is missing")
+                })?;
+            let value = view.random_range_for_operation(
+                &keyed_fixture_stream(),
+                EvidenceRef::Ingress(*id),
+                "resolve",
+                operation,
+                RandomOperationTarget::CanonicalKey(operation.to_owned()),
+                0,
+                10_000,
+                "stable resolution",
+            )?;
+            let retry = view.random_range_for_operation(
+                &keyed_fixture_stream(),
+                EvidenceRef::Ingress(*id),
+                "resolve",
+                operation,
+                RandomOperationTarget::CanonicalKey(operation.to_owned()),
+                0,
+                10_000,
+                "stable resolution",
+            )?;
+            if value != retry {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomDraw,
+                    "exact keyed retry changed its result",
+                ));
+            }
+        }
+        let _ = view.random_range(&keyed_fixture_stream(), 10_000, "sequential control draw")?;
+        Ok(BoundaryProposal::default())
+    }
+
+    impl SimulationPlugin for KeyedRandomPlugin {
+        fn name(&self) -> &'static str {
+            "fixture-keyed-random"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000032");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "operation".to_owned(),
+                description: "Admit one neutral keyed random operation".to_owned(),
+                class: IngressClass::Information,
+                payload_schema: PayloadSchema::Any,
+            })?;
+            let mut contract = BoundarySystemContract::new(
+                "resolve-operations",
+                BoundaryPhase::StrategicAggregation,
+                SystemCadence::EventDriven,
+            );
+            contract.reads = vec![StateKey::core_ingress()];
+            contract.random_streams = vec![keyed_fixture_stream()];
+            registrar.register_boundary_system(contract, keyed_random_operations)
+        }
+    }
+
+    struct KeyedRollbackPlugin;
+
+    fn stage_keyed_draw_before_later_failure(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let ingress = *context.admitted_ingress.first().ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::EvidenceUnavailable,
+                "keyed rollback fixture requires admitted ingress",
+            )
+        })?;
+        let _ = view.random_range_for_operation(
+            &keyed_rollback_stream(),
+            EvidenceRef::Ingress(ingress),
+            "resolve",
+            "rollback-operation",
+            RandomOperationTarget::CanonicalKey("rollback-target".to_owned()),
+            0,
+            10_000,
+            "rollback fixture",
+        )?;
+        Ok(BoundaryProposal::default())
+    }
+
+    fn reject_after_keyed_draw(
+        _view: &SimulationView<'_>,
+        _context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        Ok(BoundaryProposal {
+            directives: vec![BoundaryDirective::PublishKnowledge {
+                holder: KnowledgeHolderRef::Person(PersonId::new(1)),
+                visibility: StateVisibility::SameBoundary,
+                producer_correlation: Some("undeclared-after-keyed-draw".to_owned()),
+                records: vec![fixture_knowledge_draft(99)],
+                summary: "Trigger a later validation failure".to_owned(),
+            }],
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for KeyedRollbackPlugin {
+        fn name(&self) -> &'static str {
+            "fixture-keyed-rollback"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000034");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "operation".to_owned(),
+                description: "Admit one rollback probe".to_owned(),
+                class: IngressClass::Information,
+                payload_schema: PayloadSchema::Any,
+            })?;
+            let mut draw = BoundarySystemContract::new(
+                "a-stage-keyed-draw",
+                BoundaryPhase::StrategicAggregation,
+                SystemCadence::EventDriven,
+            );
+            draw.reads = vec![StateKey::core_ingress()];
+            draw.random_streams = vec![keyed_rollback_stream()];
+            registrar.register_boundary_system(draw, stage_keyed_draw_before_later_failure)?;
+
+            registrar.register_boundary_system(
+                BoundarySystemContract::new(
+                    "z-reject-after-keyed-draw",
+                    BoundaryPhase::PerspectiveAndReportMaterialization,
+                    SystemCadence::EventDriven,
+                ),
+                reject_after_keyed_draw,
+            )
+        }
     }
 
     struct AuthorityPlugin;
@@ -5200,15 +6142,22 @@ mod tests {
         }
     }
 
-    fn rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) {
+    fn try_rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) -> Result<(), CanwuError> {
         let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
         for boundary in &mut snapshot.boundaries {
             boundary.previous_hash.clone_from(&previous_hash);
-            boundary.hash =
-                compute_boundary_hash(boundary).expect("tampered boundary should still hash");
+            boundary.hash = compute_boundary_hash(boundary)?;
             previous_hash.clone_from(&boundary.hash);
         }
-        refresh_snapshot_commitments_and_checkpoint(snapshot);
+        if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {
+            snapshot.commitment_roots = Some(snapshot_commitment_roots(snapshot)?);
+        }
+        snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)?;
+        Ok(())
+    }
+
+    fn rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) {
+        try_rehash_tampered_snapshot(snapshot).expect("tampered snapshot should still hash");
     }
 
     fn refresh_snapshot_commitments_and_checkpoint(snapshot: &mut SimulationSnapshot) {
@@ -5917,6 +6866,128 @@ mod tests {
             relay.writes = vec![StateKey::new("generated-ingress-fixture", "received")];
             relay.visibility = StateVisibility::SameBoundary;
             registrar.register_boundary_system(relay, relay_generated_ingress)
+        }
+    }
+
+    struct CrossPluginProducer;
+    struct CrossPluginConsumer;
+
+    fn produce_cross_plugin_ingress(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let mut directives = Vec::new();
+        for ingress_id in &context.admitted_ingress {
+            let Some(record) = view.ingress(*ingress_id)? else {
+                continue;
+            };
+            if matches!(
+                &record.payload,
+                IngressPayload::Plugin {
+                    plugin,
+                    packet_type,
+                    ..
+                } if plugin == "cross-producer" && packet_type == "start"
+            ) {
+                directives.push(BoundaryDirective::SchedulePluginIngress {
+                    target_plugin: "cross-consumer".to_owned(),
+                    after: SimDuration::ZERO,
+                    packet_type: "accept".to_owned(),
+                    priority: 3,
+                    payload: serde_json::json!({ "label": "relayed" }),
+                    affected: vec![EntityRef::Person(PersonId::new(1))],
+                });
+            }
+        }
+        Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        })
+    }
+
+    fn consume_cross_plugin_ingress(
+        view: &SimulationView<'_>,
+        context: &BoundaryContext,
+    ) -> Result<BoundaryProposal, CanwuError> {
+        let mut directives = Vec::new();
+        for ingress_id in &context.admitted_ingress {
+            let Some(record) = view.ingress(*ingress_id)? else {
+                continue;
+            };
+            if matches!(
+                &record.payload,
+                IngressPayload::Plugin {
+                    plugin,
+                    packet_type,
+                    ..
+                } if plugin == "cross-consumer" && packet_type == "accept"
+            ) {
+                directives.push(BoundaryDirective::SetComponent {
+                    state: StateKey::new("cross-consumer", "received"),
+                    entity: EntityRef::Person(PersonId::new(1)),
+                    component: "relayed".to_owned(),
+                    value: Value::Bool(true),
+                    summary: "Record cross-plugin ingress delivery".to_owned(),
+                });
+            }
+        }
+        Ok(BoundaryProposal {
+            directives,
+            ..BoundaryProposal::default()
+        })
+    }
+
+    impl SimulationPlugin for CrossPluginProducer {
+        fn name(&self) -> &'static str {
+            "cross-producer"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000034");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "start".to_owned(),
+                description: "Start one cross-plugin relay".to_owned(),
+                class: IngressClass::Information,
+                payload_schema: object_payload_schema("label"),
+            })?;
+            let mut contract = BoundarySystemContract::new(
+                "produce-relay",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::EventDriven,
+            );
+            contract.reads = vec![StateKey::core_ingress()];
+            contract.plugin_ingress_targets = vec![PluginIngressTarget {
+                target_plugin: "cross-consumer".to_owned(),
+                packet_type: "accept".to_owned(),
+            }];
+            registrar.register_boundary_system(contract, produce_cross_plugin_ingress)
+        }
+    }
+
+    impl SimulationPlugin for CrossPluginConsumer {
+        fn name(&self) -> &'static str {
+            "cross-consumer"
+        }
+
+        test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000035");
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            registrar.register_ingress(PluginIngressDescriptor {
+                name: "accept".to_owned(),
+                description: "Accept one cross-plugin relay".to_owned(),
+                class: IngressClass::Information,
+                payload_schema: object_payload_schema("label"),
+            })?;
+            let mut contract = BoundarySystemContract::new(
+                "consume-relay",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::EventDriven,
+            );
+            contract.reads = vec![StateKey::core_ingress()];
+            contract.writes = vec![StateKey::new("cross-consumer", "received")];
+            contract.visibility = StateVisibility::SameBoundary;
+            registrar.register_boundary_system(contract, consume_cross_plugin_ingress)
         }
     }
 
@@ -8228,6 +9299,400 @@ mod tests {
     }
 
     #[test]
+    fn two_phase_archive_sealing_is_immutable_atomic_idempotent_and_tamper_evident() {
+        let (scenario, _) = demo_scenario();
+        let command = |request_id, revision| {
+            CommandRequest::new(
+                CommandRequestId::new(request_id),
+                revision,
+                CommandEnvelope::new(
+                    Issuer::Debug,
+                    Command::Plugin {
+                        plugin: "journal-command".to_owned(),
+                        command: "noop".to_owned(),
+                        payload: Value::Null,
+                    },
+                ),
+            )
+        };
+        let mut simulation = Simulation::new(141, scenario.clone()).unwrap();
+        simulation.register_plugin(&JournalCommandPlugin).unwrap();
+        let empty_wire = serde_json::to_value(simulation.checkpoint().unwrap()).unwrap();
+        for field in [
+            "archived_segment_manifest_root",
+            "archived_receipt_root",
+            "evidence_dependencies",
+            "evidence_dependency_root",
+            "keyed_draw_reservations",
+            "keyed_reservation_root",
+        ] {
+            assert!(
+                empty_wire.get(field).is_none(),
+                "empty compact continuation must skip {field}"
+            );
+        }
+        simulation
+            .enqueue_command(SimTime::EPOCH, 0, command(1, 0))
+            .unwrap();
+        simulation.step_canonical().unwrap().unwrap();
+        let mut compact = simulation.into_compacted().unwrap();
+        let before = compact.checkpoint().unwrap();
+        assert!(before.archived_segment_manifest_root.is_none());
+        assert!(before.archived_receipt_root.is_none());
+        assert!(!before.evidence_dependencies.is_empty());
+        assert!(before.evidence_dependency_root.is_some());
+        assert!(before.keyed_reservation_root.is_none());
+        let prepared = compact.prepare_evidence_seal().unwrap().unwrap();
+        assert_eq!(compact.checkpoint().unwrap(), before);
+        assert_eq!(
+            prepared.segment.archive.as_ref().unwrap().header.segment_id,
+            prepared.token.segment_id
+        );
+        assert!(
+            !prepared
+                .segment
+                .archive
+                .as_ref()
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+
+        let archive = TestArchive::default();
+        assert_eq!(
+            archive.store_evidence_segment(&prepared.segment).unwrap(),
+            ArchiveStoreOutcome::Stored
+        );
+        assert_eq!(
+            archive.store_evidence_segment(&prepared.segment).unwrap(),
+            ArchiveStoreOutcome::AlreadyPresent
+        );
+        let mut conflicting_segment = prepared.segment.clone();
+        conflicting_segment.commands[0].accepted_at = SimTime::from_minutes(1);
+        let error = archive
+            .store_evidence_segment(&conflicting_segment)
+            .expect_err("a content-addressed ID cannot be rebound to different bytes");
+        assert_eq!(error.code, ErrorCode::InvalidArchive);
+        compact
+            .commit_evidence_seal(&prepared.token, &archive)
+            .unwrap();
+        let committed = compact.checkpoint().unwrap();
+        assert_eq!(committed.archived_segment_headers.len(), 1);
+        assert!(!committed.archived_evidence_receipts.is_empty());
+        assert!(committed.archived_segment_manifest_root.is_some());
+        assert!(committed.archived_receipt_root.is_some());
+        assert!(committed.evidence_dependency_root.is_some());
+        assert!(committed.keyed_reservation_root.is_none());
+        assert!(
+            committed
+                .evidence_dependencies
+                .iter()
+                .all(|dependency| { dependency.requirement == EvidenceRequirement::IdentityOnly })
+        );
+        compact
+            .commit_evidence_seal(&prepared.token, &archive)
+            .expect("repeating the committed token must be idempotent");
+
+        let mut corrupt_provider_segment = prepared.segment.clone();
+        corrupt_provider_segment.commands[0].accepted_at = SimTime::from_minutes(1);
+        let corrupt_provider = TestArchive::default();
+        corrupt_provider
+            .segments
+            .borrow_mut()
+            .insert(prepared.token.segment_id.clone(), corrupt_provider_segment);
+        let error = compact
+            .load_archived_evidence_segment(
+                &committed.archived_evidence_receipts[0].evidence,
+                &corrupt_provider,
+            )
+            .expect_err("provider bytes must reproduce the committed segment index");
+        assert_eq!(error.code, ErrorCode::InvalidArchive);
+
+        let mut tampered_checkpoint = committed.clone();
+        tampered_checkpoint.archived_evidence_receipts[0]
+            .item_commitment
+            .replace_range(..1, "f");
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            tampered_checkpoint,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("a tampered compact receipt must not reconstruct");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut tampered_manifest_root = committed.clone();
+        tampered_manifest_root.archived_segment_manifest_root = Some("0".repeat(64));
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            tampered_manifest_root,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("the archived-segment manifest root must be committed")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut tampered_receipt_root = committed.clone();
+        tampered_receipt_root.archived_receipt_root = Some("0".repeat(64));
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            tampered_receipt_root,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("the archived-receipt root must be committed")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut missing_dependency_root = committed.clone();
+        missing_dependency_root.evidence_dependency_root = None;
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            missing_dependency_root,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("a non-empty dependency vector cannot omit its root")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut payload_dependency = committed.clone();
+        payload_dependency.evidence_dependencies[0].requirement =
+            EvidenceRequirement::PayloadRequired;
+        payload_dependency.evidence_dependency_root = Some(
+            canonical_hash(
+                "canwu.evidence.dependencies.v1",
+                &payload_dependency.evidence_dependencies,
+            )
+            .unwrap(),
+        );
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            payload_dependency,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("payload requirements need an authoritative pending schema")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        let mut reordered_dependencies = committed.clone();
+        reordered_dependencies.evidence_dependencies.reverse();
+        reordered_dependencies.evidence_dependency_root = Some(
+            canonical_hash(
+                "canwu.evidence.dependencies.v1",
+                &reordered_dependencies.evidence_dependencies,
+            )
+            .unwrap(),
+        );
+        let Err(error) = Simulation::from_checkpoint_and_journal(
+            reordered_dependencies,
+            vec![prepared.segment.clone()],
+        ) else {
+            panic!("dependency ordering is part of compact continuation")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+
+        compact
+            .enqueue_command(SimTime::EPOCH, 0, command(2, compact.revision()))
+            .unwrap();
+        compact.step_canonical().unwrap().unwrap();
+        let stale = compact.prepare_evidence_seal().unwrap().unwrap();
+        compact
+            .enqueue_command(SimTime::EPOCH, 0, command(3, compact.revision()))
+            .unwrap();
+        compact.step_canonical().unwrap().unwrap();
+        let stale_archive = TestArchive::default();
+        stale_archive
+            .store_evidence_segment(&stale.segment)
+            .unwrap();
+        let error = compact
+            .commit_evidence_seal(&stale.token, &stale_archive)
+            .expect_err("a changed live cut must reject the prepared token");
+        assert_eq!(error.code, ErrorCode::StaleSealToken);
+
+        let fresh = compact.prepare_evidence_seal().unwrap().unwrap();
+        let missing_archive = TestArchive::default();
+        let before_missing = compact.checkpoint().unwrap();
+        let error = compact
+            .commit_evidence_seal(&fresh.token, &missing_archive)
+            .expect_err("commit must read the stored segment back");
+        assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+        assert_eq!(compact.checkpoint().unwrap(), before_missing);
+    }
+
+    #[test]
+    fn archived_segment_receipts_require_provider_for_payload_reads() {
+        let (scenario, _) = demo_scenario();
+        let mut simulation = Simulation::new(142, scenario).unwrap();
+        simulation
+            .register_plugin(&ArchivedEvidencePublicationPlugin)
+            .unwrap();
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .unwrap();
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .unwrap();
+        let mut segment = simulation
+            .journal_segment_since(EvidenceCursor::default())
+            .expect("the complete retained segment should materialize");
+        let (archive_index, receipts) = persistence::evidence_archive_index(&segment)
+            .expect("the segment should produce a verified evidence index");
+        segment.archive = Some(archive_index);
+        let boundary_evidence = EvidenceRef::Boundary(BoundaryId::new(1));
+        let boundary_receipt = receipts
+            .into_iter()
+            .find(|receipt| receipt.evidence == boundary_evidence)
+            .expect("the complete segment index should contain the boundary identity");
+
+        let missing = TestArchive::default();
+        let error =
+            persistence::load_verified_archived_evidence_segment(&boundary_receipt, &missing)
+                .expect_err("identity receipt must not fabricate archived payload bytes");
+        assert_eq!(error.code, ErrorCode::EvidenceContentUnavailable);
+        missing.store_evidence_segment(&segment).unwrap();
+        assert_eq!(
+            persistence::load_verified_archived_evidence_segment(&boundary_receipt, &missing)
+                .unwrap(),
+            segment
+        );
+    }
+
+    #[test]
+    fn repeated_keyed_seals_restore_sorted_reservations_and_exact_dependencies() {
+        let (_, _, simulation, _) = run_keyed_fixture(&["zeta"]);
+        let mut compact = simulation.into_compacted().unwrap();
+        let first = compact
+            .seal_evidence()
+            .expect("the first keyed evidence tail should seal")
+            .expect("the first keyed evidence tail should be non-empty");
+
+        compact
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                KeyedRandomPlugin.name(),
+                "operation",
+                SimTime::EPOCH,
+                serde_json::json!({ "operation": "alpha" }),
+            ))
+            .unwrap();
+        compact
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("the second keyed operation should settle");
+        let second = compact
+            .seal_evidence()
+            .expect("the second keyed evidence tail should seal")
+            .expect("the second keyed evidence tail should be non-empty");
+        assert_eq!(second.start, first.end);
+
+        let checkpoint = compact.checkpoint().unwrap();
+        assert_eq!(checkpoint.archived_segment_headers.len(), 2);
+        assert_eq!(checkpoint.keyed_draw_reservations.len(), 2);
+        assert!(checkpoint.keyed_reservation_root.is_some());
+        assert!(checkpoint.evidence_dependency_root.is_some());
+        assert!(
+            checkpoint
+                .keyed_draw_reservations
+                .windows(2)
+                .all(|reservations| {
+                    (&reservations[0].stream, &reservations[0].address)
+                        < (&reservations[1].stream, &reservations[1].address)
+                })
+        );
+        for reservation in &checkpoint.keyed_draw_reservations {
+            assert!(checkpoint.evidence_dependencies.iter().any(|dependency| {
+                dependency.reference == reservation.operation_evidence
+                    && dependency.requirement == EvidenceRequirement::IdentityOnly
+            }));
+            assert!(checkpoint.evidence_dependencies.iter().any(|dependency| {
+                dependency.reference == reservation.draw_receipt.evidence
+                    && dependency.requirement == EvidenceRequirement::IdentityOnly
+            }));
+        }
+
+        let restored = CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+            checkpoint.clone(),
+            vec![first.clone(), second.clone()],
+            &[&KeyedRandomPlugin],
+        )
+        .expect("repeated keyed segments should reconstruct exactly");
+        let restored_snapshot = restored
+            .snapshot_with_segments(Vec::new())
+            .expect("repeated keyed segments should reconstruct a full snapshot");
+        assert_eq!(restored_snapshot.random_draws.len(), 4);
+
+        let alpha = restored_snapshot
+            .random_draws
+            .iter()
+            .find(|draw| {
+                matches!(
+                    &draw.address,
+                    RandomDrawAddress::OperationV1(address)
+                        if address.application_operation_id == "alpha"
+                )
+            })
+            .expect("the restored alpha reservation should have a draw");
+        let RandomDrawAddress::OperationV1(alpha_address) = &alpha.address else {
+            unreachable!("the selected draw is operation-keyed")
+        };
+        let keyed = random::retained_keyed_draws(&restored_snapshot.random_draws)
+            .expect("restored draws should rebuild the keyed index");
+        let available = restored_snapshot
+            .random_streams
+            .iter()
+            .cloned()
+            .map(|stream| (stream.key.clone(), stream))
+            .collect::<BTreeMap<_, _>>();
+        let mut retry_session = random::RandomSession::new(
+            &available,
+            std::slice::from_ref(&alpha.stream),
+            restored_snapshot.root_seed,
+            KeyedRandomPlugin.name(),
+            &keyed,
+        )
+        .expect("restored keyed state should open a random session");
+        assert_eq!(
+            retry_session
+                .range_for_operation(
+                    &alpha.stream,
+                    alpha
+                        .operation_evidence
+                        .clone()
+                        .expect("operation draw should retain exact evidence"),
+                    &alpha_address.operation_kind,
+                    &alpha_address.application_operation_id,
+                    alpha_address.target.clone(),
+                    alpha_address.draw_slot,
+                    alpha.upper_exclusive,
+                    &alpha.purpose,
+                )
+                .expect("an exact retry should survive repeated seal and restore"),
+            alpha.value
+        );
+        let conflict = retry_session
+            .range_for_operation(
+                &alpha.stream,
+                EvidenceRef::Ingress(IngressId::new(99)),
+                &alpha_address.operation_kind,
+                &alpha_address.application_operation_id,
+                alpha_address.target.clone(),
+                alpha_address.draw_slot,
+                alpha.upper_exclusive,
+                &alpha.purpose,
+            )
+            .expect_err("the same restored entropy address with different evidence must conflict");
+        assert_eq!(conflict.code, ErrorCode::RandomOperationConflict);
+        assert!(retry_session.finish().draws.is_empty());
+
+        let mut tampered = checkpoint;
+        tampered.keyed_draw_reservations.swap(0, 1);
+        tampered.keyed_reservation_root = Some(
+            canonical_hash(
+                "canwu.random.keyed-reservations.v1",
+                &tampered.keyed_draw_reservations,
+            )
+            .unwrap(),
+        );
+        let Err(error) = Simulation::from_checkpoint_and_journal(tampered, vec![first, second])
+        else {
+            panic!("reservation ordering is part of compact continuation")
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
     fn simulation_view_resolves_retained_commands_and_events_by_id() {
         let (scenario, ids) = demo_scenario();
         let mut simulation = Simulation::new(44, scenario).expect("lookup fixture should load");
@@ -8426,21 +9891,10 @@ mod tests {
         );
         let legacy_json =
             serde_json::to_string(&legacy_value).expect("legacy snapshot fixture should serialize");
-        let migrated = Simulation::from_snapshot_json(&legacy_json)
-            .expect("format 2 snapshot should migrate explicitly");
-        assert_eq!(
-            migrated.snapshot().snapshot_format_version,
-            SNAPSHOT_FORMAT_VERSION
-        );
-        assert_eq!(migrated.snapshot().engine_version, ENGINE_VERSION);
-        assert!(migrated.boundaries().is_empty());
-        let legacy_journal = migrated.replay_journal();
-        let (initial_scenario, _) = demo_scenario();
-        let Err(error) = Simulation::replay_from_journal(initial_scenario, &[], &legacy_journal)
-        else {
-            panic!("identity-unbound legacy checkpoints must not claim exact replay");
+        let Err(error) = Simulation::from_snapshot_json(&legacy_json) else {
+            panic!("format 2 snapshots must first migrate through the 0.4 runtime");
         };
-        assert_eq!(error.code, ErrorCode::LegacyReplayUnavailable);
+        assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
 
         let mut restored = Simulation::from_snapshot_json(&json).expect("snapshot should restore");
         restored
@@ -8551,8 +10005,7 @@ mod tests {
         let Err(error) = Simulation::from_snapshot_json(&malformed_json) else {
             panic!("legacy report-time overflow must return a structured error");
         };
-        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
-        assert!(error.message.contains("legacy report timing"));
+        assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
 
         let report_pending = restored
             .snapshot_json()
@@ -9723,7 +11176,7 @@ mod tests {
             .find(|draw| draw.stream == primary_random_stream())
             .expect("the primary stream should remain present with unrelated noise");
         assert_eq!(primary_draw.value, isolated_draw.value);
-        assert_eq!(primary_draw.position, isolated_draw.position);
+        assert_eq!(primary_draw.address, isolated_draw.address);
         assert_eq!(primary_draw.id, primary_receipt.random_draws[0]);
         assert_eq!(
             primary_draw.cause,
@@ -9805,6 +11258,26 @@ mod tests {
         )
         .expect("scoped draws and boundary hashes should replay exactly");
         assert_eq!(primary_only.snapshot(), replayed.snapshot());
+
+        let mut unsupported_draw = primary_only.snapshot();
+        unsupported_draw.random_draws[0].address =
+            RandomDrawAddress::OperationV1(RandomOperationAddressV1 {
+                producer_plugin: "random-primary".to_owned(),
+                operation_kind: "fixture".to_owned(),
+                application_operation_id: "operation-1".to_owned(),
+                target: RandomOperationTarget::CanonicalKey("target-1".to_owned()),
+                draw_slot: 0,
+            });
+        unsupported_draw.random_draws[0].operation_evidence = Some(
+            canwu_core::EvidenceRef::Boundary(primary_receipt.boundary_id),
+        );
+        refresh_snapshot_commitments_and_checkpoint(&mut unsupported_draw);
+        let Err(error) =
+            Simulation::from_snapshot_with_plugins(unsupported_draw, &[&PrimaryRandomPlugin])
+        else {
+            panic!("forged operation-addressed draws must fail closed");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 
         let mut corrupted_draw = primary_only.snapshot();
         corrupted_draw.random_draws[0].value = (corrupted_draw.random_draws[0].value + 1)
@@ -10939,6 +12412,465 @@ mod tests {
             .err()
             .expect("generated ingress must retain exact producer-stage provenance");
         assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn cross_plugin_ingress_requires_a_declared_target_and_waits_for_next_admission() {
+        let (scenario, _) = demo_scenario();
+        let producer = CrossPluginProducer;
+        let consumer = CrossPluginConsumer;
+        let mut simulation = Simulation::new(59, scenario.clone())
+            .expect("cross-plugin ingress fixture should initialize");
+        simulation
+            .register_plugin(&producer)
+            .expect("producer should register");
+        simulation
+            .register_plugin(&consumer)
+            .expect("consumer should register");
+        let start = simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "cross-producer",
+                "start",
+                SimTime::EPOCH,
+                serde_json::json!({ "label": "start" }),
+            ))
+            .expect("producer ingress should queue");
+
+        let first = simulation
+            .step_canonical()
+            .expect("producer boundary should settle")
+            .expect("producer ingress is due");
+        assert_eq!(
+            simulation.boundaries()[0].admitted_ingress,
+            vec![start.ingress_id]
+        );
+        assert_eq!(first.generated_ingress, vec![IngressId::new(2)]);
+        assert!(
+            simulation
+                .snapshot()
+                .plugin_components
+                .iter()
+                .all(|component| component.state != StateKey::new("cross-consumer", "received")),
+            "zero-delay cross-plugin ingress must not recurse into the producing boundary",
+        );
+
+        let second = simulation
+            .step_canonical()
+            .expect("consumer boundary should settle")
+            .expect("generated consumer ingress remains due");
+        assert_eq!(second.settled_at, SimTime::EPOCH);
+        assert_eq!(
+            simulation.boundaries()[1].admitted_ingress,
+            vec![IngressId::new(2)]
+        );
+        assert!(
+            simulation
+                .snapshot()
+                .plugin_components
+                .iter()
+                .any(|component| {
+                    component.state == StateKey::new("cross-consumer", "received")
+                        && component.value == Value::Bool(true)
+                })
+        );
+
+        let replayed = Simulation::replay_from_journal(
+            scenario,
+            &[&producer, &consumer],
+            &simulation.replay_journal(),
+        )
+        .expect("cross-plugin ingress should replay exactly");
+        assert_eq!(simulation.snapshot(), replayed.snapshot());
+    }
+
+    #[test]
+    fn knowledge_publication_is_phase_scoped_atomic_persisted_and_replayable() {
+        let (scenario, _) = demo_scenario();
+        let plugin = KnowledgePublicationPlugin;
+        let mut simulation = Simulation::new(53, scenario.clone())
+            .expect("knowledge publication fixture should initialize");
+        simulation
+            .register_plugin(&plugin)
+            .expect("knowledge publication plugin should register");
+        let receipt = simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("phase-scoped publications should settle");
+        assert_eq!(receipt.knowledge_batch_count, 3);
+        assert_eq!(receipt.knowledge_record_count, 3);
+        assert_eq!(receipt.emitted_events.len(), 3);
+        let holder = KnowledgeHolderRef::Person(PersonId::new(1));
+        assert_eq!(
+            simulation
+                .knowledge()
+                .for_holder(&holder)
+                .map_or(0, BTreeMap::len),
+            3
+        );
+        assert_eq!(simulation.boundaries()[0].knowledge_changes.len(), 3);
+
+        let snapshot = simulation.snapshot();
+        let restored = Simulation::from_snapshot_with_plugins(snapshot.clone(), &[&plugin])
+            .expect("published knowledge should restore with exact schemas");
+        assert_eq!(restored.snapshot(), snapshot);
+
+        let replayed =
+            Simulation::replay_from_journal(scenario, &[&plugin], &simulation.replay_journal())
+                .expect("published knowledge should replay exactly");
+        assert_eq!(replayed.snapshot(), snapshot);
+
+        let mut missing_record = snapshot;
+        missing_record
+            .knowledge
+            .records
+            .get_mut(&holder)
+            .expect("holder ledger exists")
+            .remove(&KnowledgeRecordId::new(2));
+        rehash_tampered_snapshot(&mut missing_record);
+        let error = Simulation::from_snapshot_with_plugins(missing_record, &[&plugin])
+            .err()
+            .expect("boundary evidence must reconstruct the exact holder ledger");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn phase13_publication_resolves_exact_current_boundary_record_evidence() {
+        let (scenario, _) = demo_scenario();
+        let plugin = PendingEvidencePublicationPlugin;
+        let mut simulation =
+            Simulation::new(59, scenario).expect("pending evidence fixture should initialize");
+        simulation
+            .register_plugin(&plugin)
+            .expect("pending evidence plugin should register");
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("phase 13 should resolve the exact phase-7 record version");
+
+        let snapshot = simulation.snapshot();
+        Simulation::from_snapshot_with_plugins(snapshot.clone(), &[&plugin])
+            .expect("exact current-boundary evidence should restore");
+
+        let mut wrong_index = snapshot;
+        let holder = KnowledgeHolderRef::Person(PersonId::new(1));
+        let record = wrong_index
+            .knowledge
+            .records
+            .get_mut(&holder)
+            .and_then(|records| records.values_mut().next())
+            .expect("published record exists");
+        let EvidenceRef::DomainRecordVersion(version) = &mut record.origin.evidence[0] else {
+            panic!("fixture origin should contain a record version");
+        };
+        version.established_by = DomainRecordVersionSource::BoundaryChange {
+            boundary: BoundaryId::new(1),
+            change_index: 1,
+        };
+        wrong_index.boundaries[0].knowledge_changes[0].records[0] = record.clone();
+        rehash_tampered_snapshot(&mut wrong_index);
+        let error = Simulation::from_snapshot_with_plugins(wrong_index, &[&plugin])
+            .err()
+            .expect("wrong record-change evidence index must fail");
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    }
+
+    #[test]
+    fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() {
+        let (scenario, _) = demo_scenario();
+        let plugin = KnowledgePublicationPlugin;
+        let mut simulation =
+            Simulation::new(61, scenario).expect("knowledge tamper fixture should initialize");
+        simulation
+            .register_plugin(&plugin)
+            .expect("knowledge publication plugin should register");
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("knowledge tamper fixture should publish");
+        let snapshot = simulation.snapshot();
+        let holder = KnowledgeHolderRef::Person(PersonId::new(1));
+        let reject = |label: &str, mut tampered: SimulationSnapshot| {
+            if let Err(error) = try_rehash_tampered_snapshot(&mut tampered) {
+                assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+                return;
+            }
+            let error = Simulation::from_snapshot_with_plugins(tampered, &[&plugin])
+                .err()
+                .unwrap_or_else(|| panic!("{label} tamper unexpectedly loaded"));
+            assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+        };
+
+        let mutate_first_record =
+            |snapshot: &mut SimulationSnapshot, mutate: &dyn Fn(&mut KnowledgeRecord)| {
+                let record = snapshot
+                    .knowledge
+                    .records
+                    .get_mut(&holder)
+                    .and_then(|records| records.values_mut().next())
+                    .expect("fixture holder record should exist");
+                mutate(record);
+            };
+
+        let mut record_holder = snapshot.clone();
+        mutate_first_record(&mut record_holder, &|record| {
+            record.holder = KnowledgeHolderRef::Person(PersonId::new(2));
+        });
+        reject("record holder", record_holder);
+
+        let mut schema_version = snapshot.clone();
+        mutate_first_record(&mut schema_version, &|record| record.schema.version += 1);
+        reject("schema version", schema_version);
+
+        let mut schema_hash = snapshot.clone();
+        schema_hash.plugin_descriptors[0].knowledge_schemas[0]
+            .schema_hash
+            .replace_range(..1, "f");
+        reject("schema semantic hash", schema_hash);
+
+        let mut payload = snapshot.clone();
+        mutate_first_record(&mut payload, &|record| {
+            record.payload = serde_json::json!({ "value": 999 });
+        });
+        reject("record payload", payload);
+
+        let mut subject = snapshot.clone();
+        mutate_first_record(&mut subject, &|record| {
+            record.subjects.push(KnowledgeSubject {
+                role: "unexpected".to_owned(),
+                target: KnowledgeSubjectTarget::Event(EventId::new(1)),
+            });
+        });
+        reject("record subject", subject);
+
+        let mut confidence = snapshot.clone();
+        mutate_first_record(&mut confidence, &|record| {
+            record.confidence_per_mille = 1_001;
+        });
+        reject("record confidence", confidence);
+
+        let mut learned_at = snapshot.clone();
+        mutate_first_record(&mut learned_at, &|record| {
+            record.learned_at = SimTime::from_minutes(1);
+        });
+        reject("record learned time", learned_at);
+
+        let mut forward_relation = snapshot.clone();
+        mutate_first_record(&mut forward_relation, &|record| {
+            record.supersedes = vec![KnowledgeRecordId::new(3)];
+        });
+        reject("forward relation", forward_relation);
+
+        let mut evidence = snapshot.clone();
+        mutate_first_record(&mut evidence, &|record| {
+            record.origin.evidence = vec![EvidenceRef::Event(EventId::new(999))];
+        });
+        reject("origin evidence", evidence);
+
+        let mut producer = snapshot.clone();
+        producer.boundaries[0].knowledge_changes[0].plugin = "foreign-plugin".to_owned();
+        reject("batch producer", producer);
+
+        let mut phase = snapshot.clone();
+        phase.boundaries[0].knowledge_changes[0].phase = BoundaryPhase::DomainDeltaProposal;
+        reject("batch phase", phase);
+
+        let mut visibility = snapshot.clone();
+        visibility.boundaries[0]
+            .knowledge_changes
+            .iter_mut()
+            .find(|change| change.phase == BoundaryPhase::PerspectiveAndReportMaterialization)
+            .expect("fixture phase-13 publication should exist")
+            .visibility = StateVisibility::NextBoundary;
+        reject("batch visibility", visibility);
+
+        let mut batch_order = snapshot.clone();
+        batch_order.boundaries[0].knowledge_changes.swap(0, 1);
+        reject("batch order", batch_order);
+
+        let mut first_id = snapshot.clone();
+        first_id.boundaries[0].knowledge_changes[0].records[0].id = KnowledgeRecordId::new(99);
+        reject("batch first record ID", first_id);
+
+        let mut event_holder = snapshot.clone();
+        let event = event_holder
+            .events
+            .iter_mut()
+            .find(|event| matches!(event.kind, EventKind::KnowledgePublished { .. }))
+            .expect("fixture publication event should exist");
+        let EventKind::KnowledgePublished { holder, .. } = &mut event.kind else {
+            unreachable!("selected event is knowledge publication")
+        };
+        *holder = KnowledgeHolderRef::Person(PersonId::new(2));
+        reject("event holder", event_holder);
+
+        let mut emission_index = snapshot.clone();
+        let emission = emission_index.boundaries[0]
+            .emissions
+            .iter_mut()
+            .find(|emission| matches!(emission.kind, BoundaryEmissionKind::KnowledgeChange { .. }))
+            .expect("fixture knowledge emission should exist");
+        emission.kind = BoundaryEmissionKind::KnowledgeChange { change_index: 99 };
+        reject("knowledge emission index", emission_index);
+
+        let mut counter_backward = snapshot.clone();
+        counter_backward.next_knowledge_record_id = 3;
+        reject("next record counter backward", counter_backward);
+
+        let mut counter_forward = snapshot;
+        counter_forward.next_knowledge_record_id = 99;
+        reject("next record counter forward", counter_forward);
+    }
+
+    fn run_keyed_fixture(
+        operations: &[&str],
+    ) -> (BTreeMap<String, u64>, u64, Simulation, Scenario) {
+        let (scenario, _) = demo_scenario();
+        let plugin = KeyedRandomPlugin;
+        let mut simulation =
+            Simulation::new(83, scenario.clone()).expect("keyed random fixture should initialize");
+        simulation
+            .register_plugin(&plugin)
+            .expect("keyed random plugin should register");
+        for operation in operations {
+            simulation
+                .enqueue_plugin_ingress(PluginIngressRequest::new(
+                    plugin.name(),
+                    "operation",
+                    SimTime::EPOCH,
+                    serde_json::json!({ "operation": operation }),
+                ))
+                .expect("operation ingress should enqueue");
+        }
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect("keyed operations should settle");
+        let mut keyed = BTreeMap::new();
+        let mut sequential = None;
+        for draw in simulation.random_draws() {
+            match &draw.address {
+                RandomDrawAddress::OperationV1(address) => {
+                    keyed.insert(address.application_operation_id.clone(), draw.value);
+                }
+                RandomDrawAddress::Sequential { .. } => sequential = Some(draw.value),
+            }
+        }
+        (
+            keyed,
+            sequential.expect("sequential control draw exists"),
+            simulation,
+            scenario,
+        )
+    }
+
+    #[test]
+    fn operation_keyed_randomness_is_order_independent_idempotent_and_replayable() {
+        let (baseline, baseline_sequential, baseline_run, baseline_scenario) =
+            run_keyed_fixture(&["alpha", "beta"]);
+        let (reordered, reordered_sequential, reordered_run, reordered_scenario) =
+            run_keyed_fixture(&["noise", "beta", "alpha"]);
+        assert_eq!(baseline["alpha"], reordered["alpha"]);
+        assert_eq!(baseline["beta"], reordered["beta"]);
+        assert_eq!(baseline_sequential, reordered_sequential);
+        assert_eq!(baseline_run.random_draws().len(), 3);
+        assert_eq!(reordered_run.random_draws().len(), 4);
+        assert_eq!(
+            baseline_run
+                .state
+                .current
+                .random_streams
+                .get(&keyed_fixture_stream())
+                .expect("keyed stream exists")
+                .position,
+            1
+        );
+
+        Simulation::from_snapshot_with_plugins(baseline_run.snapshot(), &[&KeyedRandomPlugin])
+            .expect("operation-keyed draws should restore");
+        let replayed = Simulation::replay_from_journal(
+            baseline_scenario,
+            &[&KeyedRandomPlugin],
+            &baseline_run.replay_journal(),
+        )
+        .expect("operation-keyed draws should replay exactly");
+        assert_eq!(replayed.snapshot(), baseline_run.snapshot());
+        let replayed_reordered = Simulation::replay_from_journal(
+            reordered_scenario,
+            &[&KeyedRandomPlugin],
+            &reordered_run.replay_journal(),
+        )
+        .expect("reordered operation-keyed draws should replay exactly");
+        assert_eq!(replayed_reordered.snapshot(), reordered_run.snapshot());
+    }
+
+    #[test]
+    fn later_boundary_failure_rolls_back_staged_keyed_draws_and_indexes() {
+        let (scenario, _) = demo_scenario();
+        let plugin = KeyedRollbackPlugin;
+        let mut simulation =
+            Simulation::new(89, scenario).expect("keyed rollback fixture should initialize");
+        simulation
+            .register_plugin(&plugin)
+            .expect("keyed rollback plugin should register");
+        simulation
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                plugin.name(),
+                "operation",
+                SimTime::EPOCH,
+                serde_json::json!({ "operation": "rollback-operation" }),
+            ))
+            .expect("rollback probe should enqueue");
+        let before = simulation.snapshot();
+        let error = simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+            .expect_err("the undeclared later publication must reject the boundary");
+        assert_eq!(error.code, ErrorCode::UndeclaredKnowledgeWrite);
+        assert_eq!(simulation.snapshot(), before);
+    }
+
+    #[test]
+    fn operation_keyed_snapshot_tamper_matrix_is_recomputed_fail_closed() {
+        let (_, _, simulation, _) = run_keyed_fixture(&["alpha", "beta"]);
+        let snapshot = simulation.snapshot();
+        let plugin = KeyedRandomPlugin;
+
+        let reject = |label: &str, mut tampered: SimulationSnapshot| {
+            rehash_tampered_snapshot(&mut tampered);
+            let error = Simulation::from_snapshot_with_plugins(tampered, &[&plugin])
+                .err()
+                .unwrap_or_else(|| panic!("{label} tamper unexpectedly loaded"));
+            assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+        };
+        let keyed_index = snapshot
+            .random_draws
+            .iter()
+            .position(|draw| matches!(&draw.address, RandomDrawAddress::OperationV1(_)))
+            .expect("fixture should contain a keyed draw");
+
+        let mut address = snapshot.clone();
+        let RandomDrawAddress::OperationV1(operation) =
+            &mut address.random_draws[keyed_index].address
+        else {
+            unreachable!("selected draw is operation-keyed")
+        };
+        operation.application_operation_id.push_str("-tampered");
+        reject("operation address", address);
+
+        let mut evidence = snapshot.clone();
+        evidence.random_draws[keyed_index].operation_evidence =
+            Some(EvidenceRef::Ingress(IngressId::new(2)));
+        reject("operation evidence", evidence);
+
+        let mut bound = snapshot.clone();
+        bound.random_draws[keyed_index].upper_exclusive += 1;
+        reject("operation bound", bound);
+
+        let mut purpose = snapshot.clone();
+        purpose.random_draws[keyed_index]
+            .purpose
+            .push_str(" tampered");
+        reject("operation purpose", purpose);
+
+        let mut value = snapshot;
+        value.random_draws[keyed_index].value = (value.random_draws[keyed_index].value + 1)
+            % value.random_draws[keyed_index].upper_exclusive;
+        reject("operation value", value);
     }
 
     #[test]

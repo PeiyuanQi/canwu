@@ -314,12 +314,14 @@ built-in and plugin events. A plugin may register an `EventAudience` for an
 event type (`public`, one or more actors, `affected_actors`, or `private`) in
 its persisted `PluginDescriptor`; an undeclared plugin event is private by
 default. `Canwu::viewer_context` derives the authorized actor and observation
-policy from the run configuration, and `observe_with_viewer` accepts only that
-context plus the normal time/focus input. The input cannot upgrade a private
-event to public. This audience policy governs player projections only; plugin
-system subscriptions and declared state reads remain separate runtime
-permissions. Because the declaration is persisted with the plugin descriptor,
-snapshot loading and replay use the same visibility rule.
+policy from the run configuration and binds the detached context to the current
+checkpoint. `observe_with_viewer` accepts only a freshly revalidated context
+plus the normal time/focus input; a context becomes stale after authoritative
+state changes. The input cannot upgrade a private event to public. This
+audience policy governs player projections only; plugin system subscriptions
+and declared state reads remain separate runtime permissions. Because the
+declaration is persisted with the plugin descriptor, snapshot loading and
+replay use the same visibility rule.
 
 ```mermaid
 sequenceDiagram
@@ -361,10 +363,34 @@ Codex skill plugins are development interfaces and are separate from runtime
 
 ## Knowledge model
 
-Ground truth and knowledge are separate stores. An army knowledge record has a
-known location, estimated strength range, observation time, learning time,
-confidence in permille, and source. Semantic responses use those records and
-filter event changes to facts visible to the requesting actor.
+Ground truth and knowledge are separate stores. The original actor-relative
+army observations remain a compatibility projection. The general mechanism is
+an append-only holder ledger keyed by `KnowledgeHolderRef`, which can identify a
+person or an eligible institution/entity. Plugins register versioned,
+namespaced `PluginKnowledgeSchema` contracts and receive explicit
+`KnowledgeWriteGrant` capabilities; ordinary world, component, and domain-record
+write ownership does not imply permission to publish knowledge.
+
+A `KnowledgeRecord` preserves schema, holder, typed subjects, JSON payload,
+reported and learned times, confidence, origin evidence, and explicit
+supersession or contradiction links. Publication enters only through validated
+phase-4 or phase-13 `PublishKnowledge` directives. The kernel enforces schema
+ownership, holder eligibility, declared visibility, relation integrity,
+canonical ordering, per-record and per-boundary limits, atomic settlement, and
+persisted `KnowledgePublished` evidence. It does not interpret whether a record
+is a message, report, intercepted copy, sensor observation, rumor, or analysis;
+transport, interception, audience expansion, interpretation, belief change,
+and presentation policy remain extension concerns.
+
+Holder queries are owned, bounded, and deterministically ordered. Current-head
+and full-history views can filter by schema, subject, and learned-time cuts.
+Pagination cursors bind the holder, canonical query hash, holder-relative read
+cut, and final record position, so a cursor cannot be reused against a changed
+query or a changed holder projection. Holder-local record IDs hide unrelated
+global ledger gaps. Local-ID maps, read-cut roots, and cursor bindings are
+derived during reads; no mutable query index is persisted or included in the
+authoritative state hash. Any future cache or secondary index must be rebuilt
+from the canonical ledger and remain outside authoritative commitments.
 
 ## Plugins
 
@@ -482,10 +508,10 @@ Declared seat institutions must exist both in manifest-bound genesis and in the
 persisted final state.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
-admission. Format 4 snapshots validate this evidence and require exact plugin
-identity and descriptor rehydration before continuation. Because format-4 state
-and boundary commitments include the producing engine version, a format-4 save
-from another engine version is rejected until an explicit migration exists.
+admission. Format 5 snapshots validate this evidence and require exact plugin
+identity and descriptor rehydration before continuation. Engine 0.4.0 format-4
+saves enter only through the strict legacy validator and migrate before current
+execution; format-4 saves from any other engine version are rejected.
 Boundary-aware replay uses command admission lists to reconstruct operation
 order and rejects any regenerated boundary whose complete evidence differs from
 the journal.
@@ -525,19 +551,28 @@ materialization require the sealed prefix to be supplied again. Segment gaps,
 tampering, and checkpoint mismatches therefore reach the same validator as a
 flat snapshot.
 
-Sealing is intentionally conservative. The canonical ingress queue must be
-empty, every retained command, attempt, ingress record, and event must belong to
-a completed causal prefix, and registered plugins must use current state rather than
-declare historical command/event/ingress reads. The runtime keeps only compact
-canonical request commitments and original outcomes/receipts for exact
-idempotency, plus the prior boundary-chain head and evidence-family flags needed
-for safe continuation. Commitment accumulators keep their already-validated
-prefix state and consume only the new retained tail. Ordinary `Simulation`
-history slices, flat snapshots, and replay journals keep their original full-
-history behavior; compaction is available only through the dedicated type, so
-evidence never disappears implicitly. This runtime feature reuses checkpoint-
-journal format 1 and snapshot format 4 without reinterpreting either wire
-contract.
+Sealing is intentionally fail-closed. The canonical ingress queue must be
+empty and every retained command, attempt, ingress record, event, boundary,
+random draw, and domain-record version must belong to a completed causal prefix.
+Before removal, the runtime derives a sorted `EvidenceDependency` set and marks
+each reference as `IdentityOnly` or `PayloadRequired`. Identity-only dependencies
+can continue from committed `ArchivedEvidenceReceipt` values; payload-required
+rules must resolve the exact archived item through an `ArchiveProvider` before
+the seal or later validation succeeds. Two-phase sealing prepares immutable,
+content-addressed segments, lets the host store them idempotently, then commits
+only the exact prepared token. Segment manifests, receipt roots, dependency
+roots, and operation-keyed random reservations are part of the compact
+checkpoint commitment and are recomputed during reconstruction.
+
+The runtime keeps compact canonical request commitments and original
+outcomes/receipts for exact idempotency, plus the prior boundary-chain head and
+evidence-family flags needed for safe continuation. Commitment accumulators keep
+their already-validated prefix state and consume only the new retained tail.
+Ordinary `Simulation` history slices, flat snapshots, and replay journals keep
+their full-history behavior; compaction is available only through the dedicated
+type, so evidence never disappears implicitly. Checkpoint-journal format 1 now
+wraps the current snapshot format 5 contract; legacy format-4 envelopes are
+strictly validated and migrated rather than reinterpreted in place.
 
 Boundary emissions enter the next boundary's admission cut, so an emitting
 boundary remains retained until a later completed boundary admits those events.
@@ -737,6 +772,11 @@ Renderers consume snapshots and events: territory points, route endpoints, army
 locations, relationships, movement events, and knowledge views. A renderer may
 turn them into sprites, meshes, SVG, ASCII, or tables. None of those concepts
 enter Canwu's state model.
+
+The reference debug client is an explicitly trusted host surface. Its person
+inspector may use `admin_query_knowledge` to show the current generic holder
+projection; player and remote clients must derive a restricted `CanwuViewer`
+instead and have no route to audit origins or another holder's ledger.
 
 ## Portability and versions
 

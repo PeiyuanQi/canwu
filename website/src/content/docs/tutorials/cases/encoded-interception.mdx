@@ -1,0 +1,59 @@
+---
+title: 编码传递与中途截取
+description: 用合成符号码验证传递副本、access 与 interpretation 分离，以及不同能力产生不同解读结果。
+sidebar:
+  order: 5
+  label: 编码传递与中途截取
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-information/examples/encoded_interception.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+
+本案例使用五个合成 holder：`H-601` 是来源持有者，`H-602` 是定向接收与委托
+持有者，`H-603` 是中继持有者，`H-604` 是独立解读执行者，`H-605` 是受限
+复核者。内容码 `SYN-E8-42` 和结果码 `SYN-E8-42-R` 不承载任何现实含义。
+
+## 运行
+
+```shell
+cargo run -p canwu-information --example encoded_interception
+```
+
+示例用 detached ledger 保持完整生命周期清晰可读，再通过权威
+`InformationPlugin` 执行“执行者与委托持有者不同”的授权解读。一个持久化的中立
+权限命令提供精确 claim；示例随后验证快照恢复、不会重新运行外部解码器的精确重放、
+压缩证据重建与压缩 checkpoint 恢复。
+
+## 相对时间线
+
+| 分钟 | 模型动作 |
+| ---: | --- |
+| `0–1` | 创建内容和需要 `decode_k2` 能力的 `grouped_symbols_v1` 表现。 |
+| `2–4` | 创建定向 dispatch，delivery attempt 进入 `InTransit`。 |
+| `5` | 中继节点建立一个 fidelity 为 `1000` 的 same-content representation 副本。 |
+| `6` | `H-603` 通过副本实例取得 access。 |
+| `7` | `H-603` 使用 `decode_k1`，interpretation 状态为 `Failed`，且没有 result content。 |
+| `12–13` | 定向接收者完成交付并取得原 representation 的 access。 |
+| `14–15` | `H-604` 受 `H-602` 委托使用 `decode_k2`，生成衍生结果内容和状态为 `Succeeded` 的 interpretation。 |
+| `16` | dispatch 在已有终态 delivery attempt 后完成。 |
+
+## 模型验证点
+
+<Steps>
+1. 截取首先生成 representation copy；`SameContent` 及 parent edge 保留它与原表现的关系。
+2. 取得 access 不等于取得 interpretation。`H-603` 可完整接触符号副本，但错误能力只产生失败记录。
+3. `Failed` interpretation 不允许 `result_content`；`Succeeded` interpretation 必须绑定结果内容。
+4. 每次 interpretation 同时绑定 `input_access`、`input_representation`、`performed_by` 与 `performed_for`。
+5. 定向交付仍按自己的 attempt 状态推进，截取副本不会替换接收者的交付证据。
+6. Knowledge draft 始终按 holder 隔离：`H-603` 只得到自身 access 与失败解读事实，`H-602` 得到自身 access、受托解读与 release 可用事实，`H-605` 只得到复核 release 可用事实；执行解读不会自动让 `H-604` 获得 holder knowledge。
+</Steps>
+
+## 可替换的应用层部分
+
+`grouped_symbols_v1`、`decode_k1`、`decode_k2`、节点编号和相对时延都是应用配置。
+引擎只需要中立的 representation lineage、delivery、access、interpretation 和
+holder-relative publication 契约。信道性能、编码算法含义、行为后果与叙事都留给
+下游插件。

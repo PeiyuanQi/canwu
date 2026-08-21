@@ -130,16 +130,31 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Field-level provenance and structured facts support domain-specific causal
   explanations without giving narration authority over simulation.
 
-### E10: Actor-scoped knowledge and immutable presentation
+### E10: Holder-scoped knowledge and immutable presentation
 
-- World truth, actor knowledge, inferred belief, recorded/archival state, and
+- World truth, holder knowledge, inferred belief, recorded/archival state, and
   presentation state remain distinct.
-- Actor APIs expose only delivered or otherwise permitted information,
-  including confidence, source, observed time, learned time, contradiction, and
-  staleness where the domain supplies them.
-- Missing knowledge never falls back to world truth.
-- A complete actor projection is built and validated before authoritative save
-  publication, then installed through an infallible generation-tagged swap.
+- People and eligible institutions can hold append-only, schema-validated
+  records without the kernel interpreting period- or domain-specific payloads.
+- Publication requires an explicit plugin-owned schema and declared phase write
+  grant; holder, relation, visibility, batch, and boundary limits are validated
+  atomically before commit.
+- Holder APIs expose only permitted holder-facing subjects, confidence,
+  reported and learned times, contradiction, and supersession where the domain
+  supplies them. Audit origin and evidence remain available only to an
+  explicitly authorized research/developer query. Missing knowledge never
+  falls back to world truth.
+- Current-head, full-history, learned-time, schema, subject, and paged queries
+  have deterministic order and bounded results. Pagination binds holder, query
+  hash, read cut, and record position and must fail closed after any mismatch.
+- Holder-local IDs and any query caches or secondary indexes are derived from
+  canonical ledgers, rebuilt after load, and excluded from authoritative hashes.
+- A complete actor or institution projection is built and validated before
+  authoritative save publication, then installed through an infallible
+  generation-tagged swap.
+- Snapshot/load, exact replay, compact reconstruction, and tamper tests cover
+  knowledge records and their publication evidence using only public extension
+  contracts.
 
 ### E11: Controller, seat, and run-policy separation
 
@@ -193,6 +208,13 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Solver inputs/outputs are versioned and independently testable.
 - GPU/native acceleration is optional, replaceable, and cannot own canonical
   gameplay state or change results outside a declared tolerance contract.
+- Scaling-sensitive public contracts have deterministic workload generators and
+  recorded release-build evidence for state growth, publication, bounded and
+  paged queries, load/index rebuild, replay, and compact persistence paths.
+- Performance artifacts record exact workload counts, source fingerprints,
+  compiler/target context, raw samples, P50/P95 wall time where measured,
+  allocation traffic where measured, and serialized bytes. They are comparable
+  evidence, not portable pass/fail thresholds.
 
 ### E16: Portability and operability
 

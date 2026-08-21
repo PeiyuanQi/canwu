@@ -56,9 +56,11 @@ define_id!(DecisionTraceId);
 define_id!(EventId);
 define_id!(GovernmentId);
 define_id!(IngressId);
+define_id!(HolderKnowledgeRecordId);
 define_id!(OrganizationId);
 define_id!(PersonId);
 define_id!(RandomDrawId);
+define_id!(KnowledgeRecordId);
 define_id!(ResourceId);
 define_id!(RouteId);
 define_id!(TerritoryId);
@@ -102,6 +104,110 @@ impl Display for DomainRecordKind {
 pub struct DomainRecordRef {
     pub kind: DomainRecordKind,
     pub id: String,
+}
+
+/// Persisted identity of the operation that established one domain-record
+/// version. Version zero is reserved and rejected by runtime validation.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DomainRecordVersionSource {
+    InitialScenario,
+    BoundaryChange {
+        boundary: BoundaryId,
+        change_index: u64,
+    },
+}
+
+/// Exact historical identity for an application-defined record version.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DomainRecordVersionRef {
+    pub record: DomainRecordRef,
+    pub version: u64,
+    pub established_by: DomainRecordVersionSource,
+}
+
+/// Shared persisted-evidence identity used by knowledge, decisions, random
+/// operations, replay, and compact archive receipts.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum EvidenceRef {
+    Command(CommandId),
+    CommandAttempt(CommandAttemptId),
+    Event(EventId),
+    Ingress(IngressId),
+    Boundary(BoundaryId),
+    RandomDraw(RandomDrawId),
+    DomainRecordVersion(DomainRecordVersionRef),
+}
+
+/// Stable namespace and kind for a holder-relative knowledge record.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct KnowledgeRecordKind {
+    pub namespace: String,
+    pub name: String,
+}
+
+impl KnowledgeRecordKind {
+    #[must_use]
+    pub fn new(namespace: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            namespace: namespace.into(),
+            name: name.into(),
+        }
+    }
+}
+
+impl Display for KnowledgeRecordKind {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}", self.namespace, self.name)
+    }
+}
+
+/// Exact version of one registered knowledge schema.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct KnowledgeSchemaId {
+    pub kind: KnowledgeRecordKind,
+    pub version: u32,
+}
+
+impl KnowledgeSchemaId {
+    #[must_use]
+    pub fn new(kind: KnowledgeRecordKind, version: u32) -> Self {
+        Self { kind, version }
+    }
+}
+
+/// Stable holder identity shared by people and eligible institutional entities.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum KnowledgeHolderRef {
+    Person(PersonId),
+    Entity(EntityRef),
+}
+
+impl KnowledgeHolderRef {
+    #[must_use]
+    pub fn is_person_entity(&self) -> bool {
+        matches!(self, Self::Entity(EntityRef::Person(_)))
+    }
+}
+
+/// Whether a domain entity schema may receive holder-relative knowledge.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KnowledgeHolderPolicy {
+    #[default]
+    Disallowed,
+    Allowed,
+}
+
+/// Compile-time identity for one versioned holder-relative knowledge schema.
+pub trait KnowledgeRecordType {
+    type Payload;
+
+    const NAMESPACE: &'static str;
+    const NAME: &'static str;
+    const SCHEMA_VERSION: u32;
 }
 
 impl DomainRecordRef {
@@ -470,6 +576,16 @@ mod tests {
         const NAME: &'static str = "obligation";
     }
 
+    struct Assessment;
+
+    impl KnowledgeRecordType for Assessment {
+        type Payload = String;
+
+        const NAMESPACE: &'static str = "fixture.knowledge";
+        const NAME: &'static str = "assessment";
+        const SCHEMA_VERSION: u32 = 2;
+    }
+
     #[test]
     fn typed_domain_identity_preserves_wire_shape_and_kind_boundary() {
         let typed = TypedDomainRecordRef::<Office>::new("secretariat");
@@ -502,6 +618,72 @@ mod tests {
                 "id": "secretariat-duty"
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn knowledge_identity_and_holder_wire_shapes_are_stable() {
+        let kind = KnowledgeRecordKind::new(Assessment::NAMESPACE, Assessment::NAME);
+        let schema = KnowledgeSchemaId::new(kind.clone(), Assessment::SCHEMA_VERSION);
+
+        assert_eq!(kind.to_string(), "fixture.knowledge.assessment");
+        assert_eq!(schema.version, 2);
+        assert_eq!(schema.kind, kind);
+        assert_eq!(
+            KnowledgeHolderPolicy::default(),
+            KnowledgeHolderPolicy::Disallowed
+        );
+
+        assert_eq!(
+            serde_json::to_value(KnowledgeHolderRef::Person(PersonId::new(7)))
+                .expect("person holder should serialize"),
+            serde_json::json!({ "type": "person", "value": 7 })
+        );
+        let invalid_shape = KnowledgeHolderRef::Entity(EntityRef::Person(PersonId::new(7)));
+        assert!(invalid_shape.is_person_entity());
+        let institution =
+            KnowledgeHolderRef::Entity(EntityRef::Organization(OrganizationId::new(3)));
+        assert!(!institution.is_person_entity());
+        assert_eq!(
+            serde_json::to_value(institution).expect("institution holder should serialize"),
+            serde_json::json!({
+                "type": "entity",
+                "value": { "type": "organization", "id": 3 }
+            })
+        );
+    }
+
+    #[test]
+    fn exact_domain_record_evidence_has_a_stable_wire_identity() {
+        let evidence = EvidenceRef::DomainRecordVersion(DomainRecordVersionRef {
+            record: DomainRecordRef::new("fixture.information", "dispatch", "dispatch-7"),
+            version: 2,
+            established_by: DomainRecordVersionSource::BoundaryChange {
+                boundary: BoundaryId::new(12),
+                change_index: 3,
+            },
+        });
+
+        assert_eq!(
+            serde_json::to_value(evidence).expect("evidence should serialize"),
+            serde_json::json!({
+                "type": "domain_record_version",
+                "value": {
+                    "record": {
+                        "kind": {
+                            "namespace": "fixture.information",
+                            "name": "dispatch"
+                        },
+                        "id": "dispatch-7"
+                    },
+                    "version": 2,
+                    "established_by": {
+                        "type": "boundary_change",
+                        "boundary": 12,
+                        "change_index": 3
+                    }
+                }
+            })
         );
     }
 }

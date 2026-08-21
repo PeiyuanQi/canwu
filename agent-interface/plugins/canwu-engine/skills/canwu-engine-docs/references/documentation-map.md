@@ -23,6 +23,8 @@ Resolve local paths from the Canwu repository root, not from this skill folder.
 | Daily or turn boundaries, supply and demand, reservation, allocation, or multi-system settlement | Chinese: `website/src/content/docs/tutorials/phased-boundary.mdx`; English: `website/src/content/docs/en/tutorials/phased-boundary.mdx` | `crates/canwu-api/examples/phased_boundary.rs` |
 | DecisionTicket, controller binding, dynamic options, utility evaluation, Human/External/LLM policy boundaries, decision traces, or a neighboring warlord's military-aid request | Chinese: `website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx`; English: `website/src/content/docs/en/tutorials/cases/warlord-aid-decision.mdx` | `crates/canwu-api/examples/decision_ticket.rs` and `crates/canwu-api/tests/decision_framework.rs` |
 | Aggregate social or belief diffusion, cohorts, multidimensional disposition, social influence, organization topology, institutional policy, public/private divergence, or actor estimates | Chinese: `website/src/content/docs/tutorials/cases/local-community-diffusion.mdx`; English: `website/src/content/docs/en/tutorials/cases/local-community-diffusion.mdx` | `docs/proposals/social-belief-framework.md`, `crates/canwu-society/examples/local_community_diffusion.rs`, and `crates/canwu-society/tests/framework.rs` |
+| Confidential delivery, nonexclusive access, copy/derivative lineage, intended delivery after interception, audience release, or holder-isolated knowledge | Chinese: `website/src/content/docs/tutorials/cases/confidential-copy-release.mdx`; English: `website/src/content/docs/en/tutorials/cases/confidential-copy-release.mdx` | `crates/canwu-information/examples/confidential_copy_release.rs` and `crates/canwu-information/tests/case_conformance.rs` |
+| Ephemeral channels, interception without a persistent primary instance, failed and delegated interpretation, performer/commissioning-holder separation, or restricted review distribution | Chinese: `website/src/content/docs/tutorials/cases/encoded-interception.mdx`; English: `website/src/content/docs/en/tutorials/cases/encoded-interception.mdx` | `crates/canwu-information/examples/encoded_interception.rs` and `crates/canwu-information/tests/runtime_adapter.rs` |
 
 When no checkout is available, follow links from the corresponding official
 tutorial index or open the example under
@@ -36,6 +38,7 @@ tutorial index or open the example under
 | Intended product surfaces, historical state, causality, decisions/controllers, persistence, counterfactuals, geography, plugins, debug client | `docs/end-state.md` | Use for design intent and destination, then confirm implemented behavior in current sources |
 | Named engine requirements and acceptable evidence | `docs/engine-conformance.md` | Requirements E01-E16 and the conformance evidence section |
 | SemVer, snapshot formats, migrations, hashing, replay, and supported platforms | `docs/versioning.md` | Use for compatibility claims; do not infer compatibility from examples |
+| Generic holder-relative information flow, publication, evidence, keyed randomness, compact continuation, and the neutral lifecycle extension | `docs/proposals/information-flow-mechanism.md` | Use the implementation checklist only to verify milestone status: `docs/proposals/information-flow-mechanism-todo.md` |
 
 Official design fallbacks:
 

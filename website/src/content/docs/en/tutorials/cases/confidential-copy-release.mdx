@@ -1,0 +1,75 @@
+---
+title: Confidential copy and targeted release
+description: Verify access, copy derivation, audience release, withdrawal, and retained knowledge with neutral roles, relative minutes, and synthetic content codes.
+sidebar:
+  order: 4
+  label: Confidential copy and release
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-information/examples/confidential_copy_release.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+
+This case uses only synthetic role identifiers, neutral nodes, relative minutes,
+and content codes. It does not correspond to a person, place, organization, or
+prior event. The reusable subject is the information lifecycle itself.
+
+## Run it
+
+```shell
+cargo run -p canwu-information --example confidential_copy_release
+```
+
+The example first exercises the public `InformationLifecycle` request by
+request, applying each `InformationMutationPlan` to a detached ledger that is
+easy to inspect line by line. It then seeds the same neutral records into
+`Canwu`, executes the final withdrawal through the authoritative
+`InformationPlugin`, and verifies snapshot restore, exact replay, compact
+evidence reconstruction, and compact checkpoint restore.
+
+## Synthetic inputs
+
+| Identifier | Neutral role | Node |
+| --- | --- | --- |
+| `H-101` | initial holder | `NODE-0` |
+| `H-202` | addressed recipient | `NODE-2` |
+| `H-303` | relay operator | `NODE-1` |
+| `H-404`, `H-505` | frozen audience members | `NODE-3` |
+| `H-606` | unrelated holder used for the isolation check | — |
+
+The primary code is `SYN-C4-17`; the selected-copy code is `SYN-C4-17-X`.
+Both are meaningless test values.
+
+## Relative timeline
+
+| Minute | Model action |
+| ---: | --- |
+| `0–2` | Create content, a text representation, and a persistent instance. |
+| `5–7` | Begin an addressed dispatch and its first delivery attempt. |
+| `12` | Record the relay operator's access to the original representation. |
+| `13–14` | Create a selected copy with `ContentDerivation` and a representation parent edge. |
+| `25–27` | Complete the original addressed delivery and record recipient access. |
+| `40–43` | Freeze an explicit audience, activate a targeted release, and record member access to the copy. |
+| `50` | Transition the release to `Withdrawn`. |
+| `51` | Reject new access while retaining earlier holder-relative knowledge. |
+
+## Model assertions
+
+<Steps>
+1. `Access` records that one holder encountered one representation at a time; it does not silently rewrite content.
+2. The copy preserves lineage through `source_content`, `ContentSourceEdge`, `parent_representation`, and explicit fidelity/completeness values.
+3. The original dispatch and the copy lineage advance independently; obtaining a copy cannot fabricate a delivery attempt for the addressed recipient.
+4. `AudiencePayload` freezes a member count and membership root, and the release accepts only a listed snapshot member.
+5. `Active -> Withdrawn` is irreversible. The withdrawn release cannot authorize a later access.
+6. Existing `AccessRecorded` and `ReleaseAvailable` knowledge drafts remain present. Withdrawal controls future availability; it does not rewrite information already acquired.
+</Steps>
+
+## Why this belongs in the reusable mechanism
+
+Content, representation, instance, dispatch, delivery attempt, access, audience,
+release, and derivation edges do not depend on a transmission device or social
+setting. An application plugin can replace channel profiles, role bindings,
+time distributions, and consequence rules without adding a special confidential
+event branch to the engine.

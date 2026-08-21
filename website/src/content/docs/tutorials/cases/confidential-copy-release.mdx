@@ -1,0 +1,69 @@
+---
+title: 机密副本与定向发布
+description: 用中立角色、相对分钟和合成内容码验证访问、副本衍生、受众发布、撤回与已获知识保留。
+sidebar:
+  order: 4
+  label: 机密副本与定向发布
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-information/examples/confidential_copy_release.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+
+本案例只使用合成角色编号、中立节点、相对分钟与内容码。它不对应任何人物、地域、
+组织或既有事件。可复用目标是信息生命周期本身，而不是某个背景故事。
+
+## 运行
+
+```shell
+cargo run -p canwu-information --example confidential_copy_release
+```
+
+示例先逐项调用公开的 `InformationLifecycle`，把每个请求校验为
+`InformationMutationPlan`，再由便于逐行检查的 detached ledger 执行。随后，示例把
+同一批中立记录装入 `Canwu`，通过权威 `InformationPlugin` 执行最终撤回，并验证
+快照恢复、精确重放、压缩证据重建与压缩 checkpoint 恢复。
+
+## 合成输入
+
+| 标识 | 中立角色 | 节点 |
+| --- | --- | --- |
+| `H-101` | 初始持有者 | `NODE-0` |
+| `H-202` | 定向接收者 | `NODE-2` |
+| `H-303` | 中继操作方 | `NODE-1` |
+| `H-404`、`H-505` | 冻结受众成员 | `NODE-3` |
+| `H-606` | 用于隔离验证的无关持有者 | — |
+
+主内容码是 `SYN-C4-17`，选取副本码是 `SYN-C4-17-X`。两者都是无含义测试值。
+
+## 相对时间线
+
+| 分钟 | 模型动作 |
+| ---: | --- |
+| `0–2` | 创建内容、文本表现和持久实例。 |
+| `5–7` | 建立定向 dispatch 与第一个 delivery attempt。 |
+| `12` | 中继操作方记录一次对原表现的 access。 |
+| `13–14` | 以 `ContentDerivation` 和 representation parent edge 建立选取副本。 |
+| `25–27` | 原定向交付完成，接收者记录 access。 |
+| `40–43` | 冻结显式受众，激活定向 release，成员取得副本 access。 |
+| `50` | release 转入 `Withdrawn`。 |
+| `51` | 新 access 被拒绝；此前的 holder-relative knowledge 仍保留。 |
+
+## 模型验证点
+
+<Steps>
+1. `Access` 只记录某个 holder 在某时刻接触到某个 representation；它不会自动改写 content。
+2. 副本通过 `source_content`、`ContentSourceEdge`、`parent_representation` 和 fidelity/completeness 显式保留来源链。
+3. 原 dispatch 的交付状态与副本链各自演进；取得副本不会伪造原接收者的 delivery attempt。
+4. `AudiencePayload` 保存冻结成员计数和 membership root；release 只允许列入快照的成员访问。
+5. `Active -> Withdrawn` 是不可逆状态转换。撤回后，同一 release 不能再授权新 access。
+6. 已产生的 `AccessRecorded` 与 `ReleaseAvailable` knowledge draft 不被撤回操作删除；撤回控制未来可用性，不重写过去已获信息。
+</Steps>
+
+## 为什么这些部分属于通用机制
+
+内容、表现、实例、dispatch、delivery attempt、access、受众、release 与衍生边都不依赖
+传递设备或社会背景。应用插件只需替换 channel profile、角色绑定、时间分布和结果
+规则；引擎无需加入“机密事件”或特定传播故事的专用分支。

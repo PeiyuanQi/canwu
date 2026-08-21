@@ -24,10 +24,79 @@ Engine SemVer and snapshot format versioning are separate. Every snapshot stores
 the producing engine version and an integer snapshot format version. Patch and
 minor releases may continue to read an older snapshot format. A format change
 increments the format number and should provide a migration path when practical.
-Format-4 state and boundary commitments include the producing engine version,
-so this runtime rejects a format-4 snapshot from any other engine version until
-an explicit migration rewrites the commitments. Format 2 and 3 migration records
-the source engine version, then emits a current-engine format-4 checkpoint.
+Format-4 and format-5 state and boundary commitments include the producing engine version. The 0.5 runtime writes format 5 only and accepts engine 0.4.0 format 4 only through the strict JSON migration entry points. Typed snapshots accept current engine 0.5.0 format 5 only; older format 2 and 3 values must first be upgraded by the 0.4 runtime.
+
+### 0.5.0 / snapshot format 5 migration
+
+The 0.5.0 runtime writes snapshot format 5. Format 5 is a deliberate wire break rather than an additive reinterpretation of format 4.
+
+The only direct format-4 engine identity accepted by that migration is exactly
+`0.4.0`. Loading reads only the outer version selector, then routes the value to
+independent, recursively strict legacy wire structs. Unknown and
+format-5-only fields or enum variants are rejected before any current runtime
+type is constructed. The accepted legacy value is then validated for engine
+identity, checkpoint, domain roots, boundary chain, boundary-state hashes,
+replay envelope, evidence cursors, and checkpoint-journal segment continuity
+under the 0.4 contracts. Only after those checks succeed may it map legacy
+sequential random positions to tagged sequential addresses, add empty
+generic-knowledge and compact-continuation state, switch engine and snapshot
+identity, and compute format-5 commitments.
+
+The migrated state may continue and can be replayed exactly from the first
+format-5 boundary onward. It does not claim that the 0.5 runtime reproduces old
+0.4 intermediate state commitments; those remain auditable with the original
+0.4 runtime and verified legacy bundle. Migration fixtures must cover an empty
+run, a registered plugin and boundary contract, a sequential draw, a tagged-v1
+boundary-state hash, ReplayJournal, and checkpoint-journal/live-compaction
+state, with tamper companions for each.
+
+### 0.5.0 source and wire breaks
+
+- `RandomDrawRecord.position` is replaced by `address: RandomDrawAddress` and
+  adds optional `operation_evidence: EvidenceRef`.
+- `RandomDrawAddress::Sequential { position }` is the migrated sequential wire.
+  The `OperationV1(RandomOperationAddressV1)` shape and its
+  `RandomOperationTarget` variants are reserved for forward compatibility; the
+  0.5 runtime rejects every such authoritative draw with
+  `UnsupportedRandomDrawAddress` until keyed execution is implemented.
+- `SimulationSnapshot` typed loading accepts only engine 0.5.0 format 5.
+  Engine 0.4.0 format-4 snapshots, replay journals, and checkpoint-journal
+  bundles must use their JSON loaders so strict legacy validation occurs before
+  migration.
+- `ReplayJournal` and checkpoint-journal JSON loading now reject recursively
+  unknown fields. A migrated legacy replay is marked historical-only and returns
+  `LegacyReplayUnavailable`; exact replay starts with evidence produced after
+  migration.
+- Workspace crates and exact first-party dependency requirements move in
+  lockstep from 0.4.0 to 0.5.0.
+
+#### Public Rust API delta
+
+The following public construction and exhaustive-match sites are intentionally
+source-breaking in 0.5.0. Downstream crates should update them explicitly;
+serde defaults are not a source-compatibility promise.
+
+| Surface | 0.5.0 change | Required downstream change |
+| --- | --- | --- |
+| Random records | `RandomDrawRecord.position` becomes `address: RandomDrawAddress`; `operation_evidence: Option<EvidenceRef>` is added. `RandomDrawAddress`, `RandomOperationAddressV1`, and `RandomOperationTarget` are new public enums/structs. | Construct `RandomDrawAddress::Sequential { position }` for migrated sequential use. Match every address variant and reject or defer `OperationV1` while it remains disabled. |
+| References and IDs | `DomainRecordVersionSource`, `DomainRecordVersionRef`, `EvidenceRef`, `KnowledgeRecordKind`, `KnowledgeSchemaId`, `KnowledgeHolderRef`, `KnowledgeHolderPolicy`, `KnowledgeRecordId`, and `HolderKnowledgeRecordId` are added. | Store exact version/evidence references and match holder/evidence enums exhaustively instead of using untyped strings or current-record lookups. |
+| Domain schemas | `DomainRecordSchema` adds `holder_policy` and `mutation_policy: DomainRecordMutationPolicy`; `DomainReferenceTargetKind` adds `AnyEntity`. | Update every struct literal and exhaustive match. Explicitly choose whether the record can be a knowledge holder and whether it is versioned or create-only, and validate an `AnyEntity` reference as an entity class rather than accepting arbitrary domain values. |
+| Plugin descriptors | `PluginDescriptor` adds `knowledge_schemas: Vec<PluginKnowledgeSchema>`. `PluginKnowledgeSchema`, `KnowledgeLimitsV1`, `KnowledgeSubjectSchema`, and `KnowledgeSubjectTargetKind` are new public contract types. | Update descriptor literals/registration and include the knowledge schema set in plugin identity and semantic-hash review. Use an empty vector for plugins that publish none. |
+| Boundary contracts and proposals | `BoundarySystemContract` adds `knowledge_writes: Vec<KnowledgeWriteGrant>` and `plugin_ingress_targets: Vec<PluginIngressTarget>`. `BoundaryDirective` adds `PublishKnowledge` and `SchedulePluginIngress`. | Update contract literals, declare each writable schema/visibility and cross-plugin ingress target, and extend exhaustive directive matches. Empty grant/target lists preserve existing systems. |
+| Boundary evidence | `BoundaryEmissionKind` adds `KnowledgeChange`; `BoundaryRecord` adds `knowledge_changes: Vec<BoundaryKnowledgeChange>`; `BoundaryReceipt` adds `knowledge_batch_count` and `knowledge_record_count`. | Update exhaustive matches and every public struct literal/adapter. Treat the two receipt counters as summaries, not substitutes for authoritative boundary evidence. |
+| Events and audiences | `EventKind` adds `KnowledgePublished` and `EventAudience` adds `KnowledgeHolder`. | Extend exhaustive event/audience routing and visibility checks. Do not map holder-only events to a global or actor-agnostic audience. |
+| Knowledge model and queries | `KnowledgeSource`, `KnowledgeSubjectTarget`, `KnowledgeSubject`, `KnowledgeOrigin`, `KnowledgeRecordDraft`, `KnowledgeRecord`, `KnowledgeRecordView`, `KnowledgeHistoryView`, `KnowledgeReadCut`, `KnowledgeCursor`, `KnowledgeQuery`, `KnowledgeQueryResult`, `GenericKnowledgeLedger`, `KnowledgeSnapshot`, `KnowledgeLedgerError`, and `KnowledgeQueryError` are public. `Scenario` and `SimulationSnapshot` add generic knowledge state. | Update scenario/snapshot literals. Query through an explicit holder and read cut; do not expose the admin snapshot as a player view. |
+| Viewer API | `ObservationPrincipal` and `CanwuViewer` are added. `ViewerContext` now carries a private principal and checkpoint binding instead of exposing caller-selected actor state. `Canwu` adds `admin_query_knowledge`, `viewer`, `viewer_for_actor`, and `viewer_context`; `CanwuViewer` supplies holder-bounded query/audit/observation methods. | Replace player-facing direct snapshot reads with a viewer derived from persisted run policy. Use `ViewerContext` accessors instead of a struct literal, refresh detached contexts after authoritative state changes, and reserve admin query/snapshot access for trusted host tooling. |
+| Archived evidence continuation | `PayloadRequiredEvidenceContinuationV1`, its reserved schema field/version constants, and `payload_required_evidence_continuation_property_v1` are added. `SimulationCheckpoint` adds `reachable_archive_segment_ids` and `orphaned_archive_segment_ids`. | Persist payload-required dependencies in an active create-only domain-record version, mark completion explicitly, and let the host compare every retained manifest before treating a stored segment as an orphan candidate. These APIs identify candidates only; they do not delete archive data. |
+| Errors | `ErrorCode` adds the knowledge validation/authority/limit/read-cut/not-found/write-declaration codes, `EvidenceUnavailable`, `EvidenceContentUnavailable`, `InvalidRandomOperationEvidence`, `RandomOperationConflict`, `LegacyReplayUnavailable`, and `UnsupportedRandomDrawAddress`. | Extend exhaustive error mapping. Preserve these distinctions in API/UI adapters rather than collapsing them into `InvalidSnapshot` or a generic plugin error. |
+
+The external API-delta fixture under
+`crates/canwu-sim/tests/api-delta/` constructs or matches the new format-5
+random, schema, descriptor, boundary, event, ingress, error, and generic
+knowledge surfaces as a downstream crate. It also proves that the old format-4
+random-record literal fails to compile and that a restricted `CanwuViewer`
+cannot call the trusted admin snapshot surface. These failures are maintained
+source-break and authority-boundary witnesses, not compatibility shims.
 
 Executable plugin handlers are never serialized. Snapshots retain their plugin
 descriptors and author-declared package versions and semantic hashes, block
@@ -124,7 +193,8 @@ continue, but retains migration-only replay provenance because snapshot-only
 migration cannot reconstruct every historical boundary state commitment. Saves
 created under revision format 1 export current exact-replay journals normally.
 
-Format 4 also permits additive admission-cursor format 1. Snapshots persist the
+Engine 0.4.0 format 4 introduced additive admission-cursor format 1, which
+format 5 retains. Snapshots persist the
 number of attempt, accepted-command, and event records consumed by completed
 boundaries. Runtime settlement uses those monotonic counts to read only the new
 journal tails. Loading still walks boundary evidence once to prove the global
@@ -135,7 +205,8 @@ from their validated boundary lists. The cursors are redundant derived metadata
 and are deliberately excluded from authoritative state and boundary hashes, so
 this optimization does not reinterpret existing simulation-result commitments.
 
-Format 4 also permits commitment format 1. Current snapshots persist
+Engine 0.4.0 format 4 also introduced commitment format 1. Current format-5
+snapshots persist
 domain-separated canonical roots for world, knowledge, plugin components,
 generic records, decisions, scheduler state, commands and attempts, events, ingress,
 random state and draws, the boundary chain, authoritative run/plugin identity,
@@ -162,25 +233,28 @@ are rejected. When a snapshot is at a boundary head and the record carries a
 state commitment, loading recomputes that commitment from validated state and
 requires an exact match.
 
-Checkpoint-journal format 1 is an additive persistence envelope separate from
-snapshot format 4. Its current-state checkpoint contains a current snapshot
+Checkpoint-journal format 1 is a persistence envelope versioned separately from
+the nested snapshot. Its current-state checkpoint contains a current snapshot
 shell with empty event, command, command-attempt, ingress, boundary, and random-
 draw arrays plus the full evidence cursor and existing commitment roots.
 Contiguous evidence segments reconstruct those arrays before normal snapshot
 validation. Segment gaps, duplicates, non-advancing ranges, false end cursors,
 checkpoint-side evidence duplication, unsupported envelope formats, and any
-record tampering are rejected. Existing flat snapshots are neither relabeled
-nor migrated into this envelope implicitly; they remain readable through the
-existing snapshot APIs. Checkpoint-journal format 1 requires the current
-snapshot format and has no legacy interpretation.
+record tampering are rejected. Existing flat snapshots are never relabeled into
+this envelope implicitly. Current envelopes contain format 5; engine 0.4.0
+format-4 envelopes are accepted only by the strict legacy entry point, validated
+as 0.4 artifacts, and migrated before the current reconstruction validator runs.
 
 Live journal sealing is an in-memory continuation policy over the same format-1
-cursor and segment contract. `CompactedSimulation` moves a completed retained
-tail into a caller-owned segment, preserves the total cursor and incremental
-commitment prefix internally, and requires the sealed prefix for later full
-snapshot or replay reconstruction. It introduces no new serialized format and
-requires no snapshot migration. Ordinary flat snapshots and replay journals
-retain their existing full-history semantics.
+cursor and segment contract. `CompactedSimulation` prepares a completed retained
+tail as an immutable content-addressed segment, lets an `ArchiveStore` persist it
+idempotently, and commits only the matching preparation token. It preserves the
+total cursor, archived segment/receipt/dependency roots, operation-keyed random
+reservations, and incremental commitment prefix. Full reconstruction resolves
+the exact segment sequence through an `ArchiveProvider` and re-runs normal
+snapshot validation. This adds committed continuation fields to format 5 but no
+new checkpoint-journal envelope version. Ordinary flat snapshots and replay
+journals retain their full-history semantics.
 
 Authoritative state and boundary hashes normalize the run-policy artifact: the
 actual command/effect journal remains authoritative, while run purpose,

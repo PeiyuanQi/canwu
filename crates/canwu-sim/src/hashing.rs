@@ -54,6 +54,8 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) next_ingress_id: u64,
     pub(super) next_boundary_id: u64,
     pub(super) next_random_draw_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    pub(super) next_knowledge_record_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
     #[serde(skip_serializing_if = "is_one_u64")]
@@ -110,6 +112,8 @@ pub(super) struct ControlCommitmentMaterial {
     pub(super) next_ingress_id: u64,
     pub(super) next_boundary_id: u64,
     pub(super) next_random_draw_id: u64,
+    #[serde(skip_serializing_if = "is_one_u64")]
+    pub(super) next_knowledge_record_id: u64,
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
     #[serde(skip_serializing_if = "is_one_u64")]
@@ -382,6 +386,7 @@ fn commitment_roots(
             next_ingress_id: material.next_ingress_id,
             next_boundary_id: material.next_boundary_id,
             next_random_draw_id: material.next_random_draw_id,
+            next_knowledge_record_id: material.next_knowledge_record_id,
             next_schedule_sequence: material.next_schedule_sequence,
             next_correlation_id: material.next_correlation_id,
             next_decision_trace_id: material.next_decision_trace_id,
@@ -528,6 +533,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         next_ingress_id: snapshot.next_ingress_id,
         next_boundary_id: snapshot.next_boundary_id,
         next_random_draw_id: snapshot.next_random_draw_id,
+        next_knowledge_record_id: snapshot.next_knowledge_record_id,
         next_schedule_sequence: snapshot.next_schedule_sequence,
         next_correlation_id: snapshot.next_correlation_id,
         next_decision_trace_id: snapshot.next_decision_trace_id,
@@ -611,6 +617,7 @@ pub(super) fn snapshot_commitment_roots(
             next_ingress_id: snapshot.next_ingress_id,
             next_boundary_id: snapshot.next_boundary_id,
             next_random_draw_id: snapshot.next_random_draw_id,
+            next_knowledge_record_id: snapshot.next_knowledge_record_id,
             next_schedule_sequence: snapshot.next_schedule_sequence,
             next_correlation_id: snapshot.next_correlation_id,
             next_decision_trace_id: snapshot.next_decision_trace_id,
@@ -864,7 +871,13 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
     )
 }
 
-pub(super) fn canonical_hash<T: Serialize + ?Sized>(
+/// Computes the engine's canonical JSON commitment for plugin-owned data.
+///
+/// The caller supplies a stable, versioned domain string. This is the same
+/// deterministic encoding and domain separation used by the runtime's own
+/// commitments, allowing extension operation identifiers to remain replay
+/// compatible with kernel validation.
+pub fn canonical_hash<T: Serialize + ?Sized>(
     domain: &str,
     value: &T,
 ) -> Result<String, CanwuError> {
@@ -879,6 +892,21 @@ pub(super) fn canonical_hash<T: Serialize + ?Sized>(
     hasher.update(&[0]);
     hasher.update(&encoded);
     Ok(hasher.finalize().to_hex().to_string())
+}
+
+/// Computes a domain-separated BLAKE3 commitment over an already canonical
+/// byte payload.
+///
+/// Extension contracts should prefer [`canonical_hash`] for serde values. This
+/// raw form exists for frozen binary contracts, such as Merkle interior nodes,
+/// whose byte encoding is defined independently of JSON.
+#[must_use]
+pub fn canonical_byte_hash(domain: &str, payload: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(payload);
+    hasher.finalize().to_hex().to_string()
 }
 
 pub(super) fn is_canonical_hash(value: &str) -> bool {

@@ -1,0 +1,376 @@
+{
+  "engine_version": "0.4.0",
+  "snapshot_format_version": 4,
+  "run_manifest": {
+    "provenance": "declared",
+    "format_version": 1,
+    "scenario": {
+      "namespace": "canwu.inline",
+      "name": "scenario",
+      "version": "1",
+      "semantic_hash": "34c11a3a36a3a4e1dc649be351b5abe2f20e78b1c4951c85ee5390c6e5351293"
+    },
+    "rules": [],
+    "content": [],
+    "localization_contracts": [],
+    "run_configuration": {
+      "namespace": "canwu.core",
+      "name": "default-run-configuration",
+      "version": "1",
+      "semantic_hash": "7e8651be717c58a668dedf1c4111c792dd5820a64a6881be9529ffb856f47869"
+    },
+    "sources": []
+  },
+  "run_manifest_hash": "b26f26aa2aed8546efcab8a9d16bbbd1c3afdca7fd8b0dee4075848781546edf",
+  "run_configuration": {
+    "provenance": "compatibility_v1"
+  },
+  "checkpoint_hash": "c14c0004ca8b6e0506b9aba25a79e2208844ea2020dbb485095b0b9ca73e6402",
+  "commitment_format_version": 1,
+  "commitment_roots": {
+    "world": "f5997ccf35ddf878af6575ac19b90e322583d97c45836b2a8f7a57c9159918a1",
+    "knowledge": "6f2d6369bd8683a901aa6969a86b211d856a93b1a8c0bcdc1293596f249db5c0",
+    "plugin_components": "8c7ca15c6225b0b7f2f025a224a726265d75058a9518771f8da2c48e37c2a46a",
+    "domain_records": "074eee727b693654308c607ceee21c3a822da80388f65b37017f6437faf2b798",
+    "scheduler": "85560b2401299cf0e655ef6e9641d44f3facab0a16486c87650b564084cd28e6",
+    "commands": "13df1a29fa4ef85e4ece2a026775e1dbfdc237b4cd907434e75a913df9e3b9af",
+    "events": "d39639b9342257c62aa4f052c602d6eeb8929eaf0af52522258b9724a21dc651",
+    "ingress": "e00308f09971194a7aa12c93212db40ef8b74074fe6303fdadd2d29794d897fb",
+    "random": "7a3e66e135c22b6642a1f273ec7a9d3d8e646f177292526bdffa6a0c05729708",
+    "boundary_chain": "744effe2ad0768f66894c48322cd7996870c594a785b37921453bcabe2e4cedc",
+    "identity": "bea43e35de792de5855972d6ac1f0d8c260e70227bdca6692e1d822391a19006",
+    "control": "adf1107bf4c2398de1f87f59224e944e3d52d3de5e9b261a3181c616a1bbcbde"
+  },
+  "revision_format_version": 1,
+  "replay_revision_format_version": 1,
+  "admission_cursor_format_version": 1,
+  "initial_time": 0,
+  "now": 0,
+  "plugin_registration_closed": false,
+  "world": {
+    "people": [
+      {
+        "id": 1,
+        "name": "General Shen",
+        "government": 1,
+        "current_location": 2,
+        "roles": [
+          "army_commander"
+        ]
+      },
+      {
+        "id": 2,
+        "name": "Minister Luo",
+        "government": 1,
+        "current_location": 1,
+        "roles": [
+          "civil_minister"
+        ]
+      }
+    ],
+    "governments": [
+      {
+        "id": 1,
+        "name": "State of Yun",
+        "capital": 2
+      }
+    ],
+    "territories": [
+      {
+        "id": 1,
+        "name": "Westford",
+        "controller": 1,
+        "position": {
+          "x": 80.0,
+          "y": 180.0
+        }
+      },
+      {
+        "id": 2,
+        "name": "Yun Capital",
+        "controller": 1,
+        "position": {
+          "x": 240.0,
+          "y": 120.0
+        }
+      },
+      {
+        "id": 3,
+        "name": "Eastwatch",
+        "controller": 1,
+        "position": {
+          "x": 420.0,
+          "y": 210.0
+        }
+      }
+    ],
+    "routes": [
+      {
+        "id": 1,
+        "name": "Western Post Road",
+        "from": 1,
+        "to": 2,
+        "travel_minutes": 720,
+        "terrain": "road"
+      },
+      {
+        "id": 2,
+        "name": "Eastern River Road",
+        "from": 2,
+        "to": 3,
+        "travel_minutes": 1080,
+        "terrain": "river_road"
+      }
+    ],
+    "armies": [
+      {
+        "id": 1,
+        "name": "First Field Army",
+        "government": 1,
+        "commander": 1,
+        "location": 2,
+        "strength": 8000,
+        "morale": 72,
+        "transit": null
+      }
+    ]
+  },
+  "knowledge": {
+    "actors": {
+      "1": {
+        "actor": 1,
+        "armies": {
+          "1": {
+            "army": 1,
+            "known_name": "First Field Army",
+            "known_location": 2,
+            "estimated_strength": {
+              "minimum": 8000,
+              "maximum": 8000
+            },
+            "observed_at": 0,
+            "learned_at": 0,
+            "confidence_per_mille": 1000,
+            "source": {
+              "type": "command_responsibility"
+            }
+          }
+        }
+      },
+      "2": {
+        "actor": 2,
+        "armies": {
+          "1": {
+            "army": 1,
+            "known_name": "First Field Army",
+            "known_location": 2,
+            "estimated_strength": {
+              "minimum": 7000,
+              "maximum": 9000
+            },
+            "observed_at": 0,
+            "learned_at": 0,
+            "confidence_per_mille": 700,
+            "source": {
+              "type": "scenario_record"
+            }
+          }
+        }
+      }
+    }
+  },
+  "events": [],
+  "commands": [],
+  "boundaries": [],
+  "plugin_components": [],
+  "plugin_descriptors": [],
+  "schema": {
+    "types": {
+      "army": {
+        "type_name": "army",
+        "description": "Mobile military organization",
+        "fields": [
+          {
+            "name": "id",
+            "value_type": "ArmyId",
+            "description": "Stable army identifier",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "commander",
+            "value_type": "PersonId",
+            "description": "Commanding person",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "location",
+            "value_type": "TerritoryId",
+            "description": "Ground-truth territory",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "strength",
+            "value_type": "u32",
+            "description": "Ground-truth personnel strength",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "morale",
+            "value_type": "u16",
+            "description": "Morale from 0 through 100",
+            "reference_type": null,
+            "writable_via_debug_command": true
+          },
+          {
+            "name": "transit",
+            "value_type": "Option<TransitState>",
+            "description": "Pending movement",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          }
+        ]
+      },
+      "event": {
+        "type_name": "event",
+        "description": "Inspectable state-change or information event",
+        "fields": [
+          {
+            "name": "timestamp",
+            "value_type": "SimTime",
+            "description": "Simulation occurrence time",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          }
+        ]
+      },
+      "person": {
+        "type_name": "person",
+        "description": "Historical actor with roles and a location",
+        "fields": [
+          {
+            "name": "id",
+            "value_type": "PersonId",
+            "description": "Stable person identifier",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "name",
+            "value_type": "String",
+            "description": "Display name",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "government",
+            "value_type": "GovernmentId",
+            "description": "Government membership",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "current_location",
+            "value_type": "TerritoryId",
+            "description": "Current territory",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "roles",
+            "value_type": "Vec<String>",
+            "description": "Offices and authorities",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          }
+        ]
+      },
+      "route": {
+        "type_name": "route",
+        "description": "Travel connection between territories",
+        "fields": [
+          {
+            "name": "from",
+            "value_type": "TerritoryId",
+            "description": "First route endpoint",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "to",
+            "value_type": "TerritoryId",
+            "description": "Second route endpoint",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "travel_minutes",
+            "value_type": "i64",
+            "description": "Deterministic travel duration",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "terrain",
+            "value_type": "String",
+            "description": "Terrain classification",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          }
+        ]
+      },
+      "territory": {
+        "type_name": "territory",
+        "description": "Administrative and geographic unit",
+        "fields": [
+          {
+            "name": "id",
+            "value_type": "TerritoryId",
+            "description": "Stable territory identifier",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "controller",
+            "value_type": "GovernmentId",
+            "description": "Controlling government",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          },
+          {
+            "name": "position",
+            "value_type": "MapPoint",
+            "description": "Abstract visualization point",
+            "reference_type": null,
+            "writable_via_debug_command": false
+          }
+        ]
+      }
+    }
+  },
+  "root_seed": 1700,
+  "random_streams": [
+    {
+      "key": {
+        "namespace": "canwu.core",
+        "name": "knowledge-report-delay",
+        "version": 1
+      },
+      "algorithm": "split_mix64_v1",
+      "seed": 1700,
+      "position": 0,
+      "generator_state": 1700
+    }
+  ],
+  "random_draws": [],
+  "scheduled": [],
+  "next_event_id": 1,
+  "next_command_id": 1,
+  "next_boundary_id": 1,
+  "next_random_draw_id": 1,
+  "next_schedule_sequence": 1,
+  "next_correlation_id": 1
+}

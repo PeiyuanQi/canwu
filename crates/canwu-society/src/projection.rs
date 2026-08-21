@@ -229,28 +229,28 @@ pub fn projection_for_viewer(
     canwu: &Canwu,
     viewer: &ViewerContext,
 ) -> Result<SocietyProjection, CanwuError> {
-    let authorized = canwu.viewer_context(viewer.actor())?;
+    let actor = viewer.actor().ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "society projection requires a person observation principal",
+        )
+    })?;
+    let authorized = canwu.viewer_context(actor)?;
     if authorized != *viewer {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
-            format!(
-                "actor {} is not authorized for this society projection",
-                viewer.actor()
-            ),
+            format!("actor {actor} is not authorized for this society projection"),
         ));
     }
     let state = load_society_state(canwu)?;
     state
         .projections
-        .get(&viewer.actor().get().to_string())
+        .get(&actor.get().to_string())
         .cloned()
         .ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidAuthority,
-                format!(
-                    "no delivered society projection exists for actor {}",
-                    viewer.actor()
-                ),
+                format!("no delivered society projection exists for actor {actor}"),
             )
         })
 }

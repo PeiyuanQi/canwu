@@ -1,0 +1,64 @@
+---
+title: Encoded transfer and in-path interception
+description: Use synthetic symbol codes to separate copying, access, and interpretation, with different capabilities producing different outcomes.
+sidebar:
+  order: 5
+  label: Encoded interception
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-information/examples/encoded_interception.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+
+This case uses five synthetic holders. `H-601` is the source holder, `H-602`
+the intended and commissioning holder, `H-603` the relay holder, `H-604` the
+distinct interpretation performer, and `H-605` a restricted reviewer. The
+source code `SYN-E8-42` and result code `SYN-E8-42-R` carry no real-world
+meaning.
+
+## Run it
+
+```shell
+cargo run -p canwu-information --example encoded_interception
+```
+
+The example keeps the full lifecycle readable in a detached ledger, then runs
+the distinct-performer delegated interpretation through the authoritative
+`InformationPlugin`. A persisted neutral authority command supplies the exact
+claim. The example verifies snapshot restore, exact replay without re-running
+an external decoder, compact evidence reconstruction, and compact checkpoint
+restore.
+
+## Relative timeline
+
+| Minute | Model action |
+| ---: | --- |
+| `0–1` | Create content and a `grouped_symbols_v1` representation requiring `decode_k2`. |
+| `2–4` | Begin an addressed dispatch and move its delivery attempt to `InTransit`. |
+| `5` | Create a same-content representation copy at the relay with fidelity `1000`. |
+| `6` | `H-603` gains access through the captured instance. |
+| `7` | `H-603` uses `decode_k1`; interpretation is `Failed` and has no result content. |
+| `12–13` | Complete delivery and record the addressed recipient's access to the original representation. |
+| `14–15` | `H-604` uses `decode_k2` for `H-602`, creating derived result content and a `Succeeded` interpretation. |
+| `16` | Complete the dispatch after its delivery attempt has a terminal disposition. |
+
+## Model assertions
+
+<Steps>
+1. Interception first creates a representation copy. `SameContent` and its parent edge retain the relationship to the original representation.
+2. Access is not interpretation. `H-603` can encounter the complete symbol copy while the wrong capability produces only a failed interpretation record.
+3. A `Failed` interpretation cannot bind `result_content`; a `Succeeded` interpretation must bind one.
+4. Every interpretation binds `input_access`, `input_representation`, `performed_by`, and `performed_for`.
+5. Addressed delivery advances through its own attempt states. The captured copy cannot replace the recipient's delivery evidence.
+6. Knowledge drafts remain holder-scoped: `H-603` receives its access and failed-interpretation facts, `H-602` receives its access, commissioned interpretation, and release-availability facts, and `H-605` receives only review-release availability. Performing the interpretation does not itself give `H-604` holder knowledge.
+</Steps>
+
+## Replaceable application details
+
+`grouped_symbols_v1`, `decode_k1`, `decode_k2`, node identifiers, and relative
+delays are application configuration. The engine needs only neutral contracts
+for representation lineage, delivery, access, interpretation, and
+holder-relative publication. Channel performance, encoding semantics,
+consequences, and narration remain downstream plugin concerns.

@@ -8,6 +8,7 @@ use super::{
     canonical_text, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
     is_domain_record_state, validate_type_schema,
 };
+use crate::knowledge::{KnowledgeLimitsV1, PluginKnowledgeSchema, validate_schema_set};
 use crate::records::DomainRecordSchema;
 use canwu_event::EventAudience;
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,6 +98,119 @@ impl PluginRegistrar<'_> {
         descriptor
             .record_schemas
             .sort_by(|left, right| left.kind.cmp(&right.kind));
+        *self.registry = candidate;
+        Ok(())
+    }
+
+    pub fn register_knowledge_schema(
+        &mut self,
+        mut schema: PluginKnowledgeSchema,
+    ) -> Result<(), CanwuError> {
+        schema.canonicalize();
+        schema.validate().map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!("invalid knowledge schema: {error}"),
+            )
+        })?;
+        let current_count = self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .map_or(0, |descriptor| descriptor.knowledge_schemas.len());
+        if current_count >= KnowledgeLimitsV1::CURRENT.schemas_per_plugin {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "plugin knowledge schema limit exceeded",
+            ));
+        }
+        if self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .is_some_and(|descriptor| {
+                descriptor
+                    .knowledge_schemas
+                    .iter()
+                    .any(|candidate| candidate.id == schema.id)
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "plugin {} registered knowledge schema {:?} twice",
+                    self.plugin, schema.id
+                ),
+            ));
+        }
+        if let Some(owner) = self.registry.knowledge_kind_owners.get(&schema.id.kind)
+            && owner != &self.plugin
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "knowledge kind {:?} is already owned by plugin {owner}",
+                    schema.id.kind
+                ),
+            ));
+        }
+        if let Some((owner, existing)) = self.registry.knowledge_schemas.get(&schema.id) {
+            if owner != &self.plugin {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    format!(
+                        "knowledge schema {:?} is already owned by plugin {owner}",
+                        schema.id
+                    ),
+                ));
+            }
+            if existing != &schema {
+                return Err(CanwuError::new(
+                    ErrorCode::PluginManifestMismatch,
+                    format!(
+                        "plugin {} changed the stored knowledge schema {:?}",
+                        self.plugin, schema.id
+                    ),
+                ));
+            }
+        }
+        if schema.writable
+            && self
+                .registry
+                .knowledge_schemas
+                .values()
+                .any(|(owner, existing)| {
+                    owner == &self.plugin
+                        && existing.id != schema.id
+                        && existing.id.kind == schema.id.kind
+                        && existing.writable
+                })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "knowledge kind {:?} already has a writable version",
+                    schema.id.kind
+                ),
+            ));
+        }
+        let mut candidate = self.registry.clone();
+        candidate
+            .knowledge_kind_owners
+            .entry(schema.id.kind.clone())
+            .or_insert_with(|| self.plugin.clone());
+        candidate
+            .knowledge_schemas
+            .insert(schema.id.clone(), (self.plugin.clone(), schema.clone()));
+        let descriptor = candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        descriptor.name.clone_from(&self.plugin);
+        descriptor.knowledge_schemas.push(schema);
+        descriptor
+            .knowledge_schemas
+            .sort_by(|left, right| left.id.cmp(&right.id));
         *self.registry = candidate;
         Ok(())
     }
@@ -258,6 +372,7 @@ impl PluginRegistrar<'_> {
         handler: BoundarySystemHandler,
     ) -> Result<(), CanwuError> {
         validate_boundary_system_contract(&mut contract)?;
+        validate_knowledge_write_grants(&self.plugin, &contract, &self.registry.knowledge_schemas)?;
         if self
             .registry
             .descriptors
@@ -489,6 +604,16 @@ impl PluginRegistry {
             schema: &mut candidate_schema,
         };
         plugin.register(&mut registrar)?;
+        validate_schema_set(
+            &candidate_registry.knowledge_schemas,
+            &candidate_registry.knowledge_kind_owners,
+        )
+        .map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!("invalid knowledge schema set: {error}"),
+            )
+        })?;
         let Some(generated_descriptor) = candidate_registry.descriptors.get(plugin_name) else {
             return Err(CanwuError::new(
                 ErrorCode::InvalidPluginRegistration,
@@ -537,6 +662,8 @@ impl PluginRegistry {
             reservation_offerers: BTreeMap::new(),
             random_stream_owners: BTreeMap::new(),
             record_schemas: BTreeMap::new(),
+            knowledge_schemas: BTreeMap::new(),
+            knowledge_kind_owners: BTreeMap::new(),
         };
         let mut previous_plugin = None;
         for mut descriptor in descriptors {
@@ -599,6 +726,47 @@ impl PluginRegistry {
                 registry
                     .record_schemas
                     .insert(schema.kind.clone(), (plugin.clone(), schema.clone()));
+            }
+            if descriptor.knowledge_schemas.len() > KnowledgeLimitsV1::CURRENT.schemas_per_plugin
+                || descriptor
+                    .knowledge_schemas
+                    .windows(2)
+                    .any(|pair| pair[0].id >= pair[1].id)
+            {
+                return invalid_snapshot(
+                    "plugin knowledge schemas are not in canonical order or exceed their limit",
+                );
+            }
+            for schema in &mut descriptor.knowledge_schemas {
+                let original = schema.clone();
+                schema.canonicalize();
+                schema.validate().map_err(|error| {
+                    invalid_snapshot_error(format!("invalid knowledge schema: {error}"))
+                })?;
+                if *schema != original {
+                    return invalid_snapshot(
+                        "plugin knowledge-schema declarations are not in canonical order",
+                    );
+                }
+                if let Some(owner) = registry.knowledge_kind_owners.get(&schema.id.kind) {
+                    if owner != &plugin {
+                        return invalid_snapshot(format!(
+                            "knowledge kind {:?} is owned by both {owner} and {plugin}",
+                            schema.id.kind
+                        ));
+                    }
+                } else {
+                    registry
+                        .knowledge_kind_owners
+                        .insert(schema.id.kind.clone(), plugin.clone());
+                }
+                if registry
+                    .knowledge_schemas
+                    .insert(schema.id.clone(), (plugin.clone(), schema.clone()))
+                    .is_some()
+                {
+                    return invalid_snapshot("knowledge schema ID is duplicated");
+                }
             }
             if descriptor
                 .systems
@@ -663,6 +831,12 @@ impl PluginRegistry {
                 validate_boundary_system_contract(contract).map_err(|error| {
                     invalid_snapshot_error(format!("invalid boundary system descriptor: {error}"))
                 })?;
+                validate_knowledge_write_grants(&plugin, contract, &registry.knowledge_schemas)
+                    .map_err(|error| {
+                        invalid_snapshot_error(format!(
+                            "invalid boundary knowledge writer descriptor: {error}"
+                        ))
+                    })?;
                 if *contract != original {
                     return invalid_snapshot(
                         "boundary system declarations are not in canonical order",
@@ -804,6 +978,9 @@ impl PluginRegistry {
             previous_plugin = Some(plugin.clone());
             registry.descriptors.insert(plugin, descriptor);
         }
+        validate_schema_set(&registry.knowledge_schemas, &registry.knowledge_kind_owners).map_err(
+            |error| invalid_snapshot_error(format!("invalid knowledge schema set: {error}")),
+        )?;
         Ok(registry)
     }
 
@@ -987,6 +1164,63 @@ fn validate_boundary_system_contract(
     validate_reservation_refs(&mut contract.reservation_reads)?;
     validate_random_stream_keys(&mut contract.random_streams)?;
     validate_canonical_names(&mut contract.emits, "boundary event type")?;
+    for grant in &mut contract.knowledge_writes {
+        grant.visibilities.sort();
+        grant.visibilities.dedup();
+        if grant.visibilities.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "knowledge write grants require at least one visibility",
+            ));
+        }
+    }
+    contract
+        .knowledge_writes
+        .sort_by(|left, right| left.schema.cmp(&right.schema));
+    if contract
+        .knowledge_writes
+        .windows(2)
+        .any(|pair| pair[0].schema >= pair[1].schema)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "knowledge write grants must name unique schemas in canonical order",
+        ));
+    }
+    if !contract.knowledge_writes.is_empty()
+        && !matches!(
+            contract.phase,
+            BoundaryPhase::PerceptionAndAttentionRefresh
+                | BoundaryPhase::PerspectiveAndReportMaterialization
+        )
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "knowledge publication is available only in phases 4 and 13",
+        ));
+    }
+    if contract.plugin_ingress_targets.iter().any(|target| {
+        target.target_plugin.trim().is_empty()
+            || target.target_plugin != target.target_plugin.trim()
+            || target.packet_type.trim().is_empty()
+            || target.packet_type != target.packet_type.trim()
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "cross-plugin ingress targets require canonical plugin and packet names",
+        ));
+    }
+    contract.plugin_ingress_targets.sort();
+    if contract
+        .plugin_ingress_targets
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "cross-plugin ingress targets must be unique",
+        ));
+    }
 
     let may_propose_changes = matches!(
         contract.phase,
@@ -995,7 +1229,11 @@ fn validate_boundary_system_contract(
             | BoundaryPhase::StrategicAggregation
             | BoundaryPhase::PerspectiveAndReportMaterialization
     );
-    if (!contract.writes.is_empty() || !contract.emits.is_empty()) && !may_propose_changes {
+    if (!contract.writes.is_empty()
+        || !contract.emits.is_empty()
+        || !contract.plugin_ingress_targets.is_empty())
+        && !may_propose_changes
+    {
         return Err(CanwuError::new(
             ErrorCode::InvalidPluginRegistration,
             format!(
@@ -1025,6 +1263,34 @@ fn validate_boundary_system_contract(
                 contract.name
             ),
         ));
+    }
+    Ok(())
+}
+
+fn validate_knowledge_write_grants(
+    plugin: &str,
+    contract: &BoundarySystemContract,
+    schemas: &crate::knowledge::KnowledgeSchemas,
+) -> Result<(), CanwuError> {
+    for grant in &contract.knowledge_writes {
+        let Some((owner, schema)) = schemas.get(&grant.schema) else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "boundary system {plugin}.{} names an unregistered knowledge schema",
+                    contract.name
+                ),
+            ));
+        };
+        if owner != plugin || !schema.writable {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                format!(
+                    "boundary system {plugin}.{} cannot write a foreign or read-only knowledge schema",
+                    contract.name
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1294,4 +1560,302 @@ fn register_random_streams(
         owners.insert(stream.clone(), (plugin.to_owned(), system.to_owned()));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{KnowledgeSubjectSchema, KnowledgeSubjectTargetKind};
+    use canwu_core::{CoreEntityKind, KnowledgeRecordKind, KnowledgeSchemaId};
+
+    struct KnowledgeSchemaPlugin {
+        name: &'static str,
+        schemas: Vec<PluginKnowledgeSchema>,
+    }
+
+    impl SimulationPlugin for KnowledgeSchemaPlugin {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn version(&self) -> &'static str {
+            "1"
+        }
+
+        fn semantic_hash(&self) -> &'static str {
+            "0000000000000000000000000000000000000000000000000000000000000001"
+        }
+
+        fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+            for schema in &self.schemas {
+                registrar.register_knowledge_schema(schema.clone())?;
+            }
+            Ok(())
+        }
+    }
+
+    fn knowledge_kind() -> KnowledgeRecordKind {
+        KnowledgeRecordKind::new("fixture.knowledge", "assessment")
+    }
+
+    fn knowledge_schema(version: u32, writable: bool) -> PluginKnowledgeSchema {
+        PluginKnowledgeSchema {
+            id: KnowledgeSchemaId::new(knowledge_kind(), version),
+            schema_hash: format!("{version:064x}"),
+            writable,
+            payload_schema: PayloadSchema::Any,
+            subjects: vec![],
+        }
+    }
+
+    #[test]
+    fn duplicate_schema_and_writable_conflicts_roll_back_registration() {
+        let duplicate = KnowledgeSchemaPlugin {
+            name: "duplicate-knowledge",
+            schemas: vec![knowledge_schema(1, true), knowledge_schema(1, true)],
+        };
+        let mut registry = PluginRegistry::default();
+        let mut types = SchemaRegistry::default();
+        assert!(registry.register(&duplicate, &mut types).is_err());
+        assert!(registry.descriptors.is_empty());
+        assert!(registry.knowledge_schemas.is_empty());
+        assert!(registry.knowledge_kind_owners.is_empty());
+
+        let two_writable = KnowledgeSchemaPlugin {
+            name: "two-writable-knowledge",
+            schemas: vec![knowledge_schema(1, true), knowledge_schema(2, true)],
+        };
+        assert!(registry.register(&two_writable, &mut types).is_err());
+        assert!(registry.descriptors.is_empty());
+        assert!(registry.knowledge_schemas.is_empty());
+
+        let first_owner = KnowledgeSchemaPlugin {
+            name: "first-knowledge-owner",
+            schemas: vec![knowledge_schema(1, true)],
+        };
+        registry
+            .register(&first_owner, &mut types)
+            .expect("the first kind owner should register");
+        let before = registry.clone();
+        let second_owner = KnowledgeSchemaPlugin {
+            name: "second-knowledge-owner",
+            schemas: vec![knowledge_schema(2, true)],
+        };
+        assert!(registry.register(&second_owner, &mut types).is_err());
+        assert_eq!(registry.descriptors, before.descriptors);
+        assert_eq!(registry.knowledge_schemas, before.knowledge_schemas);
+        assert_eq!(registry.knowledge_kind_owners, before.knowledge_kind_owners);
+    }
+
+    #[test]
+    fn schema_hash_mismatch_blocks_exact_rehydration() {
+        let plugin = KnowledgeSchemaPlugin {
+            name: "rehydrated-knowledge",
+            schemas: vec![knowledge_schema(1, true)],
+        };
+        let mut registry = PluginRegistry::default();
+        let mut types = SchemaRegistry::default();
+        registry
+            .register(&plugin, &mut types)
+            .expect("fixture plugin should register");
+        let mut descriptors = registry.descriptors().cloned().collect::<Vec<_>>();
+        descriptors[0].knowledge_schemas[0].schema_hash =
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
+        let mut rehydrated = PluginRegistry::from_descriptors(descriptors)
+            .expect("the altered descriptor remains structurally valid");
+        let error = rehydrated
+            .register(&plugin, &mut SchemaRegistry::default())
+            .expect_err("exact rehydration must compare the persisted schema hash");
+        assert_eq!(error.code, ErrorCode::PluginManifestMismatch);
+    }
+
+    #[test]
+    fn schema_limit_accepts_boundary_and_rejects_plus_one_atomically() {
+        let boundary = KnowledgeSchemaPlugin {
+            name: "knowledge-limit-boundary",
+            schemas: (1..=KnowledgeLimitsV1::CURRENT.schemas_per_plugin)
+                .map(|version| {
+                    knowledge_schema(
+                        u32::try_from(version).expect("schema limit fits u32"),
+                        version == 1,
+                    )
+                })
+                .collect(),
+        };
+        let mut registry = PluginRegistry::default();
+        registry
+            .register(&boundary, &mut SchemaRegistry::default())
+            .expect("the exact schema limit should be admitted");
+        assert_eq!(
+            registry.knowledge_schemas.len(),
+            KnowledgeLimitsV1::CURRENT.schemas_per_plugin
+        );
+
+        let overflow = KnowledgeSchemaPlugin {
+            name: "knowledge-limit-overflow",
+            schemas: (1..=KnowledgeLimitsV1::CURRENT.schemas_per_plugin + 1)
+                .map(|version| {
+                    knowledge_schema(
+                        u32::try_from(version).expect("schema limit fits u32"),
+                        version == 1,
+                    )
+                })
+                .collect(),
+        };
+        let mut rejected = PluginRegistry::default();
+        let error = rejected
+            .register(&overflow, &mut SchemaRegistry::default())
+            .expect_err("schema limit plus one must reject the whole plugin");
+        assert_eq!(error.code, ErrorCode::InvalidPluginRegistration);
+        assert!(rejected.descriptors.is_empty());
+        assert!(rejected.knowledge_schemas.is_empty());
+    }
+
+    #[test]
+    fn knowledge_schema_registration_canonicalizes_roles_and_targets() {
+        let mut schema = knowledge_schema(1, true);
+        schema.subjects = vec![
+            KnowledgeSubjectSchema {
+                role: "zeta".to_owned(),
+                targets: vec![
+                    KnowledgeSubjectTargetKind::AnyEntity,
+                    KnowledgeSubjectTargetKind::Core(CoreEntityKind::Person),
+                    KnowledgeSubjectTargetKind::AnyEntity,
+                ],
+                required: false,
+                multiple: true,
+            },
+            KnowledgeSubjectSchema {
+                role: "alpha".to_owned(),
+                targets: vec![KnowledgeSubjectTargetKind::Event],
+                required: true,
+                multiple: false,
+            },
+        ];
+        let plugin = KnowledgeSchemaPlugin {
+            name: "canonical-knowledge",
+            schemas: vec![schema],
+        };
+        let mut registry = PluginRegistry::default();
+        registry
+            .register(&plugin, &mut SchemaRegistry::default())
+            .expect("registrar should canonicalize declarations transactionally");
+        let stored = &registry
+            .descriptors
+            .get(plugin.name)
+            .expect("descriptor exists")
+            .knowledge_schemas[0];
+        assert_eq!(stored.subjects[0].role, "alpha");
+        assert_eq!(stored.subjects[1].role, "zeta");
+        assert_eq!(stored.subjects[1].targets.len(), 2);
+        assert!(stored.validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_schema_version_and_hash_roll_back_registration() {
+        let mut version_zero = knowledge_schema(0, true);
+        version_zero.schema_hash =
+            "0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+        let invalid_version = KnowledgeSchemaPlugin {
+            name: "invalid-knowledge-version",
+            schemas: vec![version_zero],
+        };
+        let mut registry = PluginRegistry::default();
+        let mut types = SchemaRegistry::default();
+        assert!(registry.register(&invalid_version, &mut types).is_err());
+        assert!(registry.descriptors.is_empty());
+        assert!(registry.knowledge_schemas.is_empty());
+
+        let mut bad_hash = knowledge_schema(1, true);
+        bad_hash.schema_hash = "not-a-canonical-hash".to_owned();
+        let invalid_hash = KnowledgeSchemaPlugin {
+            name: "invalid-knowledge-hash",
+            schemas: vec![bad_hash],
+        };
+        assert!(registry.register(&invalid_hash, &mut types).is_err());
+        assert!(registry.descriptors.is_empty());
+        assert!(registry.knowledge_schemas.is_empty());
+    }
+
+    #[test]
+    fn knowledge_write_grants_reject_invalid_phase_and_foreign_owner() {
+        #[allow(clippy::unnecessary_wraps)]
+        fn no_op_boundary(
+            _view: &crate::SimulationView<'_>,
+            _context: &crate::BoundaryContext,
+        ) -> Result<crate::BoundaryProposal, CanwuError> {
+            Ok(crate::BoundaryProposal::default())
+        }
+
+        let owner = KnowledgeSchemaPlugin {
+            name: "knowledge-grant-owner",
+            schemas: vec![knowledge_schema(1, true)],
+        };
+        let foreign = KnowledgeSchemaPlugin {
+            name: "knowledge-grant-foreign",
+            schemas: vec![PluginKnowledgeSchema {
+                id: KnowledgeSchemaId::new(
+                    KnowledgeRecordKind::new("fixture.foreign", "assessment"),
+                    1,
+                ),
+                schema_hash: "f000000000000000000000000000000000000000000000000000000000000000"
+                    .to_owned(),
+                writable: true,
+                payload_schema: PayloadSchema::Any,
+                subjects: Vec::new(),
+            }],
+        };
+        let mut registry = PluginRegistry::default();
+        let mut types = SchemaRegistry::default();
+        registry
+            .register(&owner, &mut types)
+            .expect("knowledge owner should register");
+        registry
+            .register(&foreign, &mut types)
+            .expect("foreign fixture should register");
+        let before = registry.clone();
+
+        let mut phase7 = BoundarySystemContract::new(
+            "invalid-phase7-publication",
+            crate::BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        phase7.knowledge_writes = vec![crate::KnowledgeWriteGrant {
+            schema: knowledge_schema(1, true).id,
+            visibilities: vec![StateVisibility::SameBoundary],
+        }];
+        let mut owner_registry = registry.clone();
+        let mut owner_types = types.clone();
+        let mut registrar = PluginRegistrar {
+            plugin: owner.name.to_owned(),
+            registry: &mut owner_registry,
+            schema: &mut owner_types,
+        };
+        let error = registrar
+            .register_boundary_system(phase7, no_op_boundary)
+            .expect_err("phase 7 must reject knowledge publication grants");
+        assert_eq!(error.code, ErrorCode::InvalidPluginRegistration);
+        assert_eq!(owner_registry.descriptors, before.descriptors);
+
+        let mut foreign_grant = BoundarySystemContract::new(
+            "foreign-knowledge-grant",
+            crate::BoundaryPhase::PerspectiveAndReportMaterialization,
+            SystemCadence::Daily,
+        );
+        foreign_grant.knowledge_writes = vec![crate::KnowledgeWriteGrant {
+            schema: knowledge_schema(1, true).id,
+            visibilities: vec![StateVisibility::SameBoundary],
+        }];
+        let mut foreign_registry = registry;
+        let mut registrar = PluginRegistrar {
+            plugin: foreign.name.to_owned(),
+            registry: &mut foreign_registry,
+            schema: &mut types,
+        };
+        let error = registrar
+            .register_boundary_system(foreign_grant, no_op_boundary)
+            .expect_err("a plugin cannot claim another plugin's writable schema");
+        assert_eq!(error.code, ErrorCode::InvalidPluginRegistration);
+        assert_eq!(foreign_registry.descriptors, before.descriptors);
+    }
 }

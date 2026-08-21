@@ -1,0 +1,19 @@
+[package]
+name = "canwu-information"
+description = "Experimental authoritative information lifecycle extension for Canwu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+canwu-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

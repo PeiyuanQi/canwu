@@ -18,6 +18,21 @@ scoped random draws together. It measures:
 - environment-bound exact replay;
 - explicit live evidence sealing and hot-state release.
 
+Select `--suite information-flow` for the public knowledge-ledger profile. It
+publishes records through a registered schema and validated boundary directives,
+keeps approximately half of each boundary's records on one hot holder, and
+spreads the rest across ordinary holders. It measures 1/10/100/1,000-record
+publication boundaries, total history construction, snapshot creation and
+serialization, current-head and paged history/delta queries, snapshot load plus
+validation, exact replay, checkpoint-journal serialization, and an initial
+compacted evidence seal. The smoke preset uses 100, 1,000, and 10,000 total
+records. The full preset uses 10,000, 100,000, and 1,000,000 records, with up to
+10,000 records per settled boundary. Every information-flow run also executes
+fixed public-API stress cases for 100 knowledge schemas, a 10,000-recipient
+addressed dispatch, a 10,000-member explicit audience, 1,000 mixed-lineage
+nodes, 100,000 access records distributed across 1,000 holders, one filtered
+query per holder, and a 100-segment archive-provider build and restore.
+
 Elapsed time and allocation traffic are collected in separate release builds.
 Elapsed mode uses Rust's default system allocator with no counting wrapper.
 Allocation mode enables a thread-local counting allocator and does not report
@@ -48,7 +63,50 @@ cargo run --release \
   --output benchmarks/baselines/2026-08-16-architecture-allocations.json
 ```
 
-PowerShell accepts the same arguments on one line. Use
+Run the measured information-flow smoke preset with:
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml -- \
+  --suite information-flow \
+  --preset smoke \
+  --samples 3 \
+  --growth-samples 1 \
+  --warmup 1 \
+  --mode elapsed \
+  --machine local-windows-x86_64 \
+  --recorded-on 2026-08-21 \
+  --output benchmarks/baselines/2026-08-21-information-flow-smoke-elapsed.json
+```
+
+The million-record preset is intentionally opt-in because the hot-holder paged
+history query derives and binds a complete read cut on each page:
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml -- \
+  --suite information-flow \
+  --preset full \
+  --samples 3 \
+  --growth-samples 1 \
+  --warmup 0 \
+  --mode elapsed \
+  --machine YOUR-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-information-flow-full-elapsed.json
+```
+
+A three-sample operation pass with one growth sample is the final comparison
+profile. The harness records source fingerprints before measurement and checks
+them again at the end; any source change fails closed instead of writing a
+mixed-source baseline. The final 2026-08-21 run completed all three scales and
+peaked at 22,294,740,992 bytes (20.76 GiB) after the harness was changed to load
+million-record snapshot and journal inputs from temporary files per measured
+setup. This keeps the full profile within ordinary workstation memory while
+preserving the measured operation interval.
+
+Use `--scales` to override either preset. PowerShell accepts the same arguments
+on one line. Use
 `cargo fmt --manifest-path benchmarks/performance-harness/Cargo.toml -- --check`,
 `cargo clippy --manifest-path benchmarks/performance-harness/Cargo.toml --all-targets --all-features -- -D warnings`,
 `cargo test --manifest-path benchmarks/performance-harness/Cargo.toml`, and
@@ -61,6 +119,67 @@ only when the machine, compiler, build profile, scales, warmup, and sample count
 match. Allocation counts and byte requests are more stable, but still belong to
 the recorded compiler and target. A baseline is evidence, not a universal
 service-level objective.
+
+## Recorded information-flow smoke baseline
+
+The 2026-08-21 smoke evidence consists of separate
+[`elapsed`](baselines/2026-08-21-information-flow-smoke-elapsed.json) and
+[`allocation`](baselines/2026-08-21-information-flow-smoke-allocations.json)
+reports plus a concise [interpretation](2026-08-21-information-flow.md). The
+elapsed pass used three operation samples, one growth sample, and one warmup;
+the allocation pass used one measured sample and no warmup. Both were recorded
+from a dirty integration worktree, and each JSON artifact preserves that fact,
+the exact source fingerprints, compiler/target details, workload counts, raw
+samples, and serialized sizes.
+
+| Knowledge records | Holders | Hot-holder records | Snapshot | Growth median | Current-head page | Paged hot history | Load + validate | Exact replay | Compact initial seal |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 51 | 50 | 240,506 B | 0.590 ms | 0.060 ms | 0.060 ms | 3.500 ms | 0.560 ms | 0.800 ms |
+| 1,000 | 60 | 500 | 1,585,855 B | 3.790 ms | 0.500 ms | 0.570 ms | 22.480 ms | 2.440 ms | 2.620 ms |
+| 10,000 | 60 | 5,000 | 14,954,774 B | 38.250 ms | 4.990 ms | 25.190 ms | 327.890 ms | 24.870 ms | 25.790 ms |
+
+These measurements expose two important costs rather than hiding them. Snapshot
+load and validation requested about 422.60 MiB of allocator traffic at 10,000
+records, while a five-page hot-holder history scan requested about 82.38 MiB.
+The current implementation has no persisted query index: holder-local IDs,
+read-cut roots, and cursor bindings are derived from the canonical ledger on
+read.
+
+The fixed public-API stress cases produced the following elapsed medians and
+operation-local allocation traffic:
+
+| Stress case | Scale | Median | Allocated |
+| --- | ---: | ---: | ---: |
+| Knowledge-schema registration | 100 schemas | 2.990 ms | 7.25 MiB |
+| Addressed dispatch planning | 10,000 recipients | 5.100 ms | 14.87 MiB |
+| Explicit audience planning | 10,000 members | 7.470 ms | 9.36 MiB |
+| Mixed-lineage validation | 1,000 nodes | 0.110 ms | 0.15 MiB |
+| Access index construction | 100,000 records / 1,000 holders | 82.630 ms | 60.52 MiB |
+| Access query, all records | 100,000 records | 7.640 ms | 2.00 MiB |
+| One access query per holder | 1,000 queries / 100,000 records | 3.778 s | 1.99 MiB |
+| Archive-provider build | 100 segments | 116.850 ms | 271.63 MiB |
+| Archive-provider restore | 100 segments | 6.480 ms | 8.99 MiB |
+
+The 1,000-holder fan-out is now explicit rather than implied by fixture shape.
+Its 4.731-second batch reveals that the detached public record set scans the
+full 100,000-record map for every holder query; a holder/reference index is a
+clear optimization candidate before this becomes a common AI or UI query path.
+The elapsed smoke process peaked at 405,487,616 bytes (386.70 MiB) resident memory.
+Windows uses `GetProcessMemoryInfo.PeakWorkingSetSize`; Linux and macOS use
+`getrusage(RUSAGE_SELF).ru_maxrss` with platform-correct units. Unsupported
+targets report a null sample and an explicit reason. These are cumulative
+process high-water marks, not per-case deltas.
+
+## Recorded information-flow full baseline
+
+The final full evidence is recorded in
+[`baselines/2026-08-21-information-flow-full-elapsed.json`](baselines/2026-08-21-information-flow-full-elapsed.json)
+and interpreted in [`2026-08-21-information-flow.md`](2026-08-21-information-flow.md).
+It uses three operation samples, one growth sample, no warmup, and the exact
+10,000 / 100,000 / 1,000,000 scales. The million-record snapshot is
+1,505,773,177 bytes; exact replay throughput is 401,214, 5,552, and 371
+records/s at those three scales respectively. The final process high-water mark
+is 22,294,740,992 bytes (20.76 GiB).
 
 ## Recorded architecture baseline
 

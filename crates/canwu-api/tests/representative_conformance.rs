@@ -172,6 +172,7 @@ fn fixture_scenario() -> Scenario {
                 },
             ),
         ]),
+        records: BTreeMap::new(),
     };
     Scenario {
         start_time: initial_time,

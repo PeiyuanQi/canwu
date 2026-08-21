@@ -1,20 +1,26 @@
 use super::{
     AssertUnwindSafe, BTreeMap, BTreeSet, BoundaryChange, BoundaryContext, BoundaryDirective,
-    BoundaryEmission, BoundaryEmissionKind, BoundaryId, BoundaryIngressGeneration, BoundaryPhase,
-    BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundaryStateHashFormat,
-    BoundarySystemContract, BoundaryTransactionCheckpoint, CanwuError, CauseRef, CommandIngress,
-    CommandRequest, CommitmentDomains, DomainRecord, DomainRecordChange, DomainRecordRef,
-    EntityRef, ErrorCode, EventKind, GENESIS_BOUNDARY_HASH, HashSet, IngressPayload,
+    BoundaryEmission, BoundaryEmissionKind, BoundaryId, BoundaryIngressGeneration,
+    BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
+    BoundaryRequest, BoundaryStateHashFormat, BoundarySystemContract,
+    BoundaryTransactionCheckpoint, CanwuError, CauseRef, CommandIngress, CommandRequest,
+    CommitmentDomains, DomainRecord, DomainRecordChange, DomainRecordRef,
+    DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH,
+    HashSet, IngressPayload, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
     PluginComponentKey, PluginComponentRecord, PluginRegistry, RefCell, ReservationAllocation,
     ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
     ReservationRef, ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot,
-    RuntimeCurrentState, ScheduleKey, ScheduledAction, SimTime, Simulation, SimulationView,
-    SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective, canonical_text,
-    catch_unwind, claim_counter, component_key, compute_boundary_hash, invalid_snapshot_error,
-    is_domain_record_state, proposal_entity_exists, proposal_entity_identity_exists, random,
-    record_change_affected_entities, records, runtime_current_entity_exists, runtime_entity_exists,
+    RuntimeCurrentState, RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation,
+    SimulationView, SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    canonical_text, catch_unwind, claim_counter, component_key, compute_boundary_hash,
+    invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
+    proposal_entity_identity_exists, random, record_change_affected_entities, records,
+    runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
     validate_domain_dependents_with_records, validate_runtime_domain_dependents,
+};
+use crate::validation::{
+    EvidenceAvailability, RuntimeValidationContext, resolve_evidence_reference,
 };
 
 impl Simulation {
@@ -245,10 +251,17 @@ impl Simulation {
         let mut requests = Vec::new();
         let mut random_overlay = boundary_snapshot.random_streams.clone();
         let mut pending_random_draws = Vec::new();
+        let mut keyed_random_draws = random::keyed_draws_with_reservations(
+            &self.state.evidence.random_draws,
+            &self.state.evidence.keyed_draw_reservations,
+        )?;
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
         let mut visible_record_overlay = BTreeMap::new();
         let mut candidate_record_overlay = BTreeMap::new();
+        let mut visible_knowledge_overlay = BTreeMap::new();
+        let mut pending_knowledge_changes = Vec::new();
+        let mut knowledge_correlations = BTreeSet::new();
         let mut ordinary = Vec::new();
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
@@ -305,12 +318,16 @@ impl Simulation {
                 let random_session = random::RandomSession::new(
                     &random_overlay,
                     &registered.contract.random_streams,
+                    boundary_snapshot.root_seed,
+                    &registered.plugin,
+                    &keyed_random_draws,
                 )?;
+                let proposal_evidence = proposal_evidence_refs(boundary_id, &evidence);
                 let view = SimulationView {
                     state: SimulationViewState::Boundary {
                         current: view_current,
                         now: view_now,
-                        evidence: &self.state.evidence,
+                        runtime: &self.state,
                     },
                     state_owners: &state_owners,
                     reader: Some(&reader),
@@ -323,6 +340,9 @@ impl Simulation {
                     record_overlay: Some(&visible_record_overlay),
                     proposed_records: (phase == BoundaryPhase::InvariantValidation)
                         .then_some(&candidate_record_overlay),
+                    boundary_id: Some(boundary_id),
+                    proposal_evidence: Some(&proposal_evidence),
+                    knowledge_overlay: Some(&visible_knowledge_overlay),
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
@@ -359,13 +379,18 @@ impl Simulation {
                     &registered.contract,
                     view_current,
                     view_now,
+                    &self.state,
+                    boundary_id,
+                    &evidence,
                     &self.plugins,
                     &visible_record_overlay,
+                    &visible_knowledge_overlay,
                     &proposal,
                 )?;
                 let random_execution = view
                     .finish_random_session()
                     .expect("boundary views always have a random session");
+                random::extend_keyed_draws(&mut keyed_random_draws, &random_execution.draws)?;
                 random_overlay.extend(random_execution.states);
                 pending_random_draws.extend(random_execution.draws.into_iter().map(|draw| {
                     PendingBoundaryRandomDraw {
@@ -405,7 +430,37 @@ impl Simulation {
                 }));
             }
 
+            let (knowledge_directives, phase_directives) =
+                partition_knowledge_directives(phase_directives);
+            if !knowledge_directives.is_empty()
+                && !matches!(
+                    phase,
+                    BoundaryPhase::PerceptionAndAttentionRefresh
+                        | BoundaryPhase::PerspectiveAndReportMaterialization
+                )
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::UndeclaredKnowledgeWrite,
+                    "knowledge publication is allowed only in phases 4 and 13",
+                ));
+            }
+
             match phase {
+                BoundaryPhase::PerceptionAndAttentionRefresh => {
+                    if !phase_directives.is_empty() {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidBoundary,
+                            "phase 4 accepts knowledge publications but no ordinary directives",
+                        ));
+                    }
+                    self.stage_knowledge_publications(
+                        phase,
+                        knowledge_directives,
+                        &mut visible_knowledge_overlay,
+                        &mut pending_knowledge_changes,
+                        &mut knowledge_correlations,
+                    )?;
+                }
                 BoundaryPhase::ReservationAndAllocation => {
                     let result = allocate_reservations(
                         std::mem::take(&mut offers),
@@ -471,6 +526,15 @@ impl Simulation {
                 }
                 BoundaryPhase::StrategicAggregation
                 | BoundaryPhase::PerspectiveAndReportMaterialization => {
+                    if phase == BoundaryPhase::PerspectiveAndReportMaterialization {
+                        self.stage_knowledge_publications(
+                            phase,
+                            knowledge_directives,
+                            &mut visible_knowledge_overlay,
+                            &mut pending_knowledge_changes,
+                            &mut knowledge_correlations,
+                        )?;
+                    }
                     let (same_boundary, next_boundary) =
                         partition_boundary_visibility(phase_directives);
                     self.apply_boundary_stage(
@@ -492,6 +556,12 @@ impl Simulation {
         }
 
         self.apply_boundary_stage(boundary_id, correlation_id, deferred, &mut evidence)?;
+        self.commit_knowledge_publications(
+            boundary_id,
+            correlation_id,
+            &pending_knowledge_changes,
+            &mut evidence.emissions,
+        )?;
         let PendingBoundaryEvidence {
             changes,
             record_changes,
@@ -525,6 +595,7 @@ impl Simulation {
             random_draws: random_draws.clone(),
             changes: changes.clone(),
             record_changes: record_changes.clone(),
+            knowledge_changes: pending_knowledge_changes.clone(),
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -553,6 +624,11 @@ impl Simulation {
             boundary_hash,
             change_count: changes.len(),
             record_change_count: record_changes.len(),
+            knowledge_batch_count: pending_knowledge_changes.len(),
+            knowledge_record_count: pending_knowledge_changes
+                .iter()
+                .map(|change| change.records.len())
+                .sum(),
             allocations: allocation_records,
         })
     }
@@ -582,7 +658,9 @@ impl Simulation {
                 }
                 BoundaryDirective::SetComponent { .. }
                 | BoundaryDirective::Emit { .. }
-                | BoundaryDirective::ScheduleIngress { .. } => None,
+                | BoundaryDirective::ScheduleIngress { .. }
+                | BoundaryDirective::SchedulePluginIngress { .. }
+                | BoundaryDirective::PublishKnowledge { .. } => None,
             })
             .collect();
         let mut stage_record_changes = BTreeMap::new();
@@ -627,7 +705,11 @@ impl Simulation {
                 BoundaryDirective::ScheduleIngress { affected, .. } => affected
                     .iter()
                     .find(|entity| !runtime_entity_identity_exists(&self.state, entity)),
-                BoundaryDirective::MutateRecord { .. } => None,
+                BoundaryDirective::SchedulePluginIngress { affected, .. } => affected
+                    .iter()
+                    .find(|entity| !runtime_entity_identity_exists(&self.state, entity)),
+                BoundaryDirective::MutateRecord { .. }
+                | BoundaryDirective::PublishKnowledge { .. } => None,
             };
             if let Some(entity) = unavailable {
                 return Err(CanwuError::new(
@@ -751,6 +833,12 @@ impl Simulation {
                         kind: BoundaryEmissionKind::Explicit,
                     });
                 }
+                BoundaryDirective::PublishKnowledge { .. } => {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        "knowledge publication execution is not enabled in this runtime slice",
+                    ));
+                }
                 BoundaryDirective::ScheduleIngress {
                     after,
                     packet_type,
@@ -803,9 +891,227 @@ impl Simulation {
                         visibility: staged.visibility,
                     });
                 }
+                BoundaryDirective::SchedulePluginIngress {
+                    target_plugin,
+                    after,
+                    packet_type,
+                    priority,
+                    payload,
+                    mut affected,
+                } => {
+                    self.ensure_canonical_ingress_can_start()?;
+                    let descriptor = self
+                        .plugins
+                        .ingress
+                        .get(&(target_plugin.clone(), packet_type.clone()))
+                        .ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::InvalidPayload,
+                                format!(
+                                    "boundary system {}.{} scheduled undeclared target ingress {}.{packet_type}",
+                                    staged.plugin, staged.system, target_plugin
+                                ),
+                            )
+                        })?
+                        .clone();
+                    descriptor.payload_schema.validate(&payload)?;
+                    affected.sort();
+                    affected.dedup();
+                    let due_at = self.state.scheduler.now.checked_add(after).ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDuration,
+                            "boundary-generated cross-plugin ingress exceeds the supported time range",
+                        )
+                    })?;
+                    let receipt = self.append_ingress(
+                        due_at,
+                        descriptor.class,
+                        priority,
+                        IngressPayload::Plugin {
+                            plugin: target_plugin,
+                            packet_type,
+                            payload,
+                            affected_entities: affected,
+                        },
+                        Some(CauseRef::Boundary(boundary_id)),
+                        true,
+                    )?;
+                    generated_ingress.push(BoundaryIngressGeneration {
+                        ingress: receipt.ingress_id,
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        phase: staged.phase,
+                        visibility: staged.visibility,
+                    });
+                }
             }
         }
         validate_runtime_domain_dependents(&self.state)?;
+        Ok(())
+    }
+
+    fn stage_knowledge_publications(
+        &mut self,
+        phase: BoundaryPhase,
+        directives: Vec<StagedBoundaryDirective>,
+        visible_overlay: &mut BTreeMap<
+            KnowledgeHolderRef,
+            BTreeMap<KnowledgeRecordId, KnowledgeRecord>,
+        >,
+        pending: &mut Vec<BoundaryKnowledgeChange>,
+        correlations: &mut BTreeSet<(String, String, String)>,
+    ) -> Result<(), CanwuError> {
+        let new_record_count = directives
+            .iter()
+            .map(|staged| match &staged.directive {
+                BoundaryDirective::PublishKnowledge { records, .. } => records.len(),
+                _ => 0,
+            })
+            .sum::<usize>();
+        let total_records = pending
+            .iter()
+            .map(|change| change.records.len())
+            .sum::<usize>()
+            .checked_add(new_record_count)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::KnowledgeLimitExceeded,
+                    "boundary knowledge record count exceeds platform range",
+                )
+            })?;
+        if total_records > crate::KnowledgeLimitsV1::CURRENT.records_per_boundary {
+            return Err(CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "boundary knowledge record limit exceeded",
+            ));
+        }
+        for staged in directives {
+            let BoundaryDirective::PublishKnowledge {
+                holder,
+                visibility,
+                producer_correlation,
+                records: drafts,
+                summary,
+            } = staged.directive
+            else {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidBoundary,
+                    "knowledge stage received an ordinary directive",
+                ));
+            };
+            if let Some(value) = &producer_correlation
+                && !correlations.insert((
+                    staged.plugin.clone(),
+                    staged.system.clone(),
+                    value.clone(),
+                ))
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidKnowledgeRecord,
+                    "producer correlation is duplicated within one system and boundary",
+                ));
+            }
+            let mut records = Vec::with_capacity(drafts.len());
+            for draft in drafts {
+                let (id, next_id) = claim_counter(
+                    self.state.counters.next_knowledge_record_id,
+                    "knowledge record ID",
+                )?;
+                self.state.counters.next_knowledge_record_id = next_id;
+                let record = KnowledgeRecord {
+                    id: KnowledgeRecordId::new(id),
+                    holder: holder.clone(),
+                    schema: draft.schema,
+                    subjects: draft.subjects,
+                    payload: draft.payload,
+                    as_of: draft.as_of,
+                    learned_at: self.state.scheduler.now,
+                    confidence_per_mille: draft.confidence_per_mille,
+                    origin: draft.origin,
+                    supersedes: draft.supersedes,
+                    contradicts: draft.contradicts,
+                };
+                if visibility == StateVisibility::SameBoundary {
+                    visible_overlay
+                        .entry(holder.clone())
+                        .or_default()
+                        .insert(record.id, record.clone());
+                }
+                records.push(record);
+            }
+            pending.push(BoundaryKnowledgeChange {
+                plugin: staged.plugin,
+                system: staged.system,
+                phase,
+                holder,
+                producer_correlation,
+                records,
+                visibility,
+                summary,
+            });
+        }
+        Ok(())
+    }
+
+    fn commit_knowledge_publications(
+        &mut self,
+        boundary_id: BoundaryId,
+        correlation_id: u64,
+        changes: &[BoundaryKnowledgeChange],
+        emissions: &mut Vec<BoundaryEmission>,
+    ) -> Result<(), CanwuError> {
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut ledger = self.state.current.knowledge.records.clone();
+        for change in changes {
+            let holder = ledger.entry(change.holder.clone()).or_default();
+            for record in &change.records {
+                if holder.insert(record.id, record.clone()).is_some() {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidKnowledgeRecord,
+                        "knowledge publication attempted to reuse a global record ID",
+                    ));
+                }
+            }
+        }
+        self.state.current.knowledge.records = ledger;
+        self.invalidate_commitments(CommitmentDomains::KNOWLEDGE);
+        for (index, change) in changes.iter().enumerate() {
+            let record_count = u32::try_from(change.records.len()).map_err(|_| {
+                CanwuError::new(
+                    ErrorCode::KnowledgeLimitExceeded,
+                    "knowledge publication event count exceeds u32",
+                )
+            })?;
+            let affected = match &change.holder {
+                KnowledgeHolderRef::Person(person) => vec![EntityRef::Person(*person)],
+                KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
+            };
+            let event = self.append_event(
+                EventKind::KnowledgePublished {
+                    holder: change.holder.clone(),
+                    record_count,
+                },
+                affected,
+                change.summary.clone(),
+                Some(CauseRef::Boundary(boundary_id)),
+                correlation_id,
+            )?;
+            emissions.push(BoundaryEmission {
+                plugin: change.plugin.clone(),
+                system: change.system.clone(),
+                event: event.id,
+                kind: BoundaryEmissionKind::KnowledgeChange {
+                    change_index: u64::try_from(index).map_err(|_| {
+                        CanwuError::new(
+                            ErrorCode::IdentifierExhausted,
+                            "knowledge change index exceeds identifier space",
+                        )
+                    })?,
+                },
+            });
+        }
         Ok(())
     }
 
@@ -883,6 +1189,59 @@ impl Simulation {
                         },
                     )?;
                 }
+                SystemDirective::EnqueuePluginIngress {
+                    after,
+                    packet_type,
+                    priority,
+                    payload,
+                    mut affected,
+                } => {
+                    self.ensure_canonical_ingress_can_start()?;
+                    let descriptor = self
+                        .plugins
+                        .ingress
+                        .get(&(plugin.to_owned(), packet_type.clone()))
+                        .ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::InvalidPayload,
+                                format!(
+                                    "plugin command scheduled unregistered ingress type {plugin}.{packet_type}"
+                                ),
+                            )
+                        })?
+                        .clone();
+                    descriptor.payload_schema.validate(&payload)?;
+                    affected.sort();
+                    affected.dedup();
+                    if affected
+                        .iter()
+                        .any(|entity| !runtime_entity_identity_exists(&self.state, entity))
+                    {
+                        return Err(CanwuError::new(
+                            ErrorCode::EntityNotFound,
+                            "plugin command ingress references an unknown entity identity",
+                        ));
+                    }
+                    let due_at = self.state.scheduler.now.checked_add(after).ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDuration,
+                            "plugin command ingress exceeds the supported time range",
+                        )
+                    })?;
+                    self.append_ingress(
+                        due_at,
+                        descriptor.class,
+                        priority,
+                        IngressPayload::Plugin {
+                            plugin: plugin.to_owned(),
+                            packet_type,
+                            payload,
+                            affected_entities: affected,
+                        },
+                        Some(cause.clone()),
+                        true,
+                    )?;
+                }
             }
         }
         Ok(())
@@ -923,6 +1282,34 @@ struct PendingBoundaryEvidence {
     generated_ingress: Vec<BoundaryIngressGeneration>,
 }
 
+fn proposal_evidence_refs(
+    boundary: BoundaryId,
+    pending: &PendingBoundaryEvidence,
+) -> BTreeSet<EvidenceRef> {
+    let mut values = BTreeSet::new();
+    for (index, change) in pending.record_changes.iter().enumerate() {
+        if let Ok(change_index) = u64::try_from(index) {
+            values.insert(EvidenceRef::DomainRecordVersion(
+                super::DomainRecordVersionRef {
+                    record: change.current.reference.clone(),
+                    version: change.current.version,
+                    established_by: DomainRecordVersionSource::BoundaryChange {
+                        boundary,
+                        change_index,
+                    },
+                },
+            ));
+        }
+    }
+    values.extend(
+        pending
+            .emissions
+            .iter()
+            .map(|emission| EvidenceRef::Event(emission.event)),
+    );
+    values
+}
+
 pub(super) struct PendingBoundaryRandomDraw {
     pub(super) plugin: String,
     pub(super) system: String,
@@ -944,13 +1331,18 @@ pub(super) fn boundary_has_event_ingress(record: &BoundaryRecord) -> bool {
     !record.admitted_events.is_empty() || !record.admitted_ingress.is_empty()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_boundary_proposal(
     plugin: &str,
     contract: &BoundarySystemContract,
     current: &RuntimeCurrentState,
     now: SimTime,
+    runtime: &RuntimeState,
+    boundary_id: BoundaryId,
+    pending_evidence: &PendingBoundaryEvidence,
     plugins: &PluginRegistry,
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    knowledge_overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
     proposal: &BoundaryProposal,
 ) -> Result<(), CanwuError> {
     if contract.phase != BoundaryPhase::ReservationAndAllocation
@@ -1023,8 +1415,21 @@ fn validate_boundary_proposal(
         }
     }
 
+    let publication_count = proposal
+        .directives
+        .iter()
+        .filter(|directive| matches!(directive, BoundaryDirective::PublishKnowledge { .. }))
+        .count();
+    if publication_count > crate::KnowledgeLimitsV1::CURRENT.batches_per_system_boundary {
+        return Err(CanwuError::new(
+            ErrorCode::KnowledgeLimitExceeded,
+            "system knowledge publication batch limit exceeded",
+        ));
+    }
     let mut component_keys = BTreeSet::new();
     let mut record_targets = BTreeSet::new();
+    let mut producer_correlations = BTreeSet::new();
+    let mut canonical_drafts = BTreeSet::new();
     for directive in &proposal.directives {
         match directive {
             BoundaryDirective::SetComponent {
@@ -1130,6 +1535,137 @@ fn validate_boundary_proposal(
                     ));
                 }
             }
+            BoundaryDirective::PublishKnowledge {
+                holder,
+                visibility,
+                producer_correlation,
+                records,
+                summary,
+            } => {
+                if !matches!(
+                    contract.phase,
+                    BoundaryPhase::PerceptionAndAttentionRefresh
+                        | BoundaryPhase::PerspectiveAndReportMaterialization
+                ) {
+                    return Err(CanwuError::new(
+                        ErrorCode::UndeclaredKnowledgeWrite,
+                        "knowledge publication is allowed only in phases 4 and 13",
+                    ));
+                }
+                if records.is_empty()
+                    || records.len() > crate::KnowledgeLimitsV1::CURRENT.records_per_batch
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::KnowledgeLimitExceeded,
+                        "knowledge publication batch is empty or exceeds its record limit",
+                    ));
+                }
+                if !canonical_text(summary)
+                    || summary.len() > crate::KnowledgeLimitsV1::CURRENT.text_bytes
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidKnowledgeRecord,
+                        "knowledge publication summary is not canonical or exceeds its limit",
+                    ));
+                }
+                if let Some(value) = producer_correlation
+                    && (!canonical_text(value)
+                        || value.len() > 256
+                        || !producer_correlations.insert(value))
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidKnowledgeRecord,
+                        "producer correlation is invalid or duplicated",
+                    ));
+                }
+                for draft in records {
+                    let Some(grant) = contract
+                        .knowledge_writes
+                        .iter()
+                        .find(|grant| grant.schema == draft.schema)
+                    else {
+                        return Err(CanwuError::new(
+                            ErrorCode::UndeclaredKnowledgeWrite,
+                            format!(
+                                "boundary system {plugin}.{} did not declare the knowledge schema",
+                                contract.name
+                            ),
+                        ));
+                    };
+                    if !grant.visibilities.contains(visibility) {
+                        return Err(CanwuError::new(
+                            ErrorCode::UndeclaredKnowledgeWrite,
+                            "knowledge publication visibility is not granted",
+                        ));
+                    }
+                    let Some((owner, schema)) = plugins.knowledge_schemas.get(&draft.schema) else {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidKnowledgeSchema,
+                            "knowledge publication uses an unregistered schema",
+                        ));
+                    };
+                    if owner != plugin || !schema.writable {
+                        return Err(CanwuError::new(
+                            ErrorCode::UndeclaredKnowledgeWrite,
+                            "knowledge publication uses a foreign or read-only schema",
+                        ));
+                    }
+                    crate::knowledge::validate_draft(
+                        draft,
+                        schema,
+                        holder,
+                        current,
+                        &plugins.record_schemas,
+                    )?;
+                    for reference in &draft.origin.evidence {
+                        validate_proposal_evidence_reference(
+                            runtime,
+                            boundary_id,
+                            pending_evidence,
+                            reference,
+                        )?;
+                    }
+                    let existing = current
+                        .knowledge
+                        .records
+                        .get(holder)
+                        .into_iter()
+                        .flat_map(|records| records.iter())
+                        .chain(
+                            knowledge_overlay
+                                .get(holder)
+                                .into_iter()
+                                .flat_map(|records| records.iter()),
+                        )
+                        .collect::<BTreeMap<_, _>>();
+                    for related in draft.supersedes.iter().chain(&draft.contradicts) {
+                        let Some(related_record) = existing.get(related) else {
+                            return Err(CanwuError::new(
+                                ErrorCode::KnowledgeRecordNotFound,
+                                "knowledge relation does not resolve for the same holder at this cut",
+                            ));
+                        };
+                        if related_record.schema.kind != draft.schema.kind {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidKnowledgeRecord,
+                                "knowledge supersession and contradiction cannot cross schema kinds",
+                            ));
+                        }
+                    }
+                    let encoded = serde_json::to_vec(&(holder, draft)).map_err(|error| {
+                        CanwuError::new(
+                            ErrorCode::InvalidKnowledgeRecord,
+                            format!("holder-scoped knowledge draft could not be encoded: {error}"),
+                        )
+                    })?;
+                    if !canonical_drafts.insert(encoded) {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidKnowledgeRecord,
+                            "one system proposal contains a duplicate canonical knowledge draft",
+                        ));
+                    }
+                }
+            }
             BoundaryDirective::ScheduleIngress {
                 after,
                 packet_type,
@@ -1173,9 +1709,136 @@ fn validate_boundary_proposal(
                     ));
                 }
             }
+            BoundaryDirective::SchedulePluginIngress {
+                target_plugin,
+                after,
+                packet_type,
+                payload,
+                affected,
+                ..
+            } => {
+                let grant = super::PluginIngressTarget {
+                    target_plugin: target_plugin.clone(),
+                    packet_type: packet_type.clone(),
+                };
+                if !contract.plugin_ingress_targets.contains(&grant) {
+                    return Err(CanwuError::new(
+                        ErrorCode::UndeclaredStateWrite,
+                        format!(
+                            "boundary system {plugin}.{} did not declare target ingress {target_plugin}.{packet_type}",
+                            contract.name
+                        ),
+                    ));
+                }
+                let descriptor = plugins
+                    .ingress
+                    .get(&(target_plugin.clone(), packet_type.clone()))
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidPayload,
+                            format!(
+                                "boundary system {plugin}.{} scheduled undeclared target ingress {target_plugin}.{packet_type}",
+                                contract.name
+                            ),
+                        )
+                    })?;
+                if after.is_negative() || now.checked_add(*after).is_none() {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidDuration,
+                        "boundary-generated cross-plugin ingress requires a nonnegative supported delay",
+                    ));
+                }
+                descriptor.payload_schema.validate(payload)?;
+                if affected.iter().any(|entity| {
+                    !proposal_entity_identity_exists(
+                        current,
+                        &plugins.record_schemas,
+                        proposal,
+                        entity,
+                    )
+                }) {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!(
+                            "boundary system {plugin}.{} scheduled cross-plugin ingress for an unknown entity identity",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
         }
     }
     Ok(())
+}
+
+fn validate_proposal_evidence_reference(
+    runtime: &RuntimeState,
+    boundary_id: BoundaryId,
+    pending: &PendingBoundaryEvidence,
+    reference: &EvidenceRef,
+) -> Result<(), CanwuError> {
+    if let EvidenceRef::DomainRecordVersion(version) = reference
+        && let DomainRecordVersionSource::BoundaryChange {
+            boundary,
+            change_index,
+        } = version.established_by
+        && boundary == boundary_id
+    {
+        let resolved = usize::try_from(change_index)
+            .ok()
+            .and_then(|index| pending.record_changes.get(index))
+            .is_some_and(|change| {
+                change.current.reference == version.record
+                    && change.current.version == version.version
+            });
+        return if resolved {
+            Ok(())
+        } else {
+            Err(CanwuError::new(
+                ErrorCode::EvidenceUnavailable,
+                "knowledge origin references an unavailable current-boundary record version",
+            ))
+        };
+    }
+
+    if let EvidenceRef::Event(id) = reference
+        && runtime
+            .evidence
+            .retained_event(*id)
+            .is_some_and(|event| event.cause == Some(CauseRef::Boundary(boundary_id)))
+    {
+        if pending
+            .emissions
+            .iter()
+            .any(|emission| emission.event == *id)
+        {
+            return Ok(());
+        }
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "knowledge origin references an event outside the proposal-visible boundary cut",
+        ));
+    }
+
+    if let EvidenceRef::Ingress(id) = reference
+        && runtime
+            .evidence
+            .retained_ingress(*id)
+            .is_some_and(|record| record.cause == Some(CauseRef::Boundary(boundary_id)))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "current-boundary generated ingress is not proposal-visible evidence",
+        ));
+    }
+
+    match resolve_evidence_reference(&RuntimeValidationContext::new(runtime), reference) {
+        EvidenceAvailability::Retained | EvidenceAvailability::Archived => Ok(()),
+        EvidenceAvailability::Missing => Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "knowledge origin references missing or wrong-version evidence",
+        )),
+    }
 }
 
 fn validate_reservation_pool(
@@ -1311,7 +1974,9 @@ fn extend_boundary_domain_record_overlay(
             }
             BoundaryDirective::SetComponent { .. }
             | BoundaryDirective::Emit { .. }
-            | BoundaryDirective::ScheduleIngress { .. } => None,
+            | BoundaryDirective::ScheduleIngress { .. }
+            | BoundaryDirective::SchedulePluginIngress { .. }
+            | BoundaryDirective::PublishKnowledge { .. } => None,
         })
         .collect();
     if requests.is_empty() {
@@ -1342,6 +2007,14 @@ fn partition_boundary_visibility(
     directives
         .into_iter()
         .partition(|staged| staged.visibility == StateVisibility::SameBoundary)
+}
+
+fn partition_knowledge_directives(
+    directives: Vec<StagedBoundaryDirective>,
+) -> (Vec<StagedBoundaryDirective>, Vec<StagedBoundaryDirective>) {
+    directives
+        .into_iter()
+        .partition(|staged| matches!(staged.directive, BoundaryDirective::PublishKnowledge { .. }))
 }
 
 fn allocate_reservations(

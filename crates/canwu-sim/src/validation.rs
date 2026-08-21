@@ -2,18 +2,21 @@ use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArmyId, BoundaryDirective, BoundaryDomainEntityCuts,
     BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
     BoundarySystemContract, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef, Command,
-    CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId, CommandIngress,
-    CommandRecord, DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome,
-    DecisionAttemptRecord, DecisionAuthority, DecisionMutation, DecisionState, DecisionTraceId,
-    DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange, DomainRecordClass,
-    DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation, DomainRecordRef, EntityRef,
-    ErrorCode, EventId, EventKind, GENESIS_BOUNDARY_HASH, IngressClass, IngressPayload,
-    IngressQueueKey, IngressRecord, InteractionPolicy, Issuer, PersistedAdmissionCursors,
-    PluginComponentKey, PluginComponentRecord, PluginRegistry, RandomDrawOutcome,
-    RandomDrawProducer, ReservationAllocation, ReservationDisposition, ReservationPoolKey,
-    ReservationRequestRecord, RunConfigurationSnapshot, RunManifest, RuntimeCurrentState,
-    RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration,
-    SimEvent, SimulationSnapshot, SystemCadence, SystemDirective, WorldSnapshot,
+    CommandAttemptId, CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId,
+    CommandIngress, CommandRecord, DecisionAction, DecisionAttemptErrorCode,
+    DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority, DecisionMutation,
+    DecisionState, DecisionTraceId, DeterministicRng, DomainHistoryCut, DomainRecord,
+    DomainRecordChange, DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory,
+    DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
+    EntityRef, ErrorCode, EventId, EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass,
+    IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
+    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
+    PersistedAdmissionCursors, PluginComponentKey, PluginComponentRecord, PluginRegistry,
+    RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
+    ReservationAllocation, ReservationDisposition, ReservationPoolKey, ReservationRequestRecord,
+    RunConfigurationSnapshot, RunManifest, RuntimeCurrentState, RuntimeState,
+    STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration, SimEvent,
+    SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective, WorldSnapshot,
     authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
     boundary_write_stage, canonical_text, canonicalize_scenario, commitment_roots_are_canonical,
@@ -40,6 +43,13 @@ pub(super) enum EvidenceLookup<'a, T> {
     Retained(&'a T),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum EvidenceAvailability {
+    Missing,
+    Archived,
+    Retained,
+}
+
 /// Shared semantic view used by runtime and snapshot validation.
 ///
 /// The validation rules operate on this interface instead of knowing whether
@@ -49,7 +59,11 @@ pub(super) enum EvidenceLookup<'a, T> {
 pub(super) trait ValidationContext {
     fn event(&self, id: EventId) -> EvidenceLookup<'_, SimEvent>;
     fn command(&self, id: CommandId) -> EvidenceLookup<'_, CommandRecord>;
+    fn command_attempt(&self, id: CommandAttemptId) -> EvidenceLookup<'_, CommandAttemptRecord>;
+    fn ingress(&self, id: IngressId) -> EvidenceLookup<'_, IngressRecord>;
     fn boundary(&self, id: BoundaryId) -> EvidenceLookup<'_, BoundaryRecord>;
+    fn random_draw(&self, id: RandomDrawId) -> EvidenceLookup<'_, RandomDrawRecord>;
+    fn domain_record_version(&self, reference: &DomainRecordVersionRef) -> EvidenceAvailability;
     fn entity_exists(&self, entity: &EntityRef) -> bool;
 }
 
@@ -67,11 +81,16 @@ impl<'a> RuntimeValidationContext<'a> {
         next_id: u64,
         archived_count: u64,
         retained: Option<&T>,
+        archived_receipt: bool,
     ) -> EvidenceLookup<'_, T> {
         if id == 0 || id >= next_id {
             EvidenceLookup::Missing
         } else if id <= archived_count {
-            EvidenceLookup::Archived
+            if archived_receipt {
+                EvidenceLookup::Archived
+            } else {
+                EvidenceLookup::Missing
+            }
         } else if let Some(record) = retained {
             EvidenceLookup::Retained(record)
         } else {
@@ -87,6 +106,10 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_event_id,
             self.state.evidence.archived.event_count,
             self.state.evidence.retained_event(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Event(id)),
         )
     }
 
@@ -96,6 +119,36 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_command_id,
             self.state.evidence.archived.command_count,
             self.state.evidence.retained_command(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Command(id)),
+        )
+    }
+
+    fn command_attempt(&self, id: CommandAttemptId) -> EvidenceLookup<'_, CommandAttemptRecord> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_command_attempt_id,
+            self.state.evidence.archived.command_attempt_count,
+            self.state.evidence.retained_command_attempt(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::CommandAttempt(id)),
+        )
+    }
+
+    fn ingress(&self, id: IngressId) -> EvidenceLookup<'_, IngressRecord> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_ingress_id,
+            self.state.evidence.archived.ingress_count,
+            self.state.evidence.retained_ingress(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Ingress(id)),
         )
     }
 
@@ -105,7 +158,28 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_boundary_id,
             self.state.evidence.archived.boundary_count,
             self.state.evidence.retained_boundary(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Boundary(id)),
         )
+    }
+
+    fn random_draw(&self, id: RandomDrawId) -> EvidenceLookup<'_, RandomDrawRecord> {
+        Self::runtime_lookup(
+            id.get(),
+            self.state.counters.next_random_draw_id,
+            self.state.evidence.archived.random_draw_count,
+            self.state.evidence.retained_random_draw(id),
+            self.state
+                .evidence
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::RandomDraw(id)),
+        )
+    }
+
+    fn domain_record_version(&self, reference: &DomainRecordVersionRef) -> EvidenceAvailability {
+        resolve_runtime_domain_record_version(self.state, reference)
     }
 
     fn entity_exists(&self, entity: &EntityRef) -> bool {
@@ -134,9 +208,28 @@ impl ValidationContext for SnapshotValidationContext<'_> {
             .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
     }
 
+    fn command_attempt(&self, id: CommandAttemptId) -> EvidenceLookup<'_, CommandAttemptRecord> {
+        snapshot_command_attempt_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn ingress(&self, id: IngressId) -> EvidenceLookup<'_, IngressRecord> {
+        snapshot_ingress_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
     fn boundary(&self, id: BoundaryId) -> EvidenceLookup<'_, BoundaryRecord> {
         snapshot_boundary_by_id(self.snapshot, id)
             .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn random_draw(&self, id: RandomDrawId) -> EvidenceLookup<'_, RandomDrawRecord> {
+        snapshot_random_draw_by_id(self.snapshot, id)
+            .map_or(EvidenceLookup::Missing, EvidenceLookup::Retained)
+    }
+
+    fn domain_record_version(&self, reference: &DomainRecordVersionRef) -> EvidenceAvailability {
+        resolve_snapshot_domain_record_version(self.snapshot, reference)
     }
 
     fn entity_exists(&self, entity: &EntityRef) -> bool {
@@ -164,6 +257,29 @@ pub(super) fn validate_cause_reference<C: ValidationContext>(
         CauseRef::System(_) if !available => Err(CauseValidationError::NonCanonicalSystem),
         _ if !available => Err(CauseValidationError::MissingEvidence),
         _ => Ok(()),
+    }
+}
+
+pub(super) fn resolve_evidence_reference<C: ValidationContext>(
+    context: &C,
+    reference: &EvidenceRef,
+) -> EvidenceAvailability {
+    fn availability<T>(lookup: &EvidenceLookup<'_, T>) -> EvidenceAvailability {
+        match lookup {
+            EvidenceLookup::Missing => EvidenceAvailability::Missing,
+            EvidenceLookup::Archived => EvidenceAvailability::Archived,
+            EvidenceLookup::Retained(_) => EvidenceAvailability::Retained,
+        }
+    }
+
+    match reference {
+        EvidenceRef::Command(id) => availability(&context.command(*id)),
+        EvidenceRef::CommandAttempt(id) => availability(&context.command_attempt(*id)),
+        EvidenceRef::Event(id) => availability(&context.event(*id)),
+        EvidenceRef::Ingress(id) => availability(&context.ingress(*id)),
+        EvidenceRef::Boundary(id) => availability(&context.boundary(*id)),
+        EvidenceRef::RandomDraw(id) => availability(&context.random_draw(*id)),
+        EvidenceRef::DomainRecordVersion(reference) => context.domain_record_version(reference),
     }
 }
 
@@ -320,6 +436,8 @@ pub(super) fn validate_snapshot(
         || snapshot.next_ingress_id != 1
         || snapshot.next_boundary_id != 1
         || snapshot.next_random_draw_id != 1
+        || snapshot.next_knowledge_record_id != 1
+        || !snapshot.knowledge.records.is_empty()
         || snapshot.next_schedule_sequence != 1
         || snapshot.next_correlation_id != 1
         || !snapshot.decisions.is_empty()
@@ -335,6 +453,28 @@ pub(super) fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
+    let max_knowledge_record_id = crate::knowledge::validate_snapshot_records(
+        snapshot,
+        &plugins.knowledge_schemas,
+        &plugins.record_schemas,
+    )
+    .map_err(|error| {
+        invalid_snapshot_error(format!("invalid generic knowledge ledger: {error}"))
+    })?;
+    let evidence_context = SnapshotValidationContext::new(snapshot);
+    for records in snapshot.knowledge.records.values() {
+        for record in records.values() {
+            for reference in &record.origin.evidence {
+                if resolve_evidence_reference(&evidence_context, reference)
+                    != EvidenceAvailability::Retained
+                {
+                    return invalid_snapshot(
+                        "generic knowledge origin references missing or wrong-version evidence",
+                    );
+                }
+            }
+        }
+    }
     let (max_boundary_id, max_boundary_correlation, domain_history, admission_cursors) =
         validate_boundary_records(
             snapshot,
@@ -937,6 +1077,11 @@ pub(super) fn validate_snapshot(
         max_random_draw_id,
         "random draw",
     )?;
+    validate_contiguous_or_exhausted_next_counter(
+        snapshot.next_knowledge_record_id,
+        max_knowledge_record_id,
+        "knowledge record",
+    )?;
     validate_next_counter(
         snapshot.next_schedule_sequence,
         max_schedule_sequence,
@@ -1034,6 +1179,10 @@ fn validate_random_evidence(
     let mut max_correlation_id = 0;
     let core_stream = random::core_report_delay_stream();
     let mut report_draws = BTreeMap::new();
+    random::retained_keyed_draws(&snapshot.random_draws).map_err(|error| {
+        invalid_snapshot_error(format!("invalid operation-keyed random index: {error}"))
+    })?;
+    let evidence_context = SnapshotValidationContext::new(snapshot);
     for (index, draw) in snapshot.random_draws.iter().enumerate() {
         let expected_id = u64::try_from(index)
             .ok()
@@ -1054,17 +1203,48 @@ fn validate_random_evidence(
         let Some((position, generator_state)) = replayed.get_mut(&draw.stream) else {
             return invalid_snapshot("random draw references an unknown stream");
         };
-        if draw.position != *position {
-            return invalid_snapshot("random draw positions are not contiguous per stream");
+        match &draw.address {
+            RandomDrawAddress::Sequential {
+                position: draw_position,
+            } => {
+                if draw.operation_evidence.is_some() || *draw_position != *position {
+                    return invalid_snapshot("random draw positions are not contiguous per stream");
+                }
+                let mut generator = DeterministicRng::from_seed(*generator_state);
+                if generator.range(draw.upper_exclusive) != draw.value {
+                    return invalid_snapshot("random draw value does not match its stream state");
+                }
+                *position = position.checked_add(1).ok_or_else(|| {
+                    invalid_snapshot_error("random stream position exceeds identifier space")
+                })?;
+                *generator_state = generator.state();
+            }
+            RandomDrawAddress::OperationV1(address) => {
+                random::validate_operation_draw(snapshot.root_seed, draw).map_err(|error| {
+                    invalid_snapshot_error(format!("invalid operation-keyed random draw: {error}"))
+                })?;
+                let Some(reference) = &draw.operation_evidence else {
+                    return invalid_snapshot("operation-keyed draw lacks evidence");
+                };
+                if resolve_evidence_reference(&evidence_context, reference)
+                    != EvidenceAvailability::Retained
+                {
+                    return invalid_snapshot(
+                        "operation-keyed draw references missing or wrong-version evidence",
+                    );
+                }
+                let RandomDrawProducer::BoundarySystem { plugin, .. } = &draw.producer else {
+                    return invalid_snapshot(
+                        "operation-keyed draws must be produced by a declared plugin system",
+                    );
+                };
+                if address.producer_plugin != *plugin {
+                    return invalid_snapshot(
+                        "operation-keyed draw address disagrees with its producer plugin",
+                    );
+                }
+            }
         }
-        let mut generator = DeterministicRng::from_seed(*generator_state);
-        if generator.range(draw.upper_exclusive) != draw.value {
-            return invalid_snapshot("random draw value does not match its stream state");
-        }
-        *position = position.checked_add(1).ok_or_else(|| {
-            invalid_snapshot_error("random stream position exceeds identifier space")
-        })?;
-        *generator_state = generator.state();
 
         match &draw.producer {
             RandomDrawProducer::BoundarySystem {
@@ -1635,9 +1815,32 @@ fn validate_ingress_records(
                             "boundary-caused ingress lacks matching generation evidence",
                         );
                     }
-                    Some(CauseRef::Command(_) | CauseRef::Event(_)) => {
+                    Some(CauseRef::Command(command_id)) => {
+                        let Some(command) = snapshot_command_by_id(snapshot, *command_id) else {
+                            return invalid_snapshot(
+                                "command-generated ingress references an unknown command",
+                            );
+                        };
+                        let Command::Plugin {
+                            plugin: producer, ..
+                        } = &command.envelope.command
+                        else {
+                            return invalid_snapshot(
+                                "only plugin commands may generate plugin ingress",
+                            );
+                        };
+                        if producer != plugin
+                            || command.accepted_at != record.issued_at
+                            || generated_by_boundary.contains_key(&record.id)
+                        {
+                            return invalid_snapshot(
+                                "command-generated ingress disagrees with its producer or issue cut",
+                            );
+                        }
+                    }
+                    Some(CauseRef::Event(_)) => {
                         return invalid_snapshot(
-                            "command- and event-generated ingress is not supported by this snapshot format",
+                            "event-generated ingress is not supported by this snapshot format",
                         );
                     }
                     Some(CauseRef::System(_)) | None
@@ -1921,11 +2124,127 @@ fn snapshot_command_by_id(snapshot: &SimulationSnapshot, id: CommandId) -> Optio
     journal_record_by_id(&snapshot.commands, id.get(), |command| command.id.get())
 }
 
+fn snapshot_command_attempt_by_id(
+    snapshot: &SimulationSnapshot,
+    id: CommandAttemptId,
+) -> Option<&CommandAttemptRecord> {
+    journal_record_by_id(&snapshot.command_attempts, id.get(), |attempt| {
+        attempt.id.get()
+    })
+}
+
+fn snapshot_ingress_by_id(snapshot: &SimulationSnapshot, id: IngressId) -> Option<&IngressRecord> {
+    journal_record_by_id(&snapshot.ingress, id.get(), |record| record.id.get())
+}
+
 fn snapshot_boundary_by_id(
     snapshot: &SimulationSnapshot,
     id: BoundaryId,
 ) -> Option<&BoundaryRecord> {
     journal_record_by_id(&snapshot.boundaries, id.get(), |boundary| boundary.id.get())
+}
+
+fn snapshot_random_draw_by_id(
+    snapshot: &SimulationSnapshot,
+    id: RandomDrawId,
+) -> Option<&RandomDrawRecord> {
+    journal_record_by_id(&snapshot.random_draws, id.get(), |draw| draw.id.get())
+}
+
+fn initial_domain_record_matches(
+    scenario: Option<&super::Scenario>,
+    reference: &DomainRecordVersionRef,
+) -> bool {
+    reference.version != 0
+        && scenario.is_some_and(|scenario| {
+            scenario.domain_records.iter().any(|record| {
+                record.reference == reference.record && record.version == reference.version
+            })
+        })
+}
+
+fn boundary_domain_record_matches(
+    boundary: &BoundaryRecord,
+    change_index: u64,
+    reference: &DomainRecordVersionRef,
+) -> bool {
+    usize::try_from(change_index)
+        .ok()
+        .and_then(|index| boundary.record_changes.get(index))
+        .is_some_and(|change| {
+            change.current.reference == reference.record
+                && change.current.version == reference.version
+        })
+}
+
+fn resolve_runtime_domain_record_version(
+    state: &RuntimeState,
+    reference: &DomainRecordVersionRef,
+) -> EvidenceAvailability {
+    if reference.version == 0 {
+        return EvidenceAvailability::Missing;
+    }
+    match reference.established_by {
+        DomainRecordVersionSource::InitialScenario => {
+            if initial_domain_record_matches(state.metadata.initial_scenario.as_ref(), reference) {
+                EvidenceAvailability::Retained
+            } else {
+                EvidenceAvailability::Missing
+            }
+        }
+        DomainRecordVersionSource::BoundaryChange {
+            boundary,
+            change_index,
+        } => match RuntimeValidationContext::new(state).boundary(boundary) {
+            EvidenceLookup::Retained(record)
+                if boundary_domain_record_matches(record, change_index, reference) =>
+            {
+                EvidenceAvailability::Retained
+            }
+            EvidenceLookup::Archived
+                if state
+                    .evidence
+                    .archived_evidence_receipts
+                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone())) =>
+            {
+                EvidenceAvailability::Archived
+            }
+            EvidenceLookup::Archived | EvidenceLookup::Retained(_) | EvidenceLookup::Missing => {
+                EvidenceAvailability::Missing
+            }
+        },
+    }
+}
+
+fn resolve_snapshot_domain_record_version(
+    snapshot: &SimulationSnapshot,
+    reference: &DomainRecordVersionRef,
+) -> EvidenceAvailability {
+    if reference.version == 0 {
+        return EvidenceAvailability::Missing;
+    }
+    match reference.established_by {
+        DomainRecordVersionSource::InitialScenario => {
+            if initial_domain_record_matches(snapshot.initial_scenario.as_ref(), reference) {
+                EvidenceAvailability::Retained
+            } else {
+                EvidenceAvailability::Missing
+            }
+        }
+        DomainRecordVersionSource::BoundaryChange {
+            boundary,
+            change_index,
+        } => snapshot_boundary_by_id(snapshot, boundary).map_or(
+            EvidenceAvailability::Missing,
+            |record| {
+                if boundary_domain_record_matches(record, change_index, reference) {
+                    EvidenceAvailability::Retained
+                } else {
+                    EvidenceAvailability::Missing
+                }
+            },
+        ),
+    }
 }
 
 fn validate_boundary_records(
@@ -1938,6 +2257,8 @@ fn validate_boundary_records(
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
     let mut boundary_values = BTreeMap::new();
+    let mut knowledge_values = BTreeMap::new();
+    let mut next_knowledge_id = 1_u64;
     let mut domain_record_values = final_domain_records.clone();
     for boundary in snapshot.boundaries.iter().rev() {
         for change in boundary.record_changes.iter().rev() {
@@ -2025,6 +2346,15 @@ fn validate_boundary_records(
         )?;
         validate_boundary_reservations(record, snapshot, plugins, &domain_record_values, &cuts)?;
         validate_boundary_changes(record, snapshot, plugins, &domain_record_values, &cuts)?;
+        validate_boundary_knowledge_changes(
+            record,
+            snapshot,
+            plugins,
+            &domain_record_values,
+            &cuts,
+            &mut knowledge_values,
+            &mut next_knowledge_id,
+        )?;
         for change in &record.changes {
             let key = component_key(
                 &change.plugin,
@@ -2093,6 +2423,11 @@ fn validate_boundary_records(
     if &domain_record_values != final_domain_records {
         return invalid_snapshot(
             "boundary domain-record changes do not materialize the persisted record state",
+        );
+    }
+    if knowledge_values != snapshot.knowledge.records {
+        return invalid_snapshot(
+            "boundary knowledge changes do not reconstruct the persisted generic ledger",
         );
     }
     Ok((
@@ -2610,6 +2945,164 @@ fn validate_boundary_record_changes(
     Ok(cuts)
 }
 
+fn validate_boundary_knowledge_changes(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    cuts: &BoundaryDomainEntityCuts,
+    values: &mut BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    next_id: &mut u64,
+) -> Result<(), CanwuError> {
+    let mut previous_order = None;
+    let mut correlations = BTreeSet::new();
+    let mut visible_current_boundary = BTreeSet::new();
+    for change in &record.knowledge_changes {
+        let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
+        else {
+            return invalid_snapshot("knowledge change references an unknown boundary system");
+        };
+        let order = (change.phase, change.plugin.clone(), change.system.clone());
+        if previous_order
+            .as_ref()
+            .is_some_and(|previous| previous > &order)
+            || change.phase != contract.phase
+            || !matches!(
+                change.phase,
+                BoundaryPhase::PerceptionAndAttentionRefresh
+                    | BoundaryPhase::PerspectiveAndReportMaterialization
+            )
+            || !boundary_system_due(
+                contract,
+                &record.cadences,
+                boundary_has_event_ingress(record),
+            )
+            || change.records.is_empty()
+            || change.records.len() > crate::KnowledgeLimitsV1::CURRENT.records_per_batch
+            || !canonical_text(&change.summary)
+            || change.summary.len() > crate::KnowledgeLimitsV1::CURRENT.text_bytes
+        {
+            return invalid_snapshot(
+                "boundary knowledge change is unauthorized, empty, or noncanonical",
+            );
+        }
+        previous_order = Some(order);
+        if let Some(correlation) = &change.producer_correlation
+            && (!canonical_text(correlation)
+                || correlation.len() > 256
+                || !correlations.insert((
+                    change.plugin.clone(),
+                    change.system.clone(),
+                    correlation.clone(),
+                )))
+        {
+            return invalid_snapshot("boundary knowledge producer correlation is invalid");
+        }
+        if !snapshot_knowledge_holder_exists_for_change(
+            snapshot,
+            plugins,
+            final_records,
+            cuts,
+            change.phase,
+            &change.holder,
+        ) {
+            return invalid_snapshot(
+                "boundary knowledge holder was unavailable at its proposal cut",
+            );
+        }
+        for stored in &change.records {
+            if stored.id.get() != *next_id
+                || stored.holder != change.holder
+                || stored.learned_at != record.at
+            {
+                return invalid_snapshot(
+                    "boundary knowledge IDs, holder, or learned time are inconsistent",
+                );
+            }
+            let Some(grant) = contract
+                .knowledge_writes
+                .iter()
+                .find(|grant| grant.schema == stored.schema)
+            else {
+                return invalid_snapshot("boundary knowledge schema was not granted");
+            };
+            if !grant.visibilities.contains(&change.visibility)
+                || plugins
+                    .knowledge_schemas
+                    .get(&stored.schema)
+                    .is_none_or(|(owner, schema)| owner != &change.plugin || !schema.writable)
+            {
+                return invalid_snapshot("boundary knowledge schema ownership is inconsistent");
+            }
+            let holder_records = values.entry(change.holder.clone()).or_default();
+            for related in stored.supersedes.iter().chain(&stored.contradicts) {
+                let Some(related_record) = holder_records.get(related) else {
+                    return invalid_snapshot(
+                        "boundary knowledge relation targets unavailable history",
+                    );
+                };
+                if related.get() >= stored.id.get()
+                    || related_record.schema.kind != stored.schema.kind
+                    || (related_record.learned_at == record.at
+                        && !visible_current_boundary.contains(related))
+                {
+                    return invalid_snapshot(
+                        "boundary knowledge relation is forward, cross-kind, or hidden at its cut",
+                    );
+                }
+            }
+            if holder_records.insert(stored.id, stored.clone()).is_some() {
+                return invalid_snapshot("boundary knowledge record ID is duplicated");
+            }
+            if change.phase == BoundaryPhase::PerceptionAndAttentionRefresh
+                && change.visibility == StateVisibility::SameBoundary
+            {
+                visible_current_boundary.insert(stored.id);
+            }
+            *next_id = next_id.checked_add(1).ok_or_else(|| {
+                invalid_snapshot_error("knowledge record identifier space is exhausted")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn snapshot_knowledge_holder_exists_for_change(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    cuts: &BoundaryDomainEntityCuts,
+    phase: BoundaryPhase,
+    holder: &KnowledgeHolderRef,
+) -> bool {
+    match holder {
+        KnowledgeHolderRef::Person(person) => snapshot.world.person(*person).is_some(),
+        KnowledgeHolderRef::Entity(EntityRef::Army(army)) => snapshot.world.army(*army).is_some(),
+        KnowledgeHolderRef::Entity(EntityRef::Government(government)) => {
+            snapshot.world.government(*government).is_some()
+        }
+        KnowledgeHolderRef::Entity(EntityRef::Domain(reference)) => {
+            let stage = (phase == BoundaryPhase::PerspectiveAndReportMaterialization)
+                .then_some(DomainRecordCommitStage::Aggregation);
+            cuts.is_live(final_records, reference, stage)
+                && plugins
+                    .record_schemas
+                    .get(&reference.kind)
+                    .is_some_and(|(_, schema)| {
+                        schema.class == DomainRecordClass::Entity
+                            && schema.holder_policy == KnowledgeHolderPolicy::Allowed
+                    })
+        }
+        KnowledgeHolderRef::Entity(
+            EntityRef::Organization(_)
+            | EntityRef::Person(_)
+            | EntityRef::Resource(_)
+            | EntityRef::Route(_)
+            | EntityRef::Territory(_),
+        ) => false,
+    }
+}
+
 fn validate_boundary_emissions(
     record: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
@@ -2627,6 +3120,7 @@ fn validate_boundary_emissions(
     }
     let mut matched_changes = BTreeSet::new();
     let mut matched_record_changes = BTreeSet::new();
+    let mut matched_knowledge_changes = BTreeSet::new();
     for emission in &record.emissions {
         let Some(event) = snapshot_event_by_id(snapshot, emission.event) else {
             return invalid_snapshot("boundary references an unknown emitted event");
@@ -2637,12 +3131,6 @@ fn validate_boundary_emissions(
             || !emitted_events.insert(emission.event)
         {
             return invalid_snapshot("boundary emitted event evidence is inconsistent");
-        }
-        let EventKind::Plugin { plugin, event_type } = &event.kind else {
-            return invalid_snapshot("boundary emitted a non-plugin event");
-        };
-        if plugin != &emission.plugin {
-            return invalid_snapshot("boundary emission plugin provenance is inconsistent");
         }
         let Some(contract) =
             snapshot_boundary_contract(plugins, &emission.plugin, &emission.system)
@@ -2656,12 +3144,19 @@ fn validate_boundary_emissions(
         ) {
             return invalid_snapshot("boundary emission source system was not due");
         }
-        let Some(commit_stage) = domain_record_commit_stage(contract.phase, contract.visibility)
-        else {
-            return invalid_snapshot("boundary emission has no deterministic commit stage");
-        };
         match emission.kind {
             BoundaryEmissionKind::Change { change_index } => {
+                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                    return invalid_snapshot("boundary change emitted a non-plugin event");
+                };
+                if plugin != &emission.plugin {
+                    return invalid_snapshot("boundary emission plugin provenance is inconsistent");
+                }
+                let Some(commit_stage) =
+                    domain_record_commit_stage(contract.phase, contract.visibility)
+                else {
+                    return invalid_snapshot("boundary emission has no deterministic commit stage");
+                };
                 let index = usize::try_from(change_index).map_err(|_| {
                     invalid_snapshot_error("boundary change evidence index is out of range")
                 })?;
@@ -2687,7 +3182,46 @@ fn validate_boundary_emissions(
                     return invalid_snapshot("boundary change evidence provenance is inconsistent");
                 }
             }
+            BoundaryEmissionKind::KnowledgeChange { change_index } => {
+                let index = usize::try_from(change_index).map_err(|_| {
+                    invalid_snapshot_error("knowledge change evidence index is out of range")
+                })?;
+                let Some(change) = record.knowledge_changes.get(index) else {
+                    return invalid_snapshot(
+                        "boundary emission references an unknown knowledge change",
+                    );
+                };
+                let EventKind::KnowledgePublished {
+                    holder,
+                    record_count,
+                } = &event.kind
+                else {
+                    return invalid_snapshot("knowledge change emitted the wrong event kind");
+                };
+                let expected_affected = match &change.holder {
+                    KnowledgeHolderRef::Person(person) => vec![EntityRef::Person(*person)],
+                    KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
+                };
+                if !matched_knowledge_changes.insert(change_index)
+                    || emission.plugin != change.plugin
+                    || emission.system != change.system
+                    || holder != &change.holder
+                    || usize::try_from(*record_count).ok() != Some(change.records.len())
+                    || event.summary != change.summary
+                    || event.affected_entities != expected_affected
+                {
+                    return invalid_snapshot(
+                        "boundary knowledge evidence provenance is inconsistent",
+                    );
+                }
+            }
             BoundaryEmissionKind::RecordChange { change_index } => {
+                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                    return invalid_snapshot("domain-record change emitted a non-plugin event");
+                };
+                if plugin != &emission.plugin {
+                    return invalid_snapshot("boundary emission plugin provenance is inconsistent");
+                }
                 let index = usize::try_from(change_index).map_err(|_| {
                     invalid_snapshot_error("boundary record-change evidence index is out of range")
                 })?;
@@ -2709,6 +3243,17 @@ fn validate_boundary_emissions(
                 }
             }
             BoundaryEmissionKind::Explicit => {
+                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                    return invalid_snapshot("explicit boundary emission is not a plugin event");
+                };
+                if plugin != &emission.plugin {
+                    return invalid_snapshot("boundary emission plugin provenance is inconsistent");
+                }
+                let Some(commit_stage) =
+                    domain_record_commit_stage(contract.phase, contract.visibility)
+                else {
+                    return invalid_snapshot("boundary emission has no deterministic commit stage");
+                };
                 if !contract.emits.contains(event_type)
                     || event.affected_entities.iter().any(|entity| {
                         !snapshot_entity_exists_for_boundary_proposal(
@@ -2736,6 +3281,9 @@ fn validate_boundary_emissions(
         return invalid_snapshot(
             "boundary domain-record change is missing its emitted evidence event",
         );
+    }
+    if matched_knowledge_changes.len() != record.knowledge_changes.len() {
+        return invalid_snapshot("boundary knowledge change is missing its emitted evidence event");
     }
     Ok(())
 }
@@ -2879,6 +3427,7 @@ fn validate_event_kind(
                 && snapshot.world.army(*army).is_some()
                 && snapshot.world.territory(*known_location).is_some()
         }
+        EventKind::KnowledgePublished { record_count, .. } => *record_count > 0,
         EventKind::DebugFieldChanged { entity, .. } => entity_exists(entity),
         EventKind::Plugin { plugin, event_type } => {
             plugins.descriptors.contains_key(plugin)
@@ -3513,7 +4062,8 @@ fn system_directive_has_entity(
 ) -> bool {
     match directive {
         SystemDirective::SetComponent { entity, .. } => predicate(entity),
-        SystemDirective::Emit { affected, .. } => affected.iter().any(predicate),
+        SystemDirective::Emit { affected, .. }
+        | SystemDirective::EnqueuePluginIngress { affected, .. } => affected.iter().any(predicate),
         SystemDirective::Schedule { directive, .. } => {
             system_directive_has_entity(directive, predicate)
         }

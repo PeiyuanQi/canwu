@@ -5,43 +5,56 @@
 pub use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
     DecisionRequestId, DecisionTicketId, DecisionTraceId, DomainEntityKindClass, DomainEntityType,
-    DomainKindClass, DomainRecordKind, DomainRecordRef, DomainRecordType, DomainValueKindClass,
-    DomainValueType, EntityRef, EventId, GovernmentId, IngressId, PersonId, RandomDrawId, RouteId,
-    SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
+    DomainKindClass, DomainRecordKind, DomainRecordRef, DomainRecordType, DomainRecordVersionRef,
+    DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
+    EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
+    KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, PersonId,
+    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeSnapshot, KnowledgeSource,
+    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
+    KnowledgeOrigin, KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut,
+    KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
+    KnowledgeSubject, KnowledgeSubjectTarget,
 };
 pub use canwu_sim::{
-    ADMISSION_CURSOR_FORMAT_VERSION, ArtifactManifest, BoundaryChange, BoundaryContext,
-    BoundaryDirective, BoundaryEmission, BoundaryEmissionKind, BoundaryIngressGeneration,
-    BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest,
-    BoundarySystemContract, BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION,
-    COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal, Command, CommandAttemptOutcome,
-    CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope, CommandIngress,
-    CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection,
-    CommandRequest, CommitmentRoots, CompactedSimulation, ControllerDecision, ControllerPolicy,
-    DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord,
-    DecisionAuthority, DecisionContext, DecisionController, DecisionControllerBinding,
-    DecisionError, DecisionErrorCode, DecisionEvaluation, DecisionExternalEvidence,
-    DecisionFactorContribution, DecisionIngressRequest, DecisionMutation, DecisionOption,
-    DecisionOptionEvaluation, DecisionOrigin, DecisionOutcome, DecisionPolicy,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule, DecisionState, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketState, DecisionTrace, DemoIds, DomainRecord,
-    DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordOperation, DomainRecordSchema, DomainReference,
-    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
-    ErrorCode, EvidenceCursor, EvidenceJournalSegment, ExternalDecisionOption,
+    ADMISSION_CURSOR_FORMAT_VERSION, ArchiveProvider, ArchiveStore, ArchiveStoreOutcome,
+    ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedSegmentHeader, ArtifactManifest,
+    BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
+    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal,
+    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
+    CanwuError, CheckpointJournal, Command, CommandAttemptOutcome, CommandAttemptRecord,
+    CommandAuthority, CommandContext, CommandEnvelope, CommandIngress, CommandOutcome,
+    CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection, CommandRequest,
+    CommitmentRoots, CompactedSimulation, ControllerDecision, ControllerPolicy, DecisionAction,
+    DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority,
+    DecisionContext, DecisionController, DecisionControllerBinding, DecisionError,
+    DecisionErrorCode, DecisionEvaluation, DecisionExternalEvidence, DecisionFactorContribution,
+    DecisionIngressRequest, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
+    DecisionOrigin, DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind,
+    DecisionRule, DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState,
+    DecisionTrace, DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft,
+    DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation,
+    DomainRecordSchema, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
+    DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode, EvidenceArchiveIndex, EvidenceCursor,
+    EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots,
+    EvidenceJournalSegment, EvidenceNestedLocator, EvidenceSealToken, ExternalDecisionOption,
     ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
     HumanPolicy, IngressClass, IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy,
-    Issuer, LlmModelIdentity, LlmPolicy, ObservationPolicy, OrderedRulePolicy, PayloadProperty,
-    PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
-    PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest,
-    PluginRegistrar, PluginRegistry, PolicyDecision, PreparedDecisionIngress, QueuedExternalPolicy,
-    QueuedHumanPolicy, QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
-    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawOutcome, RandomDrawProducer,
-    RandomDrawRecord, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
+    Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind,
+    KnowledgeWriteGrant, LlmModelIdentity, LlmPolicy, ObservationPolicy, OrderedRulePolicy,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadProperty,
+    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, PluginActionDescriptor,
+    PluginCommandHandler, PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor,
+    PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema, PluginRegistrar,
+    PluginRegistry, PolicyDecision, PreparedDecisionIngress, PreparedEvidenceSeal,
+    QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
+    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
+    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
+    RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
     ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
     ReservationRef, ReservationRequest, ReservationRequestRecord, RuleChoice, RulePolicy,
     RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
@@ -49,6 +62,7 @@ pub use canwu_sim::{
     SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
     StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy, UtilityEvaluator,
     UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator, WeightedUtilityPolicy,
+    canonical_byte_hash, canonical_hash, payload_required_evidence_continuation_property_v1,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_world::{
@@ -215,6 +229,10 @@ impl Canwu {
         self.simulation.world()
     }
 
+    /// Trusted host/admin access to the complete knowledge snapshot.
+    ///
+    /// Do not expose this facade to player, agent, observer, or remote clients;
+    /// use [`Canwu::viewer`] or [`Canwu::viewer_for_actor`] instead.
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
@@ -651,37 +669,124 @@ impl Canwu {
         ))
     }
 
-    /// Builds an authorized viewer context from the persisted run policy.
-    ///
-    /// Callers cannot select a stronger observation policy through an
-    /// observation request; the run configuration is the input-control
-    /// boundary for actor-relative versus research projections.
-    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+    /// Trusted host/admin holder query. Player-facing callers must use a
+    /// restricted [`CanwuViewer`].
+    pub fn admin_query_knowledge(
+        &self,
+        holder: KnowledgeHolderRef,
+        query: &KnowledgeQuery,
+    ) -> Result<KnowledgeQueryResult, CanwuError> {
+        self.simulation
+            .knowledge()
+            .query_current(
+                holder,
+                query,
+                self.simulation.boundaries().last().map(|value| value.id),
+            )
+            .map_err(map_knowledge_query_error)
+    }
+
+    /// Creates the restricted viewer dictated entirely by the persisted run
+    /// policy and seat binding.
+    pub fn viewer(&self) -> Result<CanwuViewer<'_>, CanwuError> {
+        let principal = self.declared_observation_principal()?;
+        Ok(CanwuViewer {
+            canwu: self,
+            context: KnowledgeViewContext { principal },
+        })
+    }
+
+    /// Character-seat and compatibility convenience. It never upgrades an
+    /// institution, public, research, or developer policy to a person.
+    pub fn viewer_for_actor(&self, actor: PersonId) -> Result<CanwuViewer<'_>, CanwuError> {
         if self.world().person(actor).is_none() {
             return Err(CanwuError::new(
                 ErrorCode::ActorNotFound,
                 format!("actor {actor} was not found"),
             ));
         }
-        let observation = match self.run_configuration().declared() {
-            Some(configuration) => {
+        let principal = match self.run_configuration().declared() {
+            Some(configuration)
                 if configuration.observation == ObservationPolicy::ActorBound
+                    && configuration.seat == SeatPolicy::CharacterBound
                     && configuration
                         .seat_binding
                         .as_ref()
                         .and_then(|binding| binding.actor)
-                        != Some(actor)
-                {
-                    return Err(CanwuError::new(
-                        ErrorCode::InvalidAuthority,
-                        format!("actor {actor} is not bound to the active observation seat"),
-                    ));
-                }
-                configuration.observation
+                        == Some(actor) =>
+            {
+                ObservationPrincipal::Person(actor)
             }
-            None => ObservationPolicy::ActorBound,
+            Some(_) => {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "the persisted run policy does not authorize a character viewer",
+                ));
+            }
+            None => ObservationPrincipal::Person(actor),
         };
-        Ok(ViewerContext { actor, observation })
+        Ok(CanwuViewer {
+            canwu: self,
+            context: KnowledgeViewContext { principal },
+        })
+    }
+
+    fn declared_observation_principal(&self) -> Result<ObservationPrincipal, CanwuError> {
+        let Some(configuration) = self.run_configuration().declared() else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "legacy runs require viewer_for_actor with an existing character",
+            ));
+        };
+        match configuration.observation {
+            ObservationPolicy::ActorBound => match configuration.seat {
+                SeatPolicy::CharacterBound => configuration
+                    .seat_binding
+                    .as_ref()
+                    .and_then(|binding| binding.actor)
+                    .map(ObservationPrincipal::Person)
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidAuthority,
+                            "character-bound observation lacks an actor binding",
+                        )
+                    }),
+                SeatPolicy::InstitutionBound => configuration
+                    .seat_binding
+                    .as_ref()
+                    .and_then(|binding| binding.institution.clone())
+                    .map(ObservationPrincipal::Institution)
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidAuthority,
+                            "institution-bound observation lacks an institution binding",
+                        )
+                    }),
+                SeatPolicy::ObserverSeat | SeatPolicy::AdvisorSeat | SeatPolicy::None => {
+                    Err(CanwuError::new(
+                        ErrorCode::InvalidAuthority,
+                        "actor-bound observation requires a character or institution seat",
+                    ))
+                }
+            },
+            ObservationPolicy::PublicObserver => Ok(ObservationPrincipal::Public),
+            ObservationPolicy::ResearchFull => Ok(ObservationPrincipal::Research),
+            ObservationPolicy::DeveloperDiagnostic => Ok(ObservationPrincipal::Developer),
+        }
+    }
+
+    /// Builds an authorized viewer context from the persisted run policy.
+    ///
+    /// Callers cannot select a stronger observation policy through an
+    /// observation request; the run configuration is the input-control
+    /// boundary for actor-relative versus research projections.
+    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+        let viewer = self.viewer_for_actor(actor)?;
+        Ok(ViewerContext {
+            principal: viewer.context.principal.clone(),
+            observation: ObservationPolicy::ActorBound,
+            checkpoint_hash: self.checkpoint_hash().to_owned(),
+        })
     }
 
     pub fn observe(
@@ -703,17 +808,19 @@ impl Canwu {
         viewer: &ViewerContext,
         request: &ObserveRequest,
     ) -> Result<AgentContext, CanwuError> {
-        let authorized = self.viewer_context(viewer.actor)?;
+        let Some(actor) = viewer.principal.person() else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "character observation requires a person principal",
+            ));
+        };
+        let authorized = self.viewer_context(actor)?;
         if authorized != *viewer {
             return Err(CanwuError::new(
                 ErrorCode::InvalidAuthority,
-                format!(
-                    "actor {} is not authorized for this observation context",
-                    viewer.actor
-                ),
+                format!("actor {actor} is not authorized for this observation context"),
             ));
         }
-        let actor = viewer.actor;
         let world = self.world();
         let person = world.person(actor).ok_or_else(|| {
             CanwuError::new(
@@ -1055,8 +1162,37 @@ impl CompactedCanwu {
         self.simulation.checkpoint()
     }
 
+    #[must_use]
+    pub fn archived_evidence_receipt(
+        &self,
+        reference: &EvidenceRef,
+    ) -> Option<&ArchivedEvidenceReceipt> {
+        self.simulation.archived_evidence_receipt(reference)
+    }
+
+    pub fn load_archived_evidence_segment(
+        &self,
+        reference: &EvidenceRef,
+        provider: &dyn ArchiveProvider,
+    ) -> Result<EvidenceJournalSegment, CanwuError> {
+        self.simulation
+            .load_archived_evidence_segment(reference, provider)
+    }
+
     pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
         self.simulation.seal_evidence()
+    }
+
+    pub fn prepare_evidence_seal(&self) -> Result<Option<PreparedEvidenceSeal>, CanwuError> {
+        self.simulation.prepare_evidence_seal()
+    }
+
+    pub fn commit_evidence_seal(
+        &mut self,
+        token: &EvidenceSealToken,
+        provider: &dyn ArchiveProvider,
+    ) -> Result<(), CanwuError> {
+        self.simulation.commit_evidence_seal(token, provider)
     }
 
     pub fn snapshot_with_segments(
@@ -1431,21 +1567,228 @@ pub enum ObservationFocus {
 /// An observation identity authorized by the run's persisted observation
 /// policy. This type is intentionally constructed through
 /// [`Canwu::viewer_context`] so an observation request cannot self-escalate.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObservationPrincipal {
+    Person(PersonId),
+    Institution(EntityRef),
+    Public,
+    Research,
+    Developer,
+}
+
+impl ObservationPrincipal {
+    const fn person(&self) -> Option<PersonId> {
+        match self {
+            Self::Person(actor) => Some(*actor),
+            Self::Institution(_) | Self::Public | Self::Research | Self::Developer => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewerContext {
-    actor: PersonId,
+    principal: ObservationPrincipal,
     observation: ObservationPolicy,
+    checkpoint_hash: String,
 }
 
 impl ViewerContext {
     #[must_use]
-    pub const fn actor(self) -> PersonId {
-        self.actor
+    pub const fn principal(&self) -> &ObservationPrincipal {
+        &self.principal
     }
 
     #[must_use]
-    pub const fn observation(self) -> ObservationPolicy {
+    pub const fn actor(&self) -> Option<PersonId> {
+        self.principal.person()
+    }
+
+    #[must_use]
+    pub const fn observation(&self) -> ObservationPolicy {
         self.observation
+    }
+}
+
+#[derive(Clone, Debug)]
+struct KnowledgeViewContext {
+    principal: ObservationPrincipal,
+}
+
+/// Restricted player/agent/observer facade. It deliberately exposes no raw
+/// snapshot, event, boundary, domain-record, or audit-origin access.
+pub struct CanwuViewer<'a> {
+    canwu: &'a Canwu,
+    context: KnowledgeViewContext,
+}
+
+impl CanwuViewer<'_> {
+    #[must_use]
+    pub const fn principal(&self) -> &ObservationPrincipal {
+        &self.context.principal
+    }
+
+    /// Queries only the holder selected by a bound person or institution
+    /// principal. Public and diagnostic principals must use their separately
+    /// named capabilities.
+    pub fn query_knowledge(
+        &self,
+        query: &KnowledgeQuery,
+    ) -> Result<KnowledgeQueryResult, CanwuError> {
+        let holder = match &self.context.principal {
+            ObservationPrincipal::Person(actor) => KnowledgeHolderRef::Person(*actor),
+            ObservationPrincipal::Institution(entity) => KnowledgeHolderRef::Entity(entity.clone()),
+            ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
+            ObservationPrincipal::Research | ObservationPrincipal::Developer => {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidKnowledgeAuthority,
+                    "diagnostic viewers must select a holder explicitly",
+                ));
+            }
+        };
+        self.canwu.admin_query_knowledge(holder, query)
+    }
+
+    /// Selects an existing holder under an explicit research/developer policy.
+    /// Returned records remain the origin-free holder projection.
+    pub fn query_holder_knowledge(
+        &self,
+        holder: KnowledgeHolderRef,
+        query: &KnowledgeQuery,
+    ) -> Result<KnowledgeQueryResult, CanwuError> {
+        match self.context.principal {
+            ObservationPrincipal::Research | ObservationPrincipal::Developer => {}
+            ObservationPrincipal::Person(_)
+            | ObservationPrincipal::Institution(_)
+            | ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
+        }
+        if !knowledge_holder_exists(self.canwu, &holder) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidKnowledgeHolder,
+                "the requested knowledge holder does not exist",
+            ));
+        }
+        self.canwu.admin_query_knowledge(holder, query)
+    }
+
+    /// Returns one audit-bearing stored record only for research/developer
+    /// principals. Normal holder queries never expose origin evidence.
+    pub fn audit_knowledge_record(
+        &self,
+        holder: &KnowledgeHolderRef,
+        record: HolderKnowledgeRecordId,
+    ) -> Result<KnowledgeRecord, CanwuError> {
+        match self.context.principal {
+            ObservationPrincipal::Research | ObservationPrincipal::Developer => {}
+            ObservationPrincipal::Person(_)
+            | ObservationPrincipal::Institution(_)
+            | ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
+        }
+        if !knowledge_holder_exists(self.canwu, holder) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidKnowledgeHolder,
+                "the requested knowledge holder does not exist",
+            ));
+        }
+        let index = usize::try_from(record.get().saturating_sub(1)).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::KnowledgeRecordNotFound,
+                "holder-relative knowledge record ID is outside the supported range",
+            )
+        })?;
+        self.canwu
+            .knowledge()
+            .for_holder(holder)
+            .and_then(|records| records.values().nth(index))
+            .cloned()
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::KnowledgeRecordNotFound,
+                    "holder-relative knowledge record was not found",
+                )
+            })
+    }
+
+    pub fn observe(&self, request: &ObserveRequest) -> Result<AgentContext, CanwuError> {
+        let ObservationPrincipal::Person(actor) = self.context.principal else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "agent observation requires a person principal",
+            ));
+        };
+        self.canwu.observe(actor, request)
+    }
+
+    #[must_use]
+    pub fn visible_changes_since(&self, since: SimTime) -> Vec<VisibleChange> {
+        let context = ViewerContext {
+            principal: self.context.principal.clone(),
+            observation: observation_for_principal(&self.context.principal),
+            checkpoint_hash: self.canwu.checkpoint_hash().to_owned(),
+        };
+        self.canwu
+            .events()
+            .iter()
+            .filter(|event| event.timestamp > since)
+            .filter_map(|event| {
+                let audience = self.canwu.simulation.event_audience(event);
+                visible_change(&context, event, &audience)
+            })
+            .collect()
+    }
+}
+
+const fn observation_for_principal(principal: &ObservationPrincipal) -> ObservationPolicy {
+    match principal {
+        ObservationPrincipal::Person(_) | ObservationPrincipal::Institution(_) => {
+            ObservationPolicy::ActorBound
+        }
+        ObservationPrincipal::Public => ObservationPolicy::PublicObserver,
+        ObservationPrincipal::Research => ObservationPolicy::ResearchFull,
+        ObservationPrincipal::Developer => ObservationPolicy::DeveloperDiagnostic,
+    }
+}
+
+fn invalid_knowledge_authority() -> CanwuError {
+    CanwuError::new(
+        ErrorCode::InvalidKnowledgeAuthority,
+        "this observation principal cannot read a private knowledge ledger",
+    )
+}
+
+fn knowledge_holder_exists(canwu: &Canwu, holder: &KnowledgeHolderRef) -> bool {
+    match holder {
+        KnowledgeHolderRef::Person(actor) => canwu.world().person(*actor).is_some(),
+        KnowledgeHolderRef::Entity(entity) => match entity {
+            EntityRef::Army(id) => canwu.world().army(*id).is_some(),
+            EntityRef::Government(id) => canwu.world().government(*id).is_some(),
+            EntityRef::Person(id) => canwu.world().person(*id).is_some(),
+            EntityRef::Domain(reference) => canwu
+                .domain_record(reference)
+                .is_some_and(|record| !record.is_deleted()),
+            EntityRef::Organization(_)
+            | EntityRef::Resource(_)
+            | EntityRef::Route(_)
+            | EntityRef::Territory(_) => false,
+        },
+    }
+}
+
+fn map_knowledge_query_error(error: KnowledgeQueryError) -> CanwuError {
+    match error {
+        KnowledgeQueryError::ReadCutUnavailable => CanwuError::new(
+            ErrorCode::KnowledgeReadCutUnavailable,
+            "knowledge cursor read cut is no longer available",
+        ),
+        KnowledgeQueryError::InvalidLimit => CanwuError::new(
+            ErrorCode::KnowledgeLimitExceeded,
+            "knowledge query page size is outside the supported range",
+        ),
+        KnowledgeQueryError::InvalidCursor
+        | KnowledgeQueryError::InvalidLedger
+        | KnowledgeQueryError::Encoding => CanwuError::new(
+            ErrorCode::InvalidKnowledgeRecord,
+            "knowledge query, cursor, or ledger is invalid",
+        ),
     }
 }
 
@@ -1515,12 +1858,17 @@ fn visible_change(
     event: &SimEvent,
     plugin_audience: &EventAudience,
 ) -> Option<VisibleChange> {
-    let actor = viewer.actor;
     let visible = match &event.kind {
-        EventKind::MoveOrdered { .. } => {
-            event.affected_entities.contains(&EntityRef::Person(actor))
+        EventKind::MoveOrdered { .. } => viewer
+            .principal
+            .person()
+            .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
+        EventKind::KnowledgeUpdated { recipient, .. } => {
+            viewer.principal.person() == Some(*recipient)
         }
-        EventKind::KnowledgeUpdated { recipient, .. } => *recipient == actor,
+        EventKind::KnowledgePublished { holder, .. } => {
+            principal_matches_holder(&viewer.principal, holder)
+        }
         EventKind::ArmyArrived { .. }
         | EventKind::ReportDispatched { .. }
         | EventKind::DebugFieldChanged { .. } => matches!(
@@ -1545,12 +1893,37 @@ fn event_visible_to(viewer: &ViewerContext, event: &SimEvent, audience: &EventAu
     }
     match audience {
         EventAudience::Public => true,
-        EventAudience::Actor(actor) => *actor == viewer.actor,
-        EventAudience::Actors(actors) => actors.binary_search(&viewer.actor).is_ok(),
-        EventAudience::AffectedActors => event
-            .affected_entities
-            .contains(&EntityRef::Person(viewer.actor)),
+        EventAudience::Actor(actor) => viewer.principal.person() == Some(*actor),
+        EventAudience::Actors(actors) => viewer
+            .principal
+            .person()
+            .is_some_and(|actor| actors.binary_search(&actor).is_ok()),
+        EventAudience::KnowledgeHolder(holder) => {
+            principal_matches_holder(&viewer.principal, holder)
+        }
+        EventAudience::AffectedActors => viewer
+            .principal
+            .person()
+            .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
         EventAudience::Private => false,
+    }
+}
+
+fn principal_matches_holder(principal: &ObservationPrincipal, holder: &KnowledgeHolderRef) -> bool {
+    match (principal, holder) {
+        (ObservationPrincipal::Person(actor), KnowledgeHolderRef::Person(holder)) => {
+            actor == holder
+        }
+        (ObservationPrincipal::Institution(institution), KnowledgeHolderRef::Entity(holder)) => {
+            institution == holder
+        }
+        (ObservationPrincipal::Research | ObservationPrincipal::Developer, _) => true,
+        (
+            ObservationPrincipal::Person(_)
+            | ObservationPrincipal::Institution(_)
+            | ObservationPrincipal::Public,
+            _,
+        ) => false,
     }
 }
 
@@ -1660,6 +2033,23 @@ pub struct CapabilityDescription {
 mod tests {
     use super::*;
 
+    fn manifest_for_configuration(
+        scenario: &Scenario,
+        configuration: &RunConfiguration,
+    ) -> RunManifest {
+        let scenario_manifest =
+            ArtifactManifest::for_scenario("fixture", "viewer-scenario", "1", scenario)
+                .expect("scenario manifest should hash");
+        let configuration_manifest = ArtifactManifest::for_run_configuration(
+            "fixture",
+            "viewer-configuration",
+            "1",
+            configuration,
+        )
+        .expect("run configuration manifest should hash");
+        RunManifest::declared(scenario_manifest, configuration_manifest)
+    }
+
     struct VisibilityPlugin {
         audience: EventAudience,
     }
@@ -1720,20 +2110,24 @@ mod tests {
             correlation_id: 1,
         };
         let actor = ViewerContext {
-            actor: ids.commander,
+            principal: ObservationPrincipal::Person(ids.commander),
             observation: ObservationPolicy::ActorBound,
+            checkpoint_hash: String::new(),
         };
         let observer = ViewerContext {
-            actor: ids.observer,
+            principal: ObservationPrincipal::Person(ids.observer),
             observation: ObservationPolicy::ActorBound,
+            checkpoint_hash: String::new(),
         };
         let public_observer = ViewerContext {
-            actor: ids.observer,
+            principal: ObservationPrincipal::Public,
             observation: ObservationPolicy::PublicObserver,
+            checkpoint_hash: String::new(),
         };
         let research = ViewerContext {
-            actor: ids.observer,
+            principal: ObservationPrincipal::Research,
             observation: ObservationPolicy::ResearchFull,
+            checkpoint_hash: String::new(),
         };
 
         assert!(visible_change(&actor, &event, &EventAudience::Public).is_some());
@@ -1809,17 +2203,168 @@ mod tests {
 
     #[test]
     fn observe_with_viewer_revalidates_input_control_context() {
-        let ids = Canwu::demo_ids();
         let canwu = Canwu::demo(35).expect("demo should load");
         let escalated = ViewerContext {
-            actor: ids.observer,
+            principal: ObservationPrincipal::Research,
             observation: ObservationPolicy::ResearchFull,
+            checkpoint_hash: canwu.checkpoint_hash().to_owned(),
         };
 
         let error = canwu
             .observe_with_viewer(&escalated, &ObserveRequest::default())
             .expect_err("a caller cannot self-escalate the observation policy");
         assert_eq!(error.code, ErrorCode::InvalidAuthority);
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn restricted_viewer_derives_principal_and_rejects_public_private_reads() {
+        let (scenario, ids) = canwu_sim::demo_scenario();
+        let actor = Canwu::demo(69).expect("actor viewer fixture should initialize");
+        let actor_viewer = actor
+            .viewer_for_actor(ids.commander)
+            .expect("legacy character viewer should derive");
+        let error = actor_viewer
+            .audit_knowledge_record(
+                &KnowledgeHolderRef::Person(ids.commander),
+                HolderKnowledgeRecordId::new(1),
+            )
+            .expect_err("actor viewers cannot read audit-bearing records");
+        assert_eq!(error.code, ErrorCode::InvalidKnowledgeAuthority);
+
+        let public_configuration = RunConfiguration::read_only_observer();
+        let public_manifest = manifest_for_configuration(&scenario, &public_configuration);
+        let public = Canwu::new_with_run_configuration(
+            71,
+            scenario.clone(),
+            public_manifest,
+            public_configuration,
+        )
+        .expect("public viewer fixture should initialize");
+        let public_viewer = public.viewer().expect("public principal should derive");
+        assert_eq!(public_viewer.principal(), &ObservationPrincipal::Public);
+        let error = public_viewer
+            .query_knowledge(&KnowledgeQuery::default())
+            .expect_err("public principal cannot read a private ledger");
+        assert_eq!(error.code, ErrorCode::InvalidKnowledgeAuthority);
+        let error = public_viewer
+            .query_holder_knowledge(
+                KnowledgeHolderRef::Person(ids.commander),
+                &KnowledgeQuery::default(),
+            )
+            .expect_err("an arbitrary valid actor ID cannot upgrade a public viewer");
+        assert_eq!(error.code, ErrorCode::InvalidKnowledgeAuthority);
+        let error = public_viewer
+            .audit_knowledge_record(
+                &KnowledgeHolderRef::Person(ids.commander),
+                HolderKnowledgeRecordId::new(1),
+            )
+            .expect_err("public viewers cannot read audit-bearing records");
+        assert_eq!(error.code, ErrorCode::InvalidKnowledgeAuthority);
+
+        let institution_configuration = RunConfiguration {
+            format_version: RUN_CONFIGURATION_FORMAT_VERSION,
+            purpose: RunPurpose::Play,
+            controller: ControllerPolicy::HumanRoleBound,
+            seat: SeatPolicy::InstitutionBound,
+            observation: ObservationPolicy::ActorBound,
+            interaction: InteractionPolicy::EraInternalCommands,
+            trace: TracePolicy::Causal,
+            seat_binding: Some(SeatBinding {
+                seat_id: "institution-seat".to_owned(),
+                controller_id: "institution-controller".to_owned(),
+                actor: Some(ids.commander),
+                institution: Some(EntityRef::Government(ids.government)),
+                permission_profile_id: "institution-profile".to_owned(),
+            }),
+            declared_interventions: Vec::new(),
+            diagnostic_commands_enabled: false,
+            require_idempotency_keys: true,
+        };
+        let institution_manifest =
+            manifest_for_configuration(&scenario, &institution_configuration);
+        let institution = Canwu::new_with_run_configuration(
+            73,
+            scenario.clone(),
+            institution_manifest,
+            institution_configuration,
+        )
+        .expect("institution viewer fixture should initialize");
+        let institution_viewer = institution
+            .viewer()
+            .expect("institution principal should derive");
+        assert_eq!(
+            institution_viewer.principal(),
+            &ObservationPrincipal::Institution(EntityRef::Government(ids.government))
+        );
+        assert_eq!(
+            institution_viewer
+                .query_knowledge(&KnowledgeQuery::default())
+                .expect("institution may query only its bound ledger")
+                .holder,
+            KnowledgeHolderRef::Entity(EntityRef::Government(ids.government))
+        );
+        assert!(institution.viewer_for_actor(ids.commander).is_err());
+        let error = institution_viewer
+            .audit_knowledge_record(
+                &KnowledgeHolderRef::Entity(EntityRef::Government(ids.government)),
+                HolderKnowledgeRecordId::new(1),
+            )
+            .expect_err("institution viewers cannot read audit-bearing records");
+        assert_eq!(error.code, ErrorCode::InvalidKnowledgeAuthority);
+
+        let mut research_configuration = RunConfiguration::read_only_observer();
+        research_configuration.observation = ObservationPolicy::ResearchFull;
+        let research_manifest = manifest_for_configuration(&scenario, &research_configuration);
+        let research = Canwu::new_with_run_configuration(
+            79,
+            scenario,
+            research_manifest,
+            research_configuration,
+        )
+        .expect("research viewer fixture should initialize");
+        let research_viewer = research.viewer().expect("research principal should derive");
+        assert_eq!(research_viewer.principal(), &ObservationPrincipal::Research);
+        assert_eq!(
+            research_viewer
+                .query_holder_knowledge(
+                    KnowledgeHolderRef::Person(ids.commander),
+                    &KnowledgeQuery::default(),
+                )
+                .expect("research may explicitly select an existing holder")
+                .holder,
+            KnowledgeHolderRef::Person(ids.commander)
+        );
+    }
+
+    #[test]
+    fn detached_viewer_context_is_bound_to_the_authorized_checkpoint() {
+        let mut canwu = Canwu::demo(83).expect("demo should load");
+        let ids = Canwu::demo_ids();
+        let context = canwu
+            .viewer_context(ids.commander)
+            .expect("the commander should receive a detached viewer context");
+
+        canwu
+            .act(
+                ids.commander,
+                SemanticAction::MoveArmy {
+                    army: ids.army,
+                    destination: ids.eastern_territory,
+                },
+            )
+            .expect("the authoritative checkpoint should advance");
+        let error = canwu
+            .observe_with_viewer(&context, &ObserveRequest::default())
+            .expect_err("a context from an older checkpoint must be rejected");
+        assert_eq!(error.code, ErrorCode::InvalidAuthority);
+
+        let refreshed = canwu
+            .viewer_context(ids.commander)
+            .expect("the current checkpoint should issue a fresh context");
+        canwu
+            .observe_with_viewer(&refreshed, &ObserveRequest::default())
+            .expect("the refreshed context should remain authorized");
     }
 
     #[test]

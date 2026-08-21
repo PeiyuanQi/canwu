@@ -28,6 +28,41 @@ The runtime should distinguish four related records:
 No semantic-agent operation may silently fall back to world state when actor
 knowledge is absent.
 
+## Information flow
+
+The reusable kernel should preserve facts about who holds which record, when it
+was learned, which registered schema gives it meaning, and which evidence or
+prior records it cites. It should support people and eligible institutions as
+holders, bounded deterministic queries, current and historical views,
+contradiction and supersession links, atomic publication, exact persistence,
+and replay. Those contracts must remain usable for correspondence, reports,
+telecommunication, intelligence, diplomacy, military coordination, public
+notices, and later media systems without embedding any one period's vocabulary
+or assumptions.
+
+The kernel should not decide routes, couriers, interception, encryption,
+recipient expansion, partial delivery, organizational interpretation, belief
+change, reputation effects, or public presentation. Extensions own those
+processes and publish their results through the common holder-ledger contract.
+A transport or audience extension may maintain derived routing and membership
+indexes for scale, but every such index is rebuildable from canonical extension
+state and excluded from authoritative commitments unless deliberately promoted
+through a separately versioned kernel contract.
+
+The supported query surface should remain bounded and cursor-safe at large
+holder histories. Performance evidence must distinguish publication cost,
+snapshot growth, query cost, load/index-rebuild cost, replay throughput, and
+compact-archive cost. Recorded baselines are engineering evidence, not a
+machine-independent service-level objective.
+
+The first authoritative implementation remains the unpublished
+`canwu-information` extension for the 0.5 line. Keeping it private lets the
+record vocabulary, lifecycle helpers, and high-fan-out continuation ergonomics
+receive another independent domain implementation before crates.io publication.
+The kernel holder-ledger, evidence, archive, and keyed-random contracts are the
+stable reusable boundary; publishing the extension is a later, separately
+reviewed compatibility decision.
+
 ## Causality and explanation
 
 Events carry command, parent-event, boundary, or typed system causes and

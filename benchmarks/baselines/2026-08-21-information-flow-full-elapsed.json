@@ -1,0 +1,968 @@
+{
+  "benchmark": "canwu-information-flow-baseline",
+  "engine_version": "0.5.0",
+  "environment": {
+    "arch": "x86_64",
+    "build_target": "",
+    "cargo": "cargo 1.97.1 (c980f4866 2026-06-30)",
+    "cargo_features": [],
+    "encoded_rustflags": "",
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)\nbinary: rustc\ncommit-hash: 8bab26f4f68e0e26f0bb7960be334d5b520ea452\ncommit-date: 2026-07-14\nhost: x86_64-pc-windows-msvc\nrelease: 1.97.1\nLLVM version: 22.1.6",
+    "rustflags": ""
+  },
+  "extension_workloads": {
+    "cases": [
+      {
+        "elapsed_samples_ns": [
+          2916200,
+          2786700,
+          3011100
+        ],
+        "name": "knowledge_schema_100_registration",
+        "summary": {
+          "elapsed_ns_max": 3011100,
+          "elapsed_ns_median": 2916200,
+          "elapsed_ns_min": 2786700,
+          "elapsed_ns_p95": 3011100
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          5582900,
+          5295700,
+          5288100
+        ],
+        "name": "addressed_dispatch_10000_plan",
+        "summary": {
+          "elapsed_ns_max": 5582900,
+          "elapsed_ns_median": 5295700,
+          "elapsed_ns_min": 5288100,
+          "elapsed_ns_p95": 5582900
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          7771200,
+          7699800,
+          7797300
+        ],
+        "name": "explicit_audience_10000_plan",
+        "summary": {
+          "elapsed_ns_max": 7797300,
+          "elapsed_ns_median": 7771200,
+          "elapsed_ns_min": 7699800,
+          "elapsed_ns_p95": 7797300
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          139500,
+          114100,
+          108700
+        ],
+        "name": "mixed_lineage_1000_validate",
+        "summary": {
+          "elapsed_ns_max": 139500,
+          "elapsed_ns_median": 114100,
+          "elapsed_ns_min": 108700,
+          "elapsed_ns_p95": 139500
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          84102000,
+          79832800,
+          83525000
+        ],
+        "name": "access_100000_index_build",
+        "summary": {
+          "elapsed_ns_max": 84102000,
+          "elapsed_ns_median": 83525000,
+          "elapsed_ns_min": 79832800,
+          "elapsed_ns_p95": 84102000
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          7950100,
+          7838800,
+          7733700
+        ],
+        "name": "access_100000_query",
+        "summary": {
+          "elapsed_ns_max": 7950100,
+          "elapsed_ns_median": 7838800,
+          "elapsed_ns_min": 7733700,
+          "elapsed_ns_p95": 7950100
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          3871052800,
+          3765582500,
+          4048668900
+        ],
+        "name": "access_100000_1000_holder_queries",
+        "summary": {
+          "elapsed_ns_max": 4048668900,
+          "elapsed_ns_median": 3871052800,
+          "elapsed_ns_min": 3765582500,
+          "elapsed_ns_p95": 4048668900
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          116933200,
+          118415600,
+          116950000
+        ],
+        "name": "archive_provider_100_segment_build",
+        "summary": {
+          "elapsed_ns_max": 118415600,
+          "elapsed_ns_median": 116950000,
+          "elapsed_ns_min": 116933200,
+          "elapsed_ns_p95": 118415600
+        }
+      },
+      {
+        "elapsed_samples_ns": [
+          6952100,
+          6537100,
+          6347300
+        ],
+        "name": "archive_provider_100_segment_restore",
+        "summary": {
+          "elapsed_ns_max": 6952100,
+          "elapsed_ns_median": 6537100,
+          "elapsed_ns_min": 6347300,
+          "elapsed_ns_p95": 6952100
+        }
+      }
+    ],
+    "limits": {
+      "access_holders": 1000,
+      "access_records": 100000,
+      "addressed_recipients": 10000,
+      "archive_segments": 100,
+      "explicit_audience_members": 10000,
+      "knowledge_schemas": 100,
+      "mixed_lineage_nodes": 1000,
+      "mixed_lineage_operations": 4
+    },
+    "notes": [
+      "The 100-schema case measures public plugin registration, schema validation, canonical ordering, registry ownership, and identity commitment refresh.",
+      "The 1,000 lineage nodes are validated across four bounded operations because the public operation contract deliberately caps one operation at 256 output slots.",
+      "The 100,000 access workload is distributed evenly across exactly 1,000 holders; the holder-query case executes one public filtered query per holder and validates 100 records per holder.",
+      "The access workloads build and query the detached public InformationRecordSet index; they do not bypass the published record wire shape.",
+      "Peak RSS checkpoints are cumulative process high-water marks and must not be subtracted as isolated case allocations."
+    ],
+    "peak_rss_checkpoints": [
+      {
+        "after": "before_extension_workloads",
+        "sample": {
+          "bytes": 14139392,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_knowledge_schema_100_registration",
+        "sample": {
+          "bytes": 14139392,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_addressed_dispatch_10000",
+        "sample": {
+          "bytes": 23085056,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_explicit_audience_10000",
+        "sample": {
+          "bytes": 23085056,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_mixed_lineage_1000",
+        "sample": {
+          "bytes": 23085056,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_access_100000_index_build",
+        "sample": {
+          "bytes": 382689280,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_access_100000_query",
+        "sample": {
+          "bytes": 404652032,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_access_100000_1000_holder_queries",
+        "sample": {
+          "bytes": 404652032,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_archive_provider_100_segment_build",
+        "sample": {
+          "bytes": 404652032,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      },
+      {
+        "after": "after_archive_provider_100_segment_restore",
+        "sample": {
+          "bytes": 404652032,
+          "error": null,
+          "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+          "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+        }
+      }
+    ]
+  },
+  "limitations": [
+    "peak RSS is available on Windows, Linux, and macOS as a process-lifetime high-water mark; unsupported targets report an explicit null sample and reason",
+    "the kernel publisher contract caps one system at 64 batches per boundary, so the kernel growth profile uses one hot holder and up to 59 additional holders; separate extension cases cover 10,000-recipient and 10,000-member fan-out validation",
+    "the access workload measures detached public index construction and query; authoritative admission of 100,000 individual access operations would also include operation and boundary overhead and is not represented by this case"
+  ],
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "cold_holder_count": 59,
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "growth_samples": 1,
+    "hot_holder_share": "approximately one half of every boundary publication",
+    "operation_samples": 3,
+    "records_per_batch_limit": 1000,
+    "records_per_boundary_limit": 10000,
+    "warmup_iterations": 0
+  },
+  "metric_mode": "elapsed",
+  "preset": "full",
+  "process_peak_rss_after": {
+    "bytes": 22294740992,
+    "error": null,
+    "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+    "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+  },
+  "process_peak_rss_before": {
+    "bytes": 5808128,
+    "error": null,
+    "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+    "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+  },
+  "publication_batches": [
+    {
+      "case": {
+        "elapsed_samples_ns": [
+          271600,
+          44500,
+          42600
+        ],
+        "name": "knowledge_publication_1_records",
+        "summary": {
+          "elapsed_ns_max": 271600,
+          "elapsed_ns_median": 44500,
+          "elapsed_ns_min": 42600,
+          "elapsed_ns_p95": 271600
+        }
+      },
+      "record_count": 1
+    },
+    {
+      "case": {
+        "elapsed_samples_ns": [
+          135500,
+          100100,
+          98800
+        ],
+        "name": "knowledge_publication_10_records",
+        "summary": {
+          "elapsed_ns_max": 135500,
+          "elapsed_ns_median": 100100,
+          "elapsed_ns_min": 98800,
+          "elapsed_ns_p95": 135500
+        }
+      },
+      "record_count": 10
+    },
+    {
+      "case": {
+        "elapsed_samples_ns": [
+          805700,
+          787800,
+          767300
+        ],
+        "name": "knowledge_publication_100_records",
+        "summary": {
+          "elapsed_ns_max": 805700,
+          "elapsed_ns_median": 787800,
+          "elapsed_ns_min": 767300,
+          "elapsed_ns_p95": 805700
+        }
+      },
+      "record_count": 100
+    },
+    {
+      "case": {
+        "elapsed_samples_ns": [
+          4408200,
+          4150500,
+          4239500
+        ],
+        "name": "knowledge_publication_1000_records",
+        "summary": {
+          "elapsed_ns_max": 4408200,
+          "elapsed_ns_median": 4239500,
+          "elapsed_ns_min": 4150500,
+          "elapsed_ns_p95": 4408200
+        }
+      },
+      "record_count": 1000
+    }
+  ],
+  "recorded_on": "2026-08-21",
+  "scales": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            36857400
+          ],
+          "name": "knowledge_history_growth",
+          "summary": {
+            "elapsed_ns_max": 36857400,
+            "elapsed_ns_median": 36857400,
+            "elapsed_ns_min": 36857400,
+            "elapsed_ns_p95": 36857400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            7299600,
+            7227800,
+            7600300
+          ],
+          "name": "knowledge_snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 7600300,
+            "elapsed_ns_median": 7299600,
+            "elapsed_ns_min": 7227800,
+            "elapsed_ns_p95": 7600300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            27958000,
+            25967100,
+            25647600
+          ],
+          "name": "knowledge_snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 27958000,
+            "elapsed_ns_median": 25967100,
+            "elapsed_ns_min": 25647600,
+            "elapsed_ns_p95": 27958000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4864300,
+            5111800,
+            5252900
+          ],
+          "name": "knowledge_current_heads_first_page",
+          "summary": {
+            "elapsed_ns_max": 5252900,
+            "elapsed_ns_median": 5111800,
+            "elapsed_ns_min": 4864300,
+            "elapsed_ns_p95": 5252900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            24632700,
+            25413900,
+            25578800
+          ],
+          "name": "knowledge_full_history_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 25578800,
+            "elapsed_ns_median": 25413900,
+            "elapsed_ns_min": 24632700,
+            "elapsed_ns_p95": 25578800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            26034200,
+            24671600,
+            24639300
+          ],
+          "name": "knowledge_delta_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 26034200,
+            "elapsed_ns_median": 24671600,
+            "elapsed_ns_min": 24639300,
+            "elapsed_ns_p95": 26034200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            339296500,
+            362502100,
+            325755800
+          ],
+          "name": "knowledge_snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 362502100,
+            "elapsed_ns_median": 339296500,
+            "elapsed_ns_min": 325755800,
+            "elapsed_ns_p95": 362502100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            24679500,
+            24924300,
+            25518300
+          ],
+          "name": "knowledge_exact_replay",
+          "summary": {
+            "elapsed_ns_max": 25518300,
+            "elapsed_ns_median": 24924300,
+            "elapsed_ns_min": 24679500,
+            "elapsed_ns_p95": 25518300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            38291500,
+            37014600,
+            36424900
+          ],
+          "name": "knowledge_checkpoint_journal_serialize",
+          "summary": {
+            "elapsed_ns_max": 38291500,
+            "elapsed_ns_median": 37014600,
+            "elapsed_ns_min": 36424900,
+            "elapsed_ns_p95": 38291500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            25665600,
+            25923900,
+            25686000
+          ],
+          "name": "knowledge_compact_initial_seal",
+          "summary": {
+            "elapsed_ns_max": 25923900,
+            "elapsed_ns_median": 25686000,
+            "elapsed_ns_min": 25665600,
+            "elapsed_ns_p95": 25923900
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "full_checkpoint_journal_bytes": 17133067
+      },
+      "derived": {
+        "exact_replay_records_per_second_median": 401214
+      },
+      "history": {
+        "boundaries": 1,
+        "checkpoint_hash": "bd9466a8b58ad80b61cab872d606e7206a936d9f47870af3ce08e79e0bf11033",
+        "command_attempts": 0,
+        "commands": 0,
+        "domain_records": 0,
+        "events": 64,
+        "hot_holder_records": 5000,
+        "ingress": 0,
+        "knowledge_holders": 60,
+        "knowledge_records": 10000,
+        "plugin_components": 0,
+        "random_draws": 0,
+        "snapshot_size_bytes": 14954774,
+        "world_entities": 62
+      },
+      "process_peak_rss_after_scale": {
+        "bytes": 404652032,
+        "error": null,
+        "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+        "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+      },
+      "scale": 10000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            15093019100
+          ],
+          "name": "knowledge_history_growth",
+          "summary": {
+            "elapsed_ns_max": 15093019100,
+            "elapsed_ns_median": 15093019100,
+            "elapsed_ns_min": 15093019100,
+            "elapsed_ns_p95": 15093019100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            99877200,
+            98479300,
+            100395700
+          ],
+          "name": "knowledge_snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 100395700,
+            "elapsed_ns_median": 99877200,
+            "elapsed_ns_min": 98479300,
+            "elapsed_ns_p95": 100395700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            300815300,
+            297799100,
+            309023900
+          ],
+          "name": "knowledge_snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 309023900,
+            "elapsed_ns_median": 300815300,
+            "elapsed_ns_min": 297799100,
+            "elapsed_ns_p95": 309023900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            92234200,
+            90382900,
+            105379900
+          ],
+          "name": "knowledge_current_heads_first_page",
+          "summary": {
+            "elapsed_ns_max": 105379900,
+            "elapsed_ns_median": 92234200,
+            "elapsed_ns_min": 90382900,
+            "elapsed_ns_p95": 105379900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4116331000,
+            4145597900,
+            4089592600
+          ],
+          "name": "knowledge_full_history_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 4145597900,
+            "elapsed_ns_median": 4116331000,
+            "elapsed_ns_min": 4089592600,
+            "elapsed_ns_p95": 4145597900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            422642600,
+            422154200,
+            435131100
+          ],
+          "name": "knowledge_delta_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 435131100,
+            "elapsed_ns_median": 422642600,
+            "elapsed_ns_min": 422154200,
+            "elapsed_ns_p95": 435131100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4526323000,
+            4358251800,
+            4358344300
+          ],
+          "name": "knowledge_snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 4526323000,
+            "elapsed_ns_median": 4358344300,
+            "elapsed_ns_min": 4358251800,
+            "elapsed_ns_p95": 4526323000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            18089613600,
+            18010558400,
+            17837110900
+          ],
+          "name": "knowledge_exact_replay",
+          "summary": {
+            "elapsed_ns_max": 18089613600,
+            "elapsed_ns_median": 18010558400,
+            "elapsed_ns_min": 17837110900,
+            "elapsed_ns_p95": 18089613600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            496771300,
+            506788200,
+            485673200
+          ],
+          "name": "knowledge_checkpoint_journal_serialize",
+          "summary": {
+            "elapsed_ns_max": 506788200,
+            "elapsed_ns_median": 496771300,
+            "elapsed_ns_min": 485673200,
+            "elapsed_ns_p95": 506788200
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            464789100,
+            467256900,
+            455336700
+          ],
+          "name": "knowledge_compact_initial_seal",
+          "summary": {
+            "elapsed_ns_max": 467256900,
+            "elapsed_ns_median": 464789100,
+            "elapsed_ns_min": 455336700,
+            "elapsed_ns_p95": 467256900
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "full_checkpoint_journal_bytes": 171588121
+      },
+      "derived": {
+        "exact_replay_records_per_second_median": 5552
+      },
+      "history": {
+        "boundaries": 10,
+        "checkpoint_hash": "abb2cb164ddf4bf163e7a978ac7d505c339b72a2e702dbb3cce3bfd7b3cf3691",
+        "command_attempts": 0,
+        "commands": 0,
+        "domain_records": 0,
+        "events": 640,
+        "hot_holder_records": 50000,
+        "ingress": 0,
+        "knowledge_holders": 60,
+        "knowledge_records": 100000,
+        "plugin_components": 0,
+        "random_draws": 0,
+        "snapshot_size_bytes": 149858400,
+        "world_entities": 62
+      },
+      "process_peak_rss_after_scale": {
+        "bytes": 2289074176,
+        "error": null,
+        "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+        "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+      },
+      "scale": 100000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            2244671731300
+          ],
+          "name": "knowledge_history_growth",
+          "summary": {
+            "elapsed_ns_max": 2244671731300,
+            "elapsed_ns_median": 2244671731300,
+            "elapsed_ns_min": 2244671731300,
+            "elapsed_ns_p95": 2244671731300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            2822448600,
+            3308983600,
+            3442258900
+          ],
+          "name": "knowledge_snapshot_create",
+          "summary": {
+            "elapsed_ns_max": 3442258900,
+            "elapsed_ns_median": 3308983600,
+            "elapsed_ns_min": 2822448600,
+            "elapsed_ns_p95": 3442258900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4860123700,
+            4924577500,
+            4771600500
+          ],
+          "name": "knowledge_snapshot_serialize_pretty",
+          "summary": {
+            "elapsed_ns_max": 4924577500,
+            "elapsed_ns_median": 4860123700,
+            "elapsed_ns_min": 4771600500,
+            "elapsed_ns_p95": 4924577500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1512755400,
+            1539412800,
+            1557311600
+          ],
+          "name": "knowledge_current_heads_first_page",
+          "summary": {
+            "elapsed_ns_max": 1557311600,
+            "elapsed_ns_median": 1539412800,
+            "elapsed_ns_min": 1512755400,
+            "elapsed_ns_p95": 1557311600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            797629321500,
+            801403149300,
+            808005021100
+          ],
+          "name": "knowledge_full_history_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 808005021100,
+            "elapsed_ns_median": 801403149300,
+            "elapsed_ns_min": 797629321500,
+            "elapsed_ns_p95": 808005021100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            7952060200,
+            8033226000,
+            7997279000
+          ],
+          "name": "knowledge_delta_hot_holder_paged",
+          "summary": {
+            "elapsed_ns_max": 8033226000,
+            "elapsed_ns_median": 7997279000,
+            "elapsed_ns_min": 7952060200,
+            "elapsed_ns_p95": 8033226000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            136889258100,
+            139077957500,
+            142290224100
+          ],
+          "name": "knowledge_snapshot_load_validate",
+          "summary": {
+            "elapsed_ns_max": 142290224100,
+            "elapsed_ns_median": 139077957500,
+            "elapsed_ns_min": 136889258100,
+            "elapsed_ns_p95": 142290224100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            2693744610100,
+            2694537908800,
+            2675602068100
+          ],
+          "name": "knowledge_exact_replay",
+          "summary": {
+            "elapsed_ns_max": 2694537908800,
+            "elapsed_ns_median": 2693744610100,
+            "elapsed_ns_min": 2675602068100,
+            "elapsed_ns_p95": 2694537908800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            12085079600,
+            12277785600,
+            12126246000
+          ],
+          "name": "knowledge_checkpoint_journal_serialize",
+          "summary": {
+            "elapsed_ns_max": 12277785600,
+            "elapsed_ns_median": 12126246000,
+            "elapsed_ns_min": 12085079600,
+            "elapsed_ns_p95": 12277785600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            23194745800,
+            22977772400,
+            23724874500
+          ],
+          "name": "knowledge_compact_initial_seal",
+          "summary": {
+            "elapsed_ns_max": 23724874500,
+            "elapsed_ns_median": 23194745800,
+            "elapsed_ns_min": 22977772400,
+            "elapsed_ns_p95": 23724874500
+          }
+        }
+      ],
+      "checkpoint_storage": {
+        "full_checkpoint_journal_bytes": 1723017102
+      },
+      "derived": {
+        "exact_replay_records_per_second_median": 371
+      },
+      "history": {
+        "boundaries": 100,
+        "checkpoint_hash": "a8e04ebdde3b3d296b03d2468682b8f76904f137a96aa1e6430aa5cfd6b18e49",
+        "command_attempts": 0,
+        "commands": 0,
+        "domain_records": 0,
+        "events": 6400,
+        "hot_holder_records": 500000,
+        "ingress": 0,
+        "knowledge_holders": 60,
+        "knowledge_records": 1000000,
+        "plugin_components": 0,
+        "random_draws": 0,
+        "snapshot_size_bytes": 1505773177,
+        "world_entities": 62
+      },
+      "process_peak_rss_after_scale": {
+        "bytes": 22294740992,
+        "error": null,
+        "provider": "GetProcessMemoryInfo.PeakWorkingSetSize",
+        "scope": "process high-water mark since process start; values after individual cases are cumulative, not per-case deltas"
+      },
+      "scale": 1000000
+    }
+  ],
+  "schema_version": 4,
+  "snapshot_format_version": 5,
+  "source": {
+    "commit": "2d337f4ff3b3f861c818339ceb22b6f46457fe75",
+    "engine_source_dirty": true,
+    "source_file_hashes": {
+      "Cargo.lock": "c385e831a11261119181e9b86e9e8430483e691b",
+      "Cargo.toml": "c09c4e3c3bd806bd0828ca184ec394084c6694f7",
+      "benchmarks/performance-harness/Cargo.lock": "3b813389b025acc7990150fedb8069c2c9cb95a8",
+      "benchmarks/performance-harness/Cargo.toml": "51c2f8b30ca6a85a07ce26d5dde26091f89b9af2",
+      "benchmarks/performance-harness/src/information_stress.rs": "08006f17f07ec025d11ceda2c682679dfe78e7cc",
+      "benchmarks/performance-harness/src/main.rs": "d69f8917ccce3511c7f52514c60d468ee382f2f7",
+      "benchmarks/performance-harness/src/peak_rss.rs": "22a8c1efb2f1019572609e8ceb49d44667435355",
+      "crates/canwu-api/Cargo.toml": "89856986ec802c1bcc93c36dfd762f0211fdabb3",
+      "crates/canwu-api/examples/continuous_game_loop.rs": "bb86e56cfbd68d68c6e6ad4a10327922b7c4c06b",
+      "crates/canwu-api/examples/decision_ticket.rs": "9f70cbf72847b677177702d6fb4f3a2e38920453",
+      "crates/canwu-api/examples/move_army.rs": "3fdc22f53e9b1fe13f0791eecea0a0149a81b5a6",
+      "crates/canwu-api/examples/phased_boundary.rs": "837dfae7dc332805929a76ec4f22a85ffc5b405c",
+      "crates/canwu-api/examples/plugin.rs": "9506dc78d6fb38a7817c06380bada1a123f2292b",
+      "crates/canwu-api/src/lib.rs": "537d43809a369d54d7a30c2cbc501db9119e7dcf",
+      "crates/canwu-api/tests/decision_framework.rs": "3ab7bef75a8696609d77065f73b228376a8a2b11",
+      "crates/canwu-api/tests/representative_conformance.rs": "9971267384ceec8b69b0f1ebb4aaedeba6d4f4f9",
+      "crates/canwu-api/tests/typed_domain_storage.rs": "e2f757064f413320565c2150ea517370b49001d8",
+      "crates/canwu-core/Cargo.toml": "8f515761ec35e0aa8fe437bff9a1965a367e2fd5",
+      "crates/canwu-core/src/lib.rs": "c803bd36bedf7b2ea4d9cd6f19d5d8e22c9a83b2",
+      "crates/canwu-debug/Cargo.toml": "faed84b3cc72f665037b1ec5b01214e01a0dc99b",
+      "crates/canwu-debug/src/main.rs": "197e55d579564edd84b01f330eebb50fdca959d9",
+      "crates/canwu-decision/Cargo.toml": "df61589ea9d37dc93669a8e18fa482c20e1e7066",
+      "crates/canwu-decision/src/engine.rs": "26bfb6674c03c78a403dfb949ebff9b422602d17",
+      "crates/canwu-decision/src/lib.rs": "4d10d2072af3dca371bedbe071051b0c0ef86076",
+      "crates/canwu-decision/src/model.rs": "dfe3336a82f0cc5bb6ddd61dc60ca581ec0fc011",
+      "crates/canwu-decision/src/policy.rs": "338b1bad5b5ef131ec1f977ec3979c2bae00916c",
+      "crates/canwu-decision/tests/policy_contracts.rs": "736a3dc4854d97008efeeb03d412fb870e715831",
+      "crates/canwu-event/Cargo.toml": "7acd5d93e3d682e4ee1acf13801b416fa22df16f",
+      "crates/canwu-event/src/lib.rs": "c3e0c4312e91ab2abbdf3a2f320c8e71b2c3f8c6",
+      "crates/canwu-information/Cargo.toml": "9a7f0a965a310f0ca133b6fbc8bb3431083cea89",
+      "crates/canwu-information/examples/confidential_copy_release.rs": "b7b8134164bca484609b4b58e5693fc69aa641d3",
+      "crates/canwu-information/examples/encoded_interception.rs": "1b2a1efa1d3718aa759eb4e65894f021b0fbfbc1",
+      "crates/canwu-information/examples/support/mod.rs": "d97b70f4faf2ff8d555d83a9a7c91dd1b823c9ae",
+      "crates/canwu-information/src/lib.rs": "c7c54daca5701a533addaaa0fbe71b7fc5433a7e",
+      "crates/canwu-information/src/lifecycle.rs": "f394ece9df4d932b290feb6f0c49d6f09d20dccc",
+      "crates/canwu-information/src/model.rs": "f8c657dd0726ec4845530592f8c9d2d5f0de2c90",
+      "crates/canwu-information/src/operation.rs": "bc8a4e07cb739047503b28b4f2ce59318d4e1e9c",
+      "crates/canwu-information/src/plugin.rs": "844cbdcf6a435bbd98cdddda2ce427a2a3346854",
+      "crates/canwu-information/src/query.rs": "b141c1320cb85706275ef2651a9cdf2f2c1d5f03",
+      "crates/canwu-information/src/schema.rs": "52538761a66cfcba005d4254c410504565eb89bf",
+      "crates/canwu-information/tests/case_conformance.rs": "9fc5cecd5a5cb5dfcf5ff52cf549cd35300f7067",
+      "crates/canwu-information/tests/information_lifecycle.rs": "c55f580c2035c32b18ec7b1477e1c1540e3d1fac",
+      "crates/canwu-information/tests/runtime_adapter.rs": "5abbd80c99b3c9c2a6849e93c6c98a102809e614",
+      "crates/canwu-information/tests/support/mod.rs": "4fb9e234020eb4cd063749d592a3ee61f8a01918",
+      "crates/canwu-knowledge/Cargo.toml": "39c2b0f808c4b95713ffb8ecf3b4efda03a25d91",
+      "crates/canwu-knowledge/src/lib.rs": "4a90b39bbf2257b43296d82f15682480a73fdfd5",
+      "crates/canwu-sim/Cargo.toml": "03078077bca2fc768fe0f11a29bc1a78f5ba4dc6",
+      "crates/canwu-sim/src/boundary.rs": "02849d9f75d5218fd5c182fc8f97b604feba2baa",
+      "crates/canwu-sim/src/decision.rs": "15b69d64e085cc955890f31f4394bb153c33764b",
+      "crates/canwu-sim/src/hashing.rs": "6923631b039f2372a2a65a7563e82f7ddf834bc4",
+      "crates/canwu-sim/src/ingress.rs": "3ea61e01d1bebeb7afc64d1143b3a687540ef63d",
+      "crates/canwu-sim/src/knowledge.rs": "b2f00d978e09cc6824dd1dd842e30e7e1c2e6d0f",
+      "crates/canwu-sim/src/legacy_v4.rs": "18673820fa8d4e533a2ca858ba9d9e2233717290",
+      "crates/canwu-sim/src/lib.rs": "3d194dbdd71366cffaf1ada0cb38395a49c01a55",
+      "crates/canwu-sim/src/manifest.rs": "6896d750d9ef33df11e01e842eb445f818ec5124",
+      "crates/canwu-sim/src/migration.rs": "40f5aeb101bee5f2dda1b435387753312abc77f2",
+      "crates/canwu-sim/src/persistence.rs": "39b26f0ed19ef3844a5fb766272cc47d7516be99",
+      "crates/canwu-sim/src/plugins.rs": "c54c1499a095d88a44312c9ed7e9b830f6acd2ba",
+      "crates/canwu-sim/src/policy.rs": "a2221c4ddb5ed3b626325351b70f65a2b8e97058",
+      "crates/canwu-sim/src/random.rs": "35b00e1a1e4d0dd3df423758a3b9aabc044e5aa6",
+      "crates/canwu-sim/src/records.rs": "7303f112a1a866c242f73a6c6fe810a83d44eb30",
+      "crates/canwu-sim/src/replay.rs": "7527ae798b6bd752f3f94042d209c33a54b51a78",
+      "crates/canwu-sim/src/scheduling.rs": "b7f17b2b6d303394086aad17b5e1d50c9c5216e0",
+      "crates/canwu-sim/src/settlement.rs": "431a750d3e2c3e9a6b787b493157ce7ed1250756",
+      "crates/canwu-sim/src/state.rs": "dea70722b3421aa5de42a9c4d650fdf1fda12c80",
+      "crates/canwu-sim/src/transactions.rs": "2237de7a98f45ebdb201025db987bae2ddbf0013",
+      "crates/canwu-sim/src/validation.rs": "bbed0edd17ed01e6c1b60fed7a7e45c1ef0a58c4",
+      "crates/canwu-sim/tests/api-delta/Cargo.toml": "9d93bb07133230d580c6763752943a97faa22acb",
+      "crates/canwu-sim/tests/api-delta/src/main.rs": "07ca608ac55626e5a679f6534f4a8fc1d91f98e7",
+      "crates/canwu-sim/tests/api_delta_compile.rs": "9837d12d94fd63bd95ead19cebc7f9472ef944f9",
+      "crates/canwu-sim/tests/format4_migration.rs": "6292c2589aa5fa5730c1f7a00ab84cd3f205fc22",
+      "crates/canwu-sim/tests/information_flow_kernel.rs": "732c32030ba0a0722193f507c7cdf3a5135ea00e",
+      "crates/canwu-sim/tests/milestone_2_3.rs": "d1953ee76868a2cc93ddb6048d7a979d900307a8",
+      "crates/canwu-society/Cargo.toml": "0ca793897528ed3b97c9977822d48ab8d27ba2c4",
+      "crates/canwu-society/examples/local_community_diffusion.rs": "e5034e8623fb2874cf49e8a35019b193977b3c45",
+      "crates/canwu-society/src/decision.rs": "27c869df8e73f71a49ef225e9942f37af6269ab0",
+      "crates/canwu-society/src/lib.rs": "5a7262d65d90cf593971c401e131c77d4a87a3d1",
+      "crates/canwu-society/src/model.rs": "ef6c38599376857598ac28f9451e5f99d04e710c",
+      "crates/canwu-society/src/plugin.rs": "04201c3da60c150cf1822a1b53dd9a6e70e2b292",
+      "crates/canwu-society/src/projection.rs": "0e3a90d273844baf44b7aed1f5f9f39d866ba38f",
+      "crates/canwu-society/src/solver.rs": "9079f00b28ba62539c62ab4d8be2207c9f4614c8",
+      "crates/canwu-society/tests/framework.rs": "b19ec2df5d946338f56cf889e887fb24546d5648",
+      "crates/canwu-time/Cargo.toml": "6874138572744692832735bd6cbf70b5fe4ec3f4",
+      "crates/canwu-time/src/lib.rs": "f042bc7a79bc1583239756a9b2aac805fe4708c6",
+      "crates/canwu-world/Cargo.toml": "ade9c07f1951886ad904984140fcc181ea4dd6bc",
+      "crates/canwu-world/src/lib.rs": "9e261a63c5e043ad151bbba8b80fa4eb6abc9ded"
+    },
+    "working_tree_dirty": true
+  },
+  "suite": "information-flow"
+}
