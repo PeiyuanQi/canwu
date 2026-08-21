@@ -1,0 +1,82 @@
+---
+title: Integrate and drive the simulation
+description: Add canwu-api to a Rust host, create a simulation, and advance the world through supported ingress paths.
+sidebar:
+  order: 2
+  label: Integration and driving
+---
+
+import { Steps } from "@astrojs/starlight/components";
+
+Canwu is a headless simulation core. The host owns windows, maps, networking, input, AI scheduling,
+and the frame loop. Canwu owns authoritative state, validation, deterministic time, events, and evidence.
+
+## Add the dependency
+
+Canwu 0.4.0 requires Rust 1.88 or newer. Application code should depend only on the public facade:
+
+```toml
+[dependencies]
+canwu-api = "0.4.0"
+```
+
+If the application persists Canwu snapshots, pin the exact version and upgrade it only with an explicit save migration:
+
+```toml
+canwu-api = "=0.4.0"
+```
+
+Do not depend directly on `canwu-sim`, `canwu-world`, or another implementation crate. Cargo may resolve them,
+but they are not independent compatibility surfaces for application code.
+
+## Minimal host flow
+
+```rust
+use canwu_api::{Canwu, SemanticAction, SimDuration};
+
+let mut canwu = Canwu::demo(35)?;
+let ids = Canwu::demo_ids();
+
+canwu.act(
+    ids.commander,
+    SemanticAction::MoveArmy {
+        army: ids.army,
+        destination: ids.eastern_territory,
+    },
+)?;
+
+let events = canwu.advance(SimDuration::days(1))?;
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+Production applications normally construct their own scenario with `Canwu::new(seed, scenario)`.
+`Canwu::demo()` exists for examples and prototypes.
+
+## Choose an ingress path
+
+| Entry point | Use it when |
+| --- | --- |
+| `act(actor, SemanticAction)` | A UI, agent, or tool works with capability-oriented semantic actions |
+| `submit(CommandEnvelope)` | The host already owns a typed command and issuer identity |
+| `process_command(CommandRequest)` | An external service needs request identity, retry behavior, and recorded outcomes |
+| `enqueue_command(...)` | A command must enter at a future simulation time with explicit priority |
+
+Every path preserves the same rule: the host never receives a mutable world reference. Canwu validates authority,
+preconditions, and the request before recording an accepted or rejected result.
+
+## Drive time
+
+<Steps>
+1. The host reads wall time, turn input, or research workflow progress.
+2. The host converts that input into `SimDuration` according to its own speed policy.
+3. Event-driven hosts call `advance()`; hosts using daily, turn, or other phased systems call `advance_canonical()` or explicit `settle_boundary()`.
+4. The host refreshes presentation state from returned events, boundary receipts, or new read-only snapshots.
+</Steps>
+
+Do not feed floating-point frame deltas directly into authoritative state. Continuously rendered clients keep host-side
+remainders and presentation interpolation; see the [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/).
+
+## Next steps
+
+- To expose results to players or agents, read [Read and present state safely](/en/developer/reading-state/).
+- To add domain rules, read [Extend with plugins](/en/developer/extensions/).

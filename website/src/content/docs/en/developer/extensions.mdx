@@ -1,0 +1,56 @@
+---
+title: Extend with plugins
+description: Add commands, domain state, and phased settlement systems without bypassing Canwu's public safety boundaries.
+sidebar:
+  order: 5
+  label: Plugin extensions
+---
+
+Canwu keeps the kernel domain-neutral. Applications add military, economic, political, or social rules through
+`SimulationPlugin`, public schemas, command handlers, and boundary systems rather than mutating the live world.
+
+## Choose an extension path
+
+| Need | Use |
+| --- | --- |
+| A user action or service request produces a local change | Plugin command through `register_command()` |
+| Several systems coordinate at the same day, turn, or time point | Boundary system through `register_boundary_system()` |
+| The plugin owns typed domain data | Domain schemas and record APIs |
+| Results require stable randomness | Declared plugin random streams so draws enter evidence |
+
+## Command plugins
+
+A command plugin should:
+
+1. Provide a stable name, version, and semantic hash.
+2. Declare its payload schema and read/write `StateKey` values with `PluginActionDescriptor`.
+3. Query through read-only `SimulationView` and check authority from `CommandContext`.
+4. Return `SystemDirective` values describing intended changes instead of mutating the world.
+5. Enter through `Command::Plugin` or `SemanticAction::Plugin` from the public API.
+
+See the runnable [command plugin tutorial](/en/tutorials/command-plugin/).
+
+## Boundary systems
+
+Use a boundary system when supply, demand, allocation, and state changes must coordinate in one settlement. Its contract
+declares:
+
+- execution phase and cadence;
+- reads, writes, and same-boundary visibility;
+- resource offers, reservation requests, and allocation dependencies;
+- domain events it may emit;
+- required random streams and schemas.
+
+Canwu runs these systems in fixed phase order, validates declared access, performs deterministic allocation, and commits
+the boundary atomically. See [phased boundary and allocation](/en/tutorials/phased-boundary/) for a complete example.
+
+## Lifecycle rules
+
+- Register plugins before commands, scenario validation, or loads that depend on them.
+- Provide the same plugin set when restoring a save or replaying a journal.
+- Do not retain live runtime references or bypass ingress to mutate state.
+- Treat a semantic-hash change as executable semantic change that requires migration or a new version.
+- Consume every extension contract through `canwu-api` from application code.
+
+Before implementation, review the [five architectural boundaries](/en/architecture/#five-architectural-boundaries), then
+start from the public example closest to your use case.

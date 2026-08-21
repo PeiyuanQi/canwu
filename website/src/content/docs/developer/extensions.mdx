@@ -1,0 +1,54 @@
+---
+title: 通过插件扩展
+description: 使用公开插件合同添加命令、领域状态和阶段结算系统，而不绕过 Canwu 的安全边界。
+sidebar:
+  order: 5
+  label: 插件扩展
+---
+
+Canwu 的内核保持领域中立。应用通过 `SimulationPlugin`、公开 schema、命令处理器和阶段系统
+添加自己的军事、经济、政治或社会规则，而不是修改实时世界对象。
+
+## 选择扩展方式
+
+| 需求 | 使用 |
+| --- | --- |
+| 一个用户动作或服务请求产生局部变化 | 插件命令 `register_command()` |
+| 多个系统在同一日结、回合或时间点协调 | 阶段系统 `register_boundary_system()` |
+| 插件拥有类型化领域数据 | 领域 schema 与记录 API |
+| 需要稳定随机结果 | 声明并使用插件随机流，让抽样进入证据记录 |
+
+## 命令插件
+
+命令插件应：
+
+1. 提供稳定的名称、版本和 semantic hash；
+2. 用 `PluginActionDescriptor` 声明载荷 schema 与读写 `StateKey`；
+3. 通过只读 `SimulationView` 查询状态，并根据 `CommandContext` 检查权限；
+4. 返回 `SystemDirective` 描述预期变化，而不是直接修改世界；
+5. 通过 `Command::Plugin` 或 `SemanticAction::Plugin` 从公开入口调用。
+
+可运行实现见[命令插件教程](/tutorials/command-plugin/)。
+
+## 阶段系统
+
+当供给、需求、分配和状态变化必须在同一边界协调时，使用阶段系统。合同应声明：
+
+- 运行 phase 与 cadence；
+- 读取、写入和同边界可见性；
+- 资源供给、预留请求和分配依赖；
+- 可能发出的领域事件；
+- 需要的随机流和 schema。
+
+Canwu 按固定阶段运行这些系统，验证声明访问，完成确定性分配，并原子提交边界结果。
+完整例子见[阶段边界与资源分配教程](/tutorials/phased-boundary/)。
+
+## 生命周期规则
+
+- 在依赖插件的命令、场景验证或加载发生前注册插件。
+- 从存档恢复或重放时提供相同插件集合。
+- 不要让插件持有实时运行时引用或绕过 ingress 修改状态。
+- 把 semantic hash 的变化视为可执行语义变化，并配套迁移或新版本。
+- 应用层只通过 `canwu-api` 使用这些合同。
+
+在实现前，先阅读[架构中的五个边界](/architecture/#五条架构边界)，再从最接近需求的公开示例开始。

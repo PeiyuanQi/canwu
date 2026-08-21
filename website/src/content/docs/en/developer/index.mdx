@@ -1,0 +1,68 @@
+---
+title: Developer guide
+description: Developer documentation for embedding Canwu in games, research tools, agents, and other host applications.
+template: doc
+sidebar:
+  order: 1
+  label: Developer guide
+hero:
+  tagline: Integrate, drive, read, persist, and extend Canwu through the supported public API.
+  actions:
+    - text: Integrate Canwu
+      link: /en/developer/integration/
+      icon: right-arrow
+    - text: Browse tutorials
+      link: /en/tutorials/
+      variant: secondary
+      icon: open-book
+    - text: 中文指南
+      link: /developer/
+      variant: minimal
+      icon: translate
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+This section is for **developers building products with Canwu**. It does not publish project roadmaps,
+maintainer procedures, branding rules, or internal design proposals. It explains how a host application
+should use `canwu-api`.
+
+## What is covered
+
+<CardGrid>
+  <LinkCard
+    title="Integrate and drive the simulation"
+    href="/en/developer/integration/"
+    description="Add the dependency, create a simulation, choose an ingress path, and convert host time into Canwu time."
+  />
+  <LinkCard
+    title="Read and present state safely"
+    href="/en/developer/reading-state/"
+    description="Separate authoritative snapshots from actor-relative views so players, agents, and remote clients do not receive ground truth."
+  />
+  <LinkCard
+    title="Save, replay, and fork"
+    href="/en/developer/persistence/"
+    description="Choose snapshots or checkpoint journals, restore plugin environments, and build exact replay or counterfactual branches."
+  />
+  <LinkCard
+    title="Extend with plugins"
+    href="/en/developer/extensions/"
+    description="Add domain rules with command plugins and boundary systems while preserving authority, determinism, and auditability."
+  />
+</CardGrid>
+
+## How this fits with the rest of the site
+
+- Start with the [tutorials](/en/tutorials/) when you want runnable code.
+- Stay in the developer guide when you need to decide what the host should call and when.
+- Read [architecture](/en/architecture/) when you need to understand why settlement, events, and randomness work this way.
+- Use the `canwu-api` source and public examples for complete type and function signatures.
+
+## Core developer constraints
+
+1. Application code depends on `canwu-api`, not internal crates as compatibility surfaces.
+2. External mutations enter through commands, semantic actions, or canonical ingress rather than direct world edits.
+3. Players and agents read actor-relative views by default; authoritative snapshots stay inside trusted host logic and debugging tools.
+4. Wall time, rendering, and input belong to the host; Canwu receives representable simulation durations.
+5. Persisted applications pin the engine version and restore the same plugin semantics during load and replay.

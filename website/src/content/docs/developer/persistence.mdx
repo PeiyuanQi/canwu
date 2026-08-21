@@ -1,0 +1,59 @@
+---
+title: 存档、重放与分支
+description: 保存和恢复 Canwu 状态，验证插件环境，并构建精确重放与反事实分支。
+sidebar:
+  order: 4
+  label: 存档与重放
+---
+
+存档不仅是序列化世界对象。Canwu 的可恢复状态还包含命令、事件、边界、随机证据、
+插件语义和校验承诺，因此应始终通过公开持久化 API 读写。
+
+## 简单存档
+
+```rust
+use canwu_api::Canwu;
+
+let canwu = Canwu::demo(35)?;
+let json = canwu.snapshot_json()?;
+let restored = Canwu::from_snapshot_json(&json)?;
+
+assert_eq!(restored.snapshot(), canwu.snapshot());
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+适合单文件存档、测试夹具和短生命周期工具。不要自行挑选字段后重建运行时；加载器会验证结构、
+哈希、历史和兼容性。
+
+## 带插件的存档
+
+如果状态包含插件定义的组件或领域记录，使用 `from_snapshot_json_with_plugins()`，并传入与保存时
+相同的插件集合。插件名称、版本和 semantic hash 属于存档环境的一部分；语义改变后不能把旧存档
+当作同一运行环境直接加载。
+
+## 何时使用 checkpoint journal
+
+`checkpoint_journal_json()` 把验证过的 checkpoint 与后续 journal 组合起来，适合需要保留可审计
+证据或避免反复写出完整运行历史的宿主。使用对应的 `from_checkpoint_journal_json()` 或
+`from_checkpoint_journal_json_with_plugins()` 恢复。
+
+## 精确重放
+
+```rust
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(scenario, &plugins, &journal)?;
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+重放必须使用匹配的场景、引擎版本和插件语义环境。若产品需要长期保存数据，建议：
+
+1. 在 `Cargo.toml` 中固定精确 `canwu-api` 版本；
+2. 随存档记录应用版本、场景标识和插件清单；
+3. 升级引擎时显式执行迁移并保留回归夹具；
+4. 用重放后的快照或权威哈希验证迁移结果。
+
+## 反事实与测试
+
+`fork()` 创建相同起点的独立仿真，`diff()` 比较两个分支的世界差异。它们适合 AI 规划、
+研究实验、回归测试和“如果当时选择不同命令”的分析。每个分支仍应通过正常命令与时间入口推进。

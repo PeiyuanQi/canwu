@@ -1,0 +1,58 @@
+---
+title: 安全读取与呈现状态
+description: 为受信任宿主、玩家、智能体和渲染器选择正确的 Canwu 读取接口。
+sidebar:
+  order: 3
+  label: 读取与呈现
+---
+
+Canwu 同时保存权威世界与角色知识。开发者最重要的读取决定不是“要哪个结构体”，
+而是“这个调用者有权知道什么”。
+
+## 按调用者选择接口
+
+| 调用者 | 推荐接口 | 说明 |
+| --- | --- | --- |
+| 受信任的服务器、调试器、测试 | `world()`、`events()`、`boundaries()`、`query()` | 可读取权威状态和完整证据 |
+| 玩家或角色代理 | `observe()`、`query_as()`、`inspect()` | 从指定角色的知识构建结果，不泄露 ground truth |
+| 行动选择器 | `available_actions()`、`act()` | 先列出合法能力，再通过同一权限边界执行 |
+| 解释界面 | `explain()` | 从已记录事件、失败或状态证据生成因果说明 |
+
+## 权威快照不是玩家视图
+
+```rust
+use canwu_api::{Canwu, ObserveRequest};
+
+let canwu = Canwu::demo(35)?;
+let ids = Canwu::demo_ids();
+
+let server_world = canwu.world();
+let commander_view = canwu.observe(ids.commander, &ObserveRequest::default())?;
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+`world()` 返回脱离运行时的只读快照，适合服务器规则、测试和受信任调试工具。
+它仍然包含真实世界信息，因此不要原样发送给玩家、角色智能体或不受信任的远程客户端。
+
+`observe()`、`query_as()` 和 `inspect()` 会根据角色已经知道的记录生成结果。
+同一军队对指挥官可以是最新位置，对远方观察者则可能仍是旧报告。
+
+## 表现层只复制，不回写
+
+渲染器可以从 `WorldSnapshot` 复制位置、路线和状态，维护自己的动画进度与插值数据。
+这些表现数据不能写回 Canwu，也不能改变命令结果。下一次权威时间推进后，再用新快照校正表现层。
+
+连续游戏应明确区分：
+
+- **墙钟时间**：帧间隔和暂停，由宿主拥有；
+- **模拟时间**：`SimTime` 与 `SimDuration`，由 Canwu 结算；
+- **表现时间**：动画和插值，可使用浮点数，但只存在于客户端。
+
+## 实用检查清单
+
+- API 响应是否需要角色身份？如果需要，优先使用 actor-relative 接口。
+- 缓存的是脱离运行时的快照，还是意外保留了内部状态引用？
+- 调试开关是否可能把 `world()` 结果暴露到生产客户端？
+- 解释结果是否来自 `explain()` 和证据，而不是 UI 猜测？
+
+想理解角色知识如何与事件传播连接，可继续阅读[事件系统](/architecture/events/)。

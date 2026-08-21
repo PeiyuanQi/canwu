@@ -29,7 +29,7 @@ const ui = {
     homeLabel: "Canwu home",
     navLabel: "Primary navigation",
     docs: "Docs",
-    projectDocs: "Project docs",
+    developerGuide: "Developer guide",
     tutorials: "Tutorials",
     architecture: "Architecture",
     integrations: "Integrations",
@@ -49,7 +49,7 @@ const ui = {
     homeLabel: "参伍引擎首页",
     navLabel: "主导航",
     docs: "文档",
-    projectDocs: "文档（英文）",
+    developerGuide: "开发者指南",
     tutorials: "使用教程",
     architecture: "架构",
     integrations: "集成",
@@ -75,7 +75,7 @@ const variants = isAuto
 
 const documentationItems = (variant: typeof variants[number]) => [
   { href: `${variant.prefix}/tutorials/`, label: variant.ui.tutorials },
-  { href: "/en/docs/", label: variant.ui.projectDocs },
+  { href: `${variant.prefix}/developer/`, label: variant.ui.developerGuide },
   { href: `${variant.prefix}/architecture/`, label: variant.ui.architecture },
 ];
 
@@ -257,7 +257,7 @@ const isCurrent = (href: string) =>
           <p>{variant.ui.footerSub}</p>
         </div>
         <div class="footer-links">
-          <a href="/en/docs/">{variant.ui.projectDocs} →</a>
+          <a href={`${variant.prefix}/developer/`}>{variant.ui.developerGuide} →</a>
           <a href="https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples">{variant.ui.examples} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md">{variant.ui.contribute} ↗</a>
           <a href="https://github.com/PeiyuanQi/canwu/issues">{variant.ui.issues} ↗</a>

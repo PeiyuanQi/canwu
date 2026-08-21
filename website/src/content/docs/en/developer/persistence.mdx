@@ -1,0 +1,60 @@
+---
+title: Save, replay, and fork
+description: Save and restore Canwu state, validate plugin environments, and build exact replay or counterfactual branches.
+sidebar:
+  order: 4
+  label: Persistence and replay
+---
+
+A save is more than a serialized world object. Recoverable Canwu state includes commands, events, boundaries, random
+evidence, plugin semantics, and validation commitments, so hosts should always use the public persistence APIs.
+
+## Simple saves
+
+```rust
+use canwu_api::Canwu;
+
+let canwu = Canwu::demo(35)?;
+let json = canwu.snapshot_json()?;
+let restored = Canwu::from_snapshot_json(&json)?;
+
+assert_eq!(restored.snapshot(), canwu.snapshot());
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+This fits single-file saves, test fixtures, and short-lived tools. Do not select a few fields and reconstruct the runtime
+yourself; the loader validates structure, hashes, history, and compatibility.
+
+## Saves with plugins
+
+If the state contains plugin-defined components or domain records, use `from_snapshot_json_with_plugins()` and pass the
+same plugin set used when the save was created. Plugin names, versions, and semantic hashes are part of the save
+environment. Changed executable semantics are not the same runtime environment.
+
+## When to use a checkpoint journal
+
+`checkpoint_journal_json()` combines a validated checkpoint with subsequent journal evidence. It fits hosts that retain
+auditable history or want to avoid repeatedly writing the complete run history. Restore it with the matching
+`from_checkpoint_journal_json()` or `from_checkpoint_journal_json_with_plugins()` function.
+
+## Exact replay
+
+```rust
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(scenario, &plugins, &journal)?;
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+Replay requires a matching scenario, engine version, and plugin semantic environment. For long-lived persisted products:
+
+1. Pin the exact `canwu-api` version in `Cargo.toml`.
+2. Store the application version, scenario identifier, and plugin inventory beside each save.
+3. Run an explicit migration when the engine changes and retain regression fixtures.
+4. Verify migrated results with replayed snapshots or authoritative hashes.
+
+## Counterfactuals and tests
+
+`fork()` creates an independent simulation from the same point, and `diff()` compares the world differences between two
+branches. Use them for AI planning, research experiments, regression tests, and “what if a different command had been
+chosen?” analysis. Each branch still advances through normal command and time entry points.

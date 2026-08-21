@@ -7,10 +7,13 @@ inside the same build rather than a separate documentation application.
 Chinese is the default language at `/`, `/showcase/`, and `/credits/`. English
 uses matching routes under `/en/`, including `/en/showcase/` and
 `/en/credits/`. Each page emits canonical and `hreflang` alternate metadata.
-Tutorial indexes are available at `/tutorials/` and `/en/tutorials/`; their
-Markdown and MDX sources live in `src/content/docs/`. The repository's
-canonical English Markdown under `../docs/` is rendered directly at
-`/en/docs/` and remains the single source of truth for those project documents.
+Tutorial indexes are available at `/tutorials/` and `/en/tutorials/`.
+Developer guides live at `/developer/` and `/en/developer/`, and architecture
+overviews live at `/architecture/` and `/en/architecture/`. Their Markdown and
+MDX sources all live in `src/content/docs/`. Repository-level design,
+maintainer, community, release, and legal documents remain under `../docs/`
+and are deliberately not published as website documentation.
+
 Scenario-driven tutorials live under `tutorials/cases/` in each locale. The
 Starlight sidebar keeps them in one collapsed, auto-generated Examples group so
 new examples do not expand the top-level tutorial navigation.

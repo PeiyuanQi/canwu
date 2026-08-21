@@ -1,0 +1,59 @@
+---
+title: Read and present state safely
+description: Choose the correct Canwu read interface for trusted hosts, players, agents, and renderers.
+sidebar:
+  order: 3
+  label: Reading and presentation
+---
+
+Canwu stores both the authoritative world and actor knowledge. The most important read decision is not which struct is
+convenient; it is what the caller is allowed to know.
+
+## Choose by caller
+
+| Caller | Preferred interface | Purpose |
+| --- | --- | --- |
+| Trusted server, debugger, or test | `world()`, `events()`, `boundaries()`, `query()` | Read authoritative state and complete evidence |
+| Player or in-world agent | `observe()`, `query_as()`, `inspect()` | Build results from that actor's knowledge without leaking ground truth |
+| Action chooser | `available_actions()`, `act()` | Discover legal capabilities, then execute through the same authority boundary |
+| Explanation UI | `explain()` | Build causal explanations from recorded events, failures, or state evidence |
+
+## An authoritative snapshot is not a player view
+
+```rust
+use canwu_api::{Canwu, ObserveRequest};
+
+let canwu = Canwu::demo(35)?;
+let ids = Canwu::demo_ids();
+
+let server_world = canwu.world();
+let commander_view = canwu.observe(ids.commander, &ObserveRequest::default())?;
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+`world()` returns a detached, read-only snapshot for server rules, tests, and trusted debugging tools. It still contains
+ground truth, so do not send it unchanged to players, actor agents, or untrusted remote clients.
+
+`observe()`, `query_as()`, and `inspect()` build results from what the selected actor knows. The same army may have a
+current location for its commander and a stale reported location for a distant observer.
+
+## Presentation copies state; it does not write back
+
+A renderer may copy locations, routes, and statuses from `WorldSnapshot`, then keep its own animation progress and
+interpolation state. Presentation values never feed back into Canwu or change command outcomes. Refresh or correct them
+from a new snapshot after authoritative time advances.
+
+Continuous clients keep three clocks separate:
+
+- **Wall time:** frame intervals and pause state, owned by the host.
+- **Simulation time:** `SimTime` and `SimDuration`, settled by Canwu.
+- **Presentation time:** animation and interpolation, allowed to use floating point but confined to the client.
+
+## Practical review checklist
+
+- Does this response require an actor identity? Prefer an actor-relative API when it does.
+- Is the cache holding a detached snapshot, or an unintended internal state reference?
+- Can a debug switch expose `world()` output to production clients?
+- Does the explanation come from `explain()` and evidence instead of UI inference?
+
+Continue with the [event system](/en/architecture/events/) to see how knowledge changes through communication and events.
