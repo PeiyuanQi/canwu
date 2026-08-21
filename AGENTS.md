@@ -37,7 +37,10 @@
 6. For public API, persistence, replay, migration, authority, determinism, or
    performance changes, obtain an independent review before committing. Resolve
    every blocking finding and re-run the affected checks.
-7. Keep implementation and verification uncommitted until the requested change
+7. Before deploying `website`, have a separate sub-agent review all website copy
+   in every supported language for fair, good, human-friendly readability.
+   Resolve every blocking finding and re-run the site checks before deployment.
+8. Keep implementation and verification uncommitted until the requested change
    set is complete. When explicitly asked to commit or push, follow the commit
    economy rules below, stage explicit paths only, use a conventional commit,
    push without force, and report remaining uncommitted work separately.
