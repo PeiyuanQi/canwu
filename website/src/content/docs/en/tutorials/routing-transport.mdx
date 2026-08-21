@@ -1,0 +1,95 @@
+---
+title: Route planning and delivery execution
+description: Model Wuxi-to-Beijing delivery, nearby recipients, rail, air, telegraph, and disaster recovery with deterministic routing and transport records.
+template: doc
+sidebar:
+  order: 5
+  label: Routing and transport
+---
+
+> **Experimental extension.** The 0.5 routing and transport types have public APIs and focused tests, but hosts must provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
+
+## Separate planning from execution
+
+“How should a delivery travel from Wuxi to Beijing?” contains two different questions:
+
+1. **Planning**: which route arrives earliest within the network, timetable, risk, and capacity constraints visible to this observer?
+2. **Execution**: has the message loaded, departed, arrived at a relay, changed custody, rerouted after a disaster, and completed the recipient's delivery attempt?
+
+`canwu-routing` answers the first question. `canwu-transport` records the second. Neither bypasses `canwu-sim` canonical ingress or writes directly into the `canwu-information` recipient ledger.
+
+## Wuxi to Beijing
+
+Planning is based on an observer-relative knowledge cut rather than an omniscient world read:
+
+```rust
+let request = RoutingRequest {
+    origin: RoutingNodeRef::new("settlement/wuxi"),
+    destination: RoutingNodeRef::new("settlement/beijing"),
+    departure_at: SimTime::from_hours(8),
+    policy: RoutingPolicy {
+        allowed_modes: [TransferMode::Rail, TransferMode::Horse]
+            .into_iter()
+            .collect(),
+        ..RoutingPolicy::default()
+    },
+};
+
+let plan = plan_route(&planning_snapshot, &request)?;
+```
+
+`PlanningSnapshot` may come from the current-world adapter or from a rail, air, telegraph, or relay-station extension. It binds the observer, knowledge cut, topology version, and expiry. Someone with a current railway timetable and someone who only knows a courier rumor can therefore produce different valid plans.
+
+If a nearby recipient is served inside the same district, the plan may contain one short walking or horse leg. Beijing may require several relays, stations, and custody transfers. The router does not collapse both destinations merely because both are “another person.”
+
+## ETA is not the delivery deadline
+
+`RoutePlan.estimated_arrival_at` is an execution estimate. `DeliveryAttempt.due_at` is the logical completion deadline in the information lifecycle. A late ETA must not silently rewrite the original deadline; the system records failure or creates a new retry attempt.
+
+Rerouting and retrying are also different:
+
+- **reroute**: create a new immutable `ItineraryRevision` for the same delivery attempt;
+- **retry**: create a new delivery-attempt version, which may choose a new plan and mode.
+
+## Rail, air, telegraph, and relay stations
+
+Historical differences belong in network data instead of four copied routing algorithms:
+
+- Rail uses `TransferMode::Rail`, station nodes, departure slots, and capacity bookings. 1900 and 1940 use different content packages and timetables.
+- Air uses `TransferMode::Air`, airports, flight slots, weather availability, and bookings.
+- Telegraph or other signals use `TransferMode::Signal`; office hours, latency, risk, and interception are data or extension policy.
+- Ancient courier networks use relay-station nodes, horse/foot traversal, and explicit custody handoffs.
+
+Fixed durations, departure schedules, and time-dependent durations use `Fixed`, `Departures`, and `Piecewise` traversal models. A non-FIFO network must explicitly select the bounded label-correcting algorithm; the default FIFO network uses deterministic Dijkstra.
+
+## Execution and disasters
+
+After planning, the host installs the plan into a transport execution and creates the completion bridge for the information attempt:
+
+```rust
+let mut execution = TransportExecution::new(
+    TransportExecutionId(7),
+    Some(delivery_attempt_version.clone()),
+);
+execution.install_initial_itinerary(initial_revision)?;
+execution.begin_saga(
+    delivery_attempt_version,
+    delivery_completion_operation_key(
+        TransportExecutionId(7),
+        ItineraryRevisionId(1),
+        1,
+    ),
+)?;
+```
+
+Each leg has its own status and actual departure/arrival times. At a relay, record a `Handoff` before starting the next leg. If flood, war, weather, or a line outage blocks the route, a domain system records the failure and reason; execution enters `ReplanPending`, and a new planning snapshot produces a successor itinerary revision. The router never invents the disaster.
+
+After the final leg arrives, execution enters `ArrivalPending`. `completion_request()` yields a stable operation key and evidence; the host submits it through canonical ingress to complete the information attempt. Repeating the same key must not complete the attempt twice.
+
+## Capacity and determinism
+
+Trains, aircraft, relay horses, and telegraph lines can use `CapacityBooking`. A booking is a persistent windowed record with requested, confirmed, consumed, released, expired, cancelled, and failed states; a route-cache hit must never hide a capacity mutation.
+
+`RoutingCache` is derived from the planning-snapshot digest, request, and policy. It is rebuildable, excluded from authoritative snapshots, and unnecessary for exact replay. Expansion, transfer, risk, and arrival-horizon limits are also policy inputs, so “no route” and “budget exceeded” are deterministic replayable outcomes.
+
+See the [architecture page](/en/architecture/) and the [repository routing/transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md) for the complete ownership boundary and M1–M3 checklist.

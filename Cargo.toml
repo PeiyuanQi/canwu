@@ -7,8 +7,10 @@ members = [
     "crates/canwu-event",
     "crates/canwu-information",
     "crates/canwu-knowledge",
+    "crates/canwu-routing",
     "crates/canwu-sim",
     "crates/canwu-society",
+    "crates/canwu-transport",
     "crates/canwu-time",
     "crates/canwu-world",
 ]
@@ -33,9 +35,11 @@ canwu-decision = { path = "crates/canwu-decision", version = "=0.5.0" }
 canwu-event = { path = "crates/canwu-event", version = "=0.5.0" }
 canwu-information = { path = "crates/canwu-information", version = "=0.5.0" }
 canwu-knowledge = { path = "crates/canwu-knowledge", version = "=0.5.0" }
+canwu-routing = { path = "crates/canwu-routing", version = "=0.5.0" }
 canwu-sim = { path = "crates/canwu-sim", version = "=0.5.0" }
 canwu-society = { path = "crates/canwu-society", version = "=0.5.0" }
 canwu-time = { path = "crates/canwu-time", version = "=0.5.0" }
+canwu-transport = { path = "crates/canwu-transport", version = "=0.5.0" }
 canwu-world = { path = "crates/canwu-world", version = "=0.5.0" }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

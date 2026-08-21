@@ -392,6 +392,43 @@ derived during reads; no mutable query index is persisted or included in the
 authoritative state hash. Any future cache or secondary index must be rebuilt
 from the canonical ledger and remain outside authoritative commitments.
 
+## Routing and transport execution
+
+Routing and transport are additive domain capabilities, not a second kernel
+scheduler or a replacement for the information ledger. Their ownership split
+is:
+
+| Layer | Responsibility |
+| --- | --- |
+| `canwu-world` or domain records | topology, stations, timetables, availability, terrain, and historical content |
+| `canwu-routing` | pure deterministic planning over an actor-relative `PlanningSnapshot` |
+| `canwu-transport` | itinerary revisions, leg execution, custody handoffs, bookings, and completion saga |
+| `canwu-information` | per-recipient delivery attempts and immutable logical deadlines |
+| `canwu-sim` | canonical ingress, scheduling, rollback, persistence, and replay |
+
+`RoutePlan.estimated_arrival_at` is an execution estimate. It must not rewrite
+`DeliveryAttempt.due_at`, which is the immutable information-completion
+deadline. A reroute supersedes an itinerary revision without creating a new
+attempt; a retry creates a new attempt version. Physical handoff is distinct
+from knowledge relay, and arrival first enters an explicit arrival-pending saga
+before an admitted completion operation reconciles the two extensions.
+
+The router supports fixed, scheduled, and piecewise traversal. Historical
+content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
+air, telegraph, or other signal systems as data. FIFO networks use stable
+Dijkstra ordering; explicitly non-FIFO networks use a bounded label-correcting
+algorithm. Capacity is a persistent transport booking, not hidden mutable
+state in a route cache. `RoutingCache` is derived, digest-keyed, rebuildable,
+and excluded from authoritative commitments.
+
+If a disaster occurs, a domain system records an explicit leg failure and
+evidence. Transport enters `ReplanPending`, takes a new planning snapshot, and
+installs a new immutable itinerary revision. The router never invents the
+disaster, mutates world truth, or silently reads facts outside the observer's
+knowledge cut. The full ownership and M1–M3 checklist lives in
+[`docs/proposals/routing-transport-mechanism.md`](proposals/routing-transport-mechanism.md)
+and [`docs/proposals/routing-transport-mechanism-todo.md`](proposals/routing-transport-mechanism-todo.md).
+
 ## Plugins
 
 Plugins register schema, semantic action metadata, command handlers, legacy

@@ -1378,6 +1378,9 @@ fn validate_dispatch_times(payload: &DispatchPayload) -> Result<(), String> {
 }
 
 fn validate_delivery_attempt_times(payload: &DeliveryAttemptPayload) -> Result<(), String> {
+    if payload.due_at < payload.prepared_at {
+        return Err("delivery deadline cannot precede preparation".to_owned());
+    }
     match payload.status {
         DeliveryAttemptStatus::Prepared => {
             if payload.dispatched_at.is_some() || payload.completed_at.is_some() {

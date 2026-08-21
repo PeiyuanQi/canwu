@@ -1,6 +1,6 @@
 [package]
-name = "canwu-api"
-description = "Public Rust facade for the Canwu deterministic historical simulation engine"
+name = "canwu-routing"
+description = "Deterministic time-dependent routing primitives for Canwu extensions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -13,14 +13,9 @@ rust-version.workspace = true
 publish = ["crates-io"]
 
 [dependencies]
+blake3.workspace = true
 canwu-core.workspace = true
-canwu-decision.workspace = true
-canwu-event.workspace = true
-canwu-knowledge.workspace = true
-canwu-routing.workspace = true
-canwu-sim.workspace = true
 canwu-time.workspace = true
-canwu-transport.workspace = true
 canwu-world.workspace = true
 serde.workspace = true
 serde_json.workspace = true

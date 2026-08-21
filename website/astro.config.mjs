@@ -59,6 +59,7 @@ export default defineConfig({
             { slug: "tutorials/continuous-game-loop" },
             { slug: "tutorials/command-plugin" },
             { slug: "tutorials/phased-boundary" },
+            { slug: "tutorials/routing-transport" },
             {
               label: "案例",
               translations: { en: "Examples" },

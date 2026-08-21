@@ -1,0 +1,95 @@
+---
+title: 路线规划与送信执行
+description: 用确定性路由和运输执行记录表达从无锡到北京、近邻投递、铁路、空运、电报与驿站灾害恢复。
+template: doc
+sidebar:
+  order: 5
+  label: 路线规划与送信
+---
+
+> **实验性扩展。** 路由和运输已经有公开的 0.5 类型与定向测试，但宿主仍需提供网络与历史内容数据；地图导入、通用容量分配器、通用历史数据集和把运输记录提升为核心快照字段仍是后续工作。
+
+## 先分清两个问题
+
+“从无锡去北京怎么走？”至少包含两层：
+
+1. **规划**：在当前观察者知道的网络、时刻表、风险和容量事实下，哪条路线能在约束内最早到达？
+2. **执行**：这封信是否已经装载、出发、到达中转站、交接、遇灾改道，并最终完成对应收件人的送达尝试？
+
+`canwu-routing` 只负责第一层；`canwu-transport` 记录第二层。它们不会绕过 `canwu-sim` 的 canonical ingress，也不会直接修改 `canwu-information` 的收件人账本。
+
+## 无锡到北京
+
+规划输入必须带观察者和知识切口，而不是直接读取全知世界：
+
+```rust
+let request = RoutingRequest {
+    origin: RoutingNodeRef::new("settlement/wuxi"),
+    destination: RoutingNodeRef::new("settlement/beijing"),
+    departure_at: SimTime::from_hours(8),
+    policy: RoutingPolicy {
+        allowed_modes: [TransferMode::Rail, TransferMode::Horse]
+            .into_iter()
+            .collect(),
+        ..RoutingPolicy::default()
+    },
+};
+
+let plan = plan_route(&planning_snapshot, &request)?;
+```
+
+`PlanningSnapshot` 可以来自当前世界的路线适配器，也可以由铁路、空运、电报或古代驿站扩展自己提供。它绑定 `observer`、`knowledge_cut`、拓扑版本和有效期，所以一个知道铁路时刻表的人，和一个只知道驿站传闻的人，可以得到不同的合法计划。
+
+如果近邻收件人的投递点位于同一地区，路由可能只需要一条短途步行或马匹 leg；去北京则可能需要多个驿站、车站和交接。路由器不会因为目标是“另一个人”就把两者当成同一个终点。
+
+## ETA 不是送信期限
+
+`RoutePlan.estimated_arrival_at` 是执行估计；`DeliveryAttempt.due_at` 是信息生命周期中的逻辑完成期限。预计晚到不能偷偷改写原始期限：系统应记录失败或创建新的 retry attempt。
+
+同样，改道和重试不是一回事：
+
+- **reroute**：创建新的不可变 `ItineraryRevision`，仍属于同一个 delivery attempt；
+- **retry**：创建新的 delivery-attempt version，可以选择新的路线和运输方式。
+
+## 铁路、空运、电报与驿站
+
+历史差异放在网络数据中，而不是复制四套寻路算法：
+
+- 铁路使用 `TransferMode::Rail`、车站节点、发车 slots 和容量 booking；1900 年与 1940 年只需要不同的内容包和时刻表。
+- 空运使用 `TransferMode::Air`、机场、班次、天气可用性和容量 booking。
+- 电报或其他信号使用 `TransferMode::Signal`，把电报局开放时间、延迟、风险和截获规则作为数据或扩展政策。
+- 古代驿站使用 relay-station 节点、马匹/步行 traversal 和明确的 custody handoff。
+
+固定时长、发车时刻和分段时长分别由 `Fixed`、`Departures` 与 `Piecewise` traversal 表达。非 FIFO 的时变网络必须显式选择有预算的 label-correcting 算法；默认 FIFO 网络使用确定性 Dijkstra。
+
+## 执行与遇灾
+
+拿到计划后，宿主把它安装到运输执行记录，并通过信息尝试的版本建立完成桥：
+
+```rust
+let mut execution = TransportExecution::new(
+    TransportExecutionId(7),
+    Some(delivery_attempt_version.clone()),
+);
+execution.install_initial_itinerary(initial_revision)?;
+execution.begin_saga(
+    delivery_attempt_version,
+    delivery_completion_operation_key(
+        TransportExecutionId(7),
+        ItineraryRevisionId(1),
+        1,
+    ),
+)?;
+```
+
+每一 leg 有自己的状态和实际出发/到达时间。到达中转站后，先记录 `Handoff`，再开始下一 leg。遇到洪水、战乱、天气或线路中断时，领域系统记录明确的失败原因，执行进入 `ReplanPending`，然后基于新的 `PlanningSnapshot` 安装后继 itinerary revision。路由器不会自行“猜”灾害。
+
+最后一 leg 到达后，执行进入 `ArrivalPending`。`completion_request()` 产生稳定的 operation key 和证据，宿主通过 canonical ingress 调用信息扩展完成送达；重复提交同一 key 不应重复完成。
+
+## 容量与确定性
+
+车次、航班、驿站马匹和电报线路都可以用 `CapacityBooking` 表示。booking 是持久的窗口记录，状态变化包括请求、确认、消耗、释放、过期、取消和失败；路线缓存不能隐藏容量写入。
+
+`RoutingCache` 只由规划快照摘要、请求和策略派生，丢失后可重建，不进入权威快照或精确重放。搜索扩展数、转运次数、风险和到达时间上限也属于策略的一部分，因此“无路可走”和“超过预算”都是可重放的确定性结果。
+
+想了解所有权边界和 M1–M3 checklist，请阅读[架构页](/architecture/)与[仓库中的 routing/transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md)。

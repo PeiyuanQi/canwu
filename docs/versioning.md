@@ -55,10 +55,10 @@ state, with tamper companions for each.
 - `RandomDrawRecord.position` is replaced by `address: RandomDrawAddress` and
   adds optional `operation_evidence: EvidenceRef`.
 - `RandomDrawAddress::Sequential { position }` is the migrated sequential wire.
-  The `OperationV1(RandomOperationAddressV1)` shape and its
-  `RandomOperationTarget` variants are reserved for forward compatibility; the
-  0.5 runtime rejects every such authoritative draw with
-  `UnsupportedRandomDrawAddress` until keyed execution is implemented.
+  The `OperationV1(RandomOperationAddressV1)` shape is also executable in the
+  0.5 runtime. Its evidence-bound address is validated and replayed by the
+  operation-keyed random journal; callers must not treat it as a sequential
+  stream position.
 - `SimulationSnapshot` typed loading accepts only engine 0.5.0 format 5.
   Engine 0.4.0 format-4 snapshots, replay journals, and checkpoint-journal
   bundles must use their JSON loaders so strict legacy validation occurs before
@@ -78,7 +78,7 @@ serde defaults are not a source-compatibility promise.
 
 | Surface | 0.5.0 change | Required downstream change |
 | --- | --- | --- |
-| Random records | `RandomDrawRecord.position` becomes `address: RandomDrawAddress`; `operation_evidence: Option<EvidenceRef>` is added. `RandomDrawAddress`, `RandomOperationAddressV1`, and `RandomOperationTarget` are new public enums/structs. | Construct `RandomDrawAddress::Sequential { position }` for migrated sequential use. Match every address variant and reject or defer `OperationV1` while it remains disabled. |
+| Random records | `RandomDrawRecord.position` becomes `address: RandomDrawAddress`; `operation_evidence: Option<EvidenceRef>` is added. `RandomDrawAddress`, `RandomOperationAddressV1`, and `RandomOperationTarget` are new public enums/structs. | Construct `RandomDrawAddress::Sequential { position }` for sequential use. Use `OperationV1` only with stable evidence, operation identity, target, draw slot, bound, and purpose. |
 | References and IDs | `DomainRecordVersionSource`, `DomainRecordVersionRef`, `EvidenceRef`, `KnowledgeRecordKind`, `KnowledgeSchemaId`, `KnowledgeHolderRef`, `KnowledgeHolderPolicy`, `KnowledgeRecordId`, and `HolderKnowledgeRecordId` are added. | Store exact version/evidence references and match holder/evidence enums exhaustively instead of using untyped strings or current-record lookups. |
 | Domain schemas | `DomainRecordSchema` adds `holder_policy` and `mutation_policy: DomainRecordMutationPolicy`; `DomainReferenceTargetKind` adds `AnyEntity`. | Update every struct literal and exhaustive match. Explicitly choose whether the record can be a knowledge holder and whether it is versioned or create-only, and validate an `AnyEntity` reference as an entity class rather than accepting arbitrary domain values. |
 | Plugin descriptors | `PluginDescriptor` adds `knowledge_schemas: Vec<PluginKnowledgeSchema>`. `PluginKnowledgeSchema`, `KnowledgeLimitsV1`, `KnowledgeSubjectSchema`, and `KnowledgeSubjectTargetKind` are new public contract types. | Update descriptor literals/registration and include the knowledge schema set in plugin identity and semantic-hash review. Use an empty vector for plugins that publish none. |
@@ -297,6 +297,15 @@ additive field and retain their prior serialized and hashed shape. A pristine,
 registration-open declared snapshot can reconstruct and manifest-validate that
 genesis before activating record schemas; execution-closed or migrated-legacy
 snapshots cannot gain that capability without an explicit migration.
+
+Routing and transport are additive extension crates in 0.5. Their authoritative
+records are expected to live in application-defined domain-record schemas, so
+adding `canwu-routing` or `canwu-transport` does not change snapshot format 5.
+`RoutingCache` is derived and rebuildable. If a future release promotes
+transport execution into first-class snapshot fields, it must introduce a
+separate format or migration fixture rather than interpreting old snapshots
+under new transport semantics. The current semantic versions are
+`canwu-routing.v1` and `canwu-transport.v1`.
 
 Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
 emission provenance, command and event admission, reservation offers, requests,

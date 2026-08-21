@@ -153,6 +153,24 @@ polygons, administrative containment, terrain, river and road networks, spatial
 indexes, travel modes, and time-dependent costs. Geometry remains data for
 clients; it never becomes a rendering subsystem.
 
+The reusable routing/transport boundary now separates planning from execution.
+`canwu-routing` plans against an observer-relative, versioned `PlanningSnapshot`
+and returns an immutable route estimate. `canwu-transport` records itinerary
+revisions, leg execution, custody handoffs, capacity bookings, and an
+arrival-pending completion saga. It does not own the information ledger or the
+simulation scheduler. A route estimate is never the same thing as an
+information deadline: `DeliveryAttempt.due_at` remains the logical completion
+deadline, while ETA can change after a disaster and trigger a reroute.
+
+This supports ancient relay stations, modern roads, 1900 or 1940 railways,
+air routes, and telegraph/signal systems through data-driven modes and
+traversal models. Disaster handling is explicit: a domain system records the
+failed leg, transport enters `ReplanPending`, and a new immutable itinerary
+revision is installed. A reroute does not create a new attempt; a retry does.
+Derived route caches are rebuildable and never authoritative state. See the
+[routing and transport proposal](proposals/routing-transport-mechanism.md) for
+the complete ownership and milestone boundary.
+
 ## Systems and plugins
 
 Population, agriculture, trade, taxation, bureaucracy, military logistics,

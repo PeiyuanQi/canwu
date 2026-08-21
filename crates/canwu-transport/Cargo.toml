@@ -1,6 +1,6 @@
 [package]
-name = "canwu-api"
-description = "Public Rust facade for the Canwu deterministic historical simulation engine"
+name = "canwu-transport"
+description = "Transport execution, itinerary revision, handoff, booking, and saga primitives"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,16 +14,9 @@ publish = ["crates-io"]
 
 [dependencies]
 canwu-core.workspace = true
-canwu-decision.workspace = true
-canwu-event.workspace = true
-canwu-knowledge.workspace = true
 canwu-routing.workspace = true
-canwu-sim.workspace = true
 canwu-time.workspace = true
-canwu-transport.workspace = true
-canwu-world.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 
 [lints]
 workspace = true

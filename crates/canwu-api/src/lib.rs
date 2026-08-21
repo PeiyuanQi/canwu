@@ -18,6 +18,13 @@ pub use canwu_knowledge::{
     KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
     KnowledgeSubject, KnowledgeSubjectTarget,
 };
+pub use canwu_routing::{
+    DepartureSlot, DurationSample, PlanningSnapshot, ROUTING_ALGORITHM_VERSION, RouteCost,
+    RouteLeg, RoutePlan, RoutingAlgorithm, RoutingCache, RoutingConnection, RoutingConnectionRef,
+    RoutingEndpoint, RoutingEndpointKind, RoutingError, RoutingNetwork, RoutingNodeRef,
+    RoutingPolicy, RoutingRequest, TransferMode, TraversalModel, plan_route,
+    planning_snapshot_from_world,
+};
 pub use canwu_sim::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArchiveProvider, ArchiveStore, ArchiveStoreOutcome,
     ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedSegmentHeader, ArtifactManifest,
@@ -65,6 +72,13 @@ pub use canwu_sim::{
     canonical_byte_hash, canonical_hash, payload_required_evidence_continuation_property_v1,
 };
 pub use canwu_time::{SimDuration, SimTime};
+pub use canwu_transport::{
+    CapacityBooking, CapacityBookingId, CapacityBookingStatus, DeliveryCompletionRequest,
+    DeliverySaga, Handoff, HandoffId, ItineraryRevision, ItineraryRevisionId,
+    ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, SagaState,
+    TRANSPORT_SEMANTIC_VERSION, TransportError, TransportExecution, TransportExecutionId,
+    TransportExecutionState, delivery_completion_operation_key,
+};
 pub use canwu_world::{
     Army, Government, MapPoint, Person, Route, Territory, TransitState, WorldDiff, WorldSnapshot,
 };
