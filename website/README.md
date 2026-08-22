@@ -13,7 +13,8 @@ overviews live at `/architecture/` and `/en/architecture/`. Their Markdown and
 MDX sources all live in `src/content/docs/`. Repository-level design,
 maintainer, community, release, and legal documents remain under `../docs/`
 and are deliberately not published as website documentation.
-
+The bilingual terminology reference is published at `/reference/terminology/`
+and `/en/reference/terminology/`.
 Scenario-driven tutorials live under `tutorials/cases/` in each locale. The
 Starlight sidebar keeps them in one collapsed, auto-generated Examples group so
 new examples do not expand the top-level tutorial navigation.

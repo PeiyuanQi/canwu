@@ -10,6 +10,9 @@
   audio, and animation belong in external clients.
 - `docs/architecture.md` and `docs/end-state.md` are the architectural source of
   truth. Keep them aligned with public APIs and dependency boundaries.
+- `docs/terminology.md` is the canonical Chinese-English terminology reference
+  for public docs and agent guidance. Keep code identifiers unchanged and
+  update the bilingual website terminology pages with it.
 - Follow `docs/versioning.md`. The root `[workspace.package].version` is the
   canonical SemVer version and all first-party crates version in lockstep.
 - External mutations must enter through validated commands or canonical ingress.

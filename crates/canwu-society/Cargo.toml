@@ -8,7 +8,7 @@ homepage.workspace = true
 readme = "README.md"
 rust-version.workspace = true
 publish = false
-description = "Experimental aggregate social diffusion extension for Canwu"
+description = "Experimental social diffusion simulation module for Canwu"
 
 [dependencies]
 canwu-api.workspace = true

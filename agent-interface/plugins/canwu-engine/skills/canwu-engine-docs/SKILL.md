@@ -1,6 +1,6 @@
 ---
 name: canwu-engine-docs
-description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, follow a foundation tutorial or scenario case, understand a public canwu-api example or official experimental extension, implement DecisionTicket/controller/policy workflows, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
+description: Read, locate, compare, summarize, and explain Canwu's official tutorials and design documentation. Use when a user asks how to start or use Canwu, follow a foundation tutorial or scenario case, understand a public canwu-api example or an official experimental domain extension such as the social diffusion simulation module, implement DecisionTicket/controller/policy workflows, choose or translate canonical Chinese-English Canwu terminology, or investigate Canwu architecture, end-state design, engine conformance, versioning, deterministic time, actor-relative knowledge, plugins, persistence, replay, or renderer integration. Also use for requests in any language to find, cite, compare, or summarize Canwu documentation, tutorials, architecture, or design notes.
 ---
 
 # Read Canwu Documentation
@@ -16,6 +16,8 @@ Keep code guidance on the public `canwu-api` boundary.
    - Use tutorials plus their runnable examples for onboarding and how-to
      questions.
    - Use design contracts for architecture, invariants, and rationale.
+   - Use `docs/terminology.md` for canonical Chinese-English terms and their
+     distinctions.
    - Use `canwu-api` source or rustdoc for exact current types, methods, and
      signatures.
    - Use the overview documents only when the user asks for a broad tour.
@@ -46,6 +48,8 @@ Keep code guidance on the public `canwu-api` boundary.
   their required evidence.
 - Use `docs/versioning.md` for SemVer, snapshots, migrations, replay, and
   compatibility claims.
+- Use `docs/terminology.md` as the source of truth for public Chinese-English
+  naming. Keep code identifiers unchanged.
 - Use the website tutorials for learning sequence and concise workflows, then
   inspect the corresponding example before giving detailed code guidance.
 - Treat README material as orientation, not as a replacement for a more
@@ -58,8 +62,9 @@ not silently combine incompatible statements.
 ## Preserve Canwu boundaries
 
 - Recommend public `canwu-api` entry points for kernel capabilities. An official
-  experimental extension may be used only when its documentation explicitly
-  says it is built on `canwu-api`; preserve its unpublished and unstable status.
+  experimental domain extension may be used only when its documentation
+  explicitly says it is built on `canwu-api`; preserve its unpublished and
+  unstable status.
 - Keep rendering, wall time, input devices, audio, and presentation state in
   the host application.
 - Use actor-relative reads for actor-facing workflows. Do not replace missing

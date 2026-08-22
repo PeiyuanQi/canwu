@@ -1,6 +1,6 @@
 ---
 title: 本地社区传播与制度回应
-description: 用稀疏人口分布、社会影响、制度决策和角色相对估计实现一个中性社会传播案例。
+description: 通过实验性社会传播模拟模块学习稀疏人口分布、社会影响、制度决策和角色相对估计。
 sidebar:
   order: 3
   label: 社区传播与制度回应
@@ -10,7 +10,11 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 1. 要解决什么问题
 
-假设你要模拟一种新观念如何从市场传播到附近村庄，以及地方机构随后如何回应。
+`canwu-society` 是一个实验性**社会传播模拟模块**（`social diffusion simulation
+module`），在 Canwu 架构中属于**模拟领域扩展**（`domain extension`）。这个示例使用一个
+抽象的“新观念”，展示它如何组合群体接触、私人接受、公开表达、组织影响、制度响应和角色相对
+估计。案例聚焦传播机制与引擎契约，便于把同一套模型适配到不同的历史或虚构情境。
+
 如果只给每个地区一个“接受度”数值，就无法区分听说过、私下认同、公开表态、
 实际参与和组织动员；如果制度政策一提交就直接改写私人认同，模拟也会失去可信度。
 
@@ -125,9 +129,9 @@ DecisionTicket -> controller-derived authority -> plugin command
 actor 生成的 `SocietyProjection`。检测率、遮蔽和 false positive 会让估计与真实
 aggregate 不同；没有 observer profile 的角色会得到错误，不会自动获得社会根记录。
 
-示例通过 `from_society_snapshot_json()` 恢复存档。这个扩展入口会在 Canwu 的
-通用存档检查之后，再核对社会 payload 使用的核心实体引用和所有已物化派生值。
-随后，示例验证 fork 与 journal replay 会重建完全相同的权威状态。
+示例通过 `from_society_snapshot_json()` 恢复存档。这个模块入口会在 Canwu 的通用
+存档检查之后，重新核对社会 payload 使用的核心实体引用和所有已物化派生值，然后
+示例再验证 fork 与 journal replay 得到完全相同的权威状态。
 
 ### 第五步：只输出动员候选，把冲突判断留给下游
 
@@ -135,9 +139,15 @@ aggregate 不同；没有 observer profile 的角色会得到错误，不会自�
 `MobilizationCandidate`，但它不是冲突事件。抗议、镇压、迁移、暴乱、结盟或
 战争仍应由独立的政治与安全扩展判断。
 
-这样，`canwu-society` 可以复用 cohort、稀疏多维分布、确定性迁移、影响边、
-组织拓扑、制度输入、政策压力、候选输出和角色估计，同时不把具体历史解释写死
-在引擎扩展里。
+## 模拟领域扩展边界
+
+这个模拟领域扩展中的可复用引擎部分是 cohort、稀疏多维分布、确定性迁移、影响边、组织拓扑、
+制度输入、政策压力、候选输出和角色估计。历史教义、礼仪、人物、文化兼容性、政策
+名称、具体冲突资格与叙事都属于下游领域包。
+
+`canwu-society` 当前 `publish = false`，也没有被 `canwu-api` 重新导出。它作为实验性
+模拟领域扩展验证公开插件契约；当前公开范围覆盖通用传播机制，历史内容与具体领域 API
+由下游包定义。
 
 ## 3. 代码在哪里
 

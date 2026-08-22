@@ -73,6 +73,40 @@
   color: var(--sl-color-gray-4);
 }
 
+.terminology-reference table {
+  width: 100%;
+  min-width: 0;
+}
+
+.terminology-reference thead,
+.terminology-reference tbody {
+  display: table;
+  width: 50rem;
+  table-layout: fixed;
+}
+
+.terminology-reference th {
+  white-space: nowrap;
+}
+
+.terminology-reference th:nth-child(1),
+.terminology-reference td:nth-child(1) {
+  width: 8.5rem;
+  min-width: 8.5rem;
+}
+
+.terminology-reference th:nth-child(2),
+.terminology-reference td:nth-child(2) {
+  width: 9.5rem;
+  min-width: 9.5rem;
+}
+
+.terminology-reference th:nth-child(3),
+.terminology-reference td:nth-child(3) {
+  width: 10.5rem;
+  min-width: 10.5rem;
+}
+
 .sl-link-card {
   transition: border-color 140ms ease, transform 140ms ease, background-color 140ms ease;
 }

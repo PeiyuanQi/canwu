@@ -79,6 +79,11 @@ export default defineConfig({
           items: [{ autogenerate: { directory: "architecture" } }],
         },
         {
+          label: "参考",
+          translations: { en: "Reference" },
+          items: [{ slug: "reference/terminology" }],
+        },
+        {
           label: "GitHub 示例",
           translations: { en: "GitHub examples" },
           link: "https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples",

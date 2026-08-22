@@ -1,0 +1,110 @@
+# Canwu Terminology / 参伍术语表
+
+This document is the canonical Chinese-English terminology reference for
+Canwu's public architecture, integration guides, tutorials, and agent-facing
+documentation. It covers stable concepts that recur across those surfaces; it
+does not attempt to translate every Rust identifier or temporary proposal term.
+
+Use the Chinese term in Chinese prose and the English term in English prose.
+Keep code identifiers exactly as written. On first use, write the Chinese term
+followed by the English term or code identifier when that helps disambiguate it,
+for example, **模拟规则插件** (`domain plugin`) or **决策票据**
+(`DecisionTicket`).
+
+Linked terms already have a more detailed guide or architecture page. Unlinked
+terms are currently defined only here and in their code-level API documentation.
+
+## Product and runtime boundaries
+
+| 中文规范写法 | English | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [参伍](../website/src/content/docs/architecture/index.mdx) | Canwu | `Canwu` | The product and public facade. Do not translate the brand as a generic noun. |
+| [无界面历史模拟引擎](../README.zh-CN.md) | headless historical simulation engine | — | The whole product category: Canwu simulates historical worlds without owning rendering, audio, or production UI. |
+| [模拟内核](../website/src/content/docs/architecture/index.mdx) | simulation core | `canwu-sim` | The private runtime that owns mutable authoritative state, scheduling, settlement, persistence, and replay. |
+| [上层应用](../website/src/content/docs/developer/integration.mdx) | host application | — | A game, research tool, service, client, or agent system that embeds Canwu. In Chinese prose, do not use “主机程序” for this concept. |
+| [公开门面](../website/src/content/docs/developer/integration.mdx) | public facade | `canwu-api` | The supported dependency and compatibility surface for application code. |
+| [模拟运行](../website/src/content/docs/developer/persistence.mdx) | simulation run | `run_id` | One causally continuous execution with its own identity, inputs, state, and evidence. |
+| [场景](../website/src/content/docs/tutorials/move-army.mdx) | scenario | `Scenario` | The initial world and configuration used to create a simulation. |
+| [权威状态](../website/src/content/docs/developer/reading-state.mdx) | authoritative state | `SimulationSnapshot` | State owned and validated by Canwu; it is the basis for commitments, persistence, and replay. |
+| [真值](../website/src/content/docs/developer/reading-state.mdx) | ground truth | — | Facts present in authoritative state whether or not a particular actor knows them. |
+| [角色相对视图](../website/src/content/docs/developer/reading-state.mdx) | actor-relative view | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and permissions rather than from omniscient state. |
+| [只读快照](../website/src/content/docs/developer/reading-state.mdx) | read-only snapshot | `WorldSnapshot` | A detached state value for trusted reads; it is not a mutable reference to the live runtime. |
+
+## Time, input, and settlement
+
+| 中文规范写法 | English | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [墙钟时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | wall time | — | Real elapsed time observed by the upper application. It never enters authoritative state directly. |
+| [模拟时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | simulation time | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
+| [表现时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | presentation time | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
+| [命令](../website/src/content/docs/developer/integration.mdx) | command | `Command`, `CommandEnvelope` | A typed request to change authoritative state through validation and authority checks. |
+| [语义动作](../website/src/content/docs/tutorials/move-army.mdx) | semantic action | `SemanticAction` | A capability-oriented action exposed to UI or agents and translated into a validated command. |
+| [规范化输入](../website/src/content/docs/architecture/events.mdx) | canonical ingress | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. Write the English term on first use when needed. |
+| [准入](../website/src/content/docs/architecture/events.mdx) | admission | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
+| [调度工作](../website/src/content/docs/architecture/events.mdx) | scheduled work | — | Work assigned a deterministic simulation due time and insertion order. |
+| [结算边界](../website/src/content/docs/architecture/settlement.mdx) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | One validated transaction that admits work, runs systems, records evidence, and commits or rolls back. |
+| [结算阶段](../website/src/content/docs/architecture/settlement.mdx) | settlement phase | `BoundaryPhase` | One position in the fixed boundary execution order. A phase is ordering, not an independent settlement algorithm. |
+| [原子提交](../website/src/content/docs/architecture/settlement.mdx) | atomic commit | — | Applying all validated changes from a boundary together so observers never see partial state. |
+| [回滚](../website/src/content/docs/architecture/settlement.mdx) | rollback | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
+
+## Plugins and extensions
+
+| 中文规范写法 | English | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [插件](../website/src/content/docs/developer/extensions.mdx) | plugin | — | Generic term. Qualify it when confusion with Codex or other tooling plugins is possible. |
+| [模拟插件](../website/src/content/docs/developer/extensions.mdx) | simulation plugin | `SimulationPlugin` | A component registered with the Canwu runtime through the public plugin contract. This is the normal Chinese name of the code-level type. |
+| 运行时模拟插件 | runtime simulation plugin | `SimulationPlugin` | Disambiguating form used only when contrasting Canwu runtime plugins with agent-interface or other tool plugins. It is not a separate plugin kind. |
+| [模拟规则插件](../website/src/content/docs/developer/extensions.mdx) | domain plugin | `SimulationPlugin` | A simulation plugin whose purpose is to provide concrete social, economic, military, character, or other domain rules. It is a purpose-level subset of simulation plugins. |
+| [模拟领域扩展](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | domain extension | — | An optional domain-specific package built on public engine contracts. It may contain plugins, schemas, commands, queries, and supporting APIs. |
+| [模拟模块](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | simulation module | — | A human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It is not itself an engine contract. |
+| [命令插件](../website/src/content/docs/tutorials/command-plugin.mdx) | command plugin | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
+| [边界系统](../website/src/content/docs/architecture/settlement.mdx) | boundary system | `BoundarySystemContract` | A declared system that runs in a settlement phase with bounded reads, writes, resources, and randomness. |
+| [领域 schema](../website/src/content/docs/developer/extensions.mdx) | domain schema | `DomainRecordType` | A versioned structural contract for plugin-owned domain data. Keep `schema` in code-adjacent Chinese prose. |
+| [领域记录](../website/src/content/docs/developer/extensions.mdx) | domain record | `DomainRecord` | Typed, persisted domain state owned by a plugin rather than by the generic world model. |
+| 插件组件 | plugin component | `PluginComponentRecord` | Plugin-owned component state attached through declared keys and visibility. |
+| [插件语义环境](../website/src/content/docs/developer/persistence.mdx) | plugin semantic environment | `PluginDescriptor` | The exact plugin identities, versions, and semantic hashes required to load or exactly replay persisted state. |
+
+## Evidence, randomness, and persistence
+
+| 中文规范写法 | English | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [事件](../website/src/content/docs/architecture/events.mdx) | event | `SimEvent` | A serializable causal record in authoritative evidence, not a UI notification. |
+| [因果关系](../website/src/content/docs/architecture/events.mdx) | causality | `CauseRef` | The recorded relationship explaining why an event or change occurred. |
+| [相关标识](../website/src/content/docs/architecture/events.mdx) | correlation ID | `correlation_id` | A stable identifier that groups records belonging to one authoritative causal root. |
+| [随机流](../website/src/content/docs/architecture/randomness.mdx) | random stream | `RandomStreamKey` | A named, versioned deterministic source owned by a declared mechanic. |
+| [抽样证据](../website/src/content/docs/architecture/randomness.mdx) | draw evidence | `RandomDrawRecord` | The recorded stream, range, operation, and result of one deterministic random draw. |
+| [资源预留](../website/src/content/docs/tutorials/phased-boundary.mdx) | reservation | `ReservationRequest` | A declared request against a conserved resource pool before allocation is settled. |
+| [资源分配](../website/src/content/docs/architecture/settlement.mdx) | allocation | `ReservationAllocation` | The deterministic result of settling competing reservations against supply. |
+| [可见性](../website/src/content/docs/architecture/settlement.mdx) | visibility | `StateVisibility` | The policy controlling which state and evidence can reach which readers. |
+| [快照](../website/src/content/docs/developer/persistence.mdx) | snapshot | `SimulationSnapshot` | A complete persisted state image validated on restore. |
+| [检查点](../website/src/content/docs/developer/persistence.mdx) | checkpoint | `SimulationCheckpoint` | A validated compact base state from which later journal evidence can continue. |
+| [检查点日志](../website/src/content/docs/developer/persistence.mdx) | checkpoint journal | `CheckpointJournal` | A checkpoint bundled with subsequent evidence for compact persistence and restoration. Use the code identifier in code-adjacent prose. |
+| [精确重放](../website/src/content/docs/developer/persistence.mdx) | exact replay | `replay_from_journal()` | Reconstructing and verifying the same run from recorded inputs and evidence without rerunning external choices. |
+| [反事实分支](../website/src/content/docs/developer/persistence.mdx) | counterfactual branch | — | A new causal branch created by choosing different input from a shared prior state; it is not exact replay. |
+| [派生分支](../website/src/content/docs/developer/persistence.mdx) | fork | `fork()` | An independent simulation copied from an existing point so it can advance with new inputs. Use `fork` when referring to the API call. |
+| [状态承诺](../website/src/content/docs/architecture/settlement.mdx) | state commitment | `CommitmentRoots` | A cryptographic commitment that binds authoritative state or evidence for validation. |
+| [语义哈希](../website/src/content/docs/developer/extensions.mdx) | semantic hash | `semantic_hash` | A stable declaration of plugin behavior used to reject incompatible load or replay environments. |
+
+## Actors, knowledge, and decisions
+
+| 中文规范写法 | English | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [角色](../website/src/content/docs/developer/reading-state.mdx) | actor | `PersonId` | A person or in-world principal whose knowledge and authority constrain a view or action. |
+| [角色知识](../website/src/content/docs/developer/reading-state.mdx) | actor knowledge | `ActorKnowledge` | What one actor knows, including source, confidence, and time. It is stored separately from ground truth. |
+| [报告](../website/src/content/docs/architecture/events.mdx) | report | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
+| [投影](../website/src/content/docs/developer/reading-state.mdx) | projection | — | A materialized, actor-scoped representation derived without exposing authoritative domain state. |
+| [权限](../website/src/content/docs/developer/integration.mdx) | authority | `CommandAuthority` | The validated right to issue a command or perform an action. Do not translate `authoritative` as 权限; authoritative state is 权威状态. |
+| [签发者](../website/src/content/docs/developer/integration.mdx) | issuer | `Issuer` | The identity presented as the source of a command. Authority validation determines whether that identity may act. |
+| [控制者](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | controller | `DecisionControllerBinding` | The entity or process bound to make decisions for a seat. Keep `controller` beside the Chinese term in code-adjacent prose. |
+| [席位](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | seat | `seat_id` | A stable decision-making role that can be bound to a controller. |
+| [决策策略](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | policy | `DecisionPolicy` | A human, external, LLM, or deterministic evaluator that selects among current decision options. |
+| [决策票据](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision ticket | `DecisionTicket` | A persisted request for one controller to choose among versioned, currently valid options. |
+| [决策选项](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision option | `DecisionOption` | One candidate choice offered by a decision ticket. |
+| [决策尝试](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision attempt | `DecisionAttemptRecord` | An authoritative record of an admitted, accepted, or rejected attempt to resolve a ticket. |
+| [决策轨迹](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision trace | `DecisionTrace` | Persisted scores, evidence, policy identity, selected option, and outcome used for explanation and replay. |
+
+## Maintenance rule
+
+When a public concept is added or renamed, update this file and the bilingual
+website terminology pages in the same change. Add a link only after a focused
+website page exists; the terminology table itself is sufficient until then.

@@ -3,7 +3,8 @@
 Status: implementation and independent review complete; Git delivery is
 authorized.
 
-This checklist implements only the generic `canwu-society` system described in
+This checklist implements only the generic `canwu-society` social diffusion
+simulation module described in
 [`social-belief-framework.md`](social-belief-framework.md). The three historical
 comparisons are design stress tests only. They are not examples, fixtures,
 or CM content. The implementation includes exactly one neutral composite
@@ -22,13 +23,14 @@ tutorial case; it does not implement the three comparisons.
       and the relevant conformance section.
 - [x] Define the minimal public and internal types, stable errors, schema
       versions, ownership, cadence, phases, and random streams.
-- [x] Add unpublished `crates/canwu-society` without creating a dependency from
-      Canwu core or `canwu-api` back to it.
+- [x] Add the unpublished `crates/canwu-society` social diffusion simulation
+      module without creating a dependency from Canwu core or `canwu-api` back
+      to it.
 
 ## 3. Authoritative data model
 
-- [x] Implement cohort records, lifecycle validation, and extension-owned
-      affiliation target references.
+- [x] Implement cohort records, lifecycle validation, and module-owned affiliation
+      target references.
 - [x] Implement sparse multidimensional disposition distributions and
       deterministic remainders keyed by stable transition identity.
 - [x] Implement sparse social influence edges and generic organization topology.
@@ -63,7 +65,7 @@ tutorial case; it does not implement the three comparisons.
       instant conversion, authority rejection, engine-issued decision
       provenance, and valid EPOCH / negative-time boundaries. Mobilization and
       conflict remain separated by the crate's type and ownership boundary.
-- [x] Add actor-privacy, extension-validated save/load, replay, fork, and plugin
+- [x] Add actor-privacy, domain-extension-validated save/load, replay, fork, and plugin
       rehydration tests; rely on the engine's workspace tamper and rollback
       suites for the generic record and boundary substrate.
 - [x] Add neutral structural sparse-scaling workloads proving that active
@@ -76,7 +78,7 @@ tutorial case; it does not implement the three comparisons.
 - [x] Add one runnable neutral example, “local community diffusion and
       institutional response,” covering cohorts, influence, one institutional
       decision, public/private divergence, actor-relative estimation, and
-      extension-validated save/load, fork, and exact replay.
+      domain-extension-validated save/load, fork, and exact replay.
 - [x] Document that same example as one bilingual tutorial case using the
       repository's tutorial navigation; do not create additional cases or a
       historical mapping.
