@@ -69,8 +69,11 @@
   plugins, records, persistence, validation, hashing, migration, and replay.
 - `crates/canwu-api`: the supported public facade and re-export boundary.
 - `crates/canwu-debug`: reference client; it may depend on `canwu-api` only.
-- `docs`: architecture, end-state, versioning, conformance, community, and
-  legal documentation.
+- `docs`: canonical architecture, end-state, versioning, conformance,
+  community, and legal documentation.
+- `website/src/content/docs`: published Astro documentation maintained as a
+  separate mirror; public doc changes must update the canonical `docs` page and
+  its matching Chinese/English website pages, then pass the website build.
 - `tools/licenses`: `cargo-about` configuration and template inputs for the
   generated third-party notice bundle.
 - `benchmarks`: deterministic non-CI performance harnesses and recorded
@@ -99,6 +102,7 @@
 | Agent skills or plugin packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; plugin validation |
 | Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; `docs/legal`; `tools/licenses`; contribution/release docs; packaged plugin notices |
 | Website or branding | `website`; `assets`; `docs/community/branding.md`; community-facing README links; site-specific checks |
+| Public documentation | Canonical `docs`; matching pages under `website/src/content/docs` in every supported language; website build |
 | Community README or onboarding structure | Keep `README.md` and `README.zh-CN.md` equivalent in claims, sections, commands, links, and folded development flow; update related website/docs links when needed |
 
 If a change crosses several rows, treat that as one architectural milestone and
