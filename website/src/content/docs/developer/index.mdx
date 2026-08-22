@@ -6,7 +6,7 @@ sidebar:
   order: 1
   label: 开发者指南
 hero:
-  tagline: 从依赖接入到存档重放，按集成方实际需要完成的工作组织 Canwu 的公开 API。
+  tagline: 按接入、读取、存档和扩展等常见任务了解 Canwu 的公开 API。
   actions:
     - text: 接入 Canwu
       link: /developer/integration/
@@ -32,7 +32,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
   <LinkCard
     title="接入并驱动仿真"
     href="/developer/integration/"
-    description="添加依赖、创建仿真、选择命令入口，并把墙钟时间转换为 Canwu 模拟时间。"
+    description="添加依赖、创建仿真、选择命令入口，并把现实时间转换为 Canwu 模拟时间。"
   />
   <LinkCard
     title="安全读取与呈现状态"
@@ -61,7 +61,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 ## 开发者的核心约束
 
 1. 应用代码只依赖 `canwu-api`，不要把内部 crate 当作兼容性接口。
-2. 外部修改通过命令、语义动作或规范化 ingress 进入，不直接改写世界状态。
+2. 外部修改通过命令、语义动作或规范化输入进入，不直接改写世界状态。
 3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的上层应用逻辑和调试工具。
-4. 墙钟、渲染和输入由上层应用负责；Canwu 只接收可表示的模拟时间。
+4. 现实时间、渲染和输入由上层应用负责；Canwu 只接收能准确表示的模拟时间。
 5. 需要存档时固定引擎版本，并在加载和重放时恢复相同的插件语义环境。

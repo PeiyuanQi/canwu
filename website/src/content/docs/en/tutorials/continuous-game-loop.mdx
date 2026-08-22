@@ -25,7 +25,7 @@ cargo run -p canwu-api --example continuous_game_loop
 
 ## Three clocks
 
-- **Wall clock:** frame durations from the renderer or game framework. The example uses predefined 60 FPS-ish and 30 FPS-ish sequences, never the real clock or `sleep()`.
+- **Wall clock:** frame durations from the renderer or game framework. The example uses predefined sequences that approximate 60 FPS and 30 FPS, never the real clock or `sleep()`.
 - **Simulation clock:** Canwu's authoritative integer-minute time. The host calls `advance_canonical()` only after at least one minute has accumulated.
 - **Presentation clock:** Canwu time plus the host's retained sub-minute remainder, used only for visual interpolation.
 

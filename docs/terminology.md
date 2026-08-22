@@ -18,11 +18,11 @@ terms are currently defined only here and in their code-level API documentation.
 
 | 中文规范写法 | English | Code or API | Meaning and use |
 | --- | --- | --- | --- |
-| [参伍](../website/src/content/docs/architecture/index.mdx) | Canwu | `Canwu` | The product and public facade. Do not translate the brand as a generic noun. |
+| [参伍](../website/src/content/docs/architecture/index.mdx) | Canwu | `Canwu` | The product name and main public API entry point. Do not translate the brand as a generic noun. |
 | [无界面历史模拟引擎](../README.zh-CN.md) | headless historical simulation engine | — | The whole product category: Canwu simulates historical worlds without owning rendering, audio, or production UI. |
 | [模拟内核](../website/src/content/docs/architecture/index.mdx) | simulation core | `canwu-sim` | The private runtime that owns mutable authoritative state, scheduling, settlement, persistence, and replay. |
 | [上层应用](../website/src/content/docs/developer/integration.mdx) | host application | — | A game, research tool, service, client, or agent system that embeds Canwu. In Chinese prose, do not use “主机程序” for this concept. |
-| [公开门面](../website/src/content/docs/developer/integration.mdx) | public facade | `canwu-api` | The supported dependency and compatibility surface for application code. |
+| [对外 API](../website/src/content/docs/developer/integration.mdx) | public facade | `canwu-api` | The supported API boundary for application code. |
 | [模拟运行](../website/src/content/docs/developer/persistence.mdx) | simulation run | `run_id` | One causally continuous execution with its own identity, inputs, state, and evidence. |
 | [场景](../website/src/content/docs/tutorials/move-army.mdx) | scenario | `Scenario` | The initial world and configuration used to create a simulation. |
 | [权威状态](../website/src/content/docs/developer/reading-state.mdx) | authoritative state | `SimulationSnapshot` | State owned and validated by Canwu; it is the basis for commitments, persistence, and replay. |
@@ -34,7 +34,7 @@ terms are currently defined only here and in their code-level API documentation.
 
 | 中文规范写法 | English | Code or API | Meaning and use |
 | --- | --- | --- | --- |
-| [墙钟时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | wall time | — | Real elapsed time observed by the upper application. It never enters authoritative state directly. |
+| [现实时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | wall time | — | Real elapsed time observed by the upper application. It never enters authoritative state directly. |
 | [模拟时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | simulation time | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
 | [表现时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | presentation time | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
 | [命令](../website/src/content/docs/developer/integration.mdx) | command | `Command`, `CommandEnvelope` | A typed request to change authoritative state through validation and authority checks. |
