@@ -1,6 +1,6 @@
 ---
 title: 安全读取与呈现状态
-description: 为受信任宿主、玩家、智能体和渲染器选择正确的 Canwu 读取接口。
+description: 为受信任主机、玩家、智能体和渲染器选择正确的 Canwu 读取接口。
 sidebar:
   order: 3
   label: 读取与呈现
@@ -44,7 +44,7 @@ let commander_view = canwu.observe(ids.commander, &ObserveRequest::default())?;
 
 连续游戏应明确区分：
 
-- **墙钟时间**：帧间隔和暂停，由宿主拥有；
+- **墙钟时间**：帧间隔和暂停，由主机拥有；
 - **模拟时间**：`SimTime` 与 `SimDuration`，由 Canwu 结算；
 - **表现时间**：动画和插值，可使用浮点数，但只存在于客户端。
 

@@ -34,7 +34,7 @@ assert_eq!(restored.snapshot(), canwu.snapshot());
 ## 何时使用 checkpoint journal
 
 `checkpoint_journal_json()` 把验证过的 checkpoint 与后续 journal 组合起来，适合需要保留可审计
-证据或避免反复写出完整运行历史的宿主。使用对应的 `from_checkpoint_journal_json()` 或
+证据或避免反复写出完整运行历史的主机。使用对应的 `from_checkpoint_journal_json()` 或
 `from_checkpoint_journal_json_with_plugins()` 恢复。
 
 ## 精确重放

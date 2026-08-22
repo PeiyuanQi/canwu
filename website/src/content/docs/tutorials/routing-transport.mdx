@@ -7,7 +7,7 @@ sidebar:
   label: 路线规划与送信
 ---
 
-> **实验性扩展。** 路由和运输已经有公开的 0.5 类型与定向测试，但宿主仍需提供网络与历史内容数据；地图导入、通用容量分配器、通用历史数据集和把运输记录提升为核心快照字段仍是后续工作。
+> **实验性扩展。** 路由和运输已经有公开的 0.5 类型与定向测试，但主机仍需提供网络与历史内容数据；地图导入、通用容量分配器、通用历史数据集和把运输记录提升为核心快照字段仍是后续工作。
 
 ## 先分清两个问题
 
@@ -64,7 +64,7 @@ let plan = plan_route(&planning_snapshot, &request)?;
 
 ## 执行与遇灾
 
-拿到计划后，宿主把它安装到运输执行记录，并通过信息尝试的版本建立完成桥：
+拿到计划后，主机把它安装到运输执行记录，并通过信息尝试的版本建立完成桥：
 
 ```rust
 let mut execution = TransportExecution::new(
@@ -84,7 +84,7 @@ execution.begin_saga(
 
 每一 leg 有自己的状态和实际出发/到达时间。到达中转站后，先记录 `Handoff`，再开始下一 leg。遇到洪水、战乱、天气或线路中断时，领域系统记录明确的失败原因，执行进入 `ReplanPending`，然后基于新的 `PlanningSnapshot` 安装后继 itinerary revision。路由器不会自行“猜”灾害。
 
-最后一 leg 到达后，执行进入 `ArrivalPending`。`completion_request()` 产生稳定的 operation key 和证据，宿主通过 canonical ingress 调用信息扩展完成送达；重复提交同一 key 不应重复完成。
+最后一 leg 到达后，执行进入 `ArrivalPending`。`completion_request()` 产生稳定的 operation key 和证据，主机通过 canonical ingress 调用信息扩展完成送达；重复提交同一 key 不应重复完成。
 
 ## 容量与确定性
 

@@ -1,12 +1,12 @@
 ---
 title: 开发者指南
-description: 面向将 Canwu 嵌入游戏、研究工具、智能体或其他宿主程序的开发者指南。
+description: 面向将 Canwu 嵌入游戏、研究工具、智能体或其他主机程序的开发者指南。
 template: doc
 sidebar:
   order: 1
   label: 开发者指南
 hero:
-  tagline: 从依赖接入到存档重放，按宿主程序真正需要做的工作组织 Canwu 的公开 API。
+  tagline: 从依赖接入到存档重放，按主机程序真正需要做的工作组织 Canwu 的公开 API。
   actions:
     - text: 接入 Canwu
       link: /developer/integration/
@@ -24,7 +24,7 @@ hero:
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 这组文档写给**使用 Canwu 构建产品的开发者**。它不记录项目路线、维护流程、
-品牌规范或内部设计提案，而是解释宿主程序如何正确使用 `canwu-api`。
+品牌规范或内部设计提案，而是解释主机程序如何正确使用 `canwu-api`。
 
 ## 你会在这里找到什么
 
@@ -32,7 +32,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
   <LinkCard
     title="接入并驱动仿真"
     href="/developer/integration/"
-    description="添加依赖、创建仿真、选择命令入口，并把宿主时间转换为 Canwu 时间。"
+    description="添加依赖、创建仿真、选择命令入口，并把主机时间转换为 Canwu 时间。"
   />
   <LinkCard
     title="安全读取与呈现状态"
@@ -54,7 +54,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 ## 如何搭配其他文档
 
 - 想先运行代码：从[教程](/tutorials/)开始。
-- 想知道宿主程序该调用什么、何时调用：留在开发者指南。
+- 想知道主机程序该调用什么、何时调用：留在开发者指南。
 - 想理解结算、事件和随机数为什么这样设计：阅读[架构](/architecture/)。
 - 想查完整类型和函数签名：查看 `canwu-api` 源码及公开示例。
 
@@ -62,6 +62,6 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 1. 应用代码只依赖 `canwu-api`，不要把内部 crate 当作兼容性接口。
 2. 外部修改通过命令、语义动作或规范化 ingress 进入，不直接改写世界状态。
-3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的宿主逻辑和调试工具。
-4. 墙钟、渲染和输入属于宿主；Canwu 只接收可表示的模拟时间。
+3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的主机逻辑和调试工具。
+4. 墙钟、渲染和输入属于主机；Canwu 只接收可表示的模拟时间。
 5. 需要存档时固定引擎版本，并在加载和重放时恢复相同的插件语义环境。
