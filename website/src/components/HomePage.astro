@@ -57,7 +57,7 @@ const agentFlow = `observe(actor)
 const c = isEnglish
   ? {
       title: "Canwu Engine — Agent-native historical simulation core",
-      description: "An agent-native, deterministic Rust core for historical, social, and strategy simulation across regions and eras.",
+      description: "An agent-native, deterministic Rust core for historical, social, and strategic simulations across regions and eras.",
       status: "open source · agent-native · actively developed",
       name: "Canwu Engine", nativeName: "参伍引擎",
       summary: "An agent-native, deterministic Rust core for historical simulation.",
@@ -75,7 +75,7 @@ const c = isEnglish
       scopeLabel: "Scope", scopeTitle: "Across dynasties, regions, and renderers", scopeCopy: "The engine core stays generic. Scenario data and plugins define institutions, geography, population, trade, conflict, and other period-specific systems. The roadmap spans multiple regions and eras, from antiquity through the late twentieth century.",
       quickLabel: "Five-minute proof", quickTitle: "Run the checked-in movement scenario", quickIntro: "The example uses the public semantic API, advances one simulated day, and shows that a commander and a distant observer can hold different knowledge about the same army.",
       clone: "Clone and run", output: "Full example output", quickTutorial: "Open the step-by-step tutorial",
-      statusTitle: "Current capabilities", statusCopy: "The core simulation workflow, authoritative ingress, atomic settlement, validated persistence, exact replay, and committed performance evidence are available today. Public APIs mature through real integrations, with migration guidance accompanying contract changes.",
+      statusTitle: "Current capabilities", statusCopy: "The core simulation workflow, canonical ingress, atomic settlement, validated persistence, exact replay, and committed performance evidence are available today. Public APIs mature through real integrations, with migration guidance accompanying contract changes.",
       availableTitle: "Available now", availableItems: ["Change world state through commands or semantic actions, with validation before execution", "Advance time, run scheduled work, and record causal events in a fixed order", "Give each actor a different view of the world, including delayed information", "Save snapshots, create incremental checkpoint journals, seal completed live evidence into caller-owned segments, and replay records exactly", "Inspect committed elapsed-time, allocation, snapshot-size, and growth benchmarks"],
       evolvingTitle: "Roadmap", evolvingItems: ["Stable public API and compatibility guidance", "C, Python, TypeScript, and network interfaces", "Content-addressed archive adapters and indexed historical lookup", "Official renderer adapters and complete runnable scenarios"],
       platforms: "CI covers Windows, macOS, and Linux.",
@@ -109,12 +109,12 @@ const c = isEnglish
       features: [
         ["replay", "确定性执行与重演", "时间、计划任务、随机流与结算记录都有稳定顺序，使相同输入能够被检查和重演。"],
         ["knowledge", "知识属于具体角色", "世界真值与角色所知分开保存。观察结果记录来源、可信度与信息时效，权威状态保留在运行时内部。"],
-        ["boundary", "跨渲染器公开 API", "外部客户端通过经验证命令改变世界，并通过快照、事件或角色视角观察读取状态。"],
+        ["boundary", "跨渲染器公开 API", "外部客户端通过经验证命令改变世界，并通过快照、事件或角色相对视图读取状态。"],
       ],
       scopeLabel: "时空范围", scopeTitle: "跨朝代、跨地区、跨渲染器", scopeCopy: "引擎核心保持通用；制度、地理、人口、贸易、冲突等特定时代规则由场景数据与插件定义。路线图覆盖多个地区与时代，从古代世界延伸到二十世纪末。",
       quickLabel: "五分钟验证", quickTitle: "运行仓库中的移动场景", quickIntro: "该示例只使用公开语义 API，推进一个模拟日，并展示指挥官与远方观察者如何对同一支军队持有不同信息。",
       clone: "克隆并运行", output: "完整示例输出", quickTutorial: "查看分步教程",
-      statusTitle: "当前能力", statusCopy: "核心模拟流程、权威输入、原子结算、持久化验证、精确重演与可复现性能证据均已具备。公开 API 通过真实集成持续成熟，契约调整同时提供迁移说明。",
+      statusTitle: "当前能力", statusCopy: "核心模拟流程、规范化输入、原子结算、持久化验证、精确重演与可复现性能证据均已具备。公开 API 通过真实集成持续成熟，契约调整同时提供迁移说明。",
       availableTitle: "现有功能", availableItems: ["通过命令或语义行动修改世界状态，先校验再执行", "按固定顺序推进时间、运行计划任务并记录事件因果", "让不同角色看到不同信息，并保留消息传播的延迟", "保存快照、创建增量检查点日志、把已完成的实时证据封存为调用方持有的分段，并精确重演记录", "查看已提交的耗时、分配、快照大小与增长基准"],
       evolvingTitle: "路线图", evolvingItems: ["稳定的公开 API 与兼容指引", "C、Python、TypeScript 和网络接口", "内容寻址归档适配器与索引化历史查询", "官方渲染适配器与完整可运行场景"],
       platforms: "持续集成覆盖 Windows、macOS 与 Linux。",
