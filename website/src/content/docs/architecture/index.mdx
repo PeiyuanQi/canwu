@@ -10,6 +10,7 @@ hero:
 ---
 
 import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="架构总览导航">
   <span class="architecture-links-label">继续阅读：</span>
@@ -81,6 +82,37 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-sim` | 私有运行时、调度、插件和结算 |
 | `canwu-api` | 程序接口与语义接口 |
 | `canwu-debug` | 只依赖公开 API 的参考客户端 |
+
+## 从领域扩展到可运行套件
+
+参伍不仅提供内核契约。通用领域扩展提供可复用机制，参考内容包提供可
+替换的领域数据，参考整合包把这些能力接入一个小型世界，入门套件则把
+它们组合成开发者可以直接运行和改造的纵向切片。这些层都在内核之上，
+不会把某个历史世界写入 `canwu-core`。
+
+<MermaidDiagram
+  label="从参伍内核到参考内容、参考整合和上层游戏的架构分层"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  sourceLoading="图表源码将在预览加载时显示。"
+  noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
+  definition={`flowchart TB
+    Core["模拟内核"] --> Api["canwu-api"]
+    Api --> Domain["通用领域扩展"]
+    Domain --> Pack["参考内容包"]
+    Domain --> Integration["参考整合包"]
+    Pack --> Integration
+    Integration --> Starter["入门套件"]
+    Starter -. "可复制或替换" .-> Game["CM、用户游戏、研究工具"]
+    Pack -. "可直接复用" .-> Game
+    Integration -. "可直接复用" .-> Game
+`}
+/>
+
+参考内容包是数据，不是新的求解器；参考整合包必须使用公开 API，并且
+可以被另一种世界或经济模型替换；入门套件必须展示场景创建、命令、结算、
+角色相对读取、保存、分支和精确重放。内容包和整合包会持续增加，不能被
+设计成只有一个固定 Demo 的特殊路径。
 
 ## 延伸阅读
 

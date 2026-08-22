@@ -10,6 +10,7 @@ hero:
 ---
 
 import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="Architecture overview navigation">
   <span class="architecture-links-label">Continue exploring:</span>
@@ -81,6 +82,40 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
 | `canwu-api` | Programmatic and semantic interfaces |
 | `canwu-debug` | Reference client using only the public API |
+
+## From domain extensions to runnable kits
+
+Canwu provides more than kernel contracts. Generic domain extensions provide
+reusable mechanics, reference content packs provide replaceable domain data,
+reference integrations connect those capabilities to a small world, and
+starter kits compose them into vertical slices developers can run and extend.
+All of these layers remain above the kernel; no historical world is embedded in
+`canwu-core`.
+
+<MermaidDiagram
+  label="Architecture layers from the Canwu kernel to reference content, integrations, and host games"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  sourceLoading="Diagram source loads with the preview."
+  noScriptMessage="JavaScript is required for the diagram preview; the text-source fallback remains available above."
+  definition={`flowchart TB
+    Core["Simulation core"] --> Api["canwu-api"]
+    Api --> Domain["Generic domain extensions"]
+    Domain --> Pack["Reference content packs"]
+    Domain --> Integration["Reference integrations"]
+    Pack --> Integration
+    Integration --> Starter["Starter kits"]
+    Starter -. "copy or replace" .-> Game["CM, user games, research tools"]
+    Pack -. "reuse directly" .-> Game
+    Integration -. "reuse directly" .-> Game
+`}
+/>
+
+Reference content packs are data, not new solvers. Reference integrations must
+use the public API and be replaceable by another world or economy model. Starter
+kits must demonstrate scenario creation, commands, settlement, actor-relative
+reads, save/load, forks, and exact replay. The collection is expected to grow;
+it is not a privileged path for one fixed demo.
 
 ## Further reading
 
