@@ -206,6 +206,21 @@ its own optional commitment root. Exact replay replays recorded decision ingress
 and verifies the resulting attempts, state, and traces; it deliberately does not
 rerun a possibly external, human, or nondeterministic policy.
 
+### Deterministic outcomes, reloads, and forks
+
+Deterministic replay is not an anti-save-scumming policy. Canwu guarantees that
+the same authoritative state, command or decision ingress, plugin semantic
+environment, and simulation-time inputs produce the same random draws and
+outcomes. Reloading a snapshot before an already admitted event therefore does
+not reroll that event. A host may still expose `fork()` or another branch
+workflow so a player, AI planner, or researcher can try a different command;
+that is a new causal branch, not a replay of the original run.
+
+Whether a product permits manual save branches, exposes only one write-through
+save, or offers research-only forks belongs to the host application's save
+policy. The engine persists enough state for all three policies but does not
+silently convert deterministic replay into irreversible play.
+
 ## Experimental social diffusion extension
 
 `canwu-society` is an unpublished reference extension built on `canwu-api`; it
