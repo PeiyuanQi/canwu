@@ -162,6 +162,14 @@ simulation scheduler. A route estimate is never the same thing as an
 information deadline: `DeliveryAttempt.due_at` remains the logical completion
 deadline, while ETA can change after a disaster and trigger a reroute.
 
+Movement commands follow the same boundary. The canonical intent is
+`OrderMovement`, with subject-specific transit and custody state. A voluntary
+person trip is an actor-bound self-move; an army order, cargo dispatch, forced
+relocation, and custody transfer use different capability policies.
+`EntityRef` identifies a subject but does not make it movable, so unsupported
+subjects fail closed. See the [movement order proposal](proposals/movement-order-mechanism.md)
+for the capability matrix and migration requirements.
+
 This supports ancient relay stations, modern roads, 1900 or 1940 railways,
 air routes, and telegraph/signal systems through data-driven modes and
 traversal models. Disaster handling is explicit: a domain system records the

@@ -516,6 +516,7 @@ fn case_world() -> WorldSnapshot {
                 government,
                 current_location: territory,
                 roles: vec!["case_holder".to_owned()],
+                transit: None,
             })
             .collect(),
         governments: vec![Government {
@@ -531,6 +532,7 @@ fn case_world() -> WorldSnapshot {
         }],
         routes: Vec::new(),
         armies: Vec::new(),
+        letters: Vec::new(),
     }
 }
 

@@ -1,6 +1,6 @@
 //! Historical entity read models and detached world snapshots.
 
-use canwu_core::{ArmyId, GovernmentId, PersonId, RouteId, TerritoryId};
+use canwu_core::{ArmyId, GovernmentId, LetterId, PersonId, RouteId, TerritoryId};
 use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,40 @@ pub struct Person {
     pub government: GovernmentId,
     pub current_location: TerritoryId,
     pub roles: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transit: Option<PersonTransitState>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PersonTransitState {
+    pub from: TerritoryId,
+    pub to: TerritoryId,
+    pub departed_at: SimTime,
+    pub arrives_at: SimTime,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LetterStatus {
+    HeldByPerson,
+    InTransit,
+    HeldAtLocation,
+    Delivered,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LetterCargo {
+    pub id: LetterId,
+    pub sender: PersonId,
+    pub recipient: PersonId,
+    pub body: String,
+    pub status: LetterStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier: Option<PersonId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<TerritoryId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<SimTime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -89,6 +123,8 @@ pub struct WorldSnapshot {
     pub territories: Vec<Territory>,
     pub routes: Vec<Route>,
     pub armies: Vec<Army>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub letters: Vec<LetterCargo>,
 }
 
 impl WorldSnapshot {
@@ -117,6 +153,11 @@ impl WorldSnapshot {
     #[must_use]
     pub fn army(&self, id: ArmyId) -> Option<&Army> {
         self.armies.iter().find(|army| army.id == id)
+    }
+
+    #[must_use]
+    pub fn letter(&self, id: LetterId) -> Option<&LetterCargo> {
+        self.letters.iter().find(|letter| letter.id == id)
     }
 
     #[must_use]
@@ -165,6 +206,7 @@ pub struct WorldDiff {
     pub changed_armies: Vec<ArmyId>,
     pub changed_people: Vec<PersonId>,
     pub changed_territories: Vec<TerritoryId>,
+    pub changed_letters: Vec<LetterId>,
 }
 
 impl WorldDiff {
@@ -188,10 +230,17 @@ impl WorldDiff {
             .filter(|territory| before.territory(territory.id) != Some(*territory))
             .map(|territory| territory.id)
             .collect();
+        let changed_letters = after
+            .letters
+            .iter()
+            .filter(|letter| before.letter(letter.id) != Some(*letter))
+            .map(|letter| letter.id)
+            .collect();
         Self {
             changed_armies,
             changed_people,
             changed_territories,
+            changed_letters,
         }
     }
 }

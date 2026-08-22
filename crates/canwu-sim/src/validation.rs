@@ -10,8 +10,8 @@ use super::{
     DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
     EntityRef, ErrorCode, EventId, EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass,
     IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
-    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
-    PersistedAdmissionCursors, PluginComponentKey, PluginComponentRecord, PluginRegistry,
+    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
+    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord, PluginRegistry,
     RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
     ReservationAllocation, ReservationDisposition, ReservationPoolKey, ReservationRequestRecord,
     RunConfigurationSnapshot, RunManifest, RuntimeCurrentState, RuntimeState,
@@ -452,6 +452,7 @@ pub(super) fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.territories, |value| value.id, "territories")?;
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
+    validate_strict_id_order(&snapshot.world.letters, |value| value.id, "letters")?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
     let max_knowledge_record_id = crate::knowledge::validate_snapshot_records(
         snapshot,
@@ -918,6 +919,7 @@ pub(super) fn validate_snapshot(
     let mut schedule_keys = BTreeSet::new();
     let mut previous_schedule = None;
     let mut pending_arrivals = BTreeMap::<ArmyId, usize>::new();
+    let mut pending_person_arrivals = BTreeMap::<PersonId, usize>::new();
     let mut pending_reports = BTreeSet::new();
     let mut max_schedule_sequence = 0;
     let mut max_correlation_id = snapshot
@@ -949,6 +951,9 @@ pub(super) fn validate_snapshot(
             ScheduledAction::ArmyArrival { army, .. } => {
                 *pending_arrivals.entry(*army).or_default() += 1;
             }
+            ScheduledAction::PersonArrival { person, .. } => {
+                *pending_person_arrivals.entry(*person).or_default() += 1;
+            }
             ScheduledAction::KnowledgeReport { dispatch_event, .. } => {
                 if !pending_reports.insert(*dispatch_event) {
                     return invalid_snapshot(
@@ -965,6 +970,18 @@ pub(super) fn validate_snapshot(
         if (army.transit.is_some() && pending != 1) || (army.transit.is_none() && pending != 0) {
             return invalid_snapshot(
                 "army transit state must have exactly one matching pending arrival",
+            );
+        }
+    }
+    for person in &snapshot.world.people {
+        let pending = pending_person_arrivals
+            .get(&person.id)
+            .copied()
+            .unwrap_or(0);
+        if (person.transit.is_some() && pending != 1) || (person.transit.is_none() && pending != 0)
+        {
+            return invalid_snapshot(
+                "person transit state must have exactly one matching pending arrival",
             );
         }
     }
@@ -3346,11 +3363,19 @@ fn validate_snapshot_command(
         })?;
     }
     match &envelope.command {
-        Command::MoveArmy { army, destination } => {
-            if snapshot.world.army(*army).is_none()
+        Command::OrderMovement {
+            subject,
+            destination,
+            cargo,
+        } => {
+            if !snapshot_entity_exists_in_history(snapshot, history, cut, subject)
                 || snapshot.world.territory(*destination).is_none()
+                || cargo.windows(2).any(|pair| pair[0] >= pair[1])
+                || cargo
+                    .iter()
+                    .any(|letter| snapshot.world.letter(*letter).is_none())
             {
-                return invalid_snapshot("move command references unknown entities");
+                return invalid_snapshot("movement command references invalid entities or cargo");
             }
         }
         Command::DebugSetArmyMorale { army, morale } => {
@@ -3408,6 +3433,32 @@ fn validate_event_kind(
         }
         EventKind::ArmyArrived { army, territory } => {
             snapshot.world.army(*army).is_some() && snapshot.world.territory(*territory).is_some()
+        }
+        EventKind::PersonMoveOrdered {
+            person,
+            from,
+            to,
+            arrival_at,
+        } => {
+            snapshot.world.person(*person).is_some()
+                && snapshot.world.territory(*from).is_some()
+                && snapshot.world.territory(*to).is_some()
+                && *arrival_at > event.timestamp
+        }
+        EventKind::PersonArrived { person, territory } => {
+            snapshot.world.person(*person).is_some()
+                && snapshot.world.territory(*territory).is_some()
+        }
+        EventKind::LetterDelivered {
+            letter,
+            carrier,
+            recipient,
+            territory,
+        } => {
+            snapshot.world.letter(*letter).is_some()
+                && snapshot.world.person(*carrier).is_some()
+                && snapshot.world.person(*recipient).is_some()
+                && snapshot.world.territory(*territory).is_some()
         }
         EventKind::ReportDispatched {
             recipient,
@@ -3480,11 +3531,14 @@ fn validate_scheduled_action(
                 record.id == command_id
                     && record.accepted_at == order.timestamp
                     && matches!(
-                        record.envelope.command,
-                        Command::MoveArmy {
-                            army: commanded_army,
+                        &record.envelope.command,
+                        Command::OrderMovement {
+                            subject: EntityRef::Army(commanded_army),
                             destination: commanded_destination,
-                        } if commanded_army == *army && commanded_destination == *destination
+                            cargo,
+                        } if *commanded_army == *army
+                            && *commanded_destination == *destination
+                            && cargo.is_empty()
                     )
             });
             if !command_matches
@@ -3500,6 +3554,78 @@ fn validate_scheduled_action(
                 return invalid_snapshot(
                     "scheduled arrival, transit, move command, and order event disagree",
                 );
+            }
+        }
+        ScheduledAction::PersonArrival {
+            person,
+            destination,
+            order_event,
+            cargo,
+            correlation_id,
+        } => {
+            let Some(person_state) = snapshot.world.person(*person) else {
+                return invalid_snapshot("scheduled person arrival is invalid");
+            };
+            let Some(transit) = &person_state.transit else {
+                return invalid_snapshot("scheduled person arrival has no matching transit");
+            };
+            let Some(order) = snapshot_event_by_id(snapshot, *order_event) else {
+                return invalid_snapshot("scheduled person arrival references an unknown event");
+            };
+            let EventKind::PersonMoveOrdered {
+                person: ordered_person,
+                from,
+                to,
+                arrival_at,
+            } = &order.kind
+            else {
+                return invalid_snapshot(
+                    "scheduled person arrival does not reference a person order",
+                );
+            };
+            let Some(CauseRef::Command(command_id)) = order.cause else {
+                return invalid_snapshot("person movement order does not reference its command");
+            };
+            let command_matches = snapshot.commands.iter().any(|record| {
+                record.id == command_id
+                    && record.accepted_at == order.timestamp
+                    && matches!(
+                        &record.envelope.command,
+                        Command::OrderMovement {
+                            subject: EntityRef::Person(commanded_person),
+                            destination: commanded_destination,
+                            cargo: commanded_cargo,
+                        } if commanded_person == person
+                            && commanded_destination == destination
+                            && commanded_cargo == cargo
+                    )
+            });
+            if !command_matches
+                || *ordered_person != *person
+                || *from != transit.from
+                || *to != *destination
+                || transit.to != *destination
+                || *arrival_at != key.at
+                || transit.arrives_at != key.at
+                || order.timestamp != transit.departed_at
+                || order.correlation_id != *correlation_id
+            {
+                return invalid_snapshot(
+                    "scheduled person arrival, transit, command, and order event disagree",
+                );
+            }
+            if cargo.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return invalid_snapshot("scheduled person arrival cargo is not canonical");
+            }
+            for letter_id in cargo {
+                let Some(letter) = snapshot.world.letter(*letter_id) else {
+                    return invalid_snapshot(
+                        "scheduled person arrival references an unknown letter",
+                    );
+                };
+                if letter.status != LetterStatus::InTransit || letter.carrier != Some(*person) {
+                    return invalid_snapshot("scheduled person arrival has invalid letter custody");
+                }
             }
         }
         ScheduledAction::KnowledgeReport {
@@ -3668,6 +3794,7 @@ fn validate_scheduled_action(
 const fn scheduled_correlation_id(action: &ScheduledAction) -> u64 {
     match action {
         ScheduledAction::ArmyArrival { correlation_id, .. }
+        | ScheduledAction::PersonArrival { correlation_id, .. }
         | ScheduledAction::KnowledgeReport { correlation_id, .. }
         | ScheduledAction::PluginDirective { correlation_id, .. } => *correlation_id,
     }
@@ -3755,7 +3882,8 @@ pub(super) fn core_world_entity_exists(world: &WorldSnapshot, entity: &EntityRef
         EntityRef::Person(id) => world.person(*id).is_some(),
         EntityRef::Route(id) => world.route(*id).is_some(),
         EntityRef::Territory(id) => world.territory(*id).is_some(),
-        EntityRef::Domain(_) | EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+        EntityRef::Domain(_) | EntityRef::Organization(_) => false,
+        EntityRef::Resource(id) => world.letter(super::LetterId::new(id.get())).is_some(),
     }
 }
 
@@ -3866,7 +3994,10 @@ pub(super) fn runtime_current_entity_exists(
         EntityRef::Person(id) => current.people.contains_key(id),
         EntityRef::Route(id) => current.routes.contains_key(id),
         EntityRef::Territory(id) => current.territories.contains_key(id),
-        EntityRef::Organization(_) | EntityRef::Resource(_) => false,
+        EntityRef::Organization(_) => false,
+        EntityRef::Resource(id) => current
+            .letters
+            .contains_key(&super::LetterId::new(id.get())),
     }
 }
 
@@ -4035,7 +4166,9 @@ pub(super) fn validate_domain_dependents_with_records(
         ScheduledAction::PluginDirective { directive, .. } => {
             system_directive_has_entity(directive, &unavailable)
         }
-        ScheduledAction::ArmyArrival { .. } | ScheduledAction::KnowledgeReport { .. } => false,
+        ScheduledAction::ArmyArrival { .. }
+        | ScheduledAction::PersonArrival { .. }
+        | ScheduledAction::KnowledgeReport { .. } => false,
     }) {
         return Err(CanwuError::new(
             ErrorCode::DomainRecordReferenced,

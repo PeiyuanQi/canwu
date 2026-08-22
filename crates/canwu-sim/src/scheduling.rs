@@ -1,12 +1,12 @@
 use super::{
     ActorKnowledge, ArmyId, ArmyKnowledge, AssertUnwindSafe, BTreeMap, BoundaryId, CanwuError,
     CauseRef, ClockTransactionCheckpoint, CommitmentDomains, DeterministicRng, EntityRef,
-    ErrorCode, EstimateRange, EventId, EventKind, KnowledgeSource, PendingBoundaryRandomDraw,
-    PersonId, RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer,
-    RandomDrawRecord, RandomStreamKey, RuntimeValidationContext, ScheduleKey, ScheduledAction,
-    ScheduledBatchTransactionCheckpoint, SimDuration, SimEvent, SimTime, Simulation,
-    SimulationView, SimulationViewState, StateKey, TerritoryId, catch_unwind, claim_counter,
-    random, validate_directives_with_context,
+    ErrorCode, EstimateRange, EventId, EventKind, KnowledgeSource, LetterStatus,
+    PendingBoundaryRandomDraw, PersonId, RandomDrawAddress, RandomDrawId, RandomDrawOutcome,
+    RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RuntimeValidationContext, ScheduleKey,
+    ScheduledAction, ScheduledBatchTransactionCheckpoint, SimDuration, SimEvent, SimTime,
+    Simulation, SimulationView, SimulationViewState, StateKey, TerritoryId, catch_unwind,
+    claim_counter, random, validate_directives_with_context,
 };
 
 impl Simulation {
@@ -201,6 +201,19 @@ impl Simulation {
                 order_event,
                 correlation_id,
             } => self.execute_arrival(army, destination, order_event, correlation_id),
+            ScheduledAction::PersonArrival {
+                person,
+                destination,
+                order_event,
+                cargo,
+                correlation_id,
+            } => self.execute_person_arrival(
+                person,
+                destination,
+                order_event,
+                &cargo,
+                correlation_id,
+            ),
             ScheduledAction::KnowledgeReport {
                 recipient,
                 army,
@@ -367,6 +380,170 @@ impl Simulation {
                 },
             )?;
         }
+        Ok(())
+    }
+
+    fn execute_person_arrival(
+        &mut self,
+        person: PersonId,
+        destination: TerritoryId,
+        order_event: EventId,
+        cargo: &[super::LetterId],
+        correlation_id: u64,
+    ) -> Result<(), CanwuError> {
+        self.invalidate_commitments(CommitmentDomains::WORLD);
+        {
+            let person_state = self.state.current.people.get_mut(&person).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::EntityNotFound,
+                    "scheduled person no longer exists",
+                )
+            })?;
+            let transit = person_state.transit.take().ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    "person arrival has no matching transit",
+                )
+            })?;
+            if transit.to != destination || transit.arrives_at != self.state.scheduler.now {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidSnapshot,
+                    "person arrival disagrees with its transit state",
+                ));
+            }
+            person_state.current_location = destination;
+        }
+        let arrival_event = self.emit(
+            EventKind::PersonArrived {
+                person,
+                territory: destination,
+            },
+            vec![EntityRef::Person(person), EntityRef::Territory(destination)],
+            format!("Person {person} arrived in territory {destination}"),
+            Some(CauseRef::Event(order_event)),
+            correlation_id,
+        )?;
+
+        for letter_id in cargo {
+            self.settle_letter_at_arrival(
+                *letter_id,
+                person,
+                destination,
+                arrival_event,
+                correlation_id,
+            )?;
+        }
+        let waiting_letters: Vec<_> = self
+            .state
+            .current
+            .letters
+            .values()
+            .filter(|letter| {
+                letter.status == LetterStatus::HeldAtLocation
+                    && letter.location == Some(destination)
+                    && letter.recipient == person
+            })
+            .map(|letter| letter.id)
+            .collect();
+        for letter_id in waiting_letters {
+            self.deliver_letter(
+                letter_id,
+                person,
+                destination,
+                arrival_event,
+                correlation_id,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn settle_letter_at_arrival(
+        &mut self,
+        letter_id: super::LetterId,
+        carrier: PersonId,
+        destination: TerritoryId,
+        arrival_event: EventId,
+        correlation_id: u64,
+    ) -> Result<(), CanwuError> {
+        let recipient = self
+            .state
+            .current
+            .letters
+            .get(&letter_id)
+            .ok_or_else(|| CanwuError::new(ErrorCode::EntityNotFound, "arrival cargo disappeared"))?
+            .recipient;
+        let recipient_is_present =
+            self.state
+                .current
+                .people
+                .get(&recipient)
+                .is_some_and(|person| {
+                    person.current_location == destination && person.transit.is_none()
+                });
+        if recipient_is_present {
+            self.deliver_letter(
+                letter_id,
+                carrier,
+                destination,
+                arrival_event,
+                correlation_id,
+            )
+        } else {
+            let letter = self
+                .state
+                .current
+                .letters
+                .get_mut(&letter_id)
+                .ok_or_else(|| {
+                    CanwuError::new(ErrorCode::EntityNotFound, "arrival cargo disappeared")
+                })?;
+            letter.status = LetterStatus::HeldAtLocation;
+            letter.carrier = None;
+            letter.location = Some(destination);
+            Ok(())
+        }
+    }
+
+    fn deliver_letter(
+        &mut self,
+        letter_id: super::LetterId,
+        carrier: PersonId,
+        territory: TerritoryId,
+        arrival_event: EventId,
+        correlation_id: u64,
+    ) -> Result<(), CanwuError> {
+        let letter = self
+            .state
+            .current
+            .letters
+            .get_mut(&letter_id)
+            .ok_or_else(|| {
+                CanwuError::new(ErrorCode::EntityNotFound, "delivery letter disappeared")
+            })?;
+        let sender = letter.sender;
+        let recipient = letter.recipient;
+        letter.status = LetterStatus::Delivered;
+        letter.carrier = None;
+        letter.location = Some(territory);
+        letter.delivered_at = Some(self.state.scheduler.now);
+        self.emit(
+            EventKind::LetterDelivered {
+                letter: letter_id,
+                carrier,
+                recipient,
+                territory,
+            },
+            vec![
+                EntityRef::Resource(super::ResourceId::new(letter_id.get())),
+                EntityRef::Person(sender),
+                EntityRef::Person(carrier),
+                EntityRef::Person(recipient),
+                EntityRef::Territory(territory),
+            ],
+            format!("Letter {letter_id} was delivered to person {recipient}"),
+            Some(CauseRef::Event(arrival_event)),
+            correlation_id,
+        )?;
         Ok(())
     }
 

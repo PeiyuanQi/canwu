@@ -19,7 +19,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 - 情报变化后，安全地更新当前可选方案；
 - 无论决策者是 AI、玩家还是外部模型，都只能选择已有选项，不能凭空生成命令；
-- 选中“派兵支援”后，由获授权的 controller 提交真正的 `MoveArmy` 命令；
+- 选中“派兵支援”后，由获授权的 controller 提交真正的 `OrderMovement` 命令；
 - 保存每次尝试、评分和执行结果，使存档恢复与精确重放不必再次询问决策者。
 
 这个案例不对应具体历史人物。人物性格、情报来源和“为什么值得援助”等历史语义
@@ -32,7 +32,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 | 系统 | 在案例中的作用 | 相关文档 |
 | --- | --- | --- |
 | 决策 ticket、controller 与 policy | 保存问题、当前选项、决策身份和评分过程 | 本页下文 |
-| 权限与命令入口 | 把选中的 option 转成经过验证的 `MoveArmy` | [架构总览](/architecture/)、[接入并驱动仿真](/developer/integration/) |
+| 权限与命令入口 | 把选中的 option 转成经过验证的 `OrderMovement` | [架构总览](/architecture/)、[接入并驱动仿真](/developer/integration/) |
 | 结算边界 | 接纳 decision ingress，持久化 trace，再执行派生命令 | [结算系统](/architecture/settlement/) |
 | 角色相对信息 | 用军阀乙可见的事实构造 context，避免泄露全知状态 | [安全读取与呈现状态](/developer/reading-state/) |
 | 存档与精确重放 | 保存 ticket、attempt、trace 和命令证据 | [存档、重放与分支](/developer/persistence/) |
@@ -64,7 +64,7 @@ exact replay，验证两条路径得到完全相同的快照。
 2. 打开援军请求 ticket。补给路线尚未确认，因此最初只有“拒绝援助”可选。
 3. 路线确认后，通过 `DecisionMutation::ReplaceOptions` 更新 context，并加入 `send-aid`。
 4. 使用 `WeightedUtilityPolicy` 为当前 options 计算确定性整数分数。
-5. 调用 `drive_decision()` 生成 resolution ingress；下一个 canonical boundary 持久化 trace，并把选中的 `MoveArmy` 交给普通命令入口。
+5. 调用 `drive_decision()` 生成 resolution ingress；下一个 canonical boundary 持久化 trace，并把选中的 `OrderMovement` 交给普通命令入口。
 6. 保存快照、重新加载并执行 exact replay，确认重放不需要再次运行 policy。
 </Steps>
 
@@ -138,9 +138,10 @@ option ID：
 
 ```rust
 DecisionOption::new("send-aid", "Send the neighboring army").with_command(
-    serde_json::to_value(Command::MoveArmy {
-        army: ids.army,
+    serde_json::to_value(Command::OrderMovement {
+        subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     })?,
 )
 ```

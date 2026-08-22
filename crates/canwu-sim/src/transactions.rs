@@ -1,8 +1,8 @@
 use super::{
     Army, ArmyId, CommitmentRoots, DecisionState, DomainRecord, DomainRecordRef, IngressQueueKey,
-    KnowledgeSnapshot, PluginComponentKey, PluginComponentRecord, RandomStreamKey,
-    RandomStreamState, RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState,
-    ScheduleKey, ScheduledAction, SimTime,
+    KnowledgeSnapshot, LetterCargo, LetterId, Person, PersonId, PluginComponentKey,
+    PluginComponentRecord, RandomStreamKey, RandomStreamState, RuntimeCommitmentCache,
+    RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey, ScheduledAction, SimTime,
 };
 use std::collections::BTreeMap;
 
@@ -76,6 +76,8 @@ impl IngressTransactionCheckpoint {
 }
 
 pub(super) struct CommandTransactionCheckpoint {
+    people: BTreeMap<PersonId, Person>,
+    letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
@@ -93,6 +95,8 @@ pub(super) struct CommandTransactionCheckpoint {
 impl CommandTransactionCheckpoint {
     pub(super) fn capture(state: &RuntimeState) -> Self {
         Self {
+            people: state.current.people.clone(),
+            letters: state.current.letters.clone(),
             armies: state.current.armies.clone(),
             knowledge: state.current.knowledge.clone(),
             plugin_components: state.current.plugin_components.clone(),
@@ -109,6 +113,8 @@ impl CommandTransactionCheckpoint {
     }
 
     pub(super) fn restore(self, state: &mut RuntimeState) {
+        state.current.people = self.people;
+        state.current.letters = self.letters;
         state.current.armies = self.armies;
         state.current.knowledge = self.knowledge;
         state.current.plugin_components = self.plugin_components;
@@ -128,6 +134,8 @@ impl CommandTransactionCheckpoint {
 }
 
 pub(super) struct BoundaryTransactionCheckpoint {
+    people: BTreeMap<PersonId, Person>,
+    letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
@@ -151,6 +159,8 @@ pub(super) struct BoundaryTransactionCheckpoint {
 impl BoundaryTransactionCheckpoint {
     pub(super) fn capture(state: &RuntimeState) -> Self {
         Self {
+            people: state.current.people.clone(),
+            letters: state.current.letters.clone(),
             armies: state.current.armies.clone(),
             knowledge: state.current.knowledge.clone(),
             plugin_components: state.current.plugin_components.clone(),
@@ -173,6 +183,8 @@ impl BoundaryTransactionCheckpoint {
     }
 
     pub(super) fn restore(self, state: &mut RuntimeState) {
+        state.current.people = self.people;
+        state.current.letters = self.letters;
         state.current.armies = self.armies;
         state.current.knowledge = self.knowledge;
         state.current.plugin_components = self.plugin_components;
@@ -198,6 +210,8 @@ impl BoundaryTransactionCheckpoint {
 }
 
 pub(super) struct ScheduledBatchTransactionCheckpoint {
+    people: BTreeMap<PersonId, Person>,
+    letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
@@ -216,6 +230,8 @@ pub(super) struct ScheduledBatchTransactionCheckpoint {
 impl ScheduledBatchTransactionCheckpoint {
     pub(super) fn capture(state: &RuntimeState) -> Self {
         Self {
+            people: state.current.people.clone(),
+            letters: state.current.letters.clone(),
             armies: state.current.armies.clone(),
             knowledge: state.current.knowledge.clone(),
             plugin_components: state.current.plugin_components.clone(),
@@ -233,6 +249,8 @@ impl ScheduledBatchTransactionCheckpoint {
     }
 
     pub(super) fn restore(self, state: &mut RuntimeState) {
+        state.current.people = self.people;
+        state.current.letters = self.letters;
         state.current.armies = self.armies;
         state.current.knowledge = self.knowledge;
         state.current.plugin_components = self.plugin_components;

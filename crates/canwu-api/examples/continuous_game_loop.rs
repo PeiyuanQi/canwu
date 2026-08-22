@@ -6,8 +6,8 @@
 
 use canwu_api::{
     ArmyId, Canwu, CanwuError, Command, CommandEnvelope, CommandRecord, CommandRequest,
-    CommandRequestId, DemoIds, Issuer, SimDuration, SimEvent, SimTime, TerritoryId, TransitState,
-    WorldSnapshot,
+    CommandRequestId, DemoIds, EntityRef, Issuer, SimDuration, SimEvent, SimTime, TerritoryId,
+    TransitState, WorldSnapshot,
 };
 use std::{
     fmt::{Display, Formatter},
@@ -266,9 +266,10 @@ impl GameHost {
         };
         let envelope = CommandEnvelope::new(
             Issuer::Actor(self.ids.commander),
-            Command::MoveArmy {
-                army: self.ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(self.ids.army),
                 destination: self.ids.eastern_territory,
+                cargo: Vec::new(),
             },
         )
         .at_time(due_at);
@@ -499,8 +500,13 @@ fn assert_expected_outcome(outcome: &RunOutcome) {
     assert_eq!(command.envelope.expected_time, Some(command_at));
     assert!(matches!(
         &command.envelope.command,
-        Command::MoveArmy { army, destination }
-            if *army == ids.army && *destination == ids.eastern_territory
+        Command::OrderMovement {
+            subject: EntityRef::Army(army),
+            destination,
+            cargo,
+        } if *army == ids.army
+            && *destination == ids.eastern_territory
+            && cargo.is_empty()
     ));
 
     let event_timeline = outcome

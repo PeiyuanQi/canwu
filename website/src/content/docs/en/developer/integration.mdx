@@ -13,18 +13,17 @@ and the frame loop. Canwu owns authoritative state, validation, deterministic ti
 
 ## Add the dependency
 
-Canwu 0.4.0 requires Rust 1.88 or newer. Application code should depend only on the public facade:
+The current main branch requires Rust 1.88 or newer. Application code should depend only on the public facade:
 
 ```toml
 [dependencies]
-canwu-api = "0.4.0"
+canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 ```
 
-If the application persists Canwu snapshots, pin the exact version and upgrade it only with an explicit save migration:
-
-```toml
-canwu-api = "=0.4.0"
-```
+If the application persists Canwu snapshots, pin a published engine release
+and upgrade it only with an explicit save migration. The current `main`
+branch dependency is for development while the movement API is being released;
+do not treat it as a stable snapshot format.
 
 Do not depend directly on `canwu-sim`, `canwu-world`, or another implementation crate. Cargo may resolve them,
 but they are not independent compatibility surfaces for application code.
@@ -39,9 +38,10 @@ let ids = Canwu::demo_ids();
 
 canwu.act(
     ids.commander,
-    SemanticAction::MoveArmy {
-        army: ids.army,
+    SemanticAction::MoveEntity {
+        subject: canwu_api::EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     },
 )?;
 

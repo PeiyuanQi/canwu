@@ -57,6 +57,7 @@ define_id!(EventId);
 define_id!(GovernmentId);
 define_id!(IngressId);
 define_id!(HolderKnowledgeRecordId);
+define_id!(LetterId);
 define_id!(OrganizationId);
 define_id!(PersonId);
 define_id!(RandomDrawId);

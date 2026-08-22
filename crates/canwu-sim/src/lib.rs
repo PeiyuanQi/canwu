@@ -92,8 +92,9 @@ pub use records::{
 use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId,
     DecisionTicketId, DecisionTraceId, DeterministicRng, DomainRecordKind, DomainRecordRef,
-    DomainRecordType, EntityRef, EventId, FieldSchema, GovernmentId, IngressId, PersonId,
-    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
+    DomainRecordType, EntityRef, EventId, FieldSchema, GovernmentId, IngressId, LetterId, PersonId,
+    RandomDrawId, ResourceId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -104,7 +105,8 @@ pub use canwu_knowledge::{
 };
 use canwu_time::{SimDuration, SimTime};
 use canwu_world::{
-    Army, Government, MapPoint, Person, Route, Territory, TransitState, WorldSnapshot,
+    Army, Government, LetterCargo, LetterStatus, MapPoint, Person, PersonTransitState, Route,
+    Territory, TransitState, WorldSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -606,9 +608,11 @@ impl SystemContract {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Command {
-    MoveArmy {
-        army: ArmyId,
+    OrderMovement {
+        subject: EntityRef,
         destination: TerritoryId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cargo: Vec<LetterId>,
     },
     DebugSetArmyMorale {
         army: ArmyId,
@@ -1972,6 +1976,13 @@ enum ScheduledAction {
         order_event: EventId,
         correlation_id: u64,
     },
+    PersonArrival {
+        person: PersonId,
+        destination: TerritoryId,
+        order_event: EventId,
+        cargo: Vec<LetterId>,
+        correlation_id: u64,
+    },
     KnowledgeReport {
         recipient: PersonId,
         army: ArmyId,
@@ -2348,6 +2359,22 @@ impl Simulation {
                 "initial scenarios cannot contain transit without admitted command/event/queue evidence",
             ));
         }
+        if scenario
+            .world
+            .people
+            .iter()
+            .any(|person| person.transit.is_some())
+            || scenario
+                .world
+                .letters
+                .iter()
+                .any(|letter| letter.status == LetterStatus::InTransit)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "initial scenarios cannot contain person or letter transit without admitted command/event/queue evidence",
+            ));
+        }
         let schema = base_schema();
         let plugins = PluginRegistry::default();
         let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
@@ -2358,6 +2385,12 @@ impl Simulation {
                     people: scenario
                         .world
                         .people
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
+                    letters: scenario
+                        .world
+                        .letters
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
@@ -2607,6 +2640,7 @@ impl Simulation {
             territories: self.state.current.territories.values().cloned().collect(),
             routes: self.state.current.routes.values().cloned().collect(),
             armies: self.state.current.armies.values().cloned().collect(),
+            letters: self.state.current.letters.values().cloned().collect(),
         }
     }
 
@@ -2691,7 +2725,10 @@ impl Simulation {
                 EventAudience::KnowledgeHolder(holder.clone())
             }
             EventKind::MoveOrdered { .. }
+            | EventKind::PersonMoveOrdered { .. }
             | EventKind::ArmyArrived { .. }
+            | EventKind::PersonArrived { .. }
+            | EventKind::LetterDelivered { .. }
             | EventKind::ReportDispatched { .. }
             | EventKind::KnowledgeUpdated { .. }
             | EventKind::DebugFieldChanged { .. } => EventAudience::Private,
@@ -3119,6 +3156,12 @@ impl Simulation {
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
+                    letters: snapshot
+                        .world
+                        .letters
+                        .into_iter()
+                        .map(|value| (value.id, value))
+                        .collect(),
                     governments: snapshot
                         .world
                         .governments
@@ -3284,11 +3327,15 @@ impl Simulation {
         context: &CommandContext,
     ) -> Result<PreparedCommand, CanwuError> {
         match &envelope.command {
-            Command::MoveArmy { army, destination } => {
+            Command::OrderMovement {
+                subject,
+                destination,
+                cargo,
+            } => {
                 let Some(actor) = decision_actor(&context.authority) else {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidAuthority,
-                        "move commands require an accountable actor origin",
+                        "movement commands require an accountable actor origin",
                     ));
                 };
                 let person = self.state.current.people.get(&actor).ok_or_else(|| {
@@ -3298,27 +3345,17 @@ impl Simulation {
                     )
                     .with_entity(EntityRef::Person(actor))
                 })?;
-                let army_state = self.state.current.armies.get(army).ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::ArmyNotFound,
-                        format!("army {army} was not found"),
-                    )
-                    .with_entity(EntityRef::Army(*army))
-                })?;
-                if army_state.commander != person.id {
+                if context
+                    .authority
+                    .command_subject
+                    .as_ref()
+                    .is_some_and(|bound| bound != subject)
+                {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidAuthority,
-                        format!("{} does not command {}", person.name, army_state.name),
+                        "command subject does not match the movement subject",
                     )
-                    .with_entity(EntityRef::Person(person.id))
-                    .with_entity(EntityRef::Army(*army)));
-                }
-                if army_state.transit.is_some() {
-                    return Err(CanwuError::new(
-                        ErrorCode::InvalidAuthority,
-                        format!("{} is already moving", army_state.name),
-                    )
-                    .with_entity(EntityRef::Army(*army)));
+                    .with_entity(subject.clone()));
                 }
                 if !self.state.current.territories.contains_key(destination) {
                     return Err(CanwuError::new(
@@ -3327,39 +3364,122 @@ impl Simulation {
                     )
                     .with_entity(EntityRef::Territory(*destination)));
                 }
-                let route = self
-                    .state
-                    .current
-                    .routes
-                    .values()
-                    .find(|route| route.connects(army_state.location, *destination))
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::NoRoute,
-                            format!(
-                                "no direct route connects territory {} to {destination}",
-                                army_state.location
-                            ),
-                        )
-                    })?;
-                let arrival_at = self
-                    .state
-                    .scheduler
-                    .now
-                    .checked_add(SimDuration::minutes(route.travel_minutes))
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidDuration,
-                            "army arrival time exceeds the supported range",
-                        )
-                    })?;
-                Ok(PreparedCommand::MoveArmy {
-                    army: *army,
-                    actor,
-                    from: army_state.location,
-                    destination: *destination,
-                    arrival_at,
-                })
+                if cargo.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        "movement cargo IDs must be sorted and unique",
+                    ));
+                }
+                match subject {
+                    EntityRef::Army(army) => {
+                        if !cargo.is_empty() {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidPayload,
+                                "army movement does not accept letter cargo yet",
+                            ));
+                        }
+                        let army_state = self.state.current.armies.get(army).ok_or_else(|| {
+                            CanwuError::new(
+                                ErrorCode::ArmyNotFound,
+                                format!("army {army} was not found"),
+                            )
+                            .with_entity(EntityRef::Army(*army))
+                        })?;
+                        if army_state.commander != person.id {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidAuthority,
+                                format!("{} does not command {}", person.name, army_state.name),
+                            )
+                            .with_entity(EntityRef::Person(person.id))
+                            .with_entity(EntityRef::Army(*army)));
+                        }
+                        if army_state.transit.is_some() {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidAuthority,
+                                format!("{} is already moving", army_state.name),
+                            )
+                            .with_entity(EntityRef::Army(*army)));
+                        }
+                        let arrival_at =
+                            self.movement_arrival_time(army_state.location, *destination)?;
+                        Ok(PreparedCommand::ArmyMovement {
+                            army: *army,
+                            actor,
+                            from: army_state.location,
+                            destination: *destination,
+                            arrival_at,
+                        })
+                    }
+                    EntityRef::Person(person_id) => {
+                        if *person_id != actor
+                            || context
+                                .authority
+                                .command_subject
+                                .as_ref()
+                                .is_some_and(|subject| subject != &EntityRef::Person(*person_id))
+                        {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidAuthority,
+                                "self-directed movement must bind the actor to the person subject",
+                            )
+                            .with_entity(EntityRef::Person(*person_id)));
+                        }
+                        let person_state =
+                            self.state.current.people.get(person_id).ok_or_else(|| {
+                                CanwuError::new(
+                                    ErrorCode::EntityNotFound,
+                                    format!("person {person_id} was not found"),
+                                )
+                                .with_entity(EntityRef::Person(*person_id))
+                            })?;
+                        if person_state.transit.is_some() {
+                            return Err(CanwuError::new(
+                                ErrorCode::InvalidAuthority,
+                                format!("person {person_id} is already moving"),
+                            )
+                            .with_entity(EntityRef::Person(*person_id)));
+                        }
+                        for letter_id in cargo {
+                            let letter =
+                                self.state.current.letters.get(letter_id).ok_or_else(|| {
+                                    CanwuError::new(
+                                        ErrorCode::EntityNotFound,
+                                        format!("letter {letter_id} was not found"),
+                                    )
+                                    .with_entity(
+                                        EntityRef::Resource(ResourceId::new(letter_id.get())),
+                                    )
+                                })?;
+                            if letter.status != LetterStatus::HeldByPerson
+                                || letter.carrier != Some(*person_id)
+                                || !self.state.current.people.contains_key(&letter.sender)
+                                || !self.state.current.people.contains_key(&letter.recipient)
+                            {
+                                return Err(CanwuError::new(
+                                    ErrorCode::InvalidAuthority,
+                                    format!("letter {letter_id} is not held by the moving person"),
+                                )
+                                .with_entity(EntityRef::Resource(ResourceId::new(
+                                    letter_id.get(),
+                                ))));
+                            }
+                        }
+                        let arrival_at = self
+                            .movement_arrival_time(person_state.current_location, *destination)?;
+                        Ok(PreparedCommand::MovePerson {
+                            person: *person_id,
+                            from: person_state.current_location,
+                            destination: *destination,
+                            cargo: cargo.clone(),
+                            arrival_at,
+                        })
+                    }
+                    _ => Err(CanwuError::new(
+                        ErrorCode::InvalidAuthority,
+                        "only army and person subjects support built-in movement",
+                    )
+                    .with_entity(subject.clone())),
+                }
             }
             Command::DebugSetArmyMorale { army, morale } => {
                 if envelope.issuer != Issuer::Debug {
@@ -3438,6 +3558,45 @@ impl Simulation {
         }
     }
 
+    fn movement_arrival_time(
+        &self,
+        from: TerritoryId,
+        to: TerritoryId,
+    ) -> Result<SimTime, CanwuError> {
+        let travel_minutes = if from == to {
+            1
+        } else {
+            self.state
+                .current
+                .routes
+                .values()
+                .find(|route| route.connects(from, to))
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::NoRoute,
+                        format!("no direct route connects territory {from} to {to}"),
+                    )
+                })?
+                .travel_minutes
+        };
+        if travel_minutes <= 0 {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDuration,
+                "movement route duration must be positive",
+            ));
+        }
+        self.state
+            .scheduler
+            .now
+            .checked_add(SimDuration::minutes(travel_minutes))
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDuration,
+                    "movement arrival time exceeds the supported range",
+                )
+            })
+    }
+
     fn apply_prepared(
         &mut self,
         prepared: PreparedCommand,
@@ -3445,7 +3604,7 @@ impl Simulation {
         correlation_id: u64,
     ) -> Result<(), CanwuError> {
         match prepared {
-            PreparedCommand::MoveArmy {
+            PreparedCommand::ArmyMovement {
                 army,
                 actor,
                 from,
@@ -3484,6 +3643,73 @@ impl Simulation {
                         army,
                         destination,
                         order_event: event,
+                        correlation_id,
+                    },
+                )?;
+            }
+            PreparedCommand::MovePerson {
+                person,
+                from,
+                destination,
+                cargo,
+                arrival_at,
+            } => {
+                self.invalidate_commitments(CommitmentDomains::WORLD);
+                let person_state = self.state.current.people.get_mut(&person).ok_or_else(|| {
+                    CanwuError::new(ErrorCode::EntityNotFound, "validated person disappeared")
+                })?;
+                person_state.transit = Some(PersonTransitState {
+                    from,
+                    to: destination,
+                    departed_at: self.state.scheduler.now,
+                    arrives_at: arrival_at,
+                });
+                for letter_id in &cargo {
+                    let letter =
+                        self.state
+                            .current
+                            .letters
+                            .get_mut(letter_id)
+                            .ok_or_else(|| {
+                                CanwuError::new(
+                                    ErrorCode::EntityNotFound,
+                                    "validated letter disappeared",
+                                )
+                            })?;
+                    letter.status = LetterStatus::InTransit;
+                    letter.carrier = Some(person);
+                    letter.location = None;
+                }
+                let event = self.emit(
+                    EventKind::PersonMoveOrdered {
+                        person,
+                        from,
+                        to: destination,
+                        arrival_at,
+                    },
+                    std::iter::once(EntityRef::Person(person))
+                        .chain(
+                            cargo
+                                .iter()
+                                .copied()
+                                .map(|id| EntityRef::Resource(ResourceId::new(id.get()))),
+                        )
+                        .chain([
+                            EntityRef::Territory(from),
+                            EntityRef::Territory(destination),
+                        ])
+                        .collect(),
+                    format!("Person {person} was ordered from {from} to {destination}"),
+                    Some(CauseRef::Command(command_id)),
+                    correlation_id,
+                )?;
+                self.schedule_at(
+                    arrival_at,
+                    ScheduledAction::PersonArrival {
+                        person,
+                        destination,
+                        order_event: event,
+                        cargo,
                         correlation_id,
                     },
                 )?;
@@ -3535,11 +3761,18 @@ impl Simulation {
 }
 
 enum PreparedCommand {
-    MoveArmy {
+    ArmyMovement {
         army: ArmyId,
         actor: PersonId,
         from: TerritoryId,
         destination: TerritoryId,
+        arrival_at: SimTime,
+    },
+    MovePerson {
+        person: PersonId,
+        from: TerritoryId,
+        destination: TerritoryId,
+        cargo: Vec<LetterId>,
         arrival_at: SimTime,
     },
     DebugMorale {
@@ -3557,12 +3790,13 @@ enum PreparedCommand {
 impl PreparedCommand {
     fn commitment_invalidation(&self) -> CommitmentDomains {
         match self {
-            Self::MoveArmy { .. } => {
+            Self::ArmyMovement { .. } => {
                 CommitmentDomains::WORLD
                     | CommitmentDomains::KNOWLEDGE
                     | CommitmentDomains::PLUGIN_COMPONENTS
                     | CommitmentDomains::SCHEDULER
             }
+            Self::MovePerson { .. } => CommitmentDomains::WORLD | CommitmentDomains::SCHEDULER,
             Self::DebugMorale { .. } => {
                 CommitmentDomains::WORLD
                     | CommitmentDomains::PLUGIN_COMPONENTS
@@ -4116,6 +4350,7 @@ fn canonicalize_scenario(scenario: &mut Scenario) {
     scenario.world.territories.sort_by_key(|value| value.id);
     scenario.world.routes.sort_by_key(|value| value.id);
     scenario.world.armies.sort_by_key(|value| value.id);
+    scenario.world.letters.sort_by_key(|value| value.id);
     scenario
         .domain_records
         .sort_by(|left, right| left.reference.cmp(&right.reference));
@@ -4137,6 +4372,7 @@ fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
     validate_unique_ids(&scenario.world.territories, |value| value.id, "territory")?;
     validate_unique_ids(&scenario.world.routes, |value| value.id, "route")?;
     validate_unique_ids(&scenario.world.armies, |value| value.id, "army")?;
+    validate_unique_ids(&scenario.world.letters, |value| value.id, "letter")?;
 
     for person in &scenario.world.people {
         if scenario.world.government(person.government).is_none()
@@ -4148,6 +4384,18 @@ fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
                     "person {} references a missing government or location",
                     person.id
                 ),
+            ));
+        }
+        if let Some(transit) = &person.transit
+            && (scenario.world.territory(transit.from).is_none()
+                || scenario.world.territory(transit.to).is_none()
+                || transit.arrives_at <= transit.departed_at
+                || transit.departed_at > scenario.start_time
+                || person.current_location != transit.from)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("person {} has invalid transit state", person.id),
             ));
         }
     }
@@ -4212,6 +4460,46 @@ fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 format!("route {} has invalid endpoints or travel time", route.id),
+            ));
+        }
+    }
+    for letter in &scenario.world.letters {
+        let custody_valid = match letter.status {
+            LetterStatus::HeldByPerson | LetterStatus::InTransit => {
+                letter.carrier.is_some()
+                    && letter.location.is_none()
+                    && letter.delivered_at.is_none()
+            }
+            LetterStatus::HeldAtLocation => {
+                letter.carrier.is_none()
+                    && letter.location.is_some()
+                    && letter.delivered_at.is_none()
+            }
+            LetterStatus::Delivered => {
+                letter.carrier.is_none()
+                    && letter.location.is_some()
+                    && letter.delivered_at.is_some()
+            }
+        };
+        if letter.body.len() > 65_536
+            || scenario.world.person(letter.sender).is_none()
+            || scenario.world.person(letter.recipient).is_none()
+            || letter
+                .location
+                .is_some_and(|location| scenario.world.territory(location).is_none())
+            || !custody_valid
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("letter {} has invalid custody or payload state", letter.id),
+            ));
+        }
+        if let Some(carrier) = letter.carrier
+            && scenario.world.person(carrier).is_none()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("letter {} references a missing carrier", letter.id),
             ));
         }
     }
@@ -4376,6 +4664,7 @@ pub fn demo_scenario() -> (Scenario, DemoIds) {
                 government: ids.government,
                 current_location: ids.central_territory,
                 roles: vec!["army_commander".to_owned()],
+                transit: None,
             },
             Person {
                 id: ids.observer,
@@ -4383,6 +4672,7 @@ pub fn demo_scenario() -> (Scenario, DemoIds) {
                 government: ids.government,
                 current_location: ids.western_territory,
                 roles: vec!["civil_minister".to_owned()],
+                transit: None,
             },
         ],
         governments: vec![Government {
@@ -4438,6 +4728,7 @@ pub fn demo_scenario() -> (Scenario, DemoIds) {
             morale: 72,
             transit: None,
         }],
+        letters: Vec::new(),
     };
     let initial_time = SimTime::EPOCH;
     let mut knowledge = KnowledgeSnapshot::default();
@@ -6994,9 +7285,10 @@ mod tests {
     fn move_order(ids: &DemoIds) -> CommandEnvelope {
         CommandEnvelope::new(
             Issuer::Actor(ids.commander),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.eastern_territory,
+                cargo: Vec::new(),
             },
         )
     }
@@ -7066,9 +7358,10 @@ mod tests {
         .expect("declared character run should load");
         let envelope = CommandEnvelope::new(
             Issuer::Human("controller.human".to_owned()),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.eastern_territory,
+                cargo: Vec::new(),
             },
         )
         .with_authority(character_authority(
@@ -7101,9 +7394,10 @@ mod tests {
         assert_eq!(simulation.snapshot(), after_accept);
 
         let mut collision_envelope = envelope.clone();
-        collision_envelope.command = Command::MoveArmy {
-            army: ids.army,
+        collision_envelope.command = Command::OrderMovement {
+            subject: EntityRef::Army(ids.army),
             destination: ids.western_territory,
+            cargo: Vec::new(),
         };
         let collision = simulation
             .process_command(CommandRequest::new(
@@ -7224,9 +7518,10 @@ mod tests {
                 0,
                 CommandEnvelope::new(
                     Issuer::Actor(ids.observer),
-                    Command::MoveArmy {
-                        army: ids.army,
+                    Command::OrderMovement {
+                        subject: EntityRef::Army(ids.army),
                         destination: ids.eastern_territory,
+                        cargo: Vec::new(),
                     },
                 ),
             ))
@@ -7300,9 +7595,10 @@ mod tests {
         .expect("declared run should load");
         let envelope = CommandEnvelope::new(
             Issuer::Human("controller.human".to_owned()),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.eastern_territory,
+                cargo: Vec::new(),
             },
         )
         .with_authority(character_authority(
@@ -7364,9 +7660,10 @@ mod tests {
         let command_at = |time| {
             CommandEnvelope::new(
                 Issuer::Human("controller.human".to_owned()),
-                Command::MoveArmy {
-                    army: ids.army,
+                Command::OrderMovement {
+                    subject: EntityRef::Army(ids.army),
                     destination: ids.eastern_territory,
+                    cargo: Vec::new(),
                 },
             )
             .with_authority(character_authority(
@@ -7895,9 +8192,10 @@ mod tests {
                 CommandRequestId::new(1),
                 CommandEnvelope::new(
                     Issuer::Actor(ids.commander),
-                    Command::MoveArmy {
-                        army: ArmyId::new(999),
+                    Command::OrderMovement {
+                        subject: EntityRef::Army(ArmyId::new(999)),
                         destination: ids.eastern_territory,
+                        cargo: Vec::new(),
                     },
                 ),
             ),
@@ -7984,9 +8282,10 @@ mod tests {
                 0,
                 CommandEnvelope::new(
                     Issuer::Human("controller.human".to_owned()),
-                    Command::MoveArmy {
-                        army: ids.army,
+                    Command::OrderMovement {
+                        subject: EntityRef::Army(ids.army),
                         destination: ids.eastern_territory,
+                        cargo: Vec::new(),
                     },
                 )
                 .with_authority(CommandAuthority::for_actor(ids.commander)),
@@ -8016,9 +8315,10 @@ mod tests {
         let replay_manifest = manifest_for_configuration(&scenario, &replay_configuration);
         let replay_envelope = CommandEnvelope::new(
             Issuer::Replay("controller.recorded".to_owned()),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.eastern_territory,
+                cargo: Vec::new(),
             },
         )
         .with_authority(character_authority(
@@ -8155,9 +8455,10 @@ mod tests {
             .expect("snapshot should serialize");
         let result = simulation.submit(CommandEnvelope::new(
             Issuer::Actor(ids.observer),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.eastern_territory,
+                cargo: Vec::new(),
             },
         ));
         assert_eq!(
@@ -8206,6 +8507,75 @@ mod tests {
                 .location,
             ids.eastern_territory
         );
+    }
+
+    #[test]
+    fn legacy_move_army_wire_shape_is_not_a_current_command() {
+        let value = serde_json::json!({
+            "type": "move_army",
+            "army": 1,
+            "destination": 3,
+        });
+        assert!(serde_json::from_value::<Command>(value).is_err());
+    }
+
+    #[test]
+    fn person_self_move_carries_and_delivers_a_letter() {
+        let (mut scenario, ids) = demo_scenario();
+        scenario.world.letters.push(LetterCargo {
+            id: LetterId::new(1),
+            sender: ids.commander,
+            recipient: ids.observer,
+            body: "Meet at the western gate".to_owned(),
+            status: LetterStatus::HeldByPerson,
+            carrier: Some(ids.commander),
+            location: None,
+            delivered_at: None,
+        });
+        let mut simulation = Simulation::new(35, scenario).expect("letter scenario should load");
+        let receipt = simulation
+            .submit(CommandEnvelope::new(
+                Issuer::Actor(ids.commander),
+                Command::OrderMovement {
+                    subject: EntityRef::Person(ids.commander),
+                    destination: ids.western_territory,
+                    cargo: vec![LetterId::new(1)],
+                },
+            ))
+            .expect("the person may move themself with a held letter");
+        assert_eq!(receipt.emitted_events.len(), 1);
+        assert_eq!(
+            simulation
+                .world()
+                .person(ids.commander)
+                .expect("person exists")
+                .transit
+                .as_ref()
+                .expect("person should be in transit")
+                .to,
+            ids.western_territory
+        );
+        let events = simulation
+            .advance(SimDuration::hours(12))
+            .expect("person arrival should execute");
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::PersonArrived { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::LetterDelivered { .. }))
+        );
+        let world = simulation.world();
+        let letter = world.letter(LetterId::new(1)).expect("letter exists");
+        assert_eq!(letter.status, LetterStatus::Delivered);
+        assert_eq!(letter.location, Some(ids.western_territory));
+        assert_eq!(letter.carrier, None);
+        let restored = Simulation::from_snapshot(simulation.snapshot())
+            .expect("person movement should survive snapshot validation");
+        assert_eq!(restored.snapshot(), simulation.snapshot());
     }
 
     #[test]
@@ -11084,9 +11454,10 @@ mod tests {
             .expect("arrival time should be representable");
         let return_order = CommandEnvelope::new(
             Issuer::Actor(ids.commander),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.western_territory,
+                cargo: Vec::new(),
             },
         )
         .at_time(arrival_at);
@@ -12107,9 +12478,10 @@ mod tests {
             .expect("arrival time should be representable");
         let return_order = CommandEnvelope::new(
             Issuer::Actor(ids.commander),
-            Command::MoveArmy {
-                army: ids.army,
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
                 destination: ids.western_territory,
+                cargo: Vec::new(),
             },
         )
         .at_time(arrival_at);

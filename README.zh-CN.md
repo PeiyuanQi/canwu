@@ -28,15 +28,12 @@ Rust 应用应依赖受支持的公开门面，而不是直接依赖实现 crate
 
 ```toml
 [dependencies]
-canwu-api = "0.4.0"
+canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 ```
 
-需要持久化 Canwu 存档的应用应精确固定引擎版本，并且只在同时提供明确存档
-迁移时升级：
-
-```toml
-canwu-api = "=0.4.0"
-```
+需要持久化 Canwu 存档的应用应固定已发布的引擎版本，并且只在同时提供明确
+存档迁移时升级。当前 `main` 分支依赖用于移动 API 发布前的开发阶段；不要把
+它当作稳定的存档格式。
 
 `canwu-api` 依赖图中的 crate 会一并发布，以便 Cargo 解析公开门面；它们不是
 供应用代码分别依赖的独立兼容性表面。`canwu-society` 等实验性工作区扩展暂不
@@ -142,16 +139,17 @@ cargo run -p canwu-society --example local_community_diffusion
 ## 最小 API 示例
 
 ```rust
-use canwu_api::{Canwu, Command, CommandEnvelope, Issuer, SimDuration};
+use canwu_api::{Canwu, Command, CommandEnvelope, EntityRef, Issuer, SimDuration};
 
 let mut canwu = Canwu::demo(35)?;
 let ids = Canwu::demo_ids();
 
 canwu.submit(CommandEnvelope::new(
     Issuer::Actor(ids.commander),
-    Command::MoveArmy {
-        army: ids.army,
+    Command::OrderMovement {
+        subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     },
 ))?;
 let events = canwu.advance(SimDuration::days(1))?;

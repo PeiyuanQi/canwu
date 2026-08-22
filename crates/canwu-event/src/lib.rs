@@ -1,7 +1,8 @@
 //! Inspectable, serializable events with compact causal provenance.
 
 use canwu_core::{
-    ArmyId, BoundaryId, CommandId, EntityRef, EventId, KnowledgeHolderRef, PersonId, TerritoryId,
+    ArmyId, BoundaryId, CommandId, EntityRef, EventId, KnowledgeHolderRef, LetterId, PersonId,
+    TerritoryId,
 };
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
@@ -26,6 +27,22 @@ pub enum EventKind {
     },
     ArmyArrived {
         army: ArmyId,
+        territory: TerritoryId,
+    },
+    PersonMoveOrdered {
+        person: PersonId,
+        from: TerritoryId,
+        to: TerritoryId,
+        arrival_at: SimTime,
+    },
+    PersonArrived {
+        person: PersonId,
+        territory: TerritoryId,
+    },
+    LetterDelivered {
+        letter: LetterId,
+        carrier: PersonId,
+        recipient: PersonId,
         territory: TerritoryId,
     },
     ReportDispatched {
@@ -80,6 +97,9 @@ impl EventKind {
         match self {
             Self::MoveOrdered { .. } => "move_ordered",
             Self::ArmyArrived { .. } => "army_arrived",
+            Self::PersonMoveOrdered { .. } => "person_move_ordered",
+            Self::PersonArrived { .. } => "person_arrived",
+            Self::LetterDelivered { .. } => "letter_delivered",
             Self::ReportDispatched { .. } => "report_dispatched",
             Self::KnowledgeUpdated { .. } => "knowledge_updated",
             Self::KnowledgePublished { .. } => "knowledge_published",

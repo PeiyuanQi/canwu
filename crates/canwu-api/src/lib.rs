@@ -8,8 +8,8 @@ pub use canwu_core::{
     DomainKindClass, DomainRecordKind, DomainRecordRef, DomainRecordType, DomainRecordVersionRef,
     DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
     EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
-    KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, PersonId,
-    RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
+    KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
+    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
@@ -75,12 +75,14 @@ pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
     CapacityBooking, CapacityBookingId, CapacityBookingStatus, DeliveryCompletionRequest,
     DeliverySaga, Handoff, HandoffId, ItineraryRevision, ItineraryRevisionId,
-    ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, SagaState,
-    TRANSPORT_SEMANTIC_VERSION, TransportError, TransportExecution, TransportExecutionId,
-    TransportExecutionState, delivery_completion_operation_key,
+    ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, MovementInitiative,
+    MovementOrder, MovementOrderError, MovementOrderId, MovementSubject, MovementSubjectRole,
+    SagaState, TRANSPORT_SEMANTIC_VERSION, TransportError, TransportExecution,
+    TransportExecutionId, TransportExecutionState, delivery_completion_operation_key,
 };
 pub use canwu_world::{
-    Army, Government, MapPoint, Person, Route, Territory, TransitState, WorldDiff, WorldSnapshot,
+    Army, Government, LetterCargo, LetterStatus, MapPoint, Person, PersonTransitState, Route,
+    Territory, TransitState, WorldDiff, WorldSnapshot,
 };
 
 use canwu_sim::Simulation;
@@ -874,6 +876,21 @@ impl Canwu {
                     due_at: transit.arrives_at,
                 })
             })
+            .chain(
+                world
+                    .people
+                    .iter()
+                    .filter(|person| person.id == actor)
+                    .filter_map(|person| {
+                        person.transit.as_ref().map(|transit| PendingCommitment {
+                            summary: format!(
+                                "{} is traveling from {} to {}",
+                                person.name, transit.from, transit.to
+                            ),
+                            due_at: transit.arrives_at,
+                        })
+                    }),
+            )
             .collect();
         Ok(AgentContext {
             identity: AgentIdentity {
@@ -952,14 +969,38 @@ impl Canwu {
                         "current_location".to_owned(),
                         json!(person.current_location),
                     ),
+                    ("transit".to_owned(), json!(person.transit)),
                 ])
             }
             EntityRef::Territory(_)
             | EntityRef::Domain(_)
             | EntityRef::Government(_)
             | EntityRef::Route(_)
-            | EntityRef::Organization(_)
-            | EntityRef::Resource(_) => return Ok(no_knowledge_inspection(entity, detail)),
+            | EntityRef::Organization(_) => return Ok(no_knowledge_inspection(entity, detail)),
+            EntityRef::Resource(resource_id) => {
+                let letter_id = LetterId::new(resource_id.get());
+                let Some(letter) = world.letter(letter_id) else {
+                    return Ok(missing_inspection(entity, detail));
+                };
+                let entitled = letter.sender == actor_state.id
+                    || letter.recipient == actor_state.id
+                    || letter.carrier == Some(actor_state.id);
+                if !entitled {
+                    return Ok(no_knowledge_inspection(entity, detail));
+                }
+                let mut fields = BTreeMap::from([
+                    ("sender".to_owned(), json!(letter.sender)),
+                    ("recipient".to_owned(), json!(letter.recipient)),
+                    ("status".to_owned(), json!(letter.status)),
+                    ("carrier".to_owned(), json!(letter.carrier)),
+                    ("location".to_owned(), json!(letter.location)),
+                    ("delivered_at".to_owned(), json!(letter.delivered_at)),
+                ]);
+                if matches!(detail, DetailLevel::Entity | DetailLevel::RawFields) && entitled {
+                    fields.insert("body".to_owned(), json!(letter.body));
+                }
+                fields
+            }
         };
         Ok(Inspection {
             entity: entity.clone(),
@@ -978,6 +1019,32 @@ impl Canwu {
             ));
         }
         let mut actions = Vec::new();
+        if let Some(person) = world.person(actor)
+            && person.transit.is_none()
+        {
+            let cargo: Vec<_> = world
+                .letters
+                .iter()
+                .filter(|letter| {
+                    letter.status == LetterStatus::HeldByPerson && letter.carrier == Some(actor)
+                })
+                .map(|letter| letter.id)
+                .collect();
+            for route in &world.routes {
+                if let Some(destination) = route.other_end(person.current_location) {
+                    actions.push(AvailableAction {
+                        action_type: "self_move".to_owned(),
+                        description: format!("Travel to territory {destination}"),
+                        payload: json!({
+                            "subject": EntityRef::Person(actor),
+                            "destination": destination,
+                            "cargo": cargo,
+                        }),
+                        legal_reason: format!("Actor {actor} may move themself"),
+                    });
+                }
+            }
+        }
         for army in world.armies.iter().filter(|army| army.commander == actor) {
             if army.transit.is_some() {
                 continue;
@@ -985,11 +1052,12 @@ impl Canwu {
             for route in &world.routes {
                 if let Some(destination) = route.other_end(army.location) {
                     actions.push(AvailableAction {
-                        action_type: "move_army".to_owned(),
+                        action_type: "move_entity".to_owned(),
                         description: format!("Move {} to territory {destination}", army.name),
                         payload: json!({
-                            "army": army.id,
+                            "subject": EntityRef::Army(army.id),
                             "destination": destination,
+                            "cargo": Vec::<LetterId>::new(),
                         }),
                         legal_reason: format!("Actor {actor} commands army {}", army.id),
                     });
@@ -1005,9 +1073,20 @@ impl Canwu {
         action: SemanticAction,
     ) -> Result<CommandReceipt, CanwuError> {
         let command = match action {
-            SemanticAction::MoveArmy { army, destination } => {
-                Command::MoveArmy { army, destination }
-            }
+            SemanticAction::SelfMove { destination, cargo } => Command::OrderMovement {
+                subject: EntityRef::Person(actor),
+                destination,
+                cargo,
+            },
+            SemanticAction::MoveEntity {
+                subject,
+                destination,
+                cargo,
+            } => Command::OrderMovement {
+                subject,
+                destination,
+                cargo,
+            },
             SemanticAction::Plugin {
                 plugin,
                 action,
@@ -1877,6 +1956,10 @@ fn visible_change(
             .principal
             .person()
             .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
+        EventKind::PersonMoveOrdered { .. } => viewer
+            .principal
+            .person()
+            .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
         EventKind::KnowledgeUpdated { recipient, .. } => {
             viewer.principal.person() == Some(*recipient)
         }
@@ -1884,6 +1967,8 @@ fn visible_change(
             principal_matches_holder(&viewer.principal, holder)
         }
         EventKind::ArmyArrived { .. }
+        | EventKind::PersonArrived { .. }
+        | EventKind::LetterDelivered { .. }
         | EventKind::ReportDispatched { .. }
         | EventKind::DebugFieldChanged { .. } => matches!(
             viewer.observation,
@@ -2005,9 +2090,16 @@ fn no_knowledge_inspection(entity: &EntityRef, detail: DetailLevel) -> Inspectio
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SemanticAction {
-    MoveArmy {
-        army: ArmyId,
+    SelfMove {
         destination: TerritoryId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cargo: Vec<LetterId>,
+    },
+    MoveEntity {
+        subject: EntityRef,
+        destination: TerritoryId,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        cargo: Vec<LetterId>,
     },
     Plugin {
         plugin: String,
@@ -2165,9 +2257,10 @@ mod tests {
         canwu
             .act(
                 ids.commander,
-                SemanticAction::MoveArmy {
-                    army: ids.army,
+                SemanticAction::MoveEntity {
+                    subject: EntityRef::Army(ids.army),
                     destination: ids.eastern_territory,
+                    cargo: Vec::new(),
                 },
             )
             .expect("movement should emit plugin notice");
@@ -2362,9 +2455,10 @@ mod tests {
         canwu
             .act(
                 ids.commander,
-                SemanticAction::MoveArmy {
-                    army: ids.army,
+                SemanticAction::MoveEntity {
+                    subject: EntityRef::Army(ids.army),
                     destination: ids.eastern_territory,
+                    cargo: Vec::new(),
                 },
             )
             .expect("the authoritative checkpoint should advance");
@@ -2388,9 +2482,10 @@ mod tests {
         canwu
             .act(
                 ids.commander,
-                SemanticAction::MoveArmy {
-                    army: ids.army,
+                SemanticAction::MoveEntity {
+                    subject: EntityRef::Army(ids.army),
                     destination: ids.eastern_territory,
+                    cargo: Vec::new(),
                 },
             )
             .expect("commander can move army");
@@ -2463,6 +2558,37 @@ mod tests {
     }
 
     #[test]
+    fn self_move_is_an_actor_bound_order_movement() {
+        let mut canwu = Canwu::demo(35).expect("demo should load");
+        let ids = Canwu::demo_ids();
+        let actions = canwu
+            .available_actions(ids.commander)
+            .expect("commander actions should be available");
+        assert!(actions.iter().any(|action| {
+            action.action_type == "self_move"
+                && action.payload["destination"] == json!(ids.eastern_territory)
+        }));
+
+        canwu
+            .act(
+                ids.commander,
+                SemanticAction::SelfMove {
+                    destination: ids.eastern_territory,
+                    cargo: Vec::new(),
+                },
+            )
+            .expect("a person may order their own movement");
+        assert!(
+            canwu
+                .world()
+                .person(ids.commander)
+                .expect("commander exists")
+                .transit
+                .is_some()
+        );
+    }
+
+    #[test]
     fn debug_mutation_uses_validated_command_and_provenance() {
         let mut canwu = Canwu::demo(35).expect("demo should load");
         let ids = Canwu::demo_ids();
@@ -2489,9 +2615,10 @@ mod tests {
         canwu
             .submit(CommandEnvelope::new(
                 Issuer::Actor(ids.commander),
-                Command::MoveArmy {
-                    army: ids.army,
+                Command::OrderMovement {
+                    subject: EntityRef::Army(ids.army),
                     destination: ids.eastern_territory,
+                    cargo: Vec::new(),
                 },
             ))
             .expect("movement should be accepted");

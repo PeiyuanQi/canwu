@@ -1761,7 +1761,8 @@ impl Simulation {
 
         for action in self.state.scheduler.actions.values() {
             match action {
-                ScheduledAction::ArmyArrival { order_event, .. } => promote_dependency(
+                ScheduledAction::ArmyArrival { order_event, .. }
+                | ScheduledAction::PersonArrival { order_event, .. } => promote_dependency(
                     &mut dependencies,
                     EvidenceRef::Event(*order_event),
                     identity,

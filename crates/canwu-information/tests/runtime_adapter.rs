@@ -130,6 +130,7 @@ fn world(holder_count: u64) -> WorldSnapshot {
                 government: government(),
                 current_location: territory(),
                 roles: vec!["observer".to_owned()],
+                transit: None,
             })
             .collect(),
         governments: vec![Government {
@@ -145,6 +146,7 @@ fn world(holder_count: u64) -> WorldSnapshot {
         }],
         routes: Vec::new(),
         armies: Vec::new(),
+        letters: Vec::new(),
     }
 }
 

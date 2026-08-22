@@ -126,9 +126,10 @@ fn refresh_aid_options(canwu: &mut Canwu, ids: DemoIds) -> Result<(), Box<dyn st
                     },
                     DecisionOption {
                         action: DecisionAction::Command {
-                            command: serde_json::to_value(Command::MoveArmy {
-                                army: ids.army,
+                            command: serde_json::to_value(Command::OrderMovement {
+                                subject: EntityRef::Army(ids.army),
                                 destination: ids.eastern_territory,
+                                cargo: Vec::new(),
                             })?,
                         },
                         utility_inputs: BTreeMap::from([

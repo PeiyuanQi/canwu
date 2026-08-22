@@ -475,6 +475,7 @@ pub(super) struct RuntimeMetadata {
 #[derive(Clone)]
 pub(super) struct RuntimeCurrentState {
     pub(super) people: BTreeMap<PersonId, Person>,
+    pub(super) letters: BTreeMap<canwu_core::LetterId, canwu_world::LetterCargo>,
     pub(super) governments: BTreeMap<GovernmentId, Government>,
     pub(super) territories: BTreeMap<TerritoryId, Territory>,
     pub(super) routes: BTreeMap<RouteId, Route>,

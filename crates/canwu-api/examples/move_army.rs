@@ -1,4 +1,4 @@
-use canwu_api::{Canwu, ObserveRequest, SemanticAction, SimDuration};
+use canwu_api::{Canwu, EntityRef, ObserveRequest, SemanticAction, SimDuration};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut canwu = Canwu::demo(35)?;
@@ -6,9 +6,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     canwu.act(
         ids.commander,
-        SemanticAction::MoveArmy {
-            army: ids.army,
+        SemanticAction::MoveEntity {
+            subject: EntityRef::Army(ids.army),
             destination: ids.eastern_territory,
+            cargo: Vec::new(),
         },
     )?;
     let arrival_events = canwu.advance(SimDuration::days(1))?;

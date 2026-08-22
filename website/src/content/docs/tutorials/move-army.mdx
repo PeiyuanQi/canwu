@@ -27,7 +27,7 @@ cargo run -p canwu-api --example move_army
 
 <Steps>
 1. 用 `Canwu::demo(35)` 创建确定性的演示世界。
-2. 调用 `act()`，以指挥官身份提交 `SemanticAction::MoveArmy`。
+2. 调用 `act()`，以指挥官身份提交 `SemanticAction::MoveEntity`，其 subject 为军队。
 3. 用 `advance()` 推进模拟时间，让已计划的到达工作发生。
 4. 分别调用 `observe()`，比较指挥官与观察者的知识记录。
 </Steps>

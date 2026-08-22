@@ -57,6 +57,14 @@ The example demonstrates a validated army move, scheduled travel, attributable
 arrival events, an immediate commander update, and a delayed report to another
 person.
 
+Movement uses the canonical `Command::OrderMovement` command. Use
+`SemanticAction::MoveEntity` for an authorized army subject, or
+`SemanticAction::SelfMove` when the actor is moving themself. A self-move is
+still an ordinary validated command: the issuer must be the same person as the
+`EntityRef::Person` subject. A person may carry explicitly listed letter IDs;
+arrival emits person and delivery events, and custody is not considered
+delivered until the recipient handoff succeeds.
+
 Run `cargo run -p canwu-api --example plugin` for an issuer-aware plugin command
 with a machine-validated payload and declared core/component access.
 

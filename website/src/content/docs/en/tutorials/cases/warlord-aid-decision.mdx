@@ -22,7 +22,7 @@ that can safely enter the live simulation:
 - update the available choices when the known facts change;
 - allow an AI, player, or external model to select only an existing option,
   never invent an arbitrary command;
-- turn the selected aid option into a real `MoveArmy` command under the
+- turn the selected aid option into a real `OrderMovement` command under the
   controller's persisted authority;
 - record attempts, scores, and outcomes so restoration and exact replay never
   have to ask the decision maker again.
@@ -39,7 +39,7 @@ The example composes several systems:
 | System | Role in this example | Related documentation |
 | --- | --- | --- |
 | Decision tickets, controllers, and policies | Store the question, current options, decision identity, and scoring process | The walkthrough below |
-| Authority and command ingress | Turn the selected option into a validated `MoveArmy` command | [Architecture overview](/en/architecture/), [Integrate and drive the simulation](/en/developer/integration/) |
+| Authority and command ingress | Turn the selected option into a validated `OrderMovement` command | [Architecture overview](/en/architecture/), [Integrate and drive the simulation](/en/developer/integration/) |
 | Settlement boundary | Admit decision ingress, persist the trace, and execute the derived command | [Settlement system](/en/architecture/settlement/) |
 | Actor-relative information | Build context from facts visible to Warlord B instead of leaking omniscient state | [Read and present state safely](/en/developer/reading-state/) |
 | Persistence and exact replay | Retain tickets, attempts, traces, and command evidence | [Save, replay, and fork](/en/developer/persistence/) |
@@ -72,7 +72,7 @@ facts visible to Warlord B
 2. Open the aid-request ticket. The supply route is not confirmed, so declining is the only initial option.
 3. Once the route is confirmed, use `DecisionMutation::ReplaceOptions` to update the context and add `send-aid`.
 4. Use `WeightedUtilityPolicy` to calculate deterministic integer scores for the current options.
-5. Call `drive_decision()` to enqueue a resolution. The next canonical boundary persists the trace and submits the selected `MoveArmy` through ordinary command admission.
+5. Call `drive_decision()` to enqueue a resolution. The next canonical boundary persists the trace and submits the selected `OrderMovement` through ordinary command admission.
 6. Save, restore, and exactly replay the run without invoking the policy again.
 </Steps>
 
@@ -150,9 +150,10 @@ policy can return only the option ID:
 
 ```rust
 DecisionOption::new("send-aid", "Send the neighboring army").with_command(
-    serde_json::to_value(Command::MoveArmy {
-        army: ids.army,
+    serde_json::to_value(Command::OrderMovement {
+        subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     })?,
 )
 ```

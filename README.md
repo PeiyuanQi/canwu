@@ -34,15 +34,13 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "0.4.0"
+canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 ```
 
-Applications that persist Canwu snapshots should pin the exact engine release
-and upgrade only alongside an explicit save migration:
-
-```toml
-canwu-api = "=0.4.0"
-```
+Applications that persist Canwu snapshots should pin a published engine
+release and upgrade only alongside an explicit save migration. The current
+`main`-branch dependency is for development while the movement API is being
+released; do not treat it as a stable snapshot format.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the facade. They are not separate compatibility surfaces for application code.
@@ -160,16 +158,17 @@ The human-readable package and registry procedure is documented in
 ## Minimal API example
 
 ```rust
-use canwu_api::{Canwu, Command, CommandEnvelope, Issuer, SimDuration};
+use canwu_api::{Canwu, Command, CommandEnvelope, EntityRef, Issuer, SimDuration};
 
 let mut canwu = Canwu::demo(35)?;
 let ids = Canwu::demo_ids();
 
 canwu.submit(CommandEnvelope::new(
     Issuer::Actor(ids.commander),
-    Command::MoveArmy {
-        army: ids.army,
+    Command::OrderMovement {
+        subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     },
 ))?;
 let events = canwu.advance(SimDuration::days(1))?;

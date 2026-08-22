@@ -346,7 +346,7 @@ sequenceDiagram
     participant Scheduler
     participant Knowledge
 
-    Client->>API: MoveArmy action
+    Client->>API: OrderMovement action
     API->>Sim: validated command envelope
     Sim->>Sim: validate all preconditions
     Sim->>Scheduler: schedule arrival
@@ -435,6 +435,16 @@ Dijkstra ordering; explicitly non-FIFO networks use a bounded label-correcting
 algorithm. Capacity is a persistent transport booking, not hidden mutable
 state in a route cache. `RoutingCache` is derived, digest-keyed, rebuildable,
 and excluded from authoritative commitments.
+
+Movement uses the admitted `OrderMovement` intent. Army and person movement are
+implemented by the same command boundary, while persisted movement state keeps
+subject-specific transit and custody invariants. A person travelling
+voluntarily uses actor-bound authority whose command subject is that same
+person; army command and future cargo or equipment movement use distinct
+capability policies. `EntityRef` remains an identity union rather than proof
+of mobility, so unsupported subjects fail closed. The detailed boundary,
+capability matrix, active-movement semantics, and migration rules are in
+[`movement-order-mechanism.md`](proposals/movement-order-mechanism.md).
 
 If a disaster occurs, a domain system records an explicit leg failure and
 evidence. Transport enters `ReplanPending`, takes a new planning snapshot, and

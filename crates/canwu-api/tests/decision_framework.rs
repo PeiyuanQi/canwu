@@ -100,9 +100,10 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
                         },
                         DecisionOption {
                             action: DecisionAction::Command {
-                                command: serde_json::to_value(Command::MoveArmy {
-                                    army: ids.army,
+                                command: serde_json::to_value(Command::OrderMovement {
+                                    subject: EntityRef::Army(ids.army),
                                     destination: ids.eastern_territory,
+                                    cargo: Vec::new(),
                                 })
                                 .expect("command value"),
                             },
@@ -370,9 +371,10 @@ fn decision_and_command_request_ids_fail_closed_before_persistence() {
                 context: DecisionContext::new("beiyang.aid-request.v1", json!({})),
                 options: vec![DecisionOption {
                     action: DecisionAction::Command {
-                        command: serde_json::to_value(Command::MoveArmy {
-                            army: ids.army,
+                        command: serde_json::to_value(Command::OrderMovement {
+                            subject: EntityRef::Army(ids.army),
                             destination: ids.eastern_territory,
+                            cargo: Vec::new(),
                         })
                         .expect("command"),
                     },

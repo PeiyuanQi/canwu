@@ -22,7 +22,7 @@ Canwu 的事件是可序列化、可检查的因果记录。事件不是 UI 通�
 | `cause` | 产生事件的命令、事件、边界或系统 |
 | `correlation_id` | 将同一处理链中的证据关联起来 |
 
-核心事件类型包括 `MoveOrdered`、`ArmyArrived`、`ReportDispatched`、`KnowledgeUpdated`、`DebugFieldChanged` 和插件事件。插件可以扩展事件类型，但必须通过注册契约声明来源和边界。
+核心事件类型包括 `MoveOrdered`、`PersonMoveOrdered`、`ArmyArrived`、`PersonArrived`、`LetterDelivered`、`ReportDispatched`、`KnowledgeUpdated`、`DebugFieldChanged` 和插件事件。插件可以扩展事件类型，但必须通过注册契约声明来源和边界。
 
 ## 因果链
 
@@ -36,10 +36,11 @@ Canwu 的事件是可序列化、可检查的因果记录。事件不是 UI 通�
 一个移动示例的证据链可以是：
 
 ```text
-MoveArmy command
-  └─ MoveOrdered event
-       └─ scheduled ArmyArrival work
-            ├─ ArmyArrived event
+OrderMovement command
+  └─ MoveOrdered or PersonMoveOrdered event
+       └─ scheduled ArmyArrival or PersonArrival work
+            ├─ ArmyArrived or PersonArrived event
+            ├─ LetterDelivered event
             └─ ReportDispatched event
                  └─ KnowledgeUpdated event
 ```

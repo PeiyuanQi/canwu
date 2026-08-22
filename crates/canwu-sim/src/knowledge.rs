@@ -268,6 +268,13 @@ pub(crate) fn validate_snapshot_records(
             .cloned()
             .map(|value| (value.id, value))
             .collect(),
+        letters: snapshot
+            .world
+            .letters
+            .iter()
+            .cloned()
+            .map(|value| (value.id, value))
+            .collect(),
         governments: snapshot
             .world
             .governments
@@ -616,6 +623,7 @@ mod tests {
     fn current_state(domain_records: Vec<DomainRecord>) -> RuntimeCurrentState {
         RuntimeCurrentState {
             people: BTreeMap::new(),
+            letters: BTreeMap::new(),
             governments: BTreeMap::new(),
             territories: BTreeMap::new(),
             routes: BTreeMap::new(),

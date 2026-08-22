@@ -13,18 +13,16 @@ Canwu 负责权威状态、验证、确定性时间、事件和证据。
 
 ## 添加依赖
 
-Canwu 0.4.0 需要 Rust 1.88 或更新版本。应用代码应只依赖公开 facade：
+当前 main 分支需要 Rust 1.88 或更新版本。应用代码应只依赖公开 facade：
 
 ```toml
 [dependencies]
-canwu-api = "0.4.0"
+canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 ```
 
-如果应用会长期保存 Canwu 快照，请固定精确版本，并把版本升级与存档迁移一起处理：
-
-```toml
-canwu-api = "=0.4.0"
-```
+如果应用会长期保存 Canwu 快照，请固定已发布的引擎版本，并把版本升级与存档迁移
+一起处理。当前 `main` 分支依赖用于移动 API 发布前的开发阶段；不要把它当作稳定的
+存档格式。
 
 不要直接依赖 `canwu-sim`、`canwu-world` 或其他实现 crate。它们可被 Cargo 解析，
 但不是应用代码的独立兼容性表面。
@@ -39,9 +37,10 @@ let ids = Canwu::demo_ids();
 
 canwu.act(
     ids.commander,
-    SemanticAction::MoveArmy {
-        army: ids.army,
+    SemanticAction::MoveEntity {
+        subject: canwu_api::EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
+        cargo: Vec::new(),
     },
 )?;
 

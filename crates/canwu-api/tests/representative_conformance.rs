@@ -62,6 +62,7 @@ fn fixture_scenario() -> Scenario {
                 government: government(),
                 current_location: central_territory(),
                 roles: vec!["field_commander".to_owned()],
+                transit: None,
             },
             Person {
                 id: observer(),
@@ -69,6 +70,7 @@ fn fixture_scenario() -> Scenario {
                 government: government(),
                 current_location: western_territory(),
                 roles: vec!["observer".to_owned()],
+                transit: None,
             },
         ],
         governments: vec![Government {
@@ -124,6 +126,7 @@ fn fixture_scenario() -> Scenario {
             morale: 72,
             transit: None,
         }],
+        letters: Vec::new(),
     };
     let knowledge = KnowledgeSnapshot {
         actors: BTreeMap::from([
@@ -863,9 +866,10 @@ fn representative_public_contracts_are_atomic_replayable_and_binding_safe() {
 
     let movement = CommandEnvelope::new(
         Issuer::Actor(commander()),
-        Command::MoveArmy {
-            army: army(),
+        Command::OrderMovement {
+            subject: EntityRef::Army(army()),
             destination: eastern_territory(),
+            cargo: Vec::new(),
         },
     )
     .with_authority(authority(commander()));
@@ -979,9 +983,10 @@ fn representative_public_contracts_are_atomic_replayable_and_binding_safe() {
     let mut fork = canwu.fork();
     let fork_movement = CommandEnvelope::new(
         Issuer::Actor(commander()),
-        Command::MoveArmy {
-            army: army(),
+        Command::OrderMovement {
+            subject: EntityRef::Army(army()),
             destination: central_territory(),
+            cargo: Vec::new(),
         },
     )
     .with_authority(authority(commander()));

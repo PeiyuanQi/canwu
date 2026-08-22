@@ -27,7 +27,7 @@ cargo run -p canwu-api --example move_army
 
 <Steps>
 1. Create a deterministic demo world with `Canwu::demo(35)`.
-2. Call `act()` as the commander with `SemanticAction::MoveArmy`.
+2. Call `act()` as the commander with `SemanticAction::MoveEntity` and an army subject.
 3. Advance simulation time so the scheduled arrival can execute.
 4. Call `observe()` for the commander and observer to compare their knowledge records.
 </Steps>

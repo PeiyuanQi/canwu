@@ -6,8 +6,8 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use canwu_core::{DomainRecordVersionRef, EvidenceRef};
-use canwu_routing::RoutePlan;
+use canwu_core::{DomainRecordVersionRef, EntityRef, EvidenceRef};
+use canwu_routing::{RoutePlan, RoutingNodeRef};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,126 @@ pub fn delivery_completion_operation_key(
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct TransportExecutionId(pub u64);
+
+/// Stable identity for an admitted transport-domain movement intent.
+///
+/// The simulation's canonical ingress is `Command::OrderMovement`. This record adds
+/// route-plan and custody evidence when a transport domain needs to persist a
+/// richer execution than the built-in army/person transit state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct MovementOrderId(pub u64);
+
+/// Who initiated a movement intent. The runtime must derive this from the
+/// admitted authority and never trust an unvalidated caller-supplied label.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementInitiative {
+    SelfDirected,
+    Commanded,
+    Delegated,
+    Forced,
+    Automatic,
+}
+
+/// The physical role of a subject in a movement manifest.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MovementSubjectRole {
+    MovablePrincipal,
+    Cargo,
+    Carrier,
+    Passenger,
+    Attached,
+}
+
+/// One typed identity in a movement manifest.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct MovementSubject {
+    pub entity: EntityRef,
+    pub role: MovementSubjectRole,
+    /// Cargo quantities are integer units and must be positive. Other roles
+    /// normally leave this unset because their cardinality is one identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantity: Option<u64>,
+    /// Expected carrier/custodian identity at admission, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_custody: Option<EntityRef>,
+}
+
+/// Immutable, admitted intent shared by transport movement domains.
+///
+/// `MovementOrder` is a contract for planning and authority evidence; it does
+/// not directly mutate a world entity. Domain handlers still own location,
+/// custody, quantity, arrival, and knowledge effects.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MovementOrder {
+    pub id: MovementOrderId,
+    pub subjects: Vec<MovementSubject>,
+    pub origin: RoutingNodeRef,
+    pub destination: RoutingNodeRef,
+    pub plan: RoutePlan,
+    pub initiative: MovementInitiative,
+    pub ordered_at: SimTime,
+    pub expected_position_revision: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MovementOrderError {
+    Invalid(String),
+}
+
+impl MovementOrder {
+    /// Validates the structural invariants that are domain-neutral.
+    ///
+    /// Existence, authority, capability, and position/custody matching remain
+    /// runtime or plugin responsibilities because this crate does not own the
+    /// world or domain records.
+    pub fn validate(&self) -> Result<(), MovementOrderError> {
+        if self.id.0 == 0
+            || self.expected_position_revision == 0
+            || self.origin.as_str().trim().is_empty()
+            || self.destination.as_str().trim().is_empty()
+        {
+            return Err(MovementOrderError::Invalid(
+                "movement order identity, endpoints, and expected position revision must be valid"
+                    .to_owned(),
+            ));
+        }
+        if self.subjects.is_empty()
+            || self
+                .subjects
+                .windows(2)
+                .any(|pair| pair[0].entity >= pair[1].entity)
+        {
+            return Err(MovementOrderError::Invalid(
+                "movement subjects must be non-empty, sorted, and unique by entity".to_owned(),
+            ));
+        }
+        for subject in &self.subjects {
+            if subject.quantity.is_some_and(|quantity| quantity == 0)
+                || (subject.role == MovementSubjectRole::Cargo && subject.quantity.is_none())
+                || (subject.role != MovementSubjectRole::Cargo && subject.quantity.is_some())
+            {
+                return Err(MovementOrderError::Invalid(
+                    "cargo requires a positive quantity and non-cargo subjects cannot carry one"
+                        .to_owned(),
+                ));
+            }
+        }
+        if self.plan.origin != self.origin
+            || self.plan.destination != self.destination
+            || self.plan.departure_at < self.ordered_at
+            || self.plan.estimated_arrival_at < self.plan.departure_at
+            || self.plan.digest.trim().is_empty()
+        {
+            return Err(MovementOrderError::Invalid(
+                "movement plan does not match the order endpoints or time range".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
@@ -607,6 +727,7 @@ pub enum TransportError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canwu_core::{PersonId, TerritoryId};
     use canwu_routing::{
         ROUTING_ALGORITHM_VERSION, RouteCost, RouteLeg, RoutingConnectionRef, RoutingNodeRef,
         TransferMode,
@@ -637,6 +758,91 @@ mod tests {
             }],
             digest: "route".to_owned(),
         }
+    }
+
+    #[test]
+    fn movement_order_accepts_a_self_directed_person_subject() {
+        let order = MovementOrder {
+            id: MovementOrderId(1),
+            subjects: vec![MovementSubject {
+                entity: EntityRef::Person(PersonId::new(7)),
+                role: MovementSubjectRole::MovablePrincipal,
+                quantity: None,
+                expected_custody: None,
+            }],
+            origin: RoutingNodeRef::new("a"),
+            destination: RoutingNodeRef::new("b"),
+            plan: plan(),
+            initiative: MovementInitiative::SelfDirected,
+            ordered_at: SimTime::EPOCH,
+            expected_position_revision: 1,
+        };
+        order.validate().unwrap();
+    }
+
+    #[test]
+    fn movement_order_rejects_duplicate_subjects_and_missing_cargo_quantity() {
+        let mut order = MovementOrder {
+            id: MovementOrderId(2),
+            subjects: vec![
+                MovementSubject {
+                    entity: EntityRef::Person(PersonId::new(7)),
+                    role: MovementSubjectRole::MovablePrincipal,
+                    quantity: None,
+                    expected_custody: None,
+                },
+                MovementSubject {
+                    entity: EntityRef::Person(PersonId::new(7)),
+                    role: MovementSubjectRole::Cargo,
+                    quantity: None,
+                    expected_custody: None,
+                },
+            ],
+            origin: RoutingNodeRef::new("a"),
+            destination: RoutingNodeRef::new("b"),
+            plan: plan(),
+            initiative: MovementInitiative::Delegated,
+            ordered_at: SimTime::EPOCH,
+            expected_position_revision: 1,
+        };
+        assert!(matches!(
+            order.validate(),
+            Err(MovementOrderError::Invalid(_))
+        ));
+        order.subjects[1].entity = EntityRef::Territory(TerritoryId::new(8));
+        assert!(matches!(
+            order.validate(),
+            Err(MovementOrderError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn movement_order_rejects_a_plan_that_does_not_match_the_order() {
+        let mut order = MovementOrder {
+            id: MovementOrderId(3),
+            subjects: vec![MovementSubject {
+                entity: EntityRef::Person(PersonId::new(9)),
+                role: MovementSubjectRole::MovablePrincipal,
+                quantity: None,
+                expected_custody: None,
+            }],
+            origin: RoutingNodeRef::new("a"),
+            destination: RoutingNodeRef::new("c"),
+            plan: plan(),
+            initiative: MovementInitiative::SelfDirected,
+            ordered_at: SimTime::EPOCH,
+            expected_position_revision: 1,
+        };
+        assert!(matches!(
+            order.validate(),
+            Err(MovementOrderError::Invalid(_))
+        ));
+        order.destination = RoutingNodeRef::new("b");
+        order.plan.digest = String::new();
+        assert!(matches!(
+            order.validate(),
+            Err(MovementOrderError::Invalid(_))
+        ));
     }
 
     #[test]
