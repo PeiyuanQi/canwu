@@ -1,0 +1,55 @@
+---
+interface Props {
+  locale?: "zh-CN" | "en";
+}
+
+const { locale = "zh-CN" } = Astro.props;
+const isEnglish = locale === "en";
+
+const copy = isEnglish
+  ? {
+      summary: "Recommended: use a coding agent for implementation",
+      intro: "Ask your coding agent to read and use the two official skills before it writes code, then consult this page, the developer guide, and the relevant runnable example.",
+      docsSkill: "canwu-engine-docs",
+      usageSkill: "canwu-engine-usage",
+      tutorials: "tutorials",
+      developer: "developer guide",
+      promptLabel: "Starter prompt",
+      prompt: "Read canwu-engine-docs and canwu-engine-usage first. Then read the relevant Canwu tutorial, developer guide section, and public example. Implement through canwu-api, explain the invariant before editing, and run the example or focused check when done.",
+    }
+  : {
+      summary: "推荐：使用 Coding Agent 开发",
+      intro: "开始写代码前，先让你的 coding agent 读取并使用这两个官方 skill，再查阅本页、开发者指南和相关可运行示例。",
+      docsSkill: "canwu-engine-docs",
+      usageSkill: "canwu-engine-usage",
+      tutorials: "快速开始",
+      developer: "开发者指南",
+      promptLabel: "可直接发送的提示",
+      prompt: "请先读取并使用 canwu-engine-docs 和 canwu-engine-usage，再阅读相关 Canwu 教程、开发者指南章节和公开示例。通过 canwu-api 实现，编辑前先说明要维护的约束，完成后运行示例或针对性检查。",
+    };
+
+const skillUrl = "https://github.com/PeiyuanQi/canwu/tree/main/agent-interface/plugins/canwu-engine/skills";
+const docsSkillUrl = `${skillUrl}/canwu-engine-docs/SKILL.md`;
+const usageSkillUrl = `${skillUrl}/canwu-engine-usage/SKILL.md`;
+const prefix = isEnglish ? "/en" : "";
+---
+
+<details class="agent-development-note">
+  <summary>
+    <span class="agent-development-note-icon" aria-hidden="true">i</span>
+    <span>{copy.summary}</span>
+  </summary>
+  <div class="agent-development-note-body">
+    <p>
+      {copy.intro}
+      <a href={docsSkillUrl} target="_blank" rel="noreferrer"><code>{copy.docsSkill}</code></a>
+      {isEnglish ? " and " : " 与 "}
+      <a href={usageSkillUrl} target="_blank" rel="noreferrer"><code>{copy.usageSkill}</code></a>{isEnglish ? "." : "。"}
+      {isEnglish ? " Start with " : " 可从 "}
+      <a href={`${prefix}/tutorials/`}>{copy.tutorials}</a>{isEnglish ? ", then use the " : "，再进入"}
+      <a href={`${prefix}/developer/`}>{copy.developer}</a>{isEnglish ? " as needed." : "。"}
+    </p>
+    <p class="agent-development-note-label">{copy.promptLabel}</p>
+    <pre><code>{copy.prompt}</code></pre>
+  </div>
+</details>

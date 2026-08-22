@@ -42,6 +42,73 @@
   text-underline-offset: 0.2em;
 }
 
+.agent-development-note {
+  margin-block: 1.25rem 1.5rem;
+  border: 1px solid var(--sl-color-gray-5);
+  border-left: 3px solid var(--sl-color-accent);
+  border-radius: 0.4rem;
+  background: color-mix(in srgb, var(--sl-color-accent-low) 38%, var(--sl-color-black));
+}
+
+.agent-development-note > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.9rem;
+  cursor: pointer;
+  color: var(--sl-color-gray-1);
+  font-weight: 650;
+}
+
+.agent-development-note > summary::marker {
+  color: var(--sl-color-accent);
+}
+
+.agent-development-note-icon {
+  display: inline-grid;
+  flex: 0 0 1.2rem;
+  place-items: center;
+  width: 1.2rem;
+  height: 1.2rem;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  color: var(--sl-color-accent-high);
+  font: 700 0.72rem/1 var(--sl-font-mono);
+}
+
+.agent-development-note-body {
+  padding: 0 0.9rem 0.9rem 2.65rem;
+  color: var(--sl-color-gray-2);
+  font-size: var(--sl-text-sm);
+}
+
+.agent-development-note-body p {
+  margin-block: 0 0.65rem;
+}
+
+.agent-development-note-body a {
+  color: var(--sl-color-accent-high);
+}
+
+.agent-development-note-label {
+  color: var(--sl-color-gray-1);
+  font-weight: 600;
+}
+
+.agent-development-note pre {
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  overflow-x: auto;
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.3rem;
+  background: color-mix(in srgb, var(--sl-color-black) 78%, var(--sl-color-gray-6));
+  color: var(--sl-color-gray-1);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
 .architecture-links {
   display: flex;
   flex-wrap: wrap;
