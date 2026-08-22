@@ -39,7 +39,7 @@ module`），在 Canwu 架构中属于**模拟领域扩展**（`domain extension
 
 | 系统 | 在案例中的作用 | 相关文档 |
 | --- | --- | --- |
-| `canwu-society` 插件扩展 | 定义 cohort、分布、影响边、制度输入和角色投影 | [通过插件扩展](/developer/extensions/) |
+| `canwu-society` 模拟领域扩展 | 定义 cohort、分布、影响边、制度输入和角色投影 | [通过插件扩展](/developer/extensions/) |
 | 结算系统 | 按稳定顺序执行人口迁移，并把制度政策延迟到下一边界生效 | [结算系统](/architecture/settlement/) |
 | 决策与权威命令 | 让机构从已有 policy options 中选择，再提交插件命令 | [架构总览](/architecture/)、[接入并驱动仿真](/developer/integration/) |
 | 角色相对读取 | 为观察者物化估计，拒绝 ground-truth fallback | [安全读取与呈现状态](/developer/reading-state/) |
@@ -143,10 +143,10 @@ aggregate 不同；没有 observer profile 的角色会得到错误，不会自�
 
 这个模拟领域扩展中的可复用引擎部分是 cohort、稀疏多维分布、确定性迁移、影响边、组织拓扑、
 制度输入、政策压力、候选输出和角色估计。历史教义、礼仪、人物、文化兼容性、政策
-名称、具体冲突资格与叙事都属于下游领域包。
+名称、具体冲突判定与叙事都属于下游领域包。
 
-`canwu-society` 当前 `publish = false`，也没有被 `canwu-api` 重新导出。它作为实验性
-模拟领域扩展验证公开插件契约；当前公开范围覆盖通用传播机制，历史内容与具体领域 API
+`canwu-society` 当前 `publish = false`，也没有被 `canwu-api` 重新导出。它是实验性
+模拟领域扩展，用于验证公开插件契约；当前公开范围覆盖通用传播机制，历史内容与具体领域 API
 由下游包定义。
 
 ## 3. 代码在哪里
