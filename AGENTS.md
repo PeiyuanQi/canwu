@@ -10,9 +10,13 @@
   audio, and animation belong in external clients.
 - `docs/architecture.md` and `docs/end-state.md` are the architectural source of
   truth. Keep them aligned with public APIs and dependency boundaries.
-- `docs/terminology.md` is the canonical Chinese-English terminology reference
-  for public docs and agent guidance. Keep code identifiers unchanged and
-  update the bilingual website terminology pages with it.
+- `docs/terminology.md` is the source of truth for public Canwu terminology.
+  Before writing or translating English or Chinese prose, consult its paired
+  `English` and `中文规范写法` columns and use those exact terms; do not invent
+  synonyms or translate code identifiers. Keep the repository term sheet and
+  both website terminology pages (`website/src/content/docs/en/reference/terminology.mdx`
+  and `website/src/content/docs/reference/terminology.mdx`) synchronized when a
+  public term is added or renamed.
 - Follow `docs/versioning.md`. The root `[workspace.package].version` is the
   canonical SemVer version and all first-party crates version in lockstep.
 - External mutations must enter through validated commands or canonical ingress.
