@@ -1,12 +1,11 @@
 # Canwu Documentation
 
-> **Recommended route: send in an agent first.** Tell your coding agent,
-> “I want to build `[your goal]` with Canwu. Find the right contract, runnable
-> example, and public API, then teach me while implementing it.” If the
-> `canwu-engine` plugin is installed, have it invoke
+> **Start with a runnable example.** Pick the guide closest to your goal and
+> look up the underlying contracts as you need them. If you use a coding agent,
+> you can ask it to find the relevant example and public API while it implements
+> the first working version. With the `canwu-engine` plugin installed, it can
+> invoke
 > [`$canwu-engine-docs`](../agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md).
-> Reading every page by hand is still legal; we just assumed your scroll wheel
-> had other plans.
 
 This directory keeps project documentation grouped by purpose so the repository
 root remains limited to files expected by Cargo, GitHub, licensing tools, and
@@ -14,6 +13,7 @@ coding agents.
 
 ## Engine contracts
 
+- [Chinese-English terminology](terminology.md)
 - [Architecture](architecture.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
@@ -23,9 +23,14 @@ coding agents.
 
 - [Continuous-time / proportional-time game loop](continuous-game-loop.md)
 
-## Experimental extensions
+## Simulation domain extensions
 
-- [Social belief and institutional diffusion framework](proposals/social-belief-framework.md)
+Canwu calls an optional domain-specific module built on the public engine
+contracts a **domain extension** (**模拟领域扩展**). `canwu-society` is the
+current experimental **social diffusion simulation module**
+(**社会传播模拟模块**) built at that layer.
+
+- [Social diffusion simulation module design](proposals/social-belief-framework.md)
 - [Social framework implementation checklist](proposals/social-belief-framework-todo.md)
 
 ## Agent access
@@ -33,7 +38,9 @@ coding agents.
 When the `canwu-engine` agent plugin is installed, invoke
 [`$canwu-engine-docs`](../agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 to locate and explain the relevant tutorial, design contract, public API source,
-or runnable example without loading the entire documentation set.
+or runnable example without loading the entire documentation set. Agents should
+consult the [terminology reference](terminology.md) before introducing or
+translating a public Canwu term.
 
 ## Community
 

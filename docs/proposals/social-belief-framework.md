@@ -1,6 +1,6 @@
 # Social Belief and Institutional Diffusion Framework
 
-Status: implemented as an unpublished experimental reference extension.
+Status: implemented as an unpublished experimental social diffusion simulation module and domain extension.
 
 Implementation baseline: Canwu `main` at
 `d026c669c91fcf5546a87c2b28e669b154a0745a` on 2026-08-20. DecisionTicket is
@@ -12,10 +12,11 @@ existing authorized `ViewerContext` boundary and never fall back to truth.
 
 Do not add a `Religion` entity or religion-specific solver to Canwu core.
 
-Prototype a generic, unpublished `canwu-society` extension that uses Canwu's
-public plugin, domain-record, boundary, persistence, and replay contracts. Keep
-historical beliefs, rituals, institutions, policies, people, and conflicts in
-downstream domain packages such as Celestial Mandate.
+Prototype a generic, unpublished `canwu-society` social diffusion simulation
+module as a domain extension that uses Canwu's public plugin, domain-record,
+boundary, persistence, and replay contracts. Keep historical beliefs, rituals,
+institutions, policies, people, and conflicts in downstream domain packages such
+as Celestial Mandate.
 
 Promote a capability into Canwu core only when an independent second system
 needs the same primitive and the experimental implementation has produced
@@ -66,11 +67,12 @@ Canwu kernel
   stable identity, time, ingress, boundary settlement, allocation,
   actor knowledge, decisions, causality, persistence, replay, hashing
 
-Experimental official extensions
+Experimental official domain extensions
   canwu-information   content, representations, transfers, access,
                       interpretation, releases
-  canwu-society       cohorts, sparse disposition distributions, social
-                      influence, organization topology, institutional alignment
+  canwu-society       social diffusion simulation module: cohorts, sparse
+                      disposition distributions, social influence, organization
+                      topology, institutional alignment
 
 Downstream domain packages
   doctrine and ritual content, historical institutions and people,
@@ -82,10 +84,10 @@ Downstream domain packages
 be re-exported by `canwu-api`, and `canwu-api` must not depend on it. During the
 experimental period it should use `publish = false`.
 
-The society extension may consume information-derived exposure inputs through
-public records or ingress, but it must not own documents, printing, interception,
-translation, or interpretation. It may produce actor-estimate drafts, but the
-kernel owns authorization and actor-relative knowledge publication.
+The social diffusion simulation module may consume information-derived exposure
+inputs through public records or ingress, but it must not own documents,
+printing, interception, translation, or interpretation. It may produce
+actor-estimate drafts, but the kernel owns authorization and actor-relative knowledge publication.
 
 ## Authoritative model
 
@@ -417,7 +419,7 @@ runnable example and its Chinese/English documentation count as one case.
 
 ## Conformance evidence
 
-The implemented extension tests prove:
+The implemented domain-extension tests prove:
 
 - every active `(cohort, target)` distribution conserves cohort headcount
 - partial transfers preserve integer remainders across save and load
@@ -426,14 +428,14 @@ The implemented extension tests prove:
 - institutional alignment and population disposition remain separate
 - actor projections never expose ground-truth membership without evidence
 - payload core-entity references and persisted derived values are recomputed at
-  the extension load boundary
+  the module load boundary
 - pending institutional policy components are validated with the root state at
-  the extension load boundary
+  the module load boundary
 - explicit command authority cannot substitute for engine-issued
   DecisionTicket provenance
 - inactive organizations cannot receive or relay organization strength
 - EPOCH and negative-time boundaries remain valid simulation times
-- extension-validated snapshot load, exact replay, and fork reproduce the same
+- domain-extension-validated snapshot load, exact replay, and fork reproduce the same
   state
 
 The crate defines mobilization candidates but no conflict type or conflict
@@ -451,8 +453,8 @@ active outputs, while inactive catalog growth does not materialize a dense
 1. Approve this proposal without declaring public API stability.
 2. Coordinate with the decision-framework worktree and information design so
    persistence, knowledge, and decision contracts are not implemented twice.
-3. Build an unpublished `canwu-society` prototype on the existing plugin and
-   domain-record contracts.
+3. Build the unpublished `canwu-society` social diffusion simulation module as
+   a domain extension on the existing plugin and domain-record contracts.
 4. Implement cohorts, sparse multidimensional disposition distributions, and
    deterministic transition remainders.
 5. Implement social influence, organization topology, institutional alignment,
@@ -499,7 +501,7 @@ Stop and redesign if any of the following occurs:
 ## Approval boundary
 
 The user approved the bounded implementation scope. This document now records
-the implemented experimental extension and its remaining stop boundary:
+the implemented experimental domain extension and its remaining stop boundary:
 historical content, CM integration, additional tutorials, publication, and core
 promotion still require separate approval.
 

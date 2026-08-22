@@ -25,7 +25,7 @@ Canwu core.
    versioned experiment inputs. No public API exposes a mutable live state.
 5. Debug and research authority is explicit and cannot be reached by silently
    falling back from an actor-scoped API.
-6. Experimental reference extensions may prove these contracts while remaining
+6. Experimental domain extensions may prove these contracts while remaining
    unpublished and outside the `canwu-api` dependency graph. Their domain
    models do not become kernel conformance requirements merely by existing in
    the workspace.
@@ -310,7 +310,8 @@ randomness, save/load, exact replay, forking, rollback, tamper detection, and
 package-identity rejection. It proves those implemented architecture boundaries
 without adding application-specific types or rules to the kernel.
 
-The unpublished `canwu-society` reference extension additionally composes E01,
+The unpublished `canwu-society` social diffusion simulation module is an
+experimental domain extension. It additionally composes E01,
 E02, E04, E05, E07, E09, E10, E12, E13, and E15 through public `canwu-api`
 contracts. Its neutral local-community fixture proves conserved sparse cohort
 distributions, deterministic integer remainders, a DecisionTicket-backed
@@ -321,8 +322,8 @@ restore, fork, and exact replay. Its authority test rejects a forged explicit
 authority envelope without engine-issued DecisionTicket provenance. Its active
 signal and observer-projection indexes are also tested to grow with sparse
 active inputs rather than rule-by-edge or observer-by-distribution cross
-products, including valid EPOCH and negative-time boundaries. This is extension
-evidence, not a claim that social or religious types belong in Canwu core.
+products, including valid EPOCH and negative-time boundaries. This is
+domain-extension evidence, not a claim that its types belong in Canwu core.
 
 The complete profile remains in progress. The major remaining gaps include
 authority scopes that prevent human/AI double control, institution/advisor

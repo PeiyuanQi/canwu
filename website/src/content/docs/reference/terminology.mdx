@@ -1,0 +1,113 @@
+---
+title: 参伍术语表
+description: 查阅 Canwu 公开架构、开发指南和教程使用的规范中英文术语、代码标识与详细说明。
+sidebar:
+  order: 1
+  label: 中英文术语表
+---
+
+本表规定参伍公开文档中的中英文写法。中文正文使用“中文规范写法”，英文正文使用
+English 栏；代码标识始终保持原样。首次出现时可同时给出英文或代码名，例如
+**模拟规则插件**（domain plugin）或**决策票据**（`DecisionTicket`）。
+
+带链接的术语已有专门页面解释其行为和使用位置；尚未链接的术语目前以本页和 API
+文档中的定义为准。仓库中的 Agent 规范来源是
+[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md)。
+
+<div class="terminology-reference">
+
+## 产品与运行时边界
+
+| 中文规范写法 | English | 代码或 API | 含义与使用位置 |
+| --- | --- | --- | --- |
+| [参伍](/architecture/) | Canwu | `Canwu` | 产品名，也是对外 API 的主要入口；不要把品牌名当作普通名词翻译。 |
+| [无界面历史模拟引擎](/architecture/) | headless historical simulation engine | — | 参伍的产品类别；负责模拟历史世界，不负责画面、音频和正式产品界面。 |
+| [模拟内核](/architecture/) | simulation core | `canwu-sim` | 持有可变权威状态、调度、结算、持久化与重放的私有运行时。 |
+| [上层应用](/developer/integration/) | host application | — | 嵌入参伍的游戏、研究工具、服务、客户端或智能体系统；中文不使用“主机程序”。 |
+| [对外 API](/developer/integration/) | public facade | `canwu-api` | 应用代码应从这里接入；版本兼容性也以这里为准。 |
+| [模拟运行](/developer/persistence/) | simulation run | `run_id` | 具有独立身份、输入、状态和证据的一次连续执行。 |
+| [场景](/tutorials/move-army/) | scenario | `Scenario` | 创建模拟时使用的初始世界和配置。 |
+| [权威状态](/developer/reading-state/) | authoritative state | `SimulationSnapshot` | 由参伍持有并验证，作为承诺、持久化和重放基础的状态。 |
+| [真值](/developer/reading-state/) | ground truth | — | 权威状态中的事实，无论某个角色是否知道。 |
+| [角色相对视图](/developer/reading-state/) | actor-relative view | `CanwuViewer`, `ViewerContext` | 根据一个角色的知识和权限生成的读取结果，不会暴露全知状态。 |
+| [只读快照](/developer/reading-state/) | read-only snapshot | `WorldSnapshot` | 供受信任读取使用的脱离运行时状态值，不是实时可变引用。 |
+
+## 时间、输入与结算
+
+| 中文规范写法 | English | 代码或 API | 含义与使用位置 |
+| --- | --- | --- | --- |
+| [现实时间](/tutorials/continuous-game-loop/) | wall time | — | 上层应用实际经历的时间，不直接写入模拟状态。 |
+| [模拟时间](/tutorials/continuous-game-loop/) | simulation time | `SimTime`, `SimDuration` | 由参伍结算、可确定表示的时间。 |
+| [表现时间](/tutorials/continuous-game-loop/) | presentation time | — | 客户端动画与插值时间，可以是小数，但不属于权威状态。 |
+| [命令](/developer/integration/) | command | `Command`, `CommandEnvelope` | 经过结构、前置条件和权限校验后改变权威状态的类型化请求。 |
+| [语义动作](/tutorials/move-army/) | semantic action | `SemanticAction` | 面向 UI 或智能体的能力型动作，最终转换成经过验证的命令。 |
+| [规范化输入](/architecture/events/) | canonical ingress | `IngressRecord` | 命令、通信、信息和调度系统共用的持久化确定性输入路径。首次出现时可附英文。 |
+| [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
+| [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |
+| [结算边界](/architecture/settlement/) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | 准入工作、运行系统、记录证据并整体提交或回滚的一次事务。 |
+| [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
+| [原子提交](/architecture/settlement/) | atomic commit | — | 一次性应用边界中所有通过验证的变化，避免暴露部分状态。 |
+| [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
+
+## 插件与扩展
+
+| 中文规范写法 | English | 代码或 API | 含义与使用位置 |
+| --- | --- | --- | --- |
+| [插件](/developer/extensions/) | plugin | — | 泛称；可能与 Codex 等工具插件混淆时必须加限定词。 |
+| [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 通过公开插件契约注册到参伍运行时的组件，也是代码类型的常用中文名。 |
+| 运行时模拟插件 | runtime simulation plugin | `SimulationPlugin` | 仅在区分参伍运行时插件与 Agent 工具插件时使用，不是独立插件类别。 |
+| [模拟规则插件](/developer/extensions/) | domain plugin | `SimulationPlugin` | 提供社会、经济、军事、人物等具体领域规则的模拟插件，是按用途划分的子集。 |
+| [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域包，可包含插件、schema、命令、查询和辅助 API。 |
+| [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整能力名称，例如“社会传播模拟模块”；它本身不是引擎契约。 |
+| [命令插件](/tutorials/command-plugin/) | command plugin | `register_command()` | 注册带 schema 校验命令及其处理器的模拟插件。 |
+| [边界系统](/architecture/settlement/) | boundary system | `BoundarySystemContract` | 在结算阶段运行，并声明读取、写入、资源与随机范围的系统。 |
+| [领域 schema](/developer/extensions/) | domain schema | `DomainRecordType` | 插件所拥有领域数据的版本化结构契约；代码相邻的中文正文保留 `schema`。 |
+| [领域记录](/developer/extensions/) | domain record | `DomainRecord` | 由插件拥有并持久化，而非属于通用世界模型的类型化领域状态。 |
+| 插件组件 | plugin component | `PluginComponentRecord` | 通过声明的键与可见性附加的插件自有组件状态。 |
+| [插件语义环境](/developer/persistence/) | plugin semantic environment | `PluginDescriptor` | 加载或精确重放时必须匹配的插件身份、版本和语义哈希集合。 |
+
+## 证据、随机性与持久化
+
+| 中文规范写法 | English | 代码或 API | 含义与使用位置 |
+| --- | --- | --- | --- |
+| [事件](/architecture/events/) | event | `SimEvent` | 权威证据中的可序列化因果记录，不是 UI 通知。 |
+| [因果关系](/architecture/events/) | causality | `CauseRef` | 解释事件或变化为何发生的已记录关系。 |
+| [相关标识](/architecture/events/) | correlation ID | `correlation_id` | 将同一权威因果根产生的记录归为一组的稳定标识。 |
+| [随机流](/architecture/randomness/) | random stream | `RandomStreamKey` | 由已声明机制拥有的具名、版本化确定性随机来源。 |
+| [抽样证据](/architecture/randomness/) | draw evidence | `RandomDrawRecord` | 一次确定性随机抽样所记录的流、范围、操作和结果。 |
+| [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
+| [资源分配](/architecture/settlement/) | allocation | `ReservationAllocation` | 在供给约束下确定性结算竞争申请的结果。 |
+| [可见性](/architecture/settlement/) | visibility | `StateVisibility` | 控制状态和证据可以到达哪些读取者的策略。 |
+| [快照](/developer/persistence/) | snapshot | `SimulationSnapshot` | 恢复时必须完整校验的持久化状态映像。 |
+| [检查点](/developer/persistence/) | checkpoint | `SimulationCheckpoint` | 可与后续日志证据衔接的已验证紧凑基础状态。 |
+| [检查点日志](/developer/persistence/) | checkpoint journal | `CheckpointJournal` | 检查点和后续证据的组合，用于紧凑持久化与恢复。代码相邻正文可直接使用类型名。 |
+| [精确重放](/developer/persistence/) | exact replay | `replay_from_journal()` | 从已记录输入与证据重建并验证同一次运行，不重新调用外部选择。 |
+| [反事实分支](/developer/persistence/) | counterfactual branch | — | 从共同的旧状态选择不同输入形成的新因果分支，不是精确重放。 |
+| [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
+| [状态承诺](/architecture/settlement/) | state commitment | `CommitmentRoots` | 绑定权威状态或证据、供校验使用的密码学承诺。 |
+| [语义哈希](/developer/extensions/) | semantic hash | `semantic_hash` | 描述插件行为的稳定值，用于拒绝不兼容的加载或重放环境。 |
+
+## 角色、知识与决策
+
+| 中文规范写法 | English | 代码或 API | 含义与使用位置 |
+| --- | --- | --- | --- |
+| [角色](/developer/reading-state/) | actor | `PersonId` | 其知识和权限会约束视图或行动的人物或世界内主体。 |
+| [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
+| [报告](/architecture/events/) | report | `EventKind::ReportDispatched` | 在更新角色知识前，在角色之间签发或送达的信息。 |
+| [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
+| [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
+| [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |
+| [控制者](/tutorials/cases/warlord-aid-decision/) | controller | `DecisionControllerBinding` | 绑定到席位、负责作出决策的实体或过程；代码相邻正文可附 `controller`。 |
+| [席位](/tutorials/cases/warlord-aid-decision/) | seat | `seat_id` | 可以绑定控制者的稳定决策角色。 |
+| [决策策略](/tutorials/cases/warlord-aid-decision/) | policy | `DecisionPolicy` | 从当前选项中作出选择的人类、外部服务、LLM 或确定性评估器。 |
+| [决策票据](/tutorials/cases/warlord-aid-decision/) | decision ticket | `DecisionTicket` | 请求一个控制者从带版本的当前有效选项中选择的持久化对象。 |
+| [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
+| [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 尝试解决票据时形成的权威准入、接受或拒绝记录。 |
+| [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |
+
+## 维护规则
+
+新增或重命名公开概念时，应在同一改动中更新仓库术语表和本页的中英文版本。只有在
+对应的专题页面已经存在时才添加链接；在此之前，本术语表本身就是该词的公开定义。
+
+</div>

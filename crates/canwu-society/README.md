@@ -1,8 +1,12 @@
 # canwu-society
 
-`canwu-society` is an experimental, unpublished Canwu extension for aggregate
+`canwu-society` is Canwu's experimental, unpublished **social diffusion
+simulation module**. Architecturally, it is a **domain extension** built on the
+public engine contracts rather than a kernel subsystem. It owns aggregate
 population dispositions, social influence, organization topology,
-institutional alignment, policy pressure, and actor-relative estimates.
+institutional alignment, policy pressure, and actor-relative estimates while
+reusing Canwu's settlement, event, decision, knowledge, persistence, and replay
+infrastructure.
 
 It intentionally contains no religion, doctrine, ritual, historical era,
 rebellion, or war types. Applications provide those meanings through data and

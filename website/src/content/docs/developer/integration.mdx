@@ -13,7 +13,7 @@ Canwu 负责权威状态、验证、确定性时间、事件和证据。
 
 ## 添加依赖
 
-当前 main 分支需要 Rust 1.88 或更新版本。应用代码应只依赖公开 facade：
+当前 main 分支需要 Rust 1.88 或更新版本。应用代码应只依赖 Canwu 的公开 API：
 
 ```toml
 [dependencies]
@@ -24,8 +24,8 @@ canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 一起处理。当前 `main` 分支依赖用于移动 API 发布前的开发阶段；不要把它当作稳定的
 存档格式。
 
-不要直接依赖 `canwu-sim`、`canwu-world` 或其他实现 crate。它们可被 Cargo 解析，
-但不是应用代码的独立兼容性表面。
+不要直接依赖 `canwu-sim`、`canwu-world` 或其他实现 crate。Cargo 会下载这些
+crate，但它们属于实现细节，不保证可供应用直接依赖，也不单独承诺兼容性。
 
 ## 最小接入流程
 
@@ -65,7 +65,7 @@ let events = canwu.advance(SimDuration::days(1))?;
 ## 驱动时间
 
 <Steps>
-1. 上层应用读取墙钟、回合输入或研究任务进度。
+1. 上层应用读取现实时间、回合输入或研究任务进度。
 2. 上层应用按自己的速度策略把它转换为 `SimDuration`。
 3. 普通事件驱动场景调用 `advance()`；使用日结、回合结算等阶段系统时调用 `advance_canonical()` 或显式 `settle_boundary()`。
 4. 从返回的事件、边界回执或新的只读快照刷新表现层。

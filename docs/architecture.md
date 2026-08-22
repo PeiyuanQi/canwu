@@ -221,13 +221,18 @@ save, or offers research-only forks belongs to the host application's save
 policy. The engine persists enough state for all three policies but does not
 silently convert deterministic replay into irreversible play.
 
-## Experimental social diffusion extension
+## Simulation domain extensions / 模拟领域扩展
 
-`canwu-society` is an unpublished reference extension built on `canwu-api`; it
-is not a dependency of `canwu-api` and is not a new kernel subsystem. It models
-the reusable part of population-scale belief and affiliation change without
-introducing religion, doctrine, ritual, historical era, rebellion, or war
-types into Canwu core.
+Canwu calls an optional domain-specific module built on the public engine
+contracts a **domain extension** (**模拟领域扩展**). A domain extension owns its
+domain state, rules, commands, and actor projections while reusing kernel
+infrastructure such as events, settlement, decisions, persistence, and replay.
+
+`canwu-society` is an unpublished experimental **social diffusion simulation
+module** (**社会传播模拟模块**). It is a domain extension built on
+`canwu-api`, not a dependency of `canwu-api` or a new kernel subsystem. It
+models the reusable part of population-scale belief and affiliation change without introducing
+religion-specific types into Canwu core.
 
 Its authoritative root record contains ordered, sparse state for:
 
@@ -246,7 +251,7 @@ conserve the cohort headcount. Missing pairs are materialized only when a rule
 actually addresses them, so runtime state grows with active relationships and
 edges rather than a dense territory/cohort/target/channel product.
 
-The extension deliberately separates this chain:
+The social diffusion simulation module deliberately separates this chain:
 
 ```text
 information exposure != awareness != private assent != public alignment
@@ -264,7 +269,7 @@ Actor-facing queries require a valid `ViewerContext` and return only a
 previously materialized projection for that actor. Absence is an authorization
 error, never a request to decode the authoritative society record. Generic
 snapshot validation checks the plugin manifest, record schema, commitments,
-and referenced core-entity existence. The extension-level
+and referenced core-entity existence. The module-level
 `from_society_snapshot_json` boundary additionally recomputes the society
 payload-to-reference binding and every persisted aggregate, mobilization
 candidate, actor projection, and pending institutional-policy component before

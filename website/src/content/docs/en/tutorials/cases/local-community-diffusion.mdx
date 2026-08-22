@@ -1,6 +1,6 @@
 ---
 title: Local community diffusion and institutional response
-description: Model one neutral social-diffusion example with sparse populations, influence, an institutional decision, and actor-relative estimates.
+description: Explore the experimental social diffusion simulation module through sparse population distributions, influence, an institutional decision, and actor-relative estimates.
 sidebar:
   order: 3
   label: Community diffusion
@@ -10,12 +10,17 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 1. What problem are we solving?
 
-Imagine that you want to simulate a new idea spreading from a market into a
-nearby village, followed by a response from a local institution. A single
-“acceptance” score cannot distinguish awareness, private assent, public
-expression, participation, and organized mobilization. The model is also hard
-to trust if an institutional policy can instantly rewrite what people privately
-believe.
+`canwu-society` is an experimental **social diffusion simulation module** and,
+architecturally, a **domain extension** for Canwu. This example uses an abstract
+“new idea” to show how it composes group contact, private assent, public
+expression, organizational influence, institutional response, and actor-relative
+estimates. It focuses on diffusion mechanics and engine contracts so the same
+model can support different historical or fictional settings.
+
+A single “acceptance” score cannot distinguish awareness, private assent,
+public expression, participation, and organized mobilization. The model is
+also hard to trust if an institutional policy can instantly rewrite what
+people privately believe.
 
 This example needs to:
 
@@ -146,7 +151,7 @@ and false positives make the estimate differ from the true aggregate. An actor
 without an observer profile receives an error instead of the society root record.
 
 The example restores through `from_society_snapshot_json()`. After Canwu's
-generic snapshot checks, this extension boundary rechecks the core references
+generic snapshot checks, this module boundary rechecks the core references
 named by the society payload and every materialized derived value. The example
 then verifies that a fork and journal replay rebuild the same authoritative
 state.
@@ -159,10 +164,18 @@ conflict event. Separate political and security extensions must decide whether
 the result qualifies as protest, repression, migration, riot, coalition, or
 war.
 
-This boundary keeps cohorts, sparse multidimensional distributions,
-deterministic transfers, influence edges, organization topology, institutional
-inputs, policy pressures, candidate outputs, and actor estimates reusable
-without hard-coding a particular historical interpretation into the extension.
+## Domain-extension boundary
+
+Reusable mechanics in this domain extension are cohorts, sparse multidimensional
+distributions, deterministic transfers, influence edges, organization
+topology, institutional inputs, policy pressures, candidate outputs, and actor
+estimates. Historical doctrine, ritual, people, cultural compatibility, policy
+labels, conflict qualification, and narration remain downstream domain data.
+
+`canwu-society` currently has `publish = false` and is not re-exported by
+`canwu-api`. It is an experimental domain extension that proves the public
+plugin contracts. Its current documented scope covers generic diffusion
+mechanics; historical content and domain-specific APIs remain downstream.
 
 ## 3. Where is the code?
 

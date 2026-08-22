@@ -44,7 +44,7 @@ released; do not treat it as a stable snapshot format.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the facade. They are not separate compatibility surfaces for application code.
-Experimental workspace extensions such as `canwu-society` remain unpublished
+Experimental domain extensions such as `canwu-society` remain unpublished
 and must be consumed from the repository until separately stabilized.
 
 ## Quick start
@@ -69,7 +69,7 @@ replay:
 cargo run -p canwu-api --example decision_ticket
 ```
 
-For the single neutral aggregate social-diffusion tutorial:
+For the social diffusion simulation module example:
 
 ```text
 cargo run -p canwu-society --example local_community_diffusion
@@ -87,8 +87,8 @@ cargo run -p canwu-society --example local_community_diffusion
 - `canwu-sim`: private simulation state, commands, scheduling, and plugins
 - `canwu-api`: public APIs for programs, agents, explanations, and debugging
 - `canwu-debug`: a small reference client built only on the public API
-- `canwu-society`: unpublished aggregate social-diffusion reference extension
-  built on `canwu-api`
+- `canwu-society`: unpublished experimental social diffusion simulation module;
+  architecturally, a domain extension built on `canwu-api`
 
 The [documentation index](docs/README.md) links the architectural contracts,
 community guidance, and legal notices. `agent-interface` contains skills for

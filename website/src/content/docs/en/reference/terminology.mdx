@@ -1,0 +1,117 @@
+---
+title: Canwu terminology
+description: Look up the canonical English and Chinese terms, code identifiers, meanings, and usage guides for Canwu.
+sidebar:
+  order: 1
+  label: English-Chinese terminology
+---
+
+This table defines the English and Chinese terms used in Canwu's public
+architecture, developer guides, and tutorials. Use the English term in English
+prose and the canonical Chinese term in Chinese prose. Keep code identifiers
+unchanged.
+
+Linked terms have a focused page that explains their behavior and where to use
+them. Unlinked terms are currently defined by this page and the API
+documentation. The agent-facing source of truth in the repository is
+[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md).
+
+<div class="terminology-reference">
+
+## Product and runtime boundaries
+
+| English | 中文规范写法 | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [Canwu](/en/architecture/) | 参伍 | `Canwu` | Product name and main public API entry point. Do not translate the brand as a generic noun. |
+| [headless historical simulation engine](/en/architecture/) | 无界面历史模拟引擎 | — | Canwu's product category: it simulates historical worlds without owning rendering, audio, or production UI. |
+| [simulation core](/en/architecture/) | 模拟内核 | `canwu-sim` | The private runtime that owns mutable authoritative state, scheduling, settlement, persistence, and replay. |
+| [host application](/en/developer/integration/) | 上层应用 | — | A game, research tool, service, client, or agent system that embeds Canwu. Chinese prose uses 上层应用, not 主机程序. |
+| [public facade](/en/developer/integration/) | 对外 API | `canwu-api` | The supported API boundary for application code. |
+| [simulation run](/en/developer/persistence/) | 模拟运行 | `run_id` | One causally continuous execution with its own identity, inputs, state, and evidence. |
+| [scenario](/en/tutorials/move-army/) | 场景 | `Scenario` | The initial world and configuration used to create a simulation. |
+| [authoritative state](/en/developer/reading-state/) | 权威状态 | `SimulationSnapshot` | State owned and validated by Canwu and used as the basis for commitments, persistence, and replay. |
+| [ground truth](/en/developer/reading-state/) | 真值 | — | Facts present in authoritative state whether or not a particular actor knows them. |
+| [actor-relative view](/en/developer/reading-state/) | 角色相对视图 | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and authority rather than omniscient state. |
+| [read-only snapshot](/en/developer/reading-state/) | 只读快照 | `WorldSnapshot` | A detached state value for trusted reads, not a mutable reference to the live runtime. |
+
+## Time, input, and settlement
+
+| English | 中文规范写法 | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [wall time](/en/tutorials/continuous-game-loop/) | 现实时间 | — | Real elapsed time observed by the host application. It never enters authoritative state directly. |
+| [simulation time](/en/tutorials/continuous-game-loop/) | 模拟时间 | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
+| [presentation time](/en/tutorials/continuous-game-loop/) | 表现时间 | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
+| [command](/en/developer/integration/) | 命令 | `Command`, `CommandEnvelope` | A typed request to change authoritative state through structural, precondition, and authority checks. |
+| [semantic action](/en/tutorials/move-army/) | 语义动作 | `SemanticAction` | A capability-oriented action for UI or agents that becomes a validated command. |
+| [canonical ingress](/en/architecture/events/) | 规范化输入 | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. |
+| [admission](/en/architecture/events/) | 准入 | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
+| [scheduled work](/en/architecture/events/) | 调度工作 | — | Work assigned a deterministic simulation due time and insertion order. |
+| [settlement boundary](/en/architecture/settlement/) | 结算边界 | `BoundaryRequest`, `BoundaryRecord` | One transaction that admits work, runs systems, records evidence, and commits or rolls back. |
+| [settlement phase](/en/architecture/settlement/) | 结算阶段 | `BoundaryPhase` | One position in the fixed boundary execution order, not an independent settlement algorithm. |
+| [atomic commit](/en/architecture/settlement/) | 原子提交 | — | Applying all validated boundary changes together so observers never see partial state. |
+| [rollback](/en/architecture/settlement/) | 回滚 | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
+
+## Plugins and extensions
+
+| English | 中文规范写法 | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [plugin](/en/developer/extensions/) | 插件 | — | Generic term. Qualify it when confusion with Codex or another tool plugin is possible. |
+| [simulation plugin](/en/developer/extensions/) | 模拟插件 | `SimulationPlugin` | A component registered with the Canwu runtime through the public plugin contract. |
+| runtime simulation plugin | 运行时模拟插件 | `SimulationPlugin` | Disambiguating form used only when contrasting Canwu runtime plugins with agent-interface plugins. It is not a separate kind. |
+| [domain plugin](/en/developer/extensions/) | 模拟规则插件 | `SimulationPlugin` | A simulation plugin that provides concrete social, economic, military, character, or other domain rules. |
+| [domain extension](/en/tutorials/cases/local-community-diffusion/) | 模拟领域扩展 | — | An optional domain package built on public contracts. It may contain plugins, schemas, commands, queries, and supporting APIs. |
+| [simulation module](/en/tutorials/cases/local-community-diffusion/) | 模拟模块 | — | A human-facing name for a coherent capability, such as the social diffusion simulation module; it is not an engine contract. |
+| [command plugin](/en/tutorials/command-plugin/) | 命令插件 | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
+| [boundary system](/en/architecture/settlement/) | 边界系统 | `BoundarySystemContract` | A declared system that runs in a phase with bounded reads, writes, resources, and randomness. |
+| [domain schema](/en/developer/extensions/) | 领域 schema | `DomainRecordType` | A versioned structural contract for plugin-owned domain data. Chinese code-adjacent prose retains `schema`. |
+| [domain record](/en/developer/extensions/) | 领域记录 | `DomainRecord` | Typed persisted domain state owned by a plugin rather than the generic world model. |
+| plugin component | 插件组件 | `PluginComponentRecord` | Plugin-owned component state attached through declared keys and visibility. |
+| [plugin semantic environment](/en/developer/persistence/) | 插件语义环境 | `PluginDescriptor` | The exact plugin identities, versions, and semantic hashes required for load or exact replay. |
+
+## Evidence, randomness, and persistence
+
+| English | 中文规范写法 | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [event](/en/architecture/events/) | 事件 | `SimEvent` | A serializable causal record in authoritative evidence, not a UI notification. |
+| [causality](/en/architecture/events/) | 因果关系 | `CauseRef` | The recorded relationship explaining why an event or change occurred. |
+| [correlation ID](/en/architecture/events/) | 相关标识 | `correlation_id` | A stable identifier that groups records belonging to one authoritative causal root. |
+| [random stream](/en/architecture/randomness/) | 随机流 | `RandomStreamKey` | A named, versioned deterministic source owned by a declared mechanic. |
+| [draw evidence](/en/architecture/randomness/) | 抽样证据 | `RandomDrawRecord` | The recorded stream, range, operation, and result of one deterministic draw. |
+| [reservation](/en/tutorials/phased-boundary/) | 资源预留 | `ReservationRequest` | A declared request against a conserved resource pool before allocation. |
+| [allocation](/en/architecture/settlement/) | 资源分配 | `ReservationAllocation` | The deterministic result of settling competing reservations against supply. |
+| [visibility](/en/architecture/settlement/) | 可见性 | `StateVisibility` | The policy controlling which state and evidence can reach which readers. |
+| [snapshot](/en/developer/persistence/) | 快照 | `SimulationSnapshot` | A complete persisted state image validated on restore. |
+| [checkpoint](/en/developer/persistence/) | 检查点 | `SimulationCheckpoint` | A validated compact base state from which later journal evidence can continue. |
+| [checkpoint journal](/en/developer/persistence/) | 检查点日志 | `CheckpointJournal` | A checkpoint bundled with subsequent evidence for compact persistence and restoration. |
+| [exact replay](/en/developer/persistence/) | 精确重放 | `replay_from_journal()` | Reconstructing and verifying the same run from recorded input and evidence without rerunning external choices. |
+| [counterfactual branch](/en/developer/persistence/) | 反事实分支 | — | A new causal branch formed by choosing different input from a shared prior state; it is not exact replay. |
+| [fork](/en/developer/persistence/) | 派生分支 | `fork()` | An independent simulation copied from an existing point so it can advance with new input. |
+| [state commitment](/en/architecture/settlement/) | 状态承诺 | `CommitmentRoots` | A cryptographic commitment that binds authoritative state or evidence for validation. |
+| [semantic hash](/en/developer/extensions/) | 语义哈希 | `semantic_hash` | A stable declaration of plugin behavior used to reject incompatible load or replay environments. |
+
+## Actors, knowledge, and decisions
+
+| English | 中文规范写法 | Code or API | Meaning and use |
+| --- | --- | --- | --- |
+| [actor](/en/developer/reading-state/) | 角色 | `PersonId` | A person or in-world principal whose knowledge and authority constrain a view or action. |
+| [actor knowledge](/en/developer/reading-state/) | 角色知识 | `ActorKnowledge` | What one actor knows, including source, confidence, and time, stored separately from ground truth. |
+| [report](/en/architecture/events/) | 报告 | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
+| [projection](/en/developer/reading-state/) | 投影 | — | A materialized actor-scoped representation that does not expose authoritative domain state. |
+| [authority](/en/developer/integration/) | 权限 | `CommandAuthority` | The validated right to issue a command or perform an action. `Authoritative state` is 权威状态. |
+| [issuer](/en/developer/integration/) | 签发者 | `Issuer` | The identity presented as the command source; authority checks decide whether it may act. |
+| [controller](/en/tutorials/cases/warlord-aid-decision/) | 控制者 | `DecisionControllerBinding` | The entity or process bound to a seat to make decisions. |
+| [seat](/en/tutorials/cases/warlord-aid-decision/) | 席位 | `seat_id` | A stable decision-making role that can be bound to a controller. |
+| [policy](/en/tutorials/cases/warlord-aid-decision/) | 决策策略 | `DecisionPolicy` | A human, external service, LLM, or deterministic evaluator that selects among current options. |
+| [decision ticket](/en/tutorials/cases/warlord-aid-decision/) | 决策票据 | `DecisionTicket` | A persisted request for one controller to choose among versioned, currently valid options. |
+| [decision option](/en/tutorials/cases/warlord-aid-decision/) | 决策选项 | `DecisionOption` | One candidate choice offered by a decision ticket. |
+| [decision attempt](/en/tutorials/cases/warlord-aid-decision/) | 决策尝试 | `DecisionAttemptRecord` | An authoritative admission, acceptance, or rejection record for an attempt to resolve a ticket. |
+| [decision trace](/en/tutorials/cases/warlord-aid-decision/) | 决策轨迹 | `DecisionTrace` | Persisted scores, evidence, policy identity, selected option, and outcome used for explanation and replay. |
+
+## Maintenance rule
+
+When a public concept is added or renamed, update the repository terminology
+file and both website language pages in the same change. Add a link only after a
+focused website page exists; this terminology table is the public definition
+until then.
+
+</div>

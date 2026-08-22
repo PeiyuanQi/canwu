@@ -1,12 +1,12 @@
 ---
 title: 快速开始
-description: 从最小可运行示例开始，学习如何通过公开 canwu-api 驱动确定性历史模拟。
+description: 从最小可运行示例开始，学习如何通过 canwu-api 驱动确定性历史模拟。
 template: doc
 sidebar:
   order: 1
   label: 快速开始
 hero:
-  tagline: 别急着把自己训练成 Markdown 解析器：先把目标交给 coding agent，让它从可运行示例带你入门；真想亲自考古，再慢慢往下翻。
+  tagline: 先跑一个最小示例，再按需要查阅背后的接口和规则。
   actions:
     - text: 从移动军队开始
       link: /tutorials/move-army/
@@ -23,22 +23,23 @@ hero:
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
-> **推荐玩法：先叫 Agent。** 把这句话交给你的 coding agent：
-> “请用 Canwu 做一个能移动军队并推进时间的最小历史模拟，边写边解释关键契约。”
-> 让它查阅本教程、开发者指南和公开示例；如果装了 `canwu-engine` 插件，再让它调用 `$canwu-engine-docs`。你当然也可以从头手读——只是滚轮本来没打算转行做考古学家。
+> **建议从示例开始。** 先照着“移动军队”教程跑通最小流程，遇到问题时再查开发者指南。
+> 如果你习惯使用代码助手，也可以把这句话交给它：
+> “请用 Canwu 做一个能移动军队并推进时间的最小历史模拟，边写边解释关键接口和规则。”
+> 让它参考本教程、开发者指南和公开示例；如果装有 `canwu-engine` 插件，还可以调用 `$canwu-engine-docs`。
 
 ## 选择一个起点
 
 <CardGrid>
   <LinkCard
-    title="移动军队：最小垂直切片"
+    title="移动军队：最小可运行示例"
     href="/tutorials/move-army/"
     description="提交经过验证的行动、推进时间，并比较不同角色知道的信息。"
   />
   <LinkCard
     title="连续时间游戏循环"
     href="/tutorials/continuous-game-loop/"
-    description="解耦墙钟时间、模拟时间与表现时间，并证明结果不依赖 FPS。"
+    description="分开处理现实时间、模拟时间与画面表现时间，并验证结果不受 FPS 影响。"
   />
   <LinkCard
     title="命令插件"
@@ -68,12 +69,12 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
   <LinkCard
     title="军阀请求邻军援助"
     href="/tutorials/cases/warlord-aid-decision/"
-    description="组合 DecisionTicket、动态 options、utility policy、权限派生命令、trace、存档与精确重放。"
+    description="组合决策票据、动态选项、决策策略、按权限生成的命令、决策轨迹、存档与精确重放。"
   />
   <LinkCard
     title="本地社区传播与制度回应"
     href="/tutorials/cases/local-community-diffusion/"
-    description="用一个中性案例组合稀疏人口分布、社会影响、制度决策、角色估计和精确重放。"
+    description="探索实验性社会传播模拟模块，组合稀疏人口分布、社会影响、制度决策、角色估计和精确重放。"
   />
   <LinkCard
     title="机密副本与定向发布"
@@ -83,7 +84,7 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
   <LinkCard
     title="编码传递与中途截取"
     href="/tutorials/cases/encoded-interception/"
-    description="分离 representation copy、access 与 interpretation，并对比不同能力的解读结果。"
+    description="区分信息副本、访问权限与解读过程，并对比不同能力下的解读结果。"
   />
   <LinkCard
     title="浏览全部案例"
