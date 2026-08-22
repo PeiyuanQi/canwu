@@ -8,7 +8,7 @@ const prefix = isEnglish ? "/en" : "";
 const installCommand = "cargo add canwu-api --git https://github.com/PeiyuanQi/canwu --branch main";
 const releaseUrl = "https://github.com/PeiyuanQi/canwu/releases";
 
-const rustExample = `use canwu_api::{Canwu, ObserveRequest, SemanticAction, SimDuration};
+const rustExample = `use canwu_api::{Canwu, EntityRef, ObserveRequest, SemanticAction, SimDuration};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut canwu = Canwu::demo(35)?;
@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     canwu.act(
         ids.commander,
         SemanticAction::MoveEntity {
-            subject: canwu_api::EntityRef::Army(ids.army),
+            subject: EntityRef::Army(ids.army),
             destination: ids.eastern_territory,
             cargo: Vec::new(),
         },
@@ -26,9 +26,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let commander = canwu.observe(ids.commander, &ObserveRequest::default())?;
     let observer = canwu.observe(ids.observer, &ObserveRequest::default())?;
-    println!("events: {}", arrival_events.len());
-    println!("commander: {:?}", commander.known_armies[0].known_location);
-    println!("observer: {:?}", observer.known_armies[0].known_location);
+    println!("time: {}", canwu.time());
+    println!("arrival events: {}", arrival_events.len());
+    println!(
+        "commander knows location: {:?}",
+        commander.known_armies[0].known_location
+    );
+    println!(
+        "observer still believes location: {:?}",
+        observer.known_armies[0].known_location
+    );
     Ok(())
 }`;
 
@@ -54,20 +61,20 @@ const c = isEnglish
       status: "open source · agent-native · actively developed",
       name: "Canwu Engine", nativeName: "参伍引擎",
       summary: "An agent-native, deterministic Rust core for historical simulation.",
-      intro: "Advance historical, social, and strategy worlds through commands, causal events, actor knowledge, and snapshots. Agents are first-class clients; choose your own renderer, interface, and content stack across regions and eras.",
+      intro: "Advance historical, social, and strategic worlds through commands, causal events, actor knowledge, and snapshots. Agents are first-class clients; choose your own renderer, interface, and content stack across regions and eras.",
       getStarted: "Run the example", repository: "View source", docs: "Read the architecture",
       installLabel: "Install", installTitle: "Add Canwu to your Rust project", installIntro: "Use the current public canwu-api facade from the main branch. Rust 1.88 or newer is required.", installCommandLabel: "One-line install", release: "View releases",
       facts: [["Replay", "Exact continuation from a recorded environment"], ["Knowledge", "Scoped to each actor"], ["Rendering", "Bring your own client"], ["Agents", "Native semantic API"]],
       example: "Excerpt from the real example", source: "Open the complete move_army.rs",
-      featuresLabel: "Why Canwu", featuresTitle: "One world model, multiple kinds of client", featuresIntro: "Canwu owns simulation truth and exposes a narrow public boundary. Games, research tools, and agents share the same deterministic world while choosing their own renderer and interface.",
+      featuresLabel: "Why Canwu", featuresTitle: "One world model, many client types", featuresIntro: "Canwu owns simulation ground truth and exposes a narrow public boundary. Games, research tools, and agents share the same deterministic world while choosing their own renderer and interface.",
       features: [
         ["replay", "Deterministic execution and replay", "Time, scheduled work, random streams, and boundary records are ordered so identical inputs can be inspected and replayed."],
-        ["knowledge", "Knowledge belongs to actors", "World truth and actor knowledge stay separate. Observations retain source, confidence, and information age while omniscient state remains inside the authority boundary."],
+        ["knowledge", "Knowledge belongs to actors", "Ground truth and actor knowledge stay separate. Observations retain source, confidence, and information age while authoritative state remains inside the runtime."],
         ["boundary", "Renderer-independent public API", "External clients change the world through validated commands and read detached snapshots, events, or actor-scoped observations."],
       ],
       scopeLabel: "Scope", scopeTitle: "Across dynasties, regions, and renderers", scopeCopy: "The engine core stays generic. Scenario data and plugins define institutions, geography, population, trade, conflict, and other period-specific systems. The roadmap spans multiple regions and eras, from antiquity through the late twentieth century.",
       quickLabel: "Five-minute proof", quickTitle: "Run the checked-in movement scenario", quickIntro: "The example uses the public semantic API, advances one simulated day, and shows that a commander and a distant observer can hold different knowledge about the same army.",
-      clone: "Clone and run", output: "Observed output", quickTutorial: "Open the step-by-step tutorial",
+      clone: "Clone and run", output: "Full example output", quickTutorial: "Open the step-by-step tutorial",
       statusTitle: "Current capabilities", statusCopy: "The core simulation workflow, authoritative ingress, atomic settlement, validated persistence, exact replay, and committed performance evidence are available today. Public APIs mature through real integrations, with migration guidance accompanying contract changes.",
       availableTitle: "Available now", availableItems: ["Change world state through commands or semantic actions, with validation before execution", "Advance time, run scheduled work, and record causal events in a fixed order", "Give each actor a different view of the world, including delayed information", "Save snapshots, create incremental checkpoint journals, seal completed live evidence into caller-owned segments, and replay records exactly", "Inspect committed elapsed-time, allocation, snapshot-size, and growth benchmarks"],
       evolvingTitle: "Roadmap", evolvingItems: ["Stable public API and compatibility guidance", "C, Python, TypeScript, and network interfaces", "Content-addressed archive adapters and indexed historical lookup", "Official renderer adapters and complete runnable scenarios"],
@@ -98,15 +105,15 @@ const c = isEnglish
       installLabel: "下载安装", installTitle: "一行命令接入 Canwu", installIntro: "从 main 分支接入当前的 canwu-api 公开入口，需要 Rust 1.88 或更高版本。", installCommandLabel: "一行安装", release: "查看发布版本",
       facts: [["重演", "同一记录环境可精确继续"], ["知识", "限定到具体角色"], ["渲染", "由客户端选择"], ["智能体", "原生语义 API"]],
       example: "真实示例代码摘录", source: "打开完整 move_army.rs",
-      featuresLabel: "为什么选择参伍", featuresTitle: "一套世界模型，接入多种客户端", featuresIntro: "参伍维护模拟真相，并通过窄而明确的公开边界提供能力。游戏、研究工具与智能体共享同一个确定性世界，同时自由选择渲染器与交互界面。",
+      featuresLabel: "为什么选择参伍", featuresTitle: "一套世界模型，接入多种客户端", featuresIntro: "参伍维护模拟真值，并通过窄而明确的公开边界提供能力。游戏、研究工具与智能体共享同一个确定性世界，同时自由选择渲染器与交互界面。",
       features: [
         ["replay", "确定性执行与重演", "时间、计划任务、随机流与结算记录都有稳定顺序，使相同输入能够被检查和重演。"],
-        ["knowledge", "知识属于具体角色", "世界真相与角色所知分开保存。观察结果记录来源、可信度与信息时效，全知状态保留在权限边界之内。"],
+        ["knowledge", "知识属于具体角色", "世界真值与角色所知分开保存。观察结果记录来源、可信度与信息时效，权威状态保留在运行时内部。"],
         ["boundary", "跨渲染器公开 API", "外部客户端通过经验证命令改变世界，并通过快照、事件或角色视角观察读取状态。"],
       ],
       scopeLabel: "时空范围", scopeTitle: "跨朝代、跨地区、跨渲染器", scopeCopy: "引擎核心保持通用；制度、地理、人口、贸易、冲突等特定时代规则由场景数据与插件定义。路线图覆盖多个地区与时代，从古代世界延伸到二十世纪末。",
       quickLabel: "五分钟验证", quickTitle: "运行仓库中的移动场景", quickIntro: "该示例只使用公开语义 API，推进一个模拟日，并展示指挥官与远方观察者如何对同一支军队持有不同信息。",
-      clone: "克隆并运行", output: "实际输出", quickTutorial: "查看分步教程",
+      clone: "克隆并运行", output: "完整示例输出", quickTutorial: "查看分步教程",
       statusTitle: "当前能力", statusCopy: "核心模拟流程、权威输入、原子结算、持久化验证、精确重演与可复现性能证据均已具备。公开 API 通过真实集成持续成熟，契约调整同时提供迁移说明。",
       availableTitle: "现有功能", availableItems: ["通过命令或语义行动修改世界状态，先校验再执行", "按固定顺序推进时间、运行计划任务并记录事件因果", "让不同角色看到不同信息，并保留消息传播的延迟", "保存快照、创建增量检查点日志、把已完成的实时证据封存为调用方持有的分段，并精确重演记录", "查看已提交的耗时、分配、快照大小与增长基准"],
       evolvingTitle: "路线图", evolvingItems: ["稳定的公开 API 与兼容指引", "C、Python、TypeScript 和网络接口", "内容寻址归档适配器与索引化历史查询", "官方渲染适配器与完整可运行场景"],
