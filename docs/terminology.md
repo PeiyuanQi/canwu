@@ -63,6 +63,9 @@ terms are currently defined only here and in their code-level API documentation.
 | [领域记录](../website/src/content/docs/developer/extensions.mdx) | domain record | `DomainRecord` | Typed, persisted domain state owned by a plugin rather than by the generic world model. |
 | 插件组件 | plugin component | `PluginComponentRecord` | Plugin-owned component state attached through declared keys and visibility. |
 | [插件语义环境](../website/src/content/docs/developer/persistence.mdx) | plugin semantic environment | `PluginDescriptor` | The exact plugin identities, versions, and semantic hashes required to load or exactly replay persisted state. |
+| 参考内容包 | reference content pack | — | A first-party or downstream package of versioned, namespaced, serializable domain definitions, scenario data, localization, and provenance. It supplies content to a domain extension; it is not a kernel subsystem or a solver. |
+| 参考整合包 | reference integration | — | A replaceable public-API implementation that maps generic domain capabilities to a small world, production, information, or society model. It may contain runtime plugins and host-adapter code. |
+| 入门套件 | starter kit | — | A runnable host and composition example that combines compatible reference content and integrations into a complete vertical slice. It is reference code, not a privileged engine path. |
 
 ## Evidence, randomness, and persistence
 

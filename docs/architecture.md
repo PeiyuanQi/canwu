@@ -119,6 +119,65 @@ can request an omniscient snapshot, but that snapshot is detached data. The
 semantic API requires an actor and builds observations from that actor's
 knowledge records.
 
+## Architecture layers / 架构分层
+
+Canwu is intentionally useful at more than one level. The engine supplies
+deterministic simulation contracts; domain extensions supply reusable mechanics;
+reference kits supply runnable defaults; and host applications decide which
+world, content, presentation, and product rules to compose. The lower layers do
+not depend on the historical content of the upper layers.
+
+```mermaid
+flowchart TB
+    subgraph Engine["Canwu engine / 参伍引擎"]
+        Core["Kernel<br/>time, commands, settlement,<br/>knowledge, decisions, replay"]
+        Api["Public facade<br/>canwu-api"]
+        Core --> Api
+    end
+
+    subgraph Domains["Generic domain extensions / 通用模拟领域扩展"]
+        Tech["Technology<br/>technology state and solvers"]
+        Info["Information<br/>content access and delivery"]
+        Society["Society<br/>population and social diffusion"]
+        Production["Production / economy<br/>assets, recipes, markets"]
+    end
+
+    subgraph Kits["Reference content and starter kits / 参考内容与入门套件"]
+        Packs["Reference content packs<br/>technology, society, economy data"]
+        Integrations["Reference integrations<br/>world and economy adapters"]
+        Starters["Starter hosts<br/>runnable vertical slices"]
+        Packs --> Integrations
+        Integrations --> Starters
+    end
+
+    subgraph Apps["Host applications / 上层应用"]
+        CM["Celestial Mandate"]
+        UserGames["User games and research tools"]
+        Clients["Clients, UI, maps, agents"]
+        CM --> Clients
+        UserGames --> Clients
+    end
+
+    Api --> Domains
+    Domains --> Packs
+    Domains --> Integrations
+    Starters -. "starter/template" .-> UserGames
+    Packs --> CM
+    Integrations --> CM
+    Domains --> CM
+```
+
+The arrows describe dependency and composition, not ownership of all the state
+below them. A reference content pack is data consumed by a domain extension. A
+reference integration is executable domain or host code that maps generic
+capabilities to a small, inspectable world model. A starter host is a complete
+consumer that demonstrates the composition without becoming part of the
+kernel.
+
+This classification prevents two opposite mistakes: putting historical or
+opinionated examples into `canwu-core`, and leaving new users with only low-level
+contracts and no working model to extend.
+
 ## Dependency direction
 
 ```mermaid
@@ -276,6 +335,62 @@ candidate, actor projection, and pending institutional-policy component before
 the restored simulation is returned. Optional materialization timestamps keep
 `SimTime::EPOCH` and negative simulation times available as real boundary
 times. Fork and exact replay use the same serialized authoritative state.
+
+### Reference content and starter kits / 参考内容与入门套件
+
+The intended reference-kit layer is a first-party consumer of the public
+contracts. It is a planned, growing product layer rather than a claim that the
+repository already provides a dynamic content-pack loader. This design does
+not introduce a required `ContentPack` runtime trait. It exists because a
+developer should be able to begin with a complete, runnable simulation and
+replace one part at a time, rather than design every domain record and
+integration before seeing a result. It is intentionally a growing collection,
+not one fixed demonstration package.
+
+| Package kind | Owns | Does not own |
+| --- | --- | --- |
+| **Reference content pack** | Versioned technology, society, economy, scenario, localization, and provenance data | A new solver, the kernel, or a mandatory historical worldview |
+| **Reference integration** | A public-API implementation that maps generic capabilities to a small world, production, or information model | Generic domain semantics or a user's world model |
+| **Starter kit** | A runnable host, composition code, commands, projections, and a documented vertical slice | A privileged runtime path or a hidden engine dependency |
+
+Reference content is data-first. A pack may be serialized data or a thin Rust
+crate that produces owned serializable values. It should use namespaced IDs,
+explicit schema versions, dependency declarations, licensing, and provenance.
+The generic extension remains responsible for validation and settlement. A pack
+must not require the extension to branch on a scenario ID or a historical case
+label.
+
+Reference integrations are deliberately replaceable. For example, a simple
+technology integration can map `fiber_source`, `clean_water`, and
+`sheet_forming` capabilities to its own buildings and resources. Another game
+can use the same content pack with a different economy or map adapter. The
+integration may contain one or more runtime plugins and a host adapter, but it
+must use only the supported `canwu-api` facade.
+
+Starter kits should demonstrate the complete public path: scenario creation,
+content selection, validated commands, boundary settlement, actor-relative
+projections, save/load, fork, and exact replay. Their code is reference code,
+not a special engine mode. Larger collections can add more packs and
+integrations without changing the kernel or forcing all users to load the same
+content.
+
+Content selection is resolved before a simulation run begins. The selected pack
+identities, versions, schema versions, and content hashes belong in the run
+manifest and initial scenario binding. Runtime systems consume the validated
+materialized records rather than reading external files during settlement. This
+keeps reference kits compatible with the existing plugin semantic environment,
+snapshot validation, and exact replay guarantees.
+
+The recommended growth path is:
+
+1. Build one small but complete starter vertical slice using public APIs only.
+2. Extract its reusable definitions into reference content packs.
+3. Add a second integration that uses the same pack with a different world or
+   economy model.
+4. Grow the catalog by domain and period, while keeping each pack and
+   integration independently versioned and replaceable.
+5. Add discovery or registry tooling only after the package manifests and
+   compatibility rules have proven stable.
 
 ## World, time, and events
 

@@ -65,6 +65,9 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [领域记录](/developer/extensions/) | domain record | `DomainRecord` | 由插件拥有并持久化，而非属于通用世界模型的类型化领域状态。 |
 | 插件组件 | plugin component | `PluginComponentRecord` | 通过声明的键与可见性附加的插件自有组件状态。 |
 | [插件语义环境](/developer/persistence/) | plugin semantic environment | `PluginDescriptor` | 加载或精确重放时必须匹配的插件身份、版本和语义哈希集合。 |
+| 参考内容包 | reference content pack | — | 由第一方或下游提供的版本化、带命名空间、可序列化领域定义、场景数据、本地化和来源信息包；它向领域扩展提供内容，不是内核子系统或求解器。 |
+| 参考整合包 | reference integration | — | 使用公开 API 将通用领域能力映射到小型世界、生产、信息或社会模型的可替换实现；可以包含运行时插件和上层应用适配代码。 |
+| 入门套件 | starter kit | — | 将兼容的参考内容包和参考整合包组合成完整纵向切片的可运行宿主与组合示例；它是参考代码，不是特权引擎路径。 |
 
 ## 证据、随机性与持久化
 

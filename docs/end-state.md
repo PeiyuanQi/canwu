@@ -202,6 +202,33 @@ abstraction is not specific to belief or religion, and a separate compatibility 
 migration decision. Until then, `canwu-api` must not depend on or re-export
 `canwu-society`.
 
+### Reference content and starter kits
+
+Canwu should ship or maintain a first-party collection of reference content
+packs, reference integrations, and starter kits above the generic domain
+extensions. This is a usability layer for engine users, not a promotion of
+historical content into the kernel.
+
+Reference content packs provide versioned, namespaced, serializable definitions
+such as technology families, process variants, social targets, scenario seeds,
+localization, balance profiles, and provenance. Reference integrations provide
+small public-API implementations that map those definitions to a world,
+production, information, or society model. Starter kits compose both into a
+runnable host application with a complete vertical slice.
+
+The collection is expected to grow. A pack must be usable with more than one
+compatible integration, and an integration must be replaceable without
+rewriting the pack. Packs and integrations remain downstream packages, with
+independent versions and content hashes recorded in the scenario/run manifest.
+The runtime must consume validated materialized data and registered handlers;
+it must never read an unverified external content file during settlement.
+
+The first-party acceptance bar is higher than an API snippet: every starter kit
+must use only the supported public facade, exercise authoritative commands and
+boundaries, expose actor-relative reads where relevant, and prove save/load,
+fork, and exact replay. It is reference code and content that users can copy or
+replace, not a privileged compatibility path.
+
 ## Debug client
 
 The first-party client remains a reference consumer. It should prioritize world

@@ -67,6 +67,9 @@ documentation. The agent-facing source of truth in the repository is
 | [domain record](/en/developer/extensions/) | 领域记录 | `DomainRecord` | Typed persisted domain state owned by a plugin rather than the generic world model. |
 | plugin component | 插件组件 | `PluginComponentRecord` | Plugin-owned component state attached through declared keys and visibility. |
 | [plugin semantic environment](/en/developer/persistence/) | 插件语义环境 | `PluginDescriptor` | The exact plugin identities, versions, and semantic hashes required for load or exact replay. |
+| reference content pack | 参考内容包 | — | A first-party or downstream package of versioned, namespaced, serializable domain definitions, scenario data, localization, and provenance. It supplies content to a domain extension; it is not a kernel subsystem or solver. |
+| reference integration | 参考整合包 | — | A replaceable public-API implementation that maps generic domain capabilities to a small world, production, information, or society model. It may contain runtime plugins and host-adapter code. |
+| starter kit | 入门套件 | — | A runnable host and composition example that combines compatible reference content and integrations into a complete vertical slice. It is reference code, not a privileged engine path. |
 
 ## Evidence, randomness, and persistence
 
