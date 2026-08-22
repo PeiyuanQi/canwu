@@ -1,6 +1,6 @@
 ---
 title: 机密副本与定向发布
-description: 用中立角色、相对分钟和合成内容码验证访问、副本衍生、受众发布、撤回与已获知识保留。
+description: 用一份从常州送往北京的匿名密奏，说明副本、定向发布、撤回和已获知识为何彼此独立。
 sidebar:
   order: 4
   label: 机密副本与定向发布
@@ -12,8 +12,20 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   打开可运行示例
 </LinkButton>
 
-本案例只使用合成角色编号、中立节点、相对分钟与内容码。它不对应任何人物、地域、
-组织或既有事件。可复用目标是信息生命周期本身，而不是某个背景故事。
+## 先看故事
+
+常州有一位官员，要把一件敏感的事情写给北京的一位收件人。他把内容写成密奏，
+封好后只发给这一个人。
+
+密奏送出前，经手人先读到了原文，并按要求抄下其中一段，做成一份工作副本。后来，
+北京的收件人收到完整密奏。又过了一段时间，经手人决定把那份“摘录副本”只给两位
+指定读者看；发现风险后，他又撤回了这次发布。
+
+撤回以后，其他人不能再打开这份副本；但已经看过的人不会被系统当作从来没有看过。
+
+这是一个匿名化、简化后的案例：不保留姓名、官职、年代和其他地点，只保留常州、
+北京。故事借鉴的是“密奏如何被抄录、送达、定向传阅”的结构，不对应某一份真实文书的
+逐字复原。
 
 ## 运行
 
@@ -23,47 +35,55 @@ cargo run -p canwu-information --example confidential_copy_release
 
 示例先逐项调用公开的 `InformationLifecycle`，把每个请求校验为
 `InformationMutationPlan`，再由便于逐行检查的 detached ledger 执行。随后，示例把
-同一批中立记录装入 `Canwu`，通过权威 `InformationPlugin` 执行最终撤回，并验证
-快照恢复、精确重放、压缩证据重建与压缩 checkpoint 恢复。
+同一批记录装入 `Canwu`，通过权威 `InformationPlugin` 执行最终撤回，并验证快照恢复、
+精确重放、压缩证据重建与压缩 checkpoint 恢复。
 
-## 合成输入
+代码中的 `H-101`、`H-202` 等只是程序标签，对应下面这些角色；它们不是历史人物姓名。
 
-| 标识 | 中立角色 | 节点 |
+| 代码标签 | 故事角色 | 所在地或关系 |
 | --- | --- | --- |
-| `H-101` | 初始持有者 | `NODE-0` |
-| `H-202` | 定向接收者 | `NODE-2` |
-| `H-303` | 中继操作方 | `NODE-1` |
-| `H-404`、`H-505` | 冻结受众成员 | `NODE-3` |
-| `H-606` | 用于隔离验证的无关持有者 | — |
+| `H-101` | 写密奏的人 | 常州 |
+| `H-202` | 指定收件人 | 北京 |
+| `H-303` | 经手、抄录副本的人 | 传递链上的经手人 |
+| `H-404`、`H-505` | 被指定查看副本的人 | 受限读者 |
+| `H-606` | 没有被授权的人 | 无关人员 |
 
-主内容码是 `SYN-C4-17`，选取副本码是 `SYN-C4-17-X`。两者都是无含义测试值。
+主内容码是 `SYN-C4-17`，摘录副本码是 `SYN-C4-17-X`。它们只是测试标签，不代表
+密奏的真实内容。
 
 ## 相对时间线
 
-| 分钟 | 模型动作 |
-| ---: | --- |
-| `0–2` | 创建内容、文本表现和持久实例。 |
-| `5–7` | 建立定向 dispatch 与第一个 delivery attempt。 |
-| `12` | 中继操作方记录一次对原表现的 access。 |
-| `13–14` | 以 `ContentDerivation` 和 representation parent edge 建立选取副本。 |
-| `25–27` | 原定向交付完成，接收者记录 access。 |
-| `40–43` | 冻结显式受众，激活定向 release，成员取得副本 access。 |
-| `50` | release 转入 `Withdrawn`。 |
-| `51` | 新 access 被拒绝；此前的 holder-relative knowledge 仍保留。 |
+| 分钟 | 故事动作 | 系统记录 |
+| ---: | --- | --- |
+| `0–2` | 常州写好密奏，并形成可传递的封装件。 | 创建 content、representation、instance |
+| `5–7` | 密奏按指定对象发往北京，第一次送达尝试开始。 | 创建 addressed dispatch 和 delivery attempt |
+| `12` | 经手人读到原文。 | 记录一次 access |
+| `13–14` | 经手人抄下其中一段，形成摘录副本。 | 创建衍生 content 和 representation parent edge |
+| `25–27` | 北京收件人收到完整密奏并读到原文。 | 完成原 dispatch 和 delivery attempt，记录 access |
+| `40–43` | 经手人冻结两位指定读者，开放副本给他们查看。 | 创建 audience，激活定向 release，并记录 access |
+| `50` | 发件人撤回这次发布。 | release 转入 `Withdrawn` |
+| `51` | 新的查看请求被拒绝；已经看过的人仍保留“看过”的知识。 | 未来 access 失败，既有 knowledge 不被抹掉 |
 
 ## 模型验证点
 
 <Steps>
-1. `Access` 只记录某个 holder 在某时刻接触到某个 representation；它不会自动改写 content。
-2. 副本通过 `source_content`、`ContentSourceEdge`、`parent_representation` 和 fidelity/completeness 显式保留来源链。
-3. 原 dispatch 的交付状态与副本链各自演进；取得副本不会伪造原接收者的 delivery attempt。
-4. `AudiencePayload` 保存冻结成员计数和 membership root；release 只允许列入快照的成员访问。
-5. `Active -> Withdrawn` 是不可逆状态转换。撤回后，同一 release 不能再授权新 access。
-6. 已产生的 `AccessRecorded` 与 `ReleaseAvailable` knowledge draft 不被撤回操作删除；撤回控制未来可用性，不重写过去已获信息。
+1. `Access` 只表示“某个持有人在某个时刻接触过某份表现”，不会因为有人读过就改写原始 content。
+2. 摘录副本通过 `source_content`、`ContentSourceEdge`、`parent_representation` 和 fidelity/completeness 显式记录“它从哪来、抄了多少、抄得有多像”。
+3. 原密奏的送达和摘录副本的传播是两条证据链；有人拿到副本，不等于北京收件人已经收到原件。
+4. `AudiencePayload` 保存冻结时的成员数量和 membership root；release 只允许这份名单里的成员访问，不会因为后来有人听说此事就自动扩大。
+5. `Active -> Withdrawn` 是不可逆状态转换。撤回后，同一 release 不能再给新人授权 access。
+6. 已产生的 `AccessRecorded` 与 `ReleaseAvailable` knowledge draft 不会被撤回操作删除。撤回控制未来还能不能看，不负责改写过去已经发生的事情。
 </Steps>
+
+## 读完后只记住三句话
+
+- 抄出副本，不等于原件已经送达。
+- 定向发布，不等于公开传阅。
+- 撤回未来权限，不会把过去的阅读记忆倒写掉。
 
 ## 为什么这些部分属于通用机制
 
-内容、表现、实例、dispatch、delivery attempt、access、受众、release 与衍生边都不依赖
-传递设备或社会背景。应用插件只需替换 channel profile、角色绑定、时间分布和结果
-规则；引擎无需加入“机密事件”或特定传播故事的专用分支。
+密奏、摘录、送达、查看、受众、发布与撤回只是故事中的叫法；在引擎里，它们对应
+content、representation、instance、dispatch、delivery attempt、access、audience、
+release 与衍生边。换成别的传递方式时，只需要替换 channel profile、角色绑定、
+时间分布和结果规则；引擎不需要加入某个历史人物或特定事件的专用分支。

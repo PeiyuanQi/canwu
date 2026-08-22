@@ -1,6 +1,6 @@
 ---
 title: 编码传递与中途截取
-description: 用合成符号码验证传递副本、access 与 interpretation 分离，以及不同能力产生不同解读结果。
+description: 用一份从常州送往北京、带有暗号的匿名密奏，说明截获、看见、解读和受托发布的区别。
 sidebar:
   order: 5
   label: 编码传递与中途截取
@@ -12,9 +12,20 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   打开可运行示例
 </LinkButton>
 
-本案例使用五个合成 holder：`H-601` 是来源持有者，`H-602` 是定向接收与委托
-持有者，`H-603` 是中继持有者，`H-604` 是独立解读执行者，`H-605` 是受限
-复核者。内容码 `SYN-E8-42` 和结果码 `SYN-E8-42-R` 不承载任何现实含义。
+## 先看故事
+
+常州的发件人和北京的收件人约定了一套只有指定人看得懂的暗号。密奏带着暗号发出，
+还没有到北京，就被传递链上的一名经手人截到，并留下了一份副本。
+
+经手人可以看到整张暗号纸，却没有对应的解法。他知道“拿到了一份东西”，却不能把
+它还原成有意义的话。北京收件人收到原件后，请一名有权限的人代为解读，得到一份
+白话结果，再把这份结果只给收件人和一名复核人查看。
+
+这件事最容易混淆的地方，可以用一句话概括：**看见了，不等于看懂了；看懂了，也不
+等于有权替别人发布。**
+
+这是一个匿名化、简化后的案例：不保留姓名、官职、年代和其他地点，只保留常州、
+北京。暗号本身也是抽象的测试设定，不试图复原任何真实密码。
 
 ## 运行
 
@@ -22,38 +33,62 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 cargo run -p canwu-information --example encoded_interception
 ```
 
-示例用 detached ledger 保持完整生命周期清晰可读，再通过权威
-`InformationPlugin` 执行“执行者与委托持有者不同”的授权解读。一个持久化的中立
-权限命令提供精确 claim；示例随后验证快照恢复、不会重新运行外部解码器的精确重放、
-压缩证据重建与压缩 checkpoint 恢复。
+示例用 detached ledger 保持完整生命周期清晰可读，再通过权威 `InformationPlugin`
+执行“解读者替收件人完成解读”的授权操作。一个持久化的中立权限命令提供精确 claim；
+示例随后验证快照恢复、不会重新运行外部解码器的精确重放、压缩证据重建与压缩
+checkpoint 恢复。
+
+代码中的编号只是程序标签：
+
+| 代码标签 | 故事角色 | 所在地或关系 |
+| --- | --- | --- |
+| `H-601` | 暗号的写出者 | 常州 |
+| `H-602` | 指定收件人 | 北京 |
+| `H-603` | 中途截取者 | 传递链上的经手人 |
+| `H-604` | 受托解读者 | 受收件人委托 |
+| `H-605` | 复核者 | 收件人指定的查看者 |
+
+`SYN-E8-42` 和 `SYN-E8-42-R` 只是测试标签，分别代表“暗号原件”和“解读结果”，
+不承载现实含义。
 
 ## 相对时间线
 
-| 分钟 | 模型动作 |
-| ---: | --- |
-| `0–1` | 创建内容和需要 `decode_k2` 能力的 `grouped_symbols_v1` 表现。 |
-| `2–4` | 创建定向 dispatch，delivery attempt 进入 `InTransit`。 |
-| `5` | 中继节点建立一个 fidelity 为 `1000` 的 same-content representation 副本。 |
-| `6` | `H-603` 通过副本实例取得 access。 |
-| `7` | `H-603` 使用 `decode_k1`，interpretation 状态为 `Failed`，且没有 result content。 |
-| `12–13` | 定向接收者完成交付并取得原 representation 的 access。 |
-| `14–15` | `H-604` 受 `H-602` 委托使用 `decode_k2`，生成衍生结果内容和状态为 `Succeeded` 的 interpretation。 |
-| `16` | dispatch 在已有终态 delivery attempt 后完成。 |
+| 分钟 | 故事动作 | 系统记录 |
+| ---: | --- | --- |
+| `0–1` | 常州写好带暗号的密奏。 | 创建原始 content 和需要 `decode_k2` 的 representation |
+| `2–4` | 密奏发往北京，仍在传递途中。 | 创建 addressed dispatch，delivery attempt 进入 `InTransit` |
+| `5` | 经手人截下暗号纸并复制一份。 | 创建 same-content representation copy 和 parent edge |
+| `6` | 经手人完整看过副本。 | 记录 access |
+| `7` | 经手人用错误的解法尝试解读。 | `decode_k1` 失败，不产生 result content |
+| `12–13` | 北京收件人收到原件并看过暗号。 | 完成 delivery attempt，记录原件 access |
+| `14–15` | 受托解读者用正确能力代收件人解读。 | `decode_k2` 成功，生成结果 content 和成功 interpretation |
+| `17–19` | 收件人把白话结果只开放给自己和复核者。 | 创建并激活受限 review release |
+| `16` | 原密奏的传递最终完成。 | dispatch 进入完成状态 |
+
+> 代码里的事件顺序以持久化记录为准；表格按故事阅读顺序排列时，`16` 会落在
+> `17–19` 之前。实际示例中，结果生成后先准备复核发布，再写入原 dispatch 的最终
+> 完成状态。
 
 ## 模型验证点
 
 <Steps>
-1. 截取首先生成 representation copy；`SameContent` 及 parent edge 保留它与原表现的关系。
-2. 取得 access 不等于取得 interpretation。`H-603` 可完整接触符号副本，但错误能力只产生失败记录。
-3. `Failed` interpretation 不允许 `result_content`；`Succeeded` interpretation 必须绑定结果内容。
-4. 每次 interpretation 同时绑定 `input_access`、`input_representation`、`performed_by` 与 `performed_for`。
-5. 定向交付仍按自己的 attempt 状态推进，截取副本不会替换接收者的交付证据。
-6. Knowledge draft 始终按 holder 隔离：`H-603` 只得到自身 access 与失败解读事实，`H-602` 得到自身 access、受托解读与 release 可用事实，`H-605` 只得到复核 release 可用事实；执行解读不会自动让 `H-604` 获得 holder knowledge。
+1. 截取首先生成 representation copy；`SameContent` 和 parent edge 说明“这是同一份内容的复制件”，不会把它伪装成北京收件人已经收到的原件。
+2. 取得 access 不等于取得 interpretation。`H-603` 可以完整看到暗号副本，但因为只有 `decode_k1`，只能得到一次失败记录。
+3. `Failed` interpretation 不允许绑定 `result_content`；`Succeeded` interpretation 必须绑定解读结果。
+4. 每次 interpretation 都同时记录输入 access、输入 representation、实际执行者 `performed_by` 和服务对象 `performed_for`，因此能看出“谁看了、谁解了、替谁解”。
+5. 定向 delivery 仍按自己的 attempt 状态推进；中途截取不会替换北京收件人的交付证据。
+6. Knowledge draft 按持有人隔离：截取者只知道自己的 access 和失败解读，收件人知道自己的 access、受托解读和复核发布，复核者只知道 release 可用；执行解读的人不会因为代办一次操作，就自动得到收件人的全部 knowledge。
 </Steps>
+
+## 读完后只记住三句话
+
+- 截到副本，不等于截到对方已经理解的内容。
+- 能看到暗号，不等于有能力解读。
+- 能替别人解读，也不等于自动拥有替别人发布的权力。
 
 ## 可替换的应用层部分
 
 `grouped_symbols_v1`、`decode_k1`、`decode_k2`、节点编号和相对时延都是应用配置。
 引擎只需要中立的 representation lineage、delivery、access、interpretation 和
-holder-relative publication 契约。信道性能、编码算法含义、行为后果与叙事都留给
-下游插件。
+holder-relative publication 契约。真实的暗号规则、传递方式、解读能力和故事后果，
+都留给下游插件。
