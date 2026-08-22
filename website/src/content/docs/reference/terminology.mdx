@@ -54,11 +54,11 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
 | [插件](/developer/extensions/) | plugin | — | 泛称；可能与 Codex 等工具插件混淆时必须加限定词。 |
-| [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 通过公开插件契约注册到参伍运行时的组件，也是代码类型的常用中文名。 |
+| [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 实现公开插件契约并注册到参伍运行时的执行单位；其名称、版本和语义哈希标识加载与精确重放所需的可执行语义。 |
 | 运行时模拟插件 | runtime simulation plugin | `SimulationPlugin` | 仅在区分参伍运行时插件与 Agent 工具插件时使用，不是独立插件类别。 |
-| [模拟规则插件](/developer/extensions/) | domain plugin | `SimulationPlugin` | 提供社会、经济、军事、人物等具体领域规则的模拟插件，是按用途划分的子集。 |
-| [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域包，可包含插件、schema、命令、查询和辅助 API。 |
-| [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整能力名称，例如“社会传播模拟模块”；它本身不是引擎契约。 |
+| [模拟规则插件](/developer/extensions/) | domain plugin | `SimulationPlugin` | 用于注册社会、经济、军事、人物等具体领域规则的模拟插件；这是对 `SimulationPlugin` 的用途描述，不是独立 API 类型。 |
+| [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域交付包，可包含一个或多个插件、领域类型、schema、命令、查询和辅助 API；没有要求实现的 `DomainExtension` trait。 |
+| [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整模拟能力名称，例如“社会传播模拟模块”；它可以由一个领域扩展及其插件实现，但本身不是引擎契约。 |
 | [命令插件](/tutorials/command-plugin/) | command plugin | `register_command()` | 注册带 schema 校验命令及其处理器的模拟插件。 |
 | [边界系统](/architecture/settlement/) | boundary system | `BoundarySystemContract` | 在结算阶段运行，并声明读取、写入、资源与随机范围的系统。 |
 | [领域 schema](/developer/extensions/) | domain schema | `DomainRecordType` | 插件所拥有领域数据的版本化结构契约；代码相邻的中文正文保留 `schema`。 |

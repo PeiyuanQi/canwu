@@ -56,11 +56,11 @@ documentation. The agent-facing source of truth in the repository is
 | English | 中文规范写法 | Code or API | Meaning and use |
 | --- | --- | --- | --- |
 | [plugin](/en/developer/extensions/) | 插件 | — | Generic term. Qualify it when confusion with Codex or another tool plugin is possible. |
-| [simulation plugin](/en/developer/extensions/) | 模拟插件 | `SimulationPlugin` | A component registered with the Canwu runtime through the public plugin contract. |
+| [simulation plugin](/en/developer/extensions/) | 模拟插件 | `SimulationPlugin` | A runtime registration unit implementing Canwu's public plugin contract. Its name, version, and semantic hash identify the executable behavior required for loading and exact replay. |
 | runtime simulation plugin | 运行时模拟插件 | `SimulationPlugin` | Disambiguating form used only when contrasting Canwu runtime plugins with agent-interface plugins. It is not a separate kind. |
-| [domain plugin](/en/developer/extensions/) | 模拟规则插件 | `SimulationPlugin` | A simulation plugin that provides concrete social, economic, military, character, or other domain rules. |
-| [domain extension](/en/tutorials/cases/local-community-diffusion/) | 模拟领域扩展 | — | An optional domain package built on public contracts. It may contain plugins, schemas, commands, queries, and supporting APIs. |
-| [simulation module](/en/tutorials/cases/local-community-diffusion/) | 模拟模块 | — | A human-facing name for a coherent capability, such as the social diffusion simulation module; it is not an engine contract. |
+| [domain plugin](/en/developer/extensions/) | 模拟规则插件 | `SimulationPlugin` | A simulation plugin used to register concrete social, economic, military, character, or other domain rules. This describes the plugin's role, not a separate API type. |
+| [domain extension](/en/tutorials/cases/local-community-diffusion/) | 模拟领域扩展 | — | An optional domain-specific delivery package built on public engine contracts. It may contain one or more plugins, domain types, schemas, commands, queries, and supporting APIs. No `DomainExtension` trait is required. |
+| [simulation module](/en/tutorials/cases/local-community-diffusion/) | 模拟模块 | — | An informal, human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It may be implemented by an extension and its plugins, but it is not an engine contract. |
 | [command plugin](/en/tutorials/command-plugin/) | 命令插件 | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
 | [boundary system](/en/architecture/settlement/) | 边界系统 | `BoundarySystemContract` | A declared system that runs in a phase with bounded reads, writes, resources, and randomness. |
 | [domain schema](/en/developer/extensions/) | 领域 schema | `DomainRecordType` | A versioned structural contract for plugin-owned domain data. Chinese code-adjacent prose retains `schema`. |
