@@ -22,11 +22,11 @@ documentation. The agent-facing source of truth in the repository is
 
 | English | 中文规范写法 | Code or API | Meaning and use |
 | --- | --- | --- | --- |
-| [Canwu](/en/architecture/) | 参伍 | `Canwu` | Product name and public facade. Do not translate the brand as a generic noun. |
+| [Canwu](/en/architecture/) | 参伍 | `Canwu` | Product name and main public API entry point. Do not translate the brand as a generic noun. |
 | [headless historical simulation engine](/en/architecture/) | 无界面历史模拟引擎 | — | Canwu's product category: it simulates historical worlds without owning rendering, audio, or production UI. |
 | [simulation core](/en/architecture/) | 模拟内核 | `canwu-sim` | The private runtime that owns mutable authoritative state, scheduling, settlement, persistence, and replay. |
 | [host application](/en/developer/integration/) | 上层应用 | — | A game, research tool, service, client, or agent system that embeds Canwu. Chinese prose uses 上层应用, not 主机程序. |
-| [public facade](/en/developer/integration/) | 公开门面 | `canwu-api` | The supported dependency and compatibility surface for application code. |
+| [public facade](/en/developer/integration/) | 对外 API | `canwu-api` | The supported API boundary for application code. |
 | [simulation run](/en/developer/persistence/) | 模拟运行 | `run_id` | One causally continuous execution with its own identity, inputs, state, and evidence. |
 | [scenario](/en/tutorials/move-army/) | 场景 | `Scenario` | The initial world and configuration used to create a simulation. |
 | [authoritative state](/en/developer/reading-state/) | 权威状态 | `SimulationSnapshot` | State owned and validated by Canwu and used as the basis for commitments, persistence, and replay. |
@@ -38,7 +38,7 @@ documentation. The agent-facing source of truth in the repository is
 
 | English | 中文规范写法 | Code or API | Meaning and use |
 | --- | --- | --- | --- |
-| [wall time](/en/tutorials/continuous-game-loop/) | 墙钟时间 | — | Real elapsed time observed by the host application. It never enters authoritative state directly. |
+| [wall time](/en/tutorials/continuous-game-loop/) | 现实时间 | — | Real elapsed time observed by the host application. It never enters authoritative state directly. |
 | [simulation time](/en/tutorials/continuous-game-loop/) | 模拟时间 | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
 | [presentation time](/en/tutorials/continuous-game-loop/) | 表现时间 | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
 | [command](/en/developer/integration/) | 命令 | `Command`, `CommandEnvelope` | A typed request to change authoritative state through structural, precondition, and authority checks. |

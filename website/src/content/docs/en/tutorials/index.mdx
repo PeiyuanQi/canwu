@@ -6,7 +6,7 @@ sidebar:
   order: 1
   label: Get started
 hero:
-  tagline: Do not train yourself to become a Markdown parser just yet. Give your goal to a coding agent, let it start from a runnable example, and save the manual archaeology for later.
+  tagline: Start with a runnable example, then look up the underlying APIs and rules as you need them.
   actions:
     - text: Start with army movement
       link: /en/tutorials/move-army/
@@ -23,15 +23,16 @@ hero:
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
-> **Recommended route: send in an agent first.** Give your coding agent this prompt:
-> “Build the smallest runnable Canwu simulation that can move an army and advance time. Explain each important contract as we go.”
-> Have it use this tutorial, the developer guide, and the public examples; if the `canwu-engine` plugin is installed, have it invoke `$canwu-engine-docs`. Reading everything by hand is still allowed—your scroll wheel simply did not apply for an archaeology internship.
+> **Start with the example.** Follow the Move an army tutorial to get a minimal simulation running, then consult the developer guide when questions come up.
+> If you use a coding agent, you can give it this prompt:
+> “Build the smallest runnable Canwu simulation that can move an army and advance time. Explain the important APIs and rules as we go.”
+> Have it consult this tutorial, the developer guide, and the public examples. With the `canwu-engine` plugin installed, it can also invoke `$canwu-engine-docs`.
 
 ## Pick a starting point
 
 <CardGrid>
   <LinkCard
-    title="Move an army: the smallest vertical slice"
+    title="Move an army: minimal runnable example"
     href="/en/tutorials/move-army/"
     description="Submit a validated action, advance time, and compare what different actors know."
   />

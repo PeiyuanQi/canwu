@@ -24,7 +24,7 @@ Canwu 面向的不只是一个可随意修改的游戏状态对象。它提供�
 
 ## 作为依赖使用
 
-Rust 应用应依赖受支持的公开门面，而不是直接依赖实现 crate：
+Rust 应用应依赖官方支持的对外 API，而不是直接依赖实现 crate：
 
 ```toml
 [dependencies]
@@ -38,9 +38,9 @@ canwu-api = "0.4.0"
 canwu-api = "=0.4.0"
 ```
 
-`canwu-api` 依赖图中的 crate 会一并发布，以便 Cargo 解析公开门面；它们不是
-供应用代码分别依赖的独立兼容性表面。`canwu-society` 等实验性模拟领域扩展暂不
-发布，在单独完成稳定化之前只能从仓库使用。
+`canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
+细节，不建议应用代码直接依赖，也不单独承诺兼容性。`canwu-society` 等实验性
+模拟领域扩展暂不发布，在单独完成稳定化之前只能从仓库使用。
 
 ## 快速开始
 
@@ -56,8 +56,8 @@ cargo run -p canwu-api --example move_army
 cargo run -p canwu-api --example phased_boundary
 ```
 
-如需查看包含动态选项、效用评估、由 controller 权限派生命令、决策 trace、
-存档与精确重放的 DecisionTicket 示例：
+如需查看包含动态选项、效用评估、按控制者权限生成命令、决策轨迹、存档与精确
+重放的 `DecisionTicket` 示例：
 
 ```text
 cargo run -p canwu-api --example decision_ticket
@@ -72,7 +72,7 @@ cargo run -p canwu-society --example local_community_diffusion
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
-- `canwu-decision`：DecisionTicket、controller、trace、通用效用评估器和 policy SDK 契约
+- `canwu-decision`：决策票据、控制者、决策轨迹、通用效用评估器和策略 SDK 接口
 - `canwu-time`：不依赖画面帧率的历史时间
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
 - `canwu-world`：历史实体和只读世界快照

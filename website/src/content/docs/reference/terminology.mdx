@@ -20,23 +20,23 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
-| [参伍](/architecture/) | Canwu | `Canwu` | 产品名和公开门面；不要把品牌名当作普通名词翻译。 |
+| [参伍](/architecture/) | Canwu | `Canwu` | 产品名，也是对外 API 的主要入口；不要把品牌名当作普通名词翻译。 |
 | [无界面历史模拟引擎](/architecture/) | headless historical simulation engine | — | 参伍的产品类别；负责模拟历史世界，不负责画面、音频和正式产品界面。 |
 | [模拟内核](/architecture/) | simulation core | `canwu-sim` | 持有可变权威状态、调度、结算、持久化与重放的私有运行时。 |
 | [上层应用](/developer/integration/) | host application | — | 嵌入参伍的游戏、研究工具、服务、客户端或智能体系统；中文不使用“主机程序”。 |
-| [公开门面](/developer/integration/) | public facade | `canwu-api` | 应用代码受支持的依赖入口和兼容性表面。 |
+| [对外 API](/developer/integration/) | public facade | `canwu-api` | 应用代码应从这里接入；版本兼容性也以这里为准。 |
 | [模拟运行](/developer/persistence/) | simulation run | `run_id` | 具有独立身份、输入、状态和证据的一次连续执行。 |
 | [场景](/tutorials/move-army/) | scenario | `Scenario` | 创建模拟时使用的初始世界和配置。 |
 | [权威状态](/developer/reading-state/) | authoritative state | `SimulationSnapshot` | 由参伍持有并验证，作为承诺、持久化和重放基础的状态。 |
 | [真值](/developer/reading-state/) | ground truth | — | 权威状态中的事实，无论某个角色是否知道。 |
-| [角色相对视图](/developer/reading-state/) | actor-relative view | `CanwuViewer`, `ViewerContext` | 从一个角色的知识和权限派生的读取表面，不是全知状态。 |
+| [角色相对视图](/developer/reading-state/) | actor-relative view | `CanwuViewer`, `ViewerContext` | 根据一个角色的知识和权限生成的读取结果，不会暴露全知状态。 |
 | [只读快照](/developer/reading-state/) | read-only snapshot | `WorldSnapshot` | 供受信任读取使用的脱离运行时状态值，不是实时可变引用。 |
 
 ## 时间、输入与结算
 
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
-| [墙钟时间](/tutorials/continuous-game-loop/) | wall time | — | 上层应用观察到的真实经过时间，不直接进入权威状态。 |
+| [现实时间](/tutorials/continuous-game-loop/) | wall time | — | 上层应用实际经历的时间，不直接写入模拟状态。 |
 | [模拟时间](/tutorials/continuous-game-loop/) | simulation time | `SimTime`, `SimDuration` | 由参伍结算、可确定表示的时间。 |
 | [表现时间](/tutorials/continuous-game-loop/) | presentation time | — | 客户端动画与插值时间，可以是小数，但不属于权威状态。 |
 | [命令](/developer/integration/) | command | `Command`, `CommandEnvelope` | 经过结构、前置条件和权限校验后改变权威状态的类型化请求。 |
