@@ -1,6 +1,6 @@
 ---
 title: 机密副本与定向发布
-description: 用一份从常州送往北京的匿名密奏，说明副本、定向发布、撤回和已获知识为何彼此独立。
+description: 用一份从常州送往北京的密奏，说明副本、定向发布、撤回和已获知识为何彼此独立。
 sidebar:
   order: 4
   label: 机密副本与定向发布
@@ -23,10 +23,6 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 撤回以后，其他人不能再打开这份副本；但已经看过的人不会被系统当作从来没有看过。
 
-这是一个匿名化、简化后的案例：不保留姓名、官职、年代和其他地点，只保留常州、
-北京。故事借鉴的是“密奏如何被抄录、送达、定向传阅”的结构，不对应某一份真实文书的
-逐字复原。
-
 ## 运行
 
 ```shell
@@ -38,7 +34,7 @@ cargo run -p canwu-information --example confidential_copy_release
 同一批记录装入 `Canwu`，通过权威 `InformationPlugin` 执行最终撤回，并验证快照恢复、
 精确重放、压缩证据重建与压缩 checkpoint 恢复。
 
-代码中的 `H-101`、`H-202` 等只是程序标签，对应下面这些角色；它们不是历史人物姓名。
+故事角色对应如下：
 
 | 代码标签 | 故事角色 | 所在地或关系 |
 | --- | --- | --- |
@@ -47,9 +43,6 @@ cargo run -p canwu-information --example confidential_copy_release
 | `H-303` | 经手、抄录副本的人 | 传递链上的经手人 |
 | `H-404`、`H-505` | 被指定查看副本的人 | 受限读者 |
 | `H-606` | 没有被授权的人 | 无关人员 |
-
-主内容码是 `SYN-C4-17`，摘录副本码是 `SYN-C4-17-X`。它们只是测试标签，不代表
-密奏的真实内容。
 
 ## 相对时间线
 
