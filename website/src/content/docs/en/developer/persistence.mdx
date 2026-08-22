@@ -58,3 +58,9 @@ Replay requires a matching scenario, engine version, and plugin semantic environ
 `fork()` creates an independent simulation from the same point, and `diff()` compares the world differences between two
 branches. Use them for AI planning, research experiments, regression tests, and “what if a different command had been
 chosen?” analysis. Each branch still advances through normal command and time entry points.
+
+## Save policy and determinism are separate
+
+Canwu's snapshot and replay contracts guarantee that the same input produces the same result, but they do not decide whether a product lets players return to an older save. An application may expose manual saves and branches in a standard mode, keep one active save in a single-writer mode, or expose `fork()` only to research tools.
+
+Do not create unreloadable randomness from wall-clock time, unrecorded random values, or live LLM output; that breaks exact replay. If rollback must be restricted, the application's save layer should reject an old branch or an overwrite instead of changing the runtime random contract.

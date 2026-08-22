@@ -1,6 +1,6 @@
 ---
 title: 编码传递与中途截取
-description: 用一份从常州送往北京、带有暗号的密奏，说明截获、看见、解读和受托发布的区别。
+description: 用合成符号代码说明复制、访问和解读的区别，以及不同能力如何产生不同结果。
 sidebar:
   order: 5
   label: 编码传递与中途截取
@@ -14,12 +14,12 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 先看故事
 
-常州的发件人和北京的收件人约定了一套只有指定人看得懂的暗号。密奏带着暗号发出，
-还没有到北京，就被传递链上的一名经手人截到，并留下了一份副本。
+本案例使用五个合成持有人和没有现实含义的内容代码。初始持有人向指定收件人发送
+一份需要特定能力才能解读的符号表现；中继经手人在传递途中截获并复制它。
 
-经手人可以看到整张暗号纸，却没有对应的解法。他知道“拿到了一份东西”，却不能把
-它还原成有意义的话。北京收件人收到原件后，请一名有权限的人代为解读，得到一份
-白话结果，再把这份结果只给收件人和一名复核人查看。
+经手人可以看到完整的符号副本，却没有对应的解法。他知道“拿到了一份东西”，却不能
+把它还原成有意义的话。指定收件人收到原件后，请一名有权限的持有人代为解读，得到
+一份结果内容，再把结果只开放给收件人和一名复核者查看。
 
 这件事最容易混淆的地方，可以用一句话概括：**看见了，不等于看懂了；看懂了，也不
 等于有权替别人发布。**
@@ -39,38 +39,34 @@ checkpoint 恢复。
 
 | 代码标签 | 故事角色 | 所在地或关系 |
 | --- | --- | --- |
-| `H-601` | 暗号的写出者 | 常州 |
-| `H-602` | 指定收件人 | 北京 |
-| `H-603` | 中途截取者 | 传递链上的经手人 |
+| `H-601` | 符号内容的初始持有人 | `NODE-0` |
+| `H-602` | 指定收件人和委托方 | `NODE-2` |
+| `H-603` | 中继经手人 | `NODE-1` |
 | `H-604` | 受托解读者 | 受收件人委托 |
-| `H-605` | 复核者 | 收件人指定的查看者 |
+| `H-605` | 受限复核者 | 收件人指定的查看者 |
 
 ## 相对时间线
 
 | 分钟 | 故事动作 | 系统记录 |
 | ---: | --- | --- |
-| `0–1` | 常州写好带暗号的密奏。 | 创建原始 content 和需要 `decode_k2` 的 representation |
-| `2–4` | 密奏发往北京，仍在传递途中。 | 创建 addressed dispatch，delivery attempt 进入 `InTransit` |
-| `5` | 经手人截下暗号纸并复制一份。 | 创建 same-content representation copy 和 parent edge |
+| `0–1` | 创建需要 `decode_k2` 的 `grouped_symbols_v1` 表现。 | 创建原始 content 和 representation |
+| `2–4` | 向指定收件人发起传递，仍在传递途中。 | 创建 addressed dispatch，delivery attempt 进入 `InTransit` |
+| `5` | 中继经手人截获符号表现并复制一份。 | 创建 same-content representation copy 和 parent edge |
 | `6` | 经手人完整看过副本。 | 记录 access |
 | `7` | 经手人用错误的解法尝试解读。 | `decode_k1` 失败，不产生 result content |
-| `12–13` | 北京收件人收到原件并看过暗号。 | 完成 delivery attempt，记录原件 access |
+| `12–13` | 指定收件人收到原件并接触符号表现。 | 完成 delivery attempt，记录原件 access |
 | `14–15` | 受托解读者用正确能力代收件人解读。 | `decode_k2` 成功，生成结果 content 和成功 interpretation |
-| `17–19` | 收件人把白话结果只开放给自己和复核者。 | 创建并激活受限 review release |
-| `16` | 原密奏的传递最终完成。 | dispatch 进入完成状态 |
-
-> 代码里的事件顺序以持久化记录为准；表格按故事阅读顺序排列时，`16` 会落在
-> `17–19` 之前。实际示例中，结果生成后先准备复核发布，再写入原 dispatch 的最终
-> 完成状态。
+| `16` | 原始传递在 delivery attempt 终止后完成。 | dispatch 进入完成状态 |
+| `17–19` | 收件人把结果只开放给自己和复核者。 | 创建并激活受限 review release |
 
 ## 模型验证点
 
 <Steps>
-1. 截取首先生成 representation copy；`SameContent` 和 parent edge 说明“这是同一份内容的复制件”，不会把它伪装成北京收件人已经收到的原件。
+1. 截取首先生成 representation copy；`SameContent` 和 parent edge 说明“这是同一份内容的复制件”，不会把它伪装成指定收件人已经收到的原件。
 2. 取得 access 不等于取得 interpretation。`H-603` 可以完整看到暗号副本，但因为只有 `decode_k1`，只能得到一次失败记录。
 3. `Failed` interpretation 不允许绑定 `result_content`；`Succeeded` interpretation 必须绑定解读结果。
 4. 每次 interpretation 都同时记录输入 access、输入 representation、实际执行者 `performed_by` 和服务对象 `performed_for`，因此能看出“谁看了、谁解了、替谁解”。
-5. 定向 delivery 仍按自己的 attempt 状态推进；中途截取不会替换北京收件人的交付证据。
+5. 定向 delivery 仍按自己的 attempt 状态推进；中途截取不会替换指定收件人的交付证据。
 6. Knowledge draft 按持有人隔离：截取者只知道自己的 access 和失败解读，收件人知道自己的 access、受托解读和复核发布，复核者只知道 release 可用；执行解读的人不会因为代办一次操作，就自动得到收件人的全部 knowledge。
 </Steps>
 

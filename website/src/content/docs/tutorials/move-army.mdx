@@ -15,7 +15,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这是理解 Canwu 公开 API 的最短路径：命令不直接修改世界状态，时间由主机显式推进，读取可以是角色相对的。
+这是理解 Canwu 公开 API 的最短路径：命令不直接修改世界状态，时间由上层应用显式推进，读取可以是角色相对的。
 
 ## 运行
 
@@ -40,4 +40,4 @@ cargo run -p canwu-api --example move_army
 
 ## 下一步
 
-实时或连续运行的游戏主机应继续阅读[连续时间游戏循环](/tutorials/continuous-game-loop/)。
+实时或连续运行的应用应继续阅读[连续时间游戏循环](/tutorials/continuous-game-loop/)。

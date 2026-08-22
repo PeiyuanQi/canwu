@@ -1,6 +1,6 @@
 ---
 title: 机密副本与定向发布
-description: 用一份从常州送往北京的密奏，说明副本、定向发布、撤回和已获知识为何彼此独立。
+description: 用合成角色、节点、相对分钟和内容代码，说明副本、定向发布、撤回和已获知识为何彼此独立。
 sidebar:
   order: 4
   label: 机密副本与定向发布
@@ -14,12 +14,13 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 先看故事
 
-常州有一位官员，要把一件敏感的事情写给北京的一位收件人。他把内容写成密奏，
-封好后只发给这一个人。
+本案例只使用合成角色标识、中立节点、相对分钟和内容代码，不对应任何真实人物、
+地点、组织或既有事件。它要展示的对象不是某段历史，而是信息生命周期本身：
+一份内容如何被复制、定向发布、撤回，以及已经获得的知识为何不会被抹去。
 
-密奏送出前，经手人先读到了原文，并按要求抄下其中一段，做成一份工作副本。后来，
-北京的收件人收到完整密奏。又过了一段时间，经手人决定把那份“摘录副本”只给两位
-指定读者看；发现风险后，他又撤回了这次发布。
+初始持有人把一份内容发送给指定收件人。中继经手人在传递过程中接触到原始表现，
+并制作一份工作副本；收件人随后收到完整内容。之后，经手人把副本只开放给冻结名单中的
+两位成员，又在发现风险后撤回这次发布。
 
 撤回以后，其他人不能再打开这份副本；但已经看过的人不会被系统当作从来没有看过。
 
@@ -38,23 +39,23 @@ cargo run -p canwu-information --example confidential_copy_release
 
 | 代码标签 | 故事角色 | 所在地或关系 |
 | --- | --- | --- |
-| `H-101` | 写密奏的人 | 常州 |
-| `H-202` | 指定收件人 | 北京 |
-| `H-303` | 经手、抄录副本的人 | 传递链上的经手人 |
-| `H-404`、`H-505` | 被指定查看副本的人 | 受限读者 |
-| `H-606` | 没有被授权的人 | 无关人员 |
+| `H-101` | 初始持有人 | `NODE-0` |
+| `H-202` | 指定收件人 | `NODE-2` |
+| `H-303` | 中继经手人 | `NODE-1` |
+| `H-404`、`H-505` | 冻结受众成员 | `NODE-3` |
+| `H-606` | 隔离检查中的无关持有人 | — |
 
 ## 相对时间线
 
 | 分钟 | 故事动作 | 系统记录 |
 | ---: | --- | --- |
-| `0–2` | 常州写好密奏，并形成可传递的封装件。 | 创建 content、representation、instance |
-| `5–7` | 密奏按指定对象发往北京，第一次送达尝试开始。 | 创建 addressed dispatch 和 delivery attempt |
-| `12` | 经手人读到原文。 | 记录一次 access |
-| `13–14` | 经手人抄下其中一段，形成摘录副本。 | 创建衍生 content 和 representation parent edge |
-| `25–27` | 北京收件人收到完整密奏并读到原文。 | 完成原 dispatch 和 delivery attempt，记录 access |
-| `40–43` | 经手人冻结两位指定读者，开放副本给他们查看。 | 创建 audience，激活定向 release，并记录 access |
-| `50` | 发件人撤回这次发布。 | release 转入 `Withdrawn` |
+| `0–2` | 创建内容、文本表现和持久实例。 | 创建 content、representation、instance |
+| `5–7` | 向指定收件人发起传递，并开始第一次送达尝试。 | 创建 addressed dispatch 和 delivery attempt |
+| `12` | 中继经手人接触原始表现。 | 记录一次 access |
+| `13–14` | 经手人制作一份摘录副本。 | 创建衍生 content 和 representation parent edge |
+| `25–27` | 指定收件人收到完整内容并接触原始表现。 | 完成原 dispatch 和 delivery attempt，记录 access |
+| `40–43` | 冻结两位受众成员，激活定向发布并记录成员访问副本。 | 创建 audience，激活定向 release，并记录 access |
+| `50` | 将发布状态转为撤回。 | release 转入 `Withdrawn` |
 | `51` | 新的查看请求被拒绝；已经看过的人仍保留“看过”的知识。 | 未来 access 失败，既有 knowledge 不被抹掉 |
 
 ## 模型验证点
@@ -62,7 +63,7 @@ cargo run -p canwu-information --example confidential_copy_release
 <Steps>
 1. `Access` 只表示“某个持有人在某个时刻接触过某份表现”，不会因为有人读过就改写原始 content。
 2. 摘录副本通过 `source_content`、`ContentSourceEdge`、`parent_representation` 和 fidelity/completeness 显式记录“它从哪来、抄了多少、抄得有多像”。
-3. 原密奏的送达和摘录副本的传播是两条证据链；有人拿到副本，不等于北京收件人已经收到原件。
+3. 原始传递和衍生副本的传播是两条证据链；有人拿到副本，不等于指定收件人已经收到原件。
 4. `AudiencePayload` 保存冻结时的成员数量和 membership root；release 只允许这份名单里的成员访问，不会因为后来有人听说此事就自动扩大。
 5. `Active -> Withdrawn` 是不可逆状态转换。撤回后，同一 release 不能再给新人授权 access。
 6. 已产生的 `AccessRecorded` 与 `ReleaseAvailable` knowledge draft 不会被撤回操作删除。撤回控制未来还能不能看，不负责改写过去已经发生的事情。
@@ -76,7 +77,7 @@ cargo run -p canwu-information --example confidential_copy_release
 
 ## 为什么这些部分属于通用机制
 
-密奏、摘录、送达、查看、受众、发布与撤回只是故事中的叫法；在引擎里，它们对应
+原始内容、衍生副本、传递、查看、受众、发布与撤回只是案例中的叫法；在引擎里，它们对应
 content、representation、instance、dispatch、delivery attempt、access、audience、
 release 与衍生边。换成别的传递方式时，只需要替换 channel profile、角色绑定、
 时间分布和结果规则；引擎不需要加入某个历史人物或特定事件的专用分支。

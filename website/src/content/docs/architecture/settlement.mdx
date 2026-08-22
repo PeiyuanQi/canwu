@@ -17,6 +17,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <MermaidDiagram
   label="结算系统四个底层构成：两种写入路径、一种资源分配计算和一种可见性策略"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  sourceLoading="图表源码将在预览加载时显示。"
+  noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
   definition={`flowchart TB
     Inputs["命令 / 事件 / 调度工作"]
     Claims["供给 + 竞争性申请"]

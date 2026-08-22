@@ -1,6 +1,6 @@
 ---
 title: 接入并驱动仿真
-description: 将 canwu-api 加入 Rust 主机程序，创建仿真，并通过公开入口推进世界。
+description: 在 Rust 应用中接入 canwu-api，创建仿真，并通过公开入口推进世界。
 sidebar:
   order: 2
   label: 接入与驱动
@@ -8,7 +8,7 @@ sidebar:
 
 import { Steps } from "@astrojs/starlight/components";
 
-Canwu 是无头仿真内核。窗口、地图、网络、输入、AI 调度和帧循环都由主机程序负责；
+Canwu 是无头仿真内核。窗口、地图、网络、输入、AI 调度和帧循环都由上层应用负责；
 Canwu 负责权威状态、验证、确定性时间、事件和证据。
 
 ## 添加依赖
@@ -29,7 +29,7 @@ canwu-api = "=0.4.0"
 不要直接依赖 `canwu-sim`、`canwu-world` 或其他实现 crate。它们可被 Cargo 解析，
 但不是应用代码的独立兼容性表面。
 
-## 最小主机流程
+## 最小接入流程
 
 ```rust
 use canwu_api::{Canwu, SemanticAction, SimDuration};
@@ -56,23 +56,23 @@ let events = canwu.advance(SimDuration::days(1))?;
 | 入口 | 适用场景 |
 | --- | --- |
 | `act(actor, SemanticAction)` | UI、智能体或工具希望使用面向能力的语义动作 |
-| `submit(CommandEnvelope)` | 主机已经持有明确的类型化命令与发行者身份 |
+| `submit(CommandEnvelope)` | 调用方已经持有明确的类型化命令与签发者身份 |
 | `process_command(CommandRequest)` | 外部服务需要带请求标识、重试和结果记录的规范化命令入口 |
 | `enqueue_command(...)` | 命令必须在未来的模拟时间按优先级进入 |
 
-无论选择哪种入口，主机都不应取得可变世界引用。Canwu 验证权限、前置条件和请求，
+无论选择哪种入口，调用方都不会取得可变世界引用。Canwu 验证权限、前置条件和请求，
 然后记录被接受或拒绝的结果。
 
 ## 驱动时间
 
 <Steps>
-1. 主机读取墙钟、回合输入或研究任务进度。
-2. 主机按自己的速度策略把它转换为 `SimDuration`。
+1. 上层应用读取墙钟、回合输入或研究任务进度。
+2. 上层应用按自己的速度策略把它转换为 `SimDuration`。
 3. 普通事件驱动场景调用 `advance()`；使用日结、回合结算等阶段系统时调用 `advance_canonical()` 或显式 `settle_boundary()`。
 4. 从返回的事件、边界回执或新的只读快照刷新表现层。
 </Steps>
 
-不要把浮点帧间隔直接写入权威状态。连续渲染程序应保留主机侧余数和表现插值；
+不要把浮点帧间隔直接写入权威状态。连续渲染程序应保留应用侧余数和表现插值；
 完整模式见[连续时间游戏循环教程](/tutorials/continuous-game-loop/)。
 
 ## 下一步

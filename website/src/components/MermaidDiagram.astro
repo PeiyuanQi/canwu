@@ -2,9 +2,20 @@
 interface Props {
   definition: string;
   label: string;
+  diagramLoading?: string;
+  sourceSummary?: string;
+  sourceLoading?: string;
+  noScriptMessage?: string;
 }
 
-const { definition, label } = Astro.props;
+const {
+  definition,
+  label,
+  diagramLoading = "Rendering diagram…",
+  sourceSummary = "View diagram source",
+  sourceLoading = "Diagram source loads with the preview.",
+  noScriptMessage = "JavaScript is required for the diagram preview; the text-source fallback remains available above.",
+} = Astro.props;
 const encodedDefinition = JSON.stringify(definition)
   .replaceAll("&", "\\u0026")
   .replaceAll("<", "\\u003c")
@@ -12,16 +23,16 @@ const encodedDefinition = JSON.stringify(definition)
 ---
 
 <figure class="mermaid-figure">
-  <figcaption class="sr-only">{label}. A text-source fallback is available below.</figcaption>
-  <div class="mermaid" role="img" aria-label={label} aria-busy="true">Rendering diagram…</div>
+  <figcaption class="sr-only">{label}. {sourceSummary}.</figcaption>
+  <div class="mermaid" role="img" aria-label={label} aria-busy="true">{diagramLoading}</div>
   <details class="mermaid-source">
-    <summary>View diagram source</summary>
-    <pre><code class="mermaid-source-code">Diagram source loads with the preview.</code></pre>
+    <summary>{sourceSummary}</summary>
+    <pre><code class="mermaid-source-code">{sourceLoading}</code></pre>
   </details>
   <script is:inline type="application/json" class="mermaid-definition" set:html={encodedDefinition}></script>
   <noscript>
     <p class="mermaid-noscript">
-      JavaScript is required for the diagram preview; the text-source fallback remains available above.
+      {noScriptMessage}
     </p>
   </noscript>
 </figure>
