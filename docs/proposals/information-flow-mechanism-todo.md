@@ -282,7 +282,8 @@ write and not a plugin-owned mutation of the knowledge store.
 - [x] Add `BoundaryKnowledgeChange` as one holder batch.
 - [x] Add skip-empty `BoundaryRecord.knowledge_changes`.
 - [x] Add `BoundaryEmissionKind::KnowledgeChange`.
-- [x] Add `EventKind::KnowledgePublished`.
+- [x] Add the `knowledge_published` typed payload and encode it through the
+  domain-neutral `EventKind` record.
 - [x] Add `EventAudience::KnowledgeHolder(KnowledgeHolderRef)` and principal-
   aware visibility without resolving an institution to a current person.
 - [x] Add batch and record counts to `BoundaryReceipt`.

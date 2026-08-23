@@ -671,7 +671,7 @@ fn marker_system(
     _view: &SimulationView<'_>,
     event: &SimEvent,
 ) -> Result<Vec<SystemDirective>, CanwuError> {
-    if !matches!(event.kind, EventKind::MoveOrdered { .. }) {
+    if !event.kind.is_type("move_ordered") {
         return Ok(Vec::new());
     }
     Ok(vec![SystemDirective::Emit {
@@ -704,13 +704,8 @@ fn recursive_system(
     _view: &SimulationView<'_>,
     event: &SimEvent,
 ) -> Result<Vec<SystemDirective>, CanwuError> {
-    let should_recurse = match &event.kind {
-        EventKind::MoveOrdered { .. } => true,
-        EventKind::Plugin { plugin, event_type } => {
-            plugin == "recursive-test" && event_type == "loop"
-        }
-        _ => false,
-    };
+    let should_recurse = event.kind.is_type("move_ordered")
+        || event.kind.plugin_identity() == Some(("recursive-test", "loop"));
     if should_recurse {
         Ok(vec![SystemDirective::Emit {
             event_type: "loop".to_owned(),
@@ -768,11 +763,7 @@ fn failing_event_system(
     _view: &SimulationView<'_>,
     event: &SimEvent,
 ) -> Result<Vec<SystemDirective>, CanwuError> {
-    if matches!(
-        &event.kind,
-        EventKind::Plugin { plugin, event_type }
-            if plugin == "failing-test" && event_type == "flag_changed"
-    ) {
+    if event.kind.plugin_identity() == Some(("failing-test", "flag_changed")) {
         Ok(vec![SystemDirective::Schedule {
             after: SimDuration::ZERO,
             directive: Box::new(SystemDirective::Emit {

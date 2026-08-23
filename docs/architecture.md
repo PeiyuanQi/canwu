@@ -308,21 +308,27 @@ world entities and event payloads. / 上面的依赖 DAG 描述当前实现，�
 公开类型的最终归属。已经接受的审计确立同一条边界：通用引擎 crate 拥有确定性
 模拟契约，参考整合包拥有时代或应用特定的世界实体和事件载荷。
 
-Under that direction, the current `canwu-world` types are a compatibility model
-for the first movement vertical slice. They move to a reference integration
-before the crate is retired. `canwu-event` is mixed: `CauseRef`,
-`EventAudience`, and the event-envelope semantics remain engine contracts,
-while the concrete movement, army, person, letter, report, knowledge, and debug
-variants in `EventKind` migrate to their owning integration or subsystem. / 按此
-方向，当前 `canwu-world` 是首个移动纵向切片的兼容模型，应先迁入参考整合包，
-再退役该 crate。`canwu-event` 则同时含有通用契约与旧载荷：因果引用、事件受众
-和事件信封语义仍归引擎，具体事件变体迁往其整合包或子系统。
+Under that direction, the current `canwu-world` types remain a compatibility
+model for the first movement vertical slice. Published versions are yanked to
+prevent new registry resolution, but the source crate and its existing
+consumers remain until the model moves to a reference integration.
+`canwu-event` now contains only generic contracts: `EventKind` is a type label
+plus flattened structured fields, while concrete movement, arrival, letter,
+report, knowledge, and debug payload structs live outside that crate. / 按此
+方向，当前 `canwu-world` 仍是首个移动纵向切片的兼容模型；已发布版本被 yank，
+以阻止新的 registry 解析选用，但源码 crate 及现有消费者会保留到模型迁入参考
+整合包。`canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
+字段组成，具体移动、到达、信件、报告、知识和调试载荷结构均位于该 crate 之外。
 
-This audit approves the ownership direction only. It does not change today's
-public API, persistence formats, or crate graph. Removing either package
-requires the migration, replay, compatibility, starter-kit, and independent-
-integration gates recorded in the audit. / 本审计只批准所有权方向，不改变当前
-公开 API、持久化格式或 crate 图；删除任一包前必须满足审计列出的迁移与验证门槛。
+The event extraction is a Rust source-API break: callers replace enum
+construction and exhaustive matching with `from_payload`, `event_type`,
+`is_type`, and typed field/payload decoding. Its serialized shape is unchanged,
+so current snapshots, journals, replay commitments, and the crate dependency DAG
+do not need a format migration for this step. Removing `canwu-world` still
+requires the remaining audit gates. / 事件迁出会破坏 Rust 源 API：调用方需以通用
+构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。序列化形状不变，
+因此本步不需要提升快照格式或改写日志、重演承诺与 crate 依赖 DAG；真正删除
+`canwu-world` 仍须满足审计中的其余门槛。
 
 ## Decision framework
 
@@ -606,11 +612,13 @@ This keeps compaction from silently changing the meaning of a valid reference
 and makes malformed runtime input and malformed snapshot evidence follow the
 same canonical checks.
 
-For a plugin event, `EventKind::event_type()` remains the compatibility kind
-label `"plugin"`. Consumers that need the actual namespaced identity should use
-`EventKind::qualified_event_type()`, which returns `plugin_name.event_type`;
-the structured `plugin` and `event_type` fields remain the authoritative
-serialized values.
+`EventKind` is domain-neutral: `event_type()` returns the persisted `type` tag,
+and `fields()` exposes its flattened structured payload. Domain owners may use
+`from_payload` and `decode_payload` to keep strongly typed payloads outside the
+generic event crate. For a plugin event, `event_type()` remains the compatibility
+kind label `"plugin"`. Consumers that need its namespaced identity should use
+`qualified_event_type()`, which returns `plugin_name.event_type`; the structured
+`plugin` and `event_type` fields remain the authoritative serialized values.
 
 Player-facing event projection reuses the same deterministic resolver for
 built-in and plugin events. A plugin may register an `EventAudience` for an

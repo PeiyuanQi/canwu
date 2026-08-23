@@ -1287,7 +1287,7 @@ fn movement_emits_events_and_executes_at_scheduled_time() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, EventKind::ArmyArrived { .. }))
+            .any(|event| event.kind.is_type("army_arrived"))
     );
     assert_eq!(
         simulation
@@ -1351,12 +1351,12 @@ fn person_self_move_carries_and_delivers_a_letter() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, EventKind::PersonArrived { .. }))
+            .any(|event| event.kind.is_type("person_arrived"))
     );
     assert!(
         events
             .iter()
-            .any(|event| matches!(event.kind, EventKind::LetterDelivered { .. }))
+            .any(|event| event.kind.is_type("letter_delivered"))
     );
     let world = simulation.world();
     let letter = world.letter(LetterId::new(1)).expect("letter exists");
@@ -1450,7 +1450,7 @@ fn snapshot_rejects_scheduled_plugin_correlation_drift() {
     let order_event = simulation
         .events()
         .iter()
-        .find(|event| matches!(event.kind, EventKind::MoveOrdered { .. }))
+        .find(|event| event.kind.is_type("move_ordered"))
         .expect("the movement order event should exist");
     let arrival_at = SimTime::EPOCH
         .checked_add(SimDuration::hours(18))

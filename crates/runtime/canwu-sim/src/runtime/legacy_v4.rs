@@ -1,9 +1,10 @@
+use super::event_payloads::{self, RuntimeEventPayload};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryRecord, BoundarySystemContract,
     CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal,
     CommandAttemptRecord, CommandRecord, CommitmentRoots, DecisionState, DeterministicRng,
     DomainRecord, DomainRecordClass, DomainRecordSchema, DomainReferenceSchema, ENGINE_VERSION,
-    ErrorCode, EvidenceCursor, EvidenceJournalSegment, IngressRecord, KnowledgeSnapshot,
+    ErrorCode, EventKind, EvidenceCursor, EvidenceJournalSegment, IngressRecord, KnowledgeSnapshot,
     PayloadSchema, PluginActionDescriptor, PluginComponentRecord, PluginDescriptor,
     PluginIngressDescriptor, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer,
     RandomDrawRecord, RandomStreamKey, RandomStreamState, ReservationRef, RunConfigurationSnapshot,
@@ -15,7 +16,9 @@ use super::{
     invalid_snapshot_error, is_canonical_hash, manifest, random_stream_commitment_root,
     snapshot_checkpoint_hash, snapshot_commitment_roots,
 };
-use canwu_core::{DomainRecordKind, RandomDrawId};
+use canwu_core::{
+    ArmyId, DomainRecordKind, EntityRef, EventId, PersonId, RandomDrawId, TerritoryId,
+};
 use canwu_event::{CauseRef, EventAudience};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -66,6 +69,20 @@ where
         invalid_snapshot_error(format!("could not re-encode strict {label}: {error}"))
     })?;
     reject_unknown_fields(value, &encoded, "")?;
+    Ok(decoded)
+}
+
+fn deserialize_strict_json<T>(json: &str, input: &Value, label: &str) -> Result<T, CanwuError>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let decoded: T = serde_json::from_str(json).map_err(|error| {
+        invalid_snapshot_error(format!("could not deserialize strict {label}: {error}"))
+    })?;
+    let encoded = serde_json::to_value(&decoded).map_err(|error| {
+        invalid_snapshot_error(format!("could not re-encode strict {label}: {error}"))
+    })?;
+    reject_unknown_fields(input, &encoded, "")?;
     Ok(decoded)
 }
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -255,6 +272,124 @@ fn legacy_identity_commitment_root(
     )
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum LegacyV4EventKind {
+    MoveOrdered {
+        army: ArmyId,
+        from: TerritoryId,
+        to: TerritoryId,
+        arrival_at: SimTime,
+    },
+    ArmyArrived {
+        army: ArmyId,
+        territory: TerritoryId,
+    },
+    ReportDispatched {
+        recipient: PersonId,
+        army: ArmyId,
+        arrives_at: SimTime,
+    },
+    KnowledgeUpdated {
+        recipient: PersonId,
+        army: ArmyId,
+        known_location: TerritoryId,
+    },
+    DebugFieldChanged {
+        entity: EntityRef,
+        field: String,
+        old_value: String,
+        new_value: String,
+    },
+    Plugin {
+        plugin: String,
+        event_type: String,
+    },
+}
+
+impl From<LegacyV4EventKind> for EventKind {
+    fn from(value: LegacyV4EventKind) -> Self {
+        match value {
+            LegacyV4EventKind::MoveOrdered {
+                army,
+                from,
+                to,
+                arrival_at,
+            } => event_payloads::MoveOrdered {
+                army,
+                from,
+                to,
+                arrival_at,
+            }
+            .into_kind(),
+            LegacyV4EventKind::ArmyArrived { army, territory } => {
+                event_payloads::ArmyArrived { army, territory }.into_kind()
+            }
+            LegacyV4EventKind::ReportDispatched {
+                recipient,
+                army,
+                arrives_at,
+            } => event_payloads::ReportDispatched {
+                recipient,
+                army,
+                arrives_at,
+            }
+            .into_kind(),
+            LegacyV4EventKind::KnowledgeUpdated {
+                recipient,
+                army,
+                known_location,
+            } => event_payloads::KnowledgeUpdated {
+                recipient,
+                army,
+                known_location,
+            }
+            .into_kind(),
+            LegacyV4EventKind::DebugFieldChanged {
+                entity,
+                field,
+                old_value,
+                new_value,
+            } => event_payloads::DebugFieldChanged {
+                entity,
+                field,
+                old_value,
+                new_value,
+            }
+            .into_kind(),
+            LegacyV4EventKind::Plugin { plugin, event_type } => {
+                EventKind::plugin(plugin, event_type)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct LegacyV4SimEvent {
+    id: EventId,
+    timestamp: SimTime,
+    kind: LegacyV4EventKind,
+    affected_entities: Vec<EntityRef>,
+    summary: String,
+    cause: Option<CauseRef>,
+    correlation_id: u64,
+}
+
+impl From<LegacyV4SimEvent> for SimEvent {
+    fn from(value: LegacyV4SimEvent) -> Self {
+        Self {
+            id: value.id,
+            timestamp: value.timestamp,
+            kind: value.kind.into(),
+            affected_entities: value.affected_entities,
+            summary: value.summary,
+            cause: value.cause,
+            correlation_id: value.correlation_id,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct LegacyV4SimulationSnapshot {
@@ -293,7 +428,7 @@ pub(super) struct LegacyV4SimulationSnapshot {
     pub plugin_registration_closed: bool,
     pub world: WorldSnapshot,
     pub knowledge: KnowledgeSnapshot,
-    pub events: Vec<SimEvent>,
+    events: Vec<LegacyV4SimEvent>,
     pub commands: Vec<CommandRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command_attempts: Vec<CommandAttemptRecord>,
@@ -357,7 +492,7 @@ impl LegacyV4SimulationSnapshot {
             plugin_registration_closed: self.plugin_registration_closed,
             world: self.world,
             knowledge: self.knowledge,
-            events: self.events,
+            events: self.events.into_iter().map(Into::into).collect(),
             commands: self.commands,
             command_attempts: self.command_attempts,
             ingress: self.ingress,
@@ -597,11 +732,11 @@ pub(super) fn deserialize_snapshot_json(json: &str) -> Result<SimulationSnapshot
         .ok_or_else(|| invalid_snapshot_error("snapshot engine selector is missing or invalid"))?;
     match format {
         SNAPSHOT_FORMAT_VERSION if engine == ENGINE_VERSION => {
-            deserialize_strict(&value, "format-5 snapshot")
+            deserialize_strict_json(json, &value, "format-5 snapshot")
         }
         4 if engine == LEGACY_V4_ENGINE_VERSION => {
             let legacy: LegacyV4SimulationSnapshot =
-                deserialize_strict(&value, "legacy format-4 snapshot")?;
+                deserialize_strict_json(json, &value, "legacy format-4 snapshot")?;
             migrate_legacy_v4(&legacy)
         }
         _ => Err(CanwuError::new(
@@ -628,7 +763,7 @@ struct LegacyV4EvidenceJournalSegment {
     start: EvidenceCursor,
     end: EvidenceCursor,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    events: Vec<SimEvent>,
+    events: Vec<LegacyV4SimEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     commands: Vec<CommandRecord>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -802,11 +937,11 @@ pub(super) fn deserialize_checkpoint_journal_json(
         .ok_or_else(|| invalid_snapshot_error("checkpoint journal engine selector is invalid"))?;
     match format {
         SNAPSHOT_FORMAT_VERSION if engine == ENGINE_VERSION => {
-            deserialize_strict(&value, "format-5 checkpoint journal")
+            deserialize_strict_json(json, &value, "format-5 checkpoint journal")
         }
         4 if engine == LEGACY_V4_ENGINE_VERSION => {
             let legacy: LegacyV4CheckpointJournal =
-                deserialize_strict(&value, "legacy format-4 checkpoint journal")?;
+                deserialize_strict_json(json, &value, "legacy format-4 checkpoint journal")?;
             migrate_legacy_checkpoint_journal(legacy)
         }
         _ => Err(CanwuError::new(

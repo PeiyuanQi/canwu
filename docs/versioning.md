@@ -18,6 +18,32 @@ serialized command/query/event contracts that are documented as public, and the
 semantic-agent operation shapes. Internal crate implementation details are not
 part of the compatibility guarantee.
 
+### Unreleased event ownership transition
+
+`EventKind` changes from an enum with engine-owned domain variants to a
+domain-neutral record containing a stable `type` tag and flattened structured
+fields. Concrete movement, arrival, letter, report, knowledge, and debug payload
+types are no longer exported by `canwu-event`. Downstream Rust code must replace
+variant construction and exhaustive matching with `EventKind::from_payload`,
+`EventKind::event_type` or `is_type`, and typed `decode_payload` or
+`decode_field` calls. Plugin callers should use `EventKind::plugin` and
+`plugin_identity`.
+
+This is an intentional Rust source break and must ship in the next pre-1.0
+minor release, not as a patch release. It is not a wire break: compatibility
+events preserve the exact serialized field order and values of the existing
+`{"type": ..., ...fields}` JSON, including the outer `"type": "plugin"`,
+`plugin`, and nested `event_type` fields used by plugin events. Snapshot format
+5, replay journals, event commitments, and historical format-5 loading therefore
+retain their existing contract.
+
+The workspace remains at the last released `0.5.1` identity while this change
+is unreleased. It must not be published under that version. The release task
+must advance all lockstep crates and exact dependency requirements to `0.6.0`
+and explicitly migrate engine identity without reinterpreting snapshot format
+5; changing only `Cargo.toml` here would make valid 0.5.1 snapshots fail the
+engine-identity gate.
+
 ## Snapshot format
 
 Engine SemVer and snapshot format versioning are separate. Every snapshot stores

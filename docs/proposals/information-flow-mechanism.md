@@ -1046,13 +1046,17 @@ Extend `BoundaryEmissionKind`:
 KnowledgeChange { change_index: u64 }
 ~~~
 
-Each committed batch emits exactly one built-in event:
+Each committed batch emits exactly one built-in event. The knowledge subsystem
+owns the typed payload and encodes it through the domain-neutral event record:
 
 ~~~rust
-EventKind::KnowledgePublished {
+#[derive(Serialize, Deserialize)]
+struct KnowledgePublished {
     holder: KnowledgeHolderRef,
     record_count: u32,
 }
+
+EventKind::from_payload("knowledge_published", &payload)?
 ~~~
 
 Every batch contains one holder and receives a contiguous audit ID range, stored

@@ -101,7 +101,7 @@ renamed by this policy.
 | --- | --- | --- | --- |
 | [角色](../website/src/content/docs/developer/reading-state.mdx) | actor | `PersonId` | A person or in-world principal whose knowledge and authority constrain a view or action. |
 | [角色知识](../website/src/content/docs/developer/reading-state.mdx) | actor knowledge | `ActorKnowledge` | What one actor knows, including source, confidence, and time. It is stored separately from ground truth. |
-| [报告](../website/src/content/docs/architecture/events.mdx) | report | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
+| [报告](../website/src/content/docs/architecture/events.mdx) | report | `report_dispatched` event payload | Information dispatched or delivered between actors before it can update their knowledge. |
 | [投影](../website/src/content/docs/developer/reading-state.mdx) | projection | — | A materialized, actor-scoped representation derived without exposing authoritative domain state. |
 | [权限](../website/src/content/docs/developer/integration.mdx) | authority | `CommandAuthority` | The validated right to issue a command or perform an action. Do not translate `authoritative` as 权限; authoritative state is 权威状态. |
 | [签发者](../website/src/content/docs/developer/integration.mdx) | issuer | `Issuer` | The identity presented as the source of a command. Authority validation determines whether that identity may act. |

@@ -2,10 +2,10 @@ use canwu_api::{
     BoundaryRequest, Canwu, Command, CommandAttemptOutcome, CommandEnvelope, CommandId,
     CommandRequest, CommandRequestId, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
-    DomainReference, DomainReferenceTarget, EntityRef, ErrorCode, EventKind, EvidenceRef,
-    Government, GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person,
-    PersonId, PluginIngressRequest, Scenario, SimTime, Territory, TerritoryId,
-    TypedDomainRecordRef, WorldSnapshot,
+    DomainReference, DomainReferenceTarget, EntityRef, ErrorCode, EvidenceRef, Government,
+    GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person, PersonId,
+    PluginIngressRequest, Scenario, SimTime, Territory, TerritoryId, TypedDomainRecordRef,
+    WorldSnapshot,
 };
 use canwu_history_research::{
     ASSESSMENT_COMMAND, ASSESSMENT_INGRESS, AssessmentCore, AssessmentRecord, HistoricalAnalysis,
@@ -575,12 +575,11 @@ fn historical_total_cap_persists_rejection_without_poisoning() {
 
 fn has_capacity_rejection(canwu: &Canwu) -> bool {
     canwu.events().iter().any(|event| {
-        matches!(
-            &event.kind,
-            EventKind::Plugin { plugin, event_type }
-                if plugin == HistoricalSourcesAssessment::PLUGIN_NAME
-                    && event_type == "historical_assessment_rejected_capacity_v1"
-        )
+        event.kind.plugin_identity()
+            == Some((
+                HistoricalSourcesAssessment::PLUGIN_NAME,
+                "historical_assessment_rejected_capacity_v1",
+            ))
     })
 }
 

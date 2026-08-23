@@ -1519,12 +1519,12 @@ fn validate_capacity_rejection_boundary(
         || emissions.iter().any(|emission| {
             indexes.events.get(&emission.event).is_none_or(|event| {
                 event.timestamp != boundary.at
-                    || !matches!(
-                        &event.kind,
-                        canwu_api::EventKind::Plugin { plugin, event_type }
-                            if plugin == crate::PLUGIN_NAME
-                                && event_type == CAPACITY_REJECTION_EVENT
-                    )
+                    || event
+                        .kind
+                        .plugin_identity()
+                        .is_none_or(|(plugin, event_type)| {
+                            plugin != crate::PLUGIN_NAME || event_type != CAPACITY_REJECTION_EVENT
+                        })
             })
         })
     {

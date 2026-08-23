@@ -1,7 +1,9 @@
 # World and Event Ownership Audit
 
-Status: accepted architectural direction. This audit does not change the
-public API, serialized formats, or current crate dependency graph.
+Status: implementation in progress. Concrete public event variants have moved
+out of `canwu-event` without changing their serialized shape. Published
+`canwu-world` versions are yanked, but its source migration and retirement are
+not complete.
 
 ## Decision
 
@@ -18,12 +20,13 @@ The governing invariant is:
 Applying that invariant gives two different outcomes:
 
 - `canwu-world` is a compatibility model for the first movement vertical slice.
-  After a supported migration moves that model into a reference integration,
-  the crate has no irreducible generic engine contract and should be retired.
-- `canwu-event` mixes generic engine contracts with legacy payload variants.
-  Keep the generic event envelope, provenance, and visibility contracts. Move
-  concrete payloads out first; only then decide whether the residual types are
-  clearer inside `canwu-sim` or still justify a focused `canwu-event` crate.
+  Its published versions are yanked to stop new registry resolution. After a
+  supported migration moves that model into a reference integration, the source
+  crate has no irreducible generic engine contract and should be retired.
+- `canwu-event` now contains the generic event envelope, provenance, visibility,
+  and structured event-record contracts. Its concrete payload variants have
+  moved out. Only after independent consumption is known should the residual
+  types move into `canwu-sim` or remain in this focused crate.
 
 The physical placement of the residual event contracts is therefore a later
 decision gate, not a pre-approved merge.
@@ -39,9 +42,9 @@ the reference integration without merging routing and world ownership.
 
 `canwu-event` has two normal first-party consumers: `canwu-sim` and
 `canwu-api`. Its values participate in persisted snapshots, replay,
-validation, event projection, plugin descriptors, and causal evidence. This is
-why moving it requires a format migration and compatibility plan rather than a
-Cargo-only refactor.
+validation, event projection, plugin descriptors, and causal evidence. The
+payload extraction therefore preserves the exact flattened event JSON shape;
+it is a Rust source-API break, but not a snapshot-format migration.
 
 The public facade and private runtime remain separate regardless of this audit.
 Their high rate of co-change reflects the facade wrapping the runtime; it does
@@ -75,21 +78,22 @@ public APIs.
 | --- | --- | --- | --- |
 | `CauseRef` | Boundary, command, parent-event, or system provenance | Generic engine contract | Keep semantics and serialized compatibility. Physical crate placement is decided only after decoupling. |
 | `EventAudience` | Persisted player-facing visibility policy | Generic engine contract | Keep fail-closed visibility semantics and replay-stable serialization. |
-| `SimEvent` | Persisted event envelope with identity, time, affected entities, summary, cause, and correlation | Generic engine contract with legacy coupling | Keep the envelope; replace its mandatory concrete `EventKind` dependency through a versioned migration. |
-| `EventKind` | Enum containing movement, arrival, letter, report, knowledge, debug, and plugin variants | Legacy compatibility payload union with one generic extension seam | Move concrete variants to their owning integration or subsystem; replace `Plugin` with a generic namespaced event identity before removing the enum. |
+| `SimEvent` | Persisted event envelope with identity, time, affected entities, summary, cause, and correlation | Generic engine contract | Keep the envelope and its serialized compatibility. |
+| `EventKind` | Stable `type` label plus flattened structured fields | Generic engine contract | Keep the wire-neutral record. Domain owners define typed payloads outside this crate and use generic encode/decode APIs. |
 
-The built-in `EventKind` variants `MoveOrdered`, `ArmyArrived`,
-`PersonMoveOrdered`, `PersonArrived`, `LetterDelivered`, and
-`ReportDispatched` belong to the reference movement/information integration.
-`KnowledgeUpdated` and `KnowledgePublished` belong with the knowledge or
-information contract that produces them. `DebugFieldChanged` belongs to the
-debug/compatibility surface. `Plugin` demonstrates the required generic seam,
-but its string fields alone are not a complete replacement plan.
+The former typed variants for movement, arrival, letter, report, knowledge, and
+debug behavior are no longer exported by `canwu-event`. Private compatibility
+payloads in `canwu-sim` strictly validate the existing tags and fields until
+their movement, information, knowledge, or debug owner is extracted. This
+intermediate placement removes domain vocabulary from the generic crate without
+pretending that the reference integration already exists.
 
-Before `EventKind` can be retired, the engine needs a canonical namespaced
-event identity and any versioned structured metadata required for validation,
-projection, and replay. Legacy event records must remain loadable, and their
-causal and commitment evidence must retain the same meaning.
+Built-in compatibility tags remain unqualified. Before independently authored
+integrations share event types, the engine still needs a canonical cross-
+integration namespace and any versioned metadata required for schema evolution.
+Plugin events retain their existing `plugin` plus nested `event_type` identity.
+Legacy event records remain loadable and keep the same causal and commitment
+meaning.
 
 ## Target boundary
 
@@ -111,18 +115,19 @@ would hide the same ownership problem behind a larger name.
 
 ## Migration sequence
 
-### 1. Characterize compatibility
+### 1. Characterize compatibility - complete for event extraction
 
 Freeze representative JSON snapshots, journals, public facade calls, routing
 adapter behavior, and exact replay outcomes. Record which names are guaranteed
 by the current compatibility policy.
 
-### 2. Introduce the generic event seam
+### 2. Introduce the generic event seam - partially complete
 
-Add a canonical namespaced event identity and versioned structured event
-metadata without removing `EventKind`. Teach validation, projection,
-persistence, and replay to handle the new representation. Provide explicit
-legacy loading and conversion.
+`EventKind` is now a generic record and concrete public variants are removed.
+Runtime validation still decodes every compatibility payload into a private
+typed structure and fails closed. Existing JSON needs no conversion because its
+`type` tag and flattened fields are unchanged. A canonical cross-integration
+namespace and payload-version contract remain open work.
 
 ### 3. Extract the reference world integration
 
@@ -167,9 +172,9 @@ Implementation is not complete until all of these are true:
 
 - **Merge `canwu-world` into `canwu-core`:** this would make opinionated
   historical entities foundational.
-- **Merge the current `canwu-event` into `canwu-sim`:** this would move legacy
-  payload ownership without resolving it and expand the persistence blast
-  radius.
+- **Merge `canwu-event` into `canwu-sim` immediately:** the payload ownership is
+  now separated, but a merge would still expand the persistence blast radius
+  before independent consumption of the generic contracts is understood.
 - **Create `canwu-model`:** this would consolidate names, not responsibilities.
 - **Merge `canwu-api` and `canwu-sim`:** this would erase the supported facade
   and private runtime boundary.

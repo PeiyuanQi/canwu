@@ -1570,9 +1570,17 @@ fn snapshot_round_trip_preserves_pending_work() {
     let mut changed_delivery = restored.snapshot();
     let mut changed_dispatch = None;
     for event in &mut changed_delivery.events {
-        if let EventKind::ReportDispatched { arrives_at, .. } = &mut event.kind {
-            *arrives_at += SimDuration::minutes(1);
-            changed_dispatch = Some((event.id, *arrives_at));
+        if event.kind.is_type("report_dispatched") {
+            let changed_arrival = event
+                .kind
+                .decode_field::<SimTime>("arrives_at")
+                .expect("report dispatch should have an arrival time")
+                + SimDuration::minutes(1);
+            event
+                .kind
+                .set_field("arrives_at", &changed_arrival)
+                .expect("report dispatch should have an arrival time");
+            changed_dispatch = Some((event.id, changed_arrival));
             break;
         }
     }
@@ -1679,6 +1687,38 @@ fn snapshot_round_trip_preserves_pending_work() {
         .expect("delivered reports should serialize");
     Simulation::from_snapshot_json(&delivered)
         .expect("completed report evidence should restore without pending work");
+}
+
+#[test]
+fn snapshot_rejects_extra_fields_on_compatibility_event_payloads() {
+    let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");
+    simulation
+        .submit(CommandEnvelope::new(
+            Issuer::Debug,
+            Command::DebugSetArmyMorale {
+                army: ids.army,
+                morale: 61,
+            },
+        ))
+        .expect("debug command should emit a compatibility event");
+    let mut snapshot = simulation.snapshot();
+    let event = snapshot
+        .events
+        .iter_mut()
+        .find(|event| event.kind.is_type("debug_field_changed"))
+        .expect("debug event should exist");
+    let mut kind = serde_json::to_value(&event.kind).expect("event should serialize");
+    kind.as_object_mut()
+        .expect("event kind should be an object")
+        .insert("extra".to_owned(), Value::Bool(true));
+    event.kind = serde_json::from_value(kind).expect("generic event should retain extra fields");
+    refresh_snapshot_commitments_and_checkpoint(&mut snapshot);
+
+    let error = Simulation::from_snapshot(snapshot)
+        .err()
+        .expect("typed compatibility payloads must reject extra fields");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(error.message.contains("event payload is not canonical"));
 }
 
 #[test]
