@@ -15,6 +15,7 @@ coding agents.
 
 - [Chinese-English terminology](terminology.md)
 - [Architecture](architecture.md)
+- [World and event ownership audit](proposals/world-event-ownership-audit.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)

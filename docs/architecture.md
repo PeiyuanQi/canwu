@@ -292,6 +292,33 @@ flowchart LR
 read-only snapshots, not a public mutable world store. This makes the command
 boundary a structural property instead of a UI convention.
 
+### World and event model ownership / 世界与事件模型所有权
+
+The dependency DAG above describes the current implementation, not the target
+ownership of every public type. The accepted
+[world and event ownership audit](proposals/world-event-ownership-audit.md)
+establishes this invariant: generic engine crates own deterministic simulation
+contracts, while reference integrations own period- and application-specific
+world entities and event payloads. / 上面的依赖 DAG 描述当前实现，并不代表每个
+公开类型的最终归属。已经接受的审计确立同一条边界：通用引擎 crate 拥有确定性
+模拟契约，参考整合包拥有时代或应用特定的世界实体和事件载荷。
+
+Under that direction, the current `canwu-world` types are a compatibility model
+for the first movement vertical slice. They move to a reference integration
+before the crate is retired. `canwu-event` is mixed: `CauseRef`,
+`EventAudience`, and the event-envelope semantics remain engine contracts,
+while the concrete movement, army, person, letter, report, knowledge, and debug
+variants in `EventKind` migrate to their owning integration or subsystem. / 按此
+方向，当前 `canwu-world` 是首个移动纵向切片的兼容模型，应先迁入参考整合包，
+再退役该 crate。`canwu-event` 则同时含有通用契约与旧载荷：因果引用、事件受众
+和事件信封语义仍归引擎，具体事件变体迁往其整合包或子系统。
+
+This audit approves the ownership direction only. It does not change today's
+public API, persistence formats, or crate graph. Removing either package
+requires the migration, replay, compatibility, starter-kit, and independent-
+integration gates recorded in the audit. / 本审计只批准所有权方向，不改变当前
+公开 API、持久化格式或 crate 图；删除任一包前必须满足审计列出的迁移与验证门槛。
+
 ## Decision framework
 
 `canwu-decision` is the official headless decision SDK. It defines persisted

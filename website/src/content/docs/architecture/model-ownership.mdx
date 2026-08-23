@@ -1,0 +1,89 @@
+---
+title: 世界与事件模型归属
+description: 逐项审计 canwu-world 与 canwu-event 的公开类型，确定哪些契约保留在引擎，哪些内容迁入参考整合包。
+template: doc
+sidebar:
+  order: 5
+  label: 模型归属
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+
+<nav class="architecture-links" aria-label="模型归属导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/">返回架构总览</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/events/">浏览事件系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/model-ownership/">English version</a>
+</nav>
+
+这次审计回答的不是“哪个 crate 行数太少”，而是“哪个层应该拥有这项语义”。结论是：**现在不应全面合并 crate**。应先把时代和应用特定的世界实体及事件载荷迁出通用引擎，再删除确实已经没有独立职责的包。
+
+<Aside type="note" title="当前实现没有改变">
+本文记录已经接受的架构方向和实施门槛。当前对外 API、存档格式以及 crate 依赖 DAG 均未改变。
+</Aside>
+
+## 一条所有权规则
+
+通用引擎 crate 拥有确定性模拟契约；参考整合包拥有军队、政府、领土、人物、信件等具体世界实体，以及描述它们领域行为的事件载荷。
+
+因此两个候选 crate 的结论并不相同：
+
+| crate | 审计结论 |
+| --- | --- |
+| `canwu-world` | 当前是首个移动纵向切片的兼容世界模型。迁入参考整合包并完成兼容迁移后，整个 crate 可以退役。 |
+| `canwu-event` | 同时包含通用事件契约和旧的具体事件载荷。先拆出载荷；剩余通用类型是否并入 `canwu-sim`，必须等独立消费情况明确后再决定。 |
+
+## `canwu-world` 的 12 个公开类型
+
+| 公开类型 | 分类 | 目标归属 |
+| --- | --- | --- |
+| `MapPoint` | 具体地图与展示模型 | 参考世界整合包 |
+| `Person` | 具体人物模型 | 参考移动/世界整合包 |
+| `PersonTransitState` | 具体人物旅行状态 | 随 `Person` 迁移 |
+| `LetterStatus` | 具体信件保管和交付生命周期 | 参考信息/物流整合包 |
+| `LetterCargo` | 具体信件正文、收发者、位置和保管状态 | 参考信息/物流整合包 |
+| `Government` | 具体政府与首都模型 | 参考政治/世界整合包 |
+| `Territory` | 具体领土、控制者和坐标模型 | 参考拓扑/世界整合包 |
+| `Route` | 具体领土间双向路线 | 参考拓扑整合包，并转换为路由自身的 `PlanningSnapshot` |
+| `TransitState` | 具体军队旅行状态 | 参考移动/世界整合包 |
+| `Army` | 具体军队、指挥官、兵力和士气模型 | 参考移动/世界整合包 |
+| `WorldSnapshot` | 只包含上述具体实体的兼容投影 | 保留迁移适配器，之后由各整合包拥有自己的脱离式投影 |
+| `WorldDiff` | 只追踪军队、人物、领土和信件 ID 的兼容差异 | 保留到调用者迁移，再使用整合包差异或通用变化证据 |
+
+`canwu-routing` 并不需要拥有这个世界。它已经用通用的 `PlanningSnapshot` 求解；目前对 `WorldSnapshot` 的依赖只是一个转换函数。该转换应随参考整合包迁移。
+
+## `canwu-event` 的 4 个公开类型
+
+| 公开类型 | 分类 | 目标归属 |
+| --- | --- | --- |
+| `CauseRef` | 通用引擎契约 | 保留命令、父事件、边界和系统因果语义及序列化兼容性 |
+| `EventAudience` | 通用引擎契约 | 保留默认私有、角色范围和可重演的可见性语义 |
+| `SimEvent` | 带有旧类型耦合的通用事件信封 | 保留身份、时间、影响对象、摘要、因果和相关标识语义；通过版本化迁移解除 `EventKind` 耦合 |
+| `EventKind` | 旧兼容载荷联合，包含一个通用插件接缝 | 具体变体迁往所属整合包或子系统；先提供规范的命名空间事件身份，再删除旧枚举 |
+
+移动、军队到达、人物旅行、信件交付和报告派发属于参考移动/信息整合包。知识事件归产生它们的知识或信息契约，调试字段事件归调试兼容面。`Plugin` 变体证明引擎需要命名空间事件身份，但两个字符串还不足以替代持久化、校验和投影所需的完整契约。
+
+## 为什么不能直接合并
+
+- 把 `canwu-world` 并入 `canwu-core` 会把一种历史世界观变成基础依赖。
+- 把当前 `canwu-event` 并入 `canwu-sim` 只会搬动混合所有权，并扩大持久化变更面。
+- 新建 `canwu-model` 只会合并名字，不会明确职责。
+- 合并 `canwu-api` 与 `canwu-sim` 会破坏对外 API 和私有运行时的边界。
+
+## 安全迁移顺序
+
+<Steps>
+1. 固定代表性的 JSON 存档、事件日志、`canwu-api` 调用、路由转换与精确重演结果。
+2. 在保留 `EventKind` 的同时，引入规范的命名空间事件身份和版本化结构化元数据，并支持旧格式加载。
+3. 只通过 `canwu-api` 建立第一方参考世界整合包，迁入具体实体、事件载荷和路由转换。
+4. 依照版本策略迁移对外 API、存档和入门套件，不静默破坏源码或线格式。
+5. `canwu-world` 没有普通消费者后再退役；旧事件载荷清空后，再判断 `canwu-event` 是否应并入 `canwu-sim`。
+</Steps>
+
+## 实施完成门槛
+
+旧存档和日志必须经过明确的版本迁移继续加载并精确重演；因果、相关标识、受众、影响对象和承诺校验必须保持确定且默认拒绝；路由 crate 必须不再依赖示例世界；至少一个可运行入门套件必须证明保存、加载、派生分支和精确重放；还需要第二种整合或测试夹具证明通用引擎没有暗中依赖第一种历史模型。
+
+完整的逐类型理由、依赖证据和门槛记录在仓库中的规范审计文档。

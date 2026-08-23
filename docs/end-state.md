@@ -28,6 +28,22 @@ The runtime should distinguish four related records:
 No semantic-agent operation may silently fall back to world state when actor
 knowledge is absent.
 
+## Model ownership
+
+Generic engine crates own deterministic simulation contracts, not a mandatory
+historical world. Concrete people, governments, territories, armies, letters,
+map coordinates, and the events that describe their domain behavior belong in
+replaceable reference integrations or host applications. Detached reads remain
+a supported public pattern, but each integration owns the shape of its world
+projection.
+
+The engine retains generic event-journal semantics: stable identity, simulation
+time, causal provenance, correlation, affected references, player-facing
+visibility, validation, persistence, and replay. Concrete domain event payloads
+must not become permanent kernel vocabulary. The accepted migration direction
+and compatibility gates are defined in the
+[world and event ownership audit](proposals/world-event-ownership-audit.md).
+
 ## Information flow
 
 The reusable kernel should preserve facts about who holds which record, when it

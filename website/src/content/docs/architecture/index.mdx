@@ -18,6 +18,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/architecture/events/">浏览事件系统</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/model-ownership/">查看模型归属</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
@@ -40,7 +42,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
 5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重演的记录。
 
-## 三个深入页面
+## 四个深入页面
 
 <CardGrid>
   <LinkCard
@@ -57,6 +59,11 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     title="随机生成方法"
     href="/architecture/randomness/"
     description="了解带命名版本的随机流、SplitMix64、抽样证据和精确重演。"
+  />
+  <LinkCard
+    title="世界与事件模型归属"
+    href="/architecture/model-ownership/"
+    description="查看每个公开世界与事件类型应保留、迁移还是在满足条件后退役。"
   />
 </CardGrid>
 
@@ -77,8 +84,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-core` | 类型化 ID、确定性随机工具和模式元数据 |
 | `canwu-time` | 历史时间戳与经过检查的时长运算 |
 | `canwu-decision` | 决策票据、确定性求值、控制者与决策策略 SDK |
-| `canwu-event` | 可序列化事件与紧凑因果来源 |
-| `canwu-world` | 历史实体和只读快照 |
+| `canwu-event` | 通用事件信封、因果来源及待迁移的兼容事件类型 |
+| `canwu-world` | 首个移动纵向切片的兼容实体和只读快照 |
 | `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
 | `canwu-routing` | 确定性时变路由原语 |
 | `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |

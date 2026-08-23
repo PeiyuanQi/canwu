@@ -18,6 +18,8 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/en/architecture/events/">Explore the event system</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/model-ownership/">Review model ownership</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/architecture/">中文架构</a>
 </nav>
 
@@ -40,7 +42,7 @@ Canwu is a headless historical simulation core. A client may be a game, research
 4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.
 5. **Evidence boundary:** commands, events, settlement, random draws, state changes, and hashes form an inspectable replay record.
 
-## Three deep dives
+## Four deep dives
 
 <CardGrid>
   <LinkCard
@@ -57,6 +59,11 @@ Canwu is a headless historical simulation core. A client may be a game, research
     title="Random generation"
     href="/en/architecture/randomness/"
     description="Versioned streams, SplitMix64, draw evidence, ownership, and exact replay."
+  />
+  <LinkCard
+    title="World and event model ownership"
+    href="/en/architecture/model-ownership/"
+    description="See which public world and event types stay, move, or retire after explicit compatibility gates."
   />
 </CardGrid>
 
@@ -77,8 +84,8 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-core` | Typed IDs, deterministic random utilities, and schema metadata |
 | `canwu-time` | Historical timestamps and checked duration arithmetic |
 | `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
-| `canwu-event` | Serializable events and compact causal provenance |
-| `canwu-world` | Historical entities and read-only snapshots |
+| `canwu-event` | Generic event envelopes and provenance plus compatibility event kinds awaiting migration |
+| `canwu-world` | Compatibility entities and detached snapshots for the first movement vertical slice |
 | `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
 | `canwu-routing` | Deterministic time-dependent routing primitives |
 | `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
