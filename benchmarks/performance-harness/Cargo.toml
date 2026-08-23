@@ -14,8 +14,8 @@ publish = false
 allocation-counting = []
 
 [dependencies]
-canwu-api = { path = "../../crates/canwu-api" }
-canwu-information = { path = "../../crates/canwu-information" }
+canwu-api = { path = "../../crates/facade/canwu-api" }
+canwu-information = { path = "../../crates/extensions/canwu-information" }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]

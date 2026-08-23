@@ -4,8 +4,8 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
-const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/src/lib.rs";
-const apiLines: Record<string, number> = { act: 711, advance: 332, settle_boundary: 336, world: 189, events: 199, snapshot_json: 356, fork: 514, diff: 521, replay_with_plugins: 425, describe_capabilities: 749, observe: 545, available_actions: 681, explain: 734, wait: 343, inspect: 603, query_as: 530, snapshot: 352 };
+const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/src/lib.rs";
+const apiLines: Record<string, number> = { act: 1070, advance: 475, settle_boundary: 479, world: 244, events: 258, snapshot_json: 499, fork: 657, diff: 664, replay_with_plugins: 568, describe_capabilities: 1119, observe: 808, available_actions: 1013, explain: 1104, wait: 486, inspect: 911, query_as: 673, snapshot: 495 };
 
 const c = isEnglish
   ? {
@@ -92,5 +92,5 @@ query_as(actor) → 角色视角` },
     ))}
   </div>
 
-  <section class="reference-footer page-width"><div><p>{c.next}</p><h2>{c.nextCopy}</h2><div class="inline-command"><code>cargo run -p canwu-api --example move_army</code></div></div><div><a class="button primary" href="https://github.com/PeiyuanQi/canwu/blob/main/crates/canwu-api/examples/move_army.rs">{c.run} ↗</a><a class="button" href={`${isEnglish ? "/en" : ""}/architecture/`}>{c.architecture} →</a><a class="text-action" href={apiSource}>{c.source} ↗</a></div></section>
+  <section class="reference-footer page-width"><div><p>{c.next}</p><h2>{c.nextCopy}</h2><div class="inline-command"><code>cargo run -p canwu-api --example move_army</code></div></div><div><a class="button primary" href="https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/examples/move_army.rs">{c.run} ↗</a><a class="button" href={`${isEnglish ? "/en" : ""}/architecture/`}>{c.architecture} →</a><a class="text-action" href={apiSource}>{c.source} ↗</a></div></section>
 </BaseLayout>

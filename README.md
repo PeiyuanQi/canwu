@@ -1,10 +1,10 @@
 # 参伍引擎 Canwu Engine
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/README.md) | [简体中文](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/README.zh-CN.md)
 
 Website: [canwu.org](https://canwu.org)
 
-<img src="assets/branding/canwu-banner-en.png" alt="Canwu simulation engine banner" width="720">
+<img src="https://raw.githubusercontent.com/PeiyuanQi/canwu/refs/tags/v0.5.1/assets/branding/canwu-banner-en.png" alt="Canwu simulation engine banner" width="720">
 
 Canwu is a headless historical simulation engine written in Rust. It simulates
 a historical world, advances time in a repeatable way, accepts validated
@@ -34,13 +34,13 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
+canwu-api = "=0.5.1"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
-release and upgrade only alongside an explicit save migration. The current
-`main`-branch dependency is for development while the movement API is being
-released; do not treat it as a stable snapshot format.
+release exactly and upgrade only alongside an explicit save migration. The
+example above selects the immutable `0.5.1` release rather than the moving
+`main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the facade. They are not separate compatibility surfaces for application code.
@@ -84,27 +84,31 @@ cargo run -p canwu-society --example local_community_diffusion
 - `canwu-event`: stored events and links between causes and effects
 - `canwu-world`: historical entities and read-only world snapshots
 - `canwu-knowledge`: what each actor knows and when they learned it
+- `canwu-routing`: deterministic, observer-relative route planning
+- `canwu-transport`: itinerary, custody, booking, and delivery execution
 - `canwu-sim`: private simulation state, commands, scheduling, and plugins
 - `canwu-api`: public APIs for programs, agents, explanations, and debugging
 - `canwu-debug`: a small reference client built only on the public API
+- `canwu-information`: unpublished experimental information-lifecycle extension
 - `canwu-society`: unpublished experimental social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
 
-The [documentation index](docs/README.md) links the architectural contracts,
-community guidance, and legal notices. `agent-interface` contains skills for
-engine users and repository maintainers; these are tooling, not runtime
-simulation plugins. The `website` and `assets` directories contain the
-community site and project media.
+The [crate map](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/crates/README.md) shows the repository layers, exact dependency
+DAG, and publication order. The [documentation index](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/README.md) links the
+architectural contracts, community guidance, and legal notices.
+`agent-interface` contains skills for engine users and repository maintainers;
+these are tooling, not runtime simulation plugins. The `website` and `assets`
+directories contain the community site and project media.
 
-Read [the architecture](docs/architecture.md) and
-[end-state design](docs/end-state.md) before changing boundaries.
+Read [the architecture](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/architecture.md) and
+[end-state design](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/end-state.md) before changing boundaries.
 
 ## Development
 
 Contributions, bug reports, examples, documentation improvements, and careful
-architecture discussions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+architecture discussions are welcome. See [CONTRIBUTING.md](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/CONTRIBUTING.md)
 for local setup and contribution terms. Coding agents must also follow
-[AGENTS.md](AGENTS.md) and any nearer instructions.
+[AGENTS.md](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/AGENTS.md) and any nearer instructions.
 
 <details>
 <summary><strong>Development flow</strong></summary>
@@ -137,23 +141,23 @@ for local setup and contribution terms. Coding agents must also follow
    determinism, or performance work. Commit only coherent, passing milestones.
 
 The detailed project hierarchy and change-surface map live in
-[AGENTS.md](AGENTS.md).
+[AGENTS.md](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/AGENTS.md).
 
 </details>
 
 ## Agent skills
 
-Agent-facing integrations live under [`agent-interface`](agent-interface/).
+Agent-facing integrations live under [`agent-interface`](https://github.com/PeiyuanQi/canwu/tree/v0.5.1/agent-interface).
 External users can invoke
-[`$canwu-engine-docs`](agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
+[`$canwu-engine-docs`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 to find and explain official tutorials and design documents, then use
-[`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
+[`$canwu-engine-usage`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
 for implementation guidance. Contributors and maintainers use skills under
-[`canwu-developer`](agent-interface/plugins/canwu-developer/skills/); the release
+[`canwu-developer`](https://github.com/PeiyuanQi/canwu/tree/v0.5.1/agent-interface/plugins/canwu-developer/skills); the release
 workflow is
-[`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md).
+[`canwu-developer-release`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md).
 The human-readable package and registry procedure is documented in
-[`docs/releasing.md`](docs/releasing.md).
+[`docs/releasing.md`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/releasing.md).
 
 ## Minimal API example
 
@@ -175,22 +179,22 @@ let events = canwu.advance(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-See `crates/canwu-api/examples/phased_boundary.rs` for an API-only plugin that
+See `crates/facade/canwu-api/examples/phased_boundary.rs` for an API-only plugin that
 offers and claims a conserved resource, consumes its declared allocation, and
 commits attributable boundary evidence.
 
 ## License
 
 Canwu is open-source software licensed under the
-[Apache License 2.0](LICENSE). You may use, modify, and distribute Canwu in
+[Apache License 2.0](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/LICENSE). You may use, modify, and distribute Canwu in
 open-source or proprietary products without royalties or revenue reporting.
 Distributed copies must comply with the Apache License and preserve applicable
-license and [NOTICE](NOTICE) material. The Apache License does not require a
+license and [NOTICE](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/NOTICE) material. The Apache License does not require a
 Canwu logo or public acknowledgement; the
-[branding guide](docs/community/branding.md) explains optional, non-endorsing
+[branding guide](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/community/branding.md) explains optional, non-endorsing
 use of the project marks. Third-party dependencies remain under their own
 licenses; see the
-[third-party license inventory](docs/legal/third-party-licenses.md).
+[third-party license inventory](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/legal/third-party-licenses.md).
 
 ## Supported platforms
 

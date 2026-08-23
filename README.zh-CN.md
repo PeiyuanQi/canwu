@@ -74,15 +74,19 @@ cargo run -p canwu-society --example local_community_diffusion
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
 - `canwu-world`：历史实体和只读世界快照
 - `canwu-knowledge`：每个角色知道什么，以及信息来自何时
+- `canwu-routing`：确定性的角色相对路线规划
+- `canwu-transport`：行程、监管交接、容量预订和运送执行
 - `canwu-sim`：不公开的模拟状态、命令、调度和插件
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
 - `canwu-debug`：只使用公开 API 的小型参考客户端
+- `canwu-information`：未发布的实验性信息生命周期扩展
 - `canwu-society`：未发布的实验性社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
 
-[文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。
-`agent-interface` 保存供引擎使用者和仓库维护者使用的技能工具，它们不是运行时
-模拟插件。`website` 和 `assets` 保存社区网站与项目素材。
+[crate 结构图](crates/README.md)展示仓库分层、精确的依赖 DAG 和发布顺序。
+[文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。`agent-interface`
+保存供引擎使用者和仓库维护者使用的技能工具，它们不是运行时模拟插件。
+`website` 和 `assets` 保存社区网站与项目素材。
 
 修改架构边界前，请先阅读[架构说明](docs/architecture.md)和
 [最终设计](docs/end-state.md)。
@@ -157,7 +161,7 @@ let events = canwu.advance(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-`crates/canwu-api/examples/phased_boundary.rs` 提供了一个只依赖公开 API 的
+`crates/facade/canwu-api/examples/phased_boundary.rs` 提供了一个只依赖公开 API 的
 插件示例：它发布并申请守恒资源、读取已声明的分配结果，并提交带明确来源的
 边界证据。
 

@@ -57,18 +57,18 @@
 
 ### Repository hierarchy
 
-- `crates/canwu-core`: stable IDs, deterministic RNG, and schema metadata shared
+- `crates/foundation/canwu-core`: stable IDs, deterministic RNG, and schema metadata shared
   across packages.
-- `crates/canwu-time`: deterministic simulation time and duration arithmetic.
-- `crates/canwu-event`: causal event types and evidence references.
-- `crates/canwu-world`: authoritative world entities and immutable snapshots.
-- `crates/canwu-knowledge`: actor-relative knowledge and observation state.
-- `crates/canwu-decision`: persisted decision contracts, controller bindings,
+- `crates/foundation/canwu-time`: deterministic simulation time and duration arithmetic.
+- `crates/model/canwu-event`: causal event types and evidence references.
+- `crates/model/canwu-world`: authoritative world entities and immutable snapshots.
+- `crates/model/canwu-knowledge`: actor-relative knowledge and observation state.
+- `crates/model/canwu-decision`: persisted decision contracts, controller bindings,
   utility evaluation, traces, and policy SDK adapters.
-- `crates/canwu-sim`: authoritative state, ingress, settlement, scheduling,
+- `crates/runtime/canwu-sim`: authoritative state, ingress, settlement, scheduling,
   plugins, records, persistence, validation, hashing, migration, and replay.
-- `crates/canwu-api`: the supported public facade and re-export boundary.
-- `crates/canwu-debug`: reference client; it may depend on `canwu-api` only.
+- `crates/facade/canwu-api`: the supported public facade and re-export boundary.
+- `crates/tools/canwu-debug`: reference client; it may depend on `canwu-api` only.
 - `docs`: canonical architecture, end-state, versioning, conformance,
   community, and legal documentation.
 - `website/src/content/docs`: published Astro documentation maintained as a

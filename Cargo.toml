@@ -1,18 +1,18 @@
 [workspace]
 members = [
-    "crates/canwu-api",
-    "crates/canwu-core",
-    "crates/canwu-decision",
-    "crates/canwu-debug",
-    "crates/canwu-event",
-    "crates/canwu-information",
-    "crates/canwu-knowledge",
-    "crates/canwu-routing",
-    "crates/canwu-sim",
-    "crates/canwu-society",
-    "crates/canwu-transport",
-    "crates/canwu-time",
-    "crates/canwu-world",
+    "crates/foundation/canwu-core",
+    "crates/foundation/canwu-time",
+    "crates/model/canwu-decision",
+    "crates/model/canwu-event",
+    "crates/model/canwu-knowledge",
+    "crates/model/canwu-world",
+    "crates/mechanisms/canwu-routing",
+    "crates/mechanisms/canwu-transport",
+    "crates/runtime/canwu-sim",
+    "crates/facade/canwu-api",
+    "crates/extensions/canwu-information",
+    "crates/extensions/canwu-society",
+    "crates/tools/canwu-debug",
 ]
 resolver = "2"
 
@@ -29,18 +29,18 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 blake3 = "1"
-canwu-api = { path = "crates/canwu-api", version = "=0.5.1" }
-canwu-core = { path = "crates/canwu-core", version = "=0.5.1" }
-canwu-decision = { path = "crates/canwu-decision", version = "=0.5.1" }
-canwu-event = { path = "crates/canwu-event", version = "=0.5.1" }
-canwu-information = { path = "crates/canwu-information", version = "=0.5.1" }
-canwu-knowledge = { path = "crates/canwu-knowledge", version = "=0.5.1" }
-canwu-routing = { path = "crates/canwu-routing", version = "=0.5.1" }
-canwu-sim = { path = "crates/canwu-sim", version = "=0.5.1" }
-canwu-society = { path = "crates/canwu-society", version = "=0.5.1" }
-canwu-time = { path = "crates/canwu-time", version = "=0.5.1" }
-canwu-transport = { path = "crates/canwu-transport", version = "=0.5.1" }
-canwu-world = { path = "crates/canwu-world", version = "=0.5.1" }
+canwu-api = { path = "crates/facade/canwu-api", version = "=0.5.1" }
+canwu-core = { path = "crates/foundation/canwu-core", version = "=0.5.1" }
+canwu-decision = { path = "crates/model/canwu-decision", version = "=0.5.1" }
+canwu-event = { path = "crates/model/canwu-event", version = "=0.5.1" }
+canwu-information = { path = "crates/extensions/canwu-information", version = "=0.5.1" }
+canwu-knowledge = { path = "crates/model/canwu-knowledge", version = "=0.5.1" }
+canwu-routing = { path = "crates/mechanisms/canwu-routing", version = "=0.5.1" }
+canwu-sim = { path = "crates/runtime/canwu-sim", version = "=0.5.1" }
+canwu-society = { path = "crates/extensions/canwu-society", version = "=0.5.1" }
+canwu-time = { path = "crates/foundation/canwu-time", version = "=0.5.1" }
+canwu-transport = { path = "crates/mechanisms/canwu-transport", version = "=0.5.1" }
+canwu-world = { path = "crates/model/canwu-world", version = "=0.5.1" }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

@@ -6,7 +6,7 @@ description: Use Canwu through its public Rust and semantic agent APIs. Use when
 # Use Canwu Engine
 
 Work through `canwu-api`. Read `README.md`, `docs/architecture.md`,
-`docs/end-state.md`, and the public types in `crates/canwu-api` as needed.
+`docs/end-state.md`, and the public types in `crates/facade/canwu-api` as needed.
 Use the sibling
 [`canwu-engine-docs`](../canwu-engine-docs/SKILL.md) skill when the primary task
 is to find, compare, summarize, or explain Canwu documentation.

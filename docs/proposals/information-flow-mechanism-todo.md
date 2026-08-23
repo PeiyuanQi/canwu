@@ -138,15 +138,15 @@ identity or wire-shape migration, and 0.5 writes format 5 only.
 
 Files:
 
-- `crates/canwu-sim/src/migration.rs`
-- `crates/canwu-sim/src/persistence.rs`
-- `crates/canwu-sim/src/hashing.rs`
-- `crates/canwu-sim/src/random.rs`
-- `crates/canwu-sim/src/replay.rs`
-- `crates/canwu-sim/src/state.rs`
-- `crates/canwu-sim/src/transactions.rs`
-- `crates/canwu-sim/src/validation.rs`
-- `crates/canwu-sim/tests/fixtures/`
+- `crates/runtime/canwu-sim/src/runtime/migration.rs`
+- `crates/runtime/canwu-sim/src/runtime/persistence.rs`
+- `crates/runtime/canwu-sim/src/runtime/hashing.rs`
+- `crates/runtime/canwu-sim/src/runtime/random.rs`
+- `crates/runtime/canwu-sim/src/runtime/replay.rs`
+- `crates/runtime/canwu-sim/src/runtime/state.rs`
+- `crates/runtime/canwu-sim/src/runtime/transactions.rs`
+- `crates/runtime/canwu-sim/src/runtime/validation.rs`
+- `crates/runtime/canwu-sim/tests/fixtures/`
 - `docs/versioning.md`
 
 Gate: no format-5 runtime model code lands until legacy validation and migration
@@ -212,9 +212,9 @@ Durable tests:
 
 Files:
 
-- `crates/canwu-core/src/lib.rs`
-- `crates/canwu-knowledge/Cargo.toml`
-- `crates/canwu-knowledge/src/lib.rs`
+- `crates/foundation/canwu-core/src/lib.rs`
+- `crates/model/canwu-knowledge/Cargo.toml`
+- `crates/model/canwu-knowledge/src/lib.rs`
 
 ## Milestone 3: schema ownership and immutable record policy
 
@@ -260,13 +260,13 @@ Durable tests:
 
 Files:
 
-- `crates/canwu-sim/src/records.rs`
-- `crates/canwu-sim/src/plugins.rs`
-- `crates/canwu-sim/src/lib.rs`
-- `crates/canwu-sim/src/validation.rs`
-- `crates/canwu-sim/src/persistence.rs`
-- `crates/canwu-sim/src/replay.rs`
-- `crates/canwu-api/src/lib.rs`
+- `crates/runtime/canwu-sim/src/runtime/records.rs`
+- `crates/runtime/canwu-sim/src/runtime/plugins.rs`
+- `crates/runtime/canwu-sim/src/runtime/mod.rs`
+- `crates/runtime/canwu-sim/src/runtime/validation.rs`
+- `crates/runtime/canwu-sim/src/runtime/persistence.rs`
+- `crates/runtime/canwu-sim/src/runtime/replay.rs`
+- `crates/facade/canwu-api/src/lib.rs`
 
 ## Milestone 4: kernel-owned publication stage
 
@@ -336,14 +336,14 @@ Durable tests:
 
 Files:
 
-- `crates/canwu-event/src/lib.rs`
-- `crates/canwu-sim/src/boundary.rs`
-- `crates/canwu-sim/src/plugins.rs`
-- `crates/canwu-sim/src/settlement.rs`
-- `crates/canwu-sim/src/lib.rs`
-- `crates/canwu-sim/src/state.rs`
-- `crates/canwu-sim/src/transactions.rs`
-- `crates/canwu-api/src/lib.rs`
+- `crates/model/canwu-event/src/lib.rs`
+- `crates/runtime/canwu-sim/src/runtime/boundary.rs`
+- `crates/runtime/canwu-sim/src/runtime/plugins.rs`
+- `crates/runtime/canwu-sim/src/runtime/settlement.rs`
+- `crates/runtime/canwu-sim/src/runtime/mod.rs`
+- `crates/runtime/canwu-sim/src/runtime/state.rs`
+- `crates/runtime/canwu-sim/src/runtime/transactions.rs`
+- `crates/facade/canwu-api/src/lib.rs`
 
 ## Milestone 5a: retained evidence, authorization, and public queries
 
@@ -406,12 +406,12 @@ Durable tests:
 
 Files:
 
-- `crates/canwu-sim/src/validation.rs`
-- `crates/canwu-sim/src/lib.rs`
-- `crates/canwu-sim/src/persistence.rs`
-- `crates/canwu-api/src/lib.rs`
+- `crates/runtime/canwu-sim/src/runtime/validation.rs`
+- `crates/runtime/canwu-sim/src/runtime/mod.rs`
+- `crates/runtime/canwu-sim/src/runtime/persistence.rs`
+- `crates/facade/canwu-api/src/lib.rs`
 - binding and remote-adapter crates that currently expose `Canwu`
-- `crates/canwu-debug/`
+- `crates/tools/canwu-debug/`
 - `docs/architecture.md`
 - `docs/end-state.md`
 - `docs/engine-conformance.md`
@@ -506,15 +506,15 @@ Durable tests:
 
 Files:
 
-- `crates/canwu-sim/src/random.rs`
-- `crates/canwu-sim/src/settlement.rs`
-- `crates/canwu-sim/src/state.rs`
-- `crates/canwu-sim/src/transactions.rs`
-- `crates/canwu-sim/src/hashing.rs`
-- `crates/canwu-sim/src/validation.rs`
-- `crates/canwu-sim/src/persistence.rs`
-- `crates/canwu-sim/src/replay.rs`
-- `crates/canwu-api/src/lib.rs`
+- `crates/runtime/canwu-sim/src/runtime/random.rs`
+- `crates/runtime/canwu-sim/src/runtime/settlement.rs`
+- `crates/runtime/canwu-sim/src/runtime/state.rs`
+- `crates/runtime/canwu-sim/src/runtime/transactions.rs`
+- `crates/runtime/canwu-sim/src/runtime/hashing.rs`
+- `crates/runtime/canwu-sim/src/runtime/validation.rs`
+- `crates/runtime/canwu-sim/src/runtime/persistence.rs`
+- `crates/runtime/canwu-sim/src/runtime/replay.rs`
+- `crates/facade/canwu-api/src/lib.rs`
 
 ## Milestone 7a: generic persistence, hashing, and replay
 
@@ -607,7 +607,7 @@ extension's validated operations.
 
 ### Package and ownership
 
-- [x] Add unpublished `crates/canwu-information` depending only on
+- [x] Add unpublished `crates/extensions/canwu-information` depending only on
   `canwu-api`, serde, and serde_json.
 - [x] Add `InformationPlugin` with a fixed neutral namespace.
 - [x] Register channel, content, representation, instance, dispatch,
@@ -659,14 +659,14 @@ Files:
 
 - `Cargo.toml`
 - `Cargo.lock`
-- `crates/canwu-information/Cargo.toml`
-- `crates/canwu-information/src/lib.rs`
-- `crates/canwu-information/src/model.rs`
-- `crates/canwu-information/src/schema.rs`
-- `crates/canwu-information/src/operation.rs`
-- `crates/canwu-information/src/lifecycle.rs`
-- `crates/canwu-information/src/plugin.rs`
-- `crates/canwu-information/src/query.rs`
+- `crates/extensions/canwu-information/Cargo.toml`
+- `crates/extensions/canwu-information/src/lib.rs`
+- `crates/extensions/canwu-information/src/model.rs`
+- `crates/extensions/canwu-information/src/schema.rs`
+- `crates/extensions/canwu-information/src/operation.rs`
+- `crates/extensions/canwu-information/src/lifecycle.rs`
+- `crates/extensions/canwu-information/src/plugin.rs`
+- `crates/extensions/canwu-information/src/query.rs`
 
 ## Milestone 9: anonymous case library and conformance profiles
 
@@ -729,10 +729,10 @@ case-conditioned shared behavior.
 
 Case/navigation files:
 
-- `crates/canwu-information/examples/confidential_copy_release.rs`
-- `crates/canwu-information/examples/encoded_interception.rs`
-- `crates/canwu-information/tests/information_lifecycle.rs`
-- `crates/canwu-information/tests/case_conformance.rs`
+- `crates/extensions/canwu-information/examples/confidential_copy_release.rs`
+- `crates/extensions/canwu-information/examples/encoded_interception.rs`
+- `crates/extensions/canwu-information/tests/information_lifecycle.rs`
+- `crates/extensions/canwu-information/tests/case_conformance.rs`
 - `website/src/content/docs/tutorials/cases/confidential-copy-release.mdx`
 - `website/src/content/docs/en/tutorials/cases/confidential-copy-release.mdx`
 - `website/src/content/docs/tutorials/cases/encoded-interception.mdx`

@@ -23,7 +23,7 @@ tutorial case; it does not implement the three comparisons.
       and the relevant conformance section.
 - [x] Define the minimal public and internal types, stable errors, schema
       versions, ownership, cadence, phases, and random streams.
-- [x] Add the unpublished `crates/canwu-society` social diffusion simulation
+- [x] Add the unpublished `crates/extensions/canwu-society` social diffusion simulation
       module without creating a dependency from Canwu core or `canwu-api` back
       to it.
 

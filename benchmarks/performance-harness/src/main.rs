@@ -1506,6 +1506,7 @@ fn information_scenario() -> Result<Scenario, Box<dyn Error>> {
             government,
             current_location: territory,
             roles: vec!["profile_holder".to_owned()],
+            transit: None,
         });
     }
     Ok(Scenario {
@@ -1525,6 +1526,7 @@ fn information_scenario() -> Result<Scenario, Box<dyn Error>> {
             }],
             routes: Vec::new(),
             armies: Vec::new(),
+            letters: Vec::new(),
         },
         knowledge: KnowledgeSnapshot::default(),
         domain_records: Vec::new(),
@@ -1808,6 +1810,7 @@ fn profile_scenario(scale: usize) -> Result<Scenario, Box<dyn Error>> {
             government: government_id,
             current_location: territory,
             roles: vec!["profile".to_owned()],
+            transit: None,
         });
         territories.push(Territory {
             id: territory,
@@ -1841,6 +1844,7 @@ fn profile_scenario(scale: usize) -> Result<Scenario, Box<dyn Error>> {
             territories,
             routes: Vec::new(),
             armies,
+            letters: Vec::new(),
         },
         knowledge: KnowledgeSnapshot::default(),
         domain_records: Vec::new(),
@@ -2159,13 +2163,13 @@ fn source_metadata() -> Result<Value, Box<dyn Error>> {
             "status",
             "--porcelain",
             "--",
-            "crates/canwu-api/src",
-            "crates/canwu-core/src",
-            "crates/canwu-event/src",
-            "crates/canwu-knowledge/src",
-            "crates/canwu-sim/src",
-            "crates/canwu-time/src",
-            "crates/canwu-world/src",
+            "crates/facade/canwu-api/src",
+            "crates/foundation/canwu-core/src",
+            "crates/model/canwu-event/src",
+            "crates/model/canwu-knowledge/src",
+            "crates/runtime/canwu-sim/src",
+            "crates/foundation/canwu-time/src",
+            "crates/model/canwu-world/src",
         ],
     );
     let mut source_file_hashes = BTreeMap::new();
