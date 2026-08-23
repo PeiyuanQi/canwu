@@ -331,7 +331,35 @@ adding `canwu-routing` or `canwu-transport` does not change snapshot format 5.
 transport execution into first-class snapshot fields, it must introduce a
 separate format or migration fixture rather than interpreting old snapshots
 under new transport semantics. The current semantic versions are
-`canwu-routing.v1` and `canwu-transport.v1`.
+`canwu-routing.v1` and `canwu-transport.v3`.
+
+`canwu-transport.v3` makes itinerary history append-only and records failure
+time for custody recovery: rerouting retains prior `LegExecution` values and
+all active-leg lookup is qualified by itinerary revision. Persisted transport
+data created under `canwu-transport.v1` or v2 must use the matching executable
+or an explicit domain migration; it must not be loaded and reinterpreted under
+v3 behavior.
+
+`canwu-correspondence` is an additive unpublished domain extension under
+snapshot format 5. Adding the crate does not change the flat snapshot format,
+but any run that registers `CorrespondencePlugin` persists its descriptor,
+record schemas, ingress contracts, and boundary contracts. Rehydration therefore
+requires the exact package version and semantic hash. A change to correspondence
+payload meaning, operation-key hashing, information-saga order, reroute/retry
+semantics, or cross-plugin ingress requires a new semantic hash and, when old
+records must continue, an explicit plugin-domain migration.
+
+The atomic addressed-dispatch activation and exact no-publication result
+finalization change `canwu-information` from plugin identity
+`0.1.0-experimental` to `0.2.0-experimental`. Its plugin semantic hash is now
+separate from the stable hash of its delegation-authority grant list. Existing
+snapshots registered with the old identity continue only with the old
+executable; no implicit reinterpretation is permitted.
+
+The correspondence milestone uses `0.2.0-experimental` because incident
+applicability and suppressed-incident evidence, failed-leg custody handoffs,
+and their replay semantics are persisted behavior. Existing correspondence
+snapshots require the old executable or an explicit migration.
 
 Technology and historical research are also additive unpublished extension
 crates in 0.5. `canwu-technology` and the three `canwu-history-research`

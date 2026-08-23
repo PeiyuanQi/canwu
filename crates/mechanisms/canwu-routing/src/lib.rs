@@ -39,6 +39,11 @@ impl RoutingConnectionRef {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]

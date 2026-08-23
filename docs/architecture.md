@@ -130,6 +130,7 @@ A 指向 B 表示 **A 依赖 B**；外部依赖和开发依赖未列入。
 flowchart TB
     subgraph ToolsExtensions["Tools and extensions / 工具与扩展"]
         Debug["canwu-debug"]
+        Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
         Technology["canwu-technology"]
@@ -159,6 +160,8 @@ flowchart TB
     end
 
     Debug --> Api
+    Correspondence --> Api
+    Correspondence --> Information
     Information --> Api
     Society --> Api
     Technology --> Api
@@ -219,6 +222,7 @@ flowchart TB
     subgraph Domains["Generic domain extensions / 通用模拟领域扩展"]
         Tech["Technology<br/>technology state and solvers"]
         Info["Information<br/>content access and delivery"]
+        Correspondence["Correspondence<br/>demand, address, and delivery orchestration"]
         Society["Society<br/>population and social diffusion"]
         Production["Production / economy<br/>assets, recipes, markets"]
     end
@@ -400,6 +404,13 @@ Canwu calls an optional domain-specific module built on the public engine
 contracts a **domain extension** (**模拟领域扩展**). A domain extension owns its
 domain state, rules, commands, and actor projections while reusing kernel
 infrastructure such as events, settlement, decisions, persistence, and replay.
+
+`canwu-correspondence` is an unpublished experimental correspondence domain
+extension. It is also a runtime `SimulationPlugin`: the first term describes
+ownership of reusable communication policy and evidence, while the second
+describes how its authoritative commands and boundary systems execute. It
+depends on `canwu-api` and `canwu-information`; neither dependency points back
+to it.
 
 `canwu-society` is an unpublished experimental **social diffusion simulation
 module** (**社会传播模拟模块**). It is a domain extension built on
@@ -715,14 +726,28 @@ is:
 | `canwu-routing` | pure deterministic planning over an actor-relative `PlanningSnapshot` |
 | `canwu-transport` | itinerary revisions, leg execution, custody handoffs, bookings, and completion saga |
 | `canwu-information` | per-recipient delivery attempts and immutable logical deadlines |
+| `canwu-correspondence` | communication demand, holder-relative address/network resolution, accepted routes, incident policy, and exact cross-extension evidence |
+| application/channel/infrastructure adapter | prepares content and dispatches, publishes period-specific network knowledge, and admits scarce capacity |
 | `canwu-sim` | canonical ingress, scheduling, rollback, persistence, and replay |
 
 `RoutePlan.estimated_arrival_at` is an execution estimate. It must not rewrite
 `DeliveryAttempt.due_at`, which is the immutable information-completion
 deadline. A reroute supersedes an itinerary revision without creating a new
-attempt; a retry creates a new attempt version. Physical handoff is distinct
+attempt; a retry creates a successor attempt record. A failed attempt leaves its
+dispatch active until a sender-authorized recovery command either creates that
+successor attempt with a fresh execution and deadline or explicitly finalizes
+the dispatch. Replanning the same attempt is available only while it is
+`WaitingForRoute` and transport is `ReplanPending`. Physical handoff is distinct
 from knowledge relay, and arrival first enters an explicit arrival-pending saga
 before an admitted completion operation reconciles the two extensions.
+
+The current correspondence plugin admits only a carrier holder identical to the
+sender and reads only that sender-owned holder ledger. Delegated carriers need a
+future capability and disclosure contract; naming another holder is not read
+authority. Its request contract likewise exposes only
+`CorrespondenceCapacityAdmission::Unconstrained`: the plugin neither checks nor
+persists a booking. Constrained transport requires a future admission variant
+backed by exact booking or simulation-reservation evidence.
 
 The router supports fixed, scheduled, and piecewise traversal. Historical
 content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
@@ -749,6 +774,8 @@ disaster, mutates world truth, or silently reads facts outside the observer's
 knowledge cut. The full ownership and M1–M3 checklist lives in
 [`docs/proposals/routing-transport-mechanism.md`](proposals/routing-transport-mechanism.md)
 and [`docs/proposals/routing-transport-mechanism-todo.md`](proposals/routing-transport-mechanism-todo.md).
+The implemented composition boundary and Wuxi delivery slice are documented in
+[`docs/proposals/correspondence-mechanism.md`](proposals/correspondence-mechanism.md).
 
 ## Plugins
 

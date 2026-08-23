@@ -27,6 +27,7 @@ flowchart BT
     api["canwu-api"]
 
     information["canwu-information"]
+    correspondence["canwu-correspondence"]
     society["canwu-society"]
     technology["canwu-technology"]
     history["canwu-history-research"]
@@ -37,6 +38,7 @@ flowchart BT
     end
     subgraph extensions["Experimental extensions"]
         information
+        correspondence
         society
         technology
         history
@@ -96,6 +98,8 @@ flowchart BT
     sim --> api
 
     api --> information
+    api --> correspondence
+    information --> correspondence
     api --> society
     api --> technology
     api --> history
@@ -112,7 +116,7 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `facade/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the facade; historical research remains an optional downstream consumer of technology | Not published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the facade; historical research remains an optional downstream consumer of technology | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
 ## Registry order

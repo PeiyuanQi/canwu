@@ -29,6 +29,14 @@ pub struct RecordBinding<T: DomainRecordType> {
     marker: PhantomData<fn() -> T>,
 }
 
+pub const MAX_ATOMIC_ADDRESSED_ATTEMPTS: usize = 255;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct AddressedDeliveryAttemptDraft {
+    pub binding: RecordBinding<DeliveryAttempt>,
+    pub payload: DeliveryAttemptPayload,
+}
+
 impl<T: DomainRecordType> RecordBinding<T> {
     #[must_use]
     pub fn new(reference: TypedDomainRecordRef<T>, mut references: Vec<DomainReference>) -> Self {
@@ -71,6 +79,12 @@ pub enum LifecycleRequest {
     BeginDispatch {
         binding: RecordBinding<Dispatch>,
         payload: DispatchPayload,
+    },
+    ActivateAddressedDispatch {
+        dispatch: TypedDomainRecordRef<Dispatch>,
+        expected_version: u64,
+        dispatched_at: canwu_api::SimTime,
+        attempts: Vec<AddressedDeliveryAttemptDraft>,
     },
     TransitionDispatch {
         record: TypedDomainRecordRef<Dispatch>,
@@ -203,6 +217,19 @@ impl InformationLifecycle {
                 validate_dispatch_shape(records, payload, binding, limits)?;
                 create(binding, payload)
             }
+            LifecycleRequest::ActivateAddressedDispatch {
+                dispatch,
+                expected_version,
+                dispatched_at,
+                attempts,
+            } => activate_addressed_dispatch(
+                records,
+                dispatch,
+                *expected_version,
+                *dispatched_at,
+                attempts,
+                limits,
+            ),
             LifecycleRequest::TransitionDispatch {
                 record,
                 expected_version,
@@ -361,6 +388,78 @@ impl InformationLifecycle {
             }
         }
     }
+}
+
+fn activate_addressed_dispatch(
+    records: &InformationRecordSet,
+    dispatch: &TypedDomainRecordRef<Dispatch>,
+    expected_version: u64,
+    dispatched_at: canwu_api::SimTime,
+    attempts: &[AddressedDeliveryAttemptDraft],
+    limits: InformationLimitsV1,
+) -> Result<InformationMutationPlan, String> {
+    if attempts.is_empty() || attempts.len() > MAX_ATOMIC_ADDRESSED_ATTEMPTS {
+        return Err(format!(
+            "atomic addressed activation requires between 1 and {MAX_ATOMIC_ADDRESSED_ATTEMPTS} attempts"
+        ));
+    }
+    let previous = records.required(dispatch)?;
+    if previous.version != expected_version {
+        return Err("dispatch expected version does not match current record".to_owned());
+    }
+    let previous_payload = previous.decode_payload::<Dispatch>().map_err(stringify)?;
+    let DispatchTarget::Addressed(recipients) = &previous_payload.target else {
+        return Err("atomic addressed activation requires an addressed dispatch".to_owned());
+    };
+    if previous_payload.status != DispatchStatus::Prepared {
+        return Err("atomic addressed activation requires a prepared dispatch".to_owned());
+    }
+    if recipients.len() != attempts.len() {
+        return Err("atomic addressed activation requires one attempt per recipient".to_owned());
+    }
+    let proposed_dispatch = DispatchPayload {
+        status: DispatchStatus::Active,
+        target: previous_payload.target.clone(),
+        prepared_at: previous_payload.prepared_at,
+        dispatched_at: Some(dispatched_at),
+        completed_at: None,
+    };
+    validate_dispatch_transition(&previous_payload, &proposed_dispatch)?;
+
+    let mut attempt_recipients = Vec::with_capacity(attempts.len());
+    let mut plan = update(
+        dispatch,
+        &proposed_dispatch,
+        previous.references.clone(),
+        expected_version,
+    )?;
+    for attempt in attempts {
+        if attempt.payload.prepared_at != dispatched_at {
+            return Err(
+                "atomic addressed attempts must be prepared at dispatch activation".to_owned(),
+            );
+        }
+        validate_delivery_attempt_shape_for_dispatch(
+            records,
+            &attempt.payload,
+            &attempt.binding,
+            limits,
+            dispatch,
+            &proposed_dispatch,
+        )?;
+        attempt_recipients.push(single_holder_role(
+            &attempt.binding.references,
+            "recipient",
+        )?);
+        plan.mutations
+            .extend(create(&attempt.binding, &attempt.payload)?.mutations);
+    }
+    if attempt_recipients != *recipients {
+        return Err(
+            "atomic addressed attempts must follow the dispatch recipient order".to_owned(),
+        );
+    }
+    Ok(plan)
 }
 
 pub fn validate_content_lineage(
@@ -1147,11 +1246,29 @@ fn validate_delivery_attempt_shape(
     }
     validate_delivery_attempt_times(payload)?;
     let dispatch = single_typed_role::<Dispatch>(&binding.references, "dispatch")?;
-    let recipient = single_holder_role(&binding.references, "recipient")?;
     let dispatch_record = records.required(&dispatch)?;
     let dispatch_payload = dispatch_record
         .decode_payload::<Dispatch>()
         .map_err(stringify)?;
+    validate_delivery_attempt_shape_for_dispatch(
+        records,
+        payload,
+        binding,
+        limits,
+        &dispatch,
+        &dispatch_payload,
+    )
+}
+
+fn validate_delivery_attempt_shape_for_dispatch(
+    records: &InformationRecordSet,
+    payload: &DeliveryAttemptPayload,
+    binding: &RecordBinding<DeliveryAttempt>,
+    limits: InformationLimitsV1,
+    dispatch: &TypedDomainRecordRef<Dispatch>,
+    dispatch_payload: &DispatchPayload,
+) -> Result<(), String> {
+    let recipient = single_holder_role(&binding.references, "recipient")?;
     if dispatch_payload.status != DispatchStatus::Active {
         return Err("new delivery attempt requires an active dispatch".to_owned());
     }
@@ -1177,7 +1294,7 @@ fn validate_delivery_attempt_shape(
             single_typed_role::<Dispatch>(&previous_record.references, "dispatch")?;
         let previous_recipient = single_holder_role(&previous_record.references, "recipient")?;
         if previous_payload.attempt_number + 1 != payload.attempt_number
-            || previous_dispatch != dispatch
+            || previous_dispatch != *dispatch
             || previous_recipient != recipient
         {
             return Err(
@@ -1408,6 +1525,7 @@ fn validate_delivery_attempt_times(payload: &DeliveryAttemptPayload) -> Result<(
             if dispatched < payload.prepared_at
                 || payload.due_at < dispatched
                 || completed < dispatched
+                || completed > payload.due_at
             {
                 return Err("terminal attempt timestamps are not monotonic".to_owned());
             }

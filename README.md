@@ -1,10 +1,10 @@
 # 参伍引擎 Canwu Engine
 
-[English](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/README.md) | [简体中文](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/README.zh-CN.md)
+[English](README.md) | [简体中文](README.zh-CN.md)
 
 Website: [canwu.org](https://canwu.org)
 
-<img src="https://raw.githubusercontent.com/PeiyuanQi/canwu/refs/tags/v0.5.1/assets/branding/canwu-banner-en.png" alt="Canwu simulation engine banner" width="720">
+<img src="assets/branding/canwu-banner-en.png" alt="Canwu simulation engine banner" width="720">
 
 Canwu is a headless historical simulation engine written in Rust. It simulates
 a historical world, advances time in a repeatable way, accepts validated
@@ -44,8 +44,9 @@ example above selects the immutable `0.5.1` release rather than the moving
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the facade. They are not separate compatibility surfaces for application code.
-Experimental domain extensions such as `canwu-society` remain unpublished
-and must be consumed from the repository until separately stabilized.
+Experimental domain extensions such as `canwu-correspondence` and
+`canwu-society` remain unpublished and must be consumed from the repository
+until separately stabilized.
 
 ## Quick start
 
@@ -79,6 +80,11 @@ For the experimental evidence-based technology flow:
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
+
+For routed local and Wuxi-to-Beijing correspondence:
+
+```text
+cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
 ## How the repository fits together
@@ -96,6 +102,8 @@ cargo run -p canwu-technology --example technology_diffusion
 - `canwu-api`: public APIs for programs, agents, explanations, and debugging
 - `canwu-debug`: a small reference client built only on the public API
 - `canwu-information`: unpublished experimental information-lifecycle extension
+- `canwu-correspondence`: unpublished experimental correspondence domain
+  extension and simulation plugin built on routing, transport, and information
 - `canwu-society`: unpublished experimental social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
 - `canwu-technology`: unpublished generic technology extension for evidence,
@@ -103,22 +111,22 @@ cargo run -p canwu-technology --example technology_diffusion
 - `canwu-history-research`: three optional historical assessment plugins kept
   downstream from base technology truth
 
-The [crate map](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/crates/README.md) shows the repository layers, exact dependency
-DAG, and publication order. The [documentation index](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/README.md) links the
+The [crate map](crates/README.md) shows the repository layers, exact dependency
+DAG, and publication order. The [documentation index](docs/README.md) links the
 architectural contracts, community guidance, and legal notices.
 `agent-interface` contains skills for engine users and repository maintainers;
 these are tooling, not runtime simulation plugins. The `website` and `assets`
 directories contain the community site and project media.
 
-Read [the architecture](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/architecture.md) and
-[end-state design](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/end-state.md) before changing boundaries.
+Read [the architecture](docs/architecture.md) and
+[end-state design](docs/end-state.md) before changing boundaries.
 
 ## Development
 
 Contributions, bug reports, examples, documentation improvements, and careful
-architecture discussions are welcome. See [CONTRIBUTING.md](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/CONTRIBUTING.md)
+architecture discussions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
 for local setup and contribution terms. Coding agents must also follow
-[AGENTS.md](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/AGENTS.md) and any nearer instructions.
+[AGENTS.md](AGENTS.md) and any nearer instructions.
 
 <details>
 <summary><strong>Development flow</strong></summary>

@@ -616,6 +616,11 @@ fn cross_plugin_ingress_requires_a_declared_target_and_waits_for_next_admission(
             })
     );
 
+    let restored =
+        Simulation::from_snapshot_with_plugins(simulation.snapshot(), &[&producer, &consumer])
+            .expect("cross-plugin ingress provenance should survive snapshot restoration");
+    assert_eq!(simulation.snapshot(), restored.snapshot());
+
     let replayed = Simulation::replay_from_journal(
         scenario,
         &[&producer, &consumer],

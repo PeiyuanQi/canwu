@@ -17,13 +17,13 @@ use super::{
     EntityRef, ErrorCode, EventId, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass, IngressId,
     IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
     KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
-    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord, PluginRegistry,
-    RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
-    ReservationAllocation, ReservationDisposition, ReservationPoolKey, ReservationRequestRecord,
-    RunConfigurationSnapshot, RunManifest, RuntimeCurrentState, RuntimeState,
-    STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration, SimEvent,
-    SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective, WorldSnapshot,
-    authoritative_revision_count, base_schema, boundaries_before_attempts,
+    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
+    PluginIngressTarget, PluginRegistry, RandomDrawAddress, RandomDrawId, RandomDrawOutcome,
+    RandomDrawProducer, RandomDrawRecord, ReservationAllocation, ReservationDisposition,
+    ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
+    RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
+    SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective,
+    WorldSnapshot, authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
     boundary_write_stage, canonical_text, canonicalize_scenario, commitment_roots_are_canonical,
     component_key, compute_boundary_hash, domain_record_commit_stage, invalid_snapshot,
@@ -2762,6 +2762,7 @@ fn validate_boundary_ingress_generation(
         };
         let IngressPayload::Plugin {
             plugin,
+            packet_type,
             affected_entities,
             ..
         } = &ingress.payload
@@ -2771,7 +2772,13 @@ fn validate_boundary_ingress_generation(
         let generated_delay = ingress.due_at.checked_sub(ingress.issued_at);
         if generation.phase != contract.phase
             || generation.visibility != contract.visibility
-            || plugin != &generation.plugin
+            || (plugin != &generation.plugin
+                && !contract
+                    .plugin_ingress_targets
+                    .contains(&PluginIngressTarget {
+                        target_plugin: plugin.clone(),
+                        packet_type: packet_type.clone(),
+                    }))
             || ingress.id != generation.ingress
             || ingress.issued_at != record.at
             || ingress.eligible_boundary_count != record.id.get()

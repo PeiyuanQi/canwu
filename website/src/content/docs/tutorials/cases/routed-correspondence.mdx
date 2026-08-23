@@ -1,0 +1,86 @@
+---
+title: 从无锡出发的经路线规划通信
+description: 通过持有人相对路径知识、运输交接、信息投递、灾害、存档和精确重放，运行无锡本地与无锡到北京的通信。
+sidebar:
+  order: 6
+  label: 经路线规划的通信
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+
+本案例把通信需求连接到物理投递。信息账本仍然与运输方式无关：
+`canwu-correspondence` 模拟领域扩展负责解析地址、根据发送者自己的持有人账本
+规划路线、持久化运输执行，并通过规范化输入（canonical ingress）推进定向投递。
+
+## 运行
+
+```shell
+cargo run -p canwu-correspondence --example routed_correspondence
+```
+
+示例让两个请求使用同一套契约：
+
+| 请求 | 接受的行程 | 到达时间 |
+| --- | --- | ---: |
+| 无锡本地投递 | 一段马匹运输 | 第 `30` 分钟 |
+| 无锡到北京 | 定时铁路到北京站，再以马匹完成最后一程 | 第 `3060` 分钟 |
+
+示例夹具通过分支选择本地或长途输入数据；通信插件本身没有“北京专用”的规划
+路径，接受的路线由收件人地址和网络知识决定。
+
+## 生命周期
+
+<Steps>
+1. 应用或渠道适配器准备一个仅含单一收件人的定向 `Dispatch`，并确定逻辑截止时间 `due_at`。
+2. 经过决策支持的命令，或确定性选中的自动 `CommunicationOpportunity`，准入通信意图。
+3. 当前插件要求承运持有人就是发送者，只读取该发送者持有的地址、端点和连接知识，然后持久化接受的 `RoutePlan` 与精确知识读取切面。
+4. 一个原子信息操作激活 dispatch，并创建第一次 `DeliveryAttempt`。
+5. `TransportExecution` 推进各路段，并在承运人或方式变化处记录显式保管权交接 `Handoff`。
+6. 按时最终到达会通过幂等的信息操作依次完成 attempt 和 dispatch，并保留精确记录版本证据；attempt 失败或迟到时，dispatch 保持 `Active`，等待显式恢复。
+</Steps>
+
+`RoutePlan.estimated_arrival_at` 是估计到达时间；`DeliveryAttempt.due_at`
+是不可变的信息投递截止时间。迟到会把 `DeliveryAttempt` 标为 `Failed`，并把
+`CorrespondenceOperation` 标为 `DeadlineMissed`，不能反向修改原始截止时间。
+
+## 灾害、截取与随机需求
+
+灾害使用 operation-keyed RNG，使当前路段失败，并从当前位置重新规划。路段历史
+保持只追加并按行程修订区分；每个接受的修订都保留精确知识读取切面和规划证据。
+同一个 delivery attempt 在后继行程修订下继续；新修订的首段会记录从失败路段转入新路段的保管权交接，并携带失败时间和投递尝试证据。不适用于当前运输尝试的事故会保留为 suppressed 证据，不会改写操作状态。
+
+当前 attempt 处于 `WaitingForRoute` 且运输为 `ReplanPending` 时，发送者授权的
+`resolve_correspondence_v1` 命令可以在知识变化后重新规划同一个 attempt。attempt
+进入终态失败后，同一命令可以创建连续编号的后继 `DeliveryAttempt`，并使用新的
+`TransportExecution` 和截止时间，或显式结束失败的 dispatch。单纯失败会让
+dispatch 保持 `Active`，也不会改写上一次 attempt 的截止时间。
+
+中途截取会为截取者创建 `Access` 记录，但不会自动终止投递。销毁、解码、改送或
+政治后果都需要独立领域规则和证据。
+
+自动通信需求是有界且确定的：一次基于 operation key 的抽取判断机会是否发生，
+另一次选择一个收件人。通信开始时机会被消费，因此恢复存档不会改选另一个人。
+
+## 古代与现代渠道
+
+古代驿路、1900/1940 年铁路、现代铁路、航空、电报和其他信号网络都可以复用
+时变路径规划。各自适配器仍负责时代特有的换乘、营业时间、预订、安全、编码和
+最后一程规则。例如，电报可以由办公室收件、信号传输和物理送达组成，而不必把
+信号路段错误地当作火车旅程。
+
+路径搜索不会预留稀缺容量。当前请求契约只有
+`CorrespondenceCapacityAdmission::Unconstrained`；插件不会检查或持久化 booking。
+铁路、航空、驿递或信号容量需要未来的准入变体携带精确 `CapacityBooking` 或模拟
+资源预留证据。因此，本案例只证明不受容量约束的投递。
+
+测试会恢复存档并精确重放完整操作，也覆盖灾后改道保留既有路段、知识更新后的
+无路恢复、后继投递重试、显式结束、拒绝外部伪造推进，以及持有人读取权限。
+持久化证据包括需求决策、每个修订的知识读取切面、路线、交接、灾害、恢复命令、
+信息操作，以及 dispatch/attempt 的精确记录版本。
+
+底层规划与执行契约见[寻路与运输](/tutorials/routing-transport/)，crate 所有权见
+[架构页](/architecture/)。

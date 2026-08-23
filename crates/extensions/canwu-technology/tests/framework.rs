@@ -2108,12 +2108,15 @@ fn idempotent_retries_do_not_consume_boundary_mutation_budget() {
         .expect("fresh operation should decode");
     assert_eq!(outcome.status, TechnologyOperationStatus::Rejected);
     assert!(
-        canwu.events().iter().all(|event| !matches!(
-            &event.kind,
-            EventKind::Plugin { plugin, event_type }
-                if plugin == "canwu-technology"
-                    && event_type == "technology_operation_rejected_capacity_v1"
-        )),
+        canwu.events().iter().all(|event| {
+            event
+                .kind
+                .plugin_identity()
+                .is_none_or(|(plugin, event_type)| {
+                    plugin != "canwu-technology"
+                        || event_type != "technology_operation_rejected_capacity_v1"
+                })
+        }),
         "idempotent retries must not produce a capacity rejection"
     );
 }

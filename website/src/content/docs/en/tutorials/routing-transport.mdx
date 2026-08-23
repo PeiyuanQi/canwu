@@ -9,6 +9,11 @@ sidebar:
 
 > **Experimental extension.** The 0.5 routing and transport types have public APIs and focused tests, but hosts must provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
 
+For a runnable end-to-end composition with addressed information delivery, see
+[Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/).
+That case uses the `canwu-correspondence` domain extension; this page continues
+to explain the lower-level planning and execution contracts.
+
 ## Separate planning from execution
 
 “How should a delivery travel from Wuxi to Beijing?” contains two different questions:
@@ -82,13 +87,13 @@ execution.begin_saga(
 )?;
 ```
 
-Each leg has its own status and actual departure/arrival times. At a relay, record a `Handoff` before starting the next leg. If flood, war, weather, or a line outage blocks the route, a domain system records the failure and reason; execution enters `ReplanPending`, and a new planning snapshot produces a successor itinerary revision. The router never invents the disaster.
+Each leg has its own status and actual departure/arrival times. At a relay, record a `Handoff` before starting the next leg. If flood, war, weather, or a line outage blocks the route, a domain system records the failure and reason; execution enters `ReplanPending`, and a new planning snapshot produces a successor itinerary revision. The replacement revision also records custody transfer from the failed segment into its first segment. Incidents outside an active transport attempt are retained as suppressed evidence rather than mutating an information or arrival-pending transition. The router never invents the disaster.
 
 After the final leg arrives, execution enters `ArrivalPending`. `completion_request()` yields a stable operation key and evidence; the host submits it through canonical ingress to complete the information attempt. Repeating the same key must not complete the attempt twice.
 
 ## Capacity and determinism
 
-Trains, aircraft, relay horses, and telegraph lines can use `CapacityBooking`. A booking is a persistent windowed record with requested, confirmed, consumed, released, expired, cancelled, and failed states; a route-cache hit must never hide a capacity mutation.
+Trains, aircraft, relay horses, and telegraph lines can use `CapacityBooking`. A booking is a persistent windowed record with requested, confirmed, consumed, released, expired, cancelled, and failed states; a route-cache hit must never hide a capacity mutation. The current correspondence contract exposes only `CorrespondenceCapacityAdmission::Unconstrained` and cannot start a constrained leg. A future admission variant must carry exact booking or simulation-reservation evidence supplied by an application or infrastructure adapter.
 
 `RoutingCache` is derived from the planning-snapshot digest, request, and policy. It is rebuildable, excluded from authoritative snapshots, and unnecessary for exact replay. Expansion, transfer, risk, and arrival-horizon limits are also policy inputs, so “no route” and “budget exceeded” are deterministic replayable outcomes.
 
