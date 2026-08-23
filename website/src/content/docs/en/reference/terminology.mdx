@@ -16,6 +16,12 @@ them. Unlinked terms are currently defined by this page and the API
 documentation. The agent-facing source of truth in the repository is
 [`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md).
 
+Each concept has one preferred public term. The consolidated wording table below
+marks alternatives as deprecated or restricted: deprecated terms must not be
+introduced in new prose, while restricted terms remain valid only in the stated
+technical context. Existing code identifiers and historical records are not
+renamed by this policy.
+
 <div class="terminology-reference">
 
 ## Product and runtime boundaries
@@ -46,7 +52,7 @@ documentation. The agent-facing source of truth in the repository is
 | [canonical ingress](/en/architecture/events/) | 规范化输入 | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. |
 | [admission](/en/architecture/events/) | 准入 | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
 | [scheduled work](/en/architecture/events/) | 调度工作 | — | Work assigned a deterministic simulation due time and insertion order. |
-| [settlement boundary](/en/architecture/settlement/) | 结算边界 | `BoundaryRequest`, `BoundaryRecord` | One transaction that admits work, runs systems, records evidence, and commits or rolls back. |
+| [settlement boundary](/en/architecture/settlement/) | 结算边界 | `BoundaryRequest`, `BoundaryRecord` | One validated settlement boundary that admits work, runs systems, records evidence, and commits or rolls back. |
 | [settlement phase](/en/architecture/settlement/) | 结算阶段 | `BoundaryPhase` | One position in the fixed boundary execution order, not an independent settlement algorithm. |
 | [atomic commit](/en/architecture/settlement/) | 原子提交 | — | Applying all validated boundary changes together so observers never see partial state. |
 | [rollback](/en/architecture/settlement/) | 回滚 | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
@@ -57,8 +63,6 @@ documentation. The agent-facing source of truth in the repository is
 | --- | --- | --- | --- |
 | [plugin](/en/developer/extensions/) | 插件 | — | Generic term. Qualify it when confusion with Codex or another tool plugin is possible. |
 | [simulation plugin](/en/developer/extensions/) | 模拟插件 | `SimulationPlugin` | A runtime registration unit implementing Canwu's public plugin contract. Its name, version, and semantic hash identify the executable behavior required for loading and exact replay. |
-| runtime simulation plugin | 运行时模拟插件 | `SimulationPlugin` | Disambiguating form used only when contrasting Canwu runtime plugins with agent-interface plugins. It is not a separate kind. |
-| [domain plugin](/en/developer/extensions/) | 模拟规则插件 | `SimulationPlugin` | A simulation plugin used to register concrete social, economic, military, character, or other domain rules. This describes the plugin's role, not a separate API type. |
 | [domain extension](/en/tutorials/cases/local-community-diffusion/) | 模拟领域扩展 | — | An optional domain-specific delivery package built on public engine contracts. It may contain one or more plugins, domain types, schemas, commands, queries, and supporting APIs. No `DomainExtension` trait is required. |
 | [simulation module](/en/tutorials/cases/local-community-diffusion/) | 模拟模块 | — | An informal, human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It may be implemented by an extension and its plugins, but it is not an engine contract. |
 | [command plugin](/en/tutorials/command-plugin/) | 命令插件 | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
@@ -100,7 +104,7 @@ documentation. The agent-facing source of truth in the repository is
 | [actor knowledge](/en/developer/reading-state/) | 角色知识 | `ActorKnowledge` | What one actor knows, including source, confidence, and time, stored separately from ground truth. |
 | [report](/en/architecture/events/) | 报告 | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
 | [projection](/en/developer/reading-state/) | 投影 | — | A materialized actor-scoped representation that does not expose authoritative domain state. |
-| [authority](/en/developer/integration/) | 权限 | `CommandAuthority` | The validated right to issue a command or perform an action. `Authoritative state` is 权威状态. |
+| [authority](/en/developer/integration/) | 权限 | `CommandAuthority` | The validated right to issue a command or perform an action. `authoritative state` is 权威状态. |
 | [issuer](/en/developer/integration/) | 签发者 | `Issuer` | The identity presented as the command source; authority checks decide whether it may act. |
 | [controller](/en/tutorials/cases/warlord-aid-decision/) | 控制者 | `DecisionControllerBinding` | The entity or process bound to a seat to make decisions. |
 | [seat](/en/tutorials/cases/warlord-aid-decision/) | 席位 | `seat_id` | A stable decision-making role that can be bound to a controller. |
@@ -109,6 +113,18 @@ documentation. The agent-facing source of truth in the repository is
 | [decision option](/en/tutorials/cases/warlord-aid-decision/) | 决策选项 | `DecisionOption` | One candidate choice offered by a decision ticket. |
 | [decision attempt](/en/tutorials/cases/warlord-aid-decision/) | 决策尝试 | `DecisionAttemptRecord` | An authoritative admission, acceptance, or rejection record for an attempt to resolve a ticket. |
 | [decision trace](/en/tutorials/cases/warlord-aid-decision/) | 决策轨迹 | `DecisionTrace` | Persisted scores, evidence, policy identity, selected option, and outcome used for explanation and replay. |
+
+## Consolidated wording
+
+| Preferred term | Deprecated or restricted alternatives | Scope and migration guidance |
+| --- | --- | --- |
+| [simulation core](/en/architecture/) / 模拟内核 | `kernel` | Restricted: use **simulation core** in product and integration prose; **kernel** remains permitted in architecture and internal implementation descriptions. |
+| [host application](/en/developer/integration/) / 上层应用 | host program / 主机程序 | Deprecated: use **host application** and **上层应用** for a game, service, client, research tool, or agent system that embeds Canwu. |
+| [public facade](/en/developer/integration/) / 对外 API | public API (when naming the `canwu-api` boundary) | Restricted: **public API** remains valid for the broader API surface; use **public facade** for the supported application boundary itself. |
+| [simulation plugin](/en/developer/extensions/) / 模拟插件 | runtime simulation plugin / 运行时模拟插件; domain plugin / 模拟规则插件 | Restricted: use the longer forms only to contrast runtime plugins with agent tools or to describe a plugin's domain role. They are not separate plugin kinds. |
+| [settlement boundary](/en/architecture/settlement/) / 结算边界 | transaction (when naming a Canwu settlement) | Restricted: **transaction** is generic implementation language; use **settlement boundary** for the validated Canwu unit. |
+| [counterfactual branch](/en/developer/persistence/) / 反事实分支 | branch (when a different input creates a new causal run) | Restricted: use **fork** for the API operation and the copied simulation; use **counterfactual branch** only after divergent input creates a new causal run. |
+| [authority](/en/developer/integration/) / 权限 | permission (when meaning `CommandAuthority`) | Restricted: use **authority** for the validated right to act; retain **permission profile** for the separate run-policy context. |
 
 ## Maintenance rule
 

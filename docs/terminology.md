@@ -8,11 +8,17 @@ does not attempt to translate every Rust identifier or temporary proposal term.
 Use the Chinese term in Chinese prose and the English term in English prose.
 Keep code identifiers exactly as written. On first use, write the Chinese term
 followed by the English term or code identifier when that helps disambiguate it,
-for example, **模拟规则插件** (`domain plugin`) or **决策票据**
+for example, **模拟插件** (`simulation plugin`) or **决策票据**
 (`DecisionTicket`).
 
 Linked terms already have a more detailed guide or architecture page. Unlinked
 terms are currently defined only here and in their code-level API documentation.
+
+Each concept has one preferred public term. The consolidated wording table below
+marks alternatives as deprecated or restricted: deprecated terms must not be
+introduced in new prose, while restricted terms remain valid only in the stated
+technical context. Existing code identifiers and historical records are not
+renamed by this policy.
 
 ## Product and runtime boundaries
 
@@ -27,7 +33,7 @@ terms are currently defined only here and in their code-level API documentation.
 | [场景](../website/src/content/docs/tutorials/move-army.mdx) | scenario | `Scenario` | The initial world and configuration used to create a simulation. |
 | [权威状态](../website/src/content/docs/developer/reading-state.mdx) | authoritative state | `SimulationSnapshot` | State owned and validated by Canwu; it is the basis for commitments, persistence, and replay. |
 | [真值](../website/src/content/docs/developer/reading-state.mdx) | ground truth | — | Facts present in authoritative state whether or not a particular actor knows them. |
-| [角色相对视图](../website/src/content/docs/developer/reading-state.mdx) | actor-relative view | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and permissions rather than from omniscient state. |
+| [角色相对视图](../website/src/content/docs/developer/reading-state.mdx) | actor-relative view | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and authority rather than from omniscient state. |
 | [只读快照](../website/src/content/docs/developer/reading-state.mdx) | read-only snapshot | `WorldSnapshot` | A detached state value for trusted reads; it is not a mutable reference to the live runtime. |
 
 ## Time, input, and settlement
@@ -42,7 +48,7 @@ terms are currently defined only here and in their code-level API documentation.
 | [规范化输入](../website/src/content/docs/architecture/events.mdx) | canonical ingress | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. Write the English term on first use when needed. |
 | [准入](../website/src/content/docs/architecture/events.mdx) | admission | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
 | [调度工作](../website/src/content/docs/architecture/events.mdx) | scheduled work | — | Work assigned a deterministic simulation due time and insertion order. |
-| [结算边界](../website/src/content/docs/architecture/settlement.mdx) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | One validated transaction that admits work, runs systems, records evidence, and commits or rolls back. |
+| [结算边界](../website/src/content/docs/architecture/settlement.mdx) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | One validated settlement boundary that admits work, runs systems, records evidence, and commits or rolls back. |
 | [结算阶段](../website/src/content/docs/architecture/settlement.mdx) | settlement phase | `BoundaryPhase` | One position in the fixed boundary execution order. A phase is ordering, not an independent settlement algorithm. |
 | [原子提交](../website/src/content/docs/architecture/settlement.mdx) | atomic commit | — | Applying all validated changes from a boundary together so observers never see partial state. |
 | [回滚](../website/src/content/docs/architecture/settlement.mdx) | rollback | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
@@ -53,8 +59,6 @@ terms are currently defined only here and in their code-level API documentation.
 | --- | --- | --- | --- |
 | [插件](../website/src/content/docs/developer/extensions.mdx) | plugin | — | Generic term. Qualify it when confusion with Codex or other tooling plugins is possible. |
 | [模拟插件](../website/src/content/docs/developer/extensions.mdx) | simulation plugin | `SimulationPlugin` | A runtime registration unit that implements Canwu's public plugin contract. Its name, version, and semantic hash identify the executable behavior used for loading and exact replay. |
-| 运行时模拟插件 | runtime simulation plugin | `SimulationPlugin` | Disambiguating form used only when contrasting Canwu runtime plugins with agent-interface or other tool plugins. It is not a separate plugin kind. |
-| [模拟规则插件](../website/src/content/docs/developer/extensions.mdx) | domain plugin | `SimulationPlugin` | A simulation plugin used to register concrete social, economic, military, character, or other domain rules. It is a role-based description of a `SimulationPlugin`, not a separate API type. |
 | [模拟领域扩展](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | domain extension | — | An optional domain-specific delivery package built on public engine contracts. It may contain one or more plugins, domain types, schemas, commands, queries, and supporting APIs. There is no required `DomainExtension` trait. |
 | [模拟模块](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | simulation module | — | An informal, human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It may be implemented by an extension and its plugins, but it is not itself an engine contract. |
 | [命令插件](../website/src/content/docs/tutorials/command-plugin.mdx) | command plugin | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
@@ -105,6 +109,18 @@ terms are currently defined only here and in their code-level API documentation.
 | [决策选项](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision option | `DecisionOption` | One candidate choice offered by a decision ticket. |
 | [决策尝试](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision attempt | `DecisionAttemptRecord` | An authoritative record of an admitted, accepted, or rejected attempt to resolve a ticket. |
 | [决策轨迹](../website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx) | decision trace | `DecisionTrace` | Persisted scores, evidence, policy identity, selected option, and outcome used for explanation and replay. |
+
+## Consolidated wording
+
+| Preferred term | Deprecated or restricted alternatives | Scope and migration guidance |
+| --- | --- | --- |
+| [模拟内核](../website/src/content/docs/architecture/index.mdx) / simulation core | `kernel` | Restricted: use **simulation core** in product and integration prose; **kernel** remains permitted in architecture and internal implementation descriptions. |
+| [上层应用](../website/src/content/docs/developer/integration.mdx) / host application | 主机程序 / host program | Deprecated: use **上层应用** and **host application** for a game, service, client, research tool, or agent system that embeds Canwu. |
+| [对外 API](../website/src/content/docs/developer/integration.mdx) / public facade | public API (when naming the `canwu-api` boundary) | Restricted: **public API** remains valid for the broader API surface; use **public facade** for the supported application boundary itself. |
+| [模拟插件](../website/src/content/docs/developer/extensions.mdx) / simulation plugin | 运行时模拟插件 / runtime simulation plugin; 模拟规则插件 / domain plugin | Restricted: use the longer forms only to contrast runtime plugins with agent tools or to describe a plugin's domain role. They are not separate plugin kinds. |
+| [结算边界](../website/src/content/docs/architecture/settlement.mdx) / settlement boundary | transaction (when naming a Canwu settlement) | Restricted: **transaction** is generic implementation language; use **settlement boundary** for the validated Canwu unit. |
+| [反事实分支](../website/src/content/docs/developer/persistence.mdx) / counterfactual branch | branch (when a different input creates a new causal run) | Restricted: use **fork** for the API operation and the copied simulation; use **counterfactual branch** only after divergent input creates a new causal run. |
+| [权限](../website/src/content/docs/developer/integration.mdx) / authority | permission (when meaning `CommandAuthority`) | Restricted: use **authority** for the validated right to act; retain **permission profile** for the separate run-policy context. |
 
 ## Maintenance rule
 
