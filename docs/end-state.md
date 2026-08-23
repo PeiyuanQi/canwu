@@ -202,6 +202,31 @@ diplomacy, migration, disease, and climate should remain separately testable
 plugins. The core may standardize broadly shared primitives only after at least
 two concrete systems need them.
 
+The first generic technology implementation is the unpublished
+`canwu-technology` domain extension. It demonstrates that invention and
+diffusion can be represented without a universal unlock tree: immutable
+technique revisions are tested through evidence-bearing attempts, qualified
+for particular operations at particular sites, installed, evaluated for a
+specific use, and adopted by an authorized holder. Claims, observations,
+capability, implementation, adoption, and transmission remain orthogonal.
+Papermaking, woodblock printing, movable type, gunpowder, and steam engines are
+cross-validation data profiles, never solver branches.
+
+Detailed historical interpretation remains optional. The three
+`canwu-history-research` plugins record bounded assessments of sources,
+practice, and production archaeology without changing base simulation truth.
+Games can omit all three, select one, or enable the suite. Promotion of any
+technology or research concept into the kernel still requires a second
+independent domain consumer and a separate compatibility decision.
+
+The current home-computer envelope is deliberately paced. Recorded component
+evidence at 100 sites supports turn-based play, while the 500-site pressure
+profile is suitable for campaign turns or offline analysis, not immediate
+interaction. The measurement used an 8-core, 32-GiB machine and is not a
+whole-game 4-core/8-GiB certification. Future delta transactions and
+incremental validation may raise that ceiling, but historical fidelity plugins
+are not a substitute for those kernel improvements.
+
 The first reference implementation of population-scale social diffusion is the
 unpublished `canwu-society` **social diffusion simulation module**.
 Architecturally, it is an experimental **domain extension** built on Canwu's

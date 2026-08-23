@@ -431,6 +431,16 @@ mod holder_records_wire {
 }
 
 impl KnowledgeSnapshot {
+    /// Counts all retained holder-relative records in one schema namespace.
+    #[must_use]
+    pub fn record_count_in_namespace(&self, namespace: &str) -> usize {
+        self.records
+            .values()
+            .flat_map(BTreeMap::values)
+            .filter(|record| record.schema.kind.namespace == namespace)
+            .count()
+    }
+
     #[must_use]
     pub fn for_actor(&self, actor: PersonId) -> Option<&ActorKnowledge> {
         self.actors.get(&actor)

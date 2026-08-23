@@ -61,6 +61,8 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 实现公开插件契约并注册到参伍运行时的执行单位；其名称、版本和语义哈希标识加载与精确重放所需的可执行语义。 |
 | [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域交付包，可包含一个或多个插件、领域类型、schema、命令、查询和辅助 API；没有要求实现的 `DomainExtension` trait。 |
 | [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整模拟能力名称，例如“社会传播模拟模块”；它可以由一个领域扩展及其插件实现，但本身不是引擎契约。 |
+| [技术模拟扩展](/tutorials/technology-diffusion/) | technology simulation extension | `canwu-technology` | 处理技术修订、证据、本地能力、实施、按用途采用和传播机会的可选通用扩展，不是全局科技树。 |
+| [历史研究插件](/tutorials/technology-diffusion/) | historical research plugin | `canwu-history-research` | 记录研究者对证据所作有界评估的可选模拟插件，不会改变基础技术真值。 |
 | [命令插件](/tutorials/command-plugin/) | command plugin | `register_command()` | 注册带 schema 校验命令及其处理器的模拟插件。 |
 | [边界系统](/architecture/settlement/) | boundary system | `BoundarySystemContract` | 在结算阶段运行，并声明读取、写入、资源与随机范围的系统。 |
 | [领域 schema](/developer/extensions/) | domain schema | `DomainRecordType` | 插件所拥有领域数据的版本化结构契约；代码相邻的中文正文保留 `schema`。 |
@@ -91,6 +93,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
 | [状态承诺](/architecture/settlement/) | state commitment | `CommitmentRoots` | 绑定权威状态或证据、供校验使用的密码学承诺。 |
 | [语义哈希](/developer/extensions/) | semantic hash | `semantic_hash` | 描述插件行为的稳定值，用于拒绝不兼容的加载或重放环境。 |
+| [精确领域记录版本](/tutorials/technology-diffusion/) | exact domain-record version | `DomainRecordVersionRef`, `domain_record_version()` | 同时绑定领域记录身份、版本和建立来源；当前记录更新后，历史证据仍保持原有含义。 |
 
 ## 角色、知识与决策
 

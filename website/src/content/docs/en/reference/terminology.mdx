@@ -65,6 +65,8 @@ renamed by this policy.
 | [simulation plugin](/en/developer/extensions/) | 模拟插件 | `SimulationPlugin` | A runtime registration unit implementing Canwu's public plugin contract. Its name, version, and semantic hash identify the executable behavior required for loading and exact replay. |
 | [domain extension](/en/tutorials/cases/local-community-diffusion/) | 模拟领域扩展 | — | An optional domain-specific delivery package built on public engine contracts. It may contain one or more plugins, domain types, schemas, commands, queries, and supporting APIs. No `DomainExtension` trait is required. |
 | [simulation module](/en/tutorials/cases/local-community-diffusion/) | 模拟模块 | — | An informal, human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It may be implemented by an extension and its plugins, but it is not an engine contract. |
+| [technology simulation extension](/en/tutorials/technology-diffusion/) | 技术模拟扩展 | `canwu-technology` | The optional generic extension for technique revisions, evidence, local capability, implementation, use-specific adoption, and transmission opportunities. It is not a global technology tree. |
+| [historical research plugin](/en/tutorials/technology-diffusion/) | 历史研究插件 | `canwu-history-research` | An optional simulation plugin that records a researcher's bounded assessment of evidence without changing base technology truth. |
 | [command plugin](/en/tutorials/command-plugin/) | 命令插件 | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
 | [boundary system](/en/architecture/settlement/) | 边界系统 | `BoundarySystemContract` | A declared system that runs in a phase with bounded reads, writes, resources, and randomness. |
 | [domain schema](/en/developer/extensions/) | 领域 schema | `DomainRecordType` | A versioned structural contract for plugin-owned domain data. Chinese code-adjacent prose retains `schema`. |
@@ -95,6 +97,7 @@ renamed by this policy.
 | [fork](/en/developer/persistence/) | 派生分支 | `fork()` | An independent simulation copied from an existing point so it can advance with new input. |
 | [state commitment](/en/architecture/settlement/) | 状态承诺 | `CommitmentRoots` | A cryptographic commitment that binds authoritative state or evidence for validation. |
 | [semantic hash](/en/developer/extensions/) | 语义哈希 | `semantic_hash` | A stable declaration of plugin behavior used to reject incompatible load or replay environments. |
+| [exact domain-record version](/en/tutorials/technology-diffusion/) | 精确领域记录版本 | `DomainRecordVersionRef`, `domain_record_version()` | A domain-record identity, version, and establishment source used to preserve the meaning of historical evidence after the current record changes. |
 
 ## Actors, knowledge, and decisions
 

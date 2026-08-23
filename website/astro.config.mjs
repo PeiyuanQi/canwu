@@ -60,6 +60,7 @@ export default defineConfig({
             { slug: "tutorials/command-plugin" },
             { slug: "tutorials/phased-boundary" },
             { slug: "tutorials/routing-transport" },
+            { slug: "tutorials/technology-diffusion" },
             {
               label: "案例",
               translations: { en: "Examples" },

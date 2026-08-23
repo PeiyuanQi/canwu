@@ -93,6 +93,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-api` | 程序接口与语义接口 |
 | `canwu-information` | 实验性权威信息生命周期扩展 |
 | `canwu-society` | 实验性社会传播模拟模块 |
+| `canwu-technology` | 实验性、证据驱动的通用技术模拟扩展 |
+| `canwu-history-research` | 可选的下游历史研究评估插件 |
 | `canwu-debug` | 只依赖公开 API 的参考客户端 |
 
 ### crate 直接依赖 DAG
@@ -112,6 +114,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
         Debug["canwu-debug"]
         Information["canwu-information"]
         Society["canwu-society"]
+        Technology["canwu-technology"]
+        History["canwu-history-research"]
     end
 
     subgraph Facade["公开门面"]
@@ -139,6 +143,9 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     Debug --> Api
     Information --> Api
     Society --> Api
+    Technology --> Api
+    History --> Api
+    History --> Technology
 
     Api --> Core
     Api --> Decision

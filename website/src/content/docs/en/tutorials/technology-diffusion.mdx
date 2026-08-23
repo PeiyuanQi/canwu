@@ -1,0 +1,176 @@
+---
+title: Invention, use, and technology diffusion
+description: Build a technology system from evidence, capability, implementation, and use-specific adoption, with optional historical research plugins.
+sidebar:
+  order: 6
+  label: Technology diffusion
+---
+
+import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
+
+## 1. Do not begin with a global unlock
+
+`canwu-technology` is an experimental **technology simulation extension**. It
+does not provide a global technology tree, era levels, or research points.
+Instead, it separates technology change into evidence relationships that can
+be saved, disputed, and replayed:
+
+```text
+technical claim != observed result
+one success != reproducible practice
+operational capability != installed implementation
+installation != adoption for one use
+adoption at one site != automatic diffusion
+```
+
+This separation lets players choose problems, run trials, bring in skilled
+people, install equipment, compare uses, and create demonstrations or
+apprenticeships. The game still owns resources, characters, economics,
+information artifacts, and narrative. The extension owns only bounded,
+deterministic, validated technology state.
+
+<Aside type="caution" title="Experimental extensions">
+  `canwu-technology` and `canwu-history-research` are currently
+  `publish = false` and are not re-exported by `canwu-api`. They prove an
+  extension pattern but do not yet promise a stable independent SemVer surface.
+</Aside>
+
+## 2. Build play from orthogonal records
+
+<Steps>
+1. Define units, integer scales, and ranges with `MetricSchema`, then describe a function and alternative requirement groups with `TechniqueSpec`.
+2. Represent each recipe, process, or design as an immutable `TechniqueRevision`; a change creates a new revision with explicit ancestry.
+3. Start a `TechnicalProgram` through a tracked player command carrying issuer, authority, time, and state-revision guards.
+4. Authorize a bounded `TechnologyExecutionIntent`, then let the named provider return an exact-intent `ExperimentAttempt` or `ProductionRun` through the separate result ingress. Passive `AttemptObservation` ingress remains linked to its exact attempt. Program provider requirements are checked when the result is submitted, so a nonmatching provider may first have a pending intent and then receive a rejected result.
+5. Create `CapabilityQualification` only through a command whose evidence satisfies the configured rule; a successful trial grants nothing automatically.
+6. Represent a local installation with `ImplementationRecord`, then evaluate and authorize one use separately with `ApplicationSpec` and `AdoptionRecord`. A new installation must cite current active qualification and assets; trial, committed, or recommitted adoption must cite current active implementations. Older exact versions remain history, not fresh authority.
+7. Use `TransmissionOpportunity` for document access, demonstration, apprenticeship, artifact inspection, personnel transfer, or independent investigation. Qualifications and implementations record their validity/install start times, and new practice transmission cites the exact one that is both already valid and current in that boundary's replayed state. Later deactivation blocks new transmission without overturning old opportunities. An old opportunity may only close; resuming the relationship requires a new opportunity based on a source valid at that time. An opportunity may link a destination learning program but never copies knowledge or capability automatically.
+</Steps>
+
+Creating a new `TechniqueRevision` also does not publish it into any actor's
+readable knowledge. A game must establish holder-relative information through
+observation, technical claims, or transmission. Labor, capital, fuel,
+institutional resistance, and political support likewise belong to content and
+game rules; they are not historical causes hidden inside the shared evaluator.
+
+Relationships whose meanings outlive a mutable record use an **exact
+domain-record version**. `DomainRecordVersionRef` fixes the record, version,
+and evidence that established that version. If the current implementation is
+later deactivated, an existing adoption still reads the installation version
+it originally cited.
+
+### One evaluator, different content
+
+The reference evaluator reads only metric and threshold data. It never checks
+names such as “papermaking,” “gunpowder,” or “steam engine”:
+
+```rust
+let result = evaluate_attempt(
+    &technique_revision,
+    &technique_spec,
+    &metric_schemas,
+    &MetricContext {
+        values: local_measurements,
+    },
+)?;
+
+if result.passed {
+    // This is evidence for this trial only. Qualification, installation,
+    // and adoption still require their own authorized operations.
+}
+```
+
+Requirement groups compose with AND; alternatives inside a group compose with
+OR. Every value has an explicit unit and integer scale, so snapshots, forks,
+and exact replay do not depend on floating-point or traversal order.
+
+## 3. Cross-validating five technologies
+
+| Case | Counterfactual required from the shared contract |
+| --- | --- |
+| Papermaking | Local fiber and operator evidence can each reverse the outcome of the same process. |
+| Woodblock printing | A stable long edition passes its use criteria while a changing short edition does not. |
+| Movable type | Glyph inventory, composition labor, edition size, and text-change frequency reverse its technical and use fit relative to woodblock. |
+| Gunpowder | The same weak powder passes a visible-flame use but fails propulsion. |
+| Steam engine | Cheap-fuel pumping passes while costly pumping and low-torque rotary use fail. |
+
+Repository tests first run every technology through catalog loading, an
+authorized program command, result ingress, boundary settlement, and an
+authoritative state query. They then prove the counterfactuals with the same
+`evaluate_attempt()` / `evaluate_application()` contract: woodblock is evaluated
+as viable for a stable long edition while movable type is evaluated as viable
+for a changing short edition; weak powder produces flame but does not satisfy
+propulsion; pumping is evaluated as viable at a cheap-coal mine and non-viable
+at an expensive site. Actual adoption still requires the authorized
+qualification, implementation, and adoption operations covered by the full
+workflow test. Case names occur only in fixture data and documentation.
+
+## 4. Keep historical research optional
+
+High-detail historical interpretation does not enter the kernel or alter base
+technology truth. `canwu-history-research` supplies three separately selectable
+**historical research plugins**:
+
+| Plugin | What it owns | What it never owns |
+| --- | --- | --- |
+| `HistoricalSourcesPlugin` | An assessor's dating, authenticity, reliability, and provenance assessment | The source artifact or technical truth |
+| `HistoricalPracticePlugin` | Assessments of practitioners, workshops, practice relationships, notebook summaries, and negative results | Base attempts, qualification, or information transfer |
+| `ProductionArchaeologyPlugin` | Assessments of remains, samples, dates, and production-process hypotheses | Runtime assets, inventory, work orders, or production runs |
+
+Every assessment retains its assessor, method and version, as-of time,
+uncertainty, summary digest, and durable citation identities that exist no later
+than its as-of cut. Contradiction and supersession may target only a prior
+assessment of the same exact subject. Citation existence alone does not establish
+relevance or historical truth. Assessment commands are trusted-host ingestion:
+assessor authority is not proof of player-visible information access, which a
+game may enforce in its own research-workflow plugin before submission.
+`HistoricalAnalysis` is a read-only host query. A game may omit all three
+plugins, select one method, or enable all three through
+`HistoricalResearchSuite`.
+
+## 5. Choose a home-hardware scale
+
+The current kernel still clones and validates broad state during a boundary;
+domain paging does not remove that cost. A 20-year workload recorded on
+2026-08-22 with a Ryzen 7 7800X3D, 32 GB RAM, Windows release build produced:
+
+| Profile | Sites / programs / links | Technology operation p95 | Monthly p95 | Deep validated load | Peak RSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Paced interactive component | 100 / 200 / 400 | 72 ms | 169 ms | 3.942 s | 648 MiB |
+| Pressure | 500 / 1,000 / 2,000 | 403 ms | 616 ms | 14.915 s | 1.158 GiB |
+
+The fixed paced-interactive component profile suits turn-based or deliberately
+paced home-computer play. It is not whole-game certification and must not be
+extrapolated into a larger-scale or sub-100 ms interaction claim. The 500-site pressure
+profile is appropriate for campaign turns or offline research, not immediate
+interaction. Technology is capped at 5,000 records, each history plugin at
+1,000, all four extensions together at 8,000, and technology knowledge at
+5,000. One payload is capped at 16 KiB, 32 references, and 64 collection
+entries; one boundary permits at most 127 combined extension mutations. Capacity
+overflow leaves explicit rejection events rather than permanently blocking later
+boundaries. These
+measurements come from an 8-core, 32-GiB component process, not a whole-game
+4-core/8-GiB certification. The paced profile's monthly p95 leaves about
+331 ms inside its 500 ms component budget, so a whole-game build must repeat the
+measurement with rendering, assets, and its other monthly systems present.
+
+## 6. Code and evidence
+
+The framework test contains the complete command, result, qualification,
+installation, adoption, teaching-opportunity, snapshot, fork, and exact-replay
+path. Historical plugin tests cover independent selection, cross-assessment
+contradiction, and deep restoration validation. Performance reports retain the
+raw samples.
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" icon="external">
+  Open the technology extension
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" variant="secondary" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-history-research" variant="secondary" icon="external">
+  Open the historical research plugins
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" variant="secondary" icon="external">
+  Read the home-hardware evidence
+</LinkButton>

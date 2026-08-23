@@ -120,6 +120,37 @@ match. Allocation counts and byte requests are more stable, but still belong to
 the recorded compiler and target. A baseline is evidence, not a universal
 service-level objective.
 
+## Technology and historical-research profile
+
+The standalone `technology-profile` binary measures the unpublished generic
+technology extension with all three historical assessment plugins enabled. It
+has a fixed 100-site paced-interactive component profile and a 500-site pressure
+profile. Every one of its 240
+months commits a technology claim and all three assessment kinds. It records
+actual file write/sync/read timings, snapshot and checkpoint reconstruction,
+exact replay, serialized growth, and fresh-process peak RSS.
+
+The recorded 2026-08-22 results and their limits are documented in
+[`2026-08-22-technology.md`](2026-08-22-technology.md). The paced-interactive result
+is suitable for paced or turn-based home-computer play, but it remains component
+evidence rather than a whole-game sub-100 ms certification. The pressure profile must not be presented as an
+interactive scale while the kernel retains broad boundary clones.
+
+Run the interactive profile with:
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin technology-profile -- \
+  --profile interactive \
+  --samples 31 \
+  --warmup 1 \
+  --months 240 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-technology-interactive-elapsed.json
+```
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

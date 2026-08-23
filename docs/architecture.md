@@ -132,6 +132,8 @@ flowchart TB
         Debug["canwu-debug"]
         Information["canwu-information"]
         Society["canwu-society"]
+        Technology["canwu-technology"]
+        History["canwu-history-research"]
     end
 
     subgraph Facade["Public facade / 公开门面"]
@@ -159,6 +161,9 @@ flowchart TB
     Debug --> Api
     Information --> Api
     Society --> Api
+    Technology --> Api
+    History --> Api
+    History --> Technology
 
     Api --> Core
     Api --> Decision
@@ -438,6 +443,66 @@ candidate, actor projection, and pending institutional-policy component before
 the restored simulation is returned. Optional materialization timestamps keep
 `SimTime::EPOCH` and negative simulation times available as real boundary
 times. Fork and exact replay use the same serialized authoritative state.
+
+### Technology and historical research / 技术与历史研究
+
+`canwu-technology` is an unpublished experimental domain extension built only
+on `canwu-api`. It owns generic metric schemas, immutable technique revisions,
+program intent, experiment and production evidence, holder/site capability,
+installed implementations, use-specific adoption, and transmission
+opportunities. It does not own a global technology tree, era levels, research
+points, inventory, markets, information artifacts, transport, or historical
+case labels.
+
+The reference evaluator applies bounded integer thresholds and alternative
+requirement groups. It returns criterion evidence rather than an `invented`
+flag. An experiment can succeed without creating qualification; qualification
+can exist without installation; installation can exist without use-specific
+adoption; a transmission opportunity never grants knowledge or capability by
+itself. Qualifications declare `valid_from` / optional `valid_until`,
+implementations declare `installed_at`, and practice transmission records the
+exact qualification or implementation that made the source capable when the
+opportunity opened. This permits historical entry without allowing a later
+installation to justify an earlier transmission. At creation, that exact
+source must also be the current version in the boundary's replayed state; later
+deactivation blocks new transmission without invalidating prior opportunities.
+After creation, the opportunity may only transition from active to closed; a
+restart requires a new opportunity citing a then-current source. An
+implementation's exact qualification is installation-time evidence, so a later
+qualification version does not implicitly stop the installed asset; games must
+stop the implementation itself to prevent it from serving as a new transmission
+source. Deliberate
+changes use tracked plugin commands, while resolved provider results and passive
+observations enter through a separate declared ingress. Program provider
+requirements are checked when a result is submitted, so intent creation may
+produce a pending intent whose eventual provider result is rejected.
+
+Dependencies whose meaning relies on a mutable domain-record body use an exact
+`DomainRecordVersionRef`. The trusted host and declared plugin views can resolve
+the retained body for that exact version, so a later update cannot reinterpret
+older evidence. Generic `EvidenceRef` citations validate retained identity and
+existence only; they do not by themselves establish relevance or historical
+truth. A compacted receipt still proves existence, but body inspection requires
+retained or archive-provided content. Module-owned restore wrappers re-run
+technology semantics after normal core snapshot, checkpoint, or replay
+validation.
+
+Historical fidelity is downstream and optional. `canwu-history-research`
+provides separately selectable source, practice, and production-archaeology
+plugins. They create bounded, append-only records of an assessor's method,
+date, uncertainty, citations, contradictions, and supersession. They never
+replace authoritative attempts, assets, production runs, capability, or
+adoption. Omitting them leaves base technology outcomes unchanged and avoids
+their record and handler cost.
+
+`DomainRecordPage` is a trusted-host query bound to one authoritative revision,
+kind, exclusive record cursor, and limit. Subsequent pages reject a stale
+revision. Boundary views use the same ordered kind range and merge only bounded
+overlay pages, avoiding copies of unrelated record kinds. This improves query
+cost but does not remove the current kernel's broad boundary transaction clones.
+The recorded home-hardware profile therefore treats 100 sites as paced
+interactive use and 500 sites as non-interactive pressure evidence; see
+[`benchmarks/2026-08-22-technology.md`](../benchmarks/2026-08-22-technology.md).
 
 ### Reference content and starter kits / 参考内容与入门套件
 

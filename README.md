@@ -75,6 +75,12 @@ For the social diffusion simulation module example:
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
+For the experimental evidence-based technology flow:
+
+```text
+cargo run -p canwu-technology --example technology_diffusion
+```
+
 ## How the repository fits together
 
 - `canwu-core`: stable IDs, repeatable random numbers, and schema metadata
@@ -92,6 +98,10 @@ cargo run -p canwu-society --example local_community_diffusion
 - `canwu-information`: unpublished experimental information-lifecycle extension
 - `canwu-society`: unpublished experimental social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
+- `canwu-technology`: unpublished generic technology extension for evidence,
+  local capability, implementation, use-specific adoption, and diffusion
+- `canwu-history-research`: three optional historical assessment plugins kept
+  downstream from base technology truth
 
 The [crate map](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/crates/README.md) shows the repository layers, exact dependency
 DAG, and publication order. The [documentation index](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/README.md) links the

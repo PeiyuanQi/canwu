@@ -1,0 +1,142 @@
+---
+title: 发明、使用与技术传播
+description: 用证据、能力、实施和按用途采用构建技术系统，并按需组合独立的历史研究插件。
+sidebar:
+  order: 6
+  label: 发明、使用与技术传播
+---
+
+import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
+
+## 1. 不要从“解锁科技”开始
+
+`canwu-technology` 是实验性的**技术模拟扩展**（technology simulation
+extension）。它不提供全局科技树、时代等级或研究点数，而是把技术变化拆成可以保存、
+质疑和重放的证据关系：
+
+```text
+技术主张 != 观察结果
+一次成功 != 可重复实践
+具备操作能力 != 已经安装
+安装完成 != 按某种用途采用
+一处采用 != 自动传播到所有地点
+```
+
+这种拆分让玩家能够选择问题、开展试验、引入工匠、安装设备、比较用途，并主动建立
+示范或师徒关系。游戏仍然决定资源、人物、经济、信息载体和叙事；参伍扩展只负责
+有界、确定、可验证的技术状态。
+
+<Aside type="caution" title="实验性扩展">
+  `canwu-technology` 和 `canwu-history-research` 当前均为 `publish = false`，也不会由
+  `canwu-api` 重新导出。它们验证扩展模式，但尚未承诺稳定的独立 SemVer 表面。
+</Aside>
+
+## 2. 用正交记录构建玩法
+
+<Steps>
+1. 用 `MetricSchema` 定义单位、整数尺度与范围，再用 `TechniqueSpec` 描述功能和可替代条件组。
+2. 每个配方、工艺或设计使用不可变 `TechniqueRevision`；变化创建新修订并记录祖先关系。
+3. 玩家通过带签发者、权限、时间与状态版本保护的命令启动 `TechnicalProgram`。
+4. 先授权一个有界的 `TechnologyExecutionIntent`，再由指定提供方通过独立 ingress 返回绑定精确 intent 的 `ExperimentAttempt` 或 `ProductionRun`；被动 `AttemptObservation` 仍须引用精确试验。项目的提供方要求在结果提交时校验，因此不合要求的提供方可能先有 pending intent，结果随后被拒绝。
+5. 只有满足配置证据规则的命令才能创建 `CapabilityQualification`；成功试验不会自动授予能力。
+6. 用 `ImplementationRecord` 表示当地安装，用 `ApplicationSpec` 和 `AdoptionRecord` 单独评估、批准某一用途。新安装必须引用当前有效的资格与资产；试用、正式采用或重新提交采用时，也必须引用当前有效的实施。旧精确版本只保留历史含义，不能充当新的授权。
+7. `TransmissionOpportunity` 只表示文献访问、示范、师徒、器物检查、人员转移或独立研究的机会；资格与实施分别记录有效起点和安装时间，新建实践传播须引用该边界重演状态中仍为当前且已经有效的精确资格或实施版本。后来停用会阻止新传播，但不会推翻旧机会；旧机会只能单向关闭，恢复关系须基于当时有效来源新建机会。它可连接目的地的学习项目，但不会自动复制知识或能力。
+</Steps>
+
+创建新的 `TechniqueRevision` 也不会自动把它写入任何行动者的可读知识；游戏应通过观察、
+技术主张或传播流程建立持有者相对的信息。劳动力、资本、燃料、制度阻力和政治支持同样
+属于内容与游戏规则，而不是通用评估器暗含的历史因果。
+
+会长期影响含义的关系使用**精确领域记录版本**（exact domain-record version）：
+`DomainRecordVersionRef` 同时固定记录、版本和建立该版本的证据。当前实施后来停用时，
+既有采用记录仍按它当时引用的安装版本解释。
+
+### 同一评估器，不同内容
+
+参考评估器只读取数据中的指标和阈值，不检查“造纸”“火药”或“蒸汽机”等名称：
+
+```rust
+let result = evaluate_attempt(
+    &technique_revision,
+    &technique_spec,
+    &metric_schemas,
+    &MetricContext {
+        values: local_measurements,
+    },
+)?;
+
+if result.passed {
+    // 这只是本次试验的判据证据；资格、安装和采用仍需各自的授权操作。
+}
+```
+
+条件组之间是 AND；一个组内的候选阈值是 OR。全部数值使用明确单位和整数尺度，
+因此存档、派生分支和精确重放不会因浮点或遍历顺序改变结果。
+
+## 3. 五项技术如何交叉验证
+
+| 案例 | 同一通用契约必须得到的反事实 |
+| --- | --- |
+| 造纸术 | 本地纤维与操作者证据各自都能反转同一工艺的试验结果。 |
+| 雕版印刷 | 稳定长版次通过用途判据，频繁修改的短版次不通过。 |
+| 活字印刷 | 字符库存、排版劳动力、版次规模和文本改动频率可反转它与雕版的技术及用途适配。 |
+| 火药 | 同一批弱火药可满足可见火焰用途，却不满足推进用途。 |
+| 蒸汽机 | 廉价燃料的抽水用途通过；高成本抽水和低扭矩旋转用途失败。 |
+
+仓库测试先让五项技术逐一经过目录、授权项目命令、结果 ingress、边界结算和权威状态
+查询，再使用同一个 `evaluate_attempt()` / `evaluate_application()` 合同证明反事实：
+评估器判定稳定长版次适用雕版、频繁修改的短版次适用活字；弱火药能产生可见火焰但
+不满足推进；廉煤矿井的抽水用途被判为适用，而高成本地点被判为不适用。真正采用仍
+须经过完整流程测试覆盖的授权资格、实施和采用操作。案例名只存在于测试数据和文档中。
+
+## 4. 把历史研究留在可选插件
+
+高精度历史研究不进入内核，也不改变基础技术真值。`canwu-history-research` 提供三个可
+独立选择的**历史研究插件**（historical research plugin）：
+
+| 插件 | 只拥有的内容 | 不拥有的内容 |
+| --- | --- | --- |
+| `HistoricalSourcesPlugin` | 研究者对年代、真实性、可靠性和来源链的评估 | 文献本体、技术真值 |
+| `HistoricalPracticePlugin` | 对工匠、工场、实践关系、笔记摘要和负结果的评估 | 基础试验、资格或知识传递 |
+| `ProductionArchaeologyPlugin` | 对遗存、样品、年代和生产过程假说的评估 | 运行时资产、库存、工单或生产记录 |
+
+每条评估都保存评估者、方法与版本、as-of 时间、不确定度、摘要 digest，以及经内核验证
+身份与时间均不晚于 as-of 截面的持久引用；反驳和取代只能指向研究同一精确对象的既有评估。
+引用存在本身不证明其相关性或历史真实性。评估命令属于可信主机摄入：评估者权限不等同于玩家可见的信息访问证明，需要这种证明的游戏应在自己的研究工作流中先行校验。`HistoricalAnalysis` 是上层应用的只读查询；游戏可以完全关闭历史插件，
+只启用一种研究方法，或用 `HistoricalResearchSuite` 同时启用三种。
+
+## 5. 选择家用硬件规模
+
+当前内核仍会在边界中复制并校验较广的状态；领域分页优化不会消除这项成本。2026-08-22
+在 Ryzen 7 7800X3D、32 GB RAM、Windows release build 上记录的 20 年工作负载如下：
+
+| 档位 | 站点 / 项目 / 传播关系 | 技术操作 p95 | 月边界 p95 | 深校验加载 | 峰值内存 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 节奏式交互组件档 | 100 / 200 / 400 | 72 ms | 169 ms | 3.942 s | 648 MiB |
+| 压力档 | 500 / 1,000 / 2,000 | 403 ms | 616 ms | 14.915 s | 1.158 GiB |
+
+固定的节奏式交互组件档适合回合制或有意放慢节奏的家用电脑游戏；它不是整机认证，
+也不应被外推为更大规模或低于 100 ms 的即时操作承诺。
+500 站点压力档适合战役回合或离线研究，不能作为即时交互承诺。技术记录总数最多
+5,000 条，每个历史插件最多 1,000 条，合计最多 8,000 条；技术知识记录最多 5,000 条。
+单载荷最多 16 KiB、32 个引用、64 个集合项；单边界合计最多 127 次扩展记录变化。容量溢出会留下明确拒绝事件，不会让已接纳输入永久阻塞后续边界。
+这些数据来自 8 核、32 GiB 的组件进程，不代表 4 核、8 GiB 整机游戏认证。节奏式档的月边界 p95
+在 500 ms 组件预算内留出约 331 ms 余量，但整机游戏仍须在渲染、资源和其他月度系统同时存在时复测。
+
+## 6. 代码与证据
+
+框架测试包含完整的命令、试验结果、资格、安装、采用、教学机会、存档、fork 和精确重放
+流程；历史插件测试覆盖插件独立选择、跨评估反驳和恢复时深校验。性能报告同时保留原始样本。
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" icon="external">
+  查看技术扩展
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" variant="secondary" icon="external">
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-history-research" variant="secondary" icon="external">
+  查看历史研究插件
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" variant="secondary" icon="external">
+  查看家用硬件基准
+</LinkButton>

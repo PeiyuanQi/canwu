@@ -44,15 +44,15 @@ pub use canwu_sim::{
     DecisionRule, DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState,
     DecisionTrace, DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation,
-    DomainRecordSchema, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
-    DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode, EvidenceArchiveIndex, EvidenceCursor,
-    EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots,
-    EvidenceJournalSegment, EvidenceNestedLocator, EvidenceSealToken, ExternalDecisionOption,
-    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
-    HumanPolicy, IngressClass, IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy,
-    Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, LlmModelIdentity, LlmPolicy, ObservationPolicy, OrderedRulePolicy,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    DomainRecordPage, DomainRecordSchema, DomainReference, DomainReferenceSchema,
+    DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode,
+    EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry, EvidenceItemLocator,
+    EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator,
+    EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
+    ExternalPolicy, HumanDecisionResponse, HumanPolicy, IngressClass, IngressPayload,
+    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
+    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LlmModelIdentity,
+    LlmPolicy, ObservationPolicy, OrderedRulePolicy, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadProperty,
     PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, PluginActionDescriptor,
     PluginCommandHandler, PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor,
@@ -284,6 +284,43 @@ impl Canwu {
         self.simulation.domain_record(reference)
     }
 
+    /// Returns whether an exact domain-record version exists in current or retained evidence.
+    #[must_use]
+    pub fn domain_record_version_evidence_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> bool {
+        self.simulation
+            .domain_record_version_evidence_exists(reference)
+    }
+
+    /// Returns whether a generic evidence identity is retained or archived.
+    #[must_use]
+    pub fn evidence_exists(&self, reference: &EvidenceRef) -> bool {
+        self.simulation.evidence_exists(reference)
+    }
+
+    /// Returns when retained evidence first became authoritative.
+    ///
+    /// Compacted identity-only receipts return `None`; load the archived
+    /// evidence body before making decisions that require temporal ordering.
+    #[must_use]
+    pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
+        self.simulation.evidence_time(reference)
+    }
+
+    /// Resolves the retained record body for one exact domain-record version.
+    ///
+    /// A compacted archive receipt proves existence but does not expose the
+    /// version body through this trusted-host query.
+    #[must_use]
+    pub fn domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<DomainRecord> {
+        self.simulation.domain_record_version(reference)
+    }
+
     #[must_use]
     pub fn typed_domain_record<T: DomainRecordType>(
         &self,
@@ -294,6 +331,20 @@ impl Canwu {
 
     pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
         self.simulation.domain_records()
+    }
+
+    /// Returns one trusted-host page bound to an authoritative revision.
+    ///
+    /// Use the returned revision as `expected_revision` on subsequent pages.
+    pub fn domain_record_page(
+        &self,
+        kind: &DomainRecordKind,
+        after: Option<&DomainRecordRef>,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<DomainRecordPage, CanwuError> {
+        self.simulation
+            .domain_record_page(kind, after, limit, expected_revision)
     }
 
     #[must_use]

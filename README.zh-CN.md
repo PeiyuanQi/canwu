@@ -66,6 +66,12 @@ cargo run -p canwu-api --example decision_ticket
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
+如需运行基于证据的实验性技术流程：
+
+```text
+cargo run -p canwu-technology --example technology_diffusion
+```
+
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
@@ -82,6 +88,9 @@ cargo run -p canwu-society --example local_community_diffusion
 - `canwu-information`：未发布的实验性信息生命周期扩展
 - `canwu-society`：未发布的实验性社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
+- `canwu-technology`：未发布的通用技术模拟扩展，负责证据、本地能力、实施、
+  按用途采用和传播机会
+- `canwu-history-research`：位于基础技术真值下游的三个可选历史研究评估插件
 
 [crate 结构图](crates/README.md)展示仓库分层、精确的依赖 DAG 和发布顺序。
 [文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。`agent-interface`

@@ -310,6 +310,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-history-research"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
+ "canwu-technology",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-information"
 version = "0.5.1"
 dependencies = [
@@ -358,6 +368,15 @@ dependencies = [
 
 [[package]]
 name = "canwu-society"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-technology"
 version = "0.5.1"
 dependencies = [
  "canwu-api",
