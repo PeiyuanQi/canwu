@@ -4,13 +4,13 @@ mod support;
 
 use canwu_api::{DomainRecordKind, DomainReference, TypedDomainRecordRef};
 use canwu_information::{
-    Access, AccessPayload, Audience, AudienceAccessEvidence, AudienceMembership, AudiencePayload,
-    Channel, ChannelCapability, ChannelPayload, Content, ContentDigest, ContentPayload,
-    ContentRelation, DeliveryAttempt, DeliveryAttemptPayload, DeliveryAttemptStatus,
-    DigestAlgorithm, Dispatch, DispatchPayload, DispatchStatus, DispatchTarget,
-    GenericInformationPublicationDraft, InformationBody, InformationLifecycle, InformationLimitsV1,
-    InformationQuery, Instance, LifecycleRequest, RecordBinding, Release, ReleasePayload,
-    ReleaseScope, ReleaseStatus, Representation, RepresentationPayload,
+    Access, AccessPayload, AddressedDeliveryAttemptDraft, Audience, AudienceAccessEvidence,
+    AudienceMembership, AudiencePayload, Channel, ChannelCapability, ChannelPayload, Content,
+    ContentDigest, ContentPayload, ContentRelation, DeliveryAttempt, DeliveryAttemptPayload,
+    DeliveryAttemptStatus, DigestAlgorithm, Dispatch, DispatchPayload, DispatchStatus,
+    DispatchTarget, GenericInformationPublicationDraft, InformationBody, InformationLifecycle,
+    InformationLimitsV1, InformationQuery, Instance, LifecycleRequest, RecordBinding, Release,
+    ReleasePayload, ReleaseScope, ReleaseStatus, Representation, RepresentationPayload,
     audience_membership_root_v1,
 };
 use serde_json::json;
@@ -336,6 +336,115 @@ fn fixture_information_partial_multi_recipient() -> Result<(), String> {
     };
     assert!(ledger.plan(&completion).is_err());
     assert_eq!(ledger.record(dispatch.as_untyped()).version, 2);
+    Ok(())
+}
+
+#[test]
+fn addressed_activation_is_atomic_and_deadline_preserving() -> Result<(), String> {
+    let mut ledger = DetachedLedger::default();
+    let (_, representation) = seed_inline_representation(&mut ledger, "ATOMIC-03")?;
+    let channel = TypedDomainRecordRef::<Channel>::new("channel-atomic-addressed");
+    ledger.plan_and_apply(&LifecycleRequest::CreateChannel {
+        binding: RecordBinding::new(channel.clone(), Vec::new()),
+        payload: ChannelPayload {
+            profile: "atomic_addressed".to_owned(),
+            capabilities: vec![ChannelCapability::AddressedDelivery],
+        },
+    })?;
+    let recipients = vec![person(2_101), person(2_102)];
+    let dispatch = TypedDomainRecordRef::<Dispatch>::new("dispatch-atomic-addressed");
+    let mut dispatch_references = vec![
+        DomainReference::from_typed("channel", channel),
+        DomainReference::from_typed("representation", representation),
+    ];
+    dispatch_references.extend(
+        recipients
+            .iter()
+            .map(|recipient| holder_reference("intended_recipient", recipient)),
+    );
+    ledger.plan_and_apply(&LifecycleRequest::BeginDispatch {
+        binding: RecordBinding::new(dispatch.clone(), dispatch_references),
+        payload: DispatchPayload {
+            status: DispatchStatus::Prepared,
+            target: DispatchTarget::Addressed(recipients.clone()),
+            prepared_at: minute(2),
+            dispatched_at: None,
+            completed_at: None,
+        },
+    })?;
+    let attempts = recipients
+        .iter()
+        .enumerate()
+        .map(|(index, recipient)| AddressedDeliveryAttemptDraft {
+            binding: RecordBinding::new(
+                TypedDomainRecordRef::<DeliveryAttempt>::new(format!(
+                    "attempt-atomic-{}",
+                    index + 1
+                )),
+                vec![
+                    DomainReference::from_typed("dispatch", dispatch.clone()),
+                    holder_reference("recipient", recipient),
+                ],
+            ),
+            payload: DeliveryAttemptPayload {
+                status: DeliveryAttemptStatus::Prepared,
+                attempt_number: 1,
+                prepared_at: minute(3),
+                dispatched_at: None,
+                due_at: minute(5),
+                completed_at: None,
+            },
+        })
+        .collect::<Vec<_>>();
+    let activation = LifecycleRequest::ActivateAddressedDispatch {
+        dispatch: dispatch.clone(),
+        expected_version: 1,
+        dispatched_at: minute(3),
+        attempts: attempts.clone(),
+    };
+    assert_eq!(ledger.plan(&activation)?.mutations.len(), 3);
+    ledger.plan_and_apply(&activation)?;
+    assert_eq!(
+        ledger.record_set()?.decode::<Dispatch>(&dispatch)?.status,
+        DispatchStatus::Active
+    );
+    for attempt in &attempts {
+        assert_eq!(
+            ledger
+                .record_set()?
+                .decode::<DeliveryAttempt>(&attempt.binding.reference)?
+                .status,
+            DeliveryAttemptStatus::Prepared
+        );
+    }
+
+    let first = attempts[0].binding.reference.clone();
+    ledger.plan_and_apply(&LifecycleRequest::TransitionDeliveryAttempt {
+        record: first.clone(),
+        expected_version: 1,
+        proposed: DeliveryAttemptPayload {
+            status: DeliveryAttemptStatus::InTransit,
+            attempt_number: 1,
+            prepared_at: minute(3),
+            dispatched_at: Some(minute(3)),
+            due_at: minute(5),
+            completed_at: None,
+        },
+    })?;
+    let late_delivery = LifecycleRequest::TransitionDeliveryAttempt {
+        record: first.clone(),
+        expected_version: 2,
+        proposed: DeliveryAttemptPayload {
+            status: DeliveryAttemptStatus::Delivered,
+            attempt_number: 1,
+            prepared_at: minute(3),
+            dispatched_at: Some(minute(3)),
+            due_at: minute(5),
+            completed_at: Some(minute(6)),
+        },
+    };
+    assert!(ledger.plan(&late_delivery).is_err());
+    assert_eq!(ledger.record(first.as_untyped()).version, 2);
     Ok(())
 }
 

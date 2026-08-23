@@ -16,7 +16,7 @@ pub use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
     KnowledgeOrigin, KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut,
     KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
-    KnowledgeSubject, KnowledgeSubjectTarget,
+    KnowledgeSubject, KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE,
 };
 pub use canwu_routing::{
     DepartureSlot, DurationSample, PlanningSnapshot, ROUTING_ALGORITHM_VERSION, RouteCost,

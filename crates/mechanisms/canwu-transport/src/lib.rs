@@ -11,7 +11,7 @@ use canwu_routing::{RoutePlan, RoutingNodeRef};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 
-pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v1";
+pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v3";
 
 #[must_use]
 pub fn delivery_completion_operation_key(
@@ -230,6 +230,7 @@ pub struct LegExecution {
     pub status: LegExecutionStatus,
     pub actual_departure_at: Option<SimTime>,
     pub actual_arrival_at: Option<SimTime>,
+    pub failed_at: Option<SimTime>,
     pub failure_reason: Option<String>,
     pub evidence: Vec<EvidenceRef>,
 }
@@ -439,6 +440,7 @@ impl TransportExecution {
                 status: LegExecutionStatus::Planned,
                 actual_departure_at: None,
                 actual_arrival_at: None,
+                failed_at: None,
                 failure_reason: None,
                 evidence: Vec::new(),
             })
@@ -458,6 +460,11 @@ impl TransportExecution {
             .ok_or(TransportError::MissingItinerary)?;
         if revision.predecessor != Some(active) || revision.valid_from < at {
             return Err(TransportError::InvalidRevision("reroute must reference the active revision and start no earlier than the reroute time".to_owned()));
+        }
+        if self.revisions.iter().any(|item| item.id == revision.id) {
+            return Err(TransportError::InvalidRevision(
+                "itinerary revision identity must be unique within an execution".to_owned(),
+            ));
         }
         if let Some(previous) = self.revisions.iter_mut().find(|item| item.id == active) {
             previous.superseded_at = Some(at);
@@ -486,12 +493,27 @@ impl TransportExecution {
                 status: LegExecutionStatus::Planned,
                 actual_departure_at: None,
                 actual_arrival_at: None,
+                failed_at: None,
                 failure_reason: None,
                 evidence: Vec::new(),
             });
         }
-        self.legs = legs;
+        self.legs.extend(legs);
         self.revisions.push(revision);
+        if let Some(saga) = self.saga.as_mut() {
+            saga.operation_key = delivery_completion_operation_key(
+                self.id,
+                self.active_itinerary_revision
+                    .ok_or(TransportError::MissingItinerary)?,
+                saga.expected_attempt_version,
+            );
+            saga.evidence.extend(
+                self.revisions
+                    .last()
+                    .map(|current| current.evidence.clone())
+                    .unwrap_or_default(),
+            );
+        }
         self.state = TransportExecutionState::Planning;
         Ok(())
     }
@@ -526,10 +548,13 @@ impl TransportExecution {
                 "transport execution cannot start a leg in its current state".to_owned(),
             ));
         }
+        let active = self
+            .active_itinerary_revision
+            .ok_or(TransportError::MissingItinerary)?;
         let leg = self
             .legs
             .iter_mut()
-            .find(|leg| leg.leg_index == self.current_leg_index)
+            .find(|leg| leg.itinerary_revision == active && leg.leg_index == self.current_leg_index)
             .ok_or(TransportError::MissingLeg)?;
         if !matches!(
             leg.status,
@@ -550,14 +575,22 @@ impl TransportExecution {
         at: SimTime,
         endpoint: String,
     ) -> Result<bool, TransportError> {
-        let final_leg = self.current_leg_index.saturating_add(1) >= self.legs.len();
+        let active = self
+            .active_itinerary_revision
+            .ok_or(TransportError::MissingItinerary)?;
+        let active_leg_count = self
+            .legs
+            .iter()
+            .filter(|leg| leg.itinerary_revision == active)
+            .count();
+        let final_leg = self.current_leg_index.saturating_add(1) >= active_leg_count;
         if final_leg && self.saga.is_none() {
             return Err(TransportError::MissingSaga);
         }
         let leg = self
             .legs
             .iter_mut()
-            .find(|leg| leg.leg_index == self.current_leg_index)
+            .find(|leg| leg.itinerary_revision == active && leg.leg_index == self.current_leg_index)
             .ok_or(TransportError::MissingLeg)?;
         if leg.status != LegExecutionStatus::Departed {
             return Err(TransportError::InvalidState(
@@ -576,7 +609,7 @@ impl TransportExecution {
         leg.actual_arrival_at = Some(at);
         self.current_endpoint = Some(endpoint);
         self.current_leg_index = self.current_leg_index.saturating_add(1);
-        if self.current_leg_index >= self.legs.len() {
+        if self.current_leg_index >= active_leg_count {
             self.state = TransportExecutionState::ArrivalPending;
             self.mark_arrival_pending()?;
             Ok(true)
@@ -586,13 +619,17 @@ impl TransportExecution {
         }
     }
 
-    pub fn fail_current_leg(&mut self, reason: String) -> Result<(), TransportError> {
+    pub fn fail_current_leg(&mut self, reason: String, at: SimTime) -> Result<(), TransportError> {
+        let active = self
+            .active_itinerary_revision
+            .ok_or(TransportError::MissingItinerary)?;
         let leg = self
             .legs
             .iter_mut()
-            .find(|leg| leg.leg_index == self.current_leg_index)
+            .find(|leg| leg.itinerary_revision == active && leg.leg_index == self.current_leg_index)
             .ok_or(TransportError::MissingLeg)?;
         leg.status = LegExecutionStatus::Failed;
+        leg.failed_at = Some(at);
         leg.failure_reason = Some(reason);
         self.state = TransportExecutionState::ReplanPending;
         Ok(())
@@ -635,16 +672,18 @@ impl TransportExecution {
             .iter()
             .find(|leg| leg.id == handoff.to_leg)
             .ok_or(TransportError::MissingLeg)?;
-        if from_leg.status != LegExecutionStatus::Arrived
-            || !matches!(
-                to_leg.status,
-                LegExecutionStatus::Planned
-                    | LegExecutionStatus::Booked
-                    | LegExecutionStatus::Waiting
-            )
+        if !matches!(
+            from_leg.status,
+            LegExecutionStatus::Arrived | LegExecutionStatus::Failed
+        ) || !matches!(
+            to_leg.status,
+            LegExecutionStatus::Planned | LegExecutionStatus::Booked | LegExecutionStatus::Waiting
+        ) || from_leg
+            .actual_arrival_at
+            .is_some_and(|arrived_at| handoff.at < arrived_at)
             || from_leg
-                .actual_arrival_at
-                .is_some_and(|arrived_at| handoff.at < arrived_at)
+                .failed_at
+                .is_some_and(|failed_at| handoff.at < failed_at)
         {
             return Err(TransportError::InvalidHandoff(
                 "handoff must follow an arrived leg and precede the next leg".to_owned(),
@@ -668,7 +707,9 @@ impl TransportExecution {
             .ok_or(TransportError::MissingItinerary)?;
         let completed_at = self
             .legs
-            .last()
+            .iter()
+            .rev()
+            .find(|leg| leg.itinerary_revision == revision)
             .and_then(|leg| leg.actual_arrival_at)
             .ok_or(TransportError::MissingLeg)?;
         let attempt = self

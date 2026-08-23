@@ -78,6 +78,15 @@ pub struct InformationOutputSlotRef {
     pub kind: InformationOutputKind,
 }
 
+#[must_use]
+pub fn addressed_attempt_output_slot(index: u16) -> InformationOutputSlot {
+    InformationOutputSlot {
+        index,
+        name: format!("attempt_{:04}", u32::from(index) + 1),
+        kind: InformationOutputKind::DeliveryAttempt,
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum LineageParent {
@@ -356,6 +365,7 @@ pub fn validate_operation_transition(
         InformationOperationStatus::ApplyingDomainChanges => matches!(
             proposed.status,
             InformationOperationStatus::AwaitingPublication
+                | InformationOperationStatus::AwaitingFinalization
                 | InformationOperationStatus::Completed
                 | InformationOperationStatus::Rejected
         ),
@@ -403,6 +413,40 @@ pub fn validate_operation_transition(
 }
 
 fn validate_request_contract(envelope: &InformationOperationEnvelope) -> Result<(), String> {
+    if let LifecycleRequest::ActivateAddressedDispatch { attempts, .. } =
+        &envelope.operation.request
+    {
+        if envelope.operation_kind != "activate_addressed_dispatch" {
+            return Err("operation kind does not match its closed request variant".to_owned());
+        }
+        if envelope.output_slots.len() != attempts.len() {
+            return Err(
+                "atomic addressed activation requires one output slot per attempt".to_owned(),
+            );
+        }
+        for (index, (slot, attempt)) in envelope
+            .output_slots
+            .iter()
+            .zip(attempts.iter())
+            .enumerate()
+        {
+            let expected_index = u16::try_from(index)
+                .map_err(|_| "atomic addressed activation output index overflow".to_owned())?;
+            if slot != &addressed_attempt_output_slot(expected_index)
+                || derive_output_record_ref(&envelope.id, slot)
+                    != *attempt.binding.reference.as_untyped()
+            {
+                return Err(
+                    "atomic addressed activation attempt binding does not use its canonical output slot"
+                        .to_owned(),
+                );
+            }
+        }
+        if !envelope.lineage.is_empty() {
+            return Err("delivery-attempt outputs cannot declare lineage".to_owned());
+        }
+        return Ok(());
+    }
     let (kind, created) = request_contract(&envelope.operation.request);
     if envelope.operation_kind != kind {
         return Err("operation kind does not match its closed request variant".to_owned());
@@ -482,6 +526,7 @@ fn request_contract(
                 binding.reference.as_untyped().clone(),
             )),
         ),
+        LifecycleRequest::ActivateAddressedDispatch { .. } => ("activate_addressed_dispatch", None),
         LifecycleRequest::TransitionDispatch { .. } => ("transition_dispatch", None),
         LifecycleRequest::BeginDeliveryAttempt { binding, .. } => (
             "begin_delivery_attempt",

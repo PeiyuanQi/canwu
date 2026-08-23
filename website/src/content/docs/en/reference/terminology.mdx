@@ -105,7 +105,11 @@ renamed by this policy.
 | --- | --- | --- | --- |
 | [actor](/en/developer/reading-state/) | 角色 | `PersonId` | A person or in-world principal whose knowledge and authority constrain a view or action. |
 | [actor knowledge](/en/developer/reading-state/) | 角色知识 | `ActorKnowledge` | What one actor knows, including source, confidence, and time, stored separately from ground truth. |
-| [report](/en/architecture/events/) | 报告 | `report_dispatched` event payload | Information dispatched or delivered between actors before it can update their knowledge. |
+| [report](/en/architecture/events/) | 报告 | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
+| [holder-relative knowledge](/en/tutorials/cases/routed-correspondence/) | 持有人相对知识 | `KnowledgeHolderRef`, `KnowledgeReadCut` | Facts read from one person, institution, office, or other holder ledger at an exact cut, never from omniscient state. |
+| [correspondence](/en/tutorials/cases/routed-correspondence/) | 通信 | `CorrespondenceOperation` | Addressed communication demand composed with information delivery and, when needed, physical or signal transport. |
+| [reroute](/en/tutorials/cases/routed-correspondence/) | 改道 | `ItineraryRevision` | A successor itinerary for the same delivery attempt after disruption or changed route knowledge. |
+| [delivery retry](/en/tutorials/cases/routed-correspondence/) | 投递重试 | `DomainReference` role `"previous_attempt"` | A new successor delivery attempt after terminal failure; it is not a reroute of the old attempt. |
 | [projection](/en/developer/reading-state/) | 投影 | — | A materialized actor-scoped representation that does not expose authoritative domain state. |
 | [authority](/en/developer/integration/) | 权限 | `CommandAuthority` | The validated right to issue a command or perform an action. `authoritative state` is 权威状态. |
 | [issuer](/en/developer/integration/) | 签发者 | `Issuer` | The identity presented as the command source; authority checks decide whether it may act. |

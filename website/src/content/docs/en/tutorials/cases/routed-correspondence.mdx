@@ -1,0 +1,107 @@
+---
+title: Routed correspondence from Wuxi
+description: Run local and Wuxi-to-Beijing correspondence through holder-relative routing knowledge, transport handoffs, information delivery, incidents, persistence, and exact replay.
+sidebar:
+  order: 6
+  label: Routed correspondence
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+
+This case connects communication demand to physical delivery. The information
+ledger remains transport-neutral: the `canwu-correspondence` domain extension
+resolves an address, plans from the sender's own holder ledger, persists
+transport execution, and advances the addressed delivery through canonical
+ingress.
+
+## Run it
+
+```shell
+cargo run -p canwu-correspondence --example routed_correspondence
+```
+
+The example runs two requests through the same contract:
+
+| Request | Accepted itinerary | Arrival |
+| --- | --- | ---: |
+| Wuxi local delivery | one horse leg | minute `30` |
+| Wuxi to Beijing | scheduled rail to the Beijing station, then a horse final mile | minute `3060` |
+
+The fixture branches to select local or long-distance input data. The
+correspondence plugin itself has no Beijing-specific planning path: recipient
+address and network knowledge determine the accepted route.
+
+## Lifecycle
+
+<Steps>
+1. An application or channel adapter prepares one single-recipient addressed `Dispatch` and chooses a logical `due_at` deadline.
+2. A decision-backed command or a deterministically selected automatic `CommunicationOpportunity` admits the correspondence intent.
+3. The current plugin requires the carrier holder to equal the sender, reads only that sender-owned address, endpoint, and connection knowledge, then persists the accepted `RoutePlan` and exact knowledge cut.
+4. One atomic information operation activates the dispatch and creates its first `DeliveryAttempt`.
+5. `TransportExecution` advances each leg and records an explicit custody `Handoff` at a carrier or mode boundary.
+6. On-time final arrival completes the attempt and dispatch through idempotent information operations, preserving exact record-version evidence. A failed or late attempt leaves the dispatch `Active` for explicit recovery.
+</Steps>
+
+`RoutePlan.estimated_arrival_at` is an estimate. `DeliveryAttempt.due_at` is the
+immutable information deadline. A late arrival marks the `DeliveryAttempt` as
+`Failed` and the `CorrespondenceOperation` as `DeadlineMissed`; it does not
+rewrite the original deadline.
+
+## Incidents and demand
+
+A disaster uses operation-keyed RNG, fails the current leg, and replans from the
+current endpoint. Legs remain append-only and revision-qualified, and every
+accepted revision retains its exact knowledge cut and planning evidence. The
+same delivery attempt continues under the successor itinerary revision. The
+replacement first leg records custody transfer from the failed leg, including
+failure-time and delivery-attempt evidence. Incidents that are not applicable
+to an active transport attempt are retained as suppressed evidence without
+mutating the operation state.
+
+While the current attempt is `WaitingForRoute` and transport is
+`ReplanPending`, the sender-authorized `resolve_correspondence_v1` command can
+replan that same attempt after knowledge changes. After terminal failure, the
+same command can create a contiguous successor `DeliveryAttempt` with a fresh
+`TransportExecution` and deadline, or explicitly finalize the failed dispatch.
+Failure alone leaves the dispatch `Active` and never rewrites the prior
+attempt's deadline.
+
+Interception creates an `Access` record for the interceptor and does not
+automatically stop delivery. Destruction, decoding, redirection, or political
+effects require separate domain rules.
+
+Automatic demand is bounded and deterministic. One operation-keyed draw decides
+whether an opportunity occurs; another selects one recipient. The opportunity
+is consumed when correspondence starts, so snapshot restore cannot choose a
+different recipient.
+
+## Historical and modern channels
+
+Ancient post roads, 1900/1940 rail, modern rail, air, telegraph, and other signal
+networks can share time-dependent route planning. Their adapters still own
+period-specific transfers, operating hours, booking rules, security, encoding,
+and final-mile behavior. A telegraph route, for example, can combine office
+collection, signal transmission, and physical delivery without pretending
+that the signal leg is a train journey.
+
+Route search does not reserve scarce capacity. The current request contract has
+only `CorrespondenceCapacityAdmission::Unconstrained`; the plugin neither
+checks nor persists a booking. Rail, air, courier, or signal capacity needs a
+future admission variant carrying exact `CapacityBooking` or simulation
+reservation evidence. This example therefore demonstrates only unconstrained
+delivery.
+
+The tests restore snapshots and replay the full operation exactly. They also
+cover post-handoff rerouting without losing prior legs, route recovery after a
+knowledge update, successor-attempt retry, explicit finalization, external
+progress rejection, and holder-read authority. Persisted evidence includes the
+demand decision, per-revision knowledge cuts, routes, handoffs, incidents,
+recovery commands, information operations, and exact dispatch/attempt versions.
+
+See [routing and transport](/en/tutorials/routing-transport/) for the lower-level
+planning/execution contracts and the [architecture page](/en/architecture/) for
+crate ownership.

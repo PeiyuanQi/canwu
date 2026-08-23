@@ -280,6 +280,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-correspondence"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
+ "canwu-information",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-debug"
 version = "0.5.1"
 dependencies = [

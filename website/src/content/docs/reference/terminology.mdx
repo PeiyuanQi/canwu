@@ -101,7 +101,11 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | --- | --- | --- | --- |
 | [角色](/developer/reading-state/) | actor | `PersonId` | 其知识和权限会约束视图或行动的人物或世界内主体。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
-| [报告](/architecture/events/) | report | `report_dispatched` 事件载荷 | 在更新角色知识前，在角色之间签发或送达的信息。 |
+| [报告](/architecture/events/) | report | `EventKind::ReportDispatched` | 在更新角色知识前，在角色之间签发或送达的信息。 |
+| [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
+| [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
+| [改道](/tutorials/cases/routed-correspondence/) | reroute | `ItineraryRevision` | 因灾害或路线知识变化，为同一个投递尝试建立后继行程。 |
+| [投递重试](/tutorials/cases/routed-correspondence/) | delivery retry | `DomainReference` 角色 `"previous_attempt"` | 终态失败后新建的后继投递尝试，不是对旧 attempt 的改道。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |

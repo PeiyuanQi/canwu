@@ -79,6 +79,18 @@ The kernel holder-ledger, evidence, archive, and keyed-random contracts are the
 stable reusable boundary; publishing the extension is a later, separately
 reviewed compatibility decision.
 
+The unpublished `canwu-correspondence` domain extension composes this neutral
+ledger with actor-relative route knowledge and transport execution. It owns
+communication opportunities, admitted sender/recipient intent, address
+resolution, accepted route evidence, incident policy, and cross-extension
+orchestration. Application and channel adapters still prepare content and
+dispatch records, supply period-specific network/address knowledge, and admit
+scarce capacity. The information ledger does not acquire route search, and the
+router does not acquire dispatch or retry lifecycle state. The implemented
+slice requires the carrier holder to be the sender and reads only that
+sender-owned ledger; delegated-carrier disclosure and authority remain future
+contracts.
+
 ## Causality and explanation
 
 Events carry command, parent-event, boundary, or typed system causes and
@@ -194,6 +206,18 @@ revision is installed. A reroute does not create a new attempt; a retry does.
 Derived route caches are rebuildable and never authoritative state. See the
 [routing and transport proposal](proposals/routing-transport-mechanism.md) for
 the complete ownership and milestone boundary.
+
+The first complete correspondence vertical slice is specified in the
+[correspondence proposal](proposals/correspondence-mechanism.md). Rerouting
+keeps the same delivery attempt and creates a successor itinerary revision;
+only a true retry creates a successor attempt. A failed attempt leaves the
+dispatch active until explicit sender-authorized retry or finalization. Replan
+of the same attempt applies only before terminal failure, while it is waiting
+for a route and transport is `ReplanPending`.
+Interception records access and does not imply delivery termination. Capacity
+allocation remains separate from pure route search. The current correspondence
+request is explicitly `Unconstrained`; constrained execution needs a future
+admission contract carrying exact booking or reservation evidence.
 
 ## Systems and plugins
 

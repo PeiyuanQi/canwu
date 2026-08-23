@@ -44,8 +44,10 @@ pub const INSTITUTIONAL_AUTHORITY_GRANT: &str = "interpret_as_assigned_role";
 pub const AUTHORITY_COMMAND_PRODUCER: &str = "canwu-authority";
 pub const AUTHORITY_COMMAND_TYPE: &str = "delegate_interpretation_v1";
 
-const PLUGIN_VERSION: &str = "0.1.0-experimental";
-const SEMANTIC_HASH: &str = "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";
+const PLUGIN_VERSION: &str = "0.2.0-experimental";
+const SEMANTIC_HASH: &str = "8b20a4c41417220c920b8d0312a6011c4cf7ec98566bad61e82bbc5fada30bc8";
+const AUTHORITY_GRANTS_HASH: &str =
+    "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";
 const INPUT_HASH_DOMAIN: &str = "canwu.information.operation-input.v1";
 const PHASE7_SYSTEM: &str = "information_lifecycle_v1";
 const PHASE13_SYSTEM: &str = "information_publication_v1";
@@ -145,7 +147,7 @@ impl SimulationPlugin for InformationPlugin {
             ));
         }
         let grants_hash = canonical_hash(AUTHORITY_GRANTS_HASH_DOMAIN, &grants)?;
-        if grants_hash != SEMANTIC_HASH {
+        if grants_hash != AUTHORITY_GRANTS_HASH {
             return Err(invalid_record(
                 "information authority grants do not match the semantic descriptor identity",
             ));
@@ -417,7 +419,9 @@ fn apply_lifecycle_boundary(
                 .map_err(|_| {
                     invalid_record("information publication chunk size is not representable")
                 })?;
-                let status = if publication_count == 0 {
+                let status = if publication_count == 0 && !result_refs.is_empty() {
+                    InformationOperationStatus::AwaitingFinalization
+                } else if publication_count == 0 {
                     InformationOperationStatus::Completed
                 } else {
                     InformationOperationStatus::AwaitingPublication
@@ -432,7 +436,8 @@ fn apply_lifecycle_boundary(
                         remaining: publication_count,
                         chunk_size,
                     });
-                proposed.completed_at = (publication_count == 0).then_some(context.at);
+                proposed.completed_at =
+                    (publication_count == 0 && result_refs.is_empty()).then_some(context.at);
                 validate_operation_transition(&previous, &proposed).map_err(invalid_record)?;
                 for mutation in plan.mutations {
                     directives.push(mutate(
@@ -527,13 +532,29 @@ fn finalize_operation(
 
 fn publish_lifecycle_boundary(
     view: &SimulationView<'_>,
-    _context: &BoundaryContext,
+    context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
     let kind = DomainRecordKind::for_type::<InformationOperationRecord>();
     let operations = all_domain_records_of_kind(view, &kind)?;
     let mut directives = Vec::new();
     for record in operations {
         let previous = record.decode_payload::<InformationOperationRecord>()?;
+        if previous.status == InformationOperationStatus::AwaitingFinalization
+            && previous.continuation.is_none()
+            && previous.domain_result_evidence.is_empty()
+        {
+            let result_evidence = resolve_result_evidence(view, &previous)?;
+            let mut proposed = previous.clone();
+            proposed.status = InformationOperationStatus::Completed;
+            proposed.domain_result_evidence = result_evidence.values().cloned().collect();
+            proposed.completed_at = Some(context.at);
+            validate_operation_transition(&previous, &proposed).map_err(invalid_record)?;
+            directives.push(mutate(
+                operation_update(&record, &proposed)?,
+                "Finalize neutral information domain-result evidence",
+            ));
+            continue;
+        }
         if previous.status != InformationOperationStatus::AwaitingPublication {
             continue;
         }
@@ -792,6 +813,9 @@ fn knowledge_draft(
             )
         }
     };
+    let mut subjects = subjects;
+    subjects.sort();
+    subjects.dedup();
     let result = result_evidence.get(primary).ok_or_else(|| {
         invalid_record("information publication lacks exact domain-result evidence")
     })?;
@@ -1326,7 +1350,8 @@ mod tests {
                 &information_authority_grants()
             )
             .expect("authority grants should hash"),
-            SEMANTIC_HASH
+            AUTHORITY_GRANTS_HASH
         );
+        assert_ne!(plugin.semantic_hash(), AUTHORITY_GRANTS_HASH);
     }
 }

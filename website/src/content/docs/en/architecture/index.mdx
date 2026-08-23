@@ -92,6 +92,7 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
 | `canwu-api` | Programmatic and semantic interfaces |
 | `canwu-information` | Experimental authoritative information lifecycle extension |
+| `canwu-correspondence` | Experimental correspondence domain extension and simulation plugin |
 | `canwu-society` | Experimental social diffusion simulation module |
 | `canwu-technology` | Experimental evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
@@ -113,6 +114,7 @@ external and development dependencies are omitted.
   definition={`flowchart TB
     subgraph ToolsExtensions["Tools and extensions"]
         Debug["canwu-debug"]
+        Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
         Technology["canwu-technology"]
@@ -142,6 +144,8 @@ external and development dependencies are omitted.
     end
 
     Debug --> Api
+    Correspondence --> Api
+    Correspondence --> Information
     Information --> Api
     Society --> Api
     Technology --> Api
@@ -193,6 +197,13 @@ reference integrations connect those capabilities to a small world, and
 starter kits compose them into vertical slices developers can run and extend.
 All of these layers remain above the kernel; no historical world is embedded in
 `canwu-core`.
+
+`canwu-correspondence` is a domain extension by ownership: it owns
+communication demand, address resolution, accepted routes, disaster and
+interception policy, and cross-mechanism evidence. It is also a
+`SimulationPlugin` by execution form, registering authoritative commands,
+canonical ingress, and boundary systems. It depends on `canwu-api` and
+`canwu-information`, with no reverse dependency, so the crate DAG stays acyclic.
 
 <MermaidDiagram
   label="Architecture layers from the Canwu kernel to reference content, integrations, and host games"

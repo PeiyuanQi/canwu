@@ -28,15 +28,15 @@ Rust 应用应依赖官方支持的对外 API，而不是直接依赖实现 crat
 
 ```toml
 [dependencies]
-canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
+canwu-api = "=0.5.1"
 ```
 
 需要持久化 Canwu 存档的应用应固定已发布的引擎版本，并且只在同时提供明确
-存档迁移时升级。当前 `main` 分支依赖用于移动 API 发布前的开发阶段；不要把
-它当作稳定的存档格式。
+存档迁移时升级。上例选择不可变的 `0.5.1` 版本，而不是持续变化的 `main` 分支。
 
 `canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
-细节，不建议应用代码直接依赖，也不单独承诺兼容性。`canwu-society` 等实验性
+细节，不建议应用代码直接依赖，也不单独承诺兼容性。`canwu-correspondence`、
+`canwu-society` 等实验性
 模拟领域扩展暂不发布，在单独完成稳定化之前只能从仓库使用。
 
 ## 快速开始
@@ -70,6 +70,11 @@ cargo run -p canwu-society --example local_community_diffusion
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
+
+如需运行无锡本地与无锡到北京的经路线规划通信示例：
+
+```text
+cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
 ## 项目结构
@@ -81,11 +86,13 @@ cargo run -p canwu-technology --example technology_diffusion
 - `canwu-world`：历史实体和只读世界快照
 - `canwu-knowledge`：每个角色知道什么，以及信息来自何时
 - `canwu-routing`：确定性的角色相对路线规划
-- `canwu-transport`：行程、监管交接、容量预订和运送执行
+- `canwu-transport`：行程、保管权交接、容量预订和运送执行
 - `canwu-sim`：不公开的模拟状态、命令、调度和插件
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
 - `canwu-debug`：只使用公开 API 的小型参考客户端
 - `canwu-information`：未发布的实验性信息生命周期扩展
+- `canwu-correspondence`：建立在寻路、运输与信息生命周期之上的未发布实验性
+  通信模拟领域扩展和模拟插件
 - `canwu-society`：未发布的实验性社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
 - `canwu-technology`：未发布的通用技术模拟扩展，负责证据、本地能力、实施、
