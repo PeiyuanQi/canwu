@@ -2063,6 +2063,62 @@ fn technology_total_and_boundary_caps_persist_rejections_without_poisoning() {
 }
 
 #[test]
+fn idempotent_retries_do_not_consume_boundary_mutation_budget() {
+    let (scenario, _, _) = scenario();
+    let mut canwu = Canwu::new_with_plugins(48, scenario, &[&TechnologyPlugin])
+        .expect("technology plugin should initialize");
+    let mut retries = Vec::new();
+    for index in 0..33 {
+        let mut envelope = collision_envelope(&format!("retry-{index:02}"));
+        envelope.id = format!("retry-operation-{index:02}");
+        apply_result(&mut canwu, envelope.clone());
+        retries.push(envelope);
+    }
+
+    for envelope in &retries {
+        canwu
+            .enqueue_plugin_ingress(PluginIngressRequest::new(
+                "canwu-technology",
+                TECHNOLOGY_RESULT_INGRESS,
+                canwu.time(),
+                serde_json::to_value(envelope).expect("idempotent retry payload"),
+            ))
+            .expect("idempotent retry ingress should enqueue");
+    }
+    let mut fresh = collision_envelope("fresh-after-retries");
+    fresh.id = "fresh-after-retries".to_owned();
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            "canwu-technology",
+            TECHNOLOGY_RESULT_INGRESS,
+            canwu.time(),
+            serde_json::to_value(fresh).expect("fresh result payload"),
+        ))
+        .expect("fresh operation ingress should enqueue");
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("idempotent retries should not exhaust mutation budget");
+
+    let outcome = canwu
+        .typed_domain_record(
+            &canwu_api::TypedDomainRecordRef::<TechnologyOperation>::new("fresh-after-retries"),
+        )
+        .expect("fresh operation should receive a terminal outcome")
+        .decode_payload::<TechnologyOperation>()
+        .expect("fresh operation should decode");
+    assert_eq!(outcome.status, TechnologyOperationStatus::Rejected);
+    assert!(
+        canwu.events().iter().all(|event| !matches!(
+            &event.kind,
+            EventKind::Plugin { plugin, event_type }
+                if plugin == "canwu-technology"
+                    && event_type == "technology_operation_rejected_capacity_v1"
+        )),
+        "idempotent retries must not produce a capacity rejection"
+    );
+}
+
+#[test]
 #[allow(clippy::too_many_lines)]
 fn future_facts_and_oversized_collections_are_terminally_rejected() {
     let (scenario, ids, catalog) = scenario();
