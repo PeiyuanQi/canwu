@@ -18,25 +18,25 @@ Resolve local paths from the Canwu repository root, not from this skill folder.
 
 | Question | Tutorial source | Detailed or executable source |
 | --- | --- | --- |
-| First successful action, explicit time advancement, or actor-relative knowledge | Chinese: `website/src/content/docs/tutorials/move-army.mdx`; English: `website/src/content/docs/en/tutorials/move-army.mdx` | `crates/canwu-api/examples/move_army.rs` |
-| Canonical movement, active person self-movement, letter cargo, authority, custody, or arrival delivery | `docs/proposals/movement-order-mechanism.md`; `docs/architecture.md` | `crates/canwu-api/src/lib.rs`, `crates/canwu-sim/src/lib.rs`, and `crates/canwu-sim/src/scheduling.rs` |
-| Pause, speed controls, FPS independence, wall/simulation/presentation clocks, or interpolation | Chinese: `website/src/content/docs/tutorials/continuous-game-loop.mdx`; English: `website/src/content/docs/en/tutorials/continuous-game-loop.mdx` | `docs/continuous-game-loop.md` and `crates/canwu-api/examples/continuous_game_loop.rs` |
-| Schema-validated plugin commands, issuer checks, or declared state access | Chinese: `website/src/content/docs/tutorials/command-plugin.mdx`; English: `website/src/content/docs/en/tutorials/command-plugin.mdx` | `crates/canwu-api/examples/plugin.rs` |
-| Daily or turn boundaries, supply and demand, reservation, allocation, or multi-system settlement | Chinese: `website/src/content/docs/tutorials/phased-boundary.mdx`; English: `website/src/content/docs/en/tutorials/phased-boundary.mdx` | `crates/canwu-api/examples/phased_boundary.rs` |
-| DecisionTicket, controller binding, dynamic options, utility evaluation, Human/External/LLM policy boundaries, decision traces, or a neighboring warlord's military-aid request | Chinese: `website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx`; English: `website/src/content/docs/en/tutorials/cases/warlord-aid-decision.mdx` | `crates/canwu-api/examples/decision_ticket.rs` and `crates/canwu-api/tests/decision_framework.rs` |
-| Social diffusion simulation module: aggregate social or belief diffusion, cohorts, multidimensional disposition, social influence, organization topology, institutional policy, public/private divergence, or actor estimates | Chinese: `website/src/content/docs/tutorials/cases/local-community-diffusion.mdx`; English: `website/src/content/docs/en/tutorials/cases/local-community-diffusion.mdx` | `docs/proposals/social-belief-framework.md`, `crates/canwu-society/examples/local_community_diffusion.rs`, and `crates/canwu-society/tests/framework.rs` |
-| Confidential delivery, nonexclusive access, copy/derivative lineage, intended delivery after interception, audience release, or holder-isolated knowledge | Chinese: `website/src/content/docs/tutorials/cases/confidential-copy-release.mdx`; English: `website/src/content/docs/en/tutorials/cases/confidential-copy-release.mdx` | `crates/canwu-information/examples/confidential_copy_release.rs` and `crates/canwu-information/tests/case_conformance.rs` |
-| Ephemeral channels, interception without a persistent primary instance, failed and delegated interpretation, performer/commissioning-holder separation, or restricted review distribution | Chinese: `website/src/content/docs/tutorials/cases/encoded-interception.mdx`; English: `website/src/content/docs/en/tutorials/cases/encoded-interception.mdx` | `crates/canwu-information/examples/encoded_interception.rs` and `crates/canwu-information/tests/runtime_adapter.rs` |
+| First successful action, explicit time advancement, or actor-relative knowledge | Chinese: `website/src/content/docs/tutorials/move-army.mdx`; English: `website/src/content/docs/en/tutorials/move-army.mdx` | `crates/facade/canwu-api/examples/move_army.rs` |
+| Canonical movement, active person self-movement, letter cargo, authority, custody, or arrival delivery | `docs/proposals/movement-order-mechanism.md`; `docs/architecture.md` | `crates/facade/canwu-api/src/lib.rs`, `crates/runtime/canwu-sim/src/runtime/mod.rs`, and `crates/runtime/canwu-sim/src/runtime/scheduling.rs` |
+| Pause, speed controls, FPS independence, wall/simulation/presentation clocks, or interpolation | Chinese: `website/src/content/docs/tutorials/continuous-game-loop.mdx`; English: `website/src/content/docs/en/tutorials/continuous-game-loop.mdx` | `docs/continuous-game-loop.md` and `crates/facade/canwu-api/examples/continuous_game_loop.rs` |
+| Schema-validated plugin commands, issuer checks, or declared state access | Chinese: `website/src/content/docs/tutorials/command-plugin.mdx`; English: `website/src/content/docs/en/tutorials/command-plugin.mdx` | `crates/facade/canwu-api/examples/plugin.rs` |
+| Daily or turn boundaries, supply and demand, reservation, allocation, or multi-system settlement | Chinese: `website/src/content/docs/tutorials/phased-boundary.mdx`; English: `website/src/content/docs/en/tutorials/phased-boundary.mdx` | `crates/facade/canwu-api/examples/phased_boundary.rs` |
+| DecisionTicket, controller binding, dynamic options, utility evaluation, Human/External/LLM policy boundaries, decision traces, or a neighboring warlord's military-aid request | Chinese: `website/src/content/docs/tutorials/cases/warlord-aid-decision.mdx`; English: `website/src/content/docs/en/tutorials/cases/warlord-aid-decision.mdx` | `crates/facade/canwu-api/examples/decision_ticket.rs` and `crates/facade/canwu-api/tests/decision_framework.rs` |
+| Social diffusion simulation module: aggregate social or belief diffusion, cohorts, multidimensional disposition, social influence, organization topology, institutional policy, public/private divergence, or actor estimates | Chinese: `website/src/content/docs/tutorials/cases/local-community-diffusion.mdx`; English: `website/src/content/docs/en/tutorials/cases/local-community-diffusion.mdx` | `docs/proposals/social-belief-framework.md`, `crates/extensions/canwu-society/examples/local_community_diffusion.rs`, and `crates/extensions/canwu-society/tests/framework.rs` |
+| Confidential delivery, nonexclusive access, copy/derivative lineage, intended delivery after interception, audience release, or holder-isolated knowledge | Chinese: `website/src/content/docs/tutorials/cases/confidential-copy-release.mdx`; English: `website/src/content/docs/en/tutorials/cases/confidential-copy-release.mdx` | `crates/extensions/canwu-information/examples/confidential_copy_release.rs` and `crates/extensions/canwu-information/tests/case_conformance.rs` |
+| Ephemeral channels, interception without a persistent primary instance, failed and delegated interpretation, performer/commissioning-holder separation, or restricted review distribution | Chinese: `website/src/content/docs/tutorials/cases/encoded-interception.mdx`; English: `website/src/content/docs/en/tutorials/cases/encoded-interception.mdx` | `crates/extensions/canwu-information/examples/encoded_interception.rs` and `crates/extensions/canwu-information/tests/runtime_adapter.rs` |
 
 When no checkout is available, follow links from the corresponding official
 tutorial index or open the example under
-`https://github.com/PeiyuanQi/canwu/tree/main/crates/canwu-api/examples`.
+`https://github.com/PeiyuanQi/canwu/tree/main/crates/facade/canwu-api/examples`.
 
 ## Design contracts
 
 | Topic | Primary source | Useful sections or companion source |
 | --- | --- | --- |
-| Headless boundary, dependency direction, world/time/events, public interfaces, knowledge, plugins, settlement, renderer integration | `docs/architecture.md` | Match the section heading to the user's term; inspect `crates/canwu-api` for exact APIs |
+| Headless boundary, dependency direction, world/time/events, public interfaces, knowledge, plugins, settlement, renderer integration | `docs/architecture.md` | Match the section heading to the user's term; inspect `crates/facade/canwu-api` for exact APIs |
 | Intended product surfaces, historical state, causality, decisions/controllers, persistence, counterfactuals, geography, plugins, debug client | `docs/end-state.md` | Use for design intent and destination, then confirm implemented behavior in current sources |
 | Named engine requirements and acceptable evidence | `docs/engine-conformance.md` | Requirements E01-E16 and the conformance evidence section |
 | SemVer, snapshot formats, migrations, hashing, replay, and supported platforms | `docs/versioning.md` | Use for compatibility claims; do not infer compatibility from examples |
@@ -52,7 +52,7 @@ Official design fallbacks:
 
 ## Exact API questions
 
-Start at `crates/canwu-api/src/lib.rs` and search for the named public type or
+Start at `crates/facade/canwu-api/src/lib.rs` and search for the named public type or
 method. Use the matching example to show composition. Do not use
-`crates/canwu-sim` as client documentation, and do not infer a public guarantee
+`crates/runtime/canwu-sim` as client documentation, and do not infer a public guarantee
 from a private implementation detail.

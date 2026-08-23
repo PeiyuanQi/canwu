@@ -1,0 +1,22 @@
+[package]
+name = "canwu-random-api-delta"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[features]
+legacy-v4-source-shape = []
+viewer-admin-leak = []
+viewer-boundary-leak = []
+viewer-domain-leak = []
+viewer-journal-leak = []
+
+[dependencies]
+canwu-api = { path = "../../../../facade/canwu-api" }
+canwu-core = { path = "../../../../foundation/canwu-core" }
+canwu-event = { path = "../../../../model/canwu-event" }
+canwu-sim = { path = "../.." }
+canwu-time = { path = "../../../../foundation/canwu-time" }
+serde_json = "1"

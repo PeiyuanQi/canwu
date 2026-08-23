@@ -1511,14 +1511,14 @@ admitted as a command or canonical ingress record.
 
 ### Package boundary
 
-Create crates/canwu-information with:
+Create crates/extensions/canwu-information with:
 
 ~~~toml
 [package]
 publish = false
 
 [dependencies]
-canwu-api = { path = "../canwu-api" }
+canwu-api = { path = "../../facade/canwu-api" }
 serde.workspace = true
 serde_json.workspace = true
 ~~~
@@ -2624,7 +2624,7 @@ Required observations:
 Suggested files after implementation:
 
 ~~~text
-crates/canwu-information/examples/confidential_copy_release.rs
+crates/extensions/canwu-information/examples/confidential_copy_release.rs
 website/src/content/docs/tutorials/cases/confidential-copy-release.mdx
 website/src/content/docs/en/tutorials/cases/confidential-copy-release.mdx
 ~~~
@@ -2690,7 +2690,7 @@ Required observations:
 Suggested files after implementation:
 
 ~~~text
-crates/canwu-information/examples/encoded_interception.rs
+crates/extensions/canwu-information/examples/encoded_interception.rs
 website/src/content/docs/tutorials/cases/encoded-interception.mdx
 website/src/content/docs/en/tutorials/cases/encoded-interception.mdx
 ~~~

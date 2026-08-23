@@ -91,7 +91,7 @@ serde defaults are not a source-compatibility promise.
 | Errors | `ErrorCode` adds the knowledge validation/authority/limit/read-cut/not-found/write-declaration codes, `EvidenceUnavailable`, `EvidenceContentUnavailable`, `InvalidRandomOperationEvidence`, `RandomOperationConflict`, `LegacyReplayUnavailable`, and `UnsupportedRandomDrawAddress`. | Extend exhaustive error mapping. Preserve these distinctions in API/UI adapters rather than collapsing them into `InvalidSnapshot` or a generic plugin error. |
 
 The external API-delta fixture under
-`crates/canwu-sim/tests/api-delta/` constructs or matches the new format-5
+`crates/runtime/canwu-sim/tests/api-delta/` constructs or matches the new format-5
 random, schema, descriptor, boundary, event, ingress, error, and generic
 knowledge surfaces as a downstream crate. It also proves that the old format-4
 random-record literal fails to compile and that a restricted `CanwuViewer`

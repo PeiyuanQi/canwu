@@ -51,13 +51,15 @@ command transcript, release artifact, or CI log.
 
 ## Publish order
 
-Publish from the tagged commit in dependency order. Wait until crates.io can
-resolve every completed group before continuing:
+Publish from the tagged commit in dependency order. The human-readable crate
+DAG is maintained in [`crates/README.md`](../crates/README.md). Wait until
+crates.io can resolve every completed group before continuing:
 
 1. `canwu-core`, `canwu-time`
-2. `canwu-event`, `canwu-knowledge`, `canwu-world`
-3. `canwu-sim`
-4. `canwu-api`
+2. `canwu-decision`, `canwu-event`, `canwu-knowledge`, `canwu-world`
+3. `canwu-routing`, `canwu-sim`
+4. `canwu-transport`
+5. `canwu-api`
 
 For each package, first run its dry-run and then publish the exact locked
 source:

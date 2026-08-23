@@ -978,6 +978,6 @@ Canwu is developed against the normative engine-neutral capability profile in
 settlement, authority, ownership, transactions, knowledge, persistence,
 lineage, packages, and publication through public extension points. Current
 coverage and remaining gaps are tracked in the profile itself. The public-only
-[`representative_conformance`](../crates/canwu-api/tests/representative_conformance.rs)
+[`representative_conformance`](../crates/facade/canwu-api/tests/representative_conformance.rs)
 fixture composes independent packages across authority, settlement, typed
 records, knowledge, randomness, persistence, replay, forking, and rollback.

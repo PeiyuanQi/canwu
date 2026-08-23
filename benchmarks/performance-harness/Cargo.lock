@@ -30,14 +30,16 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "canwu-core",
  "canwu-decision",
  "canwu-event",
  "canwu-knowledge",
+ "canwu-routing",
  "canwu-sim",
  "canwu-time",
+ "canwu-transport",
  "canwu-world",
  "serde",
  "serde_json",
@@ -45,14 +47,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-decision"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -62,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-event"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -71,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-information"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "canwu-api",
  "serde",
@@ -80,7 +82,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -101,8 +103,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-routing"
+version = "0.5.1"
+dependencies = [
+ "blake3",
+ "canwu-core",
+ "canwu-time",
+ "canwu-world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-sim"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -117,14 +131,24 @@ dependencies = [
 
 [[package]]
 name = "canwu-time"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
 ]
 
 [[package]]
+name = "canwu-transport"
+version = "0.5.1"
+dependencies = [
+ "canwu-core",
+ "canwu-routing",
+ "canwu-time",
+ "serde",
+]
+
+[[package]]
 name = "canwu-world"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "canwu-core",
  "canwu-time",

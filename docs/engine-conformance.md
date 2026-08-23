@@ -302,7 +302,7 @@ open until recurring calendar policy and all internal scheduled continuation
 sources are represented by one versioned persistence abstraction.
 
 The public-only
-[`representative_conformance`](../crates/canwu-api/tests/representative_conformance.rs)
+[`representative_conformance`](../crates/facade/canwu-api/tests/representative_conformance.rs)
 fixture now composes independent domain packages, authority-aware commands and
 persisted rejection evidence, competing reservations, same- and next-boundary
 visibility, a conditional record transition, actor-relative knowledge, scoped
