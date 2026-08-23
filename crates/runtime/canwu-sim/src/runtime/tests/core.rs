@@ -1,5 +1,122 @@
 use super::*;
 
+const SAME_BOUNDARY_VERSION_PLUGIN: &str = "fixture-same-boundary-version";
+
+fn same_boundary_record_ref() -> DomainRecordRef {
+    DomainRecordRef {
+        kind: DomainRecordKind::new("fixture.same-boundary", "record"),
+        id: "primary".to_owned(),
+    }
+}
+
+fn propose_same_boundary_update(
+    view: &SimulationView<'_>,
+    _context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let reference = same_boundary_record_ref();
+    let current = view
+        .domain_record(&reference)?
+        .ok_or_else(|| CanwuError::new(ErrorCode::InvalidDomainRecord, "fixture record missing"))?;
+    Ok(BoundaryProposal {
+        directives: vec![BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Update {
+                record: DomainRecordDraft::new(reference, serde_json::json!({"value": 2})),
+                expected_version: current.version,
+            },
+            summary: "Propose a same-boundary replacement version".to_owned(),
+        }],
+        ..BoundaryProposal::default()
+    })
+}
+
+fn verify_prior_same_boundary_version(
+    view: &SimulationView<'_>,
+    _context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let prior = DomainRecordVersionRef {
+        record: same_boundary_record_ref(),
+        version: 1,
+        established_by: DomainRecordVersionSource::InitialScenario,
+    };
+    if !view.domain_record_version_evidence_exists(&prior)?
+        || !view.evidence_exists(&EvidenceRef::DomainRecordVersion(prior))?
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "an earlier same-boundary proposal hid valid prior-version evidence",
+        ));
+    }
+    Ok(BoundaryProposal::default())
+}
+
+struct SameBoundaryVersionPlugin;
+
+impl SimulationPlugin for SameBoundaryVersionPlugin {
+    fn name(&self) -> &'static str {
+        SAME_BOUNDARY_VERSION_PLUGIN
+    }
+
+    fn version(&self) -> &'static str {
+        "test-v1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "7100000000000000000000000000000000000000000000000000000000000000"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        let mut schema =
+            DomainRecordSchema::new(same_boundary_record_ref().kind, DomainRecordClass::Record);
+        schema.mutation_policy = DomainRecordMutationPolicy::Versioned;
+        let state = schema.state_key();
+        registrar.register_record_schema(schema)?;
+
+        let mut update = BoundarySystemContract::new(
+            "a-propose-update",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        update.reads = vec![state.clone()];
+        update.writes = vec![state.clone()];
+        update.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(update, propose_same_boundary_update)?;
+
+        let mut verify = BoundarySystemContract::new(
+            "z-verify-prior-version",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        verify.reads = vec![state];
+        registrar.register_boundary_system(verify, verify_prior_same_boundary_version)
+    }
+}
+
+#[test]
+fn same_boundary_proposal_does_not_hide_valid_prior_version_evidence() {
+    let (mut scenario, _) = demo_scenario();
+    scenario.domain_records.push(DomainRecord {
+        reference: same_boundary_record_ref(),
+        owner: SAME_BOUNDARY_VERSION_PLUGIN.to_owned(),
+        class: DomainRecordClass::Record,
+        version: 1,
+        lifecycle: DomainRecordLifecycle::Active,
+        payload: serde_json::json!({"value": 1}),
+        references: Vec::new(),
+    });
+    let mut simulation = Simulation::new_with_plugins(811, scenario, &[&SameBoundaryVersionPlugin])
+        .expect("same-boundary fixture should initialize");
+    simulation
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+        .expect("both old and proposed versions should remain valid evidence");
+    assert_eq!(
+        simulation
+            .domain_record(&same_boundary_record_ref())
+            .expect("updated record")
+            .version,
+        2
+    );
+}
+
 #[test]
 fn deterministic_seed_and_event_order_survive_equal_runs() {
     let (scenario, ids) = demo_scenario();
@@ -1367,4 +1484,123 @@ fn snapshot_rejects_scheduled_plugin_correlation_drift() {
     };
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
     assert!(error.message.contains("event correlation"));
+}
+
+#[test]
+fn domain_record_candidates_stay_sparse_among_unrelated_kinds() {
+    let target = DomainRecordKind::new("test.technology", "attempt");
+    let unrelated = DomainRecordKind::new("test.world", "unrelated");
+    let mut records = BTreeMap::new();
+    for index in 0..100_000 {
+        insert_query_fixture(&mut records, unrelated.clone(), format!("{index:06}"));
+    }
+    for id in ["000", "001", "002"] {
+        insert_query_fixture(&mut records, target.clone(), id.to_owned());
+    }
+
+    let first = domain_record_candidates(&records, &target, None, 2);
+    assert_eq!(first.len(), 2);
+    assert_eq!(
+        first
+            .keys()
+            .map(|value| value.id.as_str())
+            .collect::<Vec<_>>(),
+        ["000", "001"]
+    );
+    let cursor = first.last_key_value().expect("page should not be empty").0;
+    let second = domain_record_candidates(&records, &target, Some(cursor), 2);
+    assert_eq!(second.len(), 1);
+    assert_eq!(
+        second.first_key_value().expect("tail should exist").0.id,
+        "002"
+    );
+}
+
+#[test]
+fn domain_record_pages_reject_a_stale_revision() {
+    let (scenario, _) = demo_scenario();
+    let mut simulation = Simulation::new(113, scenario).expect("demo should load");
+    let kind = DomainRecordKind::new("test.technology", "attempt");
+    let first = simulation
+        .domain_record_page(&kind, None, 16, None)
+        .expect("first page should bind a revision");
+    simulation
+        .settle_boundary(BoundaryRequest::at(simulation.time()))
+        .expect("empty boundary should settle");
+    let error = simulation
+        .domain_record_page(&kind, None, 16, Some(first.revision))
+        .expect_err("a page from an older authoritative revision must fail");
+    assert_eq!(error.code, ErrorCode::SimulationRevisionConflict);
+}
+
+#[test]
+fn domain_record_pages_validate_limits_cursors_and_empty_tails() {
+    let (scenario, _) = demo_scenario();
+    let simulation = Simulation::new(119, scenario).expect("demo should load");
+    let kind = DomainRecordKind::new("test.technology", "attempt");
+    let wrong_kind = DomainRecordKind::new("test.world", "unrelated");
+    let wrong_cursor = DomainRecordRef::new(&wrong_kind.namespace, &wrong_kind.name, "cursor");
+
+    let error = simulation
+        .domain_record_page(&kind, None, 0, None)
+        .expect_err("zero-sized pages must be rejected");
+    assert_eq!(error.code, ErrorCode::ValueOutOfRange);
+    let error = simulation
+        .domain_record_page(&kind, Some(&wrong_cursor), 16, None)
+        .expect_err("a cursor from another kind must be rejected");
+    assert_eq!(error.code, ErrorCode::InvalidPayload);
+
+    let after_tail = DomainRecordRef::new(&kind.namespace, &kind.name, "zzzz");
+    let page = simulation
+        .domain_record_page(&kind, Some(&after_tail), 16, None)
+        .expect("a cursor beyond the final record should return an empty page");
+    assert!(page.records.is_empty());
+    assert!(page.next.is_none());
+    assert_eq!(page.revision, simulation.revision());
+}
+
+#[test]
+fn generic_evidence_identity_query_distinguishes_missing_ids() {
+    let (scenario, _) = demo_scenario();
+    let mut simulation = Simulation::new(127, scenario).expect("demo should load");
+    simulation
+        .settle_boundary(BoundaryRequest::at(simulation.time()))
+        .expect("boundary should settle");
+    let boundary = simulation
+        .boundaries()
+        .last()
+        .expect("boundary evidence should exist")
+        .id;
+    assert!(simulation.evidence_exists(&EvidenceRef::Boundary(boundary)));
+    assert_eq!(
+        simulation.evidence_time(&EvidenceRef::Boundary(boundary)),
+        Some(simulation.time())
+    );
+    assert!(
+        !simulation.evidence_exists(&EvidenceRef::Boundary(BoundaryId::new(boundary.get() + 1)))
+    );
+    assert_eq!(
+        simulation.evidence_time(&EvidenceRef::Boundary(BoundaryId::new(boundary.get() + 1))),
+        None
+    );
+}
+
+fn insert_query_fixture(
+    records: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    kind: DomainRecordKind,
+    id: String,
+) {
+    let reference = DomainRecordRef { kind, id };
+    records.insert(
+        reference.clone(),
+        DomainRecord {
+            reference,
+            owner: "test".to_owned(),
+            class: DomainRecordClass::Record,
+            version: 1,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: Value::Null,
+            references: Vec::new(),
+        },
+    );
 }

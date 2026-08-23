@@ -93,6 +93,8 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-api` | Programmatic and semantic interfaces |
 | `canwu-information` | Experimental authoritative information lifecycle extension |
 | `canwu-society` | Experimental social diffusion simulation module |
+| `canwu-technology` | Experimental evidence-based generic technology simulation extension |
+| `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-debug` | Reference client using only the public API |
 
 ### Direct crate dependency DAG
@@ -113,6 +115,8 @@ external and development dependencies are omitted.
         Debug["canwu-debug"]
         Information["canwu-information"]
         Society["canwu-society"]
+        Technology["canwu-technology"]
+        History["canwu-history-research"]
     end
 
     subgraph Facade["Public facade"]
@@ -140,6 +144,9 @@ external and development dependencies are omitted.
     Debug --> Api
     Information --> Api
     Society --> Api
+    Technology --> Api
+    History --> Api
+    History --> Technology
 
     Api --> Core
     Api --> Decision

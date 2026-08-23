@@ -307,6 +307,28 @@ separate format or migration fixture rather than interpreting old snapshots
 under new transport semantics. The current semantic versions are
 `canwu-routing.v1` and `canwu-transport.v1`.
 
+Technology and historical research are also additive unpublished extension
+crates in 0.5. `canwu-technology` and the three `canwu-history-research`
+descriptors register ordinary domain-record and knowledge schemas, so they do
+not change snapshot format 5. Saves that activate them retain their exact
+plugin names, experimental versions, semantic hashes, records, commands,
+ingress, and boundary changes and cannot continue without matching handlers.
+
+`DomainRecordPage`, `domain_record_page`, and retained
+`domain_record_version` lookup are additive trusted-host APIs. `evidence_exists`
+and `evidence_time` are additive generic retained-or-archived identity queries
+for declared plugin
+views and the trusted host. A page binds an
+authoritative revision and rejects later calls against a stale revision. Exact
+version lookup returns the record body established by the named initial or
+boundary-change evidence while that body is retained; initial bodies use a
+rebuildable in-memory record index and retained boundaries use their evidence
+cursor rather than a full-history scan. An archive receipt alone
+proves identity but returns no precise evidence time or record body; callers
+that require causal ordering must load the archived body or fail closed. These
+APIs do not weaken existing snapshot or
+evidence validation and do not alter serialized state.
+
 Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
 emission provenance, command and event admission, reservation offers, requests,
 allocations, committed component changes, boundary causes, and the next boundary

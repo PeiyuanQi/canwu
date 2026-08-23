@@ -1,0 +1,20 @@
+[package]
+name = "canwu-history-research"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+publish = false
+description = "Optional historical research assessment plugins for Canwu technology simulations"
+
+[dependencies]
+canwu-api.workspace = true
+canwu-technology.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

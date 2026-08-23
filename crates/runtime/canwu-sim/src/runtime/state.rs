@@ -461,6 +461,7 @@ pub(super) struct RuntimeCounters {
 #[derive(Clone)]
 pub(super) struct RuntimeMetadata {
     pub(super) initial_scenario: Option<Scenario>,
+    pub(super) initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
     pub(super) run_manifest: RunManifest,
     pub(super) run_manifest_hash: String,
     pub(super) run_configuration: RunConfigurationSnapshot,

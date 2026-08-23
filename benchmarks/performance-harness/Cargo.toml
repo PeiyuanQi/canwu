@@ -16,6 +16,10 @@ allocation-counting = []
 [dependencies]
 canwu-api = { path = "../../crates/facade/canwu-api" }
 canwu-information = { path = "../../crates/extensions/canwu-information" }
+blake3 = "1"
+canwu-history-research = { path = "../../crates/extensions/canwu-history-research" }
+canwu-technology = { path = "../../crates/extensions/canwu-technology" }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]

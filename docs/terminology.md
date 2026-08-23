@@ -61,6 +61,8 @@ renamed by this policy.
 | [模拟插件](../website/src/content/docs/developer/extensions.mdx) | simulation plugin | `SimulationPlugin` | A runtime registration unit that implements Canwu's public plugin contract. Its name, version, and semantic hash identify the executable behavior used for loading and exact replay. |
 | [模拟领域扩展](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | domain extension | — | An optional domain-specific delivery package built on public engine contracts. It may contain one or more plugins, domain types, schemas, commands, queries, and supporting APIs. There is no required `DomainExtension` trait. |
 | [模拟模块](../website/src/content/docs/tutorials/cases/local-community-diffusion.mdx) | simulation module | — | An informal, human-facing name for a coherent simulation capability, such as the social diffusion simulation module. It may be implemented by an extension and its plugins, but it is not itself an engine contract. |
+| [技术模拟扩展](../website/src/content/docs/tutorials/technology-diffusion.mdx) | technology simulation extension | `canwu-technology` | The optional generic extension for technique revisions, evidence, local capability, implementation, use-specific adoption, and transmission opportunities. It is not a global technology tree. |
+| [历史研究插件](../website/src/content/docs/tutorials/technology-diffusion.mdx) | historical research plugin | `canwu-history-research` | An optional simulation plugin that records a researcher's bounded assessment of evidence without changing base technology truth. |
 | [命令插件](../website/src/content/docs/tutorials/command-plugin.mdx) | command plugin | `register_command()` | A simulation plugin that registers schema-validated commands and handlers. |
 | [边界系统](../website/src/content/docs/architecture/settlement.mdx) | boundary system | `BoundarySystemContract` | A declared system that runs in a settlement phase with bounded reads, writes, resources, and randomness. |
 | [领域 schema](../website/src/content/docs/developer/extensions.mdx) | domain schema | `DomainRecordType` | A versioned structural contract for plugin-owned domain data. Keep `schema` in code-adjacent Chinese prose. |
@@ -91,6 +93,7 @@ renamed by this policy.
 | [派生分支](../website/src/content/docs/developer/persistence.mdx) | fork | `fork()` | An independent simulation copied from an existing point so it can advance with new inputs. Use `fork` when referring to the API call. |
 | [状态承诺](../website/src/content/docs/architecture/settlement.mdx) | state commitment | `CommitmentRoots` | A cryptographic commitment that binds authoritative state or evidence for validation. |
 | [语义哈希](../website/src/content/docs/developer/extensions.mdx) | semantic hash | `semantic_hash` | A stable declaration of plugin behavior used to reject incompatible load or replay environments. |
+| [精确领域记录版本](../website/src/content/docs/tutorials/technology-diffusion.mdx) | exact domain-record version | `DomainRecordVersionRef`, `domain_record_version()` | A domain-record identity, version, and establishment source used to preserve the meaning of historical evidence after the current record changes. |
 
 ## Actors, knowledge, and decisions
 

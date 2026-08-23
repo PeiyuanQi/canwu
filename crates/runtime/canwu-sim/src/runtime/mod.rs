@@ -161,8 +161,143 @@ pub const COMMITMENT_FORMAT_VERSION: u32 = 1;
 /// on recursively emitted immediate events.
 pub const MAX_SYNCHRONOUS_REACTION_DEPTH: usize = 32;
 const CORE_STATE_NAMESPACE: &str = "canwu.core";
+const MAX_DOMAIN_RECORD_QUERY_LIMIT: usize = 10_000;
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// One deterministic trusted-host page of records from an authoritative read cut.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct DomainRecordPage {
+    pub kind: DomainRecordKind,
+    pub revision: u64,
+    pub records: Vec<DomainRecord>,
+    pub next: Option<DomainRecordRef>,
+}
+
+fn validate_domain_record_page_request(
+    kind: &DomainRecordKind,
+    after: Option<&DomainRecordRef>,
+    limit: usize,
+) -> Result<(), CanwuError> {
+    if limit == 0 || limit > MAX_DOMAIN_RECORD_QUERY_LIMIT {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            format!(
+                "domain-record query limit must be between 1 and {MAX_DOMAIN_RECORD_QUERY_LIMIT}"
+            ),
+        ));
+    }
+    if after.is_some_and(|cursor| cursor.kind != *kind) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "domain-record page cursor has the wrong kind",
+        ));
+    }
+    Ok(())
+}
+
+fn domain_record_candidates(
+    records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    kind: &DomainRecordKind,
+    after: Option<&DomainRecordRef>,
+    limit: usize,
+) -> BTreeMap<DomainRecordRef, DomainRecord> {
+    use std::ops::Bound::{Excluded, Included, Unbounded};
+
+    let lower = after.map_or_else(
+        || {
+            Included(DomainRecordRef {
+                kind: kind.clone(),
+                id: String::new(),
+            })
+        },
+        |cursor| Excluded(cursor.clone()),
+    );
+    records
+        .range((lower, Unbounded))
+        .take_while(|(reference, _)| reference.kind == *kind)
+        .take(limit)
+        .map(|(reference, record)| (reference.clone(), record.clone()))
+        .collect()
+}
+
+fn retained_domain_record_version(
+    state: &RuntimeState,
+    reference: &DomainRecordVersionRef,
+) -> Option<DomainRecord> {
+    if reference.version == 0 {
+        return None;
+    }
+    let record = match reference.established_by {
+        DomainRecordVersionSource::InitialScenario => state
+            .metadata
+            .initial_scenario
+            .as_ref()?
+            .domain_records
+            .get(
+                *state
+                    .metadata
+                    .initial_domain_record_indexes
+                    .get(&reference.record)?,
+            )
+            .filter(|record| record.version == reference.version),
+        DomainRecordVersionSource::BoundaryChange {
+            boundary,
+            change_index,
+        } => state
+            .evidence
+            .retained_boundary(boundary)?
+            .record_changes
+            .get(usize::try_from(change_index).ok()?)
+            .map(|change| &change.current)
+            .filter(|record| {
+                record.reference == reference.record && record.version == reference.version
+            }),
+    }?;
+    Some(record.clone())
+}
+
+fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Option<SimTime> {
+    match reference {
+        EvidenceRef::Command(id) => state
+            .evidence
+            .retained_command(*id)
+            .map(|record| record.accepted_at),
+        EvidenceRef::CommandAttempt(id) => state
+            .evidence
+            .retained_command_attempt(*id)
+            .map(|record| record.at),
+        EvidenceRef::Event(id) => state
+            .evidence
+            .retained_event(*id)
+            .map(|record| record.timestamp),
+        EvidenceRef::Ingress(id) => state
+            .evidence
+            .retained_ingress(*id)
+            .map(|record| record.issued_at),
+        EvidenceRef::Boundary(id) => state
+            .evidence
+            .retained_boundary(*id)
+            .map(|record| record.at),
+        EvidenceRef::RandomDraw(id) => state
+            .evidence
+            .retained_random_draw(*id)
+            .map(|record| record.at),
+        EvidenceRef::DomainRecordVersion(version) => match version.established_by {
+            DomainRecordVersionSource::InitialScenario => {
+                retained_domain_record_version(state, version).map(|_| state.scheduler.initial_time)
+            }
+            DomainRecordVersionSource::BoundaryChange { boundary, .. } => {
+                retained_domain_record_version(state, version).and_then(|_| {
+                    state
+                        .evidence
+                        .retained_boundary(boundary)
+                        .map(|record| record.at)
+                })
+            }
+        },
+    }
+}
 
 pub use error::{CanwuError, ErrorCode};
 pub use hashing::CommitmentRoots;
@@ -290,6 +425,12 @@ impl StateKey {
     #[must_use]
     pub fn core_ingress() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "ingress")
+    }
+
+    /// Retained or archived boundary and random-draw evidence identities.
+    #[must_use]
+    pub fn core_evidence() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "evidence")
     }
 }
 
@@ -929,6 +1070,17 @@ impl Simulation {
         let plugins = PluginRegistry::default();
         let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
         let initial_scenario = Some(scenario.clone());
+        let initial_domain_record_indexes = initial_scenario
+            .as_ref()
+            .map(|scenario| {
+                scenario
+                    .domain_records
+                    .iter()
+                    .enumerate()
+                    .map(|(index, record)| (record.reference.clone(), index))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
@@ -1003,6 +1155,7 @@ impl Simulation {
                 },
                 metadata: RuntimeMetadata {
                     initial_scenario,
+                    initial_domain_record_indexes,
                     run_manifest,
                     run_manifest_hash,
                     run_configuration,
@@ -1224,6 +1377,55 @@ impl Simulation {
         self.state.current.domain_records.get(reference)
     }
 
+    /// Returns whether an exact domain-record version exists in current or retained evidence.
+    #[must_use]
+    pub fn domain_record_version_evidence_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> bool {
+        !matches!(
+            validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(&self.state),
+                &EvidenceRef::DomainRecordVersion(reference.clone()),
+            ),
+            validation::EvidenceAvailability::Missing
+        )
+    }
+
+    /// Returns whether a generic evidence identity is retained or archived.
+    #[must_use]
+    pub fn evidence_exists(&self, reference: &EvidenceRef) -> bool {
+        !matches!(
+            validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(&self.state),
+                reference,
+            ),
+            validation::EvidenceAvailability::Missing
+        )
+    }
+
+    /// Returns when retained evidence first became authoritative.
+    ///
+    /// `None` means the evidence is missing or only its compact archive
+    /// receipt remains. Proposed same-boundary evidence is available through
+    /// [`SimulationView::evidence_time`] while its boundary is being built.
+    #[must_use]
+    pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
+        retained_evidence_time(&self.state, reference)
+    }
+
+    /// Resolves the retained record body for one exact domain-record version.
+    ///
+    /// Returns `None` when the version is unavailable or only its compacted
+    /// archive receipt remains.
+    #[must_use]
+    pub fn domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<DomainRecord> {
+        retained_domain_record_version(&self.state, reference)
+    }
+
     #[must_use]
     pub fn typed_domain_record<T: DomainRecordType>(
         &self,
@@ -1234,6 +1436,45 @@ impl Simulation {
 
     pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
         self.state.current.domain_records.values()
+    }
+
+    /// Returns one revision-bound page of authoritative domain records.
+    ///
+    /// Pass the revision returned by the first page on every subsequent page.
+    /// A mutation between pages is rejected instead of mixing two read cuts.
+    pub fn domain_record_page(
+        &self,
+        kind: &DomainRecordKind,
+        after: Option<&DomainRecordRef>,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<DomainRecordPage, CanwuError> {
+        validate_domain_record_page_request(kind, after, limit)?;
+        let revision = self.revision();
+        if expected_revision.is_some_and(|expected| expected != revision) {
+            return Err(CanwuError::new(
+                ErrorCode::SimulationRevisionConflict,
+                format!(
+                    "domain-record page expected revision {expected_revision:?}, current revision is {revision}"
+                ),
+            ));
+        }
+        let requested = limit.checked_add(1).unwrap_or(limit);
+        let mut records =
+            domain_record_candidates(&self.state.current.domain_records, kind, after, requested)
+                .into_values()
+                .collect::<Vec<_>>();
+        let has_more = records.len() > limit;
+        records.truncate(limit);
+        let next = has_more
+            .then(|| records.last().map(|record| record.reference.clone()))
+            .flatten();
+        Ok(DomainRecordPage {
+            kind: kind.clone(),
+            revision,
+            records,
+            next,
+        })
     }
 
     #[must_use]
@@ -1697,6 +1938,17 @@ impl Simulation {
             },
             None => None,
         };
+        let initial_domain_record_indexes = initial_scenario
+            .as_ref()
+            .map(|scenario| {
+                scenario
+                    .domain_records
+                    .iter()
+                    .enumerate()
+                    .map(|(index, record)| (record.reference.clone(), index))
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
@@ -1793,6 +2045,7 @@ impl Simulation {
                 },
                 metadata: RuntimeMetadata {
                     initial_scenario,
+                    initial_domain_record_indexes,
                     run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
                         invalid_snapshot_error("snapshot is missing its run manifest")
                     })?,

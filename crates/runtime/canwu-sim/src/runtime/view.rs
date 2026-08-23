@@ -6,8 +6,9 @@ use super::{
     KnowledgeRecord, KnowledgeRecordId, Person, PersonId, PluginComponentKey,
     PluginComponentRecord, RandomOperationTarget, RandomStreamKey, RefCell, ReservationAllocation,
     ReservationRef, Route, RouteId, RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent,
-    SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value, component_key, random,
-    records, validation,
+    SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value, component_key,
+    domain_record_candidates, random, records, retained_domain_record_version,
+    validate_domain_record_page_request, validation,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -103,6 +104,32 @@ impl SimulationView<'_> {
     pub fn actor_knowledge(&self, actor: PersonId) -> Result<Option<&ActorKnowledge>, CanwuError> {
         self.require_read(&StateKey::core_knowledge())?;
         Ok(self.state.current().knowledge.for_actor(actor))
+    }
+
+    /// Counts records in a knowledge namespace at the current proposal-visible cut.
+    pub fn knowledge_record_count_in_namespace(
+        &self,
+        namespace: &str,
+    ) -> Result<usize, CanwuError> {
+        self.require_read(&StateKey::core_knowledge())?;
+        let settled = self
+            .state
+            .current()
+            .knowledge
+            .record_count_in_namespace(namespace);
+        let proposed = self.knowledge_overlay.map_or(0, |overlay| {
+            overlay
+                .values()
+                .flat_map(BTreeMap::values)
+                .filter(|record| record.schema.kind.namespace == namespace)
+                .count()
+        });
+        settled.checked_add(proposed).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::ValueOutOfRange,
+                "knowledge namespace record count overflowed",
+            )
+        })
     }
 
     /// Queries holder-relative records for an omniscient plugin system.
@@ -289,8 +316,11 @@ impl SimulationView<'_> {
         reference: &DomainRecordVersionRef,
     ) -> Result<bool, CanwuError> {
         self.require_read(&records::record_state_key(&reference.record.kind))?;
-        if let Some(proposed) = self.proposed_domain_record_version(&reference.record)? {
-            return Ok(proposed == *reference);
+        if self
+            .proposed_domain_record_version(&reference.record)?
+            .is_some_and(|proposed| proposed == *reference)
+        {
+            return Ok(true);
         }
         Ok(!matches!(
             validation::resolve_evidence_reference(
@@ -298,6 +328,84 @@ impl SimulationView<'_> {
                 &EvidenceRef::DomainRecordVersion(reference.clone()),
             ),
             validation::EvidenceAvailability::Missing
+        ))
+    }
+
+    /// Returns whether a generic evidence identity is retained or archived.
+    ///
+    /// Domain-record versions proposed earlier in this boundary are visible.
+    /// Archived identities count as existing even when their bodies are no
+    /// longer retained.
+    pub fn evidence_exists(&self, reference: &EvidenceRef) -> Result<bool, CanwuError> {
+        match reference {
+            EvidenceRef::Command(_) | EvidenceRef::CommandAttempt(_) => {
+                self.require_read(&StateKey::core_commands())?;
+            }
+            EvidenceRef::Event(_) => self.require_read(&StateKey::core_events())?,
+            EvidenceRef::Ingress(_) => self.require_read(&StateKey::core_ingress())?,
+            EvidenceRef::Boundary(_) | EvidenceRef::RandomDraw(_) => {
+                self.require_read(&StateKey::core_evidence())?;
+            }
+            EvidenceRef::DomainRecordVersion(version) => {
+                return self.domain_record_version_evidence_exists(version);
+            }
+        }
+        Ok(!matches!(
+            validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(self.state.runtime()),
+                reference,
+            ),
+            validation::EvidenceAvailability::Missing
+        ))
+    }
+
+    /// Returns when retained or earlier same-boundary evidence first became
+    /// authoritative at this proposal-visible cut.
+    ///
+    /// Archived identity receipts do not retain a precise semantic time, so
+    /// they return `None` and callers that require temporal ordering must fail
+    /// closed or load the archived evidence body.
+    pub fn evidence_time(&self, reference: &EvidenceRef) -> Result<Option<SimTime>, CanwuError> {
+        if !self.evidence_exists(reference)? {
+            return Ok(None);
+        }
+        if self
+            .proposal_evidence
+            .is_some_and(|evidence| evidence.contains(reference))
+        {
+            return Ok(Some(self.time()));
+        }
+        Ok(super::retained_evidence_time(
+            self.state.runtime(),
+            reference,
+        ))
+    }
+
+    /// Resolves the retained record body for one exact domain-record version.
+    ///
+    /// Archived receipts prove that a version existed but do not contain its
+    /// body, so this returns `None` when the corresponding evidence segment is
+    /// not live in the runtime.
+    pub fn domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.record.kind))?;
+        if let Some(proposed) = self.proposed_domain_record_version(&reference.record)?
+            && proposed == *reference
+        {
+            return Ok(self
+                .proposed_records
+                .and_then(|records| records.get(&reference.record))
+                .or_else(|| {
+                    self.record_overlay
+                        .and_then(|records| records.get(&reference.record))
+                })
+                .cloned());
+        }
+        Ok(retained_domain_record_version(
+            self.state.runtime(),
+            reference,
         ))
     }
 
@@ -326,45 +434,20 @@ impl SimulationView<'_> {
         after: Option<&DomainRecordRef>,
         limit: usize,
     ) -> Result<Vec<DomainRecord>, CanwuError> {
-        const MAX_DOMAIN_RECORD_QUERY_LIMIT: usize = 10_000;
         self.require_read(&records::record_state_key(kind))?;
-        if limit == 0 || limit > MAX_DOMAIN_RECORD_QUERY_LIMIT {
-            return Err(CanwuError::new(
-                ErrorCode::ValueOutOfRange,
-                format!(
-                    "domain-record query limit must be between 1 and {MAX_DOMAIN_RECORD_QUERY_LIMIT}"
-                ),
-            ));
-        }
-        if after.is_some_and(|cursor| cursor.kind != *kind) {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidPayload,
-                "domain-record page cursor has the wrong kind",
-            ));
-        }
+        validate_domain_record_page_request(kind, after, limit)?;
 
-        let mut records = BTreeMap::new();
-        for (reference, record) in &self.state.current().domain_records {
-            if reference.kind == *kind {
-                records.insert(reference.clone(), record.clone());
-            }
-        }
+        let mut records =
+            domain_record_candidates(&self.state.current().domain_records, kind, after, limit);
         for overlay in [self.record_overlay, self.proposed_records]
             .into_iter()
             .flatten()
         {
-            for (reference, record) in overlay {
-                if reference.kind == *kind {
-                    records.insert(reference.clone(), record.clone());
-                }
+            for (reference, record) in domain_record_candidates(overlay, kind, after, limit) {
+                records.insert(reference, record);
             }
         }
-        Ok(records
-            .into_iter()
-            .filter(|(reference, _)| after.is_none_or(|cursor| reference > cursor))
-            .map(|(_, record)| record)
-            .take(limit)
-            .collect())
+        Ok(records.into_values().take(limit).collect())
     }
 
     /// Finds committed knowledge changes produced with an exact correlation.

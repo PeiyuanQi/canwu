@@ -72,6 +72,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-history-research"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
+ "canwu-technology",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-information"
 version = "0.5.1"
 dependencies = [
@@ -95,9 +105,13 @@ dependencies = [
 name = "canwu-performance-harness"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "canwu-api",
+ "canwu-history-research",
  "canwu-information",
+ "canwu-technology",
  "libc",
+ "serde",
  "serde_json",
  "windows-sys",
 ]
@@ -125,6 +139,15 @@ dependencies = [
  "canwu-knowledge",
  "canwu-time",
  "canwu-world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-technology"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
  "serde",
  "serde_json",
 ]
