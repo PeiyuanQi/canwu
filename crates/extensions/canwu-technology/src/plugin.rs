@@ -226,9 +226,6 @@ fn apply_operations(
     if operations.is_empty() {
         return Ok(BoundaryProposal::default());
     }
-    let maximum_mutations = operations.values().try_fold(0usize, |total, operation| {
-        total.checked_add(2 + usize::from(operation.execution_intent().is_some()))
-    });
     let mut state = TechnologyRecordSet::load(view)?;
     let mut directives = Vec::new();
     let mut new_operations = BTreeMap::new();
@@ -250,6 +247,11 @@ fn apply_operations(
         }
         new_operations.insert(id, operation);
     }
+    let maximum_mutations = new_operations
+        .values()
+        .try_fold(0usize, |total, operation| {
+            total.checked_add(2 + usize::from(operation.execution_intent().is_some()))
+        });
     let limits = TechnologyLimitsV1::canonical();
     let capacity_exhausted = state
         .records
