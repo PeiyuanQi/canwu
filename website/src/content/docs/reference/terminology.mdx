@@ -101,7 +101,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | --- | --- | --- | --- |
 | [角色](/developer/reading-state/) | actor | `PersonId` | 其知识和权限会约束视图或行动的人物或世界内主体。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
-| [报告](/architecture/events/) | report | `EventKind::ReportDispatched` | 在更新角色知识前，在角色之间签发或送达的信息。 |
+| [报告](/architecture/events/) | report | `report_dispatched` 事件载荷 | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |

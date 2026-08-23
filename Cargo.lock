@@ -307,6 +307,7 @@ dependencies = [
  "canwu-core",
  "canwu-time",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

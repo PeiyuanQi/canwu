@@ -209,12 +209,12 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
     let event = event_holder
         .events
         .iter_mut()
-        .find(|event| matches!(event.kind, EventKind::KnowledgePublished { .. }))
+        .find(|event| event.kind.is_type("knowledge_published"))
         .expect("fixture publication event should exist");
-    let EventKind::KnowledgePublished { holder, .. } = &mut event.kind else {
-        unreachable!("selected event is knowledge publication")
-    };
-    *holder = KnowledgeHolderRef::Person(PersonId::new(2));
+    event
+        .kind
+        .set_field("holder", &KnowledgeHolderRef::Person(PersonId::new(2)))
+        .expect("publication event should have a holder");
     reject("event holder", event_holder);
 
     let mut emission_index = snapshot.clone();

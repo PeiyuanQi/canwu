@@ -1,3 +1,7 @@
+use super::event_payloads::{
+    ArmyArrived, KnowledgeUpdated, LetterDelivered, PersonArrived, ReportDispatched,
+    RuntimeEventPayload,
+};
 use super::{
     ActorKnowledge, ArmyId, ArmyKnowledge, AssertUnwindSafe, BTreeMap, BoundaryId, CanwuError,
     CauseRef, ClockTransactionCheckpoint, CommitmentDomains, DeterministicRng, EntityRef,
@@ -279,11 +283,12 @@ impl Simulation {
                     850,
                 );
                 self.emit(
-                    EventKind::KnowledgeUpdated {
+                    KnowledgeUpdated {
                         recipient,
                         army,
                         known_location: location,
-                    },
+                    }
+                    .into_kind(),
                     vec![EntityRef::Person(recipient), EntityRef::Army(army)],
                     format!(
                         "Person {recipient} received a report locating army {army} at {location}"
@@ -331,10 +336,11 @@ impl Simulation {
             army_state.commander
         };
         let arrival_event = self.emit(
-            EventKind::ArmyArrived {
+            ArmyArrived {
                 army,
                 territory: destination,
-            },
+            }
+            .into_kind(),
             vec![EntityRef::Army(army), EntityRef::Territory(destination)],
             format!("Army {army} arrived in territory {destination}"),
             Some(CauseRef::Event(order_event)),
@@ -350,11 +356,12 @@ impl Simulation {
             1000,
         );
         self.emit(
-            EventKind::KnowledgeUpdated {
+            KnowledgeUpdated {
                 recipient: commander,
                 army,
                 known_location: destination,
-            },
+            }
+            .into_kind(),
             vec![EntityRef::Person(commander), EntityRef::Army(army)],
             format!("Commander {commander} learned that army {army} arrived at {destination}"),
             Some(CauseRef::Event(arrival_event)),
@@ -395,11 +402,12 @@ impl Simulation {
                     )
                 })?;
             let dispatch_event = self.emit(
-                EventKind::ReportDispatched {
+                ReportDispatched {
                     recipient,
                     army,
                     arrives_at,
-                },
+                }
+                .into_kind(),
                 vec![EntityRef::Person(recipient), EntityRef::Army(army)],
                 format!("A report about army {army} was dispatched to person {recipient}"),
                 Some(CauseRef::Event(arrival_event)),
@@ -460,10 +468,11 @@ impl Simulation {
             person_state.current_location = destination;
         }
         let arrival_event = self.emit(
-            EventKind::PersonArrived {
+            PersonArrived {
                 person,
                 territory: destination,
-            },
+            }
+            .into_kind(),
             vec![EntityRef::Person(person), EntityRef::Territory(destination)],
             format!("Person {person} arrived in territory {destination}"),
             Some(CauseRef::Event(order_event)),
@@ -573,12 +582,13 @@ impl Simulation {
         letter.location = Some(territory);
         letter.delivered_at = Some(self.state.scheduler.now);
         self.emit(
-            EventKind::LetterDelivered {
+            LetterDelivered {
                 letter: letter_id,
                 carrier,
                 recipient,
                 territory,
-            },
+            }
+            .into_kind(),
             vec![
                 EntityRef::Resource(super::ResourceId::new(letter_id.get())),
                 EntityRef::Person(sender),

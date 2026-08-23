@@ -22,7 +22,7 @@ Canwu 的事件是可序列化、可检查的因果记录。事件不是 UI 通�
 | `cause` | 产生事件的命令、事件、边界或系统 |
 | `correlation_id` | 将同一处理链中的证据关联起来 |
 
-核心事件类型包括 `MoveOrdered`、`PersonMoveOrdered`、`ArmyArrived`、`PersonArrived`、`LetterDelivered`、`ReportDispatched`、`KnowledgeUpdated`、`DebugFieldChanged` 和插件事件。插件可以扩展事件类型，但必须通过注册契约声明来源和边界。
+`EventKind` 本身不拥有领域事件枚举；它只保存稳定的 `type` 标签和扁平化结构字段。领域或整合包可在自己的 crate 中定义强类型载荷，再通过 `from_payload` 编码、通过 `decode_payload` 解码。当前参考运行时使用的兼容标签包括 `move_ordered`、`person_move_ordered`、`army_arrived`、`person_arrived`、`letter_delivered`、`report_dispatched`、`knowledge_updated`、`knowledge_published` 和 `debug_field_changed`。插件事件仍通过注册契约声明来源、受众和边界。
 
 ## 因果链
 

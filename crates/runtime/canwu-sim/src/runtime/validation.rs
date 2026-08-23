@@ -1,3 +1,9 @@
+use super::event_payloads::{
+    ARMY_ARRIVED, ArmyArrived, DEBUG_FIELD_CHANGED, DebugFieldChanged, KNOWLEDGE_PUBLISHED,
+    KNOWLEDGE_UPDATED, KnowledgePublished, KnowledgeUpdated, LETTER_DELIVERED, LetterDelivered,
+    MOVE_ORDERED, MoveOrdered, PERSON_ARRIVED, PERSON_MOVE_ORDERED, PLUGIN, PersonArrived,
+    PersonMoveOrdered, REPORT_DISPATCHED, ReportDispatched, RuntimeEventPayload,
+};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArmyId, BoundaryDirective, BoundaryDomainEntityCuts,
     BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
@@ -8,8 +14,8 @@ use super::{
     DecisionState, DecisionTraceId, DeterministicRng, DomainHistoryCut, DomainRecord,
     DomainRecordChange, DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory,
     DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
-    EntityRef, ErrorCode, EventId, EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass,
-    IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
+    EntityRef, ErrorCode, EventId, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass, IngressId,
+    IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
     KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
     PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord, PluginRegistry,
     RandomDrawAddress, RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
@@ -988,29 +994,26 @@ pub(super) fn validate_snapshot(
     for dispatch in snapshot
         .events
         .iter()
-        .filter(|event| matches!(event.kind, EventKind::ReportDispatched { .. }))
+        .filter(|event| event.kind.is_type(REPORT_DISPATCHED))
     {
-        let EventKind::ReportDispatched {
+        let ReportDispatched {
             recipient,
             army,
             arrives_at,
-        } = dispatch.kind
-        else {
-            unreachable!("the iterator selected report dispatch events");
-        };
+        } = ReportDispatched::decode(&dispatch.kind)
+            .map_err(|_| invalid_snapshot_error("report dispatch payload is malformed"))?;
         let Some(CauseRef::Event(arrival_id)) = dispatch.cause else {
             return invalid_snapshot("report dispatch must be caused by an army arrival");
         };
         let Some(arrival) = snapshot_event_by_id(snapshot, arrival_id) else {
             return invalid_snapshot("report dispatch references a missing army arrival");
         };
-        let EventKind::ArmyArrived {
+        let ArmyArrived {
             army: arrived_army,
             territory: arrived_location,
-        } = arrival.kind
-        else {
-            return invalid_snapshot("report dispatch cause is not an army arrival event");
-        };
+        } = ArmyArrived::decode(&arrival.kind).map_err(|_| {
+            invalid_snapshot_error("report dispatch cause is not an army arrival event")
+        })?;
         if arrived_army != army
             || arrival.timestamp != dispatch.timestamp
             || arrival.correlation_id != dispatch.correlation_id
@@ -1022,22 +1025,23 @@ pub(super) fn validate_snapshot(
             .iter()
             .filter(|event| {
                 event.cause == Some(CauseRef::Event(dispatch.id))
-                    && matches!(event.kind, EventKind::KnowledgeUpdated { .. })
+                    && event.kind.is_type(KNOWLEDGE_UPDATED)
             })
             .collect();
         if delivery_events.iter().any(|event| {
-            !matches!(
-                event.kind,
-                EventKind::KnowledgeUpdated {
-                    recipient: delivered_recipient,
-                    army: delivered_army,
-                    known_location,
-                } if delivered_recipient == recipient
-                    && delivered_army == army
-                    && known_location == arrived_location
-                    && event.timestamp == arrives_at
-                    && event.correlation_id == dispatch.correlation_id
-            )
+            let Ok(KnowledgeUpdated {
+                recipient: delivered_recipient,
+                army: delivered_army,
+                known_location,
+            }) = KnowledgeUpdated::decode(&event.kind)
+            else {
+                return true;
+            };
+            delivered_recipient != recipient
+                || delivered_army != army
+                || known_location != arrived_location
+                || event.timestamp != arrives_at
+                || event.correlation_id != dispatch.correlation_id
         }) {
             return invalid_snapshot("report delivery disagrees with its dispatch event");
         }
@@ -1299,12 +1303,11 @@ fn validate_random_evidence(
                 let Some(event) = snapshot_event_by_id(snapshot, cause) else {
                     return invalid_snapshot("core random draw references an unknown event");
                 };
-                let EventKind::ArmyArrived {
+                let ArmyArrived {
                     army: arrived_army, ..
-                } = event.kind
-                else {
-                    return invalid_snapshot("core random draw cause is not an army arrival");
-                };
+                } = ArmyArrived::decode(&event.kind).map_err(|_| {
+                    invalid_snapshot_error("core random draw cause is not an army arrival")
+                })?;
                 let Some(RandomDrawOutcome::KnowledgeReportDelivery {
                     recipient,
                     army,
@@ -1340,16 +1343,11 @@ fn validate_random_evidence(
                     || dispatch.timestamp != draw.at
                     || dispatch.correlation_id != draw.correlation_id
                     || dispatch.cause != Some(CauseRef::Event(cause))
-                    || !matches!(
-                        dispatch.kind,
-                        EventKind::ReportDispatched {
-                            recipient: dispatch_recipient,
-                            army: dispatch_army,
-                            arrives_at: dispatch_arrives,
-                        } if dispatch_recipient == *recipient
-                            && dispatch_army == *army
-                            && dispatch_arrives == *arrives_at
-                    )
+                    || ReportDispatched::decode(&dispatch.kind).map_or(true, |payload| {
+                        payload.recipient != *recipient
+                            || payload.army != *army
+                            || payload.arrives_at != *arrives_at
+                    })
                 {
                     return invalid_snapshot("core random draw provenance is inconsistent");
                 }
@@ -1370,9 +1368,7 @@ fn validate_random_evidence(
         }
     }
     for event in &snapshot.events {
-        if matches!(event.kind, EventKind::ReportDispatched { .. })
-            && !report_draws.contains_key(&event.id)
-        {
+        if event.kind.is_type(REPORT_DISPATCHED) && !report_draws.contains_key(&event.id) {
             return invalid_snapshot(
                 "report dispatch must be backed by exactly one core random draw",
             );
@@ -3163,10 +3159,10 @@ fn validate_boundary_emissions(
         }
         match emission.kind {
             BoundaryEmissionKind::Change { change_index } => {
-                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                let Some((plugin, event_type)) = event.kind.plugin_identity() else {
                     return invalid_snapshot("boundary change emitted a non-plugin event");
                 };
-                if plugin != &emission.plugin {
+                if plugin != emission.plugin.as_str() {
                     return invalid_snapshot("boundary emission plugin provenance is inconsistent");
                 }
                 let Some(commit_stage) =
@@ -3185,7 +3181,7 @@ fn validate_boundary_emissions(
                     || emission.system != change.system
                     || event.summary != change.summary
                     || event.affected_entities != vec![change.entity.clone()]
-                    || event_type != &format!("{}_changed", change.component)
+                    || event_type != format!("{}_changed", change.component)
                     || !snapshot_entity_exists_for_boundary_proposal(
                         snapshot,
                         final_records,
@@ -3208,13 +3204,12 @@ fn validate_boundary_emissions(
                         "boundary emission references an unknown knowledge change",
                     );
                 };
-                let EventKind::KnowledgePublished {
+                let KnowledgePublished {
                     holder,
                     record_count,
-                } = &event.kind
-                else {
-                    return invalid_snapshot("knowledge change emitted the wrong event kind");
-                };
+                } = KnowledgePublished::decode(&event.kind).map_err(|_| {
+                    invalid_snapshot_error("knowledge change emitted the wrong event kind")
+                })?;
                 let expected_affected = match &change.holder {
                     KnowledgeHolderRef::Person(person) => vec![EntityRef::Person(*person)],
                     KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
@@ -3222,8 +3217,8 @@ fn validate_boundary_emissions(
                 if !matched_knowledge_changes.insert(change_index)
                     || emission.plugin != change.plugin
                     || emission.system != change.system
-                    || holder != &change.holder
-                    || usize::try_from(*record_count).ok() != Some(change.records.len())
+                    || holder != change.holder
+                    || usize::try_from(record_count).ok() != Some(change.records.len())
                     || event.summary != change.summary
                     || event.affected_entities != expected_affected
                 {
@@ -3233,10 +3228,10 @@ fn validate_boundary_emissions(
                 }
             }
             BoundaryEmissionKind::RecordChange { change_index } => {
-                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                let Some((plugin, event_type)) = event.kind.plugin_identity() else {
                     return invalid_snapshot("domain-record change emitted a non-plugin event");
                 };
-                if plugin != &emission.plugin {
+                if plugin != emission.plugin.as_str() {
                     return invalid_snapshot("boundary emission plugin provenance is inconsistent");
                 }
                 let index = usize::try_from(change_index).map_err(|_| {
@@ -3260,10 +3255,10 @@ fn validate_boundary_emissions(
                 }
             }
             BoundaryEmissionKind::Explicit => {
-                let EventKind::Plugin { plugin, event_type } = &event.kind else {
+                let Some((plugin, event_type)) = event.kind.plugin_identity() else {
                     return invalid_snapshot("explicit boundary emission is not a plugin event");
                 };
-                if plugin != &emission.plugin {
+                if plugin != emission.plugin.as_str() {
                     return invalid_snapshot("boundary emission plugin provenance is inconsistent");
                 }
                 let Some(commit_stage) =
@@ -3271,7 +3266,7 @@ fn validate_boundary_emissions(
                 else {
                     return invalid_snapshot("boundary emission has no deterministic commit stage");
                 };
-                if !contract.emits.contains(event_type)
+                if !contract.emits.iter().any(|emitted| emitted == event_type)
                     || event.affected_entities.iter().any(|entity| {
                         !snapshot_entity_exists_for_boundary_proposal(
                             snapshot,
@@ -3419,72 +3414,57 @@ fn validate_event_kind(
     event: &SimEvent,
     entity_exists: &dyn Fn(&EntityRef) -> bool,
 ) -> Result<(), CanwuError> {
-    let valid = match &event.kind {
-        EventKind::MoveOrdered {
-            army,
-            from,
-            to,
-            arrival_at,
-        } => {
-            snapshot.world.army(*army).is_some()
-                && snapshot.world.territory(*from).is_some()
-                && snapshot.world.territory(*to).is_some()
-                && *arrival_at >= event.timestamp
+    let valid = match event.kind.event_type() {
+        MOVE_ORDERED => MoveOrdered::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.army(payload.army).is_some()
+                && snapshot.world.territory(payload.from).is_some()
+                && snapshot.world.territory(payload.to).is_some()
+                && payload.arrival_at >= event.timestamp
+        }),
+        ARMY_ARRIVED => ArmyArrived::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.army(payload.army).is_some()
+                && snapshot.world.territory(payload.territory).is_some()
+        }),
+        PERSON_MOVE_ORDERED => PersonMoveOrdered::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.person(payload.person).is_some()
+                && snapshot.world.territory(payload.from).is_some()
+                && snapshot.world.territory(payload.to).is_some()
+                && payload.arrival_at > event.timestamp
+        }),
+        PERSON_ARRIVED => PersonArrived::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.person(payload.person).is_some()
+                && snapshot.world.territory(payload.territory).is_some()
+        }),
+        LETTER_DELIVERED => LetterDelivered::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.letter(payload.letter).is_some()
+                && snapshot.world.person(payload.carrier).is_some()
+                && snapshot.world.person(payload.recipient).is_some()
+                && snapshot.world.territory(payload.territory).is_some()
+        }),
+        REPORT_DISPATCHED => ReportDispatched::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.person(payload.recipient).is_some()
+                && snapshot.world.army(payload.army).is_some()
+                && payload.arrives_at >= event.timestamp
+        }),
+        KNOWLEDGE_UPDATED => KnowledgeUpdated::decode(&event.kind).is_ok_and(|payload| {
+            snapshot.world.person(payload.recipient).is_some()
+                && snapshot.world.army(payload.army).is_some()
+                && snapshot.world.territory(payload.known_location).is_some()
+        }),
+        KNOWLEDGE_PUBLISHED => {
+            KnowledgePublished::decode(&event.kind).is_ok_and(|payload| payload.record_count > 0)
         }
-        EventKind::ArmyArrived { army, territory } => {
-            snapshot.world.army(*army).is_some() && snapshot.world.territory(*territory).is_some()
-        }
-        EventKind::PersonMoveOrdered {
-            person,
-            from,
-            to,
-            arrival_at,
-        } => {
-            snapshot.world.person(*person).is_some()
-                && snapshot.world.territory(*from).is_some()
-                && snapshot.world.territory(*to).is_some()
-                && *arrival_at > event.timestamp
-        }
-        EventKind::PersonArrived { person, territory } => {
-            snapshot.world.person(*person).is_some()
-                && snapshot.world.territory(*territory).is_some()
-        }
-        EventKind::LetterDelivered {
-            letter,
-            carrier,
-            recipient,
-            territory,
-        } => {
-            snapshot.world.letter(*letter).is_some()
-                && snapshot.world.person(*carrier).is_some()
-                && snapshot.world.person(*recipient).is_some()
-                && snapshot.world.territory(*territory).is_some()
-        }
-        EventKind::ReportDispatched {
-            recipient,
-            army,
-            arrives_at,
-        } => {
-            snapshot.world.person(*recipient).is_some()
-                && snapshot.world.army(*army).is_some()
-                && *arrives_at >= event.timestamp
-        }
-        EventKind::KnowledgeUpdated {
-            recipient,
-            army,
-            known_location,
-        } => {
-            snapshot.world.person(*recipient).is_some()
-                && snapshot.world.army(*army).is_some()
-                && snapshot.world.territory(*known_location).is_some()
-        }
-        EventKind::KnowledgePublished { record_count, .. } => *record_count > 0,
-        EventKind::DebugFieldChanged { entity, .. } => entity_exists(entity),
-        EventKind::Plugin { plugin, event_type } => {
-            plugins.descriptors.contains_key(plugin)
-                && canonical_text(plugin)
-                && canonical_text(event_type)
-        }
+        DEBUG_FIELD_CHANGED => DebugFieldChanged::decode(&event.kind)
+            .is_ok_and(|payload| entity_exists(&payload.entity)),
+        PLUGIN => event
+            .kind
+            .plugin_identity()
+            .is_some_and(|(plugin, event_type)| {
+                plugins.descriptors.contains_key(plugin)
+                    && canonical_text(plugin)
+                    && canonical_text(event_type)
+            }),
+        _ => false,
     };
     if valid {
         Ok(())
@@ -3515,15 +3495,17 @@ fn validate_scheduled_action(
             let Some(order) = snapshot_event_by_id(snapshot, *order_event) else {
                 return invalid_snapshot("scheduled arrival references an unknown order event");
             };
-            let EventKind::MoveOrdered {
+            if !order.kind.is_type(MOVE_ORDERED) {
+                return invalid_snapshot("scheduled arrival does not reference a move order event");
+            }
+            let MoveOrdered {
                 army: ordered_army,
                 from,
                 to,
                 arrival_at,
-            } = &order.kind
-            else {
-                return invalid_snapshot("scheduled arrival does not reference a move order event");
-            };
+            } = MoveOrdered::decode(&order.kind).map_err(|_| {
+                invalid_snapshot_error("scheduled move order event payload is invalid")
+            })?;
             let Some(CauseRef::Command(command_id)) = order.cause else {
                 return invalid_snapshot("move order event does not reference its command");
             };
@@ -3542,11 +3524,11 @@ fn validate_scheduled_action(
                     )
             });
             if !command_matches
-                || *ordered_army != *army
-                || *from != transit.from
-                || *to != *destination
+                || ordered_army != *army
+                || from != transit.from
+                || to != *destination
                 || transit.to != *destination
-                || *arrival_at != key.at
+                || arrival_at != key.at
                 || transit.arrives_at != key.at
                 || order.timestamp != transit.departed_at
                 || order.correlation_id != *correlation_id
@@ -3572,17 +3554,19 @@ fn validate_scheduled_action(
             let Some(order) = snapshot_event_by_id(snapshot, *order_event) else {
                 return invalid_snapshot("scheduled person arrival references an unknown event");
             };
-            let EventKind::PersonMoveOrdered {
+            if !order.kind.is_type(PERSON_MOVE_ORDERED) {
+                return invalid_snapshot(
+                    "scheduled person arrival does not reference a person order",
+                );
+            }
+            let PersonMoveOrdered {
                 person: ordered_person,
                 from,
                 to,
                 arrival_at,
-            } = &order.kind
-            else {
-                return invalid_snapshot(
-                    "scheduled person arrival does not reference a person order",
-                );
-            };
+            } = PersonMoveOrdered::decode(&order.kind).map_err(|_| {
+                invalid_snapshot_error("scheduled person move order event payload is invalid")
+            })?;
             let Some(CauseRef::Command(command_id)) = order.cause else {
                 return invalid_snapshot("person movement order does not reference its command");
             };
@@ -3601,11 +3585,11 @@ fn validate_scheduled_action(
                     )
             });
             if !command_matches
-                || *ordered_person != *person
-                || *from != transit.from
-                || *to != *destination
+                || ordered_person != *person
+                || from != transit.from
+                || to != *destination
                 || transit.to != *destination
-                || *arrival_at != key.at
+                || arrival_at != key.at
                 || transit.arrives_at != key.at
                 || order.timestamp != transit.departed_at
                 || order.correlation_id != *correlation_id
@@ -3645,34 +3629,37 @@ fn validate_scheduled_action(
             let Some(dispatch) = snapshot_event_by_id(snapshot, *dispatch_event) else {
                 return invalid_snapshot("scheduled report references an unknown dispatch event");
             };
-            let EventKind::ReportDispatched {
-                recipient: dispatched_recipient,
-                army: dispatched_army,
-                arrives_at,
-            } = &dispatch.kind
-            else {
+            if !dispatch.kind.is_type(REPORT_DISPATCHED) {
                 return invalid_snapshot(
                     "scheduled report does not reference a report dispatch event",
                 );
-            };
+            }
+            let ReportDispatched {
+                recipient: dispatched_recipient,
+                army: dispatched_army,
+                arrives_at,
+            } = ReportDispatched::decode(&dispatch.kind).map_err(|_| {
+                invalid_snapshot_error("scheduled report dispatch event payload is invalid")
+            })?;
             let Some(CauseRef::Event(arrival_event_id)) = dispatch.cause else {
                 return invalid_snapshot("report dispatch does not reference an arrival event");
             };
             let Some(arrival) = snapshot_event_by_id(snapshot, arrival_event_id) else {
                 return invalid_snapshot("report dispatch references an unknown arrival event");
             };
-            let EventKind::ArmyArrived {
+            if !arrival.kind.is_type(ARMY_ARRIVED) {
+                return invalid_snapshot("report dispatch cause is not an army arrival");
+            }
+            let ArmyArrived {
                 army: arrived_army,
                 territory,
-            } = &arrival.kind
-            else {
-                return invalid_snapshot("report dispatch cause is not an army arrival");
-            };
-            if *dispatched_recipient != *recipient
-                || *dispatched_army != *army
-                || *arrived_army != *army
-                || *territory != *location
-                || *arrives_at != key.at
+            } = ArmyArrived::decode(&arrival.kind)
+                .map_err(|_| invalid_snapshot_error("army arrival event payload is invalid"))?;
+            if dispatched_recipient != *recipient
+                || dispatched_army != *army
+                || arrived_army != *army
+                || territory != *location
+                || arrives_at != key.at
                 || dispatch.timestamp != arrival.timestamp
                 || *observed_at != arrival.timestamp
                 || dispatch.correlation_id != *correlation_id

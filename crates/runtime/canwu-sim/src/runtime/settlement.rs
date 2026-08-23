@@ -1,3 +1,4 @@
+use super::event_payloads::{KnowledgePublished, RuntimeEventPayload};
 use super::validation::{
     EvidenceAvailability, RuntimeValidationContext, resolve_evidence_reference,
 };
@@ -768,10 +769,7 @@ impl Simulation {
                         summary: summary.clone(),
                     });
                     let event = self.append_event(
-                        EventKind::Plugin {
-                            plugin: staged.plugin.clone(),
-                            event_type: format!("{component}_changed"),
-                        },
+                        EventKind::plugin(staged.plugin.clone(), format!("{component}_changed")),
                         vec![entity],
                         summary,
                         Some(CauseRef::Boundary(boundary_id)),
@@ -793,10 +791,7 @@ impl Simulation {
                         ));
                     };
                     let event = self.append_event(
-                        EventKind::Plugin {
-                            plugin: staged.plugin.clone(),
-                            event_type: change.operation.event_type().to_owned(),
-                        },
+                        EventKind::plugin(staged.plugin.clone(), change.operation.event_type()),
                         record_change_affected_entities(change),
                         change.summary.clone(),
                         Some(CauseRef::Boundary(boundary_id)),
@@ -817,10 +812,7 @@ impl Simulation {
                     affected,
                 } => {
                     let event = self.append_event(
-                        EventKind::Plugin {
-                            plugin: staged.plugin.clone(),
-                            event_type,
-                        },
+                        EventKind::plugin(staged.plugin.clone(), event_type),
                         affected,
                         summary,
                         Some(CauseRef::Boundary(boundary_id)),
@@ -1089,10 +1081,11 @@ impl Simulation {
                 KnowledgeHolderRef::Entity(entity) => vec![entity.clone()],
             };
             let event = self.append_event(
-                EventKind::KnowledgePublished {
+                KnowledgePublished {
                     holder: change.holder.clone(),
                     record_count,
-                },
+                }
+                .into_kind(),
                 affected,
                 change.summary.clone(),
                 Some(CauseRef::Boundary(boundary_id)),
@@ -1145,10 +1138,7 @@ impl Simulation {
                         },
                     );
                     self.emit(
-                        EventKind::Plugin {
-                            plugin: plugin.to_owned(),
-                            event_type: format!("{component}_changed"),
-                        },
+                        EventKind::plugin(plugin, format!("{component}_changed")),
                         vec![entity],
                         summary,
                         Some(cause.clone()),
@@ -1161,10 +1151,7 @@ impl Simulation {
                     affected,
                 } => {
                     self.emit(
-                        EventKind::Plugin {
-                            plugin: plugin.to_owned(),
-                            event_type,
-                        },
+                        EventKind::plugin(plugin, event_type),
                         affected,
                         summary,
                         Some(cause.clone()),

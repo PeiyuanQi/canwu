@@ -22,7 +22,7 @@ Every `SimEvent` contains:
 | `cause` | Command, event, boundary, or system that produced it |
 | `correlation_id` | Correlates evidence from one processing chain |
 
-Core event kinds include `MoveOrdered`, `PersonMoveOrdered`, `ArmyArrived`, `PersonArrived`, `LetterDelivered`, `ReportDispatched`, `KnowledgeUpdated`, `DebugFieldChanged`, and plugin events. Plugins may add event kinds through a registered contract that declares provenance and boundary ownership.
+`EventKind` itself owns no domain-event enum. It stores only a stable `type` tag and flattened structured fields. A domain or integration can define a typed payload in its own crate, encode it with `from_payload`, and recover it with `decode_payload`. Compatibility tags currently used by the reference runtime include `move_ordered`, `person_move_ordered`, `army_arrived`, `person_arrived`, `letter_delivered`, `report_dispatched`, `knowledge_updated`, `knowledge_published`, and `debug_field_changed`. Plugin events still declare provenance, audience, and boundary ownership through registration contracts.
 
 ## Causal chain
 

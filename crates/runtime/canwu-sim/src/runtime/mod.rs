@@ -1,6 +1,7 @@
 mod boundary;
 mod decision;
 mod error;
+mod event_payloads;
 mod hashing;
 mod ingress;
 mod knowledge;
@@ -110,6 +111,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+use event_payloads::{
+    DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
+    PersonMoveOrdered, RuntimeEventPayload,
+};
 use hashing::{
     ControlCommitmentMaterial, StateHashMaterial, authoritative_run_identity,
     boundary_state_hash_for_commitments, checkpoint_hash_for_commitments,
@@ -1508,21 +1513,18 @@ impl Simulation {
     /// [`EventAudience::Private`].
     #[must_use]
     pub fn event_audience(&self, event: &SimEvent) -> EventAudience {
-        match &event.kind {
-            EventKind::Plugin { plugin, event_type } => {
-                self.plugins.event_audience(plugin, event_type)
-            }
-            EventKind::KnowledgePublished { holder, .. } => {
-                EventAudience::KnowledgeHolder(holder.clone())
-            }
-            EventKind::MoveOrdered { .. }
-            | EventKind::PersonMoveOrdered { .. }
-            | EventKind::ArmyArrived { .. }
-            | EventKind::PersonArrived { .. }
-            | EventKind::LetterDelivered { .. }
-            | EventKind::ReportDispatched { .. }
-            | EventKind::KnowledgeUpdated { .. }
-            | EventKind::DebugFieldChanged { .. } => EventAudience::Private,
+        match event.kind.event_type() {
+            PLUGIN => event
+                .kind
+                .plugin_identity()
+                .map_or(EventAudience::Private, |(plugin, event_type)| {
+                    self.plugins.event_audience(plugin, event_type)
+                }),
+            KNOWLEDGE_PUBLISHED => KnowledgePublished::decode(&event.kind)
+                .map_or(EventAudience::Private, |payload| {
+                    EventAudience::KnowledgeHolder(payload.holder)
+                }),
+            _ => EventAudience::Private,
         }
     }
 
@@ -2424,12 +2426,13 @@ impl Simulation {
                     arrives_at: arrival_at,
                 });
                 let event = self.emit(
-                    EventKind::MoveOrdered {
+                    MoveOrdered {
                         army,
                         from,
                         to: destination,
                         arrival_at,
-                    },
+                    }
+                    .into_kind(),
                     vec![
                         EntityRef::Army(army),
                         EntityRef::Person(actor),
@@ -2484,12 +2487,13 @@ impl Simulation {
                     letter.location = None;
                 }
                 let event = self.emit(
-                    EventKind::PersonMoveOrdered {
+                    PersonMoveOrdered {
                         person,
                         from,
                         to: destination,
                         arrival_at,
-                    },
+                    }
+                    .into_kind(),
                     std::iter::once(EntityRef::Person(person))
                         .chain(
                             cargo
@@ -2531,12 +2535,13 @@ impl Simulation {
                     })?
                     .morale = new_morale;
                 self.emit(
-                    EventKind::DebugFieldChanged {
+                    DebugFieldChanged {
                         entity: EntityRef::Army(army),
                         field: "morale".to_owned(),
                         old_value: old_morale.to_string(),
                         new_value: new_morale.to_string(),
-                    },
+                    }
+                    .into_kind(),
                     vec![EntityRef::Army(army)],
                     format!(
                         "Debug command changed army {army} morale {old_morale} -> {new_morale}"

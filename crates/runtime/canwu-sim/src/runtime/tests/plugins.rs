@@ -608,10 +608,7 @@ fn domain_record_lifecycle_is_atomic_replayable_and_tamper_evident() {
     post_deletion_reference.events.push(SimEvent {
         id: event_id,
         timestamp: last_boundary_at,
-        kind: EventKind::Plugin {
-            plugin: "fixture-record-lifecycle".to_owned(),
-            event_type: "record_probe".to_owned(),
-        },
+        kind: EventKind::plugin("fixture-record-lifecycle", "record_probe"),
         affected_entities: vec![EntityRef::Domain(office_reference("office-a"))],
         summary: "Forge evidence after the office was deleted".to_owned(),
         cause: Some(CauseRef::Boundary(last_boundary_id)),
@@ -1329,10 +1326,7 @@ fn plugin_event_order_does_not_depend_on_registration_order() {
     let marker_plugins: Vec<_> = first
         .events()
         .iter()
-        .filter_map(|event| match &event.kind {
-            EventKind::Plugin { plugin, .. } => Some(plugin.as_str()),
-            _ => None,
-        })
+        .filter_map(|event| event.kind.plugin_identity().map(|(plugin, _)| plugin))
         .collect();
     assert_eq!(marker_plugins, vec!["alpha", "zeta"]);
 }

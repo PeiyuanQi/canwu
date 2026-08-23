@@ -18,10 +18,10 @@ import { Aside, Steps } from "@astrojs/starlight/components";
   <a href="/architecture/model-ownership/">中文版</a>
 </nav>
 
-This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates yet**. First move period- and application-specific world entities and event payloads out of the generic engine; then remove package boundaries that genuinely have no independent responsibility.
+This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads have moved out of generic `EventKind`; the next step is still to move period- and application-specific world entities into reference integrations before removing package boundaries that genuinely have no independent responsibility.
 
-<Aside type="note" title="The shipped implementation is unchanged">
-This page records an accepted architectural direction and its implementation gates. The current public API, save formats, and crate dependency DAG have not changed.
+<Aside type="note" title="Migration status">
+`EventKind` is now a generic type-tag and structured-fields record; legacy event JSON and the snapshot format are unchanged. Published `canwu-world` versions are yanked, but the source crate, existing consumers, and dependency DAG remain until the reference-world migration completes.
 </Aside>
 
 ## One ownership rule
@@ -32,8 +32,8 @@ That rule gives the two candidate crates different outcomes:
 
 | Crate | Audit result |
 | --- | --- |
-| `canwu-world` | It is currently the compatibility world model for the first movement vertical slice. The entire crate can retire after that model moves to a reference integration and compatibility migration completes. |
-| `canwu-event` | It mixes generic event contracts with legacy concrete payloads. Extract the payloads first; decide whether the residual generic types belong in `canwu-sim` only after their independent consumption is known. |
+| `canwu-world` | It remains the compatibility world model for the first movement vertical slice. Published versions no longer admit new resolution; the source crate can retire only after its model and compatibility path move to a reference integration. |
+| `canwu-event` | It now contains only generic event contracts and a structured event record. Concrete payloads are extracted; decide whether the residual generic types belong in `canwu-sim` only after their independent consumption is known. |
 
 ## The 12 public `canwu-world` types
 
@@ -60,26 +60,26 @@ That rule gives the two candidate crates different outcomes:
 | --- | --- | --- |
 | `CauseRef` | Generic engine contract | Preserve command, parent-event, boundary, and system causes plus serialized compatibility |
 | `EventAudience` | Generic engine contract | Preserve private-by-default, actor-scoped, replay-stable visibility |
-| `SimEvent` | Generic envelope with legacy type coupling | Preserve identity, time, affected references, summary, cause, and correlation ID; remove the mandatory `EventKind` dependency through a versioned migration |
-| `EventKind` | Legacy compatibility payload union with one generic plugin seam | Move concrete variants to their integration or subsystem; establish canonical namespaced event identity before deleting the enum |
+| `SimEvent` | Generic event envelope | Preserve identity, time, affected references, summary, cause, and correlation ID |
+| `EventKind` | Generic type tag and flattened structured-field record | Preserve the legacy JSON wire shape; domain owners define typed payloads outside this crate and use the generic encode/decode API |
 
-Movement, army arrival, person travel, letter delivery, and report dispatch belong to the reference movement/information integration. Knowledge events belong to the knowledge or information contract that produces them, while debug field events belong to the debug compatibility surface. The `Plugin` variant proves the engine needs namespaced event identity, but two strings are not yet a complete persistence, validation, and projection contract.
+Typed payloads for movement, army arrival, person travel, letter delivery, report dispatch, knowledge, and debug fields are no longer public `canwu-event` variants. Private compatibility payloads in the reference runtime still validate the legacy tags and fields strictly; they move again with their world, knowledge, or debug integration. Plugin events expose their compatibility namespace through `plugin_identity`.
 
 ## Why direct merges fail
 
 - Folding `canwu-world` into `canwu-core` would make one historical worldview foundational.
-- Folding today's `canwu-event` into `canwu-sim` would only relocate mixed ownership and enlarge the persistence blast radius.
+- Folding `canwu-event` into `canwu-sim` now would still enlarge the persistence blast radius; independent use of the remaining generic contracts must decide that boundary.
 - Creating `canwu-model` would consolidate names without clarifying responsibilities.
 - Merging `canwu-api` and `canwu-sim` would erase the public-facade/private-runtime boundary.
 
 ## Safe migration sequence
 
 <Steps>
-1. Freeze representative JSON saves, event journals, `canwu-api` calls, routing conversion, and exact replay outcomes.
-2. Introduce canonical namespaced event identity and versioned structured metadata alongside `EventKind`, including explicit legacy loading.
+1. Representative JSON saves, event journals, `canwu-api` calls, and exact replay outcomes are frozen.
+2. `EventKind` is now a generic structured record and its concrete public variants are extracted without changing legacy JSON. A complete cross-integration namespace and payload-version contract remains future work.
 3. Build a first-party reference world integration through public APIs and move the concrete entities, event payloads, and routing conversion into it.
 4. Migrate the facade, saved state, and starter kits under the versioning policy without silent source or wire breaks.
-5. Retire `canwu-world` after it has no normal consumers; after legacy event payloads are gone, decide whether `canwu-event` should fold into `canwu-sim`.
+5. Retire `canwu-world` after it has no normal consumers; after private compatibility event payloads move to their owners, decide whether `canwu-event` should fold into `canwu-sim`.
 </Steps>
 
 ## Completion gates

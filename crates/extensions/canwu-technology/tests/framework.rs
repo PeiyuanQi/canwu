@@ -2,11 +2,11 @@ use canwu_api::{
     ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryRequest, Canwu, CanwuError,
     Command, CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu, DomainRecord,
     DomainRecordClass, DomainRecordLifecycle, DomainRecordRef, DomainRecordVersionRef,
-    DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceJournalSegment,
-    EvidenceRef, Government, GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeQuery,
-    KnowledgeSnapshot, MapPoint, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PayloadRequiredEvidenceContinuationV1, Person, PersonId, PluginIngressRequest, Scenario,
-    SimTime, SimulationPlugin, Territory, TerritoryId, WorldSnapshot,
+    DomainRecordVersionSource, EntityRef, ErrorCode, EvidenceJournalSegment, EvidenceRef,
+    Government, GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeQuery, KnowledgeSnapshot,
+    MapPoint, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadRequiredEvidenceContinuationV1,
+    Person, PersonId, PluginIngressRequest, Scenario, SimTime, SimulationPlugin, Territory,
+    TerritoryId, WorldSnapshot,
 };
 use canwu_technology::{
     AdoptionPayload, AdoptionStatus, ApplicationSpec, ApplicationSpecPayload, AssetBinding,
@@ -2013,12 +2013,13 @@ fn technology_total_and_boundary_caps_persist_rejections_without_poisoning() {
             ))
             .is_none()
     );
-    assert!(near_cap.events().iter().any(|event| matches!(
-        &event.kind,
-        EventKind::Plugin { plugin, event_type }
-            if plugin == "canwu-technology"
-                && event_type == "technology_operation_rejected_capacity_v1"
-    )));
+    assert!(near_cap.events().iter().any(|event| {
+        event.kind.plugin_identity()
+            == Some((
+                "canwu-technology",
+                "technology_operation_rejected_capacity_v1",
+            ))
+    }));
     near_cap
         .settle_boundary(BoundaryRequest::at(near_cap.time()))
         .expect("the saturated runtime must continue after rejection");
@@ -2046,12 +2047,13 @@ fn technology_total_and_boundary_caps_persist_rejections_without_poisoning() {
         canwu
             .events()
             .iter()
-            .filter(|event| matches!(
-                &event.kind,
-                EventKind::Plugin { plugin, event_type }
-                    if plugin == "canwu-technology"
-                        && event_type == "technology_operation_rejected_capacity_v1"
-            ))
+            .filter(|event| {
+                event.kind.plugin_identity()
+                    == Some((
+                        "canwu-technology",
+                        "technology_operation_rejected_capacity_v1",
+                    ))
+            })
             .count(),
         33
     );

@@ -11,7 +11,7 @@ pub use canwu_core::{
     KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
     PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
-pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
+pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
     ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
     KnowledgeOrigin, KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut,
@@ -1252,11 +1252,10 @@ impl Canwu {
             };
         };
         let provenance = self.events().iter().rev().find(|event| {
-            matches!(
-                &event.kind,
-                EventKind::DebugFieldChanged { entity: EntityRef::Army(id), field, .. }
-                    if *id == army_id && field == "morale"
-            )
+            event.kind.is_type("debug_field_changed")
+                && event.kind.decode_field::<EntityRef>("entity").ok()
+                    == Some(EntityRef::Army(army_id))
+                && event.kind.decode_field::<String>("field").ok().as_deref() == Some("morale")
         });
         provenance.map_or_else(
             || Explanation {
@@ -2002,30 +2001,31 @@ fn visible_change(
     event: &SimEvent,
     plugin_audience: &EventAudience,
 ) -> Option<VisibleChange> {
-    let visible = match &event.kind {
-        EventKind::MoveOrdered { .. } => viewer
+    let visible = match event.kind.event_type() {
+        "move_ordered" | "person_move_ordered" => viewer
             .principal
             .person()
             .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
-        EventKind::PersonMoveOrdered { .. } => viewer
-            .principal
-            .person()
-            .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
-        EventKind::KnowledgeUpdated { recipient, .. } => {
-            viewer.principal.person() == Some(*recipient)
-        }
-        EventKind::KnowledgePublished { holder, .. } => {
-            principal_matches_holder(&viewer.principal, holder)
-        }
-        EventKind::ArmyArrived { .. }
-        | EventKind::PersonArrived { .. }
-        | EventKind::LetterDelivered { .. }
-        | EventKind::ReportDispatched { .. }
-        | EventKind::DebugFieldChanged { .. } => matches!(
+        "knowledge_updated" => event
+            .kind
+            .decode_field::<PersonId>("recipient")
+            .is_ok_and(|recipient| viewer.principal.person() == Some(recipient)),
+        "knowledge_published" => event
+            .kind
+            .decode_field::<KnowledgeHolderRef>("holder")
+            .is_ok_and(|holder| principal_matches_holder(&viewer.principal, &holder)),
+        "army_arrived"
+        | "person_arrived"
+        | "letter_delivered"
+        | "report_dispatched"
+        | "debug_field_changed" => matches!(
             viewer.observation,
             ObservationPolicy::ResearchFull | ObservationPolicy::DeveloperDiagnostic
         ),
-        EventKind::Plugin { .. } => event_visible_to(viewer, event, plugin_audience),
+        "plugin" if event.kind.plugin_identity().is_some() => {
+            event_visible_to(viewer, event, plugin_audience)
+        }
+        _ => false,
     };
     visible.then(|| VisibleChange {
         timestamp: event.timestamp,
@@ -2216,7 +2216,7 @@ mod tests {
         _view: &SimulationView<'_>,
         event: &SimEvent,
     ) -> Result<Vec<SystemDirective>, CanwuError> {
-        if !matches!(event.kind, EventKind::MoveOrdered { .. }) {
+        if !event.kind.is_type("move_ordered") {
             return Ok(Vec::new());
         }
         Ok(vec![SystemDirective::Emit {
@@ -2257,10 +2257,7 @@ mod tests {
         let event = SimEvent {
             id: EventId::new(1),
             timestamp: SimTime::EPOCH,
-            kind: EventKind::Plugin {
-                plugin: "visibility-test".to_owned(),
-                event_type: "notice".to_owned(),
-            },
+            kind: EventKind::plugin("visibility-test", "notice"),
             affected_entities: vec![EntityRef::Person(ids.commander)],
             summary: "notice".to_owned(),
             cause: None,

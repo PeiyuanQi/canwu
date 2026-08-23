@@ -303,4 +303,19 @@ fn every_tamper_companion_and_format_5_smuggling_attempt_fails_closed() {
         &serde_json::to_string(&schema_smuggled).expect("smuggled fixture should serialize"),
         &[&FixturePlugin],
     );
+
+    for format_5_kind in [
+        json!({"type": "person_move_ordered", "person": 1, "from": 1, "to": 2, "arrival_at": 1}),
+        json!({"type": "person_arrived", "person": 1, "territory": 1}),
+        json!({"type": "letter_delivered", "letter": 1, "carrier": 1, "recipient": 2, "territory": 1}),
+        json!({"type": "knowledge_published", "holder": {"type": "person", "id": 1}, "record_count": 1}),
+    ] {
+        let mut event_smuggled: Value = serde_json::from_str(PLUGIN).expect("fixture should parse");
+        event_smuggled["events"][0]["kind"] = format_5_kind;
+        assert_invalid_snapshot(
+            &serde_json::to_string(&event_smuggled)
+                .expect("format-5 event smuggling fixture should serialize"),
+            &[&FixturePlugin],
+        );
+    }
 }

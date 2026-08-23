@@ -1,7 +1,10 @@
+use super::event_payloads::{
+    REPORT_DISPATCHED, ReportDispatched, RuntimeEventPayload, canonicalize_event_kind,
+};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryRecord, COMMITMENT_FORMAT_VERSION, CanwuError,
     CauseRef, CommandAttemptOutcome, CommandAttemptRecord, DeterministicRng, ENGINE_VERSION,
-    ErrorCode, EventKind, GENESIS_BOUNDARY_HASH, IngressPayload, IngressRecord, RandomDrawAddress,
+    ErrorCode, GENESIS_BOUNDARY_HASH, IngressPayload, IngressRecord, RandomDrawAddress,
     RandomDrawId, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamState,
     RunConfigurationSnapshot, RunManifest, SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION,
     SimDuration, SimulationSnapshot, canonical_hash, compute_boundary_hash, invalid_snapshot,
@@ -13,6 +16,11 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) fn migrate_snapshot(
     mut snapshot: SimulationSnapshot,
 ) -> Result<SimulationSnapshot, CanwuError> {
+    for event in &mut snapshot.events {
+        canonicalize_event_kind(&mut event.kind).map_err(|error| {
+            invalid_snapshot_error(format!("event payload is not canonical: {error}"))
+        })?;
+    }
     match snapshot.snapshot_format_version {
         SNAPSHOT_FORMAT_VERSION => {
             if snapshot.engine_version != ENGINE_VERSION {
@@ -546,7 +554,7 @@ fn migrate_format_3_snapshot(
         snapshot
             .events
             .iter()
-            .filter(|event| matches!(event.kind, EventKind::ReportDispatched { .. }))
+            .filter(|event| event.kind.is_type(REPORT_DISPATCHED))
             .count(),
     )
     .map_err(|_| invalid_snapshot_error("legacy random draw count exceeds identifier space"))?;
@@ -558,14 +566,15 @@ fn migrate_format_3_snapshot(
 
     let mut random_draws = Vec::new();
     for event in &snapshot.events {
-        let EventKind::ReportDispatched {
+        if !event.kind.is_type(REPORT_DISPATCHED) {
+            continue;
+        }
+        let ReportDispatched {
             recipient,
             army,
             arrives_at,
-        } = event.kind
-        else {
-            continue;
-        };
+        } = ReportDispatched::decode(&event.kind)
+            .map_err(|_| invalid_snapshot_error("legacy report dispatch payload is malformed"))?;
         let jitter = arrives_at
             .as_minutes()
             .checked_sub(event.timestamp.as_minutes())

@@ -105,10 +105,18 @@ fn exercise_information_flow_api_delta() {
         knowledge_record_count: 0,
         allocations: Vec::new(),
     };
-    let event = EventKind::KnowledgePublished {
-        holder: holder.clone(),
-        record_count: 0,
-    };
+    let event = EventKind::from_fields(
+        "knowledge_published",
+        [
+            (
+                "holder".to_owned(),
+                serde_json::to_value(&holder).expect("holder should serialize"),
+            ),
+            ("record_count".to_owned(), serde_json::json!(0)),
+        ]
+        .into(),
+    )
+    .expect("event payload should be valid");
     let audience = EventAudience::KnowledgeHolder(holder);
     let emission = BoundaryEmissionKind::KnowledgeChange { change_index: 0 };
     let target = DomainReferenceTargetKind::AnyEntity;
