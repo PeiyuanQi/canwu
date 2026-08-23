@@ -76,12 +76,100 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | --- | --- |
 | `canwu-core` | Typed IDs, deterministic random utilities, and schema metadata |
 | `canwu-time` | Historical timestamps and checked duration arithmetic |
+| `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
 | `canwu-event` | Serializable events and compact causal provenance |
 | `canwu-world` | Historical entities and read-only snapshots |
 | `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
+| `canwu-routing` | Deterministic time-dependent routing primitives |
+| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
 | `canwu-api` | Programmatic and semantic interfaces |
+| `canwu-information` | Experimental authoritative information lifecycle extension |
+| `canwu-society` | Experimental social diffusion simulation module |
 | `canwu-debug` | Reference client using only the public API |
+
+### Direct crate dependency DAG
+
+This graph shows normal, direct dependencies declared between first-party
+workspace crates in their Cargo manifests. `A → B` means **A depends on B**;
+external and development dependencies are omitted.
+
+<div class="crate-dependency-dag">
+<MermaidDiagram
+  label="Directed acyclic graph of direct Canwu workspace crate dependencies; arrows point from dependents to their dependencies"
+  diagramLoading="Rendering crate dependency graph…"
+  sourceSummary="View dependency graph source"
+  sourceLoading="Dependency graph source loads with the preview."
+  noScriptMessage="JavaScript is required for the dependency graph preview; the text explanation remains available above."
+  definition={`flowchart TB
+    subgraph ToolsExtensions["Tools and extensions"]
+        Debug["canwu-debug"]
+        Information["canwu-information"]
+        Society["canwu-society"]
+    end
+
+    subgraph Facade["Public facade"]
+        Api["canwu-api"]
+    end
+
+    subgraph RuntimeMechanisms["Runtime and mechanisms"]
+        Sim["canwu-sim"]
+        Transport["canwu-transport"]
+        Routing["canwu-routing"]
+    end
+
+    subgraph Models["Models"]
+        Decision["canwu-decision"]
+        Event["canwu-event"]
+        Knowledge["canwu-knowledge"]
+        World["canwu-world"]
+    end
+
+    subgraph Foundation["Foundation"]
+        Core["canwu-core"]
+        Time["canwu-time"]
+    end
+
+    Debug --> Api
+    Information --> Api
+    Society --> Api
+
+    Api --> Core
+    Api --> Decision
+    Api --> Event
+    Api --> Knowledge
+    Api --> Routing
+    Api --> Sim
+    Api --> Time
+    Api --> Transport
+    Api --> World
+
+    Sim --> Core
+    Sim --> Decision
+    Sim --> Event
+    Sim --> Knowledge
+    Sim --> Time
+    Sim --> World
+
+    Transport --> Core
+    Transport --> Routing
+    Transport --> Time
+
+    Routing --> Core
+    Routing --> Time
+    Routing --> World
+
+    Decision --> Core
+    Decision --> Time
+    Event --> Core
+    Event --> Time
+    Knowledge --> Core
+    Knowledge --> Time
+    World --> Core
+    World --> Time
+`}
+/>
+</div>
 
 ## From domain extensions to runnable kits
 

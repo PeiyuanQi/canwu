@@ -210,6 +210,18 @@
   margin: auto;
 }
 
+@media (max-width: 50rem) {
+  .crate-dependency-dag .mermaid-figure > .mermaid {
+    justify-content: flex-start;
+  }
+
+  .crate-dependency-dag .mermaid-figure > .mermaid svg {
+    min-width: 48rem;
+    max-width: none;
+    margin-inline: 0;
+  }
+}
+
 .mermaid-source {
   border-top: 1px solid var(--sl-color-gray-5);
   padding: 0.7rem 1rem;

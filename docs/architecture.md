@@ -119,6 +119,82 @@ can request an omniscient snapshot, but that snapshot is detached data. The
 semantic API requires an actor and builds observations from that actor's
 knowledge records.
 
+## Workspace crate dependency DAG / 工作区 crate 依赖 DAG
+
+The graph shows normal, direct dependencies between first-party workspace
+crates. An arrow from A to B means **A depends on B**; external and development
+dependencies are omitted. / 下图只展示第一方工作区 crate 之间的普通直接依赖。
+A 指向 B 表示 **A 依赖 B**；外部依赖和开发依赖未列入。
+
+```mermaid
+flowchart TB
+    subgraph ToolsExtensions["Tools and extensions / 工具与扩展"]
+        Debug["canwu-debug"]
+        Information["canwu-information"]
+        Society["canwu-society"]
+    end
+
+    subgraph Facade["Public facade / 公开门面"]
+        Api["canwu-api"]
+    end
+
+    subgraph RuntimeMechanisms["Runtime and mechanisms / 运行时与机制"]
+        Sim["canwu-sim"]
+        Transport["canwu-transport"]
+        Routing["canwu-routing"]
+    end
+
+    subgraph Models["Models / 模型"]
+        Decision["canwu-decision"]
+        Event["canwu-event"]
+        Knowledge["canwu-knowledge"]
+        World["canwu-world"]
+    end
+
+    subgraph Foundation["Foundation / 基础"]
+        Core["canwu-core"]
+        Time["canwu-time"]
+    end
+
+    Debug --> Api
+    Information --> Api
+    Society --> Api
+
+    Api --> Core
+    Api --> Decision
+    Api --> Event
+    Api --> Knowledge
+    Api --> Routing
+    Api --> Sim
+    Api --> Time
+    Api --> Transport
+    Api --> World
+
+    Sim --> Core
+    Sim --> Decision
+    Sim --> Event
+    Sim --> Knowledge
+    Sim --> Time
+    Sim --> World
+
+    Transport --> Core
+    Transport --> Routing
+    Transport --> Time
+
+    Routing --> Core
+    Routing --> Time
+    Routing --> World
+
+    Decision --> Core
+    Decision --> Time
+    Event --> Core
+    Event --> Time
+    Knowledge --> Core
+    Knowledge --> Time
+    World --> Core
+    World --> Time
+```
+
 ## Architecture layers / 架构分层
 
 Canwu is intentionally useful at more than one level. The engine supplies
