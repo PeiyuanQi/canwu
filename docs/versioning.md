@@ -24,11 +24,11 @@ Engine SemVer and snapshot format versioning are separate. Every snapshot stores
 the producing engine version and an integer snapshot format version. Patch and
 minor releases may continue to read an older snapshot format. A format change
 increments the format number and should provide a migration path when practical.
-Format-4 and format-5 state and boundary commitments include the producing engine version. The 0.5 runtime writes format 5 only and accepts engine 0.4.0 format 4 only through the strict JSON migration entry points. Typed snapshots accept current engine 0.5.0 format 5 only; older format 2 and 3 values must first be upgraded by the 0.4 runtime.
+Format-4 and format-5 state and boundary commitments include the producing engine version. The 0.5 runtime writes format 5 only and accepts engine 0.4.0 format 4 only through the strict JSON migration entry points. Typed snapshots accept current engine 0.5.1 format 5 only; older format 2 and 3 values must first be upgraded by the 0.4 runtime.
 
-### 0.5.0 / snapshot format 5 migration
+### 0.5.1 / snapshot format 5 migration
 
-The 0.5.0 runtime writes snapshot format 5. Format 5 is a deliberate wire break rather than an additive reinterpretation of format 4.
+The 0.5.1 runtime writes snapshot format 5. Format 5 is a deliberate wire break rather than an additive reinterpretation of format 4.
 
 The only direct format-4 engine identity accepted by that migration is exactly
 `0.4.0`. Loading reads only the outer version selector, then routes the value to
@@ -50,7 +50,7 @@ run, a registered plugin and boundary contract, a sequential draw, a tagged-v1
 boundary-state hash, ReplayJournal, and checkpoint-journal/live-compaction
 state, with tamper companions for each.
 
-### 0.5.0 source and wire breaks
+### 0.5.1 source and wire breaks
 
 - `RandomDrawRecord.position` is replaced by `address: RandomDrawAddress` and
   adds optional `operation_evidence: EvidenceRef`.
@@ -59,7 +59,7 @@ state, with tamper companions for each.
   0.5 runtime. Its evidence-bound address is validated and replayed by the
   operation-keyed random journal; callers must not treat it as a sequential
   stream position.
-- `SimulationSnapshot` typed loading accepts only engine 0.5.0 format 5.
+- `SimulationSnapshot` typed loading accepts only engine 0.5.1 format 5.
   Engine 0.4.0 format-4 snapshots, replay journals, and checkpoint-journal
   bundles must use their JSON loaders so strict legacy validation occurs before
   migration.
@@ -68,15 +68,15 @@ state, with tamper companions for each.
   `LegacyReplayUnavailable`; exact replay starts with evidence produced after
   migration.
 - Workspace crates and exact first-party dependency requirements move in
-  lockstep from 0.4.0 to 0.5.0.
+  lockstep from 0.4.0 to 0.5.1.
 
 #### Public Rust API delta
 
 The following public construction and exhaustive-match sites are intentionally
-source-breaking in 0.5.0. Downstream crates should update them explicitly;
+source-breaking in 0.5.1. Downstream crates should update them explicitly;
 serde defaults are not a source-compatibility promise.
 
-| Surface | 0.5.0 change | Required downstream change |
+| Surface | 0.5.1 change | Required downstream change |
 | --- | --- | --- |
 | Random records | `RandomDrawRecord.position` becomes `address: RandomDrawAddress`; `operation_evidence: Option<EvidenceRef>` is added. `RandomDrawAddress`, `RandomOperationAddressV1`, and `RandomOperationTarget` are new public enums/structs. | Construct `RandomDrawAddress::Sequential { position }` for sequential use. Use `OperationV1` only with stable evidence, operation identity, target, draw slot, bound, and purpose. |
 | References and IDs | `DomainRecordVersionSource`, `DomainRecordVersionRef`, `EvidenceRef`, `KnowledgeRecordKind`, `KnowledgeSchemaId`, `KnowledgeHolderRef`, `KnowledgeHolderPolicy`, `KnowledgeRecordId`, and `HolderKnowledgeRecordId` are added. | Store exact version/evidence references and match holder/evidence enums exhaustively instead of using untyped strings or current-record lookups. |
