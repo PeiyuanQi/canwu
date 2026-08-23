@@ -28,7 +28,7 @@ renamed by this policy.
 | [无界面历史模拟引擎](../README.zh-CN.md) | headless historical simulation engine | — | The whole product category: Canwu simulates historical worlds without owning rendering, audio, or production UI. |
 | [模拟内核](../website/src/content/docs/architecture/index.mdx) | simulation core | `canwu-sim` | The private runtime that owns mutable authoritative state, scheduling, settlement, persistence, and replay. |
 | [上层应用](../website/src/content/docs/developer/integration.mdx) | host application | — | A game, research tool, service, client, or agent system that embeds Canwu. In Chinese prose, do not use “主机程序” for this concept. |
-| [对外 API](../website/src/content/docs/developer/integration.mdx) | public facade | `canwu-api` | The supported API boundary for application code. |
+| [对外 API](../website/src/content/docs/developer/integration.mdx) | public API | `canwu-api` | The supported API boundary for application code. |
 | [模拟运行](../website/src/content/docs/developer/persistence.mdx) | simulation run | `run_id` | One causally continuous execution with its own identity, inputs, state, and evidence. |
 | [场景](../website/src/content/docs/tutorials/move-army.mdx) | scenario | `Scenario` | The initial world and configuration used to create a simulation. |
 | [权威状态](../website/src/content/docs/developer/reading-state.mdx) | authoritative state | `SimulationSnapshot` | State owned and validated by Canwu; it is the basis for commitments, persistence, and replay. |
@@ -48,7 +48,7 @@ renamed by this policy.
 | [规范化输入](../website/src/content/docs/architecture/events.mdx) | canonical ingress | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. Write the English term on first use when needed. |
 | [准入](../website/src/content/docs/architecture/events.mdx) | admission | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
 | [调度工作](../website/src/content/docs/architecture/events.mdx) | scheduled work | — | Work assigned a deterministic simulation due time and insertion order. |
-| [结算边界](../website/src/content/docs/architecture/settlement.mdx) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | One validated settlement boundary that admits work, runs systems, records evidence, and commits or rolls back. |
+| [结算边界](../website/src/content/docs/architecture/settlement.mdx) | transaction | `BoundaryRequest`, `BoundaryRecord` | One validated transaction that admits work, runs systems, records evidence, and commits or rolls back. |
 | [结算阶段](../website/src/content/docs/architecture/settlement.mdx) | settlement phase | `BoundaryPhase` | One position in the fixed boundary execution order. A phase is ordering, not an independent settlement algorithm. |
 | [原子提交](../website/src/content/docs/architecture/settlement.mdx) | atomic commit | — | Applying all validated changes from a boundary together so observers never see partial state. |
 | [回滚](../website/src/content/docs/architecture/settlement.mdx) | rollback | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
@@ -87,7 +87,7 @@ renamed by this policy.
 | [检查点](../website/src/content/docs/developer/persistence.mdx) | checkpoint | `SimulationCheckpoint` | A validated compact base state from which later journal evidence can continue. |
 | [检查点日志](../website/src/content/docs/developer/persistence.mdx) | checkpoint journal | `CheckpointJournal` | A checkpoint bundled with subsequent evidence for compact persistence and restoration. Use the code identifier in code-adjacent prose. |
 | [精确重放](../website/src/content/docs/developer/persistence.mdx) | exact replay | `replay_from_journal()` | Reconstructing and verifying the same run from recorded inputs and evidence without rerunning external choices. |
-| [反事实分支](../website/src/content/docs/developer/persistence.mdx) | counterfactual branch | — | A new causal branch created by choosing different input from a shared prior state; it is not exact replay. |
+| [平行现实](../website/src/content/docs/developer/persistence.mdx) | alternative reality | — | A new causal reality created by choosing different inputs from a shared prior state; it is not exact replay. |
 | [派生分支](../website/src/content/docs/developer/persistence.mdx) | fork | `fork()` | An independent simulation copied from an existing point so it can advance with new inputs. Use `fork` when referring to the API call. |
 | [状态承诺](../website/src/content/docs/architecture/settlement.mdx) | state commitment | `CommitmentRoots` | A cryptographic commitment that binds authoritative state or evidence for validation. |
 | [语义哈希](../website/src/content/docs/developer/extensions.mdx) | semantic hash | `semantic_hash` | A stable declaration of plugin behavior used to reject incompatible load or replay environments. |
@@ -116,10 +116,10 @@ renamed by this policy.
 | --- | --- | --- |
 | [模拟内核](../website/src/content/docs/architecture/index.mdx) / simulation core | `kernel` | Restricted: use **simulation core** in product and integration prose; **kernel** remains permitted in architecture and internal implementation descriptions. |
 | [上层应用](../website/src/content/docs/developer/integration.mdx) / host application | 主机程序 / host program | Deprecated: use **上层应用** and **host application** for a game, service, client, research tool, or agent system that embeds Canwu. |
-| [对外 API](../website/src/content/docs/developer/integration.mdx) / public facade | public API (when naming the `canwu-api` boundary) | Restricted: **public API** remains valid for the broader API surface; use **public facade** for the supported application boundary itself. |
+| [对外 API](../website/src/content/docs/developer/integration.mdx) / public API | public facade | Deprecated: use **public API** for the supported application boundary and the broader API surface. |
 | [模拟插件](../website/src/content/docs/developer/extensions.mdx) / simulation plugin | 运行时模拟插件 / runtime simulation plugin; 模拟规则插件 / domain plugin | Restricted: use the longer forms only to contrast runtime plugins with agent tools or to describe a plugin's domain role. They are not separate plugin kinds. |
-| [结算边界](../website/src/content/docs/architecture/settlement.mdx) / settlement boundary | transaction (when naming a Canwu settlement) | Restricted: **transaction** is generic implementation language; use **settlement boundary** for the validated Canwu unit. |
-| [反事实分支](../website/src/content/docs/developer/persistence.mdx) / counterfactual branch | branch (when a different input creates a new causal run) | Restricted: use **fork** for the API operation and the copied simulation; use **counterfactual branch** only after divergent input creates a new causal run. |
+| [结算边界](../website/src/content/docs/architecture/settlement.mdx) / transaction | settlement boundary | Deprecated: use **transaction** for the validated Canwu unit. |
+| [平行现实](../website/src/content/docs/developer/persistence.mdx) / alternative reality | 反事实分支 / counterfactual branch; branch (when a different input creates a new causal run) | Deprecated: use **alternative reality** for a new causal reality created by divergent input; use **fork** only for the API operation and copied simulation. |
 | [权限](../website/src/content/docs/developer/integration.mdx) / authority | permission (when meaning `CommandAuthority`) | Restricted: use **authority** for the validated right to act; retain **permission profile** for the separate run-policy context. |
 
 ## Maintenance rule

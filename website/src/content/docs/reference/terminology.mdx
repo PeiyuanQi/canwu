@@ -28,7 +28,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [无界面历史模拟引擎](/architecture/) | headless historical simulation engine | — | 参伍的产品类别；负责模拟历史世界，不负责画面、音频和正式产品界面。 |
 | [模拟内核](/architecture/) | simulation core | `canwu-sim` | 持有可变权威状态、调度、结算、持久化与重放的私有运行时。 |
 | [上层应用](/developer/integration/) | host application | — | 嵌入参伍的游戏、研究工具、服务、客户端或智能体系统；中文不使用“主机程序”。 |
-| [对外 API](/developer/integration/) | public facade | `canwu-api` | 应用代码应从这里接入；版本兼容性也以这里为准。 |
+| [对外 API](/developer/integration/) | public API | `canwu-api` | 应用代码应从这里接入；版本兼容性也以这里为准。 |
 | [模拟运行](/developer/persistence/) | simulation run | `run_id` | 具有独立身份、输入、状态和证据的一次连续执行。 |
 | [场景](/tutorials/move-army/) | scenario | `Scenario` | 创建模拟时使用的初始世界和配置。 |
 | [权威状态](/developer/reading-state/) | authoritative state | `SimulationSnapshot` | 由参伍持有并验证，作为承诺、持久化和重放基础的状态。 |
@@ -48,7 +48,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [规范化输入](/architecture/events/) | canonical ingress | `IngressRecord` | 命令、通信、信息和调度系统共用的持久化确定性输入路径。首次出现时可附英文。 |
 | [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
 | [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |
-| [结算边界](/architecture/settlement/) | settlement boundary | `BoundaryRequest`, `BoundaryRecord` | 准入工作、运行系统、记录证据并整体提交或回滚的一次已验证结算边界。 |
+| [结算边界](/architecture/settlement/) | transaction | `BoundaryRequest`, `BoundaryRecord` | 准入工作、运行系统、记录证据并整体提交或回滚的一次已验证结算边界。 |
 | [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
 | [原子提交](/architecture/settlement/) | atomic commit | — | 一次性应用边界中所有通过验证的变化，避免暴露部分状态。 |
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
@@ -87,7 +87,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [检查点](/developer/persistence/) | checkpoint | `SimulationCheckpoint` | 可与后续日志证据衔接的已验证紧凑基础状态。 |
 | [检查点日志](/developer/persistence/) | checkpoint journal | `CheckpointJournal` | 检查点和后续证据的组合，用于紧凑持久化与恢复。代码相邻正文可直接使用类型名。 |
 | [精确重放](/developer/persistence/) | exact replay | `replay_from_journal()` | 从已记录输入与证据重建并验证同一次运行，不重新调用外部选择。 |
-| [反事实分支](/developer/persistence/) | counterfactual branch | — | 从共同的旧状态选择不同输入形成的新因果分支，不是精确重放。 |
+| [平行现实](/developer/persistence/) | alternative reality | — | 从共同的先前状态选择不同的输入形成新的平行现实，不是精确重放。 |
 | [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
 | [状态承诺](/architecture/settlement/) | state commitment | `CommitmentRoots` | 绑定权威状态或证据、供校验使用的密码学承诺。 |
 | [语义哈希](/developer/extensions/) | semantic hash | `semantic_hash` | 描述插件行为的稳定值，用于拒绝不兼容的加载或重放环境。 |
@@ -116,10 +116,10 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | --- | --- | --- |
 | [模拟内核](/architecture/) / simulation core | `kernel` | 受限：产品和接入文档使用 **模拟内核** 与 **simulation core**；`kernel` 可继续用于架构和内部实现说明。 |
 | [上层应用](/developer/integration/) / host application | 主机程序 / host program | 已弃用：嵌入参伍的游戏、服务、客户端、研究工具或智能体系统统一使用 **上层应用** 与 **host application**。 |
-| [对外 API](/developer/integration/) / public facade | public API（指 `canwu-api` 接入边界时） | 受限：**public API** 仍可泛指整体 API 表面；具体指应用接入边界时使用 **public facade**。 |
+| [对外 API](/developer/integration/) / public API | public facade | 已弃用：接入边界和整体 API 表面统一使用 **public API**。 |
 | [模拟插件](/developer/extensions/) / simulation plugin | 运行时模拟插件 / runtime simulation plugin；模拟规则插件 / domain plugin | 受限：仅在区分运行时插件与 Agent 工具，或说明插件领域角色时使用长写法；它们不是独立插件类别。 |
-| [结算边界](/architecture/settlement/) / settlement boundary | transaction（指参伍结算时） | 受限：`transaction` 只是通用实现描述；参伍的验证单元统一称为 **结算边界** 与 **settlement boundary**。 |
-| [反事实分支](/developer/persistence/) / counterfactual branch | branch（因不同输入形成新因果运行时） | 受限：API 操作和复制出的模拟使用 **fork**；只有在不同输入形成新因果运行后，才使用 **反事实分支** 与 **counterfactual branch**。 |
+| [结算边界](/architecture/settlement/) / transaction | settlement boundary | 已弃用：参伍的验证单元英文统一使用 **transaction**；中文规范写法仍为 **结算边界**。 |
+| [平行现实](/developer/persistence/) / alternative reality | 反事实分支 / counterfactual branch；branch（因不同输入形成新因果运行时） | 已弃用：不同输入形成的新因果现实统一使用 **平行现实** 与 **alternative reality**；API 操作和复制出的模拟继续使用 **fork**。 |
 | [权限](/developer/integration/) / authority | permission（指 `CommandAuthority` 时） | 受限：已验证的行动权统一称为 **权限** 与 **authority**；独立的运行策略上下文继续使用 **permission profile**。 |
 
 ## 维护规则
