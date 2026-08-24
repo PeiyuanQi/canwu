@@ -1,6 +1,6 @@
 ---
-title: 移动军队：最小可运行示例
-description: 用最小示例了解语义行动、确定性时间推进与角色知识差异。
+title: 移动军队：参考整合起步示例
+description: 用可运行示例了解领域插件、规范命令、确定性时间与精确重演。
 sidebar:
   order: 2
   label: 移动军队
@@ -8,35 +8,37 @@ sidebar:
 
 import { LinkButton, Steps } from "@astrojs/starlight/components";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/examples/move_army.rs" icon="external">
-  查看 move_army.rs
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs" icon="external">
+  查看 starter.rs
 </LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/facade/canwu-api/examples" variant="secondary" icon="external">
-  浏览示例目录
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/integrations/canwu-reference-world" variant="secondary" icon="external">
+  浏览参考整合 crate
 </LinkButton>
 
-这是理解 Canwu 公开 API 的最短路径：命令不直接修改世界状态，时间由上层应用显式推进，读取可以是角色相对的。
+这是理解迁移后边界的最短路径：引擎提供通用运行时，世界模型和移动命令属于可选的 `canwu-reference-world` 整合。
 
 ## 运行
 
 ```shell
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
 ## 执行流程
 
 <Steps>
-1. 用 `Canwu::demo(35)` 创建确定性的演示世界。
-2. 调用 `act()`，以指挥官身份提交 `SemanticAction::MoveEntity`，其 subject 为军队。
-3. 用 `advance()` 推进模拟时间，让已计划的到达工作发生。
-4. 分别调用 `observe()`，比较指挥官与观察者的知识记录。
+1. 用 `demo_scenario()` 创建场景、通用实体注册表与参考领域记录。
+2. 通过 `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])` 注册领域逻辑。
+3. 把 `MovementCommand` 包装成 plugin command，再经 `enqueue_command()` 进入规范队列。
+4. 用 `advance_canonical()` 推进时间，再通过参考整合的 `snapshot()` 读取军队位置。
+5. 保存快照、加载、分支并从 journal 重演，然后比较四个检查点。
 </Steps>
 
 ## 应该观察什么
 
-- 指挥官在军队到达后立即知道新位置。
-- 观察者在报告送达前仍保留旧位置认知。
-- 任何世界变化都来自公开的命令/行动边界，而不是可变世界引用。
+- 军队在时间推进后到达目标领地。
+- 世界具体类型不是 `canwu-api` 的基础依赖；应用可替换整个领域整合。
+- 加载、分支和精确重演都与原运行产生相同检查点。
+- 旧 format-5 存档的实体注册表由运行时显式迁移，不需要保留 `canwu-world` crate。
 
 ## 下一步
 

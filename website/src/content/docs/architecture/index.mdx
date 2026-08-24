@@ -30,14 +30,14 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | 层 | 责任 | 公开承诺 |
 | --- | --- | --- |
 | 客户端 | 地图、渲染、输入、研究工作流与智能体循环 | 自由选择界面，不拥有权威状态 |
-| `canwu-api` | 程序 API、查询、语义行动、事件与快照 | 通过验证后的命令和查询工作 |
+| `canwu-api` | 程序 facade、命令、领域记录、事件、快照与重演 | 通过验证后的公开入口工作 |
 | `canwu-sim` | 调度、插件、结算、持久化与重演 | 唯一持有实时可变模拟状态 |
-| 基础 crate | ID、时间、事件、世界与角色知识模型 | 提供可序列化、跨平台的基础类型 |
+| 基础与模型 crate | ID、时间、事件、决策与角色知识 | 提供可序列化、跨平台的引擎契约 |
 
 ## 五条架构边界
 
-1. **命令边界**：外部改变必须进入验证过的命令、语义行动或规范化输入；客户端不能直接改写世界。
-2. **读取边界**：程序 API 返回脱离运行时的快照，语义 API 根据角色知识生成观察结果。
+1. **命令边界**：外部改变必须进入验证过的引擎命令、领域插件命令或规范化输入；客户端不能直接改写状态。
+2. **读取边界**：公开 facade 返回通用实体、领域记录和证据；领域整合生成脱离运行时的投影，`CanwuViewer` 限定角色知识。
 3. **确定性边界**：时间、队列、插件执行顺序、资源分配和随机流都有明确的规范排序。
 4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
 5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重演的记录。
@@ -70,8 +70,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 ## 一次行动如何穿过系统
 
 <Steps>
-1. 客户端通过 `canwu-api` 提交命令或语义行动；内核验证权限、前置条件和请求身份。
-2. 接受的行动产生带因果引用的事件，并按可表示的模拟时间安排后续工作。
+1. 客户端或领域整合通过 `canwu-api` 提交类型化命令；内核验证权限、前置条件、修订版本和请求身份。
+2. 接受的命令产生带因果引用的事件，并按可表示的模拟时间安排后续工作。
 3. 到达结算边界后，内核切出准入集合和不可变边界快照，按固定阶段运行插件系统。
 4. 系统提出资源申请、状态变化、领域记录和事件；内核验证声明范围并原子提交。
 5. 结算记录保存事件、随机抽样、分配、变化、生产者和哈希，客户端再读取快照或角色视角的观察结果。
@@ -85,18 +85,18 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-time` | 历史时间戳与经过检查的时长运算 |
 | `canwu-decision` | 决策票据、确定性求值、控制者与决策策略 SDK |
 | `canwu-event` | 通用事件信封、因果来源、受众和结构化事件记录 |
-| `canwu-world` | 首个移动纵向切片的兼容实体和只读快照 |
+| `canwu-reference-world` | 可替换的示例实体、移动插件、脱离式投影、路由适配器与入门示例 |
 | `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
 | `canwu-routing` | 确定性时变路由原语 |
 | `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
 | `canwu-sim` | 私有运行时、调度、插件和结算 |
-| `canwu-api` | 程序接口与语义接口 |
+| `canwu-api` | 通用程序 facade、规范命令、领域记录、证据与重演 |
 | `canwu-information` | 实验性权威信息生命周期扩展 |
 | `canwu-correspondence` | 实验性通信模拟领域扩展与模拟插件 |
 | `canwu-society` | 实验性社会传播模拟模块 |
 | `canwu-technology` | 实验性、证据驱动的通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
-| `canwu-debug` | 只依赖公开 API 的参考客户端 |
+| `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
 
 ### crate 直接依赖 DAG
 
@@ -118,6 +118,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
         Society["canwu-society"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        ReferenceWorld["canwu-reference-world"]
     end
 
     subgraph Facade["公开门面"]
@@ -134,7 +135,6 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
         Decision["canwu-decision"]
         Event["canwu-event"]
         Knowledge["canwu-knowledge"]
-        World["canwu-world"]
     end
 
     subgraph Foundation["基础"]
@@ -150,6 +150,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     Technology --> Api
     History --> Api
     History --> Technology
+    ReferenceWorld --> Api
+    Debug --> ReferenceWorld
 
     Api --> Core
     Api --> Decision
@@ -159,14 +161,12 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     Api --> Sim
     Api --> Time
     Api --> Transport
-    Api --> World
 
     Sim --> Core
     Sim --> Decision
     Sim --> Event
     Sim --> Knowledge
     Sim --> Time
-    Sim --> World
 
     Transport --> Core
     Transport --> Routing
@@ -174,7 +174,6 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 
     Routing --> Core
     Routing --> Time
-    Routing --> World
 
     Decision --> Core
     Decision --> Time
@@ -182,8 +181,6 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     Event --> Time
     Knowledge --> Core
     Knowledge --> Time
-    World --> Core
-    World --> Time
 `}
 />
 </div>

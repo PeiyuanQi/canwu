@@ -50,10 +50,10 @@ until separately stabilized.
 
 ## Quick start
 
-Install Rust 1.88 or newer, then run the headless movement example:
+Install Rust 1.88 or newer, then run the extracted reference-world starter:
 
 ```text
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
 For a phased, API-only plugin example:
@@ -80,6 +80,7 @@ For the experimental evidence-based technology flow:
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
+```
 
 For routed local and Wuxi-to-Beijing correspondence:
 
@@ -94,13 +95,14 @@ cargo run -p canwu-correspondence --example routed_correspondence
   and policy SDK contracts
 - `canwu-time`: historical time that is independent of rendering speed
 - `canwu-event`: stored events and links between causes and effects
-- `canwu-world`: historical entities and read-only world snapshots
 - `canwu-knowledge`: what each actor knows and when they learned it
 - `canwu-routing`: deterministic, observer-relative route planning
 - `canwu-transport`: itinerary, custody, booking, and delivery execution
 - `canwu-sim`: private simulation state, commands, scheduling, and plugins
 - `canwu-api`: public APIs for programs, agents, explanations, and debugging
-- `canwu-debug`: a small reference client built only on the public API
+- `canwu-reference-world`: replaceable example entities, detached projection,
+  movement plugin, routing adapter, and runnable persistence/replay starter
+- `canwu-debug`: a small reference client built on the public API and reference integration
 - `canwu-information`: unpublished experimental information-lifecycle extension
 - `canwu-correspondence`: unpublished experimental correspondence domain
   extension and simulation plugin built on routing, transport, and information
@@ -180,20 +182,30 @@ The human-readable package and registry procedure is documented in
 ## Minimal API example
 
 ```rust
-use canwu_api::{Canwu, Command, CommandEnvelope, EntityRef, Issuer, SimDuration};
+use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
+use canwu_reference_world::{
+    MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement,
+};
 
-let mut canwu = Canwu::demo(35)?;
-let ids = Canwu::demo_ids();
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
 
-canwu.submit(CommandEnvelope::new(
+let envelope = order_movement(
     Issuer::Actor(ids.commander),
-    Command::OrderMovement {
+    &MovementCommand {
         subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
         cargo: Vec::new(),
     },
-))?;
-let events = canwu.advance(SimDuration::days(1))?;
+)?
+.at_time(canwu.time());
+canwu.enqueue_command(
+    canwu.time(),
+    0,
+    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), envelope),
+)?;
+let events = canwu.advance_canonical(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 

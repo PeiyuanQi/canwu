@@ -266,7 +266,6 @@ dependencies = [
  "canwu-sim",
  "canwu-time",
  "canwu-transport",
- "canwu-world",
  "serde",
  "serde_json",
 ]
@@ -294,6 +293,7 @@ name = "canwu-debug"
 version = "0.5.1"
 dependencies = [
  "canwu-api",
+ "canwu-reference-world",
  "eframe",
  "image",
  "serde",
@@ -351,13 +351,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-reference-world"
+version = "0.5.1"
+dependencies = [
+ "canwu-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-routing"
 version = "0.5.1"
 dependencies = [
  "blake3",
  "canwu-core",
  "canwu-time",
- "canwu-world",
  "serde",
  "serde_json",
 ]
@@ -372,7 +380,6 @@ dependencies = [
  "canwu-event",
  "canwu-knowledge",
  "canwu-time",
- "canwu-world",
  "serde",
  "serde_json",
 ]
@@ -408,15 +415,6 @@ version = "0.5.1"
 dependencies = [
  "canwu-core",
  "canwu-routing",
- "canwu-time",
- "serde",
-]
-
-[[package]]
-name = "canwu-world"
-version = "0.5.1"
-dependencies = [
- "canwu-core",
  "canwu-time",
  "serde",
 ]

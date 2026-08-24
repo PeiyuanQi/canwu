@@ -30,14 +30,14 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | Layer | Responsibility | Public contract |
 | --- | --- | --- |
 | Client | Maps, rendering, input, research workflows, and agent loops | Choose the interface freely; do not own authoritative state |
-| `canwu-api` | Programmatic API, queries, semantic actions, events, and snapshots | Work through validated commands and queries |
+| `canwu-api` | Programmatic facade, commands, domain records, events, snapshots, and replay | Work through validated public ingress |
 | `canwu-sim` | Scheduling, plugins, settlement, persistence, and replay | The only owner of live mutable simulation state |
-| Foundation crates | IDs, time, events, world, and actor knowledge | Serializable, portable building blocks |
+| Foundation and model crates | IDs, time, events, decisions, and actor knowledge | Serializable, portable engine contracts |
 
 ## Five architectural boundaries
 
-1. **Command boundary:** external changes enter through validated commands, semantic actions, or canonical ingress; clients never rewrite the world directly.
-2. **Read boundary:** the programmatic API returns detached snapshots, while the semantic API builds observations from an actor's knowledge.
+1. **Command boundary:** external changes enter through validated engine commands, domain plugin commands, or canonical ingress; clients never rewrite state directly.
+2. **Read boundary:** the facade returns generic entities, domain records, and evidence; integrations build detached projections, while `CanwuViewer` scopes actor knowledge.
 3. **Determinism boundary:** time, queues, plugin order, allocation, and random streams all have explicit canonical ordering.
 4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.
 5. **Evidence boundary:** commands, events, settlement, random draws, state changes, and hashes form an inspectable replay record.
@@ -70,8 +70,8 @@ Canwu is a headless historical simulation core. A client may be a game, research
 ## How one action moves through the system
 
 <Steps>
-1. A client submits a command or semantic action through `canwu-api`; the kernel validates authority, preconditions, and request identity.
-2. An accepted action emits a causally linked event and schedules follow-up work using representable simulation time.
+1. A client or domain integration submits a typed command through `canwu-api`; the kernel validates authority, preconditions, revision, and request identity.
+2. An accepted command emits a causally linked event and schedules follow-up work using representable simulation time.
 3. At a settlement boundary, the kernel cuts the admission set and immutable snapshot, then runs systems in fixed phase order.
 4. Systems propose reservations, state changes, domain records, and events; the kernel validates declared access and commits atomically.
 5. The boundary stores events, random draws, allocations, changes, producer provenance, and hashes before clients read snapshots or actor-scoped observations.
@@ -85,18 +85,18 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-time` | Historical timestamps and checked duration arithmetic |
 | `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
 | `canwu-event` | Generic event envelopes, provenance, audiences, and structured event records |
-| `canwu-world` | Compatibility entities and detached snapshots for the first movement vertical slice |
+| `canwu-reference-world` | Replaceable example entities, movement plugin, detached projection, routing adapter, and starter |
 | `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
 | `canwu-routing` | Deterministic time-dependent routing primitives |
 | `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
-| `canwu-api` | Programmatic and semantic interfaces |
+| `canwu-api` | Generic programmatic facade, canonical commands, domain records, evidence, and replay |
 | `canwu-information` | Experimental authoritative information lifecycle extension |
 | `canwu-correspondence` | Experimental correspondence domain extension and simulation plugin |
 | `canwu-society` | Experimental social diffusion simulation module |
 | `canwu-technology` | Experimental evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
-| `canwu-debug` | Reference client using only the public API |
+| `canwu-debug` | Reference client using the public API and reference-world integration |
 
 ### Direct crate dependency DAG
 
@@ -119,6 +119,7 @@ external and development dependencies are omitted.
         Society["canwu-society"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        ReferenceWorld["canwu-reference-world"]
     end
 
     subgraph Facade["Public facade"]
@@ -135,7 +136,6 @@ external and development dependencies are omitted.
         Decision["canwu-decision"]
         Event["canwu-event"]
         Knowledge["canwu-knowledge"]
-        World["canwu-world"]
     end
 
     subgraph Foundation["Foundation"]
@@ -151,6 +151,8 @@ external and development dependencies are omitted.
     Technology --> Api
     History --> Api
     History --> Technology
+    ReferenceWorld --> Api
+    Debug --> ReferenceWorld
 
     Api --> Core
     Api --> Decision
@@ -160,14 +162,12 @@ external and development dependencies are omitted.
     Api --> Sim
     Api --> Time
     Api --> Transport
-    Api --> World
 
     Sim --> Core
     Sim --> Decision
     Sim --> Event
     Sim --> Knowledge
     Sim --> Time
-    Sim --> World
 
     Transport --> Core
     Transport --> Routing
@@ -175,7 +175,6 @@ external and development dependencies are omitted.
 
     Routing --> Core
     Routing --> Time
-    Routing --> World
 
     Decision --> Core
     Decision --> Time
@@ -183,8 +182,6 @@ external and development dependencies are omitted.
     Event --> Time
     Knowledge --> Core
     Knowledge --> Time
-    World --> Core
-    World --> Time
 `}
 />
 </div>

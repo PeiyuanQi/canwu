@@ -1,6 +1,8 @@
-//! Historical entity read models and detached world snapshots.
+//! Deprecated format-5 compatibility projection. New world models belong in integrations.
 
-use canwu_core::{ArmyId, GovernmentId, LetterId, PersonId, RouteId, TerritoryId};
+use canwu_core::{
+    ArmyId, EntityRef, GovernmentId, LetterId, PersonId, ResourceId, RouteId, TerritoryId,
+};
 use canwu_time::{SimDuration, SimTime};
 use serde::{Deserialize, Serialize};
 
@@ -129,35 +131,65 @@ pub struct WorldSnapshot {
 
 impl WorldSnapshot {
     #[must_use]
+    pub fn entities(&self) -> Vec<EntityRef> {
+        let mut entities = Vec::with_capacity(
+            self.armies.len()
+                + self.governments.len()
+                + self.people.len()
+                + self.letters.len()
+                + self.routes.len()
+                + self.territories.len(),
+        );
+        entities.extend(self.armies.iter().map(|value| EntityRef::Army(value.id)));
+        entities.extend(
+            self.governments
+                .iter()
+                .map(|value| EntityRef::Government(value.id)),
+        );
+        entities.extend(self.people.iter().map(|value| EntityRef::Person(value.id)));
+        entities.extend(
+            self.letters
+                .iter()
+                .map(|value| EntityRef::Resource(ResourceId::new(value.id.get()))),
+        );
+        entities.extend(self.routes.iter().map(|value| EntityRef::Route(value.id)));
+        entities.extend(
+            self.territories
+                .iter()
+                .map(|value| EntityRef::Territory(value.id)),
+        );
+        entities.sort();
+        entities
+    }
+
+    #[must_use]
     pub fn person(&self, id: PersonId) -> Option<&Person> {
         self.people.iter().find(|person| person.id == id)
     }
 
     #[must_use]
     pub fn government(&self, id: GovernmentId) -> Option<&Government> {
-        self.governments
-            .iter()
-            .find(|government| government.id == id)
+        self.governments.iter().find(|value| value.id == id)
     }
 
     #[must_use]
     pub fn territory(&self, id: TerritoryId) -> Option<&Territory> {
-        self.territories.iter().find(|territory| territory.id == id)
+        self.territories.iter().find(|value| value.id == id)
     }
 
     #[must_use]
     pub fn route(&self, id: RouteId) -> Option<&Route> {
-        self.routes.iter().find(|route| route.id == id)
+        self.routes.iter().find(|value| value.id == id)
     }
 
     #[must_use]
     pub fn army(&self, id: ArmyId) -> Option<&Army> {
-        self.armies.iter().find(|army| army.id == id)
+        self.armies.iter().find(|value| value.id == id)
     }
 
     #[must_use]
     pub fn letter(&self, id: LetterId) -> Option<&LetterCargo> {
-        self.letters.iter().find(|letter| letter.id == id)
+        self.letters.iter().find(|value| value.id == id)
     }
 
     #[must_use]
@@ -198,49 +230,5 @@ impl WorldSnapshot {
                 (territory.position.x - point.x).hypot(territory.position.y - point.y) <= radius
             })
         })
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct WorldDiff {
-    pub changed_armies: Vec<ArmyId>,
-    pub changed_people: Vec<PersonId>,
-    pub changed_territories: Vec<TerritoryId>,
-    pub changed_letters: Vec<LetterId>,
-}
-
-impl WorldDiff {
-    #[must_use]
-    pub fn between(before: &WorldSnapshot, after: &WorldSnapshot) -> Self {
-        let changed_armies = after
-            .armies
-            .iter()
-            .filter(|army| before.army(army.id) != Some(*army))
-            .map(|army| army.id)
-            .collect();
-        let changed_people = after
-            .people
-            .iter()
-            .filter(|person| before.person(person.id) != Some(*person))
-            .map(|person| person.id)
-            .collect();
-        let changed_territories = after
-            .territories
-            .iter()
-            .filter(|territory| before.territory(territory.id) != Some(*territory))
-            .map(|territory| territory.id)
-            .collect();
-        let changed_letters = after
-            .letters
-            .iter()
-            .filter(|letter| before.letter(letter.id) != Some(*letter))
-            .map(|letter| letter.id)
-            .collect();
-        Self {
-            changed_armies,
-            changed_people,
-            changed_territories,
-            changed_letters,
-        }
     }
 }

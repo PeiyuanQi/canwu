@@ -192,6 +192,11 @@ fn five_technology_profiles_use_one_evaluator_contract() {
         };
         let scenario = Scenario {
             start_time: SimTime::EPOCH,
+            entities: vec![
+                EntityRef::Government(government),
+                EntityRef::Person(actor),
+                EntityRef::Territory(site),
+            ],
             world: WorldSnapshot {
                 people: vec![Person {
                     id: actor,
@@ -3362,6 +3367,7 @@ fn scenario() -> (
     (
         Scenario {
             start_time: SimTime::EPOCH,
+            entities: world.entities(),
             world,
             knowledge: KnowledgeSnapshot::default(),
             domain_records: records,

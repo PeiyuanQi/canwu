@@ -44,6 +44,35 @@ and explicitly migrate engine identity without reinterpreting snapshot format
 5; changing only `Cargo.toml` here would make valid 0.5.1 snapshots fail the
 engine-identity gate.
 
+### Unreleased world ownership transition
+
+The same next pre-1.0 minor release retires the concrete `canwu-world` package.
+Its historical reference model, plugin command handlers, read projection, and
+starter scenario now live in the optional `canwu-reference-world` integration.
+The engine and `canwu-api` facade own only generic entity identity, domain-record
+storage, command ingress, events, persistence, replay, and viewer-scoped
+knowledge. `canwu-routing` now accepts only `PlanningSnapshot` and no longer
+depends on a concrete world model.
+
+`Scenario` and `SimulationSnapshot` add a generic `entities: Vec<EntityRef>`
+registry. The serialized field is additive within snapshot format 5. The JSON
+loader explicitly derives it from the validated legacy format-5 compatibility
+projection when an old save omits it; current domain integrations must provide
+the registry rather than relying on that migration. For compatibility scenarios,
+an entity registry exactly derivable from the legacy world projection retains
+the existing scenario semantic hash; non-derived generic registries are bound
+by the current scenario hash. Deprecated format-5 world
+projection types and legacy built-in movement commands remain in the
+facade/runtime compatibility surface for an interval, but no source package or
+normal dependency edge points to `canwu-world`.
+
+The old facade-owned `observe`, `inspect`, `query_as`, `available_actions`,
+`act`, and domain-specific query/action DTOs are removed. Domain integrations
+now translate client intent into typed plugin commands, construct their own
+trusted projections from domain records, and use `CanwuViewer` for actor-scoped
+knowledge. This Rust source break must ship as part of `0.6.0`; it is not a
+patch-level change.
+
 ## Snapshot format
 
 Engine SemVer and snapshot format versioning are separate. Every snapshot stores

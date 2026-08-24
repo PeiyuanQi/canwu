@@ -16,7 +16,6 @@ publish = ["crates-io"]
 blake3.workspace = true
 canwu-core.workspace = true
 canwu-time.workspace = true
-canwu-world.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

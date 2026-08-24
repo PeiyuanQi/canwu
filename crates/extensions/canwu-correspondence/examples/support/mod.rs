@@ -177,6 +177,7 @@ pub fn scenario_with_prepared_dispatch() -> (
     (
         Scenario {
             start_time: snapshot.initial_time,
+            entities: snapshot.entities,
             world: snapshot.world,
             knowledge: snapshot.knowledge,
             domain_records: records,

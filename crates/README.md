@@ -19,7 +19,7 @@ flowchart BT
     decision["canwu-decision"]
     event["canwu-event"]
     knowledge["canwu-knowledge"]
-    world["canwu-world"]
+    reference_world["canwu-reference-world"]
 
     routing["canwu-routing"]
     transport["canwu-transport"]
@@ -35,6 +35,9 @@ flowchart BT
 
     subgraph tools["Tools"]
         debug
+    end
+    subgraph integrations["Reference integrations"]
+        reference_world
     end
     subgraph extensions["Experimental extensions"]
         information
@@ -57,7 +60,6 @@ flowchart BT
         decision
         event
         knowledge
-        world
     end
     subgraph foundation["Foundation"]
         core
@@ -70,12 +72,9 @@ flowchart BT
     time --> event
     core --> knowledge
     time --> knowledge
-    core --> world
-    time --> world
 
     core --> routing
     time --> routing
-    world --> routing
     core --> transport
     time --> transport
     routing --> transport
@@ -85,14 +84,12 @@ flowchart BT
     decision --> sim
     event --> sim
     knowledge --> sim
-    world --> sim
 
     core --> api
     time --> api
     decision --> api
     event --> api
     knowledge --> api
-    world --> api
     routing --> api
     transport --> api
     sim --> api
@@ -105,6 +102,8 @@ flowchart BT
     api --> history
     technology --> history
     api --> debug
+    api --> reference_world
+    reference_world --> debug
 ```
 
 ## Layers
@@ -112,11 +111,12 @@ flowchart BT
 | Layer | Crates | Responsibility | Registry policy |
 | --- | --- | --- | --- |
 | `foundation/` | `canwu-core`, `canwu-time` | Stable identifiers, schemas, deterministic random primitives, and simulation time | Published |
-| `model/` | `canwu-decision`, `canwu-event`, `canwu-knowledge`, `canwu-world` | Serializable model and policy contracts | Published |
+| `model/` | `canwu-decision`, `canwu-event`, `canwu-knowledge` | Serializable model and policy contracts | Published |
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `facade/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
 | `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the facade; historical research remains an optional downstream consumer of technology | Not published |
+| `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
 ## Registry order
@@ -125,7 +125,7 @@ Publish the lockstep version only from its tagged release commit, waiting for
 each completed group to become resolvable before continuing:
 
 1. `canwu-core`, `canwu-time`
-2. `canwu-decision`, `canwu-event`, `canwu-knowledge`, `canwu-world`
+2. `canwu-decision`, `canwu-event`, `canwu-knowledge`
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`

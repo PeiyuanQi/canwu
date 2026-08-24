@@ -22,27 +22,27 @@ Canwu 的事件是可序列化、可检查的因果记录。事件不是 UI 通�
 | `cause` | 产生事件的命令、事件、边界或系统 |
 | `correlation_id` | 将同一处理链中的证据关联起来 |
 
-`EventKind` 本身不拥有领域事件枚举；它只保存稳定的 `type` 标签和扁平化结构字段。领域或整合包可在自己的 crate 中定义强类型载荷，再通过 `from_payload` 编码、通过 `decode_payload` 解码。当前参考运行时使用的兼容标签包括 `move_ordered`、`person_move_ordered`、`army_arrived`、`person_arrived`、`letter_delivered`、`report_dispatched`、`knowledge_updated`、`knowledge_published` 和 `debug_field_changed`。插件事件仍通过注册契约声明来源、受众和边界。
+`EventKind` 本身不拥有领域事件枚举；它只保存稳定的 `type` 标签和扁平化结构字段。领域或整合包可在自己的 crate 中定义强类型载荷，再通过 `from_payload` 编码、通过 `decode_payload` 解码。内核只为兼容旧存档继续识别 `move_ordered`、`army_arrived` 等旧标签；新的领域事件由插件拥有，并通过注册契约声明来源、受众和边界。
 
 ## 因果链
 
 `CauseRef` 用四类来源表达事件为什么发生：
 
-- `Command`：由外部命令或语义行动接受后产生；
+- `Command`：由外部引擎命令或领域插件命令接受后产生；
 - `Event`：由已经记录的事件触发；
 - `Boundary`：由某个结算边界中的系统产生；
 - `System`：由内核系统或受控插件系统产生。
 
-一个移动示例的证据链可以是：
+一个由插件拥有的领域动作可以形成如下证据链：
 
 ```text
-OrderMovement command
-  └─ MoveOrdered or PersonMoveOrdered event
-       └─ scheduled ArmyArrival or PersonArrival work
-            ├─ ArmyArrived or PersonArrived event
-            ├─ LetterDelivered event
-            └─ ReportDispatched event
-                 └─ KnowledgeUpdated event
+plugin command
+  └─ typed domain event
+       └─ scheduled plugin work
+            ├─ domain-state change
+            ├─ follow-up domain event
+            └─ actor-scoped report
+                 └─ knowledge publication
 ```
 
 链上的每一项都保留时间、实体、原因和关联 ID，因此调试界面可以解释“发生了什么”，重演器也可以检查“为什么以这个顺序发生”。
@@ -61,7 +61,7 @@ OrderMovement command
 
 ## 事件与角色知识
 
-世界真相和角色知识是两套不同的存储。比如军队抵达后，指挥官可以立即拥有新位置；远方角色则可能先收到 `ReportDispatched`，再在报告到达时产生 `KnowledgeUpdated`。语义 API 只返回请求角色可见的事件变化和知识记录，不把全知状态泄露给客户端。
+权威领域状态和角色知识是两套不同的存储。比如军队抵达后，指挥官可以立即拥有新位置；远方角色则可能在报告送达后才更新记录。`CanwuViewer` 只查询所绑定持有者的知识，不把受信任领域投影泄露给客户端。
 
 ## 边界事件与重演
 

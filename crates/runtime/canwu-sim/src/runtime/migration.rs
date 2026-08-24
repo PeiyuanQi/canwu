@@ -35,6 +35,7 @@ pub(super) fn migrate_snapshot(
             if snapshot.legacy_rng.is_some() {
                 return invalid_snapshot("format 5 snapshots cannot contain the legacy global RNG");
             }
+            migrate_format_5_entity_registry(&mut snapshot);
             hydrate_snapshot_run_configuration(&mut snapshot)?;
             migrate_snapshot_revision(&mut snapshot)?;
             migrate_snapshot_admission_cursors(&mut snapshot)?;
@@ -83,6 +84,20 @@ pub(super) fn migrate_snapshot(
                 snapshot.snapshot_format_version, snapshot.engine_version, SNAPSHOT_FORMAT_VERSION
             ),
         )),
+    }
+}
+
+fn migrate_format_5_entity_registry(snapshot: &mut SimulationSnapshot) {
+    if let Some(initial_scenario) = &mut snapshot.initial_scenario
+        && initial_scenario.entities.is_empty()
+    {
+        initial_scenario.entities = super::scenario::legacy_entities(&initial_scenario.world);
+    }
+    if snapshot.entities.is_empty() {
+        snapshot.entities = snapshot.initial_scenario.as_ref().map_or_else(
+            || super::scenario::legacy_entities(&snapshot.world),
+            |scenario| scenario.entities.clone(),
+        );
     }
 }
 

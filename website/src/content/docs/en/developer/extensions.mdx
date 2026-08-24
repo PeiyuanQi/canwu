@@ -26,7 +26,7 @@ A command plugin should:
 2. Declare its payload schema and read/write `StateKey` values with `PluginActionDescriptor`.
 3. Query through read-only `SimulationView` and check authority from `CommandContext`.
 4. Return `SystemDirective` values describing intended changes instead of mutating the world.
-5. Enter through `Command::Plugin` or `SemanticAction::Plugin` from the public API.
+5. Enter with `Command::Plugin` through public `submit()`, `process_command()`, or `enqueue_command()` ingress.
 
 See the runnable [command plugin tutorial](/en/tutorials/command-plugin/).
 

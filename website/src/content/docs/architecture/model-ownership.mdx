@@ -1,6 +1,6 @@
 ---
 title: 世界与事件模型归属
-description: 逐项审计 canwu-world 与 canwu-event 的公开类型，确定哪些契约保留在引擎，哪些内容迁入参考整合包。
+description: 了解已退役的 canwu-world 如何迁入参考整合包，以及通用事件契约为何继续留在引擎中。
 template: doc
 sidebar:
   order: 5
@@ -18,10 +18,10 @@ import { Aside, Steps } from "@astrojs/starlight/components";
   <a href="/en/architecture/model-ownership/">English version</a>
 </nav>
 
-这次审计回答的不是“哪个 crate 行数太少”，而是“哪个层应该拥有这项语义”。结论是：**不应全面合并 crate**。具体事件载荷已从通用 `EventKind` 中迁出；下一步仍是把时代和应用特定的世界实体迁到参考整合包，再删除确实已经没有独立职责的包。
+这次审计回答的不是“哪个 crate 行数太少”，而是“哪个层应该拥有这项语义”。结论是：**不应全面合并 crate**。具体事件载荷已从通用 `EventKind` 中迁出，示例世界也先迁入 `canwu-reference-world`，然后才删除失去独立职责的旧包边界。
 
 <Aside type="note" title="迁移状态">
-`EventKind` 已成为通用的类型标签加结构化字段记录，旧事件 JSON 形状和快照格式保持不变。`canwu-world` 的已发布版本已经 yank，但源码 crate、现有消费者和依赖 DAG 仍保留到参考世界迁移完成。
+迁移现已完成。`canwu-reference-world` 拥有示例模型、移动插件、脱离式投影和路由适配器；旧源码包和依赖边已经删除。受支持的 format-5 存档继续通过明确的兼容实体注册迁移加载。
 </Aside>
 
 ## 一条所有权规则
@@ -32,7 +32,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 
 | crate | 审计结论 |
 | --- | --- |
-| `canwu-world` | 当前是首个移动纵向切片的兼容世界模型。已发布版本停止新选用；迁入参考整合包并完成兼容迁移后，源码 crate 才能退役。 |
+| 已退役的 `canwu-world` | 具体模型现由 `canwu-reference-world` 拥有；弃用的 format-5 投影类型只保留在 facade/runtime 兼容表面。 |
 | `canwu-event` | 现在只包含通用事件契约和结构化事件记录。具体载荷已经迁出；剩余通用类型是否并入 `canwu-sim`，必须等独立消费情况明确后再决定。 |
 
 ## `canwu-world` 的 12 个公开类型
@@ -52,7 +52,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 | `WorldSnapshot` | 只包含上述具体实体的兼容投影 | 保留迁移适配器，之后由各整合包拥有自己的脱离式投影 |
 | `WorldDiff` | 只追踪军队、人物、领土和信件 ID 的兼容差异 | 保留到调用者迁移，再使用整合包差异或通用变化证据 |
 
-`canwu-routing` 并不需要拥有这个世界。它已经用通用的 `PlanningSnapshot` 求解；目前对 `WorldSnapshot` 的依赖只是一个转换函数。该转换应随参考整合包迁移。
+`canwu-routing` 不拥有这个世界。求解器只接收通用 `PlanningSnapshot`；`WorldSnapshot` 转换现已迁入 `canwu-reference-world`。
 
 ## `canwu-event` 的 4 个公开类型
 
@@ -77,9 +77,9 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 <Steps>
 1. 已固定代表性的 JSON 存档、事件日志、`canwu-api` 调用与精确重演结果。
 2. 已把 `EventKind` 改为通用结构化记录，并在不改变旧 JSON 形状的前提下迁出具体公开变体；完整的跨整合包命名空间与载荷版本仍是后续契约。
-3. 只通过 `canwu-api` 建立第一方参考世界整合包，迁入具体实体、事件载荷和路由转换。
-4. 依照版本策略迁移对外 API、存档和入门套件，不静默破坏源码或线格式。
-5. `canwu-world` 没有普通消费者后再退役；私有兼容事件载荷迁入各自所有者后，再判断 `canwu-event` 是否应并入 `canwu-sim`。
+3. `canwu-reference-world` 已通过公开 API 接管具体实体、移动行为、脱离式投影和路由转换。
+4. 受支持的 format-5 状态会得到明确的兼容实体注册；可运行入门示例证明保存、加载、派生分支与精确重演。
+5. `canwu-world` 在普通消费者归零后已退役；`canwu-event` 的独立边界仍留待单独决策。
 </Steps>
 
 ## 实施完成门槛

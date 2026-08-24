@@ -716,6 +716,11 @@ fn scenario(actor: PersonId) -> Scenario {
     let territory = TerritoryId::new(1);
     Scenario {
         start_time: SimTime::EPOCH,
+        entities: vec![
+            EntityRef::Government(government),
+            EntityRef::Person(actor),
+            EntityRef::Territory(territory),
+        ],
         world: WorldSnapshot {
             people: vec![Person {
                 id: actor,

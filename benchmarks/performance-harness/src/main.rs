@@ -1509,25 +1509,27 @@ fn information_scenario() -> Result<Scenario, Box<dyn Error>> {
             transit: None,
         });
     }
+    let world = WorldSnapshot {
+        people,
+        governments: vec![Government {
+            id: government,
+            name: "Profile Institution".to_owned(),
+            capital: territory,
+        }],
+        territories: vec![Territory {
+            id: territory,
+            name: "Profile Location".to_owned(),
+            controller: government,
+            position: MapPoint { x: 0.0, y: 0.0 },
+        }],
+        routes: Vec::new(),
+        armies: Vec::new(),
+        letters: Vec::new(),
+    };
     Ok(Scenario {
         start_time: canwu_api::SimTime::EPOCH,
-        world: WorldSnapshot {
-            people,
-            governments: vec![Government {
-                id: government,
-                name: "Profile Institution".to_owned(),
-                capital: territory,
-            }],
-            territories: vec![Territory {
-                id: territory,
-                name: "Profile Location".to_owned(),
-                controller: government,
-                position: MapPoint { x: 0.0, y: 0.0 },
-            }],
-            routes: Vec::new(),
-            armies: Vec::new(),
-            letters: Vec::new(),
-        },
+        entities: world.entities(),
+        world,
         knowledge: KnowledgeSnapshot::default(),
         domain_records: Vec::new(),
     })
@@ -1832,20 +1834,22 @@ fn profile_scenario(scale: usize) -> Result<Scenario, Box<dyn Error>> {
             transit: None,
         });
     }
+    let world = WorldSnapshot {
+        people,
+        governments: vec![Government {
+            id: government_id,
+            name: "Profile Government".to_owned(),
+            capital: TerritoryId::new(1),
+        }],
+        territories,
+        routes: Vec::new(),
+        armies,
+        letters: Vec::new(),
+    };
     Ok(Scenario {
         start_time: canwu_api::SimTime::EPOCH,
-        world: WorldSnapshot {
-            people,
-            governments: vec![Government {
-                id: government_id,
-                name: "Profile Government".to_owned(),
-                capital: TerritoryId::new(1),
-            }],
-            territories,
-            routes: Vec::new(),
-            armies,
-            letters: Vec::new(),
-        },
+        entities: world.entities(),
+        world,
         knowledge: KnowledgeSnapshot::default(),
         domain_records: Vec::new(),
     })
@@ -2169,7 +2173,7 @@ fn source_metadata() -> Result<Value, Box<dyn Error>> {
             "crates/model/canwu-knowledge/src",
             "crates/runtime/canwu-sim/src",
             "crates/foundation/canwu-time/src",
-            "crates/model/canwu-world/src",
+            "crates/integrations/canwu-reference-world/src",
         ],
     );
     let mut source_file_hashes = BTreeMap::new();

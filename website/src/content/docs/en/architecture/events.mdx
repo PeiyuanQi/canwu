@@ -22,27 +22,27 @@ Every `SimEvent` contains:
 | `cause` | Command, event, boundary, or system that produced it |
 | `correlation_id` | Correlates evidence from one processing chain |
 
-`EventKind` itself owns no domain-event enum. It stores only a stable `type` tag and flattened structured fields. A domain or integration can define a typed payload in its own crate, encode it with `from_payload`, and recover it with `decode_payload`. Compatibility tags currently used by the reference runtime include `move_ordered`, `person_move_ordered`, `army_arrived`, `person_arrived`, `letter_delivered`, `report_dispatched`, `knowledge_updated`, `knowledge_published`, and `debug_field_changed`. Plugin events still declare provenance, audience, and boundary ownership through registration contracts.
+`EventKind` itself owns no domain-event enum. It stores only a stable `type` tag and flattened structured fields. A domain or integration can define a typed payload in its own crate, encode it with `from_payload`, and recover it with `decode_payload`. The kernel still recognizes legacy tags such as `move_ordered` and `army_arrived` only for compatibility. New domain events belong to their plugin and declare provenance, audience, and boundary ownership through registration contracts.
 
 ## Causal chain
 
 `CauseRef` expresses four sources:
 
-- `Command`: accepted external command or semantic action;
+- `Command`: accepted external engine command or domain plugin command;
 - `Event`: a previously recorded event;
 - `Boundary`: a system running in a settlement boundary;
 - `System`: a kernel or controlled plugin system.
 
-A movement example can form this evidence chain:
+A plugin-owned domain action can form this evidence chain:
 
 ```text
-OrderMovement command
-  └─ MoveOrdered or PersonMoveOrdered event
-       └─ scheduled ArmyArrival or PersonArrival work
-            ├─ ArmyArrived or PersonArrived event
-            ├─ LetterDelivered event
-            └─ ReportDispatched event
-                 └─ KnowledgeUpdated event
+plugin command
+  └─ typed domain event
+       └─ scheduled plugin work
+            ├─ domain-state change
+            ├─ follow-up domain event
+            └─ actor-scoped report
+                 └─ knowledge publication
 ```
 
 Every link retains time, entities, cause, and correlation, so a debug surface can explain what happened and replay can check why it happened in that order.
@@ -61,7 +61,7 @@ Opportunity generation, event-result settlement, and actor-scoped report publica
 
 ## Events and actor knowledge
 
-World truth and actor knowledge are separate stores. After an army arrives, a commander may know the new location immediately, while a distant actor first receives `ReportDispatched` and later a `KnowledgeUpdated` event. The semantic API returns only event changes and knowledge records visible to the requesting actor; it never exposes omniscient state to a client.
+Authoritative domain state and actor knowledge are separate stores. After an army arrives, a commander may know the new location immediately, while a distant actor updates only after a report is delivered. `CanwuViewer` queries only the bound holder's knowledge and never exposes a trusted domain projection to that client.
 
 ## Boundary events and replay
 

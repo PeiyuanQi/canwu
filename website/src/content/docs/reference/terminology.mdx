@@ -44,7 +44,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [模拟时间](/tutorials/continuous-game-loop/) | simulation time | `SimTime`, `SimDuration` | 由参伍结算、可确定表示的时间。 |
 | [表现时间](/tutorials/continuous-game-loop/) | presentation time | — | 客户端动画与插值时间，可以是小数，但不属于权威状态。 |
 | [命令](/developer/integration/) | command | `Command`, `CommandEnvelope` | 经过结构、前置条件和权限校验后改变权威状态的类型化请求。 |
-| [语义动作](/tutorials/move-army/) | semantic action | `SemanticAction` | 面向 UI 或智能体的能力型动作，最终转换成经过验证的命令。 |
+| [领域命令](/tutorials/move-army/) | domain command | `Command::Plugin` | 由领域整合定义并经公开规范入口验证的类型化意图。 |
 | [规范化输入](/architecture/events/) | canonical ingress | `IngressRecord` | 命令、通信、信息和调度系统共用的持久化确定性输入路径。首次出现时可附英文。 |
 | [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
 | [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |

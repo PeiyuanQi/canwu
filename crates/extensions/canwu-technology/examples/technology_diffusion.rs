@@ -408,6 +408,13 @@ fn scenario() -> Result<ExampleScenario, Box<dyn Error>> {
     ];
     let scenario = Scenario {
         start_time: SimTime::EPOCH,
+        entities: vec![
+            EntityRef::Government(government),
+            EntityRef::Person(operator),
+            EntityRef::Person(learner),
+            EntityRef::Territory(workshop),
+            EntityRef::Territory(destination),
+        ],
         world: WorldSnapshot {
             people: vec![
                 Person {

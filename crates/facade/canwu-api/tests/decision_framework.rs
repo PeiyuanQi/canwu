@@ -16,6 +16,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
     let initial = canwu.snapshot();
     let scenario = Scenario {
         start_time: initial.initial_time,
+        entities: initial.entities,
         world: initial.world,
         knowledge: initial.knowledge,
         domain_records: Vec::new(),

@@ -21,7 +21,7 @@ remain owners of their existing contracts.
 
 | Area | Owner | Rule |
 | --- | --- | --- |
-| topology and timetable facts | `canwu-world` or a domain extension | authoritative world/domain records |
+| topology and timetable facts | a reference integration or domain extension | authoritative typed domain records |
 | actor-relative planning facts | `canwu-routing` input | `PlanningSnapshot` includes observer, read cut, and validity |
 | route calculation | `canwu-routing` | deterministic, side-effect free, rebuildable cache only |
 | leg execution and custody | `canwu-transport` | durable domain records, explicit transitions |

@@ -1,9 +1,9 @@
 use super::{
     ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army, ArmyId, BoundaryRecord, CanwuError,
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
-    DecisionRequestId, DecisionState, DomainRecord, DomainRecordRef, ErrorCode, EvidenceCursor,
-    EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
-    KeyedDrawReservation, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
+    DecisionRequestId, DecisionState, DomainRecord, DomainRecordRef, EntityRef, ErrorCode,
+    EvidenceCursor, EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt,
+    IngressRecord, KeyedDrawReservation, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
     PluginComponentRecord, RandomDrawRecord, RandomStreamKey, RandomStreamState, Route, RouteId,
     RunConfigurationSnapshot, RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent,
     SimTime, Territory, TerritoryId,
@@ -475,8 +475,9 @@ pub(super) struct RuntimeMetadata {
 
 #[derive(Clone)]
 pub(super) struct RuntimeCurrentState {
+    pub(super) entities: BTreeSet<EntityRef>,
     pub(super) people: BTreeMap<PersonId, Person>,
-    pub(super) letters: BTreeMap<canwu_core::LetterId, canwu_world::LetterCargo>,
+    pub(super) letters: BTreeMap<canwu_core::LetterId, super::LetterCargo>,
     pub(super) governments: BTreeMap<GovernmentId, Government>,
     pub(super) territories: BTreeMap<TerritoryId, Territory>,
     pub(super) routes: BTreeMap<RouteId, Route>,

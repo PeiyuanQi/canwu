@@ -26,7 +26,7 @@ Canwu 的内核保持领域中立。应用通过 `SimulationPlugin`、公开 sch
 2. 用 `PluginActionDescriptor` 声明载荷 schema 与读写 `StateKey`；
 3. 通过只读 `SimulationView` 查询状态，并根据 `CommandContext` 检查权限；
 4. 返回 `SystemDirective` 描述预期变化，而不是直接修改世界；
-5. 通过 `Command::Plugin` 或 `SemanticAction::Plugin` 从公开入口调用。
+5. 通过 `Command::Plugin` 从 `submit()`、`process_command()` 或 `enqueue_command()` 公开入口调用。
 
 可运行实现见[命令插件教程](/tutorials/command-plugin/)。
 

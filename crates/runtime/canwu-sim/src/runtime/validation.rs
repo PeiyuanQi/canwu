@@ -374,6 +374,15 @@ pub(super) fn validate_snapshot(
         }
         None
     };
+    if snapshot
+        .initial_scenario
+        .as_ref()
+        .is_some_and(|scenario| scenario.entities != snapshot.entities)
+    {
+        return invalid_snapshot(
+            "snapshot entity registry does not match its manifest-bound initial scenario",
+        );
+    }
     if !is_canonical_hash(&snapshot.run_manifest_hash)
         || manifest::hash(run_manifest)? != snapshot.run_manifest_hash
     {
@@ -389,17 +398,30 @@ pub(super) fn validate_snapshot(
         ));
     };
     manifest::validate_run_configuration(run_manifest, run_configuration)?;
-    let (configuration_world, configuration_records) = snapshot.initial_scenario.as_ref().map_or(
-        (&snapshot.world, snapshot.domain_records.as_slice()),
-        |scenario| (&scenario.world, scenario.domain_records.as_slice()),
-    );
+    let (configuration_entities, configuration_world, configuration_records) =
+        snapshot.initial_scenario.as_ref().map_or(
+            (
+                snapshot.entities.as_slice(),
+                &snapshot.world,
+                snapshot.domain_records.as_slice(),
+            ),
+            |scenario| {
+                (
+                    scenario.entities.as_slice(),
+                    &scenario.world,
+                    scenario.domain_records.as_slice(),
+                )
+            },
+        );
     validate_run_configuration_entities(
         run_configuration,
+        configuration_entities,
         configuration_world,
         configuration_records,
     )?;
     validate_run_configuration_entities(
         run_configuration,
+        &snapshot.entities,
         &snapshot.world,
         &snapshot.domain_records,
     )?;
@@ -1400,7 +1422,8 @@ fn validate_snapshot_domain_records(
         return invalid_snapshot("snapshot contains duplicate domain record references");
     }
     records::validate_record_store(&records, &plugins.record_schemas, snapshot.now, &|entity| {
-        core_world_entity_exists(&snapshot.world, entity)
+        snapshot.entities.binary_search(entity).is_ok()
+            || core_world_entity_exists(&snapshot.world, entity)
     })
     .map_err(|error| {
         invalid_snapshot_error(format!("snapshot domain-record state is invalid: {error}"))
@@ -1414,13 +1437,17 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     })?;
     for controller in snapshot.decisions.controllers.values() {
         let authority_exists = match &controller.authority {
-            DecisionAuthority::Actor { actor } => snapshot.world.person(*actor).is_some(),
+            DecisionAuthority::Actor { actor } => {
+                snapshot_entity_exists(snapshot, &EntityRef::Person(*actor))
+            }
             DecisionAuthority::Institution {
                 institution,
                 responsible_actor,
             } => {
                 snapshot_entity_identity_exists(snapshot, institution)
-                    && responsible_actor.is_none_or(|actor| snapshot.world.person(actor).is_some())
+                    && responsible_actor.is_none_or(|actor| {
+                        snapshot_entity_exists(snapshot, &EntityRef::Person(actor))
+                    })
             }
             DecisionAuthority::Council { .. } | DecisionAuthority::NoResponsibleActor { .. } => {
                 true
@@ -3096,10 +3123,8 @@ fn snapshot_knowledge_holder_exists_for_change(
     holder: &KnowledgeHolderRef,
 ) -> bool {
     match holder {
-        KnowledgeHolderRef::Person(person) => snapshot.world.person(*person).is_some(),
-        KnowledgeHolderRef::Entity(EntityRef::Army(army)) => snapshot.world.army(*army).is_some(),
-        KnowledgeHolderRef::Entity(EntityRef::Government(government)) => {
-            snapshot.world.government(*government).is_some()
+        KnowledgeHolderRef::Person(person) => {
+            snapshot_entity_exists(snapshot, &EntityRef::Person(*person))
         }
         KnowledgeHolderRef::Entity(EntityRef::Domain(reference)) => {
             let stage = (phase == BoundaryPhase::PerspectiveAndReportMaterialization)
@@ -3113,13 +3138,7 @@ fn snapshot_knowledge_holder_exists_for_change(
                             && schema.holder_policy == KnowledgeHolderPolicy::Allowed
                     })
         }
-        KnowledgeHolderRef::Entity(
-            EntityRef::Organization(_)
-            | EntityRef::Person(_)
-            | EntityRef::Resource(_)
-            | EntityRef::Route(_)
-            | EntityRef::Territory(_),
-        ) => false,
+        KnowledgeHolderRef::Entity(entity) => snapshot_entity_exists(snapshot, entity),
     }
 }
 
@@ -3332,7 +3351,14 @@ fn validate_snapshot_command(
     cut: DomainHistoryCut,
 ) -> Result<(), CanwuError> {
     match &envelope.issuer {
-        Issuer::Actor(actor) if snapshot.world.person(*actor).is_none() => {
+        Issuer::Actor(actor)
+            if !snapshot_entity_exists_in_history(
+                snapshot,
+                history,
+                cut,
+                &EntityRef::Person(*actor),
+            ) =>
+        {
             return invalid_snapshot("command issuer actor is missing");
         }
         Issuer::System(name) if !canonical_text(name) => {
@@ -3844,6 +3870,7 @@ pub(super) fn claim_counter(current: u64, label: &str) -> Result<(u64, u64), Can
 
 pub(super) fn validate_run_configuration_entities(
     run_configuration: &RunConfigurationSnapshot,
+    entities: &[EntityRef],
     world: &WorldSnapshot,
     domain_records: &[DomainRecord],
 ) -> Result<(), CanwuError> {
@@ -3853,14 +3880,11 @@ pub(super) fn validate_run_configuration_entities(
     else {
         return Ok(());
     };
-    if binding
-        .actor
-        .is_some_and(|actor| world.person(actor).is_none())
-        || binding
-            .institution
-            .as_ref()
-            .is_some_and(|institution| !entity_exists_in_parts(world, domain_records, institution))
-    {
+    if binding.actor.is_some_and(|actor| {
+        entities.binary_search(&EntityRef::Person(actor)).is_err() && world.person(actor).is_none()
+    }) || binding.institution.as_ref().is_some_and(|institution| {
+        !entity_exists_in_parts(entities, world, domain_records, institution)
+    }) {
         return Err(CanwuError::new(
             ErrorCode::InvalidRunConfiguration,
             "run seat binding references an entity absent from the scenario or snapshot",
@@ -3882,6 +3906,7 @@ pub(super) fn core_world_entity_exists(world: &WorldSnapshot, entity: &EntityRef
 }
 
 fn entity_exists_in_parts(
+    entities: &[EntityRef],
     world: &WorldSnapshot,
     domain_records: &[DomainRecord],
     entity: &EntityRef,
@@ -3892,12 +3917,17 @@ fn entity_exists_in_parts(
                 && record.class == DomainRecordClass::Entity
                 && !record.is_deleted()
         }),
-        _ => core_world_entity_exists(world, entity),
+        _ => entities.binary_search(entity).is_ok() || core_world_entity_exists(world, entity),
     }
 }
 
 fn snapshot_entity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
-    entity_exists_in_parts(&snapshot.world, &snapshot.domain_records, entity)
+    entity_exists_in_parts(
+        &snapshot.entities,
+        &snapshot.world,
+        &snapshot.domain_records,
+        entity,
+    )
 }
 
 pub(super) fn snapshot_entity_exists_in_history(
@@ -3908,7 +3938,10 @@ pub(super) fn snapshot_entity_exists_in_history(
 ) -> bool {
     match entity {
         EntityRef::Domain(reference) => history.is_live(reference, cut),
-        _ => core_world_entity_exists(&snapshot.world, entity),
+        _ => {
+            snapshot.entities.binary_search(entity).is_ok()
+                || core_world_entity_exists(&snapshot.world, entity)
+        }
     }
 }
 
@@ -3920,7 +3953,10 @@ fn snapshot_entity_identity_exists_in_history(
 ) -> bool {
     match entity {
         EntityRef::Domain(reference) => history.exists(reference, cut),
-        _ => core_world_entity_exists(&snapshot.world, entity),
+        _ => {
+            snapshot.entities.binary_search(entity).is_ok()
+                || core_world_entity_exists(&snapshot.world, entity)
+        }
     }
 }
 
@@ -3933,7 +3969,10 @@ fn snapshot_entity_exists_at_boundary(
 ) -> bool {
     match entity {
         EntityRef::Domain(reference) => cuts.is_live(final_records, reference, stage),
-        _ => core_world_entity_exists(&snapshot.world, entity),
+        _ => {
+            snapshot.entities.binary_search(entity).is_ok()
+                || core_world_entity_exists(&snapshot.world, entity)
+        }
     }
 }
 
@@ -3958,7 +3997,10 @@ fn snapshot_entity_exists_for_boundary_proposal(
                     source.1,
                 )
         }
-        _ => core_world_entity_exists(&snapshot.world, entity),
+        _ => {
+            snapshot.entities.binary_search(entity).is_ok()
+                || core_world_entity_exists(&snapshot.world, entity)
+        }
     }
 }
 
@@ -3967,7 +4009,10 @@ fn snapshot_entity_identity_exists(snapshot: &SimulationSnapshot, entity: &Entit
         EntityRef::Domain(reference) => snapshot.domain_records.iter().any(|record| {
             &record.reference == reference && record.class == DomainRecordClass::Entity
         }),
-        _ => core_world_entity_exists(&snapshot.world, entity),
+        _ => {
+            snapshot.entities.binary_search(entity).is_ok()
+                || core_world_entity_exists(&snapshot.world, entity)
+        }
     }
 }
 
@@ -3980,18 +4025,10 @@ pub(super) fn runtime_current_entity_exists(
     entity: &EntityRef,
 ) -> bool {
     match entity {
-        EntityRef::Army(id) => current.armies.contains_key(id),
         EntityRef::Domain(reference) => {
             records::domain_entity_exists(&current.domain_records, reference)
         }
-        EntityRef::Government(id) => current.governments.contains_key(id),
-        EntityRef::Person(id) => current.people.contains_key(id),
-        EntityRef::Route(id) => current.routes.contains_key(id),
-        EntityRef::Territory(id) => current.territories.contains_key(id),
-        EntityRef::Organization(_) => false,
-        EntityRef::Resource(id) => current
-            .letters
-            .contains_key(&super::LetterId::new(id.get())),
+        _ => current.entities.contains(entity),
     }
 }
 

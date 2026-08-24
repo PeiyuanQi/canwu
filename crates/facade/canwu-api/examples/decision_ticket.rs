@@ -32,6 +32,7 @@ fn replay_scenario(canwu: &Canwu) -> Scenario {
     let initial = canwu.snapshot();
     Scenario {
         start_time: initial.initial_time,
+        entities: initial.entities,
         world: initial.world,
         knowledge: initial.knowledge,
         domain_records: Vec::new(),

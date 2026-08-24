@@ -1,6 +1,6 @@
 [package]
-name = "canwu-world"
-description = "Authoritative historical world entities and immutable snapshots for Canwu"
+name = "canwu-reference-world"
+description = "Replaceable first-party reference world integration for Canwu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,12 +10,12 @@ readme.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-publish = ["crates-io"]
+publish = false
 
 [dependencies]
-canwu-core.workspace = true
-canwu-time.workspace = true
+canwu-api.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

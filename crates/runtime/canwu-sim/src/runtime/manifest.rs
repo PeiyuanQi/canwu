@@ -270,6 +270,11 @@ pub(crate) fn validate_run_configuration(
 
 fn scenario_semantic_hash(scenario: &Scenario) -> Result<String, CanwuError> {
     let mut canonical = scenario.clone();
+    canonical.entities.sort();
+    canonical.entities.dedup();
+    if canonical.entities == super::scenario::legacy_entities(&canonical.world) {
+        canonical.entities.clear();
+    }
     canonical.world.people.sort_by_key(|value| value.id);
     canonical.world.governments.sort_by_key(|value| value.id);
     canonical.world.territories.sort_by_key(|value| value.id);

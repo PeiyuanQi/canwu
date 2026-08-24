@@ -6,61 +6,41 @@ sidebar:
   label: Persistence and replay
 ---
 
-A save is more than a serialized world object. Recoverable Canwu state includes commands, events, boundaries, random
-evidence, plugin semantics, and validation commitments, so hosts should always use the public persistence APIs.
-
-## Simple saves
-
-```rust
-use canwu_api::Canwu;
-
-let canwu = Canwu::demo(35)?;
-let json = canwu.snapshot_json()?;
-let restored = Canwu::from_snapshot_json(&json)?;
-
-assert_eq!(restored.snapshot(), canwu.snapshot());
-# Ok::<(), canwu_api::CanwuError>(())
-```
-
-This fits single-file saves, test fixtures, and short-lived tools. Do not select a few fields and reconstruct the runtime
-yourself; the loader validates structure, hashes, history, and compatibility.
+A save is not one serialized world struct. Recoverable Canwu state includes the entity registry, domain records, commands, events, boundaries, random evidence, plugin semantics, and validation commitments.
 
 ## Saves with plugins
 
-If the state contains plugin-defined components or domain records, use `from_snapshot_json_with_plugins()` and pass the
-same plugin set used when the save was created. Plugin names, versions, and semantic hashes are part of the save
-environment. Changed executable semantics are not the same runtime environment.
-
-## When to use a checkpoint journal
-
-`checkpoint_journal_json()` combines a validated checkpoint with subsequent journal evidence. It fits hosts that retain
-auditable history or want to avoid repeatedly writing the complete run history. Restore it with the matching
-`from_checkpoint_journal_json()` or `from_checkpoint_journal_json_with_plugins()` function.
-
-## Exact replay
-
 ```rust
-let journal = canwu.replay_journal();
-let replayed = Canwu::replay_from_journal(scenario, &plugins, &journal)?;
-assert_eq!(replayed.snapshot(), canwu.snapshot());
+use canwu_api::Canwu;
+use canwu_reference_world::{ReferenceWorldPlugin, demo_scenario};
+
+let (scenario, _) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+let json = canwu.snapshot_json()?;
+let restored = Canwu::from_snapshot_json_with_plugins(&json, &[&plugin])?;
+
+assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-Replay requires a matching scenario, engine version, and plugin semantic environment. For long-lived persisted products:
+Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
 
-1. Pin the exact `canwu-api` version in `Cargo.toml`.
-2. Store the application version, scenario identifier, and plugin inventory beside each save.
-3. Run an explicit migration when the engine changes and retain regression fixtures.
-4. Verify migrated results with replayed snapshots or authoritative hashes.
+Old format-5 saves may lack the top-level generic `entities` field. The loader explicitly builds that registry from the validated compatibility projection. It does not depend on the retired `canwu-world` source package.
+
+## Checkpoint journals and exact replay
+
+`checkpoint_journal_json()` combines a validated checkpoint with later journal evidence. Restore it with the matching `from_checkpoint_journal_json_with_plugins()` function.
+
+```rust
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(scenario, &[&plugin], &journal)?;
+assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
+# Ok::<(), canwu_api::CanwuError>(())
+```
+
+Replay requires a matching scenario, engine version, and plugin semantic environment. Long-lived products should pin the engine version, record application and scenario identities, retain migration fixtures, and verify results with checkpoint hashes.
 
 ## Counterfactuals and tests
 
-`fork()` creates an independent simulation from the same point, and `diff()` compares the world differences between two
-branches. Use them for AI planning, research experiments, regression tests, and “what if a different command had been
-chosen?” analysis. Each branch still advances through normal command and time entry points.
-
-## Save policy and determinism are separate
-
-Canwu's snapshot and replay contracts guarantee that the same input produces the same result, but they do not decide whether a product lets players return to an older save. An application may expose manual saves and branches in a standard mode, keep one active save in a single-writer mode, or expose `fork()` only to research tools.
-
-Do not create unreloadable randomness from wall-clock time, unrecorded random values, or live LLM output; that breaks exact replay. If rollback must be restricted, the application's save layer should reject an old branch or an overwrite instead of changing the runtime random contract.
+`fork()` creates an independent simulation from the same point. Compare branches with domain projections or checkpoint hashes; every branch still advances through normal command and time ingress.

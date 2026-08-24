@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let snapshot = demo.snapshot();
     let scenario = Scenario {
         start_time: snapshot.initial_time,
+        entities: snapshot.entities,
         world: snapshot.world,
         knowledge: snapshot.knowledge,
         domain_records: vec![tutorial_state().into_record()?],

@@ -1312,6 +1312,9 @@ fn legacy_move_army_wire_shape_is_not_a_current_command() {
 #[test]
 fn person_self_move_carries_and_delivers_a_letter() {
     let (mut scenario, ids) = demo_scenario();
+    scenario
+        .entities
+        .push(EntityRef::Resource(ResourceId::new(1)));
     scenario.world.letters.push(LetterCargo {
         id: LetterId::new(1),
         sender: ids.commander,

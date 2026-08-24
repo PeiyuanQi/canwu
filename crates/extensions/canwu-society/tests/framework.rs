@@ -157,6 +157,7 @@ fn inactive_target_catalog_growth_stays_sparse_and_does_not_change_existing_tran
     let snapshot = demo.snapshot();
     let scenario = Scenario {
         start_time: snapshot.initial_time,
+        entities: snapshot.entities,
         world: snapshot.world,
         knowledge: snapshot.knowledge,
         domain_records: vec![extended.into_record().expect("extended state record")],
@@ -310,6 +311,7 @@ fn epoch_and_negative_time_boundaries_are_valid_materialization_times() {
         42,
         Scenario {
             start_time,
+            entities: snapshot.entities,
             world: snapshot.world,
             knowledge: KnowledgeSnapshot::default(),
             domain_records: vec![tutorial_state().into_record().expect("society record")],
@@ -341,6 +343,7 @@ fn society_payload_and_core_references_must_remain_bound() {
         42,
         Scenario {
             start_time: snapshot.initial_time,
+            entities: snapshot.entities,
             world: snapshot.world,
             knowledge: snapshot.knowledge,
             domain_records: vec![record],
@@ -456,6 +459,7 @@ fn tutorial_simulation() -> (Canwu, Scenario) {
     let snapshot = demo.snapshot();
     let scenario = Scenario {
         start_time: snapshot.initial_time,
+        entities: snapshot.entities,
         world: snapshot.world,
         knowledge: snapshot.knowledge,
         domain_records: vec![

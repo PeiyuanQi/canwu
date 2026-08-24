@@ -490,6 +490,7 @@ impl LegacyV4SimulationSnapshot {
             initial_scenario: self.initial_scenario,
             now: self.now,
             plugin_registration_closed: self.plugin_registration_closed,
+            entities: super::scenario::legacy_entities(&self.world),
             world: self.world,
             knowledge: self.knowledge,
             events: self.events.into_iter().map(Into::into).collect(),
@@ -1091,6 +1092,13 @@ mod tests {
         let mut value =
             serde_json::to_value(simulation.snapshot()).expect("current snapshot should serialize");
         let object = value.as_object_mut().expect("snapshot should be an object");
+        object.remove("entities");
+        if let Some(initial_scenario) = object
+            .get_mut("initial_scenario")
+            .and_then(Value::as_object_mut)
+        {
+            initial_scenario.remove("entities");
+        }
         object.insert(
             "engine_version".to_owned(),
             Value::String(LEGACY_V4_ENGINE_VERSION.to_owned()),

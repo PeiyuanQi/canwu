@@ -1,6 +1,6 @@
 ---
 title: Integrate and drive the simulation
-description: Add canwu-api to a Rust host, create a simulation, and advance the world through supported ingress paths.
+description: Combine canwu-api with a domain integration, then advance the simulation through supported ingress paths.
 sidebar:
   order: 2
   label: Integration and driving
@@ -8,75 +8,67 @@ sidebar:
 
 import { Steps } from "@astrojs/starlight/components";
 
-Canwu is a headless simulation core. The host owns windows, maps, networking, input, AI scheduling,
-and the frame loop. Canwu owns authoritative state, validation, deterministic time, events, and evidence.
+Canwu is a headless simulation core. The host owns windows, maps, networking, input, AI scheduling, and the frame loop. Canwu owns generic authoritative state, validation, deterministic time, events, and evidence. Concrete world models and commands belong to the domain integration selected by the application.
 
-## Add the dependency
+## Add dependencies
 
-The current main branch requires Rust 1.88 or newer. Application code should depend only on the public facade:
+The current main branch requires Rust 1.88 or newer. Depend on the public facade and explicitly select a domain integration:
 
 ```toml
 [dependencies]
 canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
+canwu-reference-world = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
 ```
 
-If the application persists Canwu snapshots, pin a published engine release
-and upgrade it only with an explicit save migration. The current `main`
-branch dependency is for development while the movement API is being released;
-do not treat it as a stable snapshot format.
+`canwu-reference-world` is a replaceable starter integration, not an engine foundation crate. The old `canwu-world` crate is retired. Do not depend on `canwu-sim` or another runtime implementation crate.
 
-Do not depend directly on `canwu-sim`, `canwu-world`, or another implementation crate. Cargo may resolve them,
-but they are not independent compatibility surfaces for application code.
+Applications that persist snapshots should pin a published engine release and pair every upgrade with an explicit save migration.
 
 ## Minimal host flow
 
 ```rust
-use canwu_api::{Canwu, SemanticAction, SimDuration};
+use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
+use canwu_reference_world::{MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement};
 
-let mut canwu = Canwu::demo(35)?;
-let ids = Canwu::demo_ids();
-
-canwu.act(
-    ids.commander,
-    SemanticAction::MoveEntity {
-        subject: canwu_api::EntityRef::Army(ids.army),
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+let command = order_movement(
+    Issuer::Actor(ids.commander),
+    &MovementCommand {
+        subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
         cargo: Vec::new(),
     },
+)?.at_time(canwu.time());
+canwu.enqueue_command(
+    canwu.time(),
+    0,
+    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), command),
 )?;
-
-let events = canwu.advance(SimDuration::days(1))?;
+canwu.advance_canonical(SimDuration::hours(19))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-Production applications normally construct their own scenario with `Canwu::new(seed, scenario)`.
-`Canwu::demo()` exists for examples and prototypes.
+Production applications normally construct their own `Scenario` and plugins. The reference integration's `demo_scenario()` is only a runnable template.
 
 ## Choose an ingress path
 
 | Entry point | Use it when |
 | --- | --- |
-| `act(actor, SemanticAction)` | A UI, agent, or tool works with capability-oriented semantic actions |
-| `submit(CommandEnvelope)` | The host already owns a typed command and issuer identity |
-| `process_command(CommandRequest)` | An external service needs request identity, retry behavior, and recorded outcomes |
-| `enqueue_command(...)` | A command must enter at a future simulation time with explicit priority |
+| `submit(CommandEnvelope)` | The host already owns a typed plugin command and issuer identity |
+| `process_command(CommandRequest)` | An external service needs request identity, revision validation, and recorded outcomes |
+| `enqueue_command(...)` | A command must enter at an explicit simulation time and priority |
 
-Every path preserves the same rule: the host never receives a mutable world reference. Canwu validates authority,
-preconditions, and the request before recording an accepted or rejected result.
+The domain integration translates UI or agent intent into a typed plugin command. Every ingress path preserves the same rule: the host never receives a mutable world reference.
 
 ## Drive time
 
 <Steps>
 1. The host reads wall time, turn input, or research workflow progress.
 2. The host converts that input into `SimDuration` according to its own speed policy.
-3. Event-driven hosts call `advance()`; hosts using daily, turn, or other phased systems call `advance_canonical()` or explicit `settle_boundary()`.
-4. The host refreshes presentation state from returned events, boundary receipts, or new read-only snapshots.
+3. Event-driven hosts call `advance()`; hosts with daily, turn, or other phased systems call `advance_canonical()` or explicit `settle_boundary()`.
+4. The host refreshes presentation from events, boundary receipts, or a read-only projection produced by its domain integration.
 </Steps>
 
-Do not feed floating-point frame deltas directly into authoritative state. Continuously rendered clients keep host-side
-remainders and presentation interpolation; see the [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/).
-
-## Next steps
-
-- To expose results to players or agents, read [Read and present state safely](/en/developer/reading-state/).
-- To add domain rules, read [Extend with plugins](/en/developer/extensions/).
+Do not feed floating-point frame deltas directly into authoritative state. See the [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/) for the complete pattern.

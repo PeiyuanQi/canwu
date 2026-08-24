@@ -63,7 +63,7 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 
 ## 开发者的核心约束
 
-1. 应用代码只依赖 `canwu-api`，不要把内部 crate 当作兼容性接口。
+1. 应用代码通过 `canwu-api` 接入；具体领域规则选择公开整合包，不依赖内部 crate 作为兼容接口。
 2. 外部修改通过命令、语义动作或规范化输入进入，不直接改写世界状态。
 3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的上层应用逻辑和调试工具。
 4. 现实时间、渲染和输入由上层应用负责；Canwu 只接收能准确表示的模拟时间。

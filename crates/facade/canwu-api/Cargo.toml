@@ -21,7 +21,6 @@ canwu-routing.workspace = true
 canwu-sim.workspace = true
 canwu-time.workspace = true
 canwu-transport.workspace = true
-canwu-world.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
