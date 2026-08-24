@@ -37,7 +37,7 @@ Install a Rust toolchain that meets the `rust-version` requirement in the root
 Run the small headless example:
 
 ```text
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
 Run the reference debug client:

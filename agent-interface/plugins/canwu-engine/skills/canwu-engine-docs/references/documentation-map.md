@@ -18,7 +18,7 @@ Resolve local paths from the Canwu repository root, not from this skill folder.
 
 | Question | Tutorial source | Detailed or executable source |
 | --- | --- | --- |
-| First successful action, explicit time advancement, or actor-relative knowledge | Chinese: `website/src/content/docs/tutorials/move-army.mdx`; English: `website/src/content/docs/en/tutorials/move-army.mdx` | `crates/api/canwu-api/examples/move_army.rs` |
+| First successful action, explicit time advancement, or actor-relative knowledge | Chinese: `website/src/content/docs/tutorials/move-army.mdx`; English: `website/src/content/docs/en/tutorials/move-army.mdx` | `crates/integrations/canwu-reference-world/examples/starter.rs` |
 | Canonical movement, active person self-movement, letter cargo, authority, custody, or arrival delivery | `docs/proposals/movement-order-mechanism.md`; `docs/architecture.md` | `crates/api/canwu-api/src/lib.rs`, `crates/runtime/canwu-sim/src/runtime/mod.rs`, and `crates/runtime/canwu-sim/src/runtime/scheduling.rs` |
 | Pause, speed controls, FPS independence, wall/simulation/presentation clocks, or interpolation | Chinese: `website/src/content/docs/tutorials/continuous-game-loop.mdx`; English: `website/src/content/docs/en/tutorials/continuous-game-loop.mdx` | `docs/continuous-game-loop.md` and `crates/api/canwu-api/examples/continuous_game_loop.rs` |
 | Schema-validated plugin commands, issuer checks, or declared state access | Chinese: `website/src/content/docs/tutorials/command-plugin.mdx`; English: `website/src/content/docs/en/tutorials/command-plugin.mdx` | `crates/api/canwu-api/examples/plugin.rs` |

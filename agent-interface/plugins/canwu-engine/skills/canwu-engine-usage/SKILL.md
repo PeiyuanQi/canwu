@@ -50,12 +50,11 @@ store deterministic plugin state in serialized components.
 Run:
 
 ```text
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
-The example demonstrates a validated army move, scheduled travel, attributable
-arrival events, an immediate commander update, and a delayed report to another
-person.
+The example demonstrates a validated army move, scheduled travel, and exact
+save/load, fork, and replay.
 
 Movement uses the canonical `Command::OrderMovement` command. Use
 `SemanticAction::MoveEntity` for an authorized army subject, or
