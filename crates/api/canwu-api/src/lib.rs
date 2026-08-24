@@ -626,6 +626,15 @@ impl Canwu {
         })
     }
 
+    pub fn replay_from_journal_json(
+        plugins: &[&dyn SimulationPlugin],
+        json: &str,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::replay_from_journal_json(plugins, json)?,
+        })
+    }
+
     #[must_use]
     pub fn fork(&self) -> Self {
         Self {
