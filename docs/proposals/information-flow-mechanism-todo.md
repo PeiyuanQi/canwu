@@ -266,7 +266,7 @@ Files:
 - `crates/runtime/canwu-sim/src/runtime/validation.rs`
 - `crates/runtime/canwu-sim/src/runtime/persistence.rs`
 - `crates/runtime/canwu-sim/src/runtime/replay.rs`
-- `crates/facade/canwu-api/src/lib.rs`
+- `crates/api/canwu-api/src/lib.rs`
 
 ## Milestone 4: kernel-owned publication stage
 
@@ -344,7 +344,7 @@ Files:
 - `crates/runtime/canwu-sim/src/runtime/mod.rs`
 - `crates/runtime/canwu-sim/src/runtime/state.rs`
 - `crates/runtime/canwu-sim/src/runtime/transactions.rs`
-- `crates/facade/canwu-api/src/lib.rs`
+- `crates/api/canwu-api/src/lib.rs`
 
 ## Milestone 5a: retained evidence, authorization, and public queries
 
@@ -370,7 +370,7 @@ only the information intended for them.
 - [x] Validate boundary ID, change index, record reference, and record version
   as one tuple.
 
-### Holder authorization and restricted facade
+### Holder authorization and restricted API
 
 - [x] Add private-field `KnowledgeViewContext`.
 - [x] Add `ObservationPrincipal::{Person, Institution, Public}` derived only
@@ -410,7 +410,7 @@ Files:
 - `crates/runtime/canwu-sim/src/runtime/validation.rs`
 - `crates/runtime/canwu-sim/src/runtime/mod.rs`
 - `crates/runtime/canwu-sim/src/runtime/persistence.rs`
-- `crates/facade/canwu-api/src/lib.rs`
+- `crates/api/canwu-api/src/lib.rs`
 - binding and remote-adapter crates that currently expose `Canwu`
 - `crates/tools/canwu-debug/`
 - `docs/architecture.md`
@@ -515,7 +515,7 @@ Files:
 - `crates/runtime/canwu-sim/src/runtime/validation.rs`
 - `crates/runtime/canwu-sim/src/runtime/persistence.rs`
 - `crates/runtime/canwu-sim/src/runtime/replay.rs`
-- `crates/facade/canwu-api/src/lib.rs`
+- `crates/api/canwu-api/src/lib.rs`
 
 ## Milestone 7a: generic persistence, hashing, and replay
 

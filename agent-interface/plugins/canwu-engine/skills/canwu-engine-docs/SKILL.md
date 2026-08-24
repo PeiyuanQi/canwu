@@ -22,13 +22,13 @@ Keep code guidance on the public `canwu-api` boundary.
      signatures.
    - Use the overview documents only when the user asks for a broad tour.
 3. Prefer a current local Canwu checkout. Recognize the repository root by
-   `Cargo.toml`, `docs/architecture.md`, and `crates/facade/canwu-api`. If no checkout
+   `Cargo.toml`, `docs/architecture.md`, and `crates/api/canwu-api`. If no checkout
    is available, open the official Canwu or GitHub URLs in the map.
 4. Search before loading long files. In a checkout, start with a focused search
    such as:
 
    ```text
-   rg -n "<term>" README.md README.zh-CN.md docs website/src/content/docs crates/facade/canwu-api
+   rg -n "<term>" README.md README.zh-CN.md docs website/src/content/docs crates/api/canwu-api
    ```
 
 5. Read the relevant section and enough surrounding context to preserve its

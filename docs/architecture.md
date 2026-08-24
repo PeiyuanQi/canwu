@@ -138,7 +138,7 @@ flowchart TB
         ReferenceWorld["canwu-reference-world"]
     end
 
-    subgraph Facade["Public facade / 公开门面"]
+    subgraph PublicApi["Public API / 对外 API"]
         Api["canwu-api"]
     end
 
@@ -212,7 +212,7 @@ not depend on the historical content of the upper layers.
 flowchart TB
     subgraph Engine["Canwu engine / 参伍引擎"]
         Core["Kernel<br/>time, commands, settlement,<br/>knowledge, decisions, replay"]
-        Api["Public facade<br/>canwu-api"]
+        Api["Public API<br/>canwu-api"]
         Core --> Api
     end
 
@@ -311,14 +311,14 @@ world entities and event payloads. / 上面的依赖 DAG 描述当前实现，�
 That migration is now complete: `canwu-reference-world` owns the model,
 movement behavior, detached projection, and routing adapter; the source
 `canwu-world` package has been retired from the workspace and dependency DAG.
-Format-5 world fields remain only as a deprecated facade/runtime compatibility
-projection for old callers and saves.
+Format-5 world fields remain only as a deprecated compatibility projection in the
+public API/runtime for old callers and saves.
 `canwu-event` now contains only generic contracts: `EventKind` is a type label
 plus flattened structured fields, while concrete movement, arrival, letter,
 report, knowledge, and debug payload structs live outside that crate. / 按此
 方向，这项迁移已经完成：`canwu-reference-world` 拥有模型、移动行为、脱离式
 投影和路由适配器；`canwu-world` 源码包已从 workspace 与依赖 DAG 退役。
-format-5 世界字段只作为旧调用方与旧存档的弃用兼容投影保留在 facade/runtime。
+format-5 世界字段只作为旧调用方与旧存档的弃用兼容投影保留在对外 API/运行时。
 `canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
 字段组成，具体移动、到达、信件、报告、知识和调试载荷结构均位于该 crate 之外。
 
@@ -548,7 +548,7 @@ technology integration can map `fiber_source`, `clean_water`, and
 `sheet_forming` capabilities to its own buildings and resources. Another game
 can use the same content pack with a different economy or map adapter. The
 integration may contain one or more runtime plugins and a host adapter, but it
-must use only the supported `canwu-api` facade.
+must use only the supported public API.
 
 Starter kits should demonstrate the complete public path: scenario creation,
 content selection, validated commands, boundary settlement, actor-relative
@@ -676,7 +676,7 @@ sequenceDiagram
   the same command dispatcher and reference-world plugin as every other client.
 
 Repository agent skills live under `agent-interface/`. The `canwu-engine`
-plugin teaches external agents to use the public facade and domain integrations. The
+plugin teaches external agents to use the public API and domain integrations. The
 `canwu-developer` plugin contains contributor and release workflows. These
 Codex skill plugins are development interfaces and are separate from runtime
 `SimulationPlugin` implementations registered in `canwu-sim`.
@@ -824,7 +824,7 @@ deserialization. `DomainRecordSchema::for_entity` and `for_record`,
 `DomainRecordDraft::from_typed`, typed simulation/view queries, and
 `DomainRecord::decode_payload` provide a typed package path while the
 authoritative snapshot keeps the existing schema-validated representation.
-This additive facade leaves checkpoint and snapshot formats unchanged.
+This additive public API leaves checkpoint and snapshot formats unchanged.
 
 Domain record state is boundary-only: immediate reactors and commands cannot
 write a record kind as an untyped component. Boundary systems declare the
@@ -924,8 +924,8 @@ replay contract bind the archived records just as before. `CheckpointJournal`
 is a portable full-save convenience envelope; incremental stores should persist
 the smaller current-state checkpoint and only newly appended segments.
 
-`CompactedSimulation` and the public `CompactedCanwu` facade add the explicit
-live archive contract. Entering compact mode preserves the retained history;
+`CompactedSimulation` and `CompactedCanwu` add the explicit live archive
+contract. Entering compact mode preserves the retained history;
 `seal_evidence` then moves one fully settled, contiguous tail into a caller-owned
 `EvidenceJournalSegment` and advances the private retained-window cursor. The
 caller keeps every returned segment in exact cursor order. Current-state
@@ -1179,6 +1179,6 @@ Canwu is developed against the normative engine-neutral capability profile in
 settlement, authority, ownership, transactions, knowledge, persistence,
 lineage, packages, and publication through public extension points. Current
 coverage and remaining gaps are tracked in the profile itself. The public-only
-[`representative_conformance`](../crates/facade/canwu-api/tests/representative_conformance.rs)
+[`representative_conformance`](../crates/api/canwu-api/tests/representative_conformance.rs)
 fixture composes independent packages across authority, settlement, typed
 records, knowledge, randomness, persistence, replay, forking, and rollback.

@@ -32,7 +32,7 @@ That rule gives the two candidate crates different outcomes:
 
 | Crate | Audit result |
 | --- | --- |
-| retired `canwu-world` | Its concrete model now lives in `canwu-reference-world`. Deprecated format-5 projection types remain only in the facade/runtime compatibility surface. |
+| retired `canwu-world` | Its concrete model now lives in `canwu-reference-world`. Deprecated format-5 projection types remain only in the public API/runtime compatibility surface. |
 | `canwu-event` | It now contains only generic event contracts and a structured event record. Concrete payloads are extracted; decide whether the residual generic types belong in `canwu-sim` only after their independent consumption is known. |
 
 ## The 12 public `canwu-world` types
@@ -70,7 +70,7 @@ Typed payloads for movement, army arrival, person travel, letter delivery, repor
 - Folding `canwu-world` into `canwu-core` would make one historical worldview foundational.
 - Folding `canwu-event` into `canwu-sim` now would still enlarge the persistence blast radius; independent use of the remaining generic contracts must decide that boundary.
 - Creating `canwu-model` would consolidate names without clarifying responsibilities.
-- Merging `canwu-api` and `canwu-sim` would erase the public-facade/private-runtime boundary.
+- Merging `canwu-api` and `canwu-sim` would erase the public API/private-runtime boundary.
 
 ## Safe migration sequence
 

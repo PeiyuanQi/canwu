@@ -21,7 +21,7 @@ Applying that invariant gives two different outcomes:
 
 - `canwu-world` had no irreducible generic engine contract and is retired.
   `canwu-reference-world` owns the extracted model. Deprecated format-5
-  projections remain in the facade/runtime only to load supported saves and
+  projections remain in the public API/runtime only to load supported saves and
   give existing callers an explicit migration interval.
 - `canwu-event` now contains the generic event envelope, provenance, visibility,
   and structured event-record contracts. Its concrete payload variants have
@@ -45,8 +45,8 @@ validation, event projection, plugin descriptors, and causal evidence. The
 payload extraction therefore preserves the exact flattened event JSON shape;
 it is a Rust source-API break, but not a snapshot-format migration.
 
-The public facade and private runtime remain separate regardless of this audit.
-Their high rate of co-change reflects the facade wrapping the runtime; it does
+The public API and private runtime remain separate regardless of this audit.
+Their high rate of co-change reflects the public API wrapping the runtime; it does
 not erase the public/private boundary.
 
 ## `canwu-world` public-type classification
@@ -106,7 +106,7 @@ The target ownership is:
    transport, knowledge, information, and society contracts.
 4. Reference integrations own the concrete first-party world model and the
    event payloads that explain its movement, letters, reports, and presentation.
-5. `canwu-api` remains the supported facade and re-exports compatibility types
+5. `canwu-api` remains the supported public API and re-exports compatibility types
    only for as long as the migration policy requires.
 
 This is not a proposal for a new `canwu-model` crate. A shared model bucket
@@ -116,7 +116,7 @@ would hide the same ownership problem behind a larger name.
 
 ### 1. Characterize compatibility - complete for event extraction
 
-Freeze representative JSON snapshots, journals, public facade calls, routing
+Freeze representative JSON snapshots, journals, public API calls, routing
 adapter behavior, and exact replay outcomes. Record which names are guaranteed
 by the current compatibility policy.
 
@@ -135,7 +135,7 @@ into a first-party reference integration built only on `canwu-api`. Move
 `planning_snapshot_from_world` with that integration so `canwu-routing` accepts
 only its own generic planning input.
 
-### 4. Migrate the facade and saved state - complete
+### 4. Migrate the public API and saved state - complete
 
 Offer integration-owned projections and events alongside the compatibility
 surface. Deprecate or remove old re-exports only under the repository's
@@ -157,7 +157,7 @@ Implementation is not complete until all of these are true:
   migration and reproduce their documented replay outcomes;
 - commitment, cause, correlation, audience, and affected-entity validation
   remain deterministic and fail closed;
-- the public facade follows `docs/versioning.md`, with no silent source or wire
+- the public API follows `docs/versioning.md`, with no silent source or wire
   break;
 - `canwu-routing` no longer depends on the concrete example world;
 - at least one runnable starter kit demonstrates the extracted integration,
@@ -175,7 +175,7 @@ Implementation is not complete until all of these are true:
   now separated, but a merge would still expand the persistence blast radius
   before independent consumption of the generic contracts is understood.
 - **Create `canwu-model`:** this would consolidate names, not responsibilities.
-- **Merge `canwu-api` and `canwu-sim`:** this would erase the supported facade
+- **Merge `canwu-api` and `canwu-sim`:** this would erase the supported public API
   and private runtime boundary.
 - **Delete compatibility types immediately:** these types are re-exported and
   serialized; Cargo success would not prove source, save, or replay

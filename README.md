@@ -29,7 +29,7 @@ larger games, research environments, and agent-driven simulations.
 
 ## Use Canwu as a dependency
 
-Rust applications should depend on the supported public facade rather than the
+Rust applications should depend on the supported public API rather than the
 implementation crates:
 
 ```toml
@@ -43,7 +43,7 @@ example above selects the immutable `0.5.1` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
-the facade. They are not separate compatibility surfaces for application code.
+the public API. They are not separate compatibility surfaces for application code.
 Experimental domain extensions such as `canwu-correspondence` and
 `canwu-society` remain unpublished and must be consumed from the repository
 until separately stabilized.
@@ -209,7 +209,7 @@ let events = canwu.advance_canonical(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-See `crates/facade/canwu-api/examples/phased_boundary.rs` for an API-only plugin that
+See `crates/api/canwu-api/examples/phased_boundary.rs` for an API-only plugin that
 offers and claims a conserved resource, consumes its declared allocation, and
 commits attributable boundary evidence.
 

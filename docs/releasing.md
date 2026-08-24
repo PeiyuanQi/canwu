@@ -79,7 +79,7 @@ registry only, and run a minimal public-API smoke test.
 Create the annotated tag from the verified release commit and push it without
 force. A GitHub Release may be prepared as a draft before registry publication,
 but publish the release only after every crates.io package and the external
-consumer smoke test pass. Release notes must state the supported facade,
+consumer smoke test pass. Release notes must state the supported public API,
 snapshot compatibility implications, major capabilities, known conformance
 gaps, and verification performed.
 

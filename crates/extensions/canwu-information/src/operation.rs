@@ -181,7 +181,7 @@ pub struct InformationOperationPayload {
 
 /// Returns the canonical JSON bytes used as the operation input-hash material.
 ///
-/// Hashing is deliberately left to the engine facade so this crate does not
+/// Hashing is deliberately left to the engine's public API so this crate does not
 /// introduce a second canonical-hash implementation.
 pub fn canonical_input_bytes(
     envelope: &InformationOperationEnvelope,

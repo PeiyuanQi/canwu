@@ -4,7 +4,7 @@ This directory is organized by dependency layer. The folder names help people
 navigate the repository; published Cargo package names remain unchanged.
 Applications should depend on `canwu-api`, not on the implementation crates
 below it. Experimental extensions are repository packages rather than part of
-the supported facade.
+the supported public API.
 
 ## Dependency graph
 
@@ -46,7 +46,7 @@ flowchart BT
         technology
         history
     end
-    subgraph facade["Supported facade"]
+    subgraph PublicApi["Public API"]
         api
     end
     subgraph runtime["Runtime"]
@@ -114,8 +114,8 @@ flowchart BT
 | `model/` | `canwu-decision`, `canwu-event`, `canwu-knowledge` | Serializable model and policy contracts | Published |
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
-| `facade/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the facade; historical research remains an optional downstream consumer of technology | Not published |
+| `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the public API; historical research remains an optional downstream consumer of technology | Not published |
 | `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 

@@ -91,7 +91,7 @@ pub struct Canwu {
     simulation: Simulation,
 }
 
-/// Public facade for a live runtime whose sealed evidence segments are stored by the caller.
+/// Public API for a live runtime whose sealed evidence segments are stored by the caller.
 pub struct CompactedCanwu {
     simulation: CompactedSimulation,
 }
@@ -255,7 +255,7 @@ impl Canwu {
 
     /// Trusted host/admin access to the complete knowledge snapshot.
     ///
-    /// Do not expose this facade to player, agent, observer, or remote clients;
+    /// Do not expose this public API to player, agent, observer, or remote clients;
     /// use [`Canwu::viewer`] or [`Canwu::viewer_for_actor`] instead.
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
@@ -1212,7 +1212,7 @@ struct KnowledgeViewContext {
     principal: ObservationPrincipal,
 }
 
-/// Restricted player/agent/observer facade. It deliberately exposes no raw
+/// Restricted player/agent/observer API. It deliberately exposes no raw
 /// snapshot, event, boundary, domain-record, or audit-origin access.
 pub struct CanwuViewer<'a> {
     canwu: &'a Canwu,
@@ -1451,7 +1451,7 @@ pub struct Explanation {
     pub causal_chain: Vec<ExplanationStep>,
 }
 
-// The former facade tests exercised the retired built-in reference world.
+// The former public API tests exercised the retired built-in reference world.
 // Integration coverage now lives with `canwu-reference-world`.
 #[cfg(any())]
 mod tests {
@@ -1953,7 +1953,7 @@ mod tests {
             .checkpoint_journal_json()
             .expect("checkpoint journal should serialize");
         let restored = Canwu::from_checkpoint_journal_json(&json)
-            .expect("checkpoint journal should restore through the public facade");
+            .expect("checkpoint journal should restore through the public API");
         assert_eq!(restored.snapshot(), canwu.snapshot());
 
         canwu
@@ -1962,27 +1962,27 @@ mod tests {
         let expected = canwu.snapshot();
         let mut compact = canwu
             .into_compacted()
-            .expect("the public facade should enter compact mode");
+            .expect("the public API should enter compact mode");
         let segment = compact
             .seal_evidence()
-            .expect("the public compact facade should seal evidence")
-            .expect("the public compact facade should return a segment");
+            .expect("the public compact API should seal evidence")
+            .expect("the public compact API should return a segment");
         let compact_checkpoint = compact
             .checkpoint()
-            .expect("the public compact facade should checkpoint");
+            .expect("the public compact API should checkpoint");
         assert_eq!(
             compact
                 .snapshot_with_segments(vec![segment.clone()])
-                .expect("the public compact facade should reconstruct its snapshot"),
+                .expect("the public compact API should reconstruct its snapshot"),
             expected
         );
         let restored_compact =
             CompactedCanwu::from_checkpoint_and_journal(compact_checkpoint, vec![segment])
-                .expect("the public compact facade should restore from its archive");
+                .expect("the public compact API should restore from its archive");
         assert_eq!(
             restored_compact
                 .snapshot_with_segments(Vec::new())
-                .expect("the restored compact facade should retain validated evidence"),
+                .expect("the restored compact API should retain validated evidence"),
             expected
         );
     }

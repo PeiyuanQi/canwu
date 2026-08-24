@@ -80,7 +80,7 @@ Downstream domain packages
   incidents, rebellion qualification, narration, UI
 ```
 
-`canwu-society` should depend on the supported `canwu-api` facade. It must not
+`canwu-society` should depend on the supported public API (`canwu-api`). It must not
 be re-exported by `canwu-api`, and `canwu-api` must not depend on it. During the
 experimental period it should use `publish = false`.
 
@@ -353,7 +353,7 @@ SocietyQuery
 SocietyProjection
 ```
 
-The public facade should accept owned, serializable values and batch operations.
+The public API should accept owned, serializable values and batch operations.
 It must not return mutable stores or expose internal solver caches.
 
 Rule implementations remain stateless. Deterministic state, remainders, and

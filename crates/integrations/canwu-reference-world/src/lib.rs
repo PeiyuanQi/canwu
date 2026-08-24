@@ -1,4 +1,4 @@
-//! Replaceable reference world model built only on the supported Canwu facade.
+//! Replaceable reference world model built only on Canwu's supported public API.
 
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 

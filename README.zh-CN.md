@@ -189,7 +189,7 @@ let events = canwu.advance_canonical(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-`crates/facade/canwu-api/examples/phased_boundary.rs` 提供了一个只依赖公开 API 的
+`crates/api/canwu-api/examples/phased_boundary.rs` 提供了一个只依赖公开 API 的
 插件示例：它发布并申请守恒资源、读取已声明的分配结果，并提交带明确来源的
 边界证据。
 

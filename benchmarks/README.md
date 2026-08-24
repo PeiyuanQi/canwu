@@ -891,7 +891,7 @@ using the scheduling-module milestone as its before baseline. Domain packages
 can declare `DomainRecordType` with a sealed entity/value class, construct
 `TypedDomainRecordRef<T>` identities, build typed schemas and drafts, decode
 typed payloads, and query typed identities through the simulation and public
-facade. Entity and value capabilities derive automatically from the class.
+public API. Entity and value capabilities derive automatically from the class.
 Typed references retain the existing `DomainRecordRef` wire shape and validate
 the namespaced kind during deserialization, so checkpoint and snapshot formats
 remain unchanged.

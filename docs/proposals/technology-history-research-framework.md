@@ -292,7 +292,7 @@ digests.
 1. Bounded read-cut paging, `canwu-technology`, the three-plugin historical
    suite, neutral starter, five profiles, benchmarks, docs, website, delivery,
    and deployment all land together; none is postponed.
-2. Both crates compile through the supported facade with no reverse dependency.
+2. Both crates compile through the supported public API with no reverse dependency.
 3. Authority, exact retry/collision, evidence predicates, bounds, actor privacy,
    rollback, restoration, tamper, fork, replay, and manifest mismatch have
    durable contract tests.

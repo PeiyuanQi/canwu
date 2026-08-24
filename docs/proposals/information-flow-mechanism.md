@@ -24,7 +24,7 @@ Add two generic capabilities to the Canwu kernel:
 Build content lineage, representations, instances, dispatches, per-recipient
 delivery attempts, access, interpretation, audiences, and release as an
 unpublished authoritative `canwu-information` extension plugin that depends
-only on the supported `canwu-api` facade. The extension, not an application
+only on the supported public API (`canwu-api`). The extension, not an application
 plugin, owns the fixed information record namespace and is the only writer of
 those records.
 
@@ -1096,14 +1096,14 @@ from the current run's persisted seat binding without rewriting history.
 
 #### Trust and capability boundary
 
-`Canwu` remains the trusted in-process engine-host/admin facade. Its detached
+`Canwu` remains the trusted in-process engine-host/admin API. Its detached
 world, knowledge, domain-record, boundary, event, snapshot, and export methods
 are intentionally omniscient. `PublicObserver` does not make an object that
 already owns `Canwu` untrusted; Rust code with that capability is part of the
 trusted host.
 
 Player clients, AI agents, network callers, and read-only observers must not be
-given the admin facade. Add a restricted `CanwuViewer<'a>` session created by
+given the admin API. Add a restricted `CanwuViewer<'a>` session created by
 the host:
 
 ~~~rust
@@ -1136,7 +1136,7 @@ stronger principal. `CanwuViewer` exposes only authorized observe, query,
 knowledge, event, action, explanation, and capability methods. It has no raw
 knowledge/event/boundary/domain-record/snapshot/export accessor and cannot be
 upgraded back to `Canwu`. This is the supported privacy boundary. Bindings and
-remote adapters expose `CanwuViewer`, not the admin facade.
+remote adapters expose `CanwuViewer`, not the admin API.
 
 Runtime plugins are also part of the trusted computing base. A system granted
 the coarse `canwu.core.knowledge` read can inspect the full ledger through
@@ -1259,7 +1259,7 @@ retroactively revoke a prior `Access` record. If such a policy changes an
 agent's current usable projection, it publishes or persists that policy state
 separately and cites it in later decisions.
 
-The trusted admin facade and restricted viewer deliberately expose different
+The trusted admin API and restricted viewer deliberately expose different
 methods:
 
 ~~~rust
@@ -1522,7 +1522,7 @@ Create crates/extensions/canwu-information with:
 publish = false
 
 [dependencies]
-canwu-api = { path = "../../facade/canwu-api" }
+canwu-api = { path = "../../api/canwu-api" }
 serde.workspace = true
 serde_json.workspace = true
 ~~~
@@ -1530,7 +1530,7 @@ serde_json.workspace = true
 The crate provides typed record payloads, schema constructors, pure validation
 helpers, owned operation requests/results, and an authoritative
 `InformationPlugin`. It does not receive mutable simulation state and does not
-bypass the public facade.
+bypass the public API.
 
 `InformationPlugin` owns the fixed `canwu.information` record namespace,
 registers the schemas, commands, ingress descriptors, and boundary systems, and

@@ -68,7 +68,7 @@
   utility evaluation, traces, and policy SDK adapters.
 - `crates/runtime/canwu-sim`: authoritative state, ingress, settlement, scheduling,
   plugins, records, persistence, validation, hashing, migration, and replay.
-- `crates/facade/canwu-api`: the supported public facade and re-export boundary.
+- `crates/api/canwu-api`: the supported public API and re-export boundary.
 - `crates/tools/canwu-debug`: reference client; it may depend on `canwu-api` and
   first-party reference integrations, never runtime internals.
 - `docs`: canonical architecture, end-state, versioning, conformance,

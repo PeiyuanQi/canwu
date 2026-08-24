@@ -110,7 +110,7 @@ period-specific AI subsystem. The long-term ownership boundary is:
 | `canwu-core` | Stable decision request, ticket, and trace IDs only. It does not own policy or domain semantics. |
 | `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, accepted/rejected attempt records, traces, deterministic utility evaluation, and Utility/Rule/Human/External/LLM policy interfaces. |
 | `canwu-sim` | Authoritative decision state, canonical ingress, non-poisoning rejection admission, deadlines, authority derivation, transactional command admission, commitments, persistence validation, and exact replay. |
-| `canwu-api` | The supported facade for creating, refreshing, evaluating, inspecting, saving, and replaying decisions. |
+| `canwu-api` | The supported public API for creating, refreshing, evaluating, inspecting, saving, and replaying decisions. |
 | Domain packages | Decision triggers, actor-relative fact projection, option and blocker generation, utility factors and weights, rules, personality or doctrine, and the command represented by each option. |
 
 A controller is a durable binding between a ticket, a policy identity, and the
@@ -289,7 +289,7 @@ The runtime must consume validated materialized data and registered handlers;
 it must never read an unverified external content file during settlement.
 
 The first-party acceptance bar is higher than an API snippet: every starter kit
-must use only the supported public facade, exercise authoritative commands and
+must use only the supported public API, exercise authoritative commands and
 boundaries, expose actor-relative reads where relevant, and prove save/load,
 fork, and exact replay. It is reference code and content that users can copy or
 replace, not a privileged compatibility path.

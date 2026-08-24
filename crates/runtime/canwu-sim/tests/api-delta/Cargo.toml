@@ -14,7 +14,7 @@ viewer-domain-leak = []
 viewer-journal-leak = []
 
 [dependencies]
-canwu-api = { path = "../../../../facade/canwu-api" }
+canwu-api = { path = "../../../../api/canwu-api" }
 canwu-core = { path = "../../../../foundation/canwu-core" }
 canwu-event = { path = "../../../../model/canwu-event" }
 canwu-sim = { path = "../.." }

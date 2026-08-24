@@ -14,7 +14,7 @@ publish = false
 allocation-counting = []
 
 [dependencies]
-canwu-api = { path = "../../crates/facade/canwu-api" }
+canwu-api = { path = "../../crates/api/canwu-api" }
 canwu-information = { path = "../../crates/extensions/canwu-information" }
 blake3 = "1"
 canwu-history-research = { path = "../../crates/extensions/canwu-history-research" }

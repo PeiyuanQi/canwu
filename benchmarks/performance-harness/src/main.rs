@@ -2167,7 +2167,7 @@ fn source_metadata() -> Result<Value, Box<dyn Error>> {
             "status",
             "--porcelain",
             "--",
-            "crates/facade/canwu-api/src",
+            "crates/api/canwu-api/src",
             "crates/foundation/canwu-core/src",
             "crates/model/canwu-event/src",
             "crates/model/canwu-knowledge/src",

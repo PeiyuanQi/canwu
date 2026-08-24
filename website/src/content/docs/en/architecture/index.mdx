@@ -30,14 +30,14 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | Layer | Responsibility | Public contract |
 | --- | --- | --- |
 | Client | Maps, rendering, input, research workflows, and agent loops | Choose the interface freely; do not own authoritative state |
-| `canwu-api` | Programmatic facade, commands, domain records, events, snapshots, and replay | Work through validated public ingress |
+| `canwu-api` | Programmatic API, commands, domain records, events, snapshots, and replay | Work through validated public ingress |
 | `canwu-sim` | Scheduling, plugins, settlement, persistence, and replay | The only owner of live mutable simulation state |
 | Foundation and model crates | IDs, time, events, decisions, and actor knowledge | Serializable, portable engine contracts |
 
 ## Five architectural boundaries
 
 1. **Command boundary:** external changes enter through validated engine commands, domain plugin commands, or canonical ingress; clients never rewrite state directly.
-2. **Read boundary:** the facade returns generic entities, domain records, and evidence; integrations build detached projections, while `CanwuViewer` scopes actor knowledge.
+2. **Read boundary:** the public API returns generic entities, domain records, and evidence; integrations build detached projections, while `CanwuViewer` scopes actor knowledge.
 3. **Determinism boundary:** time, queues, plugin order, allocation, and random streams all have explicit canonical ordering.
 4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.
 5. **Evidence boundary:** commands, events, settlement, random draws, state changes, and hashes form an inspectable replay record.
@@ -90,7 +90,7 @@ Canwu is a headless historical simulation core. A client may be a game, research
 | `canwu-routing` | Deterministic time-dependent routing primitives |
 | `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
-| `canwu-api` | Generic programmatic facade, canonical commands, domain records, evidence, and replay |
+| `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
 | `canwu-information` | Experimental authoritative information lifecycle extension |
 | `canwu-correspondence` | Experimental correspondence domain extension and simulation plugin |
 | `canwu-society` | Experimental social diffusion simulation module |
@@ -122,7 +122,7 @@ external and development dependencies are omitted.
         ReferenceWorld["canwu-reference-world"]
     end
 
-    subgraph Facade["Public facade"]
+    subgraph PublicApi["Public API"]
         Api["canwu-api"]
     end
 

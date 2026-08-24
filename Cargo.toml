@@ -8,7 +8,7 @@ members = [
     "crates/mechanisms/canwu-routing",
     "crates/mechanisms/canwu-transport",
     "crates/runtime/canwu-sim",
-    "crates/facade/canwu-api",
+    "crates/api/canwu-api",
     "crates/extensions/canwu-information",
     "crates/extensions/canwu-history-research",
     "crates/extensions/canwu-correspondence",
@@ -32,7 +32,7 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 blake3 = "1"
-canwu-api = { path = "crates/facade/canwu-api", version = "=0.5.1" }
+canwu-api = { path = "crates/api/canwu-api", version = "=0.5.1" }
 canwu-core = { path = "crates/foundation/canwu-core", version = "=0.5.1" }
 canwu-decision = { path = "crates/model/canwu-decision", version = "=0.5.1" }
 canwu-event = { path = "crates/model/canwu-event", version = "=0.5.1" }

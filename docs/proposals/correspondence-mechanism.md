@@ -16,7 +16,7 @@ its authoritative rules register commands, ingress, schemas, and boundary
 systems with `canwu-sim`. These are different axes: domain ownership describes
 what the crate means; `SimulationPlugin` describes how it executes.
 
-The crate depends on `canwu-api` and `canwu-information`. Neither the facade nor
+The crate depends on `canwu-api` and `canwu-information`. Neither the public API nor
 the information extension depends back on correspondence, so the workspace
 dependency graph remains acyclic.
 
@@ -28,7 +28,7 @@ dependency graph remains acyclic.
 | `canwu-correspondence` | Communication opportunity, admitted correspondence intent, holder-relative address/network resolution, accepted route, execution progress, reroute policy, interception bridge, and exact cross-extension evidence. |
 | Application, channel, and infrastructure adapters | Compose content and channel records, prepare the addressed dispatch, supply period-specific network/address knowledge, reserve scarce capacity, and expose player or AI decisions. |
 | `canwu-sim` | Authority admission, canonical ingress, ordered scheduling, operation-keyed RNG, atomic boundary commits, cross-plugin ingress validation, persistence, and exact replay. |
-| `canwu-api` | Supported facade and shared serializable contracts; no correspondence policy. |
+| `canwu-api` | Public API and shared serializable contracts; no correspondence policy. |
 
 ## Authoritative lifecycle
 

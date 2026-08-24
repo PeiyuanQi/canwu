@@ -925,7 +925,7 @@ fn source_content_hash() -> String {
     for relative in [
         "Cargo.toml",
         "Cargo.lock",
-        "crates/facade/canwu-api",
+        "crates/api/canwu-api",
         "crates/extensions/canwu-history-research",
         "crates/model/canwu-knowledge",
         "crates/runtime/canwu-sim",

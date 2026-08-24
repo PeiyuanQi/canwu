@@ -87,7 +87,7 @@ export default defineConfig({
         {
           label: "GitHub 示例",
           translations: { en: "GitHub examples" },
-          link: "https://github.com/PeiyuanQi/canwu/tree/main/crates/facade/canwu-api/examples",
+          link: "https://github.com/PeiyuanQi/canwu/tree/main/crates/api/canwu-api/examples",
         },
       ],
     }),
