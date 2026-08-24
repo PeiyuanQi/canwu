@@ -58,34 +58,6 @@ fn scenario_generic_ledger_is_kernel_issued_only() {
 }
 
 #[test]
-fn format_5_snapshot_without_entity_registry_migrates_from_legacy_projection() {
-    let (simulation, _) = Simulation::demo(35).expect("demo should initialize");
-    let expected_entities = simulation.entities().cloned().collect::<Vec<_>>();
-    let expected_checkpoint = simulation.checkpoint_hash().to_owned();
-    let mut snapshot: serde_json::Value = serde_json::from_str(
-        &simulation
-            .snapshot_json()
-            .expect("demo snapshot should serialize"),
-    )
-    .expect("demo snapshot JSON should parse");
-    snapshot
-        .as_object_mut()
-        .expect("snapshot root should be an object")
-        .remove("entities");
-
-    let restored = Simulation::from_snapshot_json(
-        &serde_json::to_string(&snapshot).expect("legacy-shaped snapshot should serialize"),
-    )
-    .expect("format-5 entity registry should migrate");
-
-    assert_eq!(
-        restored.entities().cloned().collect::<Vec<_>>(),
-        expected_entities
-    );
-    assert_eq!(restored.checkpoint_hash(), expected_checkpoint);
-}
-
-#[test]
 fn compatibility_scenarios_derive_and_require_the_complete_entity_registry() {
     let (mut omitted, _) = demo_scenario();
     let expected = omitted.entities.clone();

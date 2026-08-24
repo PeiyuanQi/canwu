@@ -65,6 +65,7 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) schema: &'a SchemaRegistry,
     pub(super) scheduled: &'a [ScheduledRecord],
     pub(super) root_seed: u64,
+    pub(super) authority_root_seed: u64,
     pub(super) random_streams: &'a [RandomStreamState],
     pub(super) random_draws: &'a [RandomDrawRecord],
     pub(super) next_event_id: u64,
@@ -122,6 +123,7 @@ struct IdentityCommitmentMaterial<'a> {
     initial_time: SimTime,
     #[serde(skip_serializing_if = "Option::is_none")]
     initial_scenario: Option<&'a Scenario>,
+    authority_root_seed: u64,
     plugin_descriptors: String,
     schema: &'a SchemaRegistry,
 }
@@ -321,6 +323,7 @@ pub(super) fn identity_commitment_root(
     run_manifest_hash: &str,
     initial_time: SimTime,
     initial_scenario: Option<&Scenario>,
+    authority_root_seed: u64,
     plugin_descriptors: &[PluginDescriptor],
     schema: &SchemaRegistry,
 ) -> Result<String, CanwuError> {
@@ -333,6 +336,7 @@ pub(super) fn identity_commitment_root(
             run_manifest_hash,
             initial_time,
             initial_scenario,
+            authority_root_seed,
             plugin_descriptors: canonical_sorted_hash_by(
                 "canwu.commitment.identity.plugins.v1",
                 plugin_descriptors,
@@ -417,6 +421,7 @@ fn commitment_roots(
         material.run_manifest_hash,
         material.initial_time,
         material.initial_scenario,
+        material.authority_root_seed,
         material.plugin_descriptors,
         material.schema,
     )?;
@@ -515,13 +520,7 @@ pub(super) fn authoritative_run_identity(
     let mut authoritative_manifest = run_manifest.clone();
     let RunManifest::Declared {
         run_configuration, ..
-    } = &mut authoritative_manifest
-    else {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidRunManifest,
-            "declared run policy requires a declared run manifest",
-        ));
-    };
+    } = &mut authoritative_manifest;
     **run_configuration = ArtifactManifest::new(
         "canwu.core",
         "authoritative-policy-excluded",
@@ -571,6 +570,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         schema: &snapshot.schema,
         scheduled: &snapshot.scheduled,
         root_seed: snapshot.root_seed,
+        authority_root_seed: snapshot.authority_root_seed,
         random_streams: &snapshot.random_streams,
         random_draws: &snapshot.random_draws,
         next_event_id: snapshot.next_event_id,
@@ -657,6 +657,7 @@ pub(super) fn snapshot_commitment_roots(
             schema: &snapshot.schema,
             scheduled: &snapshot.scheduled,
             root_seed: snapshot.root_seed,
+            authority_root_seed: snapshot.authority_root_seed,
             random_streams: &snapshot.random_streams,
             random_draws: &snapshot.random_draws,
             next_event_id: snapshot.next_event_id,

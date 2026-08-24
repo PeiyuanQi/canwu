@@ -6,19 +6,19 @@ use super::{
     DeterministicRng, DomainRecord, DomainRecordRef, DomainRecordSchema, DomainRecordType,
     DomainRecordVersionRef, DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef,
     IngressPayload, IngressReceipt, IngressRecord, KeyedDrawReservation, KnowledgeSnapshot,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginComponentRecord, PluginDescriptor,
-    PluginIngressRequest, RandomDrawAddress, RandomDrawRecord, RandomStreamState,
+    OutboxEntry, PayloadProperty, PayloadSchema, PayloadValueType, PluginComponentRecord,
+    PluginDescriptor, PluginIngressRequest, RandomDrawAddress, RandomDrawRecord, RandomStreamState,
     RunConfigurationSnapshot, RunManifest, RuntimeEvidence, SNAPSHOT_FORMAT_VERSION,
     STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledAction, ScheduledRecord, SchemaRegistry,
     SimDuration, SimEvent, SimTime, Simulation, SimulationPlugin, SystemCadence,
     TypedDomainRecordRef, WorldSnapshot, has_unqueued_command_history, invalid_snapshot_error,
-    is_one_u64, is_zero_u32, is_zero_u64, legacy_v4, one_u64,
+    is_one_u64, is_zero_u32, is_zero_u64, one_u64,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SimulationSnapshot {
     pub engine_version: String,
     pub snapshot_format_version: u32,
@@ -37,13 +37,13 @@ pub struct SimulationSnapshot {
     /// Persisted canonical roots verified before a snapshot becomes live.
     pub commitment_roots: Option<CommitmentRoots>,
     #[serde(default)]
-    /// Version of the revision migration and checkpoint sub-contract.
+    /// Version of the revision and checkpoint sub-contract.
     pub revision_format_version: u32,
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     /// Monotonic revision after all persisted attempt and boundary transactions.
     pub state_revision: u64,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
-    /// Revision-evidence format available to exact replay; zero is migration-only.
+    /// Revision-evidence format available to exact replay.
     pub replay_revision_format_version: u32,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     /// Version of the persisted boundary-admission cursor contract.
@@ -84,6 +84,9 @@ pub struct SimulationSnapshot {
     pub schema: SchemaRegistry,
     #[serde(default)]
     pub root_seed: u64,
+    /// Authority credential root, intentionally independent from simulation RNG.
+    #[serde(default)]
+    pub authority_root_seed: u64,
     #[serde(default)]
     pub random_streams: Vec<RandomStreamState>,
     #[serde(default)]
@@ -118,12 +121,17 @@ fn legacy_world_is_empty(world: &WorldSnapshot) -> bool {
         && world.letters.is_empty()
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 /// Complete recorded environment and input journal for exact replay.
 pub struct ReplayJournal {
     pub engine_version: String,
     pub snapshot_format_version: u32,
     pub root_seed: u64,
+    /// Self-contained initial scenario used by exact replay. Callers never
+    /// provide a second scenario that could diverge from the journal.
+    pub initial_scenario: Scenario,
+    pub authority_root_seed: u64,
     pub run_manifest: RunManifest,
     pub run_manifest_hash: String,
     pub run_configuration: RunConfigurationSnapshot,
@@ -144,46 +152,8 @@ pub struct ReplayJournal {
     pub final_revision: u64,
 }
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct ReplayJournalWire {
-    pub(super) engine_version: String,
-    pub(super) snapshot_format_version: u32,
-    pub(super) root_seed: u64,
-    pub(super) run_manifest: RunManifest,
-    pub(super) run_manifest_hash: String,
-    #[serde(default)]
-    pub(super) run_configuration: Option<RunConfigurationSnapshot>,
-    pub(super) plugin_descriptors: Vec<PluginDescriptor>,
-    pub(super) plugin_registration_closed: bool,
-    pub(super) commands: Vec<CommandRecord>,
-    #[serde(default)]
-    pub(super) command_attempts: Vec<CommandAttemptRecord>,
-    #[serde(default)]
-    pub(super) ingress: Vec<IngressRecord>,
-    pub(super) boundaries: Vec<BoundaryRecord>,
-    pub(super) final_time: SimTime,
-    pub(super) checkpoint_hash: String,
-    #[serde(default)]
-    pub(super) commitment_format_version: u32,
-    #[serde(default)]
-    pub(super) revision_format_version: u32,
-    #[serde(default)]
-    pub(super) final_revision: u64,
-}
-
-impl<'de> Deserialize<'de> for ReplayJournal {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        legacy_v4::deserialize_replay_value(&value).map_err(serde::de::Error::custom)
-    }
-}
-
 /// Version of current-state checkpoints plus append-only evidence segments.
-pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 1;
+pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 2;
 const ARCHIVED_SEGMENT_MANIFEST_DOMAIN: &str = "canwu.evidence.archived-segment-manifest.v1";
 const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v1";
 const EVIDENCE_DEPENDENCY_DOMAIN: &str = "canwu.evidence.dependencies.v1";
@@ -1322,6 +1292,27 @@ impl CompactedSimulation {
         self.simulation.checkpoint()
     }
 
+    /// Returns stable identities for committed boundary emissions still
+    /// retained by this compact runtime. Sealed prefixes remain owned by the
+    /// caller as archive segments and can be replayed from those segments.
+    pub fn outbox_entries(&self) -> Result<Vec<OutboxEntry>, CanwuError> {
+        self.simulation.outbox_entries()
+    }
+
+    /// Reconstructs durable delivery identities for a caller-owned sealed
+    /// evidence segment. Sealing does not remove these identities; the caller
+    /// can retain the segment and regenerate the same at-least-once delivery
+    /// keys after restart.
+    pub fn outbox_entries_for_segment(
+        &self,
+        segment: &EvidenceJournalSegment,
+    ) -> Result<Vec<OutboxEntry>, CanwuError> {
+        Simulation::outbox_entries_for_boundaries(
+            &self.simulation.state.metadata.run_manifest_hash,
+            &segment.boundaries,
+        )
+    }
+
     /// Returns the committed receipt for an archived evidence identity.
     #[must_use]
     pub fn archived_evidence_receipt(
@@ -2394,6 +2385,7 @@ impl Simulation {
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
             root_seed: self.state.current.root_seed,
+            authority_root_seed: self.state.current.authority_root_seed,
             random_streams: self
                 .state
                 .current
@@ -2753,7 +2745,7 @@ impl Simulation {
 
     /// Deserializes and restores a portable checkpoint-journal JSON bundle.
     pub fn from_checkpoint_journal_json(json: &str) -> Result<Self, CanwuError> {
-        let bundle = super::legacy_v4::deserialize_checkpoint_journal_json(json)?;
+        let bundle: CheckpointJournal = super::deserialize_f6_json(json, "checkpoint journal")?;
         Self::from_checkpoint_journal(bundle)
     }
 
@@ -2762,7 +2754,7 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let bundle = super::legacy_v4::deserialize_checkpoint_journal_json(json)?;
+        let bundle: CheckpointJournal = super::deserialize_f6_json(json, "checkpoint journal")?;
         Self::from_checkpoint_journal_with_plugins(bundle, plugins)
     }
 }

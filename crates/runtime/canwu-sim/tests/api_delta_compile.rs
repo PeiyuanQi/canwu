@@ -26,31 +26,12 @@ fn compile_fixture(extra_args: &[&str]) -> Output {
 }
 
 #[test]
-fn format_5_construction_compiles_and_format_4_construction_documents_the_source_break() {
+fn format_6_construction_compiles() {
     let current = compile_fixture(&[]);
     assert!(
         current.status.success(),
-        "format-5 external fixture failed:\n{}",
+        "format-6 external fixture failed:\n{}",
         String::from_utf8_lossy(&current.stderr)
-    );
-
-    let legacy = compile_fixture(&["--features", "legacy-v4-source-shape"]);
-    assert!(
-        !legacy.status.success(),
-        "format-4 source shape unexpectedly compiled"
-    );
-    let stderr = String::from_utf8_lossy(&legacy.stderr);
-    assert!(
-        stderr.contains("RandomDrawRecord"),
-        "unexpected compiler output: {stderr}"
-    );
-    assert!(
-        stderr.contains("position"),
-        "unexpected compiler output: {stderr}"
-    );
-    assert!(
-        stderr.contains("address") || stderr.contains("operation_evidence"),
-        "the compiler should identify the required format-5 fields: {stderr}"
     );
 }
 

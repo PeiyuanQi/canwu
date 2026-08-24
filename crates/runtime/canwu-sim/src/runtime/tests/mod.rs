@@ -1,6 +1,7 @@
 #![allow(clippy::unnecessary_wraps)]
 
 use super::*;
+use crate::runtime::hashing::snapshot_state_hash;
 
 #[derive(Default)]
 struct TestArchive {
@@ -1653,11 +1654,6 @@ fn refresh_snapshot_commitments_and_checkpoint(snapshot: &mut SimulationSnapshot
     }
     snapshot.checkpoint_hash = snapshot_checkpoint_hash(snapshot)
         .expect("tampered snapshot should still have a coherent outer commitment");
-}
-
-fn downgrade_snapshot_commitments(snapshot: &mut SimulationSnapshot) {
-    snapshot.commitment_format_version = 0;
-    snapshot.commitment_roots = None;
 }
 
 fn record_lifecycle_proposal(context: &BoundaryContext, delete_only: bool) -> BoundaryProposal {

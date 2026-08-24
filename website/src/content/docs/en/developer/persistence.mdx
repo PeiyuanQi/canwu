@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
 
-Old format-5 saves may lack the top-level generic `entities` field. The loader explicitly builds that registry from the validated compatibility projection. It does not depend on the retired `canwu-world` source package.
+0.6 uses the Format 6 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, and `authority_root_seed`. The kernel does not silently migrate format-4 or format-5 data.
 
 ## Checkpoint journals and exact replay
 
@@ -34,12 +34,18 @@ Old format-5 saves may lack the top-level generic `entities` field. The loader e
 
 ```rust
 let journal = canwu.replay_journal();
-let replayed = Canwu::replay_from_journal(scenario, &[&plugin], &journal)?;
+let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-Replay requires a matching scenario, engine version, and plugin semantic environment. Long-lived products should pin the engine version, record application and scenario identities, retain migration fixtures, and verify results with checkpoint hashes.
+Exact replay uses the journal's initial scenario and does not accept a second caller-supplied scenario. Engine version, run identity, and plugin semantic environment must match. `Canwu::outbox_entries()` exposes durable boundary emissions; the host delivers them at least once and deduplicates by `delivery_id`. Exact replay regenerates the same identity without re-sending external effects.
+
+`CompactedCanwu::outbox_entries()` covers the retained evidence tail. After a
+seal, the caller owns the returned `EvidenceJournalSegment` and can use
+`outbox_entries_for_segment` to regenerate the same identities. Boundary
+emissions remain paired with host delivery and acknowledgement state; sealing
+does not imply that an external effect was delivered or acknowledged.
 
 ## Counterfactuals and tests
 

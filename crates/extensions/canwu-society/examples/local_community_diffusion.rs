@@ -27,7 +27,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         knowledge: snapshot.knowledge,
         domain_records: vec![tutorial_state().into_record()?],
     };
-    let replay_scenario = scenario.clone();
     let mut canwu = Canwu::new_with_plugins(42, scenario, &[&plugin])?;
 
     settle_day(&mut canwu, 1)?;
@@ -86,8 +85,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     assert_eq!(restored.snapshot(), canwu.snapshot());
     let forked = canwu.fork();
     assert_eq!(forked.snapshot(), canwu.snapshot());
-    let replayed =
-        Canwu::replay_from_journal(replay_scenario, &[&plugin], &canwu.replay_journal())?;
+    let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())?;
     assert_eq!(replayed.snapshot(), canwu.snapshot());
     println!("snapshot restore, fork, and exact replay reproduced the same authoritative state");
     Ok(())

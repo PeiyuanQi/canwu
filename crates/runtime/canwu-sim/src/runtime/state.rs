@@ -487,6 +487,9 @@ pub(super) struct RuntimeCurrentState {
     pub(super) domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
     pub(super) decisions: DecisionState,
     pub(super) root_seed: u64,
+    /// Persisted authority credential root. It is intentionally separate from
+    /// the deterministic simulation RNG seed and is never used for draws.
+    pub(super) authority_root_seed: u64,
     pub(super) random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
 }
 

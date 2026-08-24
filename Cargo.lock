@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-core",
  "canwu-decision",
@@ -272,7 +272,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -280,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-correspondence"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "canwu-information",
@@ -290,7 +290,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-debug"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "canwu-reference-world",
@@ -302,7 +302,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-decision"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-event"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-history-research"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "canwu-technology",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-information"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -352,7 +352,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-reference-world"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -361,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-routing"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-sim"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -386,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-society"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -395,7 +395,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-technology"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -404,14 +404,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-time"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-transport"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "canwu-core",
  "canwu-routing",

@@ -273,6 +273,19 @@ pub struct BoundaryEmission {
     pub kind: BoundaryEmissionKind,
 }
 
+/// Durable, idempotent external-delivery identity derived from committed
+/// boundary evidence. The engine creates one entry for every emission; a host
+/// may deliver it at least once and use `delivery_id` as its idempotency key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OutboxEntry {
+    pub delivery_id: String,
+    pub boundary: BoundaryId,
+    pub event: EventId,
+    pub emission_index: u64,
+    pub plugin: String,
+    pub system: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BoundaryIngressGeneration {
     pub ingress: IngressId,

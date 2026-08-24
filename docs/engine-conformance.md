@@ -165,7 +165,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Read-only observers cannot issue authoritative commands, and changing only
   observation or presentation cannot change authoritative hashes or RNG state.
 
-### E12: Persistence, replay, migration, and lineage
+### E12: Persistence, replay, clean break, and lineage
 
 - Checkpoints preserve all deterministic state needed for exact continuation:
   queues, accumulators, commands/effects, reservations, transitions, knowledge,
@@ -173,8 +173,9 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Save identity records engine, schema, rules, scenario/content, plugin/mod,
   localization-sensitive contract, run configuration, and source/provenance
   manifests as applicable.
-- Compatible migrations are explicit; incompatible loads fail with stable
-  machine-readable reasons.
+- Format 6 is a pre-1.0 clean break: unsupported older formats fail with stable
+  machine-readable reasons, and any migration/export of old data is owned by
+  the application outside the Canwu runtime.
 - Replay restores the recorded plugin/rules environment before applying its
   journal.
 - Forks create a new lineage with parent and boundary identity. Comparison and
@@ -184,8 +185,8 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 
 - Registration is atomic, deterministic, namespaced, versioned, and validated.
 - Executable handlers are paired with serializable manifests and semantic
-  hashes; missing or changed required packages block load/replay unless an
-  explicit migration applies.
+  hashes; missing or changed required packages block load/replay. Replacing a
+  package or upgrading its semantics requires a new declared identity.
 - Engine APIs support constrained data/rule packages and deterministic overlay
   resolution without default arbitrary script injection.
 - A package cannot write another owner's state except through a declared,
@@ -239,13 +240,13 @@ JSON escape hatch, or a narrow green demo test is not conformance evidence.
 
 ## Current baseline
 
-The v0.4 engine provides a public, deterministic fourteen-phase settlement API.
+The v0.6 engine provides a public, deterministic fourteen-phase settlement API.
 Boundary systems declare cadence, reads, writes, reservation participation,
 allocation reads, owned random streams, emissions, and visibility. The kernel
 provides stable allocation order, separately staged ordinary and conditional
 commits, same-boundary overlays, next-boundary visibility, full rollback on
 fatal error, scoped deterministic draws, and persisted boundary evidence with
-exact plugin/system provenance. Snapshot format 4 adds random draw journals,
+exact plugin/system provenance. Snapshot format 6 adds random draw journals,
 state and boundary hash chains, a current-state checkpoint commitment, hashed
 run/content/source manifests, exact plugin version and semantic identities, and
 an environment-bound replay journal that also verifies command-only and
@@ -262,9 +263,9 @@ replay ingress is kernel-only, so live callers cannot self-label around
 produce identical authoritative state/boundary hashes and RNG state. Every
 report dispatch must retain exactly one
 causally linked core random draw, and authoritative scheduling rejects time
-overflow rather than saturating. Current-format checkpoints also require an
-exact engine-version match unless an explicit migration rewrites their
-commitments.
+overflow rather than saturating. Format 6 checkpoints require an exact engine
+and contract-version match; rewriting older data is an application-owned export
+outside the runtime.
 E01 now has a public generic storage contract: plugins register namespaced
 entity or record kinds with payload and typed-reference schemas; boundary
 systems atomically create, expected-version update, retire, successor-link, and
@@ -277,8 +278,8 @@ rollback, cycle-free succession, canonical save/load, exact replay,
 provenance-tamper rejection, historical-cut rejection for pre-creation and
 post-deletion evidence, rejection of cross-system same-stage creation use, and
 manifest-bound protection against shifting created records into genesis state.
-Compatible handler-free format 2 and 3 saves migrate with explicit legacy
-provenance for continuation and explicitly reject unsupported exact replay.
+Format 6 rejects format 2 through 5 saves before runtime construction; any
+historical export or conversion remains application-owned and outside Canwu.
 These complete the current E01 contract and are substantial but still partial
 implementations of E02, E04 through E09, and E11 through E13.
 
@@ -331,8 +332,8 @@ permission semantics, experiment lineage, and the remaining canonical
 run-configuration identity fields; recurring calendar policy and unified
 persistence for internal scheduled continuations; released, carried, and lost
 reservation outcomes plus atomic conservation bundles; field-level provenance
-and structured report facts; immutable generation-tagged actor projections; a
-general migration registry, replay environment discovery, fork lineage, and
+and structured report facts; immutable generation-tagged actor projections;
+replay environment discovery, fork lineage, and
 branch comparison; constrained data/rule packages; binding-oriented batch APIs;
 and a versioned deterministic solver boundary. Final conformance requires those
 contracts, their executable evidence, and a requirement-by-requirement audit.

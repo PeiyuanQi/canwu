@@ -12,7 +12,6 @@ use canwu_sim::{
 };
 use canwu_time::SimTime;
 
-#[cfg(not(feature = "legacy-v4-source-shape"))]
 fn construct_record() -> RandomDrawRecord {
     RandomDrawRecord {
         id: RandomDrawId::new(1),
@@ -22,7 +21,7 @@ fn construct_record() -> RandomDrawRecord {
         operation_evidence: None,
         upper_exclusive: 10,
         value: 4,
-        purpose: "compile the format-5 shape".to_owned(),
+        purpose: "compile the format-6 shape".to_owned(),
         producer: RandomDrawProducer::CoreSystem {
             system: "api-delta".to_owned(),
         },
@@ -32,7 +31,6 @@ fn construct_record() -> RandomDrawRecord {
     }
 }
 
-#[cfg(not(feature = "legacy-v4-source-shape"))]
 fn exercise_information_flow_api_delta() {
     let holder = KnowledgeHolderRef::Person(PersonId::new(1));
     let schema_id = KnowledgeSchemaId {
@@ -44,7 +42,7 @@ fn exercise_information_flow_api_delta() {
         visibility: StateVisibility::SameBoundary,
         producer_correlation: Some("fixture-correlation".to_owned()),
         records: Vec::new(),
-        summary: "exercise the format-5 publication shape".to_owned(),
+        summary: "exercise the format-6 publication shape".to_owned(),
     };
     let cross_plugin_ingress = BoundaryDirective::SchedulePluginIngress {
         target_plugin: "fixture-target".to_owned(),
@@ -151,33 +149,12 @@ fn exercise_information_flow_api_delta() {
     );
 }
 
-#[cfg(not(feature = "legacy-v4-source-shape"))]
 fn inspect_snapshot_delta(snapshot: &SimulationSnapshot) -> usize {
     snapshot.knowledge.records.len()
 }
 
-#[cfg(not(feature = "legacy-v4-source-shape"))]
 fn inspect_viewer_context(context: &canwu_api::ViewerContext) {
     let _ = (context.principal(), context.actor(), context.observation());
-}
-
-#[cfg(feature = "legacy-v4-source-shape")]
-fn construct_record() -> RandomDrawRecord {
-    RandomDrawRecord {
-        id: RandomDrawId::new(1),
-        at: SimTime::EPOCH,
-        stream: RandomStreamKey::new("fixture", "compile", 1),
-        position: 0,
-        upper_exclusive: 10,
-        value: 4,
-        purpose: "compile the format-4 shape".to_owned(),
-        producer: RandomDrawProducer::CoreSystem {
-            system: "api-delta".to_owned(),
-        },
-        outcome: None,
-        cause: CauseRef::System("api-delta".to_owned()),
-        correlation_id: 1,
-    }
 }
 
 #[cfg(feature = "viewer-admin-leak")]
@@ -216,7 +193,6 @@ fn main() {
     let record = construct_record();
     assert_eq!(record.upper_exclusive, 10);
 
-    #[cfg(not(feature = "legacy-v4-source-shape"))]
     {
         exercise_information_flow_api_delta();
         let _ = inspect_snapshot_delta;

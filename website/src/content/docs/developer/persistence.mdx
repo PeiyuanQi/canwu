@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 一旦状态包含插件领域记录，加载时必须提供与保存时相同的插件集合。插件名称、版本和 semantic hash 是环境承诺的一部分。
 
-旧 format-5 存档可能没有顶层通用 `entities` 字段。加载器会从已验证的兼容投影显式构建注册表；它不依赖已退役的 `canwu-world` 源码包。
+0.6 使用 Format 6 clean break。快照必须带有声明式 `RunManifest`、运行配置、规范化 `initial_scenario`、完整 commitment roots 和 `authority_root_seed`；format-4/5 数据不会在内核中自动迁移。
 
 ## checkpoint journal 与精确重放
 
@@ -34,12 +34,14 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 ```rust
 let journal = canwu.replay_journal();
-let replayed = Canwu::replay_from_journal(scenario, &[&plugin], &journal)?;
+let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-重放必须使用匹配的场景、引擎版本和插件语义环境。长期存储的产品应固定引擎版本，记录应用与场景标识，保留迁移回归夹具，并用 checkpoint hash 验证结果。
+精确重放使用 journal 内的初始场景，不接受调用方另传的场景；引擎版本、运行身份和插件语义环境必须匹配。`Canwu::outbox_entries()` 返回边界产生的持久化外发项，宿主应按 `delivery_id` 做至少一次投递和幂等去重；精确重放不会重新发送外部副作用。
+
+`CompactedCanwu::outbox_entries()` 只返回当前保留证据尾部的外发项。证据封存后，调用方拥有返回的 `EvidenceJournalSegment`，可使用 `outbox_entries_for_segment` 重新生成相同的标识。边界外发记录仍应与宿主的投递及确认状态一同保存；封存本身不表示外部副作用已投递或已确认。
 
 ## 反事实与测试
 

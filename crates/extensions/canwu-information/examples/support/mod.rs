@@ -272,7 +272,7 @@ where
     } else {
         vec![&information]
     };
-    verify_snapshot_and_replay(&canwu, scenario, &plugins, &replay_plugins, &snapshot)?;
+    verify_snapshot_and_replay(&canwu, &plugins, &replay_plugins, &snapshot)?;
     verify_compact_reconstruction(canwu, &plugins, &snapshot)
 }
 
@@ -417,7 +417,6 @@ fn verify_completed_records(
 
 fn verify_snapshot_and_replay(
     canwu: &Canwu,
-    scenario: Scenario,
     restore_plugins: &[&dyn SimulationPlugin],
     replay_plugins: &[&dyn SimulationPlugin],
     snapshot: &canwu_api::SimulationSnapshot,
@@ -428,8 +427,8 @@ fn verify_snapshot_and_replay(
     if restored.snapshot() != *snapshot {
         return Err("authoritative case snapshot restore diverged".to_owned());
     }
-    let replayed = Canwu::replay_from_journal(scenario, replay_plugins, &canwu.replay_journal())
-        .map_err(stringify)?;
+    let replayed =
+        Canwu::replay_from_journal(replay_plugins, &canwu.replay_journal()).map_err(stringify)?;
     if replayed.snapshot() != *snapshot {
         return Err("authoritative case exact replay diverged".to_owned());
     }

@@ -1,4 +1,6 @@
-//! Deprecated format-5 compatibility projection. New world models belong in integrations.
+//! Reference-world projection retained for the current runtime facade.
+//!
+//! This type is not a persistence migration path; Format 6 rejects old saves.
 
 use canwu_core::{
     ArmyId, EntityRef, GovernmentId, LetterId, PersonId, ResourceId, RouteId, TerritoryId,

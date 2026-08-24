@@ -1545,7 +1545,7 @@ fn playable_flow_is_authoritative_private_and_exactly_restorable() {
     .expect("technology checkpoint should restore");
     assert_eq!(checkpoint_restored.snapshot(), canwu.snapshot());
     validate_technology_runtime(&canwu.fork()).expect("fork should validate");
-    let replayed = replay_technology_from_journal(scenario, &[&plugin], &canwu.replay_journal())
+    let replayed = replay_technology_from_journal(&[&plugin], &canwu.replay_journal())
         .expect("journal should replay");
     assert_eq!(replayed.snapshot(), canwu.snapshot());
 }
@@ -1892,12 +1892,9 @@ fn operation_collision_reduction_is_order_and_duplicate_independent() {
             .expect("collision should have one terminal operation")
             .decode_payload::<TechnologyOperation>()
             .expect("collision operation should decode");
-        let replayed = replay_technology_from_journal(
-            scenario.clone(),
-            &[&TechnologyPlugin],
-            &canwu.replay_journal(),
-        )
-        .expect("collision should replay exactly");
+        let replayed =
+            replay_technology_from_journal(&[&TechnologyPlugin], &canwu.replay_journal())
+                .expect("collision should replay exactly");
         assert_eq!(replayed.snapshot(), canwu.snapshot());
         let domain = canwu.domain_records().cloned().collect::<Vec<_>>();
         (outcome, domain)

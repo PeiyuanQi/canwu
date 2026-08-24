@@ -1187,7 +1187,7 @@ mod tests {
         assert_eq!(snapshot(&fork), snapshot(&canwu));
 
         let journal = canwu.replay_journal();
-        let replayed = Canwu::replay_from_journal(scenario, &[&plugin], &journal)
+        let replayed = Canwu::replay_from_journal(&[&plugin], &journal)
             .expect("plugin-aware replay should reproduce the run");
         assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
         assert_eq!(snapshot(&replayed), snapshot(&canwu));
@@ -1254,7 +1254,6 @@ mod tests {
     #[test]
     fn a_second_pending_movement_is_rejected_without_blocking_settlement() {
         let (scenario, ids) = demo_scenario().expect("reference scenario should be valid");
-        let replay_scenario = scenario.clone();
         let plugin = ReferenceWorldPlugin;
         let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])
             .expect("reference run should initialize");
@@ -1316,9 +1315,8 @@ mod tests {
                 .location,
             ids.eastern_territory
         );
-        let replayed =
-            Canwu::replay_from_journal(replay_scenario, &[&plugin], &canwu.replay_journal())
-                .expect("the accepted and rejected movements should replay exactly");
+        let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())
+            .expect("the accepted and rejected movements should replay exactly");
         assert_eq!(replayed.snapshot(), canwu.snapshot());
     }
 }
