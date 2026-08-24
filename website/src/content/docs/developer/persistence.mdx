@@ -41,6 +41,8 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 
 精确重放使用 journal 内的初始场景，不接受调用方另传的场景；引擎版本、运行身份和插件语义环境必须匹配。`Canwu::outbox_entries()` 返回边界产生的持久化外发项，宿主应按 `delivery_id` 做至少一次投递和幂等去重；精确重放不会重新发送外部副作用。
 
+调用 `Canwu::replay_from_journal_json()` 从 JSON 载入 journal；它会在精确重放开始前递归拒绝未知字段。
+
 `CompactedCanwu::outbox_entries()` 只返回当前保留证据尾部的外发项。证据封存后，调用方拥有返回的 `EvidenceJournalSegment`，可使用 `outbox_entries_for_segment` 重新生成相同的标识。边界外发记录仍应与宿主的投递及确认状态一同保存；封存本身不表示外部副作用已投递或已确认。
 
 ## 反事实与测试

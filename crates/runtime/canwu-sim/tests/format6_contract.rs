@@ -68,6 +68,14 @@ fn exact_replay_uses_the_journal_initial_scenario_and_preserves_outbox_identity(
         panic!("exact replay must reject an authority-root substitution");
     };
     assert_eq!(error.code, ErrorCode::ReplayEnvironmentMismatch);
+
+    let mut journal_wire =
+        serde_json::to_value(simulation.replay_journal()).expect("replay journal should serialize");
+    journal_wire["initial_scenario"]["unexpected"] = Value::Bool(true);
+    let Err(error) = Simulation::replay_from_journal_json(&[], &journal_wire.to_string()) else {
+        panic!("replay journal JSON must reject unknown nested fields");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 }
 
 #[test]

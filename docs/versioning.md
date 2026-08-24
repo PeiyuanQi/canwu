@@ -36,6 +36,8 @@ authority root, commands, attempts, ingress, boundaries, random draws, and
 final revision/checkpoint commitments. `replay_from_journal(plugins, journal)`
 does not accept a second scenario supplied by the caller; the scenario in the
 journal is authoritative and is validated against the manifest.
+`replay_from_journal_json` is the strict JSON counterpart and rejects unknown
+fields recursively before replay begins.
 
 Executable policy implementations are not replay inputs. Decisions, outcomes,
 and evidence already admitted to the journal are replayed as records.

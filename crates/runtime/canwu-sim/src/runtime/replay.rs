@@ -258,6 +258,16 @@ impl Simulation {
         Ok(simulation)
     }
 
+    /// Deserializes a Format 6 replay journal with recursive unknown-field
+    /// rejection, then performs the exact environment-bound replay.
+    pub fn replay_from_journal_json(
+        plugins: &[&dyn SimulationPlugin],
+        json: &str,
+    ) -> Result<Self, CanwuError> {
+        let journal: ReplayJournal = super::deserialize_f6_json(json, "replay journal")?;
+        Self::replay_from_journal(plugins, &journal)
+    }
+
     #[cfg(test)]
     #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn replay_from_journal_with_scenario(

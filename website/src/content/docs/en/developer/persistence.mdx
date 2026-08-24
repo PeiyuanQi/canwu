@@ -41,6 +41,9 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 
 Exact replay uses the journal's initial scenario and does not accept a second caller-supplied scenario. Engine version, run identity, and plugin semantic environment must match. `Canwu::outbox_entries()` exposes durable boundary emissions; the host delivers them at least once and deduplicates by `delivery_id`. Exact replay regenerates the same identity without re-sending external effects.
 
+Use `Canwu::replay_from_journal_json()` when the journal is stored as JSON; it
+rejects unknown fields recursively before exact replay begins.
+
 `CompactedCanwu::outbox_entries()` covers the retained evidence tail. After a
 seal, the caller owns the returned `EvidenceJournalSegment` and can use
 `outbox_entries_for_segment` to regenerate the same identities. Boundary
