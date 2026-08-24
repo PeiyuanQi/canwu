@@ -61,14 +61,16 @@
   across packages.
 - `crates/foundation/canwu-time`: deterministic simulation time and duration arithmetic.
 - `crates/model/canwu-event`: causal event types and evidence references.
-- `crates/model/canwu-world`: authoritative world entities and immutable snapshots.
+- `crates/integrations/canwu-reference-world`: replaceable example world, detached
+  projection, movement plugin, and routing adapter built on `canwu-api`.
 - `crates/model/canwu-knowledge`: actor-relative knowledge and observation state.
 - `crates/model/canwu-decision`: persisted decision contracts, controller bindings,
   utility evaluation, traces, and policy SDK adapters.
 - `crates/runtime/canwu-sim`: authoritative state, ingress, settlement, scheduling,
   plugins, records, persistence, validation, hashing, migration, and replay.
 - `crates/facade/canwu-api`: the supported public facade and re-export boundary.
-- `crates/tools/canwu-debug`: reference client; it may depend on `canwu-api` only.
+- `crates/tools/canwu-debug`: reference client; it may depend on `canwu-api` and
+  first-party reference integrations, never runtime internals.
 - `docs`: canonical architecture, end-state, versioning, conformance,
   community, and legal documentation.
 - `website/src/content/docs`: published Astro documentation maintained as a
@@ -89,7 +91,7 @@
 | If changing | Inspect and usually update |
 | --- | --- |
 | Stable IDs, generic references, or schemas | `canwu-core`; owning world/event/record types; `canwu-api` re-exports; serialization and migration tests |
-| World entity shape or lifecycle | `canwu-world`; `canwu-knowledge`; simulation validation/persistence/replay; public queries; debug projections |
+| Reference world entity shape or lifecycle | `canwu-reference-world`; typed domain records; compatibility migration; debug projections; matching starter/docs |
 | Actor-relative knowledge or visibility | `canwu-knowledge`; `SimulationView`; `canwu-api`; information-flow and replay tests |
 | Decision tickets, controllers, options, evaluators, or policies | `canwu-decision`; `canwu-sim` decision ingress/persistence/validation/replay; core decision IDs; `canwu-api`; architecture/versioning docs; stale-option, authority, and replay tests |
 | Commands, authority, run policy, or ingress | `canwu-sim` policy/ingress/validation; core request IDs; `canwu-api`; snapshot/replay/versioning docs; stale/idempotency/rollback tests |
@@ -142,7 +144,7 @@ contracts, never the reverse.
   generic.
 - Use integer or fixed-unit simulation values where floating-point behavior
   could affect determinism.
-- The debug client depends on `canwu-api`, not on simulation internals.
+- The debug client depends on `canwu-api` and `canwu-reference-world`, not on simulation internals.
 - Tests are evidence, not process. The project uses no test-driven-development
   requirement, test quota, or coverage target.
 - Admit a committed test only when it is necessary for a durable contract,
@@ -161,7 +163,7 @@ contracts, never the reverse.
 - Build debug client: `cargo check -p canwu-debug`
 - Cross-platform CI: `.github/workflows/ci.yml` runs on Windows, macOS, and Linux.
 - Public examples when APIs or behavior change:
-  `cargo run -p canwu-api --example move_army`,
+  `cargo run -p canwu-reference-world --example starter`,
   `cargo run -p canwu-api --example phased_boundary`, and
   `cargo run -p canwu-api --example plugin`, and
   `cargo run -p canwu-api --example decision_ticket`.

@@ -62,6 +62,9 @@ pub struct SimulationSnapshot {
     pub initial_scenario: Option<Scenario>,
     pub now: SimTime,
     pub plugin_registration_closed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<super::EntityRef>,
+    #[serde(default, skip_serializing_if = "legacy_world_is_empty")]
     pub world: WorldSnapshot,
     pub knowledge: KnowledgeSnapshot,
     pub events: Vec<SimEvent>,
@@ -104,6 +107,15 @@ pub struct SimulationSnapshot {
     pub(super) next_correlation_id: u64,
     #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
     pub(super) next_decision_trace_id: u64,
+}
+
+fn legacy_world_is_empty(world: &WorldSnapshot) -> bool {
+    world.people.is_empty()
+        && world.governments.is_empty()
+        && world.territories.is_empty()
+        && world.routes.is_empty()
+        && world.armies.is_empty()
+        && world.letters.is_empty()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1508,8 +1520,17 @@ impl CompactedSimulation {
         self.simulation.boundary_head_hash()
     }
 
+    pub fn entities(&self) -> impl Iterator<Item = &super::EntityRef> {
+        self.simulation.entities()
+    }
+
     #[must_use]
-    pub fn world(&self) -> WorldSnapshot {
+    pub fn entity_exists(&self, entity: &super::EntityRef) -> bool {
+        self.simulation.entity_exists(entity)
+    }
+
+    #[must_use]
+    pub fn world(&self) -> super::WorldSnapshot {
         self.simulation.world()
     }
 
@@ -2347,6 +2368,7 @@ impl Simulation {
             initial_scenario: self.bound_initial_scenario().cloned(),
             now: self.state.scheduler.now,
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
+            entities: self.state.current.entities.iter().cloned().collect(),
             world: self.world(),
             knowledge: self.state.current.knowledge.clone(),
             events: Vec::new(),

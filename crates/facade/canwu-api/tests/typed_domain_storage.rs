@@ -1,8 +1,8 @@
 use canwu_api::{
     Canwu, CanwuError, DomainEntityKindClass, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordSchema, DomainRecordType, DomainValueKindClass, ErrorCode,
-    KnowledgeSnapshot, PayloadProperty, PayloadSchema, PayloadValueType, PluginRegistrar, Scenario,
-    SimTime, SimulationPlugin, TypedDomainRecordRef, WorldSnapshot,
+    PayloadProperty, PayloadSchema, PayloadValueType, PluginRegistrar, Scenario, SimTime,
+    SimulationPlugin, TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -82,11 +82,8 @@ fn typed_domain_storage_is_binding_safe_across_save_and_load() {
     };
     let draft = DomainRecordDraft::from_typed(office.clone(), &payload)
         .expect("typed payload should encode through the public API");
-    let scenario = Scenario {
-        start_time: SimTime::EPOCH,
-        world: WorldSnapshot::default(),
-        knowledge: KnowledgeSnapshot::default(),
-        domain_records: vec![DomainRecord {
+    let scenario =
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
             reference: draft.reference,
             owner: "fixture-governance".to_owned(),
             class: DomainRecordClass::Entity,
@@ -94,8 +91,7 @@ fn typed_domain_storage_is_binding_safe_across_save_and_load() {
             lifecycle: DomainRecordLifecycle::Active,
             payload: draft.payload,
             references: draft.references,
-        }],
-    };
+        }]);
     let plugin = GovernancePlugin;
     let canwu = Canwu::new_with_plugins(7, scenario, &[&plugin])
         .expect("typed initial domain state should validate");

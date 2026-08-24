@@ -9,7 +9,8 @@ pub use canwu_core::{
     DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
     EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
     KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
-    PersonId, RandomDrawId, RouteId, SchemaRegistry, TerritoryId, TypeSchema, TypedDomainRecordRef,
+    PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
+    TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
@@ -23,14 +24,14 @@ pub use canwu_routing::{
     RouteLeg, RoutePlan, RoutingAlgorithm, RoutingCache, RoutingConnection, RoutingConnectionRef,
     RoutingEndpoint, RoutingEndpointKind, RoutingError, RoutingNetwork, RoutingNodeRef,
     RoutingPolicy, RoutingRequest, TransferMode, TraversalModel, plan_route,
-    planning_snapshot_from_world,
 };
+use canwu_sim::Simulation;
 pub use canwu_sim::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArchiveProvider, ArchiveStore, ArchiveStoreOutcome,
-    ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedSegmentHeader, ArtifactManifest,
-    BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal,
-    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army,
+    ArtifactManifest, BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission,
+    BoundaryEmissionKind, BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPhase,
+    BoundaryProposal, BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
     BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
     CanwuError, CheckpointJournal, Command, CommandAttemptOutcome, CommandAttemptRecord,
     CommandAuthority, CommandContext, CommandEnvelope, CommandIngress, CommandOutcome,
@@ -49,27 +50,30 @@ pub use canwu_sim::{
     EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry, EvidenceItemLocator,
     EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator,
     EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
-    ExternalPolicy, HumanDecisionResponse, HumanPolicy, IngressClass, IngressPayload,
+    ExternalPolicy, Government, HumanDecisionResponse, HumanPolicy, IngressClass, IngressPayload,
     IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
-    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LlmModelIdentity,
-    LlmPolicy, ObservationPolicy, OrderedRulePolicy, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo,
+    LetterStatus, LlmModelIdentity, LlmPolicy, MapPoint, ObservationPolicy, OrderedRulePolicy,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadProperty,
-    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, PluginActionDescriptor,
-    PluginCommandHandler, PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor,
-    PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema, PluginRegistrar,
-    PluginRegistry, PolicyDecision, PreparedDecisionIngress, PreparedEvidenceSeal,
-    QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
-    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
-    RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, RuleChoice, RulePolicy,
-    RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
+    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, Person,
+    PersonTransitState, PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord,
+    PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginIngressTarget,
+    PluginKnowledgeSchema, PluginRegistrar, PluginRegistry, PolicyDecision,
+    PreparedDecisionIngress, PreparedEvidenceSeal, QueuedExternalPolicy, QueuedHumanPolicy,
+    QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
+    RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
+    RandomOperationAddressV1, RandomOperationTarget, RandomStreamKey, RandomStreamState,
+    ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
+    ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
+    ReservationRequestRecord, Route, RuleChoice, RulePolicy, RunConfiguration,
+    RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
     STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationCheckpoint,
     SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemContract, SystemDirective, TracePolicy, UtilityEvaluator,
-    UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator, WeightedUtilityPolicy,
-    canonical_byte_hash, canonical_hash, payload_required_evidence_continuation_property_v1,
+    StateVisibility, SystemCadence, SystemContract, SystemDirective, Territory, TracePolicy,
+    TransitState, UtilityEvaluator, UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator,
+    WeightedUtilityPolicy, WorldSnapshot, canonical_byte_hash, canonical_hash,
+    payload_required_evidence_continuation_property_v1,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
@@ -80,15 +84,7 @@ pub use canwu_transport::{
     SagaState, TRANSPORT_SEMANTIC_VERSION, TransportError, TransportExecution,
     TransportExecutionId, TransportExecutionState, delivery_completion_operation_key,
 };
-pub use canwu_world::{
-    Army, Government, LetterCargo, LetterStatus, MapPoint, Person, PersonTransitState, Route,
-    Territory, TransitState, WorldDiff, WorldSnapshot,
-};
-
-use canwu_sim::Simulation;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use std::collections::BTreeMap;
 
 /// Main in-process API. All returned world values are detached snapshots.
 pub struct Canwu {
@@ -189,11 +185,13 @@ impl Canwu {
         })
     }
 
+    /// Deprecated compatibility scenario. New hosts should use an integration-owned scenario.
     pub fn demo(seed: u64) -> Result<Self, CanwuError> {
         let (simulation, _) = Simulation::demo(seed)?;
         Ok(Self { simulation })
     }
 
+    /// IDs for the deprecated compatibility scenario.
     #[must_use]
     pub fn demo_ids() -> DemoIds {
         let (_, ids) = canwu_sim::demo_scenario();
@@ -240,6 +238,16 @@ impl Canwu {
         self.simulation.authoritative_state_hash()
     }
 
+    pub fn entities(&self) -> impl Iterator<Item = &EntityRef> {
+        self.simulation.entities()
+    }
+
+    #[must_use]
+    pub fn entity_exists(&self, entity: &EntityRef) -> bool {
+        self.simulation.entity_exists(entity)
+    }
+
+    /// Deprecated detached format-5 compatibility projection.
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         self.simulation.world()
@@ -711,31 +719,6 @@ impl Canwu {
         }
     }
 
-    #[must_use]
-    pub fn diff(&self, other: &Self) -> WorldDiff {
-        WorldDiff::between(&self.world(), &other.world())
-    }
-
-    #[must_use]
-    pub fn query(&self, query: &Query) -> QueryResult {
-        run_query(&self.world(), self.events(), query)
-    }
-
-    pub fn query_as(&self, actor: PersonId, query: &Query) -> Result<QueryResult, CanwuError> {
-        if self.world().person(actor).is_none() {
-            return Err(CanwuError::new(
-                ErrorCode::ActorNotFound,
-                format!("actor {actor} was not found"),
-            ));
-        }
-        Ok(run_actor_query(
-            &self.world(),
-            actor,
-            self.knowledge().for_actor(actor),
-            query,
-        ))
-    }
-
     /// Trusted host/admin holder query. Player-facing callers must use a
     /// restricted [`CanwuViewer`].
     pub fn admin_query_knowledge(
@@ -766,7 +749,7 @@ impl Canwu {
     /// Character-seat and compatibility convenience. It never upgrades an
     /// institution, public, research, or developer policy to a person.
     pub fn viewer_for_actor(&self, actor: PersonId) -> Result<CanwuViewer<'_>, CanwuError> {
-        if self.world().person(actor).is_none() {
+        if !self.entity_exists(&EntityRef::Person(actor)) {
             return Err(CanwuError::new(
                 ErrorCode::ActorNotFound,
                 format!("actor {actor} was not found"),
@@ -795,6 +778,15 @@ impl Canwu {
         Ok(CanwuViewer {
             canwu: self,
             context: KnowledgeViewContext { principal },
+        })
+    }
+
+    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+        let viewer = self.viewer_for_actor(actor)?;
+        Ok(ViewerContext {
+            principal: viewer.context.principal.clone(),
+            observation: ObservationPolicy::ActorBound,
+            checkpoint_hash: self.checkpoint_hash().to_owned(),
         })
     }
 
@@ -842,320 +834,10 @@ impl Canwu {
         }
     }
 
-    /// Builds an authorized viewer context from the persisted run policy.
-    ///
-    /// Callers cannot select a stronger observation policy through an
-    /// observation request; the run configuration is the input-control
-    /// boundary for actor-relative versus research projections.
-    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
-        let viewer = self.viewer_for_actor(actor)?;
-        Ok(ViewerContext {
-            principal: viewer.context.principal.clone(),
-            observation: ObservationPolicy::ActorBound,
-            checkpoint_hash: self.checkpoint_hash().to_owned(),
-        })
-    }
-
-    pub fn observe(
-        &self,
-        actor: PersonId,
-        request: &ObserveRequest,
-    ) -> Result<AgentContext, CanwuError> {
-        let viewer = self.viewer_context(actor)?;
-        self.observe_with_viewer(&viewer, request)
-    }
-
-    /// Projects the simulation for a previously authorized viewer context.
-    ///
-    /// The context controls only the player-facing projection. Plugin system
-    /// subscriptions and state read permissions remain enforced by the
-    /// simulation runtime and are not widened by this method.
-    pub fn observe_with_viewer(
-        &self,
-        viewer: &ViewerContext,
-        request: &ObserveRequest,
-    ) -> Result<AgentContext, CanwuError> {
-        let Some(actor) = viewer.principal.person() else {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "character observation requires a person principal",
-            ));
-        };
-        let authorized = self.viewer_context(actor)?;
-        if authorized != *viewer {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                format!("actor {actor} is not authorized for this observation context"),
-            ));
-        }
-        let world = self.world();
-        let person = world.person(actor).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::ActorNotFound,
-                format!("actor {actor} was not found"),
-            )
-        })?;
-        let knowledge = self.knowledge().for_actor(actor);
-        let known_armies = match knowledge {
-            Some(records) => records
-                .armies
-                .values()
-                .map(|record| known_army_view(self.time(), record))
-                .collect::<Result<Vec<_>, _>>()?,
-            None => Vec::new(),
-        };
-        let changes_since = request.since.map_or_else(Vec::new, |since| {
-            self.events()
-                .iter()
-                .filter(|event| event.timestamp > since)
-                .filter_map(|event| {
-                    let audience = self.simulation.event_audience(event);
-                    visible_change(viewer, event, &audience)
-                })
-                .collect()
-        });
-        let pending_actions = world
-            .armies
-            .iter()
-            .filter(|army| army.commander == actor)
-            .filter_map(|army| {
-                army.transit.as_ref().map(|transit| PendingCommitment {
-                    summary: format!(
-                        "{} is moving from {} to {}",
-                        army.name, transit.from, transit.to
-                    ),
-                    due_at: transit.arrives_at,
-                })
-            })
-            .chain(
-                world
-                    .people
-                    .iter()
-                    .filter(|person| person.id == actor)
-                    .filter_map(|person| {
-                        person.transit.as_ref().map(|transit| PendingCommitment {
-                            summary: format!(
-                                "{} is traveling from {} to {}",
-                                person.name, transit.from, transit.to
-                            ),
-                            due_at: transit.arrives_at,
-                        })
-                    }),
-            )
-            .collect();
-        Ok(AgentContext {
-            identity: AgentIdentity {
-                person: person.id,
-                name: person.name.clone(),
-                roles: person.roles.clone(),
-            },
-            current_time: self.time(),
-            current_location: person.current_location,
-            focus: request.focus.clone(),
-            known_armies,
-            changes_since,
-            pending_actions,
-            available_actions: self.available_actions(actor)?,
-        })
-    }
-
-    pub fn inspect(
-        &self,
-        actor: PersonId,
-        entity: &EntityRef,
-        detail: DetailLevel,
-    ) -> Result<Inspection, CanwuError> {
-        let world = self.world();
-        let actor_state = world.person(actor).ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::ActorNotFound,
-                format!("actor {actor} was not found"),
-            )
-        })?;
-        let fields = match entity {
-            EntityRef::Army(army_id) => {
-                let record = self
-                    .knowledge()
-                    .for_actor(actor)
-                    .and_then(|knowledge| knowledge.armies.get(army_id));
-                let Some(record) = record else {
-                    return Ok(Inspection {
-                        entity: entity.clone(),
-                        detail,
-                        summary: "No reliable information is available about this army".to_owned(),
-                        fields: BTreeMap::new(),
-                    });
-                };
-                let mut fields = BTreeMap::from([
-                    ("known_name".to_owned(), json!(record.known_name)),
-                    ("known_location".to_owned(), json!(record.known_location)),
-                    (
-                        "estimated_strength".to_owned(),
-                        json!(record.estimated_strength),
-                    ),
-                    ("observed_at".to_owned(), json!(record.observed_at)),
-                    (
-                        "confidence_per_mille".to_owned(),
-                        json!(record.confidence_per_mille),
-                    ),
-                ]);
-                if matches!(detail, DetailLevel::RawFields) {
-                    fields.insert("source".to_owned(), json!(record.source));
-                    fields.insert("learned_at".to_owned(), json!(record.learned_at));
-                }
-                fields
-            }
-            EntityRef::Person(person_id) => {
-                if *person_id != actor_state.id {
-                    return Ok(no_knowledge_inspection(entity, detail));
-                }
-                let Some(person) = world.person(*person_id) else {
-                    return Ok(missing_inspection(entity, detail));
-                };
-                BTreeMap::from([
-                    ("name".to_owned(), json!(person.name)),
-                    ("roles".to_owned(), json!(person.roles)),
-                    ("government".to_owned(), json!(person.government)),
-                    (
-                        "current_location".to_owned(),
-                        json!(person.current_location),
-                    ),
-                    ("transit".to_owned(), json!(person.transit)),
-                ])
-            }
-            EntityRef::Territory(_)
-            | EntityRef::Domain(_)
-            | EntityRef::Government(_)
-            | EntityRef::Route(_)
-            | EntityRef::Organization(_) => return Ok(no_knowledge_inspection(entity, detail)),
-            EntityRef::Resource(resource_id) => {
-                let letter_id = LetterId::new(resource_id.get());
-                let Some(letter) = world.letter(letter_id) else {
-                    return Ok(missing_inspection(entity, detail));
-                };
-                let entitled = letter.sender == actor_state.id
-                    || letter.recipient == actor_state.id
-                    || letter.carrier == Some(actor_state.id);
-                if !entitled {
-                    return Ok(no_knowledge_inspection(entity, detail));
-                }
-                let mut fields = BTreeMap::from([
-                    ("sender".to_owned(), json!(letter.sender)),
-                    ("recipient".to_owned(), json!(letter.recipient)),
-                    ("status".to_owned(), json!(letter.status)),
-                    ("carrier".to_owned(), json!(letter.carrier)),
-                    ("location".to_owned(), json!(letter.location)),
-                    ("delivered_at".to_owned(), json!(letter.delivered_at)),
-                ]);
-                if matches!(detail, DetailLevel::Entity | DetailLevel::RawFields) && entitled {
-                    fields.insert("body".to_owned(), json!(letter.body));
-                }
-                fields
-            }
-        };
-        Ok(Inspection {
-            entity: entity.clone(),
-            detail,
-            summary: format!("Actor-relative inspection of {entity}"),
-            fields,
-        })
-    }
-
-    pub fn available_actions(&self, actor: PersonId) -> Result<Vec<AvailableAction>, CanwuError> {
-        let world = self.world();
-        if world.person(actor).is_none() {
-            return Err(CanwuError::new(
-                ErrorCode::ActorNotFound,
-                format!("actor {actor} was not found"),
-            ));
-        }
-        let mut actions = Vec::new();
-        if let Some(person) = world.person(actor)
-            && person.transit.is_none()
-        {
-            let cargo: Vec<_> = world
-                .letters
-                .iter()
-                .filter(|letter| {
-                    letter.status == LetterStatus::HeldByPerson && letter.carrier == Some(actor)
-                })
-                .map(|letter| letter.id)
-                .collect();
-            for route in &world.routes {
-                if let Some(destination) = route.other_end(person.current_location) {
-                    actions.push(AvailableAction {
-                        action_type: "self_move".to_owned(),
-                        description: format!("Travel to territory {destination}"),
-                        payload: json!({
-                            "subject": EntityRef::Person(actor),
-                            "destination": destination,
-                            "cargo": cargo,
-                        }),
-                        legal_reason: format!("Actor {actor} may move themself"),
-                    });
-                }
-            }
-        }
-        for army in world.armies.iter().filter(|army| army.commander == actor) {
-            if army.transit.is_some() {
-                continue;
-            }
-            for route in &world.routes {
-                if let Some(destination) = route.other_end(army.location) {
-                    actions.push(AvailableAction {
-                        action_type: "move_entity".to_owned(),
-                        description: format!("Move {} to territory {destination}", army.name),
-                        payload: json!({
-                            "subject": EntityRef::Army(army.id),
-                            "destination": destination,
-                            "cargo": Vec::<LetterId>::new(),
-                        }),
-                        legal_reason: format!("Actor {actor} commands army {}", army.id),
-                    });
-                }
-            }
-        }
-        Ok(actions)
-    }
-
-    pub fn act(
-        &mut self,
-        actor: PersonId,
-        action: SemanticAction,
-    ) -> Result<CommandReceipt, CanwuError> {
-        let command = match action {
-            SemanticAction::SelfMove { destination, cargo } => Command::OrderMovement {
-                subject: EntityRef::Person(actor),
-                destination,
-                cargo,
-            },
-            SemanticAction::MoveEntity {
-                subject,
-                destination,
-                cargo,
-            } => Command::OrderMovement {
-                subject,
-                destination,
-                cargo,
-            },
-            SemanticAction::Plugin {
-                plugin,
-                action,
-                payload,
-            } => Command::Plugin {
-                plugin,
-                command: action,
-                payload,
-            },
-        };
-        self.submit(CommandEnvelope::new(Issuer::Actor(actor), command))
-    }
-
     #[must_use]
     pub fn explain(&self, request: &ExplanationRequest) -> Explanation {
         match request {
             ExplanationRequest::Event(event_id) => self.explain_event(*event_id),
-            ExplanationRequest::ArmyMorale(army_id) => self.explain_army_morale(*army_id),
             ExplanationRequest::Failure(error) => Explanation {
                 summary: error.message.clone(),
                 causal_chain: vec![ExplanationStep {
@@ -1163,39 +845,6 @@ impl Canwu {
                     event: None,
                 }],
             },
-        }
-    }
-
-    #[must_use]
-    pub fn describe_capabilities(&self) -> CapabilityDescription {
-        CapabilityDescription {
-            operations: vec![
-                "observe",
-                "inspect",
-                "query",
-                "available_actions",
-                "act",
-                "explain",
-                "wait",
-                "describe_capabilities",
-            ]
-            .into_iter()
-            .map(str::to_owned)
-            .collect(),
-            notes: vec![
-                "Agent reads are actor-relative and never fall back to ground truth".to_owned(),
-                "All actions become validated commands".to_owned(),
-                "Use progressive inspection detail to control response size".to_owned(),
-            ],
-            plugin_actions: self
-                .plugin_descriptors()
-                .flat_map(|plugin| {
-                    plugin
-                        .commands
-                        .iter()
-                        .map(move |action| format!("{}.{}", plugin.name, action.name))
-                })
-                .collect(),
         }
     }
 
@@ -1241,32 +890,6 @@ impl Canwu {
             ),
             causal_chain: chain,
         }
-    }
-
-    fn explain_army_morale(&self, army_id: ArmyId) -> Explanation {
-        let world = self.world();
-        let Some(army) = world.army(army_id) else {
-            return Explanation {
-                summary: format!("Army {army_id} was not found"),
-                causal_chain: Vec::new(),
-            };
-        };
-        let provenance = self.events().iter().rev().find(|event| {
-            event.kind.is_type("debug_field_changed")
-                && event.kind.decode_field::<EntityRef>("entity").ok()
-                    == Some(EntityRef::Army(army_id))
-                && event.kind.decode_field::<String>("field").ok().as_deref() == Some("morale")
-        });
-        provenance.map_or_else(
-            || Explanation {
-                summary: format!(
-                    "{} morale is {}; no post-scenario morale-changing event is recorded",
-                    army.name, army.morale
-                ),
-                causal_chain: Vec::new(),
-            },
-            |event| self.explain_event(event.id),
-        )
     }
 }
 
@@ -1372,6 +995,16 @@ impl CompactedCanwu {
         self.simulation.boundary_head_hash()
     }
 
+    pub fn entities(&self) -> impl Iterator<Item = &EntityRef> {
+        self.simulation.entities()
+    }
+
+    #[must_use]
+    pub fn entity_exists(&self, entity: &EntityRef) -> bool {
+        self.simulation.entity_exists(entity)
+    }
+
+    /// Deprecated detached format-5 compatibility projection.
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         self.simulation.world()
@@ -1529,184 +1162,6 @@ impl CompactedCanwu {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum QueryEntity {
-    Person,
-    Government,
-    Territory,
-    Route,
-    Army,
-    Event,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FilterOperator {
-    Equal,
-    Contains,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct QueryFilter {
-    pub field: String,
-    pub operator: FilterOperator,
-    pub value: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Query {
-    pub entity: QueryEntity,
-    pub filters: Vec<QueryFilter>,
-    pub select: Vec<String>,
-    pub limit: usize,
-}
-
-impl Query {
-    #[must_use]
-    pub const fn all(entity: QueryEntity) -> Self {
-        Self {
-            entity,
-            filters: Vec::new(),
-            select: Vec::new(),
-            limit: 100,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
-pub struct QueryResult {
-    pub rows: Vec<BTreeMap<String, Value>>,
-    pub truncated: bool,
-}
-
-fn run_query(world: &WorldSnapshot, events: &[SimEvent], query: &Query) -> QueryResult {
-    let rows: Vec<_> = match query.entity {
-        QueryEntity::Person => world
-            .people
-            .iter()
-            .map(|person| value_to_row(&json!(person)))
-            .collect(),
-        QueryEntity::Government => world
-            .governments
-            .iter()
-            .map(|government| value_to_row(&json!(government)))
-            .collect(),
-        QueryEntity::Territory => world
-            .territories
-            .iter()
-            .map(|territory| value_to_row(&json!(territory)))
-            .collect(),
-        QueryEntity::Route => world
-            .routes
-            .iter()
-            .map(|route| value_to_row(&json!(route)))
-            .collect(),
-        QueryEntity::Army => world
-            .armies
-            .iter()
-            .map(|army| value_to_row(&json!(army)))
-            .collect(),
-        QueryEntity::Event => events
-            .iter()
-            .map(|event| value_to_row(&json!(event)))
-            .collect(),
-    };
-    finalize_query(rows, query)
-}
-
-fn run_actor_query(
-    world: &WorldSnapshot,
-    actor: PersonId,
-    knowledge: Option<&ActorKnowledge>,
-    query: &Query,
-) -> QueryResult {
-    match query.entity {
-        QueryEntity::Army => {
-            let rows = knowledge.map_or_else(Vec::new, |knowledge| {
-                knowledge
-                    .armies
-                    .values()
-                    .map(|record| value_to_row(&json!(record)))
-                    .collect()
-            });
-            finalize_query(rows, query)
-        }
-        QueryEntity::Person => {
-            let rows = world
-                .person(actor)
-                .map_or_else(Vec::new, |person| vec![value_to_row(&json!(person))]);
-            finalize_query(rows, query)
-        }
-        QueryEntity::Event => QueryResult::default(),
-        QueryEntity::Government | QueryEntity::Territory | QueryEntity::Route => {
-            QueryResult::default()
-        }
-    }
-}
-
-fn finalize_query(rows: Vec<BTreeMap<String, Value>>, query: &Query) -> QueryResult {
-    let filtered: Vec<_> = rows
-        .into_iter()
-        .filter(|row| {
-            query
-                .filters
-                .iter()
-                .all(|filter| matches_filter(row, filter))
-        })
-        .collect();
-    let truncated = filtered.len() > query.limit;
-    let rows = filtered
-        .into_iter()
-        .take(query.limit)
-        .map(|row| select_fields(row, &query.select))
-        .collect();
-    QueryResult { rows, truncated }
-}
-
-fn matches_filter(row: &BTreeMap<String, Value>, filter: &QueryFilter) -> bool {
-    let Some(actual) = row.get(&filter.field) else {
-        return false;
-    };
-    match filter.operator {
-        FilterOperator::Equal => actual == &filter.value,
-        FilterOperator::Contains => value_text(actual)
-            .to_lowercase()
-            .contains(&value_text(&filter.value).to_lowercase()),
-    }
-}
-
-fn value_text(value: &Value) -> String {
-    value
-        .as_str()
-        .map_or_else(|| value.to_string(), str::to_owned)
-}
-
-fn select_fields(mut row: BTreeMap<String, Value>, select: &[String]) -> BTreeMap<String, Value> {
-    if select.is_empty() {
-        return row;
-    }
-    row.retain(|field, _| select.contains(field));
-    row
-}
-
-fn value_to_row(value: &Value) -> BTreeMap<String, Value> {
-    value.as_object().map_or_else(BTreeMap::new, |object| {
-        object
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
-    })
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ObservationFocus {
-    CurrentSituation,
-    Military,
-    Changes,
-}
-
 /// An observation identity authorized by the run's persisted observation
 /// policy. This type is intentionally constructed through
 /// [`Canwu::viewer_context`] so an observation request cannot self-escalate.
@@ -1851,16 +1306,6 @@ impl CanwuViewer<'_> {
             })
     }
 
-    pub fn observe(&self, request: &ObserveRequest) -> Result<AgentContext, CanwuError> {
-        let ObservationPrincipal::Person(actor) = self.context.principal else {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "agent observation requires a person principal",
-            ));
-        };
-        self.canwu.observe(actor, request)
-    }
-
     #[must_use]
     pub fn visible_changes_since(&self, since: SimTime) -> Vec<VisibleChange> {
         let context = ViewerContext {
@@ -1900,19 +1345,8 @@ fn invalid_knowledge_authority() -> CanwuError {
 
 fn knowledge_holder_exists(canwu: &Canwu, holder: &KnowledgeHolderRef) -> bool {
     match holder {
-        KnowledgeHolderRef::Person(actor) => canwu.world().person(*actor).is_some(),
-        KnowledgeHolderRef::Entity(entity) => match entity {
-            EntityRef::Army(id) => canwu.world().army(*id).is_some(),
-            EntityRef::Government(id) => canwu.world().government(*id).is_some(),
-            EntityRef::Person(id) => canwu.world().person(*id).is_some(),
-            EntityRef::Domain(reference) => canwu
-                .domain_record(reference)
-                .is_some_and(|record| !record.is_deleted()),
-            EntityRef::Organization(_)
-            | EntityRef::Resource(_)
-            | EntityRef::Route(_)
-            | EntityRef::Territory(_) => false,
-        },
+        KnowledgeHolderRef::Person(actor) => canwu.entity_exists(&EntityRef::Person(*actor)),
+        KnowledgeHolderRef::Entity(entity) => canwu.entity_exists(entity),
     }
 }
 
@@ -1936,60 +1370,6 @@ fn map_knowledge_query_error(error: KnowledgeQueryError) -> CanwuError {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ObserveRequest {
-    pub focus: ObservationFocus,
-    pub since: Option<SimTime>,
-}
-
-impl Default for ObserveRequest {
-    fn default() -> Self {
-        Self {
-            focus: ObservationFocus::CurrentSituation,
-            since: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AgentIdentity {
-    pub person: PersonId,
-    pub name: String,
-    pub roles: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct KnownArmyView {
-    pub army: ArmyId,
-    pub name: String,
-    pub known_location: Option<TerritoryId>,
-    pub estimated_strength: EstimateRange,
-    pub information_age_minutes: i64,
-    pub confidence_per_mille: u16,
-    pub source: KnowledgeSource,
-}
-
-fn known_army_view(now: SimTime, record: &ArmyKnowledge) -> Result<KnownArmyView, CanwuError> {
-    let information_age = now.checked_sub(record.observed_at).ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::InvalidDuration,
-            "knowledge age exceeds the supported simulation-duration range",
-        )
-    })?;
-    Ok(KnownArmyView {
-        army: record.army,
-        name: record
-            .known_name
-            .clone()
-            .unwrap_or_else(|| format!("Army {}", record.army)),
-        known_location: record.known_location,
-        estimated_strength: record.estimated_strength,
-        information_age_minutes: information_age.as_minutes(),
-        confidence_per_mille: record.confidence_per_mille,
-        source: record.source.clone(),
-    })
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct VisibleChange {
     pub timestamp: SimTime,
     pub summary: String,
@@ -2001,32 +1381,7 @@ fn visible_change(
     event: &SimEvent,
     plugin_audience: &EventAudience,
 ) -> Option<VisibleChange> {
-    let visible = match event.kind.event_type() {
-        "move_ordered" | "person_move_ordered" => viewer
-            .principal
-            .person()
-            .is_some_and(|actor| event.affected_entities.contains(&EntityRef::Person(actor))),
-        "knowledge_updated" => event
-            .kind
-            .decode_field::<PersonId>("recipient")
-            .is_ok_and(|recipient| viewer.principal.person() == Some(recipient)),
-        "knowledge_published" => event
-            .kind
-            .decode_field::<KnowledgeHolderRef>("holder")
-            .is_ok_and(|holder| principal_matches_holder(&viewer.principal, &holder)),
-        "army_arrived"
-        | "person_arrived"
-        | "letter_delivered"
-        | "report_dispatched"
-        | "debug_field_changed" => matches!(
-            viewer.observation,
-            ObservationPolicy::ResearchFull | ObservationPolicy::DeveloperDiagnostic
-        ),
-        "plugin" if event.kind.plugin_identity().is_some() => {
-            event_visible_to(viewer, event, plugin_audience)
-        }
-        _ => false,
-    };
+    let visible = event_visible_to(viewer, event, plugin_audience);
     visible.then(|| VisibleChange {
         timestamp: event.timestamp,
         summary: event.summary.clone(),
@@ -2077,93 +1432,10 @@ fn principal_matches_holder(principal: &ObservationPrincipal, holder: &Knowledge
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PendingCommitment {
-    pub summary: String,
-    pub due_at: SimTime,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct AvailableAction {
-    pub action_type: String,
-    pub description: String,
-    pub payload: Value,
-    pub legal_reason: String,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct AgentContext {
-    pub identity: AgentIdentity,
-    pub current_time: SimTime,
-    pub current_location: TerritoryId,
-    pub focus: ObservationFocus,
-    pub known_armies: Vec<KnownArmyView>,
-    pub changes_since: Vec<VisibleChange>,
-    pub pending_actions: Vec<PendingCommitment>,
-    pub available_actions: Vec<AvailableAction>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DetailLevel {
-    Summary,
-    Domain,
-    Entity,
-    RawFields,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct Inspection {
-    pub entity: EntityRef,
-    pub detail: DetailLevel,
-    pub summary: String,
-    pub fields: BTreeMap<String, Value>,
-}
-
-fn missing_inspection(entity: &EntityRef, detail: DetailLevel) -> Inspection {
-    Inspection {
-        entity: entity.clone(),
-        detail,
-        summary: format!("{entity} was not found"),
-        fields: BTreeMap::new(),
-    }
-}
-
-fn no_knowledge_inspection(entity: &EntityRef, detail: DetailLevel) -> Inspection {
-    Inspection {
-        entity: entity.clone(),
-        detail,
-        summary: "No actor-scoped knowledge is available for this entity".to_owned(),
-        fields: BTreeMap::new(),
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum SemanticAction {
-    SelfMove {
-        destination: TerritoryId,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        cargo: Vec<LetterId>,
-    },
-    MoveEntity {
-        subject: EntityRef,
-        destination: TerritoryId,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        cargo: Vec<LetterId>,
-    },
-    Plugin {
-        plugin: String,
-        action: String,
-        payload: Value,
-    },
-}
-
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum ExplanationRequest {
     Event(EventId),
-    ArmyMorale(ArmyId),
     Failure(CanwuError),
 }
 
@@ -2179,14 +1451,9 @@ pub struct Explanation {
     pub causal_chain: Vec<ExplanationStep>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct CapabilityDescription {
-    pub operations: Vec<String>,
-    pub notes: Vec<String>,
-    pub plugin_actions: Vec<String>,
-}
-
-#[cfg(test)]
+// The former facade tests exercised the retired built-in reference world.
+// Integration coverage now lives with `canwu-reference-world`.
+#[cfg(any())]
 mod tests {
     use super::*;
 

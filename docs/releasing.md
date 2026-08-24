@@ -56,7 +56,7 @@ DAG is maintained in [`crates/README.md`](../crates/README.md). Wait until
 crates.io can resolve every completed group before continuing:
 
 1. `canwu-core`, `canwu-time`
-2. `canwu-decision`, `canwu-event`, `canwu-knowledge`, `canwu-world`
+2. `canwu-decision`, `canwu-event`, `canwu-knowledge`
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`

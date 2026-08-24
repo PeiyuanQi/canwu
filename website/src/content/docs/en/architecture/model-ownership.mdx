@@ -1,6 +1,6 @@
 ---
 title: World and event model ownership
-description: Audit every public canwu-world and canwu-event type to decide which contracts stay in the engine and which content moves to reference integrations.
+description: See how the retired canwu-world package moved into a reference integration while generic event contracts stayed in the engine.
 template: doc
 sidebar:
   order: 5
@@ -18,10 +18,10 @@ import { Aside, Steps } from "@astrojs/starlight/components";
   <a href="/architecture/model-ownership/">中文版</a>
 </nav>
 
-This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads have moved out of generic `EventKind`; the next step is still to move period- and application-specific world entities into reference integrations before removing package boundaries that genuinely have no independent responsibility.
+This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads moved out of generic `EventKind`, and the example world moved into `canwu-reference-world` before its old package boundary was removed.
 
 <Aside type="note" title="Migration status">
-`EventKind` is now a generic type-tag and structured-fields record; legacy event JSON and the snapshot format are unchanged. Published `canwu-world` versions are yanked, but the source crate, existing consumers, and dependency DAG remain until the reference-world migration completes.
+The migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone; supported format-5 saves still load through an explicit compatibility entity-registry migration.
 </Aside>
 
 ## One ownership rule
@@ -32,7 +32,7 @@ That rule gives the two candidate crates different outcomes:
 
 | Crate | Audit result |
 | --- | --- |
-| `canwu-world` | It remains the compatibility world model for the first movement vertical slice. Published versions no longer admit new resolution; the source crate can retire only after its model and compatibility path move to a reference integration. |
+| retired `canwu-world` | Its concrete model now lives in `canwu-reference-world`. Deprecated format-5 projection types remain only in the facade/runtime compatibility surface. |
 | `canwu-event` | It now contains only generic event contracts and a structured event record. Concrete payloads are extracted; decide whether the residual generic types belong in `canwu-sim` only after their independent consumption is known. |
 
 ## The 12 public `canwu-world` types
@@ -52,7 +52,7 @@ That rule gives the two candidate crates different outcomes:
 | `WorldSnapshot` | Compatibility projection containing only the concrete entities above | Keep a migration adapter, then let each integration own its detached projection |
 | `WorldDiff` | Compatibility diff limited to army, person, territory, and letter IDs | Keep until callers migrate, then use integration diffs or generic change evidence |
 
-`canwu-routing` does not need to own this world. Its solver already consumes the generic `PlanningSnapshot`; the current `WorldSnapshot` dependency is only a conversion function. That conversion should move with the reference integration.
+`canwu-routing` does not own this world. Its solver consumes the generic `PlanningSnapshot`; the `WorldSnapshot` conversion now lives in `canwu-reference-world`.
 
 ## The 4 public `canwu-event` types
 
@@ -77,9 +77,9 @@ Typed payloads for movement, army arrival, person travel, letter delivery, repor
 <Steps>
 1. Representative JSON saves, event journals, `canwu-api` calls, and exact replay outcomes are frozen.
 2. `EventKind` is now a generic structured record and its concrete public variants are extracted without changing legacy JSON. A complete cross-integration namespace and payload-version contract remains future work.
-3. Build a first-party reference world integration through public APIs and move the concrete entities, event payloads, and routing conversion into it.
-4. Migrate the facade, saved state, and starter kits under the versioning policy without silent source or wire breaks.
-5. Retire `canwu-world` after it has no normal consumers; after private compatibility event payloads move to their owners, decide whether `canwu-event` should fold into `canwu-sim`.
+3. `canwu-reference-world` now owns the concrete entities, movement behavior, detached projection, and routing conversion through public APIs.
+4. Supported format-5 state receives an explicit compatibility entity registry; the runnable starter proves save/load, fork, and exact replay.
+5. `canwu-world` is retired after reaching zero normal consumers. The independent `canwu-event` decision remains separate.
 </Steps>
 
 ## Completion gates

@@ -7,7 +7,7 @@ use canwu_api::{
     DecisionOrigin, DomainEntityKindClass, DomainRecordDraft, DomainRecordLifecycle,
     DomainRecordSchema, DomainRecordType, DomainReference, DomainReferenceSchema,
     DomainReferenceTargetKind, DomainValueKindClass, EntityRef, ErrorCode, EstimateRange,
-    Government, GovernmentId, Issuer, KnowledgeSnapshot, KnowledgeSource, MapPoint, ObserveRequest,
+    Government, GovernmentId, Issuer, KnowledgeSnapshot, KnowledgeSource, MapPoint,
     PayloadProperty, PayloadSchema, PayloadValueType, Person, PersonId, PluginActionDescriptor,
     PluginRegistrar, RandomDrawProducer, RandomStreamKey, ReservationDisposition, ReservationOffer,
     ReservationPoolKey, ReservationRef, ReservationRequest, Route, RouteId, Scenario, SimDuration,
@@ -179,6 +179,17 @@ fn fixture_scenario() -> Scenario {
     };
     Scenario {
         start_time: initial_time,
+        entities: vec![
+            EntityRef::Army(army()),
+            EntityRef::Government(government()),
+            EntityRef::Person(commander()),
+            EntityRef::Person(observer()),
+            EntityRef::Route(RouteId::new(1)),
+            EntityRef::Route(RouteId::new(2)),
+            EntityRef::Territory(western_territory()),
+            EntityRef::Territory(central_territory()),
+            EntityRef::Territory(eastern_territory()),
+        ],
         world,
         knowledge,
         domain_records: Vec::new(),
@@ -882,17 +893,19 @@ fn representative_public_contracts_are_atomic_replayable_and_binding_safe() {
         .expect("scheduled movement should complete deterministically");
 
     let commander_view = canwu
-        .observe(commander(), &ObserveRequest::default())
-        .expect("the commander projection should be available");
+        .knowledge()
+        .for_actor(commander())
+        .expect("the commander knowledge ledger should be available");
     let observer_view = canwu
-        .observe(observer(), &ObserveRequest::default())
-        .expect("the observer projection should be available");
+        .knowledge()
+        .for_actor(observer())
+        .expect("the observer knowledge ledger should be available");
     assert_eq!(
-        commander_view.known_armies[0].known_location,
+        commander_view.armies[&army()].known_location,
         Some(eastern_territory())
     );
     assert_eq!(
-        observer_view.known_armies[0].known_location,
+        observer_view.armies[&army()].known_location,
         Some(central_territory())
     );
 

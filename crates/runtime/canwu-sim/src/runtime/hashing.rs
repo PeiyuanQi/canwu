@@ -2,8 +2,8 @@ use super::{
     ArtifactManifest, BOUNDARY_STATE_HASH_V1_PREFIX, BoundaryChange, BoundaryEmission, BoundaryId,
     BoundaryIngressGeneration, BoundaryRecord, BoundaryStateHashFormat, COMMITMENT_FORMAT_VERSION,
     CanwuError, CommandAttemptId, CommandAttemptRecord, CommandId, CommandRecord, DecisionState,
-    DomainRecord, DomainRecordChange, ErrorCode, EventId, GENESIS_BOUNDARY_HASH, IngressId,
-    IngressRecord, JournalCommitmentRoots, KnowledgeSnapshot, PluginComponentRecord,
+    DomainRecord, DomainRecordChange, EntityRef, ErrorCode, EventId, GENESIS_BOUNDARY_HASH,
+    IngressId, IngressRecord, JournalCommitmentRoots, KnowledgeSnapshot, PluginComponentRecord,
     PluginDescriptor, RandomDrawId, RandomDrawRecord, RandomStreamState, ReservationAllocation,
     ReservationOfferRecord, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
     RuntimeDomainCommitmentRoots, STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledRecord,
@@ -46,6 +46,8 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) initial_scenario: Option<&'a Scenario>,
     pub(super) now: SimTime,
     pub(super) plugin_registration_closed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) entities: Option<&'a [EntityRef]>,
     pub(super) world: &'a WorldSnapshot,
     pub(super) knowledge: &'a KnowledgeSnapshot,
     pub(super) events: &'a [SimEvent],
@@ -82,12 +84,14 @@ pub(super) struct StateHashMaterial<'a> {
 }
 
 #[derive(Serialize)]
-struct WorldCommitmentMaterial {
+struct WorldCommitmentMaterial<'a> {
     people: String,
     governments: String,
     territories: String,
     routes: String,
     armies: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entities: Option<&'a [EntityRef]>,
 }
 
 #[derive(Serialize)]
@@ -192,7 +196,27 @@ where
     canonical_hash(domain, &ordered)
 }
 
-pub(super) fn world_commitment_root(world: &WorldSnapshot) -> Result<String, CanwuError> {
+pub(super) fn committed_entities<'a>(
+    entities: &'a [EntityRef],
+    world: &WorldSnapshot,
+) -> Option<&'a [EntityRef]> {
+    (!entities.is_empty() && entities != super::scenario::legacy_entities(world))
+        .then_some(entities)
+}
+
+pub(super) fn committed_initial_scenario(scenario: Option<&Scenario>) -> Option<Scenario> {
+    scenario.cloned().map(|mut scenario| {
+        if scenario.entities == super::scenario::legacy_entities(&scenario.world) {
+            scenario.entities.clear();
+        }
+        scenario
+    })
+}
+
+pub(super) fn world_commitment_root(
+    world: &WorldSnapshot,
+    entities: &[EntityRef],
+) -> Result<String, CanwuError> {
     canonical_hash(
         "canwu.commitment.world.v1",
         &WorldCommitmentMaterial {
@@ -221,6 +245,7 @@ pub(super) fn world_commitment_root(world: &WorldSnapshot) -> Result<String, Can
                 &world.armies,
                 |value| value.id,
             )?,
+            entities: committed_entities(entities, world),
         },
     )
 }
@@ -323,7 +348,7 @@ fn commitment_roots(
     boundary_head: Option<&str>,
     journal_roots: Option<&JournalCommitmentRoots>,
 ) -> Result<CommitmentRoots, CanwuError> {
-    let world = world_commitment_root(material.world)?;
+    let world = world_commitment_root(material.world, material.entities.unwrap_or_default())?;
     let knowledge = knowledge_commitment_root(material.knowledge)?;
     let plugin_components = plugin_component_commitment_root(material.plugin_components)?;
     let domain_records = domain_record_commitment_root(material.domain_records)?;
@@ -522,15 +547,17 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
     })?;
     let (authoritative_manifest, authoritative_manifest_hash) =
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
+    let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
     state_hash(&StateHashMaterial {
         engine_version: &snapshot.engine_version,
         snapshot_format_version: snapshot.snapshot_format_version,
         run_manifest: &authoritative_manifest,
         run_manifest_hash: &authoritative_manifest_hash,
         initial_time: snapshot.initial_time,
-        initial_scenario: snapshot.initial_scenario.as_ref(),
+        initial_scenario: initial_scenario.as_ref(),
         now: snapshot.now,
         plugin_registration_closed: snapshot.plugin_registration_closed,
+        entities: committed_entities(&snapshot.entities, &snapshot.world),
         world: &snapshot.world,
         knowledge: &snapshot.knowledge,
         events: &snapshot.events,
@@ -605,6 +632,7 @@ pub(super) fn snapshot_commitment_roots(
     })?;
     let (authoritative_manifest, authoritative_manifest_hash) =
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
+    let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
     commitment_roots(
         &StateHashMaterial {
             engine_version: &snapshot.engine_version,
@@ -612,9 +640,10 @@ pub(super) fn snapshot_commitment_roots(
             run_manifest: &authoritative_manifest,
             run_manifest_hash: &authoritative_manifest_hash,
             initial_time: snapshot.initial_time,
-            initial_scenario: snapshot.initial_scenario.as_ref(),
+            initial_scenario: initial_scenario.as_ref(),
             now: snapshot.now,
             plugin_registration_closed: snapshot.plugin_registration_closed,
+            entities: committed_entities(&snapshot.entities, &snapshot.world),
             world: &snapshot.world,
             knowledge: &snapshot.knowledge,
             events: &snapshot.events,

@@ -1,6 +1,6 @@
 ---
-title: "Move an army: minimal runnable example"
-description: Learn semantic actions, deterministic time advancement, and actor-relative knowledge.
+title: "Move an army: reference integration starter"
+description: Learn domain plugins, canonical commands, deterministic time, and exact replay from a runnable example.
 sidebar:
   order: 2
   label: Move an army
@@ -8,35 +8,37 @@ sidebar:
 
 import { LinkButton, Steps } from "@astrojs/starlight/components";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/examples/move_army.rs" icon="external">
-  Open move_army.rs
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs" icon="external">
+  Open starter.rs
 </LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/facade/canwu-api/examples" variant="secondary" icon="external">
-  Browse the example folder
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/integrations/canwu-reference-world" variant="secondary" icon="external">
+  Browse the reference integration crate
 </LinkButton>
 
-This is the shortest path through Canwu's public API: commands do not mutate the world directly, the host advances time explicitly, and reads can be actor-relative.
+This is the shortest path through the migrated boundary: the engine supplies the generic runtime, while the world model and movement command belong to the optional `canwu-reference-world` integration.
 
 ## Run it
 
 ```shell
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
 ## Flow
 
 <Steps>
-1. Create a deterministic demo world with `Canwu::demo(35)`.
-2. Call `act()` as the commander with `SemanticAction::MoveEntity` and an army subject.
-3. Advance simulation time so the scheduled arrival can execute.
-4. Call `observe()` for the commander and observer to compare their knowledge records.
+1. Call `demo_scenario()` to create a scenario, generic entity registry, and reference-domain records.
+2. Register domain logic with `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])`.
+3. Wrap a `MovementCommand` as a plugin command and pass it through canonical `enqueue_command()` ingress.
+4. Advance time with `advance_canonical()`, then read the army location through the integration's `snapshot()` projection.
+5. Save, load, fork, and replay from the journal, then compare all four checkpoints.
 </Steps>
 
 ## What to notice
 
-- The commander learns the new location as soon as the army arrives.
-- The observer retains stale information until a report is delivered.
-- Every world change enters through the public command/action boundary, never a mutable world reference.
+- The army reaches the destination after time advances.
+- Concrete world types are not a foundation dependency of `canwu-api`; an application can replace the entire domain integration.
+- Load, fork, and exact replay all produce the same checkpoint as the original run.
+- The runtime explicitly migrates the entity registry for old format-5 saves without retaining the `canwu-world` crate.
 
 ## Next
 

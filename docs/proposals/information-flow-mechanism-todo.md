@@ -769,7 +769,7 @@ Case/navigation files:
 - [x] `cargo clippy --workspace --all-targets -- -D warnings`
 - [x] `cargo test --workspace`
 - [x] `cargo check -p canwu-debug`
-- [x] `cargo run -p canwu-api --example move_army`
+- [x] `cargo run -p canwu-reference-world --example starter`
 - [x] `cargo run -p canwu-api --example phased_boundary`
 - [x] `cargo run -p canwu-api --example plugin`
 - [x] `cargo run -p canwu-api --example decision_ticket`

@@ -103,7 +103,7 @@ flowchart TB
     end
     subgraph Public[Public Interfaces]
         Programmatic[Programmatic API]
-        Semantic[Semantic / Agent API]
+        Viewer[Viewer / Agent API]
         DebugApi[Debug API]
     end
     CQE[Command / Query / Event]
@@ -115,9 +115,9 @@ flowchart TB
 ```
 
 Applications never receive mutable access to live state. The programmatic API
-can request an omniscient snapshot, but that snapshot is detached data. The
-semantic API requires an actor and builds observations from that actor's
-knowledge records.
+can request generic authoritative records and evidence as detached data. The
+viewer API binds an actor or institution and queries only that holder's
+knowledge records. Concrete world projections belong to domain integrations.
 
 ## Workspace crate dependency DAG / 工作区 crate 依赖 DAG
 
@@ -135,6 +135,7 @@ flowchart TB
         Society["canwu-society"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        ReferenceWorld["canwu-reference-world"]
     end
 
     subgraph Facade["Public facade / 公开门面"]
@@ -151,7 +152,6 @@ flowchart TB
         Decision["canwu-decision"]
         Event["canwu-event"]
         Knowledge["canwu-knowledge"]
-        World["canwu-world"]
     end
 
     subgraph Foundation["Foundation / 基础"]
@@ -176,14 +176,14 @@ flowchart TB
     Api --> Sim
     Api --> Time
     Api --> Transport
-    Api --> World
+    ReferenceWorld --> Api
+    Debug --> ReferenceWorld
 
     Sim --> Core
     Sim --> Decision
     Sim --> Event
     Sim --> Knowledge
     Sim --> Time
-    Sim --> World
 
     Transport --> Core
     Transport --> Routing
@@ -191,7 +191,6 @@ flowchart TB
 
     Routing --> Core
     Routing --> Time
-    Routing --> World
 
     Decision --> Core
     Decision --> Time
@@ -199,8 +198,6 @@ flowchart TB
     Event --> Time
     Knowledge --> Core
     Knowledge --> Time
-    World --> Core
-    World --> Time
 ```
 
 ## Architecture layers / 架构分层
@@ -270,7 +267,7 @@ flowchart LR
     core[canwu-core]
     time[canwu-time]
     event[canwu-event]
-    world[canwu-world]
+    reference_world[canwu-reference-world]
     knowledge[canwu-knowledge]
     decision[canwu-decision]
     sim[canwu-sim]
@@ -279,8 +276,6 @@ flowchart LR
 
     event --> core
     event --> time
-    world --> core
-    world --> time
     knowledge --> core
     knowledge --> time
     decision --> core
@@ -288,18 +283,19 @@ flowchart LR
     sim --> core
     sim --> time
     sim --> event
-    sim --> world
     sim --> knowledge
     sim --> decision
     api --> sim
-    api --> world
+    reference_world --> api
     api --> knowledge
     debug --> api
+    debug --> reference_world
 ```
 
-`canwu-sim` owns the mutable runtime. `canwu-world` contains entity models and
-read-only snapshots, not a public mutable world store. This makes the command
-boundary a structural property instead of a UI convention.
+`canwu-sim` owns the mutable runtime. `canwu-reference-world` owns the example
+entities and detached projection through typed domain records and plugin
+commands. This makes the command boundary a structural property instead of a
+UI convention.
 
 ### World and event model ownership / 世界与事件模型所有权
 
@@ -312,27 +308,29 @@ world entities and event payloads. / 上面的依赖 DAG 描述当前实现，�
 公开类型的最终归属。已经接受的审计确立同一条边界：通用引擎 crate 拥有确定性
 模拟契约，参考整合包拥有时代或应用特定的世界实体和事件载荷。
 
-Under that direction, the current `canwu-world` types remain a compatibility
-model for the first movement vertical slice. Published versions are yanked to
-prevent new registry resolution, but the source crate and its existing
-consumers remain until the model moves to a reference integration.
+That migration is now complete: `canwu-reference-world` owns the model,
+movement behavior, detached projection, and routing adapter; the source
+`canwu-world` package has been retired from the workspace and dependency DAG.
+Format-5 world fields remain only as a deprecated facade/runtime compatibility
+projection for old callers and saves.
 `canwu-event` now contains only generic contracts: `EventKind` is a type label
 plus flattened structured fields, while concrete movement, arrival, letter,
 report, knowledge, and debug payload structs live outside that crate. / 按此
-方向，当前 `canwu-world` 仍是首个移动纵向切片的兼容模型；已发布版本被 yank，
-以阻止新的 registry 解析选用，但源码 crate 及现有消费者会保留到模型迁入参考
-整合包。`canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
+方向，这项迁移已经完成：`canwu-reference-world` 拥有模型、移动行为、脱离式
+投影和路由适配器；`canwu-world` 源码包已从 workspace 与依赖 DAG 退役。
+format-5 世界字段只作为旧调用方与旧存档的弃用兼容投影保留在 facade/runtime。
+`canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
 字段组成，具体移动、到达、信件、报告、知识和调试载荷结构均位于该 crate 之外。
 
 The event extraction is a Rust source-API break: callers replace enum
 construction and exhaustive matching with `from_payload`, `event_type`,
 `is_type`, and typed field/payload decoding. Its serialized shape is unchanged,
-so current snapshots, journals, replay commitments, and the crate dependency DAG
-do not need a format migration for this step. Removing `canwu-world` still
-requires the remaining audit gates. / 事件迁出会破坏 Rust 源 API：调用方需以通用
+so current snapshots, journals, and replay commitments retain their format-5
+contract. Missing entity registries in supported format-5 compatibility saves
+are migrated explicitly from their legacy world projection. / 事件迁出会破坏 Rust 源 API：调用方需以通用
 构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。序列化形状不变，
-因此本步不需要提升快照格式或改写日志、重演承诺与 crate 依赖 DAG；真正删除
-`canwu-world` 仍须满足审计中的其余门槛。
+因此本步不需要提升快照格式或改写日志与重演承诺。受支持的 format-5 兼容存档
+若缺少实体注册，会由旧世界投影明确迁移得到。
 
 ## Decision framework
 
@@ -653,8 +651,8 @@ sequenceDiagram
     participant Scheduler
     participant Knowledge
 
-    Client->>API: OrderMovement action
-    API->>Sim: validated command envelope
+    Client->>API: reference-world movement command
+    API->>Sim: validated plugin command envelope
     Sim->>Sim: validate all preconditions
     Sim->>Scheduler: schedule arrival
     Sim-->>Client: MoveOrdered event
@@ -668,17 +666,17 @@ sequenceDiagram
 
 ## Public interfaces
 
-- Programmatic API: typed entity reads, commands, events, time, snapshots,
-  forks, world diffs, schemas, and plugin descriptors.
-- Query API: serializable entity selection, filters, selected fields, and
-  limits for tools and bindings.
-- Semantic API: `observe`, `inspect`, `query`, `available_actions`, `act`,
-  `explain`, `wait`, and `describe_capabilities`.
-- Debug API: omniscient reads plus explicitly debug-authorized commands. The
-  reference UI uses the same command dispatcher as every other client.
+- Programmatic API: generic entity identity, typed domain-record reads,
+  commands, events, time, snapshots, forks, schemas, and plugin descriptors.
+- Domain integration API: typed plugin commands and detached read projections;
+  `canwu-reference-world` is the runnable example, not a foundation dependency.
+- Viewer API: actor- or institution-scoped knowledge queries through
+  `CanwuViewer`, plus event/failure explanations from committed evidence.
+- Debug API: trusted entity/domain-record/event reads. The reference UI uses
+  the same command dispatcher and reference-world plugin as every other client.
 
 Repository agent skills live under `agent-interface/`. The `canwu-engine`
-plugin teaches external agents to use the public and semantic APIs. The
+plugin teaches external agents to use the public facade and domain integrations. The
 `canwu-developer` plugin contains contributor and release workflows. These
 Codex skill plugins are development interfaces and are separate from runtime
 `SimulationPlugin` implementations registered in `canwu-sim`.
@@ -722,7 +720,7 @@ is:
 
 | Layer | Responsibility |
 | --- | --- |
-| `canwu-world` or domain records | topology, stations, timetables, availability, terrain, and historical content |
+| reference integration or domain records | topology, stations, timetables, availability, terrain, and historical content |
 | `canwu-routing` | pure deterministic planning over an actor-relative `PlanningSnapshot` |
 | `canwu-transport` | itinerary revisions, leg execution, custody handoffs, bookings, and completion saga |
 | `canwu-information` | per-recipient delivery attempts and immutable logical deadlines |
@@ -779,7 +777,7 @@ The implemented composition boundary and Wuxi delivery slice are documented in
 
 ## Plugins
 
-Plugins register schema, semantic action metadata, command handlers, legacy
+Plugins register schemas, typed command handlers, legacy
 event reactors, and phased boundary systems. Registration is transactional:
 duplicate plugin, command, system, schema, state owner, phase writer, or
 reservation offerer claims reject the complete plugin registration without

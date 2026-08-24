@@ -48,7 +48,7 @@ renamed by this policy.
 | [simulation time](/en/tutorials/continuous-game-loop/) | 模拟时间 | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
 | [presentation time](/en/tutorials/continuous-game-loop/) | 表现时间 | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
 | [command](/en/developer/integration/) | 命令 | `Command`, `CommandEnvelope` | A typed request to change authoritative state through structural, precondition, and authority checks. |
-| [semantic action](/en/tutorials/move-army/) | 语义动作 | `SemanticAction` | A capability-oriented action for UI or agents that becomes a validated command. |
+| [domain command](/en/tutorials/move-army/) | 领域命令 | `Command::Plugin` | Typed intent defined by a domain integration and validated through public canonical ingress. |
 | [canonical ingress](/en/architecture/events/) | 规范化输入 | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. |
 | [admission](/en/architecture/events/) | 准入 | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
 | [scheduled work](/en/architecture/events/) | 调度工作 | — | Work assigned a deterministic simulation due time and insertion order. |

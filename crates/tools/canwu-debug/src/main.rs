@@ -1,10 +1,11 @@
-//! Minimal first-party reference client. It uses only `canwu-api`.
+//! Minimal first-party client for the replaceable reference-world integration.
 
 #![allow(clippy::module_name_repetitions)]
 
-use canwu_api::{
-    Canwu, Command, CommandEnvelope, DemoIds, EntityRef, Issuer, KnowledgeHolderRef,
-    KnowledgeQuery, SimDuration, WorldSnapshot,
+use canwu_api::{Canwu, EntityRef, KnowledgeHolderRef, KnowledgeQuery, SimDuration};
+use canwu_reference_world::{
+    MapPoint, ReferenceWorldIds, ReferenceWorldPlugin, WorldSnapshot, demo_scenario,
+    snapshot as reference_snapshot,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use serde_json::Value;
@@ -33,7 +34,7 @@ enum LogoLanguage {
 
 struct DebugApp {
     canwu: Canwu,
-    ids: DemoIds,
+    ids: ReferenceWorldIds,
     english_logo: TextureHandle,
     chinese_logo: TextureHandle,
     logo_language: LogoLanguage,
@@ -42,7 +43,6 @@ struct DebugApp {
     selected: Option<EntityRef>,
     search: String,
     saved_snapshot: Option<String>,
-    morale_edit: u16,
     map_pan: Vec2,
     map_zoom: f32,
     status: String,
@@ -50,8 +50,7 @@ struct DebugApp {
 
 impl DebugApp {
     fn new(context: &egui::Context) -> Self {
-        let canwu = Canwu::demo(35).expect("built-in scenario must be valid");
-        let ids = Canwu::demo_ids();
+        let (canwu, ids) = new_reference_run();
         Self {
             canwu,
             ids,
@@ -63,7 +62,6 @@ impl DebugApp {
             selected: Some(EntityRef::Army(ids.army)),
             search: String::new(),
             saved_snapshot: None,
-            morale_edit: 72,
             map_pan: Vec2::ZERO,
             map_zoom: 1.0,
             status: "Ready".to_owned(),
@@ -71,10 +69,9 @@ impl DebugApp {
     }
 
     fn reset(&mut self) {
-        self.canwu = Canwu::demo(35).expect("built-in scenario must be valid");
+        (self.canwu, self.ids) = new_reference_run();
         self.running = false;
         self.selected = Some(EntityRef::Army(self.ids.army));
-        self.morale_edit = 72;
         "Scenario reset through the lifecycle API".clone_into(&mut self.status);
     }
 
@@ -126,7 +123,8 @@ impl DebugApp {
                 .clicked()
                 && let Some(snapshot) = &self.saved_snapshot
             {
-                match Canwu::from_snapshot_json(snapshot) {
+                let plugin = ReferenceWorldPlugin;
+                match Canwu::from_snapshot_json_with_plugins(snapshot, &[&plugin]) {
                     Ok(canwu) => {
                         self.canwu = canwu;
                         self.running = false;
@@ -150,7 +148,7 @@ impl DebugApp {
         ui.heading("World Browser");
         ui.text_edit_singleline(&mut self.search);
         let search = self.search.to_lowercase();
-        let world = self.canwu.world();
+        let world = reference_snapshot(&self.canwu).expect("reference world must remain valid");
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::CollapsingHeader::new(format!("Persons ({})", world.people.len()))
                 .default_open(true)
@@ -255,7 +253,7 @@ impl DebugApp {
             return;
         };
         ui.monospace(selected.to_string());
-        let world = self.canwu.world();
+        let world = reference_snapshot(&self.canwu).expect("reference world must remain valid");
         let Some(value) = entity_value(&world, &selected) else {
             ui.label("Entity is not present in this snapshot");
             return;
@@ -296,26 +294,6 @@ impl DebugApp {
                 }
                 Err(error) => {
                     ui.colored_label(Color32::LIGHT_RED, error.to_string());
-                }
-            }
-        }
-
-        if let EntityRef::Army(army) = selected {
-            ui.separator();
-            ui.label("Debug command");
-            ui.add(egui::Slider::new(&mut self.morale_edit, 0..=100).text("morale"));
-            if ui.button("Apply morale through command").clicked() {
-                match self.canwu.submit(CommandEnvelope::new(
-                    Issuer::Debug,
-                    Command::DebugSetArmyMorale {
-                        army,
-                        morale: self.morale_edit,
-                    },
-                )) {
-                    Ok(receipt) => {
-                        self.status = format!("Accepted debug command {}", receipt.command_id);
-                    }
-                    Err(error) => self.status = error.to_string(),
                 }
             }
         }
@@ -363,7 +341,7 @@ impl DebugApp {
         }
         let rect = response.rect;
         painter.rect_filled(rect, 4.0, Color32::from_rgb(24, 29, 32));
-        let world = self.canwu.world();
+        let world = reference_snapshot(&self.canwu).expect("reference world must remain valid");
 
         for route in &world.routes {
             let Some(from) = world.territory(route.from) else {
@@ -429,10 +407,18 @@ impl DebugApp {
         }
     }
 
-    fn map_position(&self, rect: Rect, point: canwu_api::MapPoint) -> Pos2 {
+    fn map_position(&self, rect: Rect, point: MapPoint) -> Pos2 {
         let origin = rect.left_top() + Vec2::new(30.0, 25.0) + self.map_pan;
         origin + Vec2::new(point.x, point.y) * self.map_zoom
     }
+}
+
+fn new_reference_run() -> (Canwu, ReferenceWorldIds) {
+    let (scenario, ids) = demo_scenario().expect("reference scenario must be valid");
+    let plugin = ReferenceWorldPlugin;
+    let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])
+        .expect("reference scenario must initialize");
+    (canwu, ids)
 }
 
 fn load_logo(context: &egui::Context, name: &str, bytes: &[u8]) -> TextureHandle {

@@ -31,9 +31,9 @@ pub struct TransportExecutionId(pub u64);
 
 /// Stable identity for an admitted transport-domain movement intent.
 ///
-/// The simulation's canonical ingress is `Command::OrderMovement`. This record adds
-/// route-plan and custody evidence when a transport domain needs to persist a
-/// richer execution than the built-in army/person transit state.
+/// The simulation admits movement through a host- or integration-defined command.
+/// This record adds route-plan and custody evidence when a transport domain needs
+/// to persist a richer execution than its own projected transit state.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct MovementOrderId(pub u64);

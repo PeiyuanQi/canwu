@@ -6,6 +6,7 @@ mod hashing;
 mod ingress;
 mod knowledge;
 mod legacy_v4;
+mod legacy_world;
 mod manifest;
 mod migration;
 mod persistence;
@@ -101,7 +102,7 @@ pub use canwu_knowledge::{
     KnowledgeSubjectTarget,
 };
 use canwu_time::{SimDuration, SimTime};
-use canwu_world::{
+pub use legacy_world::{
     Army, Government, LetterCargo, LetterStatus, MapPoint, Person, PersonTransitState, Route,
     Territory, TransitState, WorldSnapshot,
 };
@@ -1040,6 +1041,7 @@ impl Simulation {
         manifest::validate_run_configuration(&run_manifest, &run_configuration)?;
         validate_run_configuration_entities(
             &run_configuration,
+            &scenario.entities,
             &scenario.world,
             &scenario.domain_records,
         )?;
@@ -1089,6 +1091,7 @@ impl Simulation {
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
+                    entities: scenario.entities.into_iter().collect(),
                     people: scenario
                         .world
                         .people
@@ -1340,6 +1343,15 @@ impl Simulation {
         self.compute_boundary_state_hash()
     }
 
+    pub fn entities(&self) -> impl Iterator<Item = &EntityRef> {
+        self.state.current.entities.iter()
+    }
+
+    #[must_use]
+    pub fn entity_exists(&self, entity: &EntityRef) -> bool {
+        runtime_entity_exists(&self.state, entity)
+    }
+
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         WorldSnapshot {
@@ -1566,6 +1578,7 @@ impl Simulation {
 
     fn compute_boundary_state_hash(&self) -> Result<String, CanwuError> {
         let world = self.world();
+        let entities: Vec<_> = self.state.current.entities.iter().cloned().collect();
         let plugin_components: Vec<_> = self
             .state
             .current
@@ -1603,16 +1616,17 @@ impl Simulation {
             &self.state.metadata.run_manifest_hash,
             &self.state.metadata.run_configuration,
         )?;
-        let initial_scenario = self.bound_initial_scenario();
+        let initial_scenario = hashing::committed_initial_scenario(self.bound_initial_scenario());
         state_hash(&StateHashMaterial {
             engine_version: ENGINE_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             run_manifest: &authoritative_manifest,
             run_manifest_hash: &authoritative_manifest_hash,
             initial_time: self.state.scheduler.initial_time,
-            initial_scenario,
+            initial_scenario: initial_scenario.as_ref(),
             now: self.state.scheduler.now,
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
+            entities: hashing::committed_entities(&entities, &world),
             world: &world,
             knowledge: &self.state.current.knowledge,
             events: &self.state.evidence.events,
@@ -1647,7 +1661,11 @@ impl Simulation {
     ) -> Result<RuntimeCommitmentRootUpdates, CanwuError> {
         let world = needs
             .contains(CommitmentDomains::WORLD)
-            .then(|| world_commitment_root(&self.world()))
+            .then(|| {
+                let world = self.world();
+                let entities: Vec<_> = self.state.current.entities.iter().cloned().collect();
+                world_commitment_root(&world, &entities)
+            })
             .transpose()?;
         let knowledge = needs
             .contains(CommitmentDomains::KNOWLEDGE)
@@ -1719,13 +1737,15 @@ impl Simulation {
                 &self.state.metadata.run_manifest_hash,
                 &self.state.metadata.run_configuration,
             )?;
+            let initial_scenario =
+                hashing::committed_initial_scenario(self.bound_initial_scenario());
             Some(identity_commitment_root(
                 ENGINE_VERSION,
                 SNAPSHOT_FORMAT_VERSION,
                 &manifest,
                 &manifest_hash,
                 self.state.scheduler.initial_time,
-                self.bound_initial_scenario(),
+                initial_scenario.as_ref(),
                 &descriptors,
                 &self.schema,
             )?)
@@ -1906,6 +1926,7 @@ impl Simulation {
         let snapshot = migrate_snapshot(snapshot)?;
         validate_scenario_state(&Scenario {
             start_time: snapshot.now,
+            entities: snapshot.entities.clone(),
             world: snapshot.world.clone(),
             knowledge: snapshot.knowledge.clone(),
             domain_records: snapshot.domain_records.clone(),
@@ -1929,6 +1950,7 @@ impl Simulation {
                 Some(run_manifest @ RunManifest::Declared { .. }) => {
                     let initial_scenario = Scenario {
                         start_time: snapshot.initial_time,
+                        entities: snapshot.entities.clone(),
                         world: snapshot.world.clone(),
                         knowledge: snapshot.knowledge.clone(),
                         domain_records: snapshot.domain_records.clone(),
@@ -1954,6 +1976,7 @@ impl Simulation {
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
+                    entities: snapshot.entities.into_iter().collect(),
                     people: snapshot
                         .world
                         .people

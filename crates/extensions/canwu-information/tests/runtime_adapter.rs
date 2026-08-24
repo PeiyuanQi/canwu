@@ -153,6 +153,7 @@ fn world(holder_count: u64) -> WorldSnapshot {
 fn empty_scenario() -> Scenario {
     Scenario {
         start_time: SimTime::EPOCH,
+        entities: world(1).entities(),
         world: world(1),
         knowledge: KnowledgeSnapshot::default(),
         domain_records: Vec::new(),
@@ -270,6 +271,7 @@ fn release_scenario(holder_count: u64) -> ReleaseFixture {
     ReleaseFixture {
         scenario: Scenario {
             start_time: SimTime::EPOCH,
+            entities: world(holder_count).entities(),
             world: world(holder_count),
             knowledge: KnowledgeSnapshot::default(),
             domain_records: vec![
@@ -423,6 +425,7 @@ fn interpretation_scenario() -> (
     (
         Scenario {
             start_time: SimTime::EPOCH,
+            entities: world(4).entities(),
             world: world(4),
             knowledge: KnowledgeSnapshot::default(),
             domain_records: vec![

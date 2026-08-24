@@ -1,5 +1,5 @@
 use super::{
-    ActorKnowledge, Army, ArmyId, ArmyKnowledge, CanwuError, DomainRecord, ErrorCode,
+    ActorKnowledge, Army, ArmyId, ArmyKnowledge, CanwuError, DomainRecord, EntityRef, ErrorCode,
     EstimateRange, FieldSchema, Government, GovernmentId, KnowledgeSnapshot, KnowledgeSource,
     LetterStatus, MapPoint, Person, PersonId, Route, RouteId, SchemaRegistry, SimDuration, SimTime,
     Territory, TerritoryId, TypeSchema, WorldSnapshot, core_world_entity_exists, invalid_snapshot,
@@ -23,10 +23,67 @@ pub struct DemoIds {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Scenario {
     pub start_time: SimTime,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entities: Vec<EntityRef>,
+    #[serde(default)]
     pub world: WorldSnapshot,
     pub knowledge: KnowledgeSnapshot,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub domain_records: Vec<DomainRecord>,
+}
+
+impl Scenario {
+    #[must_use]
+    pub fn new(start_time: SimTime, entities: Vec<EntityRef>) -> Self {
+        Self {
+            start_time,
+            entities,
+            world: WorldSnapshot::default(),
+            knowledge: KnowledgeSnapshot::default(),
+            domain_records: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_domain_records(mut self, domain_records: Vec<DomainRecord>) -> Self {
+        self.domain_records = domain_records;
+        self
+    }
+}
+
+pub(super) fn legacy_entities(world: &WorldSnapshot) -> Vec<EntityRef> {
+    let mut entities = Vec::with_capacity(
+        world.people.len()
+            + world.governments.len()
+            + world.territories.len()
+            + world.routes.len()
+            + world.armies.len()
+            + world.letters.len(),
+    );
+    entities.extend(world.armies.iter().map(|value| EntityRef::Army(value.id)));
+    entities.extend(
+        world
+            .governments
+            .iter()
+            .map(|value| EntityRef::Government(value.id)),
+    );
+    entities.extend(world.people.iter().map(|value| EntityRef::Person(value.id)));
+    entities.extend(
+        world
+            .letters
+            .iter()
+            .map(|value| EntityRef::Resource(super::ResourceId::new(value.id.get()))),
+    );
+    entities.extend(world.routes.iter().map(|value| EntityRef::Route(value.id)));
+    entities.extend(
+        world
+            .territories
+            .iter()
+            .map(|value| EntityRef::Territory(value.id)),
+    );
+    entities.sort();
+    entities.dedup();
+    entities
 }
 
 pub(super) fn require_plugin_aware_initial_records(scenario: &Scenario) -> Result<(), CanwuError> {
@@ -40,6 +97,11 @@ pub(super) fn require_plugin_aware_initial_records(scenario: &Scenario) -> Resul
 }
 
 pub(super) fn canonicalize_scenario(scenario: &mut Scenario) {
+    if scenario.entities.is_empty() {
+        scenario.entities = legacy_entities(&scenario.world);
+    }
+    scenario.entities.sort();
+    scenario.entities.dedup();
     scenario.world.people.sort_by_key(|value| value.id);
     scenario.world.governments.sort_by_key(|value| value.id);
     scenario.world.territories.sort_by_key(|value| value.id);
@@ -62,12 +124,23 @@ pub(super) fn validate_scenario(scenario: &Scenario) -> Result<(), CanwuError> {
 }
 
 pub(super) fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuError> {
+    validate_entities(&scenario.entities)?;
     validate_unique_ids(&scenario.world.people, |value| value.id, "person")?;
     validate_unique_ids(&scenario.world.governments, |value| value.id, "government")?;
     validate_unique_ids(&scenario.world.territories, |value| value.id, "territory")?;
     validate_unique_ids(&scenario.world.routes, |value| value.id, "route")?;
     validate_unique_ids(&scenario.world.armies, |value| value.id, "army")?;
     validate_unique_ids(&scenario.world.letters, |value| value.id, "letter")?;
+    let expected_legacy_entities = legacy_entities(&scenario.world);
+    if expected_legacy_entities
+        .iter()
+        .any(|entity| scenario.entities.binary_search(entity).is_err())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            "scenario entity registry is missing an identity from its populated compatibility world",
+        ));
+    }
 
     for person in &scenario.world.people {
         if scenario.world.government(person.government).is_none()
@@ -199,7 +272,8 @@ pub(super) fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuEr
         }
     }
     records::validate_initial_records(&scenario.domain_records, scenario.start_time, &|entity| {
-        core_world_entity_exists(&scenario.world, entity)
+        scenario.entities.binary_search(entity).is_ok()
+            || core_world_entity_exists(&scenario.world, entity)
     })?;
     for (actor_id, actor) in &scenario.knowledge.actors {
         if actor.actor != *actor_id || scenario.world.person(*actor_id).is_none() {
@@ -226,6 +300,31 @@ pub(super) fn validate_scenario_state(scenario: &Scenario) -> Result<(), CanwuEr
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_entities(entities: &[EntityRef]) -> Result<(), CanwuError> {
+    if entities.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            "scenario entity identities must be unique and canonically sorted",
+        ));
+    }
+    if entities.iter().any(|entity| match entity {
+        EntityRef::Army(id) => id.get() == 0,
+        EntityRef::Domain(_) => true,
+        EntityRef::Government(id) => id.get() == 0,
+        EntityRef::Organization(id) => id.get() == 0,
+        EntityRef::Person(id) => id.get() == 0,
+        EntityRef::Resource(id) => id.get() == 0,
+        EntityRef::Route(id) => id.get() == 0,
+        EntityRef::Territory(id) => id.get() == 0,
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            "scenario entities require nonzero core identities; domain entities come from domain records",
+        ));
     }
     Ok(())
 }
@@ -478,6 +577,17 @@ pub fn demo_scenario() -> (Scenario, DemoIds) {
     (
         Scenario {
             start_time: initial_time,
+            entities: vec![
+                EntityRef::Army(ids.army),
+                EntityRef::Government(ids.government),
+                EntityRef::Person(ids.commander),
+                EntityRef::Person(ids.observer),
+                EntityRef::Route(RouteId::new(1)),
+                EntityRef::Route(RouteId::new(2)),
+                EntityRef::Territory(ids.western_territory),
+                EntityRef::Territory(ids.central_territory),
+                EntityRef::Territory(ids.eastern_territory),
+            ],
             world,
             knowledge,
             domain_records: Vec::new(),

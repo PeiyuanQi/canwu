@@ -1,9 +1,9 @@
 # World and Event Ownership Audit
 
-Status: implementation in progress. Concrete public event variants have moved
-out of `canwu-event` without changing their serialized shape. Published
-`canwu-world` versions are yanked, but its source migration and retirement are
-not complete.
+Status: implemented. Concrete public event variants have moved out of
+`canwu-event` without changing their serialized shape. The world model,
+movement behavior, detached projection, and routing adapter now live in
+`canwu-reference-world`; the `canwu-world` package is retired.
 
 ## Decision
 
@@ -19,10 +19,10 @@ The governing invariant is:
 
 Applying that invariant gives two different outcomes:
 
-- `canwu-world` is a compatibility model for the first movement vertical slice.
-  Its published versions are yanked to stop new registry resolution. After a
-  supported migration moves that model into a reference integration, the source
-  crate has no irreducible generic engine contract and should be retired.
+- `canwu-world` had no irreducible generic engine contract and is retired.
+  `canwu-reference-world` owns the extracted model. Deprecated format-5
+  projections remain in the facade/runtime only to load supported saves and
+  give existing callers an explicit migration interval.
 - `canwu-event` now contains the generic event envelope, provenance, visibility,
   and structured event-record contracts. Its concrete payload variants have
   moved out. Only after independent consumption is known should the residual
@@ -33,12 +33,11 @@ decision gate, not a pre-approved merge.
 
 ## Evidence from the current dependency graph
 
-`canwu-world` has three normal first-party consumers: `canwu-sim`,
-`canwu-api`, and `canwu-routing`. The facade re-exports every public world type,
-and the runtime persists or projects the same concrete entities. Routing uses
-`WorldSnapshot` only through `planning_snapshot_from_world`; its actual solver
-already owns a domain-neutral `PlanningSnapshot`. That adapter can move with
-the reference integration without merging routing and world ownership.
+`canwu-world` now has no source package or dependency edges. `canwu-routing`
+accepts only its domain-neutral `PlanningSnapshot`; the former
+`planning_snapshot_from_world` adapter moved to `canwu-reference-world`.
+`canwu-sim` and `canwu-api` retain deprecated format-5 compatibility
+projections but do not depend on the extracted integration.
 
 `canwu-event` has two normal first-party consumers: `canwu-sim` and
 `canwu-api`. Its values participate in persisted snapshots, replay,
@@ -129,23 +128,23 @@ typed structure and fails closed. Existing JSON needs no conversion because its
 `type` tag and flattened fields are unchanged. A canonical cross-integration
 namespace and payload-version contract remain open work.
 
-### 3. Extract the reference world integration
+### 3. Extract the reference world integration - complete
 
 Move the current people, government, territory, route, army, and letter model
 into a first-party reference integration built only on `canwu-api`. Move
 `planning_snapshot_from_world` with that integration so `canwu-routing` accepts
 only its own generic planning input.
 
-### 4. Migrate the facade and saved state
+### 4. Migrate the facade and saved state - complete
 
 Offer integration-owned projections and events alongside the compatibility
 surface. Deprecate or remove old re-exports only under the repository's
 versioning policy, with snapshot and journal migrations and updated starter
 kits.
 
-### 5. Remove empty package boundaries
+### 5. Remove empty package boundaries - complete for `canwu-world`
 
-Retire `canwu-world` after it has no normal consumers. Re-evaluate
+`canwu-world` is retired after reaching zero normal consumers. Re-evaluate
 `canwu-event` after its legacy payload union is gone: fold the residual generic
 contracts into `canwu-sim` only if they have no useful independent consumers;
 otherwise keep the now-focused crate.

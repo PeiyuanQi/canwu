@@ -261,6 +261,7 @@ pub(crate) fn validate_snapshot_records(
     record_schemas: &DomainRecordSchemas,
 ) -> Result<u64, CanwuError> {
     let current = RuntimeCurrentState {
+        entities: snapshot.entities.iter().cloned().collect(),
         people: snapshot
             .world
             .people
@@ -595,15 +596,15 @@ mod tests {
     use super::super::records::{DomainRecord, DomainRecordLifecycle, DomainRecordSchema};
     use super::*;
     use crate::DecisionState;
+    use crate::runtime::{Government, MapPoint, Route, Territory};
     use canwu_core::{
         DomainRecordRef, EventId, EvidenceRef, GovernmentId, KnowledgeRecordId, PersonId,
         ResourceId, RouteId, TerritoryId,
     };
     use canwu_knowledge::{KnowledgeOrigin, KnowledgeSnapshot};
     use canwu_time::SimTime;
-    use canwu_world::{Government, MapPoint, Route, Territory};
     use serde_json::json;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn knowledge_kind() -> KnowledgeRecordKind {
         KnowledgeRecordKind::new("fixture.knowledge", "assessment")
@@ -622,6 +623,7 @@ mod tests {
 
     fn current_state(domain_records: Vec<DomainRecord>) -> RuntimeCurrentState {
         RuntimeCurrentState {
+            entities: BTreeSet::new(),
             people: BTreeMap::new(),
             letters: BTreeMap::new(),
             governments: BTreeMap::new(),

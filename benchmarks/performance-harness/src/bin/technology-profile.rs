@@ -746,21 +746,23 @@ fn fixture(
         &revisions[0],
     )?;
 
+    let world = WorldSnapshot {
+        people,
+        governments: vec![Government {
+            id: government,
+            name: "Benchmark authority".to_owned(),
+            capital: TerritoryId::new(1),
+        }],
+        territories,
+        routes: Vec::new(),
+        armies: Vec::new(),
+        letters: Vec::new(),
+    };
     Ok((
         Scenario {
             start_time: SimTime::EPOCH,
-            world: WorldSnapshot {
-                people,
-                governments: vec![Government {
-                    id: government,
-                    name: "Benchmark authority".to_owned(),
-                    capital: TerritoryId::new(1),
-                }],
-                territories,
-                routes: Vec::new(),
-                armies: Vec::new(),
-                letters: Vec::new(),
-            },
+            entities: world.entities(),
+            world,
             knowledge: KnowledgeSnapshot::default(),
             domain_records: records,
         },

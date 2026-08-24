@@ -5,73 +5,72 @@ interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/src/lib.rs";
-const apiLines: Record<string, number> = { act: 1070, advance: 475, settle_boundary: 479, world: 244, events: 258, snapshot_json: 499, fork: 657, diff: 664, replay_with_plugins: 568, describe_capabilities: 1119, observe: 808, available_actions: 1013, explain: 1104, wait: 486, inspect: 911, query_as: 673, snapshot: 495 };
+const starterSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs";
 
-const c = isEnglish
+const commonCases = [
+  {
+    id: "games", number: "01", api: ["enqueue_command", "advance_canonical", "typed_domain_record", "events"],
+    proof: `canwu.enqueue_command(time, priority, request)?;
+canwu.advance_canonical(SimDuration::hours(1))?;
+let state = canwu.typed_domain_record::<GameState>(&record_ref)?;
+let events = canwu.events();`,
+  },
+  {
+    id: "research", number: "02", api: ["snapshot_json", "fork", "replay_journal", "replay_from_journal", "checkpoint_hash"],
+    proof: `let saved = canwu.snapshot_json()?;
+let branch = canwu.fork();
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(scenario, plugins, &journal)?;
+assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());`,
+  },
+  {
+    id: "agents", number: "03", api: ["viewer_for_actor", "query_knowledge", "enqueue_command", "events", "explain"],
+    proof: `let viewer = canwu.viewer_for_actor(actor)?;
+let view = canwu.query_knowledge(&viewer, query)?;
+canwu.enqueue_command(time, priority, request)?;
+let why = canwu.explain(&explanation_request);`,
+  },
+  {
+    id: "education", number: "04", api: ["entities", "events", "snapshot_json", "fork", "explain"],
+    proof: `entities()       → stable identities
+domain snapshot → timeline or map state
+events()         → causal history
+fork()           → repeatable branch`,
+  },
+];
+
+const localized = isEnglish
   ? {
       title: "Canwu integration patterns",
       description: "Concrete integration boundaries for games, historical research, agent environments, and public-history clients.",
       label: "Integration patterns",
       heading: "Use one deterministic simulation core with any client",
-      intro: "Canwu is the single source of truth for simulation time, state, commands, and events. The client contributes presentation, authentication, orchestration, and shipping content. This page maps today's engine capabilities and the ecosystem opportunities around each integration.",
-      index: "Integration types",
-      available: "Available in the core",
-      client: "Your client provides",
-      notIncluded: "Ecosystem opportunities",
-      relevant: "Public API",
-      evidence: "Integration shape",
+      intro: "Canwu owns simulation time, the entity registry, command ingress, events, persistence, and replay. Domain integrations own concrete models and typed commands; clients contribute presentation, authentication, orchestration, and content.",
+      index: "Integration types", available: "Available in the core", client: "Your client provides", notIncluded: "Ecosystem opportunities", relevant: "Public API", evidence: "Integration shape",
       cases: [
-        { id: "games", number: "01", kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server boundary while keeping the renderer and player experience independent.", available: ["Deterministic time and frame-independent scheduling", "Validated commands and events with recorded causes", "Actor-scoped observations and delayed reports", "Domain state managed through declared plugins"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production-ready scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
-let events = canwu.advance(SimDuration::hours(1))?;
-let world = canwu.world();` },
-        { id: "research", number: "02", kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep simulation runs independent of a notebook or visualization layer, then compare branches through snapshots and state diffs.", available: ["Deterministic run state and snapshots", "Fork, diff, and exact replay interfaces", "Causal events, random-draw journals, and state hashes", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Model-validation frameworks for historical accuracy"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
-let mut branch = canwu.fork();
-branch.act(actor, intervention)?;
-let comparison = baseline.diff(&branch);` },
-        { id: "agents", number: "03", kind: "Agents", status: "Semantic loop available", title: "Multi-agent historical environments", purpose: "Give each model a stable action loop with actor-scoped observations and semantic actions suited to programmatic clients.", available: ["Capability and legal-action discovery", "Observations limited to the represented actor", "Actor identity and command validation", "Causal explanations for resulting events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Authentication and authorization policies"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
-let actions = canwu.available_actions(actor)?;
-let events = canwu.act(actor, selected_action)?;
-let why = canwu.explain(&explanation_request);` },
-        { id: "education", number: "04", kind: "Education", status: "Architecture direction", title: "Classroom and public-history tools", purpose: "Use replayable state and multiple actor perspectives beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and scenario state", "Different perspectives on the same world", "Repeatable interventions through snapshots and forks", "Causal records that can support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → timeline or map state
-events()        → causal history
-query_as(actor) → perspective-specific view` },
+        { kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu in the game process or behind a server boundary while keeping concrete world rules in an integration plugin.", available: ["Deterministic time and frame-independent scheduling", "Canonical command ingress and causal events", "Generic entity and domain-record registries", "Plugin-owned typed state and boundary settlement"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"] },
+        { kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep runs independent of notebooks and visualization layers, then compare committed branch outcomes.", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay interfaces", "Causal events and random-draw journals", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Historical model-validation frameworks"] },
+        { kind: "Agents", status: "Canonical loop available", title: "Multi-agent historical environments", purpose: "Give each model an actor-scoped knowledge view and route its typed decisions through the same validated command boundary.", available: ["Viewer identities scoped to represented actors", "Knowledge queries without ground-truth leakage", "Issuer and revision validation", "Causal explanations for stored events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
+        { kind: "Education", status: "Core APIs available", title: "Classroom and public-history tools", purpose: "Use replayable domain projections beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and generic entity identity", "Domain projections supplied by integrations", "Repeatable interventions through snapshots and forks", "Causal records that support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"] },
       ],
-      next: "Start with runnable evidence",
-      nextCopy: "Run the checked-in example first. Then use the architecture document to decide where your client ends and Canwu begins.",
-      run: "View move_army source", architecture: "Read integration architecture", source: "Open API source",
+      next: "Start with runnable evidence", nextCopy: "Run the checked-in reference integration first. Then use the architecture document to decide where your domain plugin and client boundaries belong.", run: "View starter source", architecture: "Read integration architecture", source: "Open API source",
     }
   : {
       title: "参伍集成模式",
       description: "游戏、历史研究、智能体环境与公共史客户端接入参伍的具体技术边界。",
-      label: "集成模式",
-      heading: "让不同客户端共享同一个确定性模拟世界",
-      intro: "参伍统一维护模拟时间、世界状态、命令与事件；客户端贡献表现、认证、编排和可发行内容。本页展示当前引擎能力与每类集成周围的生态扩展方向。",
-      index: "集成类型",
-      available: "内核已经提供",
-      client: "客户端需要提供",
-      notIncluded: "生态扩展方向",
-      relevant: "公开 API",
-      evidence: "接入方式",
+      label: "集成模式", heading: "让不同客户端共享同一个确定性模拟内核",
+      intro: "参伍统一维护时间、实体注册表、命令入口、事件、持久化与重演。领域整合拥有具体模型和类型化命令；客户端负责表现、认证、编排与内容。",
+      index: "集成类型", available: "内核已经提供", client: "客户端需要提供", notIncluded: "生态扩展方向", relevant: "公开 API", evidence: "接入方式",
       cases: [
-        { id: "games", number: "01", kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；渲染器与玩家体验保持独立。", available: ["确定性时间与画面帧率解耦的调度", "经验证命令与记录原因的事件", "按角色过滤的观察结果与延迟报告", "通过声明式插件管理领域状态"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["渲染器适配器", "生产级多人服务", "完整可玩战役"], api: ["act", "advance", "settle_boundary", "world", "events"], proof: `canwu.act(player_actor, action)?;
-let events = canwu.advance(SimDuration::hours(1))?;
-let world = canwu.world();` },
-        { id: "research", number: "02", kind: "研究", status: "分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再通过快照与状态差异比较不同分支。", available: ["确定性运行状态与快照", "分支、差异与精确重演接口", "因果事件、随机抽取日志与状态哈希", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "支撑历史准确性研究的模型验证框架"], api: ["snapshot_json", "fork", "diff", "replay_with_plugins", "world"], proof: `let baseline = canwu.fork();
-let mut branch = canwu.fork();
-branch.act(actor, intervention)?;
-let comparison = baseline.diff(&branch);` },
-        { id: "agents", number: "03", kind: "智能体", status: "语义循环已可用", title: "多智能体历史环境", purpose: "让每个模型使用稳定行动循环，通过角色限定观察与语义行动接入模拟。", available: ["能力与合法行动发现", "限定到所代表角色的观察结果", "角色身份与命令验证", "对结果事件的因果解释"], client: ["模型选择与编排", "指定发令主体之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "身份认证与授权政策"], api: ["describe_capabilities", "observe", "available_actions", "act", "explain", "wait"], proof: `let view = canwu.observe(actor, &request)?;
-let actions = canwu.available_actions(actor)?;
-let events = canwu.act(actor, selected_action)?;
-let why = canwu.explain(&explanation_request);` },
-        { id: "education", number: "04", kind: "教育", status: "架构方向", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重演状态与多个角色视角。", available: ["历史时间与场景状态", "同一世界中的不同角色视角", "通过快照与分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"], api: ["observe", "inspect", "query_as", "snapshot", "fork", "explain"], proof: `snapshot()      → 时间线或地图状态
-events()        → 因果历史
-query_as(actor) → 角色视角` },
+        { kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；具体世界规则由整合插件拥有。", available: ["确定性时间与画面帧率解耦调度", "规范命令入口与因果事件", "通用实体与领域记录注册表", "插件拥有的类型化状态与边界结算"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["渲染器适配器", "生产级多人服务", "完整可玩战役"] },
+        { kind: "研究", status: "分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再比较已承诺的分支结果。", available: ["经验证快照与检查点哈希", "分支与精确重演接口", "因果事件与随机抽取日志", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "历史模型验证框架"] },
+        { kind: "智能体", status: "规范循环已可用", title: "多智能体历史环境", purpose: "为每个模型提供限定到角色的知识视图，并把类型化决策送入同一个经验证命令边界。", available: ["限定到所代表角色的观察者身份", "不泄露世界真值的知识查询", "发令者与修订版本验证", "存储事件的因果解释"], client: ["模型选择与编排", "指定发令主体之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "应用授权政策"] },
+        { kind: "教育", status: "核心 API 已可用", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重演的领域投影。", available: ["历史时间与通用实体身份", "由领域整合提供的投影", "通过快照与分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"] },
       ],
-      next: "先运行证据，再阅读愿景",
-      nextCopy: "先运行仓库中的示例，再通过架构文档确定客户端与参伍之间的边界。",
-      run: "查看 move_army 示例", architecture: "阅读集成架构", source: "打开 API 源码",
+      next: "先运行证据，再阅读架构", nextCopy: "先运行仓库中的参考整合示例，再通过架构文档确定领域插件与客户端的边界。", run: "查看 starter 示例", architecture: "阅读集成架构", source: "打开 API 源码",
     };
+
+const c = { ...localized, cases: localized.cases.map((item, index) => ({ ...commonCases[index], ...item })) };
 ---
 
 <BaseLayout title={c.title} description={c.description} locale={locale} zhPath="/showcase/" enPath="/en/showcase/">
@@ -86,11 +85,11 @@ query_as(actor) → 角色视角` },
         <header><code>{item.number}</code><p>{item.kind} · {item.status}</p><h2>{item.title}</h2><span>{item.purpose}</span></header>
         <div class="integration-details">
           <div class="responsibility-grid three"><article><h3>{c.available}</h3><ul class="technical-list">{item.available.map((entry) => <li>{entry}</li>)}</ul></article><article><h3>{c.client}</h3><ul class="technical-list">{item.client.map((entry) => <li>{entry}</li>)}</ul></article><article><h3>{c.notIncluded}</h3><ul class="technical-list">{item.missing.map((entry) => <li>{entry}</li>)}</ul></article></div>
-          <div class="integration-proof"><div><span>{c.evidence}</span><pre><code>{item.proof}</code></pre></div><div class="api-strip"><span>{c.relevant}</span><div>{item.api.map((name) => <a href={`${apiSource}#L${apiLines[name]}`}><code>{name}()</code></a>)}</div></div></div>
+          <div class="integration-proof"><div><span>{c.evidence}</span><pre><code>{item.proof}</code></pre></div><div class="api-strip"><span>{c.relevant}</span><div>{item.api.map((name) => <a href={apiSource}><code>{name}()</code></a>)}</div></div></div>
         </div>
       </section>
     ))}
   </div>
 
-  <section class="reference-footer page-width"><div><p>{c.next}</p><h2>{c.nextCopy}</h2><div class="inline-command"><code>cargo run -p canwu-api --example move_army</code></div></div><div><a class="button primary" href="https://github.com/PeiyuanQi/canwu/blob/main/crates/facade/canwu-api/examples/move_army.rs">{c.run} ↗</a><a class="button" href={`${isEnglish ? "/en" : ""}/architecture/`}>{c.architecture} →</a><a class="text-action" href={apiSource}>{c.source} ↗</a></div></section>
+  <section class="reference-footer page-width"><div><p>{c.next}</p><h2>{c.nextCopy}</h2><div class="inline-command"><code>cargo run -p canwu-reference-world --example starter</code></div></div><div><a class="button primary" href={starterSource}>{c.run} ↗</a><a class="button" href={`${isEnglish ? "/en" : ""}/architecture/`}>{c.architecture} →</a><a class="text-action" href={apiSource}>{c.source} ↗</a></div></section>
 </BaseLayout>

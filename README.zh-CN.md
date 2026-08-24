@@ -41,10 +41,10 @@ canwu-api = "=0.5.1"
 
 ## 快速开始
 
-安装 Rust 1.88 或更高版本，然后运行无界面移动示例：
+安装 Rust 1.88 或更高版本，然后运行已经迁出的参考世界入门示例：
 
 ```text
-cargo run -p canwu-api --example move_army
+cargo run -p canwu-reference-world --example starter
 ```
 
 如需查看只使用公开 API 的分阶段插件示例：
@@ -70,6 +70,7 @@ cargo run -p canwu-society --example local_community_diffusion
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
+```
 
 如需运行无锡本地与无锡到北京的经路线规划通信示例：
 
@@ -83,13 +84,14 @@ cargo run -p canwu-correspondence --example routed_correspondence
 - `canwu-decision`：决策票据、控制者、决策轨迹、通用效用评估器和策略 SDK 接口
 - `canwu-time`：不依赖画面帧率的历史时间
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
-- `canwu-world`：历史实体和只读世界快照
 - `canwu-knowledge`：每个角色知道什么，以及信息来自何时
 - `canwu-routing`：确定性的角色相对路线规划
 - `canwu-transport`：行程、保管权交接、容量预订和运送执行
 - `canwu-sim`：不公开的模拟状态、命令、调度和插件
 - `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
-- `canwu-debug`：只使用公开 API 的小型参考客户端
+- `canwu-reference-world`：可替换的示例实体、脱离式投影、移动插件、路由适配器
+  和可运行的持久化/重演入门示例
+- `canwu-debug`：建立在公开 API 与参考整合包之上的小型参考客户端
 - `canwu-information`：未发布的实验性信息生命周期扩展
 - `canwu-correspondence`：建立在寻路、运输与信息生命周期之上的未发布实验性
   通信模拟领域扩展和模拟插件
@@ -160,20 +162,30 @@ cargo run -p canwu-correspondence --example routed_correspondence
 ## 最小 API 示例
 
 ```rust
-use canwu_api::{Canwu, Command, CommandEnvelope, EntityRef, Issuer, SimDuration};
+use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
+use canwu_reference_world::{
+    MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement,
+};
 
-let mut canwu = Canwu::demo(35)?;
-let ids = Canwu::demo_ids();
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
 
-canwu.submit(CommandEnvelope::new(
+let envelope = order_movement(
     Issuer::Actor(ids.commander),
-    Command::OrderMovement {
+    &MovementCommand {
         subject: EntityRef::Army(ids.army),
         destination: ids.eastern_territory,
         cargo: Vec::new(),
     },
-))?;
-let events = canwu.advance(SimDuration::days(1))?;
+)?
+.at_time(canwu.time());
+canwu.enqueue_command(
+    canwu.time(),
+    0,
+    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), envelope),
+)?;
+let events = canwu.advance_canonical(SimDuration::days(1))?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 

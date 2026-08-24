@@ -6,7 +6,6 @@
 #![allow(clippy::missing_errors_doc)]
 
 use canwu_time::{SimDuration, SimTime};
-use canwu_world::WorldSnapshot;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, VecDeque};
@@ -275,59 +274,6 @@ impl PlanningSnapshot {
     pub fn digest(&self) -> String {
         canonical_digest(self)
     }
-}
-
-pub fn planning_snapshot_from_world(
-    world: &WorldSnapshot,
-    observer: impl Into<String>,
-    observed_at: SimTime,
-    knowledge_cut: impl Into<String>,
-    topology_version: impl Into<String>,
-    mode: TransferMode,
-) -> Result<PlanningSnapshot, RoutingError> {
-    let topology_version = topology_version.into();
-    let endpoints = world
-        .territories
-        .iter()
-        .map(|territory| RoutingEndpoint {
-            id: RoutingNodeRef::new(format!("territory/{}", territory.id.get())),
-            kind: RoutingEndpointKind::Settlement,
-        })
-        .collect::<Vec<_>>();
-    let mut connections = Vec::with_capacity(world.routes.len() * 2);
-    for route in &world.routes {
-        let forward = RoutingConnection {
-            id: RoutingConnectionRef::new(format!("route/{}/forward", route.id.get())),
-            from: RoutingNodeRef::new(format!("territory/{}", route.from.get())),
-            to: RoutingNodeRef::new(format!("territory/{}", route.to.get())),
-            mode,
-            traversal: TraversalModel::Fixed {
-                duration: SimDuration::minutes(route.travel_minutes),
-            },
-            available_from: None,
-            available_until: None,
-            risk_per_mille: 0,
-            resource_cost: 0,
-        };
-        let reverse = RoutingConnection {
-            id: RoutingConnectionRef::new(format!("route/{}/reverse", route.id.get())),
-            from: forward.to.clone(),
-            to: forward.from.clone(),
-            ..forward.clone()
-        };
-        connections.push(forward);
-        connections.push(reverse);
-    }
-    let network = RoutingNetwork::new(topology_version.clone(), endpoints, connections)?;
-    Ok(PlanningSnapshot {
-        observer: observer.into(),
-        observed_at,
-        valid_until: None,
-        knowledge_cut: knowledge_cut.into(),
-        topology_version,
-        timetable_version: None,
-        network,
-    })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -963,55 +909,5 @@ mod tests {
         let mut changed = request.clone();
         changed.policy.version = "policy.v2".to_owned();
         assert_ne!(first, RoutingCache::key(&snapshot, &changed));
-    }
-
-    #[test]
-    fn world_snapshot_adapter_produces_two_directional_connections() {
-        let world = WorldSnapshot {
-            territories: vec![
-                canwu_world::Territory {
-                    id: canwu_core::TerritoryId::new(1),
-                    name: "无锡".to_owned(),
-                    controller: canwu_core::GovernmentId::new(1),
-                    position: canwu_world::MapPoint { x: 0.0, y: 0.0 },
-                },
-                canwu_world::Territory {
-                    id: canwu_core::TerritoryId::new(2),
-                    name: "北京".to_owned(),
-                    controller: canwu_core::GovernmentId::new(1),
-                    position: canwu_world::MapPoint { x: 1.0, y: 1.0 },
-                },
-            ],
-            routes: vec![canwu_world::Route {
-                id: canwu_core::RouteId::new(1),
-                name: "大运河".to_owned(),
-                from: canwu_core::TerritoryId::new(1),
-                to: canwu_core::TerritoryId::new(2),
-                travel_minutes: 100,
-                terrain: "canal".to_owned(),
-            }],
-            ..WorldSnapshot::default()
-        };
-        let snapshot = planning_snapshot_from_world(
-            &world,
-            "courier",
-            SimTime::EPOCH,
-            "knowledge:1",
-            "world:1",
-            TransferMode::RiverBoat,
-        )
-        .unwrap();
-        let plan = plan_route(
-            &snapshot,
-            &RoutingRequest {
-                origin: RoutingNodeRef::new("territory/1"),
-                destination: RoutingNodeRef::new("territory/2"),
-                departure_at: SimTime::EPOCH,
-                policy: RoutingPolicy::default(),
-            },
-        )
-        .unwrap();
-        assert_eq!(plan.estimated_arrival_at, SimTime::from_minutes(100));
-        assert_eq!(plan.legs[0].mode, TransferMode::RiverBoat);
     }
 }

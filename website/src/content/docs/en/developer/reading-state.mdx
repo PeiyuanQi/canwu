@@ -1,59 +1,43 @@
 ---
 title: Read and present state safely
-description: Choose the correct Canwu read interface for trusted hosts, players, agents, and renderers.
+description: Choose generic or domain read interfaces for trusted hosts, players, agents, and renderers.
 sidebar:
   order: 3
   label: Reading and presentation
 ---
 
-Canwu stores both the authoritative world and actor knowledge. The most important read decision is not which struct is
-convenient; it is what the caller is allowed to know.
+Canwu separates generic authoritative state from actor knowledge, while a domain integration builds concrete world projections. The most important read decision is what the caller is allowed to know.
 
 ## Choose by caller
 
 | Caller | Preferred interface | Purpose |
 | --- | --- | --- |
-| Trusted server, debugger, or test | `world()`, `events()`, `boundaries()`, `query()` | Read authoritative state and complete evidence |
-| Player or in-world agent | `observe()`, `query_as()`, `inspect()` | Build results from that actor's knowledge without leaking ground truth |
-| Action chooser | `available_actions()`, `act()` | Discover legal capabilities, then execute through the same authority boundary |
-| Explanation UI | `explain()` | Build causal explanations from recorded events, failures, or state evidence |
+| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()` | Read generic authoritative state and complete evidence |
+| Domain rule or renderer adapter | Integration `snapshot()` or equivalent projection | Assemble typed domain records into a detached view |
+| Player or in-world agent | `viewer_for_actor()` + `query_knowledge()` | Read only that actor's knowledge without leaking ground truth |
+| Explanation UI | `explain()` | Build causal explanations from recorded events or failures |
 
-## An authoritative snapshot is not a player view
+## A domain projection is not a player view
 
 ```rust
-use canwu_api::{Canwu, ObserveRequest};
+use canwu_api::{Canwu, KnowledgeQuery};
+use canwu_reference_world::{ReferenceWorldPlugin, demo_scenario, snapshot};
 
-let canwu = Canwu::demo(35)?;
-let ids = Canwu::demo_ids();
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
 
-let server_world = canwu.world();
-let commander_view = canwu.observe(ids.commander, &ObserveRequest::default())?;
+let server_world = snapshot(&canwu)?;
+let commander_knowledge = canwu
+    .viewer_for_actor(ids.commander)?
+    .query_knowledge(&KnowledgeQuery::default())?;
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-`world()` returns a detached, read-only snapshot for server rules, tests, and trusted debugging tools. It still contains
-ground truth, so do not send it unchanged to players, actor agents, or untrusted remote clients.
+The reference integration's `snapshot()` is a trusted projection containing full world truth. Do not send it unchanged to players, actor agents, or untrusted clients.
 
-`observe()`, `query_as()`, and `inspect()` build results from what the selected actor knows. The same army may have a
-current location for its commander and a stale reported location for a distant observer.
+The reference world is only one integration. A custom domain assembles its own projection from `typed_domain_record()` while using `CanwuViewer` for actor knowledge.
 
 ## Presentation copies state; it does not write back
 
-A renderer may copy locations, routes, and statuses from `WorldSnapshot`, then keep its own animation progress and
-interpolation state. Presentation values never feed back into Canwu or change command outcomes. Refresh or correct them
-from a new snapshot after authoritative time advances.
-
-Continuous clients keep three clocks separate:
-
-- **Wall time:** frame intervals and pause state, owned by the host.
-- **Simulation time:** `SimTime` and `SimDuration`, settled by Canwu.
-- **Presentation time:** animation and interpolation, allowed to use floating point but confined to the client.
-
-## Practical review checklist
-
-- Does this response require an actor identity? Prefer an actor-relative API when it does.
-- Is the cache holding a detached snapshot, or an unintended internal state reference?
-- Can a debug switch expose `world()` output to production clients?
-- Does the explanation come from `explain()` and evidence instead of UI inference?
-
-Continue with the [event system](/en/architecture/events/) to see how knowledge changes through communication and events.
+A renderer may copy locations, routes, and statuses from a domain projection, then keep its own animation and interpolation data. Presentation state never feeds back into Canwu. Continuous clients keep wall time, simulation time, and presentation time separate.

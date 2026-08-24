@@ -44,7 +44,7 @@ renamed by this policy.
 | [模拟时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | simulation time | `SimTime`, `SimDuration` | Deterministic, representable time settled by Canwu. |
 | [表现时间](../website/src/content/docs/tutorials/continuous-game-loop.mdx) | presentation time | — | Client-side animation or interpolation time; it may be fractional and is not authoritative. |
 | [命令](../website/src/content/docs/developer/integration.mdx) | command | `Command`, `CommandEnvelope` | A typed request to change authoritative state through validation and authority checks. |
-| [语义动作](../website/src/content/docs/tutorials/move-army.mdx) | semantic action | `SemanticAction` | A capability-oriented action exposed to UI or agents and translated into a validated command. |
+| [领域命令](../website/src/content/docs/tutorials/move-army.mdx) | domain command | `Command::Plugin` | Typed intent defined by a domain integration and validated through public canonical ingress. |
 | [规范化输入](../website/src/content/docs/architecture/events.mdx) | canonical ingress | `IngressRecord` | The persisted, deterministically ordered input path for commands, communication, information, and scheduled systems. Write the English term on first use when needed. |
 | [准入](../website/src/content/docs/architecture/events.mdx) | admission | — | The decision and cut that determine which pending inputs belong to a boundary. It is not a synonym for ingress. |
 | [调度工作](../website/src/content/docs/architecture/events.mdx) | scheduled work | — | Work assigned a deterministic simulation due time and insertion order. |

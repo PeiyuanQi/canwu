@@ -64,8 +64,8 @@ should use `canwu-api`.
 
 ## Core developer constraints
 
-1. Application code depends on `canwu-api`, not internal crates as compatibility surfaces.
-2. External mutations enter through commands, semantic actions, or canonical ingress rather than direct world edits.
+1. Application code enters through `canwu-api`; choose a public domain integration for concrete rules, and do not use internal crates as compatibility surfaces.
+2. External mutations enter through engine commands, domain plugin commands, or canonical ingress rather than direct state edits.
 3. Players and agents read actor-relative views by default; authoritative snapshots stay inside trusted host logic and debugging tools.
 4. Wall time, rendering, and input belong to the host; Canwu receives representable simulation durations.
 5. Persisted applications pin the engine version and restore the same plugin semantics during load and replay.

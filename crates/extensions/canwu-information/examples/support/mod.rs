@@ -243,6 +243,7 @@ where
     let has_external_authority = authority_claim.is_some();
     let scenario = Scenario {
         start_time: canwu_api::SimTime::from_minutes(1_000),
+        entities: case_world().entities(),
         world: case_world(),
         knowledge: KnowledgeSnapshot::default(),
         domain_records: seed.domain_records().cloned().collect(),
