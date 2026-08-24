@@ -608,7 +608,7 @@ extension's validated operations.
 
 ### Package and ownership
 
-- [x] Add unpublished `crates/extensions/canwu-information` depending only on
+- [x] Add published experimental `crates/extensions/canwu-information` depending only on
   `canwu-api`, serde, and serde_json.
 - [x] Add `InformationPlugin` with a fixed neutral namespace.
 - [x] Register channel, content, representation, instance, dispatch,

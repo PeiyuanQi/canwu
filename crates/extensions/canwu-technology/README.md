@@ -1,6 +1,6 @@
 # canwu-technology
 
-`canwu-technology` is Canwu's unpublished experimental technology simulation
+`canwu-technology` is Canwu's published experimental technology simulation
 domain extension. It models immutable technique revisions, evidence-bearing
 attempts, holder-relative claims and observations, local capability,
 implementation, use-specific adoption, and teaching opportunities.

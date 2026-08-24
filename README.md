@@ -44,9 +44,9 @@ example above selects the immutable `0.6.0` release rather than the moving
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the public API. They are not separate compatibility surfaces for application code.
-Experimental domain extensions such as `canwu-correspondence` and
-`canwu-society` remain unpublished and must be consumed from the repository
-until separately stabilized.
+The experimental domain extensions are also published as crates.io packages so
+applications can depend on a released extension version; they remain optional
+and may evolve independently before 1.0.
 
 ## Quick start
 
@@ -103,15 +103,15 @@ cargo run -p canwu-correspondence --example routed_correspondence
 - `canwu-reference-world`: replaceable example entities, detached projection,
   movement plugin, routing adapter, and runnable persistence/replay starter
 - `canwu-debug`: a small reference client built on the public API and reference integration
-- `canwu-information`: unpublished experimental information-lifecycle extension
-- `canwu-correspondence`: unpublished experimental correspondence domain
+- `canwu-information`: published experimental information-lifecycle extension
+- `canwu-correspondence`: published experimental correspondence domain
   extension and simulation plugin built on routing, transport, and information
-- `canwu-society`: unpublished experimental social diffusion simulation module;
+- `canwu-society`: published experimental social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
-- `canwu-technology`: unpublished generic technology extension for evidence,
+- `canwu-technology`: published generic technology extension for evidence,
   local capability, implementation, use-specific adoption, and diffusion
-- `canwu-history-research`: three optional historical assessment plugins kept
-  downstream from base technology truth
+- `canwu-history-research`: published optional historical assessment plugins
+  kept downstream from base technology truth
 
 The [crate map](crates/README.md) shows the repository layers, exact dependency
 DAG, and publication order. The [documentation index](docs/README.md) links the

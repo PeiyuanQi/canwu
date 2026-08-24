@@ -26,9 +26,9 @@ Canwu core.
 5. Debug and research authority is explicit and cannot be reached by silently
    falling back from an actor-scoped API.
 6. Experimental domain extensions may prove these contracts while remaining
-   unpublished and outside the `canwu-api` dependency graph. Their domain
-   models do not become kernel conformance requirements merely by existing in
-   the workspace.
+   optional and outside the `canwu-api` dependency graph. Their domain models
+   do not become kernel conformance requirements merely by existing in the
+   workspace, whether or not the extension crate is published.
 
 ## Required engine contracts
 
@@ -311,7 +311,7 @@ randomness, save/load, exact replay, forking, rollback, tamper detection, and
 package-identity rejection. It proves those implemented architecture boundaries
 without adding application-specific types or rules to the kernel.
 
-The unpublished `canwu-society` social diffusion simulation module is an
+The published experimental `canwu-society` social diffusion simulation module is an
 experimental domain extension. It additionally composes E01,
 E02, E04, E05, E07, E09, E10, E12, E13, and E15 through public `canwu-api`
 contracts. Its neutral local-community fixture proves conserved sparse cohort

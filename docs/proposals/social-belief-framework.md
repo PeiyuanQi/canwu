@@ -1,6 +1,6 @@
 # Social Belief and Institutional Diffusion Framework
 
-Status: implemented as an unpublished experimental social diffusion simulation module and domain extension.
+Status: implemented as a published experimental social diffusion simulation module and domain extension.
 
 Implementation baseline: Canwu `main` at
 `d026c669c91fcf5546a87c2b28e669b154a0745a` on 2026-08-20. DecisionTicket is
@@ -12,7 +12,7 @@ existing authorized `ViewerContext` boundary and never fall back to truth.
 
 Do not add a `Religion` entity or religion-specific solver to Canwu core.
 
-Prototype a generic, unpublished `canwu-society` social diffusion simulation
+Prototype a generic, published experimental `canwu-society` social diffusion simulation
 module as a domain extension that uses Canwu's public plugin, domain-record,
 boundary, persistence, and replay contracts. Keep historical beliefs, rituals,
 institutions, policies, people, and conflicts in downstream domain packages such
@@ -82,7 +82,8 @@ Downstream domain packages
 
 `canwu-society` should depend on the supported public API (`canwu-api`). It must not
 be re-exported by `canwu-api`, and `canwu-api` must not depend on it. During the
-experimental period it should use `publish = false`.
+experimental period it is published to crates.io while retaining an explicitly
+unstable API surface.
 
 The social diffusion simulation module may consume information-derived exposure
 inputs through public records or ingress, but it must not own documents,
@@ -453,7 +454,7 @@ active outputs, while inactive catalog growth does not materialize a dense
 1. Approve this proposal without declaring public API stability.
 2. Coordinate with the decision-framework worktree and information design so
    persistence, knowledge, and decision contracts are not implemented twice.
-3. Build the unpublished `canwu-society` social diffusion simulation module as
+3. Build the published experimental `canwu-society` social diffusion simulation module as
    a domain extension on the existing plugin and domain-record contracts.
 4. Implement cohorts, sparse multidimensional disposition distributions, and
    deterministic transition remainders.

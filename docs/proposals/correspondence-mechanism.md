@@ -4,7 +4,7 @@ Status: implemented experimental 0.5 milestone.
 
 This proposal defines the reusable integration between communication demand,
 holder-relative routing knowledge, transport execution, and the neutral
-information lifecycle. The first implementation is the unpublished
+information lifecycle. The first implementation is the published experimental
 `canwu-correspondence` crate and its runnable Wuxi delivery example.
 
 ## Architectural position

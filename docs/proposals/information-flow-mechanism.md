@@ -22,8 +22,8 @@ Add two generic capabilities to the Canwu kernel:
    operation-keyed random draw whose result is unaffected by unrelated draws.
 
 Build content lineage, representations, instances, dispatches, per-recipient
-delivery attempts, access, interpretation, audiences, and release as an
-unpublished authoritative `canwu-information` extension plugin that depends
+delivery attempts, access, interpretation, audiences, and release as a
+published experimental authoritative `canwu-information` extension plugin that depends
 only on the supported public API (`canwu-api`). The extension, not an application
 plugin, owns the fixed information record namespace and is the only writer of
 those records.
@@ -99,7 +99,7 @@ Canwu kernel
   operation-keyed deterministic random draws
   atomic settlement, evidence, hashing, persistence, replay
 
-canwu-information (experimental, publish = false)
+canwu-information (published experimental crate)
   authoritative extension plugin and fixed schema owner
   information content
   representations and derivation lineage
@@ -1519,7 +1519,7 @@ Create crates/extensions/canwu-information with:
 
 ~~~toml
 [package]
-publish = false
+publish = ["crates-io"]
 
 [dependencies]
 canwu-api = { path = "../../api/canwu-api" }
@@ -3005,9 +3005,9 @@ second and counterexample profiles can constrain the model.
 ### Recommended option
 
 Implement the smallest generic kernel publication and operation-keyed random
-primitives, keep the authoritative information lifecycle in an unpublished
-extension, and require two public cases plus the structurally different
-conformance profiles before publication.
+primitives, keep the authoritative information lifecycle in its published
+experimental extension, and require two public cases plus the structurally
+different conformance profiles before further compatibility promotion.
 
 This option has a larger proof burden than a case-specific plugin but preserves
 reversibility and exposes overfitting before the API is stable.
@@ -3036,7 +3036,8 @@ Stop implementation and revise this design if any of the following occurs:
 
 ## Promotion gate
 
-canwu-information remains publish = false until:
+`canwu-information` is published as an experimental crate. It remains optional
+and is not re-exported by `canwu-api`; future compatibility promotion requires:
 
 - both anonymous public cases use the same public record and lifecycle types;
 - all internal conformance profiles pass unchanged;
@@ -3050,5 +3051,5 @@ canwu-information remains publish = false until:
 - a fourth synthetic consumer can implement a different information channel
   without changing shared types.
 
-Only after that evidence should stable parts be considered for publication or
-promotion into Canwu core.
+That evidence is separate from publication and from any future promotion of
+stable parts into Canwu core.

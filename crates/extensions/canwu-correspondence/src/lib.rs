@@ -1,6 +1,6 @@
 //! Addressed correspondence orchestration for Canwu.
 //!
-//! This unpublished domain extension binds decision-backed communication
+//! This published experimental domain extension binds decision-backed communication
 //! intents to holder-relative address and route knowledge, the pure routing
 //! mechanism, transport execution, and the neutral information lifecycle.
 

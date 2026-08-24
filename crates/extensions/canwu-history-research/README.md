@@ -1,6 +1,6 @@
 # canwu-history-research
 
-Optional, unpublished historical research assessment plugins for Canwu.
+Optional, published historical research assessment plugins for Canwu.
 They record source, practice, and production-archaeology assessments without
 changing the authoritative outcome of `canwu-technology`.
 

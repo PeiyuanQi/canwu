@@ -1,6 +1,6 @@
 # canwu-society
 
-`canwu-society` is Canwu's experimental, unpublished **social diffusion
+`canwu-society` is Canwu's published experimental **social diffusion
 simulation module**. Architecturally, it is a **domain extension** built on the
 public engine contracts rather than a kernel subsystem. It owns aggregate
 population dispositions, social influence, organization topology,

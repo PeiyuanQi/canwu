@@ -3,7 +3,7 @@
 //! The crate models generic population dispositions, influence networks,
 //! organization topology, institutional alignment, policy pressure, and
 //! authorized observer estimates. Historical meanings remain in downstream
-//! packages. Architecturally, it is an unpublished domain extension built on
+//! packages. Architecturally, it is a published experimental domain extension built on
 //! Canwu's public engine contracts, not a kernel subsystem.
 
 mod decision;

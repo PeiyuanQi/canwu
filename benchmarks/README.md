@@ -122,7 +122,7 @@ service-level objective.
 
 ## Technology and historical-research profile
 
-The standalone `technology-profile` binary measures the unpublished generic
+The standalone `technology-profile` binary measures the published experimental generic
 technology extension with all three historical assessment plugins enabled. It
 has a fixed 100-site paced-interactive component profile and a 500-site pressure
 profile. Every one of its 240

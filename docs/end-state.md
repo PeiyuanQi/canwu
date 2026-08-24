@@ -71,15 +71,16 @@ snapshot growth, query cost, load/index-rebuild cost, replay throughput, and
 compact-archive cost. Recorded baselines are engineering evidence, not a
 machine-independent service-level objective.
 
-The first authoritative implementation remains the unpublished
-`canwu-information` extension for the 0.5 line. Keeping it private lets the
-record vocabulary, lifecycle helpers, and high-fan-out continuation ergonomics
-receive another independent domain implementation before crates.io publication.
+The first authoritative implementation was the
+`canwu-information` extension for the 0.5 line; it is now a published
+experimental crate. Publishing it makes the record vocabulary, lifecycle
+helpers, and high-fan-out continuation ergonomics available to independent
+consumers while keeping the extension optional.
 The kernel holder-ledger, evidence, archive, and keyed-random contracts are the
-stable reusable boundary; publishing the extension is a later, separately
-reviewed compatibility decision.
+stable reusable boundary; each extension remains a separately reviewed
+compatibility decision.
 
-The unpublished `canwu-correspondence` domain extension composes this neutral
+The published experimental `canwu-correspondence` domain extension composes this neutral
 ledger with actor-relative route knowledge and transport execution. It owns
 communication opportunities, admitted sender/recipient intent, address
 resolution, accepted route evidence, incident policy, and cross-extension
@@ -226,7 +227,7 @@ diplomacy, migration, disease, and climate should remain separately testable
 plugins. The core may standardize broadly shared primitives only after at least
 two concrete systems need them.
 
-The first generic technology implementation is the unpublished
+The first generic technology implementation is the published experimental
 `canwu-technology` domain extension. It demonstrates that invention and
 diffusion can be represented without a universal unlock tree: immutable
 technique revisions are tested through evidence-bearing attempts, qualified
@@ -252,7 +253,7 @@ incremental validation may raise that ceiling, but historical fidelity plugins
 are not a substitute for those kernel improvements.
 
 The first reference implementation of population-scale social diffusion is the
-unpublished `canwu-society` **social diffusion simulation module**.
+published experimental `canwu-society` **social diffusion simulation module**.
 Architecturally, it is an experimental **domain extension** built on Canwu's
 public engine contracts. It keeps cohort distributions, influence
 edges, organization topology, institutional alignment, policy pressure,

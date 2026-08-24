@@ -2,9 +2,10 @@
 
 Canwu publishes its Rust libraries to crates.io and uses GitHub tags and
 releases as the immutable source reference for each version. Applications
-should depend only on `canwu-api`; the remaining library crates are published
-to satisfy its dependency graph. `canwu-debug` is a reference binary and is not
-published to crates.io.
+should depend only on `canwu-api`; the foundation, model, mechanism, and runtime
+crates are published to satisfy its dependency graph. Optional domain extensions
+are published separately for applications that opt into them. `canwu-debug` is
+a reference binary and is not published to crates.io.
 
 ## Release identity
 
@@ -60,6 +61,8 @@ crates.io can resolve every completed group before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
+6. `canwu-information`, `canwu-society`, `canwu-technology`
+7. `canwu-correspondence`, `canwu-history-research`
 
 For each package, first run its dry-run and then publish the exact locked
 source:

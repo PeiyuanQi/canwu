@@ -3,8 +3,8 @@
 This directory is organized by dependency layer. The folder names help people
 navigate the repository; published Cargo package names remain unchanged.
 Applications should depend on `canwu-api`, not on the implementation crates
-below it. Experimental extensions are repository packages rather than part of
-the supported public API.
+below it. Experimental extensions are published packages, but remain optional
+and are not part of the supported public API surface.
 
 ## Dependency graph
 
@@ -115,7 +115,7 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the public API; historical research remains an optional downstream consumer of technology | Not published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Published experimental domain implementations built on the public API; historical research remains an optional downstream consumer of technology | Published |
 | `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
@@ -129,6 +129,8 @@ each completed group to become resolvable before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
+6. `canwu-information`, `canwu-society`, `canwu-technology`
+7. `canwu-correspondence`, `canwu-history-research`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and

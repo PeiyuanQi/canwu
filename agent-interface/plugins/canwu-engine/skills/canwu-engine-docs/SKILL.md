@@ -63,8 +63,8 @@ not silently combine incompatible statements.
 
 - Recommend public `canwu-api` entry points for kernel capabilities. An official
   experimental domain extension may be used only when its documentation
-  explicitly says it is built on `canwu-api`; preserve its unpublished and
-  unstable status.
+  explicitly says it is built on `canwu-api`; preserve its optional and
+  unstable status even though the extension crate is published.
 - Keep rendering, wall time, input devices, audio, and presentation state in
   the host application.
 - Use actor-relative reads for actor-facing workflows. Do not replace missing

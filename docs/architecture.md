@@ -411,14 +411,14 @@ contracts a **domain extension** (**模拟领域扩展**). A domain extension ow
 domain state, rules, commands, and actor projections while reusing kernel
 infrastructure such as events, settlement, decisions, persistence, and replay.
 
-`canwu-correspondence` is an unpublished experimental correspondence domain
+`canwu-correspondence` is a published experimental correspondence domain
 extension. It is also a runtime `SimulationPlugin`: the first term describes
 ownership of reusable communication policy and evidence, while the second
 describes how its authoritative commands and boundary systems execute. It
 depends on `canwu-api` and `canwu-information`; neither dependency points back
 to it.
 
-`canwu-society` is an unpublished experimental **social diffusion simulation
+`canwu-society` is a published experimental **social diffusion simulation
 module** (**社会传播模拟模块**). It is a domain extension built on
 `canwu-api`, not a dependency of `canwu-api` or a new kernel subsystem. It
 models the reusable part of population-scale belief and affiliation change without introducing
@@ -469,7 +469,7 @@ times. Fork and exact replay use the same serialized authoritative state.
 
 ### Technology and historical research / 技术与历史研究
 
-`canwu-technology` is an unpublished experimental domain extension built only
+`canwu-technology` is a published experimental domain extension built only
 on `canwu-api`. It owns generic metric schemas, immutable technique revisions,
 program intent, experiment and production evidence, holder/site capability,
 installed implementations, use-specific adoption, and transmission
