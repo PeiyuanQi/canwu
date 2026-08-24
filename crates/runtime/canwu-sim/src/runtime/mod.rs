@@ -5,16 +5,15 @@ mod event_payloads;
 mod hashing;
 mod ingress;
 mod knowledge;
-mod legacy_v4;
 mod legacy_world;
 mod manifest;
-mod migration;
 mod persistence;
 mod plugins;
 mod policy;
 mod random;
 mod records;
 mod replay;
+mod revision;
 mod scenario;
 mod scheduling;
 mod settlement;
@@ -29,9 +28,9 @@ pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
     BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryProposal, BoundaryReceipt,
     BoundaryRecord, BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
-    KnowledgeWriteGrant, PluginIngressTarget, ReservationAllocation, ReservationDisposition,
-    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
-    ReservationRequest, ReservationRequestRecord,
+    KnowledgeWriteGrant, OutboxEntry, PluginIngressTarget, ReservationAllocation,
+    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
+    ReservationRef, ReservationRequest, ReservationRequestRecord,
 };
 pub use canwu_core::{
     DomainRecordVersionRef, DomainRecordVersionSource, EvidenceRef, HolderKnowledgeRecordId,
@@ -124,12 +123,11 @@ use hashing::{
     is_canonical_hash, knowledge_commitment_root, plugin_component_commitment_root,
     random_stream_commitment_root, runtime_commitment_roots, scheduler_commitment_root,
     snapshot_boundary_head_state_hash, snapshot_checkpoint_hash, snapshot_commitment_roots,
-    snapshot_is_at_boundary_head, snapshot_state_hash, state_hash, world_commitment_root,
+    snapshot_is_at_boundary_head, state_hash, world_commitment_root,
 };
 use ingress::IngressQueueKey;
-use migration::{
+use revision::{
     PersistedAdmissionCursors, authoritative_revision_count, boundaries_before_attempts,
-    inferred_run_configuration, migrate_snapshot,
 };
 use settlement::{PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_system_due};
 use state::{
@@ -154,13 +152,16 @@ use validation::{
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 5;
-/// Version of the independently migrated authoritative revision commitment.
-pub const STATE_REVISION_FORMAT_VERSION: u32 = 1;
+/// Format 6 is the first pre-1.0 self-contained persistence contract. Older
+/// snapshots, journals, and sub-contract versions are rejected before any
+/// mutable runtime state is constructed.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
+/// Version of the authoritative revision commitment.
+pub const STATE_REVISION_FORMAT_VERSION: u32 = 2;
 /// Version of persisted monotonic boundary-admission cursors.
-pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 1;
+pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 2;
 /// Version of the domain-separated checkpoint commitment contract.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 1;
+pub const COMMITMENT_FORMAT_VERSION: u32 = 2;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying
@@ -170,6 +171,137 @@ const CORE_STATE_NAMESPACE: &str = "canwu.core";
 const MAX_DOMAIN_RECORD_QUERY_LIMIT: usize = 10_000;
 const GENESIS_BOUNDARY_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
+
+fn fresh_authority_root_seed(root_seed: u64, run_manifest_hash: &str) -> Result<u64, CanwuError> {
+    let digest =
+        hashing::canonical_hash("canwu.authority-root.v1", &(root_seed, run_manifest_hash))?;
+    u64::from_str_radix(&digest[..16], 16)
+        .map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                format!("invalid authority root derivation: {error}"),
+            )
+        })
+        .and_then(|seed| {
+            (seed != 0).then_some(seed).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "the derived authority root cannot be zero",
+                )
+            })
+        })
+}
+
+fn reject_unknown_f6_fields(input: &Value, encoded: &Value, path: &str) -> Result<(), CanwuError> {
+    match (input, encoded) {
+        (Value::Object(input), Value::Object(encoded)) => {
+            for (key, value) in input {
+                let field_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let Some(expected) = encoded.get(key) else {
+                    return Err(invalid_snapshot_error(format!(
+                        "format 6 wire contains unknown field `{field_path}`"
+                    )));
+                };
+                reject_unknown_f6_fields(value, expected, &field_path)?;
+            }
+        }
+        (Value::Array(input), Value::Array(encoded)) => {
+            if input.len() != encoded.len() {
+                return Err(invalid_snapshot_error(format!(
+                    "format 6 wire array `{path}` changed shape during decoding"
+                )));
+            }
+            for (index, (value, expected)) in input.iter().zip(encoded).enumerate() {
+                reject_unknown_f6_fields(value, expected, &format!("{path}[{index}]"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn deserialize_f6_json<T>(json: &str, label: &str) -> Result<T, CanwuError>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
+    let input: Value = serde_json::from_str(json).map_err(|error| {
+        invalid_snapshot_error(format!("could not parse format 6 {label}: {error}"))
+    })?;
+    let decoded: T = serde_json::from_value(input.clone()).map_err(|error| {
+        invalid_snapshot_error(format!("could not deserialize format 6 {label}: {error}"))
+    })?;
+    let encoded = serde_json::to_value(&decoded).map_err(|error| {
+        invalid_snapshot_error(format!("could not re-encode format 6 {label}: {error}"))
+    })?;
+    reject_unknown_f6_fields(&input, &encoded, "")?;
+    Ok(decoded)
+}
+
+fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+    if snapshot.commitment_format_version != COMMITMENT_FORMAT_VERSION
+        || snapshot.revision_format_version != STATE_REVISION_FORMAT_VERSION
+        || snapshot.replay_revision_format_version != STATE_REVISION_FORMAT_VERSION
+        || snapshot.admission_cursor_format_version != ADMISSION_CURSOR_FORMAT_VERSION
+        || snapshot.authority_root_seed == 0
+        || snapshot.legacy_rng.is_some()
+    {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshots must use the current commitment, revision, admission, and authority contracts",
+        ));
+    }
+    let Some(RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshots require a declared run manifest",
+        ));
+    };
+    let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshots must retain their canonical initial scenario",
+        ));
+    };
+    if matches!(
+        snapshot.run_configuration,
+        Some(
+            RunConfigurationSnapshot::LegacyUnspecified | RunConfigurationSnapshot::ManifestOnlyV1
+        )
+    ) {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshots cannot use legacy or manifest-only run configuration provenance",
+        ));
+    }
+    manifest::validate(
+        snapshot.run_manifest.as_ref().expect("checked above"),
+        Some(initial_scenario),
+    )?;
+    let expected_manifest_hash =
+        manifest::hash(snapshot.run_manifest.as_ref().expect("checked above"))?;
+    if snapshot.run_manifest_hash != expected_manifest_hash {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshot run manifest hash is inconsistent",
+        ));
+    }
+    let run_configuration = snapshot
+        .run_configuration
+        .as_ref()
+        .ok_or_else(|| invalid_snapshot_error("format 6 snapshots require run configuration"))?;
+    let (_, authority_manifest_hash) = authoritative_run_identity(
+        snapshot.run_manifest.as_ref().expect("checked above"),
+        &expected_manifest_hash,
+        run_configuration,
+    )?;
+    let expected_authority_root =
+        fresh_authority_root_seed(snapshot.root_seed, &authority_manifest_hash)?;
+    if snapshot.authority_root_seed != expected_authority_root {
+        return Err(invalid_snapshot_error(
+            "format 6 snapshot authority root is not bound to its run identity",
+        ));
+    }
+    Ok(())
+}
 
 /// One deterministic trusted-host page of records from an authoritative read cut.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1037,7 +1169,7 @@ impl Simulation {
         canonicalize_scenario(&mut scenario);
         validate_scenario(&scenario)?;
         manifest::canonicalize(&mut run_manifest);
-        manifest::validate(&run_manifest, Some(&scenario), false)?;
+        manifest::validate(&run_manifest, Some(&scenario))?;
         manifest::validate_run_configuration(&run_manifest, &run_configuration)?;
         validate_run_configuration_entities(
             &run_configuration,
@@ -1075,6 +1207,9 @@ impl Simulation {
         }
         let schema = base_schema();
         let plugins = PluginRegistry::default();
+        let (_, authority_manifest_hash) =
+            authoritative_run_identity(&run_manifest, &run_manifest_hash, &run_configuration)?;
+        let authority_root_seed = fresh_authority_root_seed(seed, &authority_manifest_hash)?;
         let core_stream = RandomStreamState::initial(seed, random::core_report_delay_stream());
         let initial_scenario = Some(scenario.clone());
         let initial_domain_record_indexes = initial_scenario
@@ -1137,6 +1272,7 @@ impl Simulation {
                         .collect(),
                     decisions: DecisionState::default(),
                     root_seed: seed,
+                    authority_root_seed,
                     random_streams: BTreeMap::from([(core_stream.key.clone(), core_stream)]),
                 },
                 scheduler: RuntimeScheduler {
@@ -1280,23 +1416,8 @@ impl Simulation {
         )
     }
 
-    fn domain_record_feature_enabled(&self) -> bool {
-        !self.plugins.record_schemas.is_empty()
-            || !self.state.current.domain_records.is_empty()
-            || self
-                .state
-                .evidence
-                .boundaries
-                .iter()
-                .any(|boundary| !boundary.record_changes.is_empty())
-    }
-
     fn bound_initial_scenario(&self) -> Option<&Scenario> {
-        if self.domain_record_feature_enabled() {
-            self.state.metadata.initial_scenario.as_ref()
-        } else {
-            None
-        }
+        self.state.metadata.initial_scenario.as_ref()
     }
 
     #[must_use]
@@ -1540,12 +1661,24 @@ impl Simulation {
         }
     }
 
+    ///
+    /// # Panics
+    ///
+    /// Panics only if a runtime object was constructed without its required
+    /// Format 6 initial scenario, which is prevented by the public loaders.
     #[must_use]
     pub fn replay_journal(&self) -> ReplayJournal {
         ReplayJournal {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
             root_seed: self.state.current.root_seed,
+            initial_scenario: self
+                .state
+                .metadata
+                .initial_scenario
+                .clone()
+                .expect("Format 6 runs always retain their initial scenario"),
+            authority_root_seed: self.state.current.authority_root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
             run_configuration: self.state.metadata.run_configuration.clone(),
@@ -1561,6 +1694,51 @@ impl Simulation {
             revision_format_version: self.state.metadata.replay_revision_format_version,
             final_revision: self.state.counters.state_revision,
         }
+    }
+
+    /// Returns the durable external-delivery outbox derived from committed
+    /// boundary emissions. Entries are deterministic and never re-sent by
+    /// exact replay; the host owns delivery retries and acknowledgement.
+    pub fn outbox_entries(&self) -> Result<Vec<OutboxEntry>, CanwuError> {
+        Self::outbox_entries_for_boundaries(
+            &self.state.metadata.run_manifest_hash,
+            &self.state.evidence.boundaries,
+        )
+    }
+
+    pub(crate) fn outbox_entries_for_boundaries(
+        run_manifest_hash: &str,
+        boundaries: &[BoundaryRecord],
+    ) -> Result<Vec<OutboxEntry>, CanwuError> {
+        let mut entries = Vec::new();
+        for boundary in boundaries {
+            for (index, emission) in boundary.emissions.iter().enumerate() {
+                let emission_index = u64::try_from(index).map_err(|_| {
+                    CanwuError::new(
+                        ErrorCode::IdentifierExhausted,
+                        "outbox emission index exceeds the persistent identifier space",
+                    )
+                })?;
+                let delivery_id = canonical_hash(
+                    "canwu.outbox.delivery.v1",
+                    &(
+                        run_manifest_hash,
+                        boundary.id,
+                        emission.event,
+                        emission_index,
+                    ),
+                )?;
+                entries.push(OutboxEntry {
+                    delivery_id,
+                    boundary: boundary.id,
+                    event: emission.event,
+                    emission_index,
+                    plugin: emission.plugin.clone(),
+                    system: emission.system.clone(),
+                });
+            }
+        }
+        Ok(entries)
     }
 
     fn compute_boundary_state_hash_for(
@@ -1640,6 +1818,7 @@ impl Simulation {
             schema: &self.schema,
             scheduled: &scheduled,
             root_seed: self.state.current.root_seed,
+            authority_root_seed: self.state.current.authority_root_seed,
             random_streams: &random_streams,
             random_draws: &self.state.evidence.random_draws,
             next_event_id: self.state.counters.next_event_id,
@@ -1746,6 +1925,7 @@ impl Simulation {
                 &manifest_hash,
                 self.state.scheduler.initial_time,
                 initial_scenario.as_ref(),
+                self.state.current.authority_root_seed,
                 &descriptors,
                 &self.schema,
             )?)
@@ -1919,11 +2099,11 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::UnsupportedSnapshotVersion,
                 format!(
-                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; legacy format-4 JSON must use the strict JSON loader"
+                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; legacy format-4/5 JSON is not supported"
                 ),
             ));
         }
-        let snapshot = migrate_snapshot(snapshot)?;
+        validate_f6_snapshot_contract(&snapshot)?;
         validate_scenario_state(&Scenario {
             start_time: snapshot.now,
             entities: snapshot.entities.clone(),
@@ -1944,24 +2124,9 @@ impl Simulation {
             .filter(|record| !admitted_ingress.contains(&record.id))
             .map(IngressQueueKey::from_record)
             .collect();
-        let initial_scenario = match snapshot.initial_scenario.clone() {
-            Some(initial_scenario) => Some(initial_scenario),
-            None if !snapshot.plugin_registration_closed => match snapshot.run_manifest.as_ref() {
-                Some(run_manifest @ RunManifest::Declared { .. }) => {
-                    let initial_scenario = Scenario {
-                        start_time: snapshot.initial_time,
-                        entities: snapshot.entities.clone(),
-                        world: snapshot.world.clone(),
-                        knowledge: snapshot.knowledge.clone(),
-                        domain_records: snapshot.domain_records.clone(),
-                    };
-                    manifest::validate(run_manifest, Some(&initial_scenario), true)?;
-                    Some(initial_scenario)
-                }
-                _ => None,
-            },
-            None => None,
-        };
+        let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
+            invalid_snapshot_error("format 6 validation requires an initial scenario")
+        })?);
         let initial_domain_record_indexes = initial_scenario
             .as_ref()
             .map(|scenario| {
@@ -2036,6 +2201,7 @@ impl Simulation {
                         .collect(),
                     decisions: snapshot.decisions,
                     root_seed: snapshot.root_seed,
+                    authority_root_seed: snapshot.authority_root_seed,
                     random_streams: snapshot
                         .random_streams
                         .into_iter()
@@ -2115,7 +2281,7 @@ impl Simulation {
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
-        let snapshot = legacy_v4::deserialize_snapshot_json(json)?;
+        let snapshot: SimulationSnapshot = deserialize_f6_json(json, "snapshot")?;
         Self::from_snapshot(snapshot)
     }
 
@@ -2135,7 +2301,7 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let snapshot = legacy_v4::deserialize_snapshot_json(json)?;
+        let snapshot: SimulationSnapshot = deserialize_f6_json(json, "snapshot")?;
         Self::from_snapshot_with_plugins(snapshot, plugins)
     }
 

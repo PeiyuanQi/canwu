@@ -7,6 +7,16 @@ fourteen independent algorithms. At the lowest level, the runtime combines two
 state-write paths, one deterministic allocation primitive, and one
 cross-cutting visibility policy:
 
+## Format 6 contract / Format 6 契约
+
+Before 1.0, Canwu uses a clean persistence break. Format 6 requires a declared
+run manifest, declared run configuration, canonical initial scenario, versioned
+commitments, and a self-contained replay journal. The engine does not load or
+silently migrate format-4/5 saves. `SimulationGranularity` supplies the generic
+`aggregate` / `group` / `actor` levels; Population, Special Group, and Character
+are Celestial Mandate mappings owned by a downstream reference integration.
+Southern Ming and WWII content therefore does not belong in Canwu core.
+
 ```mermaid
 flowchart TB
     Inputs["Commands / events / scheduled work<br/>命令 / 事件 / 调度工作"]
@@ -308,29 +318,27 @@ world entities and event payloads. / 上面的依赖 DAG 描述当前实现，�
 公开类型的最终归属。已经接受的审计确立同一条边界：通用引擎 crate 拥有确定性
 模拟契约，参考整合包拥有时代或应用特定的世界实体和事件载荷。
 
-That migration is now complete: `canwu-reference-world` owns the model,
+That ownership split is now complete: `canwu-reference-world` owns the model,
 movement behavior, detached projection, and routing adapter; the source
 `canwu-world` package has been retired from the workspace and dependency DAG.
-Format-5 world fields remain only as a deprecated compatibility projection in the
-public API/runtime for old callers and saves.
+The remaining `WorldSnapshot` projection is a current reference/runtime API,
+not a persistence migration surface. Format 6 does not load old saves.
 `canwu-event` now contains only generic contracts: `EventKind` is a type label
 plus flattened structured fields, while concrete movement, arrival, letter,
 report, knowledge, and debug payload structs live outside that crate. / 按此
 方向，这项迁移已经完成：`canwu-reference-world` 拥有模型、移动行为、脱离式
 投影和路由适配器；`canwu-world` 源码包已从 workspace 与依赖 DAG 退役。
-format-5 世界字段只作为旧调用方与旧存档的弃用兼容投影保留在对外 API/运行时。
+当前 `WorldSnapshot` 只作为参考整合与运行时投影保留；Format 6 不加载旧存档。
 `canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
 字段组成，具体移动、到达、信件、报告、知识和调试载荷结构均位于该 crate 之外。
 
 The event extraction is a Rust source-API break: callers replace enum
 construction and exhaustive matching with `from_payload`, `event_type`,
-`is_type`, and typed field/payload decoding. Its serialized shape is unchanged,
-so current snapshots, journals, and replay commitments retain their format-5
-contract. Missing entity registries in supported format-5 compatibility saves
-are migrated explicitly from their legacy world projection. / 事件迁出会破坏 Rust 源 API：调用方需以通用
-构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。序列化形状不变，
-因此本步不需要提升快照格式或改写日志与重演承诺。受支持的 format-5 兼容存档
-若缺少实体注册，会由旧世界投影明确迁移得到。
+`is_type`, and typed field/payload decoding. Format 6 also fixes canonical
+field ordering and commitment versions; old format-4/5 snapshots and journals
+are rejected rather than migrated. / 事件迁出会破坏 Rust 源 API：调用方需以通用
+构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。Format 6 同时固定
+规范字段顺序并提升承诺版本；旧 format-4/5 快照和日志会被拒绝，不在内核中迁移。
 
 ## Decision framework
 
@@ -891,10 +899,10 @@ Declared seat institutions must exist both in manifest-bound genesis and in the
 persisted final state.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
-admission. Format 5 snapshots validate this evidence and require exact plugin
-identity and descriptor rehydration before continuation. Engine 0.4.0 format-4
-saves enter only through the strict legacy validator and migrate before current
-execution; format-4 saves from any other engine version are rejected.
+admission. Format 6 snapshots validate this evidence and require exact plugin
+identity and descriptor rehydration before continuation. Format-4 and format-5
+saves and journals are rejected before runtime construction; no legacy
+migration path exists in the pre-1.0 engine.
 Boundary-aware replay uses command admission lists to reconstruct operation
 order and rejects any regenerated boundary whose complete evidence differs from
 the journal.
@@ -904,13 +912,14 @@ cursors. Each settlement reads only the unadmitted journal tails and advances
 the cursors after the boundary record commits, so admission work is proportional
 to newly admitted evidence instead of all prior boundaries and journals. The
 cursors are persisted derived metadata: loading validates them against the
-global boundary-prefix proof, legacy snapshots derive them deterministically,
-and failed settlement restores them with the rest of the transaction.
+global boundary-prefix proof, and failed settlement restores them with the rest
+of the transaction. Format 6 does not derive them for older snapshots because
+older snapshots are outside the supported load contract.
 
 Append-only events, commands, command attempts, ingress, boundary records, and
 random draws have one internal owner, `RuntimeEvidence`, separate from mutable
 world/knowledge/plugin state. Public flat snapshots and replay journals retain
-their existing serialized shapes. Checkpoint-journal format 1 adds a separate
+their existing serialized shapes. Checkpoint-journal format 2 adds a separate
 incremental persistence path: `SimulationCheckpoint` captures current state,
 scheduler, counters, metadata, and the already-computed full commitment roots
 while leaving every append-only evidence array empty. `EvidenceCursor` records
@@ -918,7 +927,7 @@ the exact cut through all six journals, and `EvidenceJournalSegment` stores only
 the records after a prior cut. Loading requires segments to start at the global
 zero cut, remain contiguous, advance at least one journal, encode truthful end
 cursors, and finish exactly at the checkpoint cut. It then reconstructs the
-flat snapshot in memory and runs the existing migration and validation path, so
+flat snapshot in memory and runs the current validation path, so
 the checkpoint roots, boundary chain, IDs, authority, causal evidence, and exact
 replay contract bind the archived records just as before. `CheckpointJournal`
 is a portable full-save convenience envelope; incremental stores should persist
@@ -953,9 +962,9 @@ evidence-family flags needed for safe continuation. Commitment accumulators keep
 their already-validated prefix state and consume only the new retained tail.
 Ordinary `Simulation` history slices, flat snapshots, and replay journals keep
 their full-history behavior; compaction is available only through the dedicated
-type, so evidence never disappears implicitly. Checkpoint-journal format 1 now
-wraps the current snapshot format 5 contract; legacy format-4 envelopes are
-strictly validated and migrated rather than reinterpreted in place.
+type, so evidence never disappears implicitly. Checkpoint-journal format 2
+wraps the current snapshot format 6 contract. Older checkpoint-journal
+envelopes are rejected rather than reinterpreted or migrated in place.
 
 Boundary emissions enter the next boundary's admission cut, so an emitting
 boundary remains retained until a later completed boundary admits those events.
@@ -1003,7 +1012,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 1 roots for world, knowledge,
+Every current snapshot stores commitment format 2 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable
@@ -1012,20 +1021,11 @@ domain `canwu.checkpoint.v4` combines those domain-separated roots with the
 exact run-manifest hash and authoritative revision contract. Loading recomputes
 and compares every root before accepting the outer checkpoint.
 
-Earlier format-4 snapshots carry commitment format 0. Migration verifies their
-checkpoint-v3 full-state commitment first, derives the current roots only from
-that verified state, and writes a checkpoint-v4 commitment; it cannot launder a
-tampered legacy snapshot. Exact replay journals record their commitment format,
-so historical journals can still reproduce checkpoint v3 while current journals
-reproduce checkpoint v4. Untagged historical boundary state commitments remain
-on their original full-state contract. New boundaries write a `v1:`-tagged
-commitment over the current canonical roots with the prior boundary-chain head,
-so settlement no longer serializes and hashes the complete retained journals.
-Exact replay selects the recorded contract independently for every boundary,
-which permits a legacy chain to continue with current commitments without
-reinterpreting its earlier hashes. When a snapshot is exactly at its boundary
-head, loading derives the expected contract from the tag and compares it with
-the independently validated current state; unknown tags are rejected. Runtime
+Format 6 boundaries write a `v1:`-tagged commitment over the current canonical
+roots with the prior boundary-chain head, so settlement no longer serializes and
+hashes the complete retained journals. When a snapshot is exactly at its
+boundary head, loading derives the expected contract from the tag and compares
+it with the independently validated current state; unknown tags are rejected. Runtime
 checkpoint refresh keeps cloneable incremental hash
 state for append-only commands, attempts, events, ingress, and random draws, and
 feeds only newly appended journal tails into those roots. It also retains the
@@ -1125,29 +1125,22 @@ binds the exact full run-manifest hash, so differently authorized or observable
 runs cannot masquerade as the same save even when their simulated state is
 identical. Use
 `ReplayJournal` and `replay_from_journal` for exact replay: the journal freezes
-engine and snapshot versions, root seed, run manifest, run configuration,
-plugin descriptors, the plugin-registration lifecycle state, accepted commands,
-accepted/rejected command attempts, boundaries, final time, and final checkpoint
-hash plus the final authoritative revision before executing anything. The older
-`replay*` helpers reconstruct caller-supplied fixtures but do not claim
-recorded-environment verification. Automatic package discovery remains later
-work. Revision-format-0 snapshots can migrate and continue, but retain
-migration-only replay provenance because snapshot-only migration cannot rebuild
-every historical boundary state commitment. They therefore cannot export a
-journal that claims current exact replay. New plugin
+engine and snapshot versions, root seed, canonical initial scenario, authority
+root, run manifest, run configuration, plugin descriptors, the plugin-registration
+lifecycle state, accepted commands, accepted/rejected command attempts, canonical
+ingress, boundaries, final time, and final checkpoint hash plus the final
+authoritative revision before executing anything. Automatic package discovery
+remains later work. Format 6 rejects older revision provenance and cannot export
+a journal that claims current exact replay from an unsupported save. New plugin
 registration closes after the first recorded tracked attempt (accepted or
 expected-rejected), successful compatibility command, time advance, or phased
 settlement; exact snapshot rehydration remains allowed after that point.
 Snapshots retain the run's initial time and reject a
 registration-open flag when commands, events, queued work, component state,
 counter movement, or elapsed simulation time proves execution already began.
-Format 2 and 3 checkpoints without plugins can continue after explicit
-migration with identity-unbound legacy provenance. Exact replay is rejected
-with `legacy_replay_unavailable`, because those formats did not retain enough
-environment identity or state commitments to make that claim safely. Earlier
-format-4 saves that retained a custom run-configuration artifact but not the
-six policy dimensions hydrate as `ManifestOnlyV1`; their recorded manifest and
-exact replay remain valid without fabricating modern policy semantics.
+There is no pre-1.0 continuation or migration exception for format 2, 3, 4, or
+5 data. Hosts that need to retain those saves must use the old engine or perform
+an explicit application-owned export outside Canwu.
 
 ## External renderer integration
 

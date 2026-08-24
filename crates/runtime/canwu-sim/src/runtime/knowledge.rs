@@ -329,6 +329,7 @@ pub(crate) fn validate_snapshot_records(
             .collect(),
         decisions: snapshot.decisions.clone(),
         root_seed: snapshot.root_seed,
+        authority_root_seed: snapshot.authority_root_seed,
         random_streams: snapshot
             .random_streams
             .iter()
@@ -638,6 +639,7 @@ mod tests {
                 .collect(),
             decisions: DecisionState::default(),
             root_seed: 1,
+            authority_root_seed: 1,
             random_streams: BTreeMap::new(),
         }
     }

@@ -1,18 +1,20 @@
 use super::{
-    BOUNDARY_STATE_HASH_V1_PREFIX, BoundaryRecord, BoundaryRequest, COMMITMENT_FORMAT_VERSION,
-    CanwuError, CauseRef, CommandAttemptOutcome, CommandAttemptRecord, CommandIngress,
-    CommandOutcome, CommandRecord, ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord,
-    PluginIngressRequest, PluginRegistry, ReplayJournal, RunConfiguration, RunManifest,
-    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, SimDuration, SimTime,
-    Simulation, SimulationPlugin, authoritative_revision_count, boundary_state_hash_format,
-    is_canonical_hash, manifest,
+    BoundaryRecord, BoundaryRequest, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef,
+    CommandAttemptOutcome, CommandAttemptRecord, CommandIngress, CommandOutcome, CommandRecord,
+    ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord, PluginIngressRequest, PluginRegistry,
+    ReplayJournal, SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, SimDuration, SimTime,
+    Simulation, SimulationPlugin, authoritative_revision_count, authoritative_run_identity,
+    boundary_state_hash_format, is_canonical_hash, manifest,
 };
+#[cfg(test)]
+use super::{RunConfiguration, RunManifest, Scenario};
 use std::collections::BTreeSet;
 
 impl Simulation {
     /// Reconstructs caller-supplied core commands without proving a recorded
     /// package environment. Use [`Self::replay_from_journal`] for exact replay.
-    pub fn replay(
+    #[cfg(test)]
+    pub(crate) fn replay(
         seed: u64,
         scenario: Scenario,
         commands: &[CommandRecord],
@@ -23,7 +25,8 @@ impl Simulation {
 
     /// Reconstructs caller-supplied inputs under caller-supplied plugins.
     /// This is not an exact replay identity check.
-    pub fn replay_with_plugins(
+    #[cfg(test)]
+    pub(crate) fn replay_with_plugins(
         seed: u64,
         scenario: Scenario,
         plugins: &[&dyn SimulationPlugin],
@@ -36,7 +39,8 @@ impl Simulation {
     /// Reconstructs caller-supplied inputs and compares supplied boundaries.
     /// Use [`Self::replay_from_journal`] when command-only runs must also bind
     /// their recorded run and plugin identities.
-    pub fn replay_with_boundaries(
+    #[cfg(test)]
+    pub(crate) fn replay_with_boundaries(
         seed: u64,
         scenario: Scenario,
         plugins: &[&dyn SimulationPlugin],
@@ -58,7 +62,8 @@ impl Simulation {
 
     /// Reconstructs caller-supplied inputs under a caller-supplied run manifest.
     /// This is useful for fixtures; it does not establish recorded identity.
-    pub fn replay_with_run_manifest(
+    #[cfg(test)]
+    pub(crate) fn replay_with_run_manifest(
         seed: u64,
         scenario: Scenario,
         run_manifest: RunManifest,
@@ -75,7 +80,8 @@ impl Simulation {
     /// Reconstructs caller-supplied inputs under a caller-supplied declared run
     /// configuration. This does not establish recorded-environment identity.
     #[allow(clippy::too_many_arguments)]
-    pub fn replay_with_run_configuration(
+    #[cfg(test)]
+    pub(crate) fn replay_with_run_configuration(
         seed: u64,
         scenario: Scenario,
         run_manifest: RunManifest,
@@ -115,39 +121,31 @@ impl Simulation {
     /// Replays only after the recorded engine, run, seed, and plugin manifests
     /// match, then verifies the final checkpoint commitment.
     pub fn replay_from_journal(
-        scenario: Scenario,
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
-        if !matches!(
-            journal.commitment_format_version,
-            0 | COMMITMENT_FORMAT_VERSION
-        ) {
+        if journal.commitment_format_version != COMMITMENT_FORMAT_VERSION {
             return Err(CanwuError::new(
                 ErrorCode::ReplayEnvironmentMismatch,
                 format!(
-                    "replay journal commitment format {} is unsupported; this engine reads legacy format 0 and current format {COMMITMENT_FORMAT_VERSION}",
+                    "replay journal commitment format {} is unsupported; this engine reads format {COMMITMENT_FORMAT_VERSION}",
                     journal.commitment_format_version
                 ),
             ));
         }
-        if journal.commitment_format_version == 0
-            && journal.boundaries.iter().any(|boundary| {
-                boundary
-                    .state_hash
-                    .as_deref()
-                    .is_some_and(|hash| hash.starts_with(BOUNDARY_STATE_HASH_V1_PREFIX))
-            })
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ReplayEnvironmentMismatch,
-                "legacy commitment journals cannot contain boundary state commitment v1",
-            ));
-        }
         if journal.revision_format_version != STATE_REVISION_FORMAT_VERSION {
             return Err(CanwuError::new(
-                ErrorCode::LegacyReplayUnavailable,
-                "legacy revision histories can continue after snapshot migration but cannot claim exact replay because historical state commitments cannot be reconstructed without their original runtime",
+                ErrorCode::ReplayEnvironmentMismatch,
+                format!(
+                    "replay journal revision format {} is unsupported; this engine reads format {STATE_REVISION_FORMAT_VERSION}",
+                    journal.revision_format_version
+                ),
+            ));
+        }
+        if journal.authority_root_seed == 0 {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "replay journal is missing its persisted authority root",
             ));
         }
         let expected_final_revision = authoritative_revision_count(
@@ -162,13 +160,15 @@ impl Simulation {
             ));
         }
         let normalized = journal;
-        if matches!(journal.run_manifest, RunManifest::MigratedLegacy { .. }) {
+        let scenario = normalized.initial_scenario.clone();
+        manifest::validate(&normalized.run_manifest, Some(&scenario))?;
+        let expected_manifest_hash = manifest::hash(&normalized.run_manifest)?;
+        if normalized.run_manifest_hash != expected_manifest_hash {
             return Err(CanwuError::new(
-                ErrorCode::LegacyReplayUnavailable,
-                "legacy checkpoints can continue after migration but lack enough recorded identity for exact replay",
+                ErrorCode::ReplayEnvironmentMismatch,
+                "replay journal run manifest hash is inconsistent",
             ));
         }
-        manifest::validate(&normalized.run_manifest, Some(&scenario), false)?;
         manifest::validate_run_configuration(
             &normalized.run_manifest,
             &normalized.run_configuration,
@@ -182,6 +182,19 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::ReplayEnvironmentMismatch,
                 "replay journal engine, format, or run identity does not match this runtime",
+            ));
+        }
+        let (_, authority_manifest_hash) = authoritative_run_identity(
+            &normalized.run_manifest,
+            &normalized.run_manifest_hash,
+            &normalized.run_configuration,
+        )?;
+        if normalized.authority_root_seed
+            != super::fresh_authority_root_seed(normalized.root_seed, &authority_manifest_hash)?
+        {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "replay journal authority root is not bound to its run identity",
             ));
         }
         PluginRegistry::from_descriptors(normalized.plugin_descriptors.clone()).map_err(
@@ -199,12 +212,7 @@ impl Simulation {
             normalized.run_manifest.clone(),
             normalized.run_configuration.clone(),
         )?;
-        if normalized.commitment_format_version == 0 {
-            simulation.state.metadata.commitment_format_version = 0;
-            simulation.state.metadata.commitment_roots = None;
-            simulation.state.metadata.commitment_cache = None;
-            simulation.refresh_checkpoint_hash()?;
-        }
+        simulation.state.current.authority_root_seed = normalized.authority_root_seed;
         let simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
         if actual_descriptors != normalized.plugin_descriptors {
@@ -248,6 +256,22 @@ impl Simulation {
             ));
         }
         Ok(simulation)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value)]
+    pub(crate) fn replay_from_journal_with_scenario(
+        scenario: Scenario,
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+    ) -> Result<Self, CanwuError> {
+        if scenario != journal.initial_scenario {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayEnvironmentMismatch,
+                "test replay scenario disagrees with the self-contained journal scenario",
+            ));
+        }
+        Self::replay_from_journal(plugins, journal)
     }
 
     fn replay_records(

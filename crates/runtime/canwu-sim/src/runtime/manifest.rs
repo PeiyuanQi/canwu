@@ -90,12 +90,6 @@ pub enum RunManifest {
         #[serde(default)]
         sources: Vec<ArtifactManifest>,
     },
-    MigratedLegacy {
-        format_version: u32,
-        source_engine_version: String,
-        source_snapshot_format: u32,
-        checkpoint_hash: String,
-    },
 }
 
 impl RunManifest {
@@ -130,41 +124,25 @@ impl RunManifest {
             sources: Vec::new(),
         }
     }
-
-    pub(crate) fn migrated_legacy(
-        source_engine_version: String,
-        source_snapshot_format: u32,
-        checkpoint_hash: String,
-    ) -> Self {
-        Self::MigratedLegacy {
-            format_version: RUN_MANIFEST_FORMAT_VERSION,
-            source_engine_version,
-            source_snapshot_format,
-            checkpoint_hash,
-        }
-    }
 }
 
 pub(crate) fn canonicalize(manifest: &mut RunManifest) {
-    if let RunManifest::Declared {
+    let RunManifest::Declared {
         rules,
         content,
         localization_contracts,
         sources,
         ..
-    } = manifest
-    {
-        rules.sort();
-        content.sort();
-        localization_contracts.sort();
-        sources.sort();
-    }
+    } = manifest;
+    rules.sort();
+    content.sort();
+    localization_contracts.sort();
+    sources.sort();
 }
 
 pub(crate) fn validate(
     manifest: &RunManifest,
     scenario: Option<&Scenario>,
-    allow_legacy: bool,
 ) -> Result<(), CanwuError> {
     match manifest {
         RunManifest::Declared {
@@ -193,27 +171,6 @@ pub(crate) fn validate(
                 return invalid_manifest(
                     "scenario manifest hash does not match the admitted scenario",
                 );
-            }
-            Ok(())
-        }
-        RunManifest::MigratedLegacy {
-            format_version,
-            source_engine_version,
-            source_snapshot_format,
-            checkpoint_hash,
-        } => {
-            if !allow_legacy {
-                return invalid_manifest(
-                    "new simulations require a declared scenario and run configuration manifest",
-                );
-            }
-            if *format_version != RUN_MANIFEST_FORMAT_VERSION
-                || source_engine_version.trim().is_empty()
-                || source_engine_version != source_engine_version.trim()
-                || !matches!(source_snapshot_format, 2 | 3)
-                || !is_canonical_hash(checkpoint_hash)
-            {
-                return invalid_manifest("migrated legacy run provenance is invalid");
             }
             Ok(())
         }
@@ -258,13 +215,9 @@ pub(crate) fn validate_run_configuration(
             }
             Ok(())
         }
-        (RunManifest::MigratedLegacy { .. }, RunConfigurationSnapshot::LegacyUnspecified) => Ok(()),
         (RunManifest::Declared { .. }, RunConfigurationSnapshot::LegacyUnspecified) => {
             invalid_manifest("declared runs cannot use an identity-unbound run configuration")
         }
-        (RunManifest::MigratedLegacy { .. }, _) => invalid_manifest(
-            "legacy migrations cannot silently inherit a current run configuration",
-        ),
     }
 }
 

@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[test]
 #[allow(clippy::too_many_lines)]
 fn aggregate_diffusion_decision_projection_and_replay_share_one_contract() {
-    let (mut canwu, initial_scenario) = tutorial_simulation();
+    let (mut canwu, _initial_scenario) = tutorial_simulation();
     let plugin = SocietyPlugin;
     let ids = Canwu::demo_ids();
 
@@ -128,9 +128,8 @@ fn aggregate_diffusion_decision_projection_and_replay_share_one_contract() {
     assert_eq!(restored.snapshot(), final_snapshot);
     assert_eq!(forked.snapshot(), final_snapshot);
 
-    let replayed =
-        Canwu::replay_from_journal(initial_scenario, &[&plugin], &canwu.replay_journal())
-            .expect("exactly replay society history");
+    let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())
+        .expect("exactly replay society history");
     assert_eq!(replayed.snapshot(), final_snapshot);
 }
 

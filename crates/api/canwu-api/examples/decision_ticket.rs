@@ -2,15 +2,14 @@ use canwu_api::{
     Canwu, Command, CommandRequestId, DecisionAction, DecisionAuthority, DecisionContext,
     DecisionControllerBinding, DecisionEvaluation, DecisionIngressRequest, DecisionMutation,
     DecisionOption, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId,
-    DecisionTicketDraft, DecisionTicketId, DemoIds, EntityRef, Scenario, SimDuration,
-    UtilityProfile, WeightedUtilityPolicy,
+    DecisionTicketDraft, DecisionTicketId, DemoIds, EntityRef, SimDuration, UtilityProfile,
+    WeightedUtilityPolicy,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut canwu = Canwu::demo(1918)?;
-    let replay_scenario = replay_scenario(&canwu);
     let ids = Canwu::demo_ids();
 
     open_aid_request(&mut canwu, ids)?;
@@ -23,20 +22,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .expect("utility decision trace");
     println!("{}", serde_json::to_string_pretty(trace)?);
 
-    verify_persistence_and_replay(&canwu, replay_scenario)?;
+    verify_persistence_and_replay(&canwu)?;
     println!("snapshot_restore=ok exact_replay=ok");
     Ok(())
-}
-
-fn replay_scenario(canwu: &Canwu) -> Scenario {
-    let initial = canwu.snapshot();
-    Scenario {
-        start_time: initial.initial_time,
-        entities: initial.entities,
-        world: initial.world,
-        knowledge: initial.knowledge,
-        domain_records: Vec::new(),
-    }
 }
 
 fn open_aid_request(canwu: &mut Canwu, ids: DemoIds) -> Result<(), Box<dyn std::error::Error>> {
@@ -172,14 +160,11 @@ fn resolve_aid_request(canwu: &mut Canwu) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-fn verify_persistence_and_replay(
-    canwu: &Canwu,
-    replay_scenario: Scenario,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn verify_persistence_and_replay(canwu: &Canwu) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = canwu.snapshot();
     let restored = Canwu::from_snapshot_json(&serde_json::to_string(&snapshot)?)?;
     assert_eq!(restored.snapshot(), snapshot);
-    let replayed = Canwu::replay_from_journal(replay_scenario, &[], &canwu.replay_journal())?;
+    let replayed = Canwu::replay_from_journal(&[], &canwu.replay_journal())?;
     assert_eq!(replayed.snapshot(), snapshot);
     Ok(())
 }

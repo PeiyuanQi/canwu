@@ -355,19 +355,8 @@ fn domain_record_lifecycle_is_atomic_replayable_and_tamper_evident() {
     let mut record_free = Simulation::new(87, scenario.clone())
         .expect("record-free compatibility fixture should load");
     let record_free_snapshot = record_free.snapshot();
-    assert!(
-        record_free_snapshot.initial_scenario.is_none(),
-        "record-free format-4 state must retain its prior additive shape"
-    );
-    let mut redundant_initial_scenario = record_free_snapshot.clone();
-    redundant_initial_scenario.initial_scenario = Some(scenario.clone());
-    refresh_snapshot_commitments_and_checkpoint(&mut redundant_initial_scenario);
-    let error = Simulation::from_snapshot(redundant_initial_scenario)
-        .err()
-        .expect("record-free snapshots must not carry ignored genesis state");
-    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
     let mut record_free_restored = Simulation::from_snapshot(record_free_snapshot)
-        .expect("a pristine record-free snapshot should restore");
+        .expect("a pristine Format 6 snapshot should restore");
     record_free
         .register_plugin(&RecordLifecyclePlugin)
         .expect("the original pristine runtime should accept record schemas");
@@ -807,6 +796,18 @@ fn domain_record_snapshot_cannot_delete_the_bound_seat_institution() {
         manifest::hash(&run_manifest).expect("forged manifest should hash canonically");
     forged.run_manifest = Some(run_manifest);
     forged.run_configuration = Some(RunConfigurationSnapshot::Declared(configuration));
+    let (_, authority_manifest_hash) = authoritative_run_identity(
+        forged.run_manifest.as_ref().expect("forged manifest"),
+        &forged.run_manifest_hash,
+        forged
+            .run_configuration
+            .as_ref()
+            .expect("forged configuration"),
+    )
+    .expect("forged authority identity should hash");
+    forged.authority_root_seed =
+        fresh_authority_root_seed(forged.root_seed, &authority_manifest_hash)
+            .expect("forged authority root should derive");
     let final_state_hash =
         snapshot_state_hash(&forged).expect("the forged institution-bound final state should hash");
     forged
@@ -1013,7 +1014,7 @@ fn scoped_random_streams_are_isolated_recorded_hashed_and_replayable() {
     let Err(error) =
         Simulation::from_snapshot_with_plugins(missing_state_commitment, &[&PrimaryRandomPlugin])
     else {
-        panic!("declared format-4 runs require every boundary state commitment");
+        panic!("current declared runs require every boundary state commitment");
     };
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 
@@ -1085,10 +1086,7 @@ fn run_and_plugin_manifests_bind_continuation_and_replay() {
         localization_contracts,
         sources,
         ..
-    } = &mut run_manifest
-    else {
-        unreachable!("the fixture creates a declared manifest");
-    };
+    } = &mut run_manifest;
     rules.extend([
         ArtifactManifest::from_bytes("fixture", "zeta-rules", "1", b"zeta")
             .expect("rule identity should hash"),
@@ -1115,9 +1113,7 @@ fn run_and_plugin_manifests_bind_continuation_and_replay() {
         run_configuration.clone(),
     )
     .expect("declared run identity should be admitted");
-    let RunManifest::Declared { rules, .. } = simulation.run_manifest() else {
-        unreachable!("new runs retain a declared manifest");
-    };
+    let RunManifest::Declared { rules, .. } = simulation.run_manifest();
     assert_eq!(rules[0].name, "alpha-rules");
     assert_eq!(rules[1].name, "zeta-rules");
     assert!(is_canonical_hash(simulation.run_manifest_hash()));
@@ -1166,7 +1162,7 @@ fn run_and_plugin_manifests_bind_continuation_and_replay() {
     let Err(error) = Simulation::from_snapshot(corrupted_manifest_hash) else {
         panic!("a tampered run manifest hash must not load");
     };
-    assert_eq!(error.code, ErrorCode::InvalidRunManifest);
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 
     let replayed = Simulation::replay_with_run_configuration(
         91,
@@ -1183,9 +1179,7 @@ fn run_and_plugin_manifests_bind_continuation_and_replay() {
     assert_eq!(simulation.snapshot(), replayed.snapshot());
 
     let mut changed_environment = exact_manifest;
-    let RunManifest::Declared { content, .. } = &mut changed_environment else {
-        unreachable!("the fixture retains a declared manifest");
-    };
+    let RunManifest::Declared { content, .. } = &mut changed_environment;
     content[0].semantic_hash =
         "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_owned();
     let Err(error) = Simulation::replay_with_run_configuration(
@@ -1556,8 +1550,9 @@ fn command_only_replay_journal_binds_the_recorded_plugin_environment() {
         .advance(SimDuration::ZERO)
         .expect("zero advance should close authoritative registration");
     let closure_journal = registration_closed_only.replay_journal();
-    let closure_replay = Simulation::replay_from_journal(scenario.clone(), &[], &closure_journal)
-        .expect("exact replay should reproduce registration closure without other work");
+    let closure_replay =
+        Simulation::replay_from_journal_with_scenario(scenario.clone(), &[], &closure_journal)
+            .expect("exact replay should reproduce registration closure without other work");
     assert_eq!(
         registration_closed_only.snapshot(),
         closure_replay.snapshot()
@@ -1590,13 +1585,19 @@ fn command_only_replay_journal_binds_the_recorded_plugin_environment() {
     };
     assert_eq!(error.code, ErrorCode::PluginCommandNotFound);
     let journal = simulation.replay_journal();
-    let exact = Simulation::replay_from_journal(scenario.clone(), &[&AuthorityPlugin], &journal)
-        .expect("the exact command-only environment should replay");
+    let exact = Simulation::replay_from_journal_with_scenario(
+        scenario.clone(),
+        &[&AuthorityPlugin],
+        &journal,
+    )
+    .expect("the exact command-only environment should replay");
     assert_eq!(simulation.snapshot(), exact.snapshot());
 
-    let Err(error) =
-        Simulation::replay_from_journal(scenario.clone(), &[&ChangedAuthorityPlugin], &journal)
-    else {
+    let Err(error) = Simulation::replay_from_journal_with_scenario(
+        scenario.clone(),
+        &[&ChangedAuthorityPlugin],
+        &journal,
+    ) else {
         panic!("changed handler semantics must fail before command-only replay");
     };
     assert_eq!(error.code, ErrorCode::ReplayEnvironmentMismatch);

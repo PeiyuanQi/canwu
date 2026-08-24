@@ -1,3 +1,4 @@
+use super::event_payloads::canonicalize_event_kind;
 use super::event_payloads::{
     ArmyArrived, KnowledgeUpdated, LetterDelivered, PersonArrived, ReportDispatched,
     RuntimeEventPayload,
@@ -719,12 +720,18 @@ impl Simulation {
 
     pub(super) fn append_event(
         &mut self,
-        kind: EventKind,
+        mut kind: EventKind,
         affected_entities: Vec<EntityRef>,
         summary: String,
         cause: Option<CauseRef>,
         correlation_id: u64,
     ) -> Result<SimEvent, CanwuError> {
+        canonicalize_event_kind(&mut kind).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!("event payload is not canonical: {error}"),
+            )
+        })?;
         let (event_id, next_event_id) =
             claim_counter(self.state.counters.next_event_id, "event ID")?;
         let id = EventId::new(event_id);

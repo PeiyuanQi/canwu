@@ -988,7 +988,7 @@ fn representative_public_contracts_are_atomic_replayable_and_binding_safe() {
     assert_eq!(canwu.snapshot(), restored.snapshot());
 
     let journal = canwu.replay_journal();
-    let replayed = Canwu::replay_from_journal(scenario.clone(), &plugins, &journal)
+    let replayed = Canwu::replay_from_journal(&plugins, &journal)
         .expect("the exact public journal should replay");
     assert_eq!(canwu.snapshot(), replayed.snapshot());
 

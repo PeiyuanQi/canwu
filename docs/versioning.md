@@ -1,450 +1,87 @@
-# Versioning and Compatibility
+# Versioning and Persistence
 
-Canwu uses [Semantic Versioning 2.0.0](https://semver.org/). The canonical
-project version is `[workspace.package].version` in the root `Cargo.toml`, and
-all first-party crates use that version in lockstep.
+Canwu is pre-1.0. Format 6 is a deliberate clean break: the 0.6 runtime
+writes and reads only its current contracts. There is no implicit loader or
+runtime migration for format 2, 3, 4, or 5 data. Applications that need old
+records must keep the old engine or run an explicit, application-owned export
+outside the Canwu runtime.
 
-## SemVer policy
+## Current contract
 
-- `MAJOR`: incompatible changes to supported public APIs after `1.0.0`.
-- `MINOR`: backward-compatible functionality. Before `1.0.0`, a minor release
-  may contain an intentional breaking API change, which must be documented.
-- `PATCH`: backward-compatible fixes, documentation, and internal improvements.
-- Pre-release identifiers such as `0.3.0-alpha.1` are used for unstable release
-  candidates when needed.
+The workspace version is `0.6.0`. A live `SimulationSnapshot` has:
 
-The SemVer compatibility surface includes exported Rust API types and behavior,
-serialized command/query/event contracts that are documented as public, and the
-semantic-agent operation shapes. Internal crate implementation details are not
-part of the compatibility guarantee.
+- snapshot format `6`;
+- commitment format `2`;
+- state revision format `2`;
+- admission cursor format `2`;
+- exact replay revision format `2`;
+- a declared `RunManifest`, declared run configuration, and canonical
+  `initial_scenario`;
+- a non-zero `authority_root_seed`, derived independently from the simulation
+  random streams.
 
-### Unreleased event ownership transition
+Typed loading and strict JSON loading reject any other engine or contract
+version. Strict JSON loading also rejects unknown fields at every nested
+object and rejects a wire value whose canonical re-encoding changes shape.
 
-`EventKind` changes from an enum with engine-owned domain variants to a
-domain-neutral record containing a stable `type` tag and flattened structured
-fields. Concrete movement, arrival, letter, report, knowledge, and debug payload
-types are no longer exported by `canwu-event`. Downstream Rust code must replace
-variant construction and exhaustive matching with `EventKind::from_payload`,
-`EventKind::event_type` or `is_type`, and typed `decode_payload` or
-`decode_field` calls. Plugin callers should use `EventKind::plugin` and
-`plugin_identity`.
+The runtime no longer contains `migration.rs` or `legacy_v4.rs`. An older
+snapshot must not be silently relabeled as format 6, and a legacy replay
+journal cannot be promoted to exact replay.
 
-This is an intentional Rust source break and must ship in the next pre-1.0
-minor release, not as a patch release. It is not a wire break: compatibility
-events preserve the exact serialized field order and values of the existing
-`{"type": ..., ...fields}` JSON, including the outer `"type": "plugin"`,
-`plugin`, and nested `event_type` fields used by plugin events. Snapshot format
-5, replay journals, event commitments, and historical format-5 loading therefore
-retain their existing contract.
+## Self-contained exact replay
 
-The workspace remains at the last released `0.5.1` identity while this change
-is unreleased. It must not be published under that version. The release task
-must advance all lockstep crates and exact dependency requirements to `0.6.0`
-and explicitly migrate engine identity without reinterpreting snapshot format
-5; changing only `Cargo.toml` here would make valid 0.5.1 snapshots fail the
-engine-identity gate.
+`ReplayJournal` is the complete replay boundary. It carries the canonical
+initial scenario, declared run identity, run configuration, plugin descriptors,
+authority root, commands, attempts, ingress, boundaries, random draws, and
+final revision/checkpoint commitments. `replay_from_journal(plugins, journal)`
+does not accept a second scenario supplied by the caller; the scenario in the
+journal is authoritative and is validated against the manifest.
 
-### Unreleased world ownership transition
+Executable policy implementations are not replay inputs. Decisions, outcomes,
+and evidence already admitted to the journal are replayed as records.
 
-The same next pre-1.0 minor release retires the concrete `canwu-world` package.
-Its historical reference model, plugin command handlers, read projection, and
-starter scenario now live in the optional `canwu-reference-world` integration.
-The engine and `canwu-api` own only generic entity identity, domain-record
-storage, command ingress, events, persistence, replay, and viewer-scoped
-knowledge. `canwu-routing` now accepts only `PlanningSnapshot` and no longer
-depends on a concrete world model.
+## Durable outbox
 
-`Scenario` and `SimulationSnapshot` add a generic `entities: Vec<EntityRef>`
-registry. The serialized field is additive within snapshot format 5. The JSON
-loader explicitly derives it from the validated legacy format-5 compatibility
-projection when an old save omits it; current domain integrations must provide
-the registry rather than relying on that migration. For compatibility scenarios,
-an entity registry exactly derivable from the legacy world projection retains
-the existing scenario semantic hash; non-derived generic registries are bound
-by the current scenario hash. Deprecated format-5 world projection types and
-legacy built-in movement commands remain in the public API/runtime compatibility
-surface for an interval, but no source package or
-normal dependency edge points to `canwu-world`.
+Boundary emissions are exposed through `Canwu::outbox_entries()`. Each entry
+has a stable `delivery_id` derived from the run manifest, boundary, event, and
+emission index. The host application must deliver entries at least once and
+deduplicate by `delivery_id`. Exact replay regenerates the same outbox
+identity; it does not re-send external effects.
 
-The old public API methods `observe`, `inspect`, `query_as`, `available_actions`,
-`act`, and domain-specific query/action DTOs are removed. Domain integrations
-now translate client intent into typed plugin commands, construct their own
-trusted projections from domain records, and use `CanwuViewer` for actor-scoped
-knowledge. This Rust source break must ship as part of `0.6.0`; it is not a
-patch-level change.
+In compact mode, `CompactedCanwu::outbox_entries()` returns entries from the
+retained evidence tail. Once evidence is sealed, the caller owns the returned
+`EvidenceJournalSegment` and must keep its boundary emissions with the host's
+delivery/acknowledgement state; compaction does not acknowledge or deliver an
+external effect on the host's behalf.
 
-## Snapshot format
+## Granularity boundary
 
-Engine SemVer and snapshot format versioning are separate. Every snapshot stores
-the producing engine version and an integer snapshot format version. Patch and
-minor releases may continue to read an older snapshot format. A format change
-increments the format number and should provide a migration path when practical.
-Format-4 and format-5 state and boundary commitments include the producing engine version. The 0.5 runtime writes format 5 only and accepts engine 0.4.0 format 4 only through the strict JSON migration entry points. Typed snapshots accept current engine 0.5.1 format 5 only; older format 2 and 3 values must first be upgraded by the 0.4 runtime.
+The engine exposes the domain-neutral `SimulationGranularity` enum:
 
-### 0.5.1 / snapshot format 5 migration
+| Value | Meaning |
+| --- | --- |
+| `aggregate` | A coarse aggregate or population-scale state. |
+| `group` | A bounded social, institutional, military, or organizational group. |
+| `actor` | A person or other principal with its own knowledge and authority. |
 
-The 0.5.1 runtime writes snapshot format 5. Format 5 is a deliberate wire break rather than an additive reinterpretation of format 4.
+These are engine simulation levels, not a fixed historical ontology. A host
+game may map them to its own terms. In Celestial Mandate, for example,
+`aggregate` can map to Population, `group` to Special Group, and `actor` to
+Character. That mapping belongs in a CM reference integration or host adapter,
+not in Canwu core.
 
-The only direct format-4 engine identity accepted by that migration is exactly
-`0.4.0`. Loading reads only the outer version selector, then routes the value to
-independent, recursively strict legacy wire structs. Unknown and
-format-5-only fields or enum variants are rejected before any current runtime
-type is constructed. The accepted legacy value is then validated for engine
-identity, checkpoint, domain roots, boundary chain, boundary-state hashes,
-replay envelope, evidence cursors, and checkpoint-journal segment continuity
-under the 0.4 contracts. Only after those checks succeed may it map legacy
-sequential random positions to tagged sequential addresses, add empty
-generic-knowledge and compact-continuation state, switch engine and snapshot
-identity, and compute format-5 commitments.
+## Reference integrations
 
-The migrated state may continue and can be replayed exactly from the first
-format-5 boundary onward. It does not claim that the 0.5 runtime reproduces old
-0.4 intermediate state commitments; those remain auditable with the original
-0.4 runtime and verified legacy bundle. Migration fixtures must cover an empty
-run, a registered plugin and boundary contract, a sequential draw, a tagged-v1
-boundary-state hash, ReplayJournal, and checkpoint-journal/live-compaction
-state, with tamper companions for each.
+Southern Ming and WWII are content and ruleset integrations for Celestial
+Mandate. They are not Canwu adapters and are intentionally absent from this
+repository. Canwu provides the generic state, authority, boundary, evidence,
+granularity, persistence, replay, and outbox contracts that those integrations
+consume.
 
-### 0.5.1 source and wire breaks
+## Source compatibility
 
-- `RandomDrawRecord.position` is replaced by `address: RandomDrawAddress` and
-  adds optional `operation_evidence: EvidenceRef`.
-- `RandomDrawAddress::Sequential { position }` is the migrated sequential wire.
-  The `OperationV1(RandomOperationAddressV1)` shape is also executable in the
-  0.5 runtime. Its evidence-bound address is validated and replayed by the
-  operation-keyed random journal; callers must not treat it as a sequential
-  stream position.
-- `SimulationSnapshot` typed loading accepts only engine 0.5.1 format 5.
-  Engine 0.4.0 format-4 snapshots, replay journals, and checkpoint-journal
-  bundles must use their JSON loaders so strict legacy validation occurs before
-  migration.
-- `ReplayJournal` and checkpoint-journal JSON loading now reject recursively
-  unknown fields. A migrated legacy replay is marked historical-only and returns
-  `LegacyReplayUnavailable`; exact replay starts with evidence produced after
-  migration.
-- Workspace crates and exact first-party dependency requirements move in
-  lockstep from 0.4.0 to 0.5.1.
-
-#### Public Rust API delta
-
-The following public construction and exhaustive-match sites are intentionally
-source-breaking in 0.5.1. Downstream crates should update them explicitly;
-serde defaults are not a source-compatibility promise.
-
-| Surface | 0.5.1 change | Required downstream change |
-| --- | --- | --- |
-| Random records | `RandomDrawRecord.position` becomes `address: RandomDrawAddress`; `operation_evidence: Option<EvidenceRef>` is added. `RandomDrawAddress`, `RandomOperationAddressV1`, and `RandomOperationTarget` are new public enums/structs. | Construct `RandomDrawAddress::Sequential { position }` for sequential use. Use `OperationV1` only with stable evidence, operation identity, target, draw slot, bound, and purpose. |
-| References and IDs | `DomainRecordVersionSource`, `DomainRecordVersionRef`, `EvidenceRef`, `KnowledgeRecordKind`, `KnowledgeSchemaId`, `KnowledgeHolderRef`, `KnowledgeHolderPolicy`, `KnowledgeRecordId`, and `HolderKnowledgeRecordId` are added. | Store exact version/evidence references and match holder/evidence enums exhaustively instead of using untyped strings or current-record lookups. |
-| Domain schemas | `DomainRecordSchema` adds `holder_policy` and `mutation_policy: DomainRecordMutationPolicy`; `DomainReferenceTargetKind` adds `AnyEntity`. | Update every struct literal and exhaustive match. Explicitly choose whether the record can be a knowledge holder and whether it is versioned or create-only, and validate an `AnyEntity` reference as an entity class rather than accepting arbitrary domain values. |
-| Plugin descriptors | `PluginDescriptor` adds `knowledge_schemas: Vec<PluginKnowledgeSchema>`. `PluginKnowledgeSchema`, `KnowledgeLimitsV1`, `KnowledgeSubjectSchema`, and `KnowledgeSubjectTargetKind` are new public contract types. | Update descriptor literals/registration and include the knowledge schema set in plugin identity and semantic-hash review. Use an empty vector for plugins that publish none. |
-| Boundary contracts and proposals | `BoundarySystemContract` adds `knowledge_writes: Vec<KnowledgeWriteGrant>` and `plugin_ingress_targets: Vec<PluginIngressTarget>`. `BoundaryDirective` adds `PublishKnowledge` and `SchedulePluginIngress`. | Update contract literals, declare each writable schema/visibility and cross-plugin ingress target, and extend exhaustive directive matches. Empty grant/target lists preserve existing systems. |
-| Boundary evidence | `BoundaryEmissionKind` adds `KnowledgeChange`; `BoundaryRecord` adds `knowledge_changes: Vec<BoundaryKnowledgeChange>`; `BoundaryReceipt` adds `knowledge_batch_count` and `knowledge_record_count`. | Update exhaustive matches and every public struct literal/adapter. Treat the two receipt counters as summaries, not substitutes for authoritative boundary evidence. |
-| Events and audiences | `EventKind` adds `KnowledgePublished` and `EventAudience` adds `KnowledgeHolder`. | Extend exhaustive event/audience routing and visibility checks. Do not map holder-only events to a global or actor-agnostic audience. |
-| Knowledge model and queries | `KnowledgeSource`, `KnowledgeSubjectTarget`, `KnowledgeSubject`, `KnowledgeOrigin`, `KnowledgeRecordDraft`, `KnowledgeRecord`, `KnowledgeRecordView`, `KnowledgeHistoryView`, `KnowledgeReadCut`, `KnowledgeCursor`, `KnowledgeQuery`, `KnowledgeQueryResult`, `GenericKnowledgeLedger`, `KnowledgeSnapshot`, `KnowledgeLedgerError`, and `KnowledgeQueryError` are public. `Scenario` and `SimulationSnapshot` add generic knowledge state. | Update scenario/snapshot literals. Query through an explicit holder and read cut; do not expose the admin snapshot as a player view. |
-| Viewer API | `ObservationPrincipal` and `CanwuViewer` are added. `ViewerContext` now carries a private principal and checkpoint binding instead of exposing caller-selected actor state. `Canwu` adds `admin_query_knowledge`, `viewer`, `viewer_for_actor`, and `viewer_context`; `CanwuViewer` supplies holder-bounded query/audit/observation methods. | Replace player-facing direct snapshot reads with a viewer derived from persisted run policy. Use `ViewerContext` accessors instead of a struct literal, refresh detached contexts after authoritative state changes, and reserve admin query/snapshot access for trusted host tooling. |
-| Archived evidence continuation | `PayloadRequiredEvidenceContinuationV1`, its reserved schema field/version constants, and `payload_required_evidence_continuation_property_v1` are added. `SimulationCheckpoint` adds `reachable_archive_segment_ids` and `orphaned_archive_segment_ids`. | Persist payload-required dependencies in an active create-only domain-record version, mark completion explicitly, and let the host compare every retained manifest before treating a stored segment as an orphan candidate. These APIs identify candidates only; they do not delete archive data. |
-| Errors | `ErrorCode` adds the knowledge validation/authority/limit/read-cut/not-found/write-declaration codes, `EvidenceUnavailable`, `EvidenceContentUnavailable`, `InvalidRandomOperationEvidence`, `RandomOperationConflict`, `LegacyReplayUnavailable`, and `UnsupportedRandomDrawAddress`. | Extend exhaustive error mapping. Preserve these distinctions in API/UI adapters rather than collapsing them into `InvalidSnapshot` or a generic plugin error. |
-
-The external API-delta fixture under
-`crates/runtime/canwu-sim/tests/api-delta/` constructs or matches the new format-5
-random, schema, descriptor, boundary, event, ingress, error, and generic
-knowledge surfaces as a downstream crate. It also proves that the old format-4
-random-record literal fails to compile and that a restricted `CanwuViewer`
-cannot call the trusted admin snapshot surface. These failures are maintained
-source-break and authority-boundary witnesses, not compatibility shims.
-
-Executable plugin handlers are never serialized. Snapshots retain their plugin
-descriptors and author-declared package versions and semantic hashes, block
-authoritative continuation while required handlers are inactive, and accept
-rehydration only when registration recreates that exact identity and contract.
-Plugin command journals must use plugin-aware replay.
-
-Snapshot format 4 replaces the single global RNG with owned, versioned random
-streams and a draw journal containing producer, purpose, cause, correlation,
-position, bound, and result. Every successful phased boundary records a
-deterministic state hash and a chained boundary hash. Snapshots also persist a
-hashed run manifest for scenario, rules, content, localization contracts, run
-configuration, and source identities. Additive format-4 run-policy fields use
-explicit `CompatibilityV1` or `LegacyUnspecified` provenance when older data did
-not record the six run-policy dimensions. Earlier format-4 snapshots with a
-custom run-configuration artifact hydrate as `ManifestOnlyV1`: their exact
-manifest identity and replay remain valid, but the engine does not invent
-policy dimensions that were never serialized. Pre-policy format-4 replay
-journals hydrate the same provenance from their manifest and default the absent
-attempt journal to empty, so command-only journals remain readable. The default
-compatibility artifact cannot be relabeled as `ManifestOnlyV1`. Declared
-configurations persist those dimensions plus typed live/frozen-replay
-command-attempt evidence,
-including accepted and expected-rejected outcomes, idempotency keys, revision
-and simulation-time guards, authority context, and synchronous emitted-event
-IDs. Legacy-direct command records are restricted to compatibility provenance;
-declared runs require tracked attempt evidence. Legacy format 2 and 3 inputs are
-rejected if they attempt to smuggle these newer fields into a historical shape.
-
-Format 4 also permits additive canonical-ingress descriptors, records, counters,
-and boundary admission/generation evidence. Empty ingress fields and the default
-next-ingress counter are omitted, preserving the serialized and hashed shape of
-earlier record-free format-4 state. Persisted queue order is due time, class,
-descending priority, issue time, then ingress ID; every record also carries the
-boundary-count cut after which it can be admitted. Boundary-generated packets
-name their producing boundary and appear in that boundary's ordered
-`generated_ingress` evidence with the producer plugin, system, phase, and
-visibility/commit-stage input. Both admission and generation evidence are bound
-by the chained boundary hash. A zero-delay generated packet is deliberately
-assigned to the next admission cut, which may create a second boundary at the
-same timestamp. Loading validates descriptor ownership and schemas, stable
-entity identities at the issue and producer-proposal cuts, canonical admission
-order, cause and generation provenance, pending-work timeliness, and counter
-continuity. Command-attempt order, live-request provenance, and admitted calendar
-cadences are reconstructed from the queue. Generated delays must fit the signed
-simulation-duration domain. Exact replay re-enqueues external records but
-requires plugin systems to reproduce boundary-generated records. Declared read-only runs reject newly authored live
-plugin ingress. Format 2 and 3 inputs reject all of these fields rather than
-interpreting canonical-ingress semantics under a legacy identity.
-
-Format 4 also permits additive decision state and decision ingress. Empty
-controller, ticket, attempt, and trace collections plus the default next-trace counter
-are omitted, preserving the serialized and hashed shape of decision-free
-format-4 snapshots. Decision ingress persists registration, ticket opening,
-version-guarded option replacement, resolution, and cancellation. Loading
-validates referenced entity identities, controller/policy bindings, ticket,
-attempt, and trace continuity, nested command equality and derived authority,
-then reconstructs both accepted and expected-rejected outcomes from admitted
-ingress. Expected revision, ticket-version, closed-ticket, and related admission
-conflicts are persisted as rejected `DecisionAttemptRecord` values rather than
-rolling back and poisoning the queue. Decision and nested command request IDs
-must be nonzero and globally unique across their ingress families. Declared
-read-only runs reject newly authored decision ingress. Exact replay re-enqueues
-the recorded decision mutations and commands; it never invokes the original
-Utility, Rule, Human, External, or LLM policy. Consequently policy output is
-part of replay evidence, while executable policy implementations are not a
-serialized replay dependency.
-
-Accepted and rejected decision attempts do not independently advance the
-authoritative revision. Their containing completed boundary advances it once;
-an admitted nested command still contributes its own accepted-command or
-expected-command-rejection revision transaction.
-
-Format 4 also has a separately versioned authoritative-revision sub-contract.
-Revision format 1 persists a monotonic value that advances exactly once for each
-accepted command, persisted expected command rejection, or completed settlement
-boundary. Failed transactions, exact retries, request-ID collisions, bare clock
-movement, queued but unadmitted ingress, and plugin setup do not advance it;
-expected simulation time remains the independent guard for clock and scheduled
-work. The value is reconstructible as tracked command attempts plus boundaries,
-or as legacy-direct commands plus boundaries when no attempt journal exists.
-Checkpoint domain `canwu.checkpoint.v3` binds the revision format and value in
-addition to deterministic state, the boundary-chain head, and applicable run
-identity. The boundary-state hash deliberately remains revision-neutral.
-
-An earlier format-4 snapshot defaults to revision format 0. Loading first
-verifies its legacy checkpoint, translates command-attempt revisions and
-expected-revision guards without changing their stale/current relationship,
-refreshes the boundary-head state commitment and chained boundary hashes when
-needed, derives the final revision from committed evidence, and emits a current
-checkpoint. A format-0 replay journal does not carry a final revision commitment
-and is therefore not reinterpreted as exact replay. Its snapshot can migrate and
-continue, but retains migration-only replay provenance because snapshot-only
-migration cannot reconstruct every historical boundary state commitment. Saves
-created under revision format 1 export current exact-replay journals normally.
-
-Engine 0.4.0 format 4 introduced additive admission-cursor format 1, which
-format 5 retains. Snapshots persist the
-number of attempt, accepted-command, and event records consumed by completed
-boundaries. Runtime settlement uses those monotonic counts to read only the new
-journal tails. Loading still walks boundary evidence once to prove the global
-causal prefix and requires the persisted counts to match exactly; gaps,
-duplicates, backward cursors, and counts beyond the journals are rejected.
-Older format-4 snapshots default to cursor format 0 and derive current counts
-from their validated boundary lists. The cursors are redundant derived metadata
-and are deliberately excluded from authoritative state and boundary hashes, so
-this optimization does not reinterpret existing simulation-result commitments.
-
-Engine 0.4.0 format 4 also introduced commitment format 1. Current format-5
-snapshots persist
-domain-separated canonical roots for world, knowledge, plugin components,
-generic records, decisions, scheduler state, commands and attempts, events, ingress,
-random state and draws, the boundary chain, authoritative run/plugin identity,
-and runtime control counters. Each unordered collection is sorted by stable
-identity before hashing. Checkpoint domain `canwu.checkpoint.v4` binds those
-roots, the exact run-manifest hash, the commitment format, and the authoritative
-revision contract. A format-0 snapshot is never interpreted under the new
-semantics: loading first recomputes and verifies its checkpoint-v3 full-state
-hash, then derives roots and emits checkpoint v4. Any present format-1 root is
-recomputed and compared independently before the outer checkpoint is accepted.
-Replay journals persist their commitment format; format-0 journals reproduce
-checkpoint v3 exactly, while current journals reproduce checkpoint v4.
-
-Boundary state commitments have an independent in-field contract. Historical
-64-character hashes are legacy format 0 and retain their original full-state
-meaning. New boundaries use `v1:<64-character hash>`, derived from commitment
-format 1 roots after authoritative mutation and before the new boundary record
-enters the chain. The roots include current world, knowledge, plugin state,
-generic records, scheduler, command/attempt, event, ingress, random, identity,
-control, and the prior boundary-chain head. Existing hashes are never
-reinterpreted or rewritten. A loaded legacy chain may append tagged v1 records,
-and exact replay chooses the contract recorded on each boundary. Unknown tags
-are rejected. When a snapshot is at a boundary head and the record carries a
-state commitment, loading recomputes that commitment from validated state and
-requires an exact match.
-
-Checkpoint-journal format 1 is a persistence envelope versioned separately from
-the nested snapshot. Its current-state checkpoint contains a current snapshot
-shell with empty event, command, command-attempt, ingress, boundary, and random-
-draw arrays plus the full evidence cursor and existing commitment roots.
-Contiguous evidence segments reconstruct those arrays before normal snapshot
-validation. Segment gaps, duplicates, non-advancing ranges, false end cursors,
-checkpoint-side evidence duplication, unsupported envelope formats, and any
-record tampering are rejected. Existing flat snapshots are never relabeled into
-this envelope implicitly. Current envelopes contain format 5; engine 0.4.0
-format-4 envelopes are accepted only by the strict legacy entry point, validated
-as 0.4 artifacts, and migrated before the current reconstruction validator runs.
-
-Live journal sealing is an in-memory continuation policy over the same format-1
-cursor and segment contract. `CompactedSimulation` prepares a completed retained
-tail as an immutable content-addressed segment, lets an `ArchiveStore` persist it
-idempotently, and commits only the matching preparation token. It preserves the
-total cursor, archived segment/receipt/dependency roots, operation-keyed random
-reservations, and incremental commitment prefix. Full reconstruction resolves
-the exact segment sequence through an `ArchiveProvider` and re-runs normal
-snapshot validation. This adds committed continuation fields to format 5 but no
-new checkpoint-journal envelope version. Ordinary flat snapshots and replay
-journals retain their full-history semantics.
-
-Authoritative state and boundary hashes normalize the run-policy artifact: the
-actual command/effect journal remains authoritative, while run purpose,
-controller, seat, observation, interaction, and trace policy do not alter
-simulation-result identity. The recomputed checkpoint uses a versioned
-save-container commitment that also binds the exact full run-manifest hash.
-Thus observation/trace-only variants have identical authoritative and RNG
-results but distinct save identity. Exact `ReplayJournal` replay verifies engine
-and format versions, root seed, run and plugin manifests, run configuration,
-plugin-registration lifecycle state, accepted commands, command attempts,
-boundaries, final time, and final checkpoint hash, including command-only,
-rejection-only, and registration-closure-only runs. Each report dispatch must retain exactly one
-causally linked core random draw, and authoritative scheduling rejects
-unrepresentable time instead of saturating. Checked hour/day construction and
-checked time/duration arithmetic are available for data-dependent values;
-convenience constructors and operators never clamp. New runs require declared
-manifests; format 2 and 3 checkpoints without plugins migrate with explicit
-legacy provenance. They may continue, but exact replay returns
-`legacy_replay_unavailable`. Legacy snapshots containing executable plugin
-descriptors are rejected because their handler semantic identities cannot be
-recovered safely.
-
-Format 4 also permits additive application-defined domain record schemas,
-ordered record stores, and boundary `record_changes`. These fields are omitted
-when empty, preserving the serialized and hashed shape of earlier format-4
-state. A record change carries its plugin/system owner, operation, previous and
-current versioned values, visibility, and summary; its boundary emission points
-back to the exact change index. Loading validates schemas and live references,
-reverse-reconstructs the initial record store, reapplies lifecycle bundles in
-canonical commit-stage order, rejects successor cycles, validates entity-bearing
-evidence at both its proposal-visible and committed historical cuts, and compares
-the result with the persisted store.
-Format 2 and 3 inputs reject these fields rather than interpreting new lifecycle
-semantics under a legacy identity. Format-4 snapshots with declared domain
-record schemas also retain the canonical initial scenario and verify it against
-the scenario artifact in the run manifest. Record history reconstructed in
-reverse must equal that bound genesis, so a rehashed snapshot cannot relabel
-created records as initial state. Record-free format-4 snapshots omit this
-additive field and retain their prior serialized and hashed shape. A pristine,
-registration-open declared snapshot can reconstruct and manifest-validate that
-genesis before activating record schemas; execution-closed or migrated-legacy
-snapshots cannot gain that capability without an explicit migration.
-
-Routing and transport are additive extension crates in 0.5. Their authoritative
-records are expected to live in application-defined domain-record schemas, so
-adding `canwu-routing` or `canwu-transport` does not change snapshot format 5.
-`RoutingCache` is derived and rebuildable. If a future release promotes
-transport execution into first-class snapshot fields, it must introduce a
-separate format or migration fixture rather than interpreting old snapshots
-under new transport semantics. The current semantic versions are
-`canwu-routing.v1` and `canwu-transport.v3`.
-
-`canwu-transport.v3` makes itinerary history append-only and records failure
-time for custody recovery: rerouting retains prior `LegExecution` values and
-all active-leg lookup is qualified by itinerary revision. Persisted transport
-data created under `canwu-transport.v1` or v2 must use the matching executable
-or an explicit domain migration; it must not be loaded and reinterpreted under
-v3 behavior.
-
-`canwu-correspondence` is an additive unpublished domain extension under
-snapshot format 5. Adding the crate does not change the flat snapshot format,
-but any run that registers `CorrespondencePlugin` persists its descriptor,
-record schemas, ingress contracts, and boundary contracts. Rehydration therefore
-requires the exact package version and semantic hash. A change to correspondence
-payload meaning, operation-key hashing, information-saga order, reroute/retry
-semantics, or cross-plugin ingress requires a new semantic hash and, when old
-records must continue, an explicit plugin-domain migration.
-
-The atomic addressed-dispatch activation and exact no-publication result
-finalization change `canwu-information` from plugin identity
-`0.1.0-experimental` to `0.2.0-experimental`. Its plugin semantic hash is now
-separate from the stable hash of its delegation-authority grant list. Existing
-snapshots registered with the old identity continue only with the old
-executable; no implicit reinterpretation is permitted.
-
-The correspondence milestone uses `0.2.0-experimental` because incident
-applicability and suppressed-incident evidence, failed-leg custody handoffs,
-and their replay semantics are persisted behavior. Existing correspondence
-snapshots require the old executable or an explicit migration.
-
-Technology and historical research are also additive unpublished extension
-crates in 0.5. `canwu-technology` and the three `canwu-history-research`
-descriptors register ordinary domain-record and knowledge schemas, so they do
-not change snapshot format 5. Saves that activate them retain their exact
-plugin names, experimental versions, semantic hashes, records, commands,
-ingress, and boundary changes and cannot continue without matching handlers.
-
-`DomainRecordPage`, `domain_record_page`, and retained
-`domain_record_version` lookup are additive trusted-host APIs. `evidence_exists`
-and `evidence_time` are additive generic retained-or-archived identity queries
-for declared plugin
-views and the trusted host. A page binds an
-authoritative revision and rejects later calls against a stale revision. Exact
-version lookup returns the record body established by the named initial or
-boundary-change evidence while that body is retained; initial bodies use a
-rebuildable in-memory record index and retained boundaries use their evidence
-cursor rather than a full-history scan. An archive receipt alone
-proves identity but returns no precise evidence time or record body; callers
-that require causal ordering must load the archived body or fail closed. These
-APIs do not weaken existing snapshot or
-evidence validation and do not alter serialized state.
-
-Snapshot format 3 adds canonical phased-boundary records, exact plugin/system
-emission provenance, command and event admission, reservation offers, requests,
-allocations, committed component changes, boundary causes, and the next boundary
-counter. Loading recomputes allocation evidence and validates each boundary
-change and emission against its serialized plugin contract. The engine performs
-an explicit format 2 to format 3 migration when no phased-boundary state is
-present. Boundary-aware replay regenerates and compares complete boundary
-records rather than silently replaying only the command subset of a run.
-
-Snapshot format 2 introduced namespaced plugin component records,
-deterministic typed state keys, machine-validated command payload schemas,
-declared read/write ownership, the plugin-registration lifecycle flag,
-actor-known army names, initial simulation time, and deterministic plugin
-system/action contracts. Component records use typed
-`(plugin, state, entity, component)` identity. Format 1 remains intentionally
-rejected; no released save depends on that initial development-only format.
-
-Every supported load validates canonical ordering, references, causes,
-transit/queue and report-delivery coherence, registration lifecycle, run and
-plugin manifests, causally linked random evidence, descriptors, ownership,
-boundary hashes, the current checkpoint commitment, and counter continuity
-before constructing runtime maps.
-
-## Supported operating systems
-
-Canwu supports Windows, macOS, and Linux:
-
-- Headless engine crates avoid operating-system-specific APIs.
-- The reference debug client uses `eframe` with the OpenGL `glow` backend.
-- Linux enables both Wayland and X11 window backends.
-- CI builds, lints, and tests the workspace on all three operating systems.
-
-Platform-specific integrations must remain in adapters or narrowly scoped
-modules. New code should use `std::path` and portable Rust APIs rather than
-assuming path separators, shell syntax, filesystem case sensitivity, or a
-particular newline convention.
+The 0.6 change removes caller-supplied replay wrappers from the public facade.
+Use the constructor APIs for new runs, `snapshot`/`checkpoint` for persistence,
+`replay_from_journal` for exact replay, and `outbox_entries` for host delivery.
+Downstream crates must update their code to these contracts; no deprecated
+alias is retained before 1.0.

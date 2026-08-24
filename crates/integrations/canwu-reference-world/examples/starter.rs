@@ -6,7 +6,6 @@ use canwu_reference_world::{
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (scenario, ids) = demo_scenario()?;
-    let replay_scenario = scenario.clone();
     let plugin = ReferenceWorldPlugin;
     let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
 
@@ -30,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let loaded = Canwu::from_snapshot_json_with_plugins(&saved, &[&plugin])?;
     let fork = loaded.fork();
     let journal = canwu.replay_journal();
-    let replayed = Canwu::replay_from_journal(replay_scenario, &[&plugin], &journal)?;
+    let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
 
     assert_eq!(loaded.checkpoint_hash(), canwu.checkpoint_hash());
     assert_eq!(fork.checkpoint_hash(), canwu.checkpoint_hash());

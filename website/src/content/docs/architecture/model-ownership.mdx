@@ -21,7 +21,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 这次审计回答的不是“哪个 crate 行数太少”，而是“哪个层应该拥有这项语义”。结论是：**不应全面合并 crate**。具体事件载荷已从通用 `EventKind` 中迁出，示例世界也先迁入 `canwu-reference-world`，然后才删除失去独立职责的旧包边界。
 
 <Aside type="note" title="迁移状态">
-迁移现已完成。`canwu-reference-world` 拥有示例模型、移动插件、脱离式投影和路由适配器；旧源码包和依赖边已经删除。受支持的 format-5 存档继续通过明确的兼容实体注册迁移加载。
+所有权迁移现已完成。`canwu-reference-world` 拥有示例模型、移动插件、脱离式投影和路由适配器；旧源码包和依赖边已经删除。Format 6 快照自带规范实体注册与初始场景，旧 format-4/5 存档由内核拒绝，不进行隐式迁移。
 </Aside>
 
 ## 一条所有权规则
@@ -32,7 +32,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 
 | crate | 审计结论 |
 | --- | --- |
-| 已退役的 `canwu-world` | 具体模型现由 `canwu-reference-world` 拥有；弃用的 format-5 投影类型只保留在对外 API/运行时兼容表面。 |
+| 已退役的 `canwu-world` | 具体模型现由 `canwu-reference-world` 拥有；当前 `WorldSnapshot` 仅作为参考整合与运行时投影保留。 |
 | `canwu-event` | 现在只包含通用事件契约和结构化事件记录。具体载荷已经迁出；剩余通用类型是否并入 `canwu-sim`，必须等独立消费情况明确后再决定。 |
 
 ## `canwu-world` 的 12 个公开类型
@@ -49,8 +49,8 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 | `Route` | 具体领土间双向路线 | 参考拓扑整合包，并转换为路由自身的 `PlanningSnapshot` |
 | `TransitState` | 具体军队旅行状态 | 参考移动/世界整合包 |
 | `Army` | 具体军队、指挥官、兵力和士气模型 | 参考移动/世界整合包 |
-| `WorldSnapshot` | 只包含上述具体实体的兼容投影 | 保留迁移适配器，之后由各整合包拥有自己的脱离式投影 |
-| `WorldDiff` | 只追踪军队、人物、领土和信件 ID 的兼容差异 | 保留到调用者迁移，再使用整合包差异或通用变化证据 |
+| `WorldSnapshot` | 只包含上述具体实体的参考投影 | 由参考整合包提供给需要它的 host；不承担旧存档迁移 |
+| `WorldDiff` | 只追踪军队、人物、领土和信件 ID 的参考差异 | 由参考整合包提供；通用内核使用边界变化证据 |
 
 `canwu-routing` 不拥有这个世界。求解器只接收通用 `PlanningSnapshot`；`WorldSnapshot` 转换现已迁入 `canwu-reference-world`。
 
@@ -78,12 +78,12 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 1. 已固定代表性的 JSON 存档、事件日志、`canwu-api` 调用与精确重演结果。
 2. 已把 `EventKind` 改为通用结构化记录，并在不改变旧 JSON 形状的前提下迁出具体公开变体；完整的跨整合包命名空间与载荷版本仍是后续契约。
 3. `canwu-reference-world` 已通过公开 API 接管具体实体、移动行为、脱离式投影和路由转换。
-4. 受支持的 format-5 状态会得到明确的兼容实体注册；可运行入门示例证明保存、加载、派生分支与精确重演。
+4. Format 6 将实体注册与初始场景写入自描述快照；可运行入门示例证明保存、加载、派生分支与精确重演。
 5. `canwu-world` 在普通消费者归零后已退役；`canwu-event` 的独立边界仍留待单独决策。
 </Steps>
 
 ## 实施完成门槛
 
-旧存档和日志必须经过明确的版本迁移继续加载并精确重演；因果、相关标识、受众、影响对象和承诺校验必须保持确定且默认拒绝；路由 crate 必须不再依赖示例世界；至少一个可运行入门套件必须证明保存、加载、派生分支和精确重放；还需要第二种整合或测试夹具证明通用引擎没有暗中依赖第一种历史模型。
+Format 6 旧存档和日志必须明确拒绝；因果、相关标识、受众、影响对象和承诺校验必须保持确定且默认拒绝；路由 crate 必须不再依赖示例世界；至少一个可运行入门套件必须证明保存、加载、派生分支和精确重放；还需要第二种整合或测试夹具证明通用引擎没有暗中依赖第一种历史模型。
 
 完整的逐类型理由、依赖证据和门槛记录在仓库中的规范审计文档。

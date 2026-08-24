@@ -34,12 +34,12 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "=0.5.1"
+canwu-api = "=0.6.0"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
 release exactly and upgrade only alongside an explicit save migration. The
-example above selects the immutable `0.5.1` release rather than the moving
+example above selects the immutable `0.6.0` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve

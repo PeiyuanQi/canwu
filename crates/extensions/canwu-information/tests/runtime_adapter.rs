@@ -1089,7 +1089,7 @@ fn publication_continues_across_sixty_four_holders_and_snapshot_replay_is_exact(
     );
 
     let journal = canwu.replay_journal();
-    let replayed = Canwu::replay_from_journal(scenario, &[&plugin], &journal)
+    let replayed = Canwu::replay_from_journal(&[&plugin], &journal)
         .expect("authoritative journal should replay exactly");
     assert_eq!(replayed.snapshot(), canwu.snapshot());
     assert_eq!(
@@ -1196,7 +1196,7 @@ fn delegated_interpretation_publishes_only_to_holder_and_replays_without_externa
     settle(&mut canwu);
     let snapshot = canwu.snapshot();
     let replay_plugins: [&dyn SimulationPlugin; 2] = [&REPLAY_GUARD_AUTHORITY_PLUGIN, &plugin];
-    let replayed = Canwu::replay_from_journal(scenario, &replay_plugins, &canwu.replay_journal())
+    let replayed = Canwu::replay_from_journal(&replay_plugins, &canwu.replay_journal())
         .expect("interpretation replay must consume the persisted result without external work");
     assert_eq!(replayed.snapshot(), snapshot);
 

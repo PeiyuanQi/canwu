@@ -9,8 +9,8 @@ pub use canwu_core::{
     DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
     EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
     KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
-    PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry, TerritoryId, TypeSchema,
-    TypedDomainRecordRef,
+    PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry, SimulationGranularity,
+    TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
@@ -54,7 +54,7 @@ pub use canwu_sim::{
     IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
     KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo,
     LetterStatus, LlmModelIdentity, LlmPolicy, MapPoint, ObservationPolicy, OrderedRulePolicy,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    OutboxEntry, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadProperty,
     PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, Person,
     PersonTransitState, PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord,
@@ -399,6 +399,10 @@ impl Canwu {
         self.simulation.replay_journal()
     }
 
+    pub fn outbox_entries(&self) -> Result<Vec<OutboxEntry>, CanwuError> {
+        self.simulation.outbox_entries()
+    }
+
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
     }
@@ -613,102 +617,12 @@ impl Canwu {
         })
     }
 
-    pub fn replay(
-        seed: u64,
-        scenario: Scenario,
-        commands: &[CommandRecord],
-        final_time: SimTime,
-    ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay(seed, scenario, commands, final_time)?,
-        })
-    }
-
-    pub fn replay_with_plugins(
-        seed: u64,
-        scenario: Scenario,
-        plugins: &[&dyn SimulationPlugin],
-        commands: &[CommandRecord],
-        final_time: SimTime,
-    ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_with_plugins(
-                seed, scenario, plugins, commands, final_time,
-            )?,
-        })
-    }
-
-    pub fn replay_with_boundaries(
-        seed: u64,
-        scenario: Scenario,
-        plugins: &[&dyn SimulationPlugin],
-        commands: &[CommandRecord],
-        boundaries: &[BoundaryRecord],
-        final_time: SimTime,
-    ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_with_boundaries(
-                seed, scenario, plugins, commands, boundaries, final_time,
-            )?,
-        })
-    }
-
-    pub fn replay_with_run_manifest(
-        seed: u64,
-        scenario: Scenario,
-        run_manifest: RunManifest,
-        plugins: &[&dyn SimulationPlugin],
-        commands: &[CommandRecord],
-        boundaries: &[BoundaryRecord],
-        final_time: SimTime,
-    ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_with_run_manifest(
-                seed,
-                scenario,
-                run_manifest,
-                plugins,
-                commands,
-                boundaries,
-                final_time,
-            )?,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn replay_with_run_configuration(
-        seed: u64,
-        scenario: Scenario,
-        run_manifest: RunManifest,
-        run_configuration: RunConfiguration,
-        plugins: &[&dyn SimulationPlugin],
-        commands: &[CommandRecord],
-        command_attempts: &[CommandAttemptRecord],
-        boundaries: &[BoundaryRecord],
-        final_time: SimTime,
-    ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_with_run_configuration(
-                seed,
-                scenario,
-                run_manifest,
-                run_configuration,
-                plugins,
-                commands,
-                command_attempts,
-                boundaries,
-                final_time,
-            )?,
-        })
-    }
-
     pub fn replay_from_journal(
-        scenario: Scenario,
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
         Ok(Self {
-            simulation: Simulation::replay_from_journal(scenario, plugins, journal)?,
+            simulation: Simulation::replay_from_journal(plugins, journal)?,
         })
     }
 
@@ -926,6 +840,17 @@ impl CompactedCanwu {
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
+    }
+
+    pub fn outbox_entries(&self) -> Result<Vec<OutboxEntry>, CanwuError> {
+        self.simulation.outbox_entries()
+    }
+
+    pub fn outbox_entries_for_segment(
+        &self,
+        segment: &EvidenceJournalSegment,
+    ) -> Result<Vec<OutboxEntry>, CanwuError> {
+        self.simulation.outbox_entries_for_segment(segment)
     }
 
     #[must_use]

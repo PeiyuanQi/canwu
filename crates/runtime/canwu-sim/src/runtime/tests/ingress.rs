@@ -194,7 +194,7 @@ fn canonical_ingress_orders_commands_packets_and_calendar_work() {
     assert_eq!(simulation.snapshot(), late_before);
 
     let journal = simulation.replay_journal();
-    let replayed = Simulation::replay_from_journal(scenario, &[&plugin], &journal)
+    let replayed = Simulation::replay_from_journal_with_scenario(scenario, &[&plugin], &journal)
         .expect("canonical ingress should replay in its recorded environment");
     assert_eq!(simulation.snapshot(), replayed.snapshot());
 
@@ -316,7 +316,7 @@ fn exact_replay_cannot_advance_past_unadmitted_due_ingress() {
     journal.final_time = forged_final;
     journal.checkpoint_hash = forged_snapshot.checkpoint_hash;
 
-    let error = Simulation::replay_from_journal(scenario, &[], &journal)
+    let error = Simulation::replay_from_journal_with_scenario(scenario, &[], &journal)
         .err()
         .expect("replay must not cross unadmitted due ingress");
     assert_eq!(error.code, ErrorCode::InvalidBoundary);
@@ -533,7 +533,7 @@ fn boundary_generated_zero_delay_ingress_waits_for_the_next_same_time_boundary()
     assert_eq!(simulation.snapshot(), restored.snapshot());
 
     let journal = simulation.replay_journal();
-    let replayed = Simulation::replay_from_journal(scenario, &[&plugin], &journal)
+    let replayed = Simulation::replay_from_journal_with_scenario(scenario, &[&plugin], &journal)
         .expect("boundary-generated ingress should replay from its producing system");
     assert_eq!(simulation.snapshot(), replayed.snapshot());
 
@@ -621,7 +621,7 @@ fn cross_plugin_ingress_requires_a_declared_target_and_waits_for_next_admission(
             .expect("cross-plugin ingress provenance should survive snapshot restoration");
     assert_eq!(simulation.snapshot(), restored.snapshot());
 
-    let replayed = Simulation::replay_from_journal(
+    let replayed = Simulation::replay_from_journal_with_scenario(
         scenario,
         &[&producer, &consumer],
         &simulation.replay_journal(),

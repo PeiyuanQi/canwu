@@ -138,8 +138,7 @@ fn disaster_after_handoff_preserves_prior_leg_and_handoff_evidence() {
 #[test]
 fn knowledge_update_explicitly_wakes_a_waiting_route_on_the_same_attempt() {
     let plugins: &[&dyn SimulationPlugin] = &[&InformationPlugin, &CorrespondencePlugin];
-    let (mut canwu, replay_scenario, sender, request) =
-        start_delivery_case(true, SimDuration::days(10));
+    let (mut canwu, sender, request) = start_delivery_case(true, SimDuration::days(10));
     step_until_status(
         &mut canwu,
         &request.operation_key,
@@ -223,8 +222,7 @@ fn knowledge_update_explicitly_wakes_a_waiting_route_on_the_same_attempt() {
     let restored =
         Canwu::from_snapshot_json_with_plugins(&canwu.snapshot_json().unwrap(), plugins).unwrap();
     assert_eq!(restored.snapshot(), canwu.snapshot());
-    let replayed =
-        Canwu::replay_from_journal(replay_scenario, plugins, &canwu.replay_journal()).unwrap();
+    let replayed = Canwu::replay_from_journal(plugins, &canwu.replay_journal()).unwrap();
     assert_eq!(replayed.snapshot(), canwu.snapshot());
 }
 
@@ -239,7 +237,7 @@ fn interception_records_access_without_stopping_delivery() {
 
 #[test]
 fn late_arrival_fails_without_rewriting_the_deadline() {
-    let (mut canwu, _, _, request) = start_delivery_case(true, SimDuration::days(1));
+    let (mut canwu, _, request) = start_delivery_case(true, SimDuration::days(1));
     step_until_terminal(&mut canwu, &request.operation_key);
     let operation = load_operation(&canwu, &request.operation_key);
     assert_eq!(operation.status, CorrespondenceStatus::DeadlineMissed);
@@ -258,8 +256,7 @@ fn late_arrival_fails_without_rewriting_the_deadline() {
 #[test]
 fn failed_delivery_retries_with_a_successor_attempt_and_active_dispatch() {
     let plugins: &[&dyn SimulationPlugin] = &[&InformationPlugin, &CorrespondencePlugin];
-    let (mut canwu, replay_scenario, sender, request) =
-        start_delivery_case(true, SimDuration::days(1));
+    let (mut canwu, sender, request) = start_delivery_case(true, SimDuration::days(1));
     step_until_terminal(&mut canwu, &request.operation_key);
     let failed = load_operation(&canwu, &request.operation_key);
     assert_eq!(failed.status, CorrespondenceStatus::DeadlineMissed);
@@ -290,14 +287,13 @@ fn failed_delivery_retries_with_a_successor_attempt_and_active_dispatch() {
     let restored =
         Canwu::from_snapshot_json_with_plugins(&canwu.snapshot_json().unwrap(), plugins).unwrap();
     assert_eq!(restored.snapshot(), canwu.snapshot());
-    let replayed =
-        Canwu::replay_from_journal(replay_scenario, plugins, &canwu.replay_journal()).unwrap();
+    let replayed = Canwu::replay_from_journal(plugins, &canwu.replay_journal()).unwrap();
     assert_eq!(replayed.snapshot(), canwu.snapshot());
 }
 
 #[test]
 fn failed_delivery_keeps_dispatch_active_until_explicit_finalization() {
-    let (mut canwu, _, sender, request) = start_delivery_case(true, SimDuration::days(1));
+    let (mut canwu, sender, request) = start_delivery_case(true, SimDuration::days(1));
     step_until_terminal(&mut canwu, &request.operation_key);
     let failed = load_operation(&canwu, &request.operation_key);
     assert_eq!(failed.dispatch.version, 2);
@@ -316,7 +312,7 @@ fn failed_delivery_keeps_dispatch_active_until_explicit_finalization() {
 
 #[test]
 fn external_progress_cannot_bypass_planned_travel_time() {
-    let (mut canwu, _, _, request) = start_delivery_case(false, SimDuration::days(1));
+    let (mut canwu, _, request) = start_delivery_case(false, SimDuration::days(1));
     step_until_status(
         &mut canwu,
         &request.operation_key,
@@ -392,7 +388,6 @@ fn sender_cannot_read_an_unrelated_carriers_private_route_knowledge() {
 fn automatic_opportunity_selects_and_consumes_one_recipient_deterministically() {
     let plugins: &[&dyn SimulationPlugin] = &[&InformationPlugin, &CorrespondencePlugin];
     let (scenario, sender, recipient, prepared_dispatch) = scenario_with_prepared_dispatch();
-    let replay_scenario = scenario.clone();
     let mut canwu = Canwu::new_with_plugins(1940, scenario, plugins).unwrap();
     let operation_key = "automatic-wuxi-letter";
     canwu
@@ -492,8 +487,7 @@ fn automatic_opportunity_selects_and_consumes_one_recipient_deterministically() 
     let restored =
         Canwu::from_snapshot_json_with_plugins(&canwu.snapshot_json().unwrap(), plugins).unwrap();
     assert_eq!(restored.snapshot(), canwu.snapshot());
-    let replayed =
-        Canwu::replay_from_journal(replay_scenario, plugins, &canwu.replay_journal()).unwrap();
+    let replayed = Canwu::replay_from_journal(plugins, &canwu.replay_journal()).unwrap();
     assert_eq!(replayed.snapshot(), canwu.snapshot());
 }
 
@@ -503,8 +497,7 @@ fn run_delivery_case(
     due_after: SimDuration,
 ) -> canwu_correspondence::CorrespondenceOperation {
     let plugins: &[&dyn SimulationPlugin] = &[&InformationPlugin, &CorrespondencePlugin];
-    let (mut canwu, replay_scenario, sender, request) =
-        start_delivery_case(long_distance, due_after);
+    let (mut canwu, sender, request) = start_delivery_case(long_distance, due_after);
 
     if matches!(incident, IncidentCase::DisasterAfterHandoff) {
         step_until_handoff(&mut canwu, &request.operation_key);
@@ -598,8 +591,7 @@ fn run_delivery_case(
     let snapshot_json = canwu.snapshot_json().unwrap();
     let restored = Canwu::from_snapshot_json_with_plugins(&snapshot_json, plugins).unwrap();
     assert_eq!(restored.snapshot(), canwu.snapshot());
-    let replayed =
-        Canwu::replay_from_journal(replay_scenario, plugins, &canwu.replay_journal()).unwrap();
+    let replayed = Canwu::replay_from_journal(plugins, &canwu.replay_journal()).unwrap();
     assert_eq!(replayed.snapshot(), canwu.snapshot());
     operation
 }
@@ -607,15 +599,9 @@ fn run_delivery_case(
 fn start_delivery_case(
     long_distance: bool,
     due_after: SimDuration,
-) -> (
-    Canwu,
-    canwu_api::Scenario,
-    canwu_api::PersonId,
-    InitiateCorrespondenceRequest,
-) {
+) -> (Canwu, canwu_api::PersonId, InitiateCorrespondenceRequest) {
     let plugins: &[&dyn SimulationPlugin] = &[&InformationPlugin, &CorrespondencePlugin];
     let (scenario, sender, recipient, prepared_dispatch) = scenario_with_prepared_dispatch();
-    let replay_scenario = scenario.clone();
     let mut canwu = Canwu::new_with_plugins(1940, scenario, plugins).unwrap();
     let carrier = KnowledgeHolderRef::Person(sender);
     let destination = if long_distance {
@@ -666,7 +652,7 @@ fn start_delivery_case(
         automatic_opportunity: None,
     };
     open_and_resolve_send_decision(&mut canwu, sender, &request);
-    (canwu, replay_scenario, sender, request)
+    (canwu, sender, request)
 }
 
 fn open_and_resolve_send_decision(

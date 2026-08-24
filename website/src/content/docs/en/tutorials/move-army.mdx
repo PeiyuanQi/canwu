@@ -38,7 +38,7 @@ cargo run -p canwu-reference-world --example starter
 - The army reaches the destination after time advances.
 - Concrete world types are not a foundation dependency of `canwu-api`; an application can replace the entire domain integration.
 - Load, fork, and exact replay all produce the same checkpoint as the original run.
-- The runtime explicitly migrates the entity registry for old format-5 saves without retaining the `canwu-world` crate.
+- Format 6 snapshots carry their canonical entity registry and initial scenario; the kernel rejects old format-4/5 saves instead of migrating them implicitly.
 
 ## Next
 

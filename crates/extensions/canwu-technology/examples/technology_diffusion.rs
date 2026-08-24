@@ -300,7 +300,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let snapshot = canwu.snapshot_json()?;
     let restored = from_technology_snapshot_json(&snapshot, &[&plugin])?;
-    let replayed = replay_technology_from_journal(scenario, &[&plugin], &canwu.replay_journal())?;
+    let replayed = replay_technology_from_journal(&[&plugin], &canwu.replay_journal())?;
     assert_eq!(restored.snapshot(), canwu.snapshot());
     assert_eq!(replayed.snapshot(), canwu.snapshot());
     println!("snapshot restore and exact replay match");

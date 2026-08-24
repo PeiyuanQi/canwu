@@ -3,8 +3,7 @@ use canwu_api::{
     DecisionAttemptOutcome, DecisionAuthority, DecisionContext, DecisionControllerBinding,
     DecisionEvaluation, DecisionIngressRequest, DecisionMutation, DecisionOption, DecisionOutcome,
     DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId, DecisionTicketDraft,
-    DecisionTicketId, EntityRef, ErrorCode, Scenario, SimDuration, UtilityProfile,
-    WeightedUtilityPolicy,
+    DecisionTicketId, EntityRef, ErrorCode, SimDuration, UtilityProfile, WeightedUtilityPolicy,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -13,14 +12,6 @@ use std::collections::BTreeMap;
 #[allow(clippy::too_many_lines)]
 fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy() {
     let mut canwu = Canwu::demo(1918).expect("demo");
-    let initial = canwu.snapshot();
-    let scenario = Scenario {
-        start_time: initial.initial_time,
-        entities: initial.entities,
-        world: initial.world,
-        knowledge: initial.knowledge,
-        domain_records: Vec::new(),
-    };
     let ids = Canwu::demo_ids();
     let controller = DecisionControllerBinding::new(
         "warlord-b-ai",
@@ -200,7 +191,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
     assert_eq!(restored.snapshot(), snapshot);
 
     let journal = canwu.replay_journal();
-    let replayed = Canwu::replay_from_journal(scenario, &[], &journal).expect("exact replay");
+    let replayed = Canwu::replay_from_journal(&[], &journal).expect("exact replay");
     assert_eq!(replayed.snapshot(), snapshot);
 
     let mut compact = canwu.into_compacted().expect("compact decision runtime");

@@ -337,43 +337,27 @@ pub(super) fn validate_snapshot(
             "snapshot is missing its run manifest",
         ));
     };
-    let has_domain_feature = !plugins.record_schemas.is_empty()
-        || !snapshot.domain_records.is_empty()
-        || snapshot
-            .boundaries
-            .iter()
-            .any(|boundary| !boundary.record_changes.is_empty());
-    let initial_domain_records = if let Some(initial_scenario) = &snapshot.initial_scenario {
-        if !has_domain_feature {
-            return invalid_snapshot(
-                "record-free snapshots must omit the domain-record initial scenario",
-            );
-        }
-        let mut canonical = initial_scenario.clone();
-        canonicalize_scenario(&mut canonical);
-        if &canonical != initial_scenario || initial_scenario.start_time != snapshot.initial_time {
-            return invalid_snapshot("snapshot initial scenario is not canonical or time-aligned");
-        }
-        validate_scenario(initial_scenario).map_err(|error| {
-            invalid_snapshot_error(format!("snapshot initial scenario is invalid: {error}"))
-        })?;
-        manifest::validate(run_manifest, Some(initial_scenario), true)?;
-        Some(
-            initial_scenario
-                .domain_records
-                .iter()
-                .map(|record| (record.reference.clone(), record.clone()))
-                .collect::<BTreeMap<_, _>>(),
-        )
-    } else {
-        manifest::validate(run_manifest, None, true)?;
-        if has_domain_feature {
-            return invalid_snapshot(
-                "domain-record snapshots require their manifest-bound initial scenario",
-            );
-        }
-        None
+    let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
+        return invalid_snapshot(
+            "format 6 snapshots require their manifest-bound initial scenario",
+        );
     };
+    let mut canonical = initial_scenario.clone();
+    canonicalize_scenario(&mut canonical);
+    if &canonical != initial_scenario || initial_scenario.start_time != snapshot.initial_time {
+        return invalid_snapshot("snapshot initial scenario is not canonical or time-aligned");
+    }
+    validate_scenario(initial_scenario).map_err(|error| {
+        invalid_snapshot_error(format!("snapshot initial scenario is invalid: {error}"))
+    })?;
+    manifest::validate(run_manifest, Some(initial_scenario))?;
+    let initial_domain_records = Some(
+        initial_scenario
+            .domain_records
+            .iter()
+            .map(|record| (record.reference.clone(), record.clone()))
+            .collect::<BTreeMap<_, _>>(),
+    );
     if snapshot
         .initial_scenario
         .as_ref()
@@ -848,8 +832,8 @@ pub(super) fn validate_snapshot(
         let persisted_roots = snapshot.commitment_roots.as_ref().ok_or_else(|| {
             invalid_snapshot_error("current commitment snapshot is missing its domain roots")
         })?;
-        if !commitment_roots_are_canonical(persisted_roots)
-            || snapshot_commitment_roots(snapshot)? != *persisted_roots
+        let calculated_roots = snapshot_commitment_roots(snapshot)?;
+        if !commitment_roots_are_canonical(persisted_roots) || calculated_roots != *persisted_roots
         {
             return invalid_snapshot(
                 "persisted commitment roots do not match the canonical snapshot domains",

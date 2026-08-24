@@ -7,7 +7,6 @@ publish = false
 [workspace]
 
 [features]
-legacy-v4-source-shape = []
 viewer-admin-leak = []
 viewer-boundary-leak = []
 viewer-domain-leak = []

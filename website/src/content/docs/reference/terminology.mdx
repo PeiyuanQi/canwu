@@ -35,6 +35,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [真值](/developer/reading-state/) | ground truth | — | 权威状态中的事实，无论某个角色是否知道。 |
 | [角色相对视图](/developer/reading-state/) | actor-relative view | `CanwuViewer`, `ViewerContext` | 根据一个角色的知识和权限（authority）生成的读取结果，不会暴露全知状态。 |
 | [只读快照](/developer/reading-state/) | read-only snapshot | `WorldSnapshot` | 供受信任读取使用的脱离运行时状态值，不是实时可变引用。 |
+| 模拟粒度 | simulation granularity | `SimulationGranularity` | 内核的领域无关粒度：`aggregate`、`group`、`actor`。CM 应在自己的整合包中映射为 Population、Special Group、Character。 |
 
 ## 时间、输入与结算
 

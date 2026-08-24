@@ -25,6 +25,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless core）。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
 
+## Format 6 与三种模拟粒度
+
+0.6 在 1.0 之前采用 clean break：快照和 `ReplayJournal` 必须自带声明式运行身份、初始场景、commitment、authority root 与完整证据；内核不自动加载 format-4/5 存档。`SimulationGranularity` 只定义领域无关的 `aggregate`、`group`、`actor` 三层。Celestial Mandate 可在自己的参考整合包中将它们映射为 Population、Special Group、Character；Southern Ming 与 WWII 是 CM 内容与规则整合，不是参伍内核模块。
+
 ## 从客户端到内核
 
 | 层 | 责任 | 公开承诺 |

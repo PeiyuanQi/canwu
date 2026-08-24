@@ -135,7 +135,9 @@ impl Serialize for EventValue {
             Self::Array(values) => values.serialize(serializer),
             Self::Object(fields) => {
                 let mut map = serializer.serialize_map(Some(fields.len()))?;
-                for (key, value) in fields {
+                let mut ordered = fields.iter().collect::<Vec<_>>();
+                ordered.sort_by(|left, right| left.0.cmp(&right.0));
+                for (key, value) in ordered {
                     map.serialize_entry(key, value)?;
                 }
                 map.end()
@@ -241,7 +243,9 @@ impl Serialize for EventKind {
     {
         let mut map = serializer.serialize_map(Some(self.fields.len() + 1))?;
         map.serialize_entry("type", &self.event_type)?;
-        for (key, value) in &self.fields {
+        let mut ordered = self.fields.iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| left.0.cmp(&right.0));
+        for (key, value) in ordered {
             map.serialize_entry(key, value)?;
         }
         map.end()
@@ -650,23 +654,23 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&supply).unwrap(),
-            r#"{"type":"plugin","plugin":"example-supply","event_type":"grain_allocated"}"#
+            r#"{"type":"plugin","event_type":"grain_allocated","plugin":"example-supply"}"#
         );
     }
 
     #[test]
-    fn legacy_domain_and_plugin_wire_shapes_round_trip_unchanged() {
+    fn event_wire_shapes_round_trip_in_canonical_field_order() {
         let fixtures = [
-            r#"{"type":"move_ordered","army":1,"from":2,"to":3,"arrival_at":60}"#,
+            r#"{"type":"move_ordered","army":1,"arrival_at":60,"from":2,"to":3}"#,
             r#"{"type":"army_arrived","army":1,"territory":3}"#,
-            r#"{"type":"person_move_ordered","person":4,"from":2,"to":3,"arrival_at":60}"#,
+            r#"{"type":"person_move_ordered","arrival_at":60,"from":2,"person":4,"to":3}"#,
             r#"{"type":"person_arrived","person":4,"territory":3}"#,
-            r#"{"type":"letter_delivered","letter":5,"carrier":4,"recipient":6,"territory":3}"#,
-            r#"{"type":"report_dispatched","recipient":4,"army":1,"arrives_at":90}"#,
-            r#"{"type":"knowledge_updated","recipient":4,"army":1,"known_location":3}"#,
-            r#"{"type":"knowledge_published","holder":{"type":"person","id":4},"record_count":2}"#,
-            r#"{"type":"debug_field_changed","entity":{"type":"army","id":1},"field":"morale","old_value":"70","new_value":"75"}"#,
-            r#"{"type":"plugin","plugin":"example","event_type":"changed"}"#,
+            r#"{"type":"letter_delivered","carrier":4,"letter":5,"recipient":6,"territory":3}"#,
+            r#"{"type":"report_dispatched","army":1,"arrives_at":90,"recipient":4}"#,
+            r#"{"type":"knowledge_updated","army":1,"known_location":3,"recipient":4}"#,
+            r#"{"type":"knowledge_published","holder":{"id":4,"type":"person"},"record_count":2}"#,
+            r#"{"type":"debug_field_changed","entity":{"id":1,"type":"army"},"field":"morale","new_value":"75","old_value":"70"}"#,
+            r#"{"type":"plugin","event_type":"changed","plugin":"example"}"#,
         ];
 
         for fixture in fixtures {

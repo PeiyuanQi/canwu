@@ -66,6 +66,35 @@ define_id!(ResourceId);
 define_id!(RouteId);
 define_id!(TerritoryId);
 
+/// Generic simulation granularity used by host applications to map aggregate,
+/// group, and individual actors onto the same authoritative engine.
+///
+/// The engine deliberately does not call these levels "population", "special
+/// group", or "character". Those are content terms owned by a reference
+/// integration such as Celestial Mandate. A host may map its population model
+/// to [`Self::Aggregate`], its special groups to [`Self::Group`], and its
+/// characters to [`Self::Actor`] without changing the kernel's identity wire
+/// format.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SimulationGranularity {
+    Aggregate,
+    Group,
+    Actor,
+}
+
+impl SimulationGranularity {
+    /// Returns the stable public label used in manifests and diagnostics.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Aggregate => "aggregate",
+            Self::Group => "group",
+            Self::Actor => "actor",
+        }
+    }
+}
+
 /// Stable application-defined record kind. Namespaces and names are validated
 /// by the simulation package registry before authoritative use.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]

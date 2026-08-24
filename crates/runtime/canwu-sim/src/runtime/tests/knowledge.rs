@@ -30,9 +30,12 @@ fn knowledge_publication_is_phase_scoped_atomic_persisted_and_replayable() {
         .expect("published knowledge should restore with exact schemas");
     assert_eq!(restored.snapshot(), snapshot);
 
-    let replayed =
-        Simulation::replay_from_journal(scenario, &[&plugin], &simulation.replay_journal())
-            .expect("published knowledge should replay exactly");
+    let replayed = Simulation::replay_from_journal_with_scenario(
+        scenario,
+        &[&plugin],
+        &simulation.replay_journal(),
+    )
+    .expect("published knowledge should replay exactly");
     assert_eq!(replayed.snapshot(), snapshot);
 
     let mut missing_record = snapshot;
@@ -259,14 +262,14 @@ fn operation_keyed_randomness_is_order_independent_idempotent_and_replayable() {
 
     Simulation::from_snapshot_with_plugins(baseline_run.snapshot(), &[&KeyedRandomPlugin])
         .expect("operation-keyed draws should restore");
-    let replayed = Simulation::replay_from_journal(
+    let replayed = Simulation::replay_from_journal_with_scenario(
         baseline_scenario,
         &[&KeyedRandomPlugin],
         &baseline_run.replay_journal(),
     )
     .expect("operation-keyed draws should replay exactly");
     assert_eq!(replayed.snapshot(), baseline_run.snapshot());
-    let replayed_reordered = Simulation::replay_from_journal(
+    let replayed_reordered = Simulation::replay_from_journal_with_scenario(
         reordered_scenario,
         &[&KeyedRandomPlugin],
         &reordered_run.replay_journal(),

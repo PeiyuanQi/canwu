@@ -35,6 +35,10 @@ renamed by this policy.
 | [真值](../website/src/content/docs/developer/reading-state.mdx) | ground truth | — | Facts present in authoritative state whether or not a particular actor knows them. |
 | [角色相对视图](../website/src/content/docs/developer/reading-state.mdx) | actor-relative view | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and authority rather than from omniscient state. |
 | [只读快照](../website/src/content/docs/developer/reading-state.mdx) | read-only snapshot | `WorldSnapshot` | A detached state value for trusted reads; it is not a mutable reference to the live runtime. |
+| 模拟粒度 | simulation granularity | `SimulationGranularity` | Domain-neutral engine level: `aggregate`, `group`, or `actor`. Do not replace these generic terms with a CM-specific ontology in Canwu core. |
+| 聚合层 | aggregate | `SimulationGranularity::Aggregate` | Coarse population-, economy-, or region-scale state. A host may map it to Population. |
+| 群体层 | group | `SimulationGranularity::Group` | Bounded social, institutional, military, or organizational group. A host may map it to Special Group. |
+| 角色层 | actor | `SimulationGranularity::Actor` | A person or other principal with knowledge and authority. A host may map it to Character. |
 
 ## Time, input, and settlement
 

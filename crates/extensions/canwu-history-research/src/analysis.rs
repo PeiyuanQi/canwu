@@ -67,11 +67,10 @@ pub fn from_historical_research_checkpoint_journal(
 }
 
 pub fn replay_historical_research_from_journal(
-    scenario: canwu_api::Scenario,
     plugins: &[&dyn canwu_api::SimulationPlugin],
     journal: &canwu_api::ReplayJournal,
 ) -> Result<Canwu, CanwuError> {
-    let canwu = Canwu::replay_from_journal(scenario, plugins, journal)?;
+    let canwu = Canwu::replay_from_journal(plugins, journal)?;
     validate_historical_research_runtime(&canwu)?;
     Ok(canwu)
 }
