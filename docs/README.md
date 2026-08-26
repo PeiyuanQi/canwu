@@ -47,6 +47,8 @@ The architecture document defines the ownership and persistence boundary for
 these packages. The first starter kit should become the canonical path from a
 selected content pack to a saved and replayable simulation.
 
+- [Governance transition case](governance-transition-case.md)
+
 ## Agent access
 
 When the `canwu-engine` agent plugin is installed, invoke

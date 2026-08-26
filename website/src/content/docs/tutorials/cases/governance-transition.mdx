@@ -1,0 +1,107 @@
+---
+title: 中央赈粮令与多机构原子执行
+description: 用 manifest、跨插件规范化输入、同边界原子提交和只读审计模拟一次中央赈粮令。
+sidebar:
+  order: 2
+  label: 中央赈粮令
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+## 1. 要解决什么问题
+
+假设你正在制作一个南明时期的历史模拟。中央赈济机构签发一份赈粮令，国库
+负责拨粮，县级粮务机构负责在地方登记执行。中央不能直接替两个机构写状态，
+还必须知道：双方是否都执行了同一份命令、版本是否正确、结果是否完整。
+
+这个案例把问题缩小成一条可验证的权力链：
+
+- 中央机构发布一份带有参与者契约的 manifest；
+- 国库和县级机构各自拥有自己的领域记录；
+- 两个机构在同一个 transaction 中完成原子提交；
+- 中央的只读审计在缺少任何一方时拒绝整个 transaction；
+- 保存、恢复和 exact replay 不依赖重新询问外部决策者。
+
+历史名称只是上层应用的数据。Canwu 不内置“皇帝”“尚书”“知县”或固定官僚
+树；应用可以用人物、席位、机构和委托权限（delegated authority）组合出南明、清、法国
+封建制度或其他政治体系。
+
+## 2. 案例如何运行
+
+| 模拟插件 | 拥有的状态 | 边界系统 |
+| --- | --- | --- |
+| `case-relief-central` | `ReliefOrder` manifest | `publish-order`、`audit-order` |
+| `case-relief-treasury` | 国库 `ReliefAction` | `prepare-treasury` |
+| `case-relief-county` | 县级粮务 `ReliefAction` | `prepare-county` |
+
+先运行示例：
+
+```shell
+cargo run -p canwu-api --example governance_transition
+```
+
+程序会先发布中央 manifest。它发出的两个零延迟 plugin ingress 不会在同一个
+系统调用中重入，而是在下一个 transaction 才被接纳。随后国库和县级系统各自
+准备 600 单位粮食的执行记录，中央审计验证双方的 owner、版本、状态和
+post-state hash，程序最后确认 exact replay 与原始快照一致。
+
+### 实现流程
+
+```text
+中央 issue ingress
+  -> publish-order 写入 manifest
+  -> 生成国库 / 县级 execute ingress
+  -> 下一个 transaction 接纳双方 ingress
+  -> 两个 owner 在 phase 10 准备记录
+  -> 中央 phase 12 只读审计
+  -> 原子提交或完整回滚
+```
+
+<Steps>
+1. 为中央、国库和县级机构注册三个 simulation plugin，并分别注册它们拥有的 domain schema。
+2. 通过中央的 canonical ingress 提交 `relief-order-1646`。
+3. 让中央 `publish-order` 创建 manifest，并声明两个目标 plugin 的 `execute-relief-order` ingress。
+4. 让国库和县级 `prepare-*` 系统只消费各自的 ingress，验证 manifest 后以 `SameBoundary` 可见性提交自己的记录。
+5. 让中央 `audit-order` 读取双方记录和 manifest；任一记录缺失、owner 不符、版本错误或 hash 不符都会使 transaction 失败。
+6. 保存 snapshot，恢复并执行 exact replay，确认同一组输入得到同一份权威状态。
+</Steps>
+
+### Manifest 是权力链的契约
+
+`ReliefOrder` 不是 Canwu 的固定政治对象，而是中央 plugin 注册的 typed domain
+record。它声明每个执行者的：
+
+- plugin owner；
+- boundary system 名称；
+- 预期版本；
+- disposition；
+- post-state hash。
+
+这样中央可以审计“谁应该做什么”，但不会越权写入国库或县级状态。每个执行者
+仍然通过自己的 plugin 写入自己的 domain record。
+
+### 为什么两个执行系统都需要模拟
+
+如果只有中央一个系统直接写完所有结果，游戏仍然可以显示结果，但无法表现：
+
+- 地方机构尚未收到命令；
+- 国库已执行而县级阻塞；
+- 某个机构上报了错误版本；
+- 中央审计发现参与者遗漏并回滚整个 transaction。
+
+因此这里模拟的是可验证的职责和延迟，而不是为了数量而创建官员对象。人物、
+机构内部层级、家族、关系和具体权限应由上层应用按场景需要增加。
+
+## 3. 代码在哪里
+
+这个案例完全使用公开 `canwu-api`，没有依赖模拟内核内部模块。
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
+  查看 canonical 案例说明
+</LinkButton>
+
+下一步可以把 `ReliefOrder` 替换成自己的官职、机构或领域 schema，把人物的
+权限和角色相对知识（actor-relative knowledge）接到同一条 ingress 与 transaction 链上。

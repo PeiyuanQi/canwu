@@ -1,0 +1,118 @@
+---
+title: A central relief order with atomic multi-office execution
+description: Model a central relief order with a manifest, cross-plugin canonical ingress, same-boundary commit, and read-only audit.
+sidebar:
+  order: 2
+  label: Central relief order
+---
+
+import { LinkButton, Steps } from "@astrojs/starlight/components";
+
+## 1. What problem are we solving?
+
+Imagine a Southern Ming historical simulation in which a central relief office
+issues a grain order. The treasury is responsible for releasing supplies, while
+a county grain office records local execution. The central office must not write
+both offices' state directly. It must also verify that both offices executed the
+same order, at the expected version, with complete results.
+
+This case reduces that problem to a verifiable authority chain:
+
+- the central office publishes a manifest containing the participant contract;
+- the treasury and county each own their domain record;
+- both offices commit in one transaction;
+- a central read-only audit rejects the transaction if either participant is missing;
+- save, restore, and exact replay do not ask an external decision maker again.
+
+The historical labels belong to the host application. Canwu does not contain
+an emperor, minister, magistrate, or mandatory bureaucratic tree. An application
+can combine people, seats, institutions, and delegated authority to represent
+Southern Ming, Qing, medieval France, or another political system.
+
+## 2. How does the example work?
+
+| Simulation plugin | Owned state | Boundary systems |
+| --- | --- | --- |
+| `case-relief-central` | `ReliefOrder` manifest | `publish-order`, `audit-order` |
+| `case-relief-treasury` | Treasury `ReliefAction` | `prepare-treasury` |
+| `case-relief-county` | County `ReliefAction` | `prepare-county` |
+
+Start the example:
+
+```shell
+cargo run -p canwu-api --example governance_transition
+```
+
+The program first publishes the central manifest. Its two zero-delay plugin
+ingresses do not re-enter the same system call; Canwu admits them at the next
+transaction. The treasury and county systems then prepare their own 600-unit
+grain dispositions. The central audit checks both owners, versions, statuses,
+and post-state hashes. Finally, the example confirms that exact replay produces
+the same snapshot.
+
+### Implementation path
+
+```text
+central issue ingress
+  -> publish-order writes the manifest
+  -> schedule treasury / county execute ingresses
+  -> admit both ingresses in the next transaction
+  -> both owners prepare records in phase 10
+  -> central read-only audit in phase 12
+  -> atomic commit or complete rollback
+```
+
+<Steps>
+1. Register three simulation plugins for the central office, treasury, and county, each with its own domain schema.
+2. Submit `relief-order-1646` through the central canonical ingress.
+3. Let `publish-order` create the manifest and declare one `execute-relief-order` ingress for each target plugin.
+4. Let each `prepare-*` system consume only its own ingress, validate the manifest, and stage its owner-scoped record with `SameBoundary` visibility.
+5. Let `audit-order` read the manifest and both records. A missing record, wrong owner, stale version, or mismatched hash fails the transaction.
+6. Save a snapshot, restore it, and run exact replay to prove that the same inputs produce the same authoritative state.
+</Steps>
+
+### The manifest is the authority-chain contract
+
+`ReliefOrder` is not a fixed Canwu political object. It is a typed domain record
+registered by the central plugin. It declares each participant's:
+
+- plugin owner;
+- boundary system name;
+- expected version;
+- disposition;
+- post-state hash.
+
+The central office can therefore audit who must do what without writing treasury
+or county state. Each participant still writes its own domain record through its
+own simulation plugin.
+
+### Why simulate both execution systems?
+
+If one central system writes every result directly, a game can still display a
+final number, but it cannot represent:
+
+- a local office that has not received the order;
+- a treasury that has acted while the county is blocked;
+- an office reporting the wrong version;
+- a central audit that discovers an omitted participant and rolls back the transaction.
+
+The point is to simulate verifiable responsibility and delay, not to create
+official objects merely for quantity. The host application can add people,
+internal institutional hierarchy, families, relationships, and authority rules
+when the scenario needs them.
+
+## 3. Where is the code?
+
+This case uses only the public `canwu-api`; it does not depend on simulation-core
+internals.
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
+  Read the canonical case note
+</LinkButton>
+
+You can replace `ReliefOrder` with your own office, institution, or decree
+schema, then connect actor authority and actor-relative knowledge to the same
+ingress and transaction chain.
