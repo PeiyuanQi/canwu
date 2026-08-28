@@ -42,6 +42,105 @@ import { Icon } from "@astrojs/starlight/components";
   let mermaidModule: Promise<typeof import("mermaid")> | undefined;
   let renderQueue = Promise.resolve();
 
+  const minimumZoom = 0.5;
+  const maximumZoom = 2.5;
+  const zoomStep = 0.25;
+
+  function setupZoomableMermaid(figure: HTMLElement, diagram: HTMLElement) {
+    if (figure.dataset.zoomable !== "true") return;
+
+    const zoomOut = figure.querySelector<HTMLButtonElement>("[data-mermaid-zoom-out]");
+    const zoomReset = figure.querySelector<HTMLButtonElement>("[data-mermaid-zoom-reset]");
+    const zoomIn = figure.querySelector<HTMLButtonElement>("[data-mermaid-zoom-in]");
+    const zoomLevel = figure.querySelector<HTMLElement>("[data-mermaid-zoom-level]");
+    const svg = diagram.querySelector<SVGSVGElement>("svg");
+    if (!zoomOut || !zoomReset || !zoomIn || !zoomLevel || !svg) return;
+
+    const getScale = () => Number(diagram.dataset.zoomScale ?? "1");
+    const updateControls = (scale: number) => {
+      const percentage = Math.round(scale * 100);
+      zoomLevel.textContent = `${percentage}%`;
+      zoomReset.setAttribute("aria-label", `${zoomReset.title}: ${percentage}%`);
+      zoomOut.disabled = scale <= minimumZoom;
+      zoomIn.disabled = scale >= maximumZoom;
+    };
+    const applyScale = (scale: number) => {
+      const currentSvg = diagram.querySelector<SVGSVGElement>("svg");
+      if (!currentSvg) return;
+
+      const styles = getComputedStyle(diagram);
+      const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+      const availableWidth = Math.max(diagram.clientWidth - horizontalPadding, 1);
+      const baseWidth = window.matchMedia("(max-width: 50rem)").matches
+        ? Math.max(availableWidth, 768)
+        : availableWidth;
+      currentSvg.style.width = `${baseWidth * scale}px`;
+      currentSvg.style.maxWidth = "none";
+      diagram.dataset.zoomScale = String(scale);
+      updateControls(scale);
+    };
+    const setScale = (requestedScale: number, focalX = diagram.clientWidth / 2, focalY = diagram.clientHeight / 2) => {
+      const scale = Math.min(maximumZoom, Math.max(minimumZoom, requestedScale));
+      const oldWidth = diagram.scrollWidth;
+      const oldHeight = diagram.scrollHeight;
+      const oldLeft = diagram.scrollLeft;
+      const oldTop = diagram.scrollTop;
+
+      applyScale(scale);
+      requestAnimationFrame(() => {
+        if (oldWidth > 0) {
+          diagram.scrollLeft = (oldLeft + focalX) * (diagram.scrollWidth / oldWidth) - focalX;
+        }
+        if (oldHeight > 0) {
+          diagram.scrollTop = (oldTop + focalY) * (diagram.scrollHeight / oldHeight) - focalY;
+        }
+      });
+    };
+
+    applyScale(getScale());
+    figure.classList.add("zoom-ready");
+
+    if (figure.dataset.zoomBound === "true") return;
+    figure.dataset.zoomBound = "true";
+
+    zoomOut.addEventListener("click", () => setScale(getScale() - zoomStep));
+    zoomIn.addEventListener("click", () => setScale(getScale() + zoomStep));
+    zoomReset.addEventListener("click", () => setScale(1));
+
+    let activePointer: number | undefined;
+    let pointerX = 0;
+    let pointerY = 0;
+    let scrollLeft = 0;
+    let scrollTop = 0;
+
+    diagram.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.pointerType === "touch") return;
+      activePointer = event.pointerId;
+      pointerX = event.clientX;
+      pointerY = event.clientY;
+      scrollLeft = diagram.scrollLeft;
+      scrollTop = diagram.scrollTop;
+      diagram.setPointerCapture(event.pointerId);
+      diagram.classList.add("is-panning");
+      event.preventDefault();
+    });
+    diagram.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== activePointer) return;
+      diagram.scrollLeft = scrollLeft - (event.clientX - pointerX);
+      diagram.scrollTop = scrollTop - (event.clientY - pointerY);
+    });
+    const stopPanning = (event: PointerEvent) => {
+      if (event.pointerId !== activePointer) return;
+      activePointer = undefined;
+      diagram.classList.remove("is-panning");
+    };
+    diagram.addEventListener("pointerup", stopPanning);
+    diagram.addEventListener("pointercancel", stopPanning);
+    diagram.addEventListener("lostpointercapture", stopPanning);
+
+    new ResizeObserver(() => applyScale(getScale())).observe(diagram);
+  }
+
   function renderMermaidDiagrams() {
     renderQueue = renderQueue.then(async () => {
       const figures = Array.from(document.querySelectorAll<HTMLElement>(".mermaid-figure"));
@@ -78,6 +177,7 @@ import { Icon } from "@astrojs/starlight/components";
           figure.classList.add("render-failed");
         } finally {
           diagram.setAttribute("aria-busy", "false");
+          setupZoomableMermaid(figure, diagram);
         }
       }
     });

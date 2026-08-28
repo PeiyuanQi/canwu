@@ -6,6 +6,11 @@ interface Props {
   sourceSummary?: string;
   sourceLoading?: string;
   noScriptMessage?: string;
+  zoomable?: boolean;
+  zoomControlsLabel?: string;
+  zoomInLabel?: string;
+  zoomOutLabel?: string;
+  resetZoomLabel?: string;
 }
 
 const {
@@ -15,6 +20,11 @@ const {
   sourceSummary = "View diagram source",
   sourceLoading = "Diagram source loads with the preview.",
   noScriptMessage = "JavaScript is required for the diagram preview; the text-source fallback remains available above.",
+  zoomable = false,
+  zoomControlsLabel = "Diagram zoom",
+  zoomInLabel = "Zoom in",
+  zoomOutLabel = "Zoom out",
+  resetZoomLabel = "Reset zoom",
 } = Astro.props;
 const encodedDefinition = JSON.stringify(definition)
   .replaceAll("&", "\\u0026")
@@ -22,9 +32,26 @@ const encodedDefinition = JSON.stringify(definition)
   .replaceAll(">", "\\u003e");
 ---
 
-<figure class="mermaid-figure">
+<figure class="mermaid-figure" data-zoomable={zoomable ? "true" : undefined}>
   <figcaption class="sr-only">{label}. {sourceSummary}.</figcaption>
-  <div class="mermaid" role="img" aria-label={label} aria-busy="true">{diagramLoading}</div>
+  {zoomable && (
+    <div class="mermaid-toolbar">
+      <div class="mermaid-zoom-controls" role="group" aria-label={zoomControlsLabel}>
+        <button type="button" data-mermaid-zoom-out aria-label={zoomOutLabel} title={zoomOutLabel}>-</button>
+        <button type="button" data-mermaid-zoom-reset aria-label={`${resetZoomLabel}: 100%`} title={resetZoomLabel}>
+          <span data-mermaid-zoom-level aria-live="polite">100%</span>
+        </button>
+        <button type="button" data-mermaid-zoom-in aria-label={zoomInLabel} title={zoomInLabel}>+</button>
+      </div>
+    </div>
+  )}
+  <div
+    class="mermaid"
+    role="img"
+    aria-label={label}
+    aria-busy="true"
+    tabindex={zoomable ? "0" : undefined}
+  >{diagramLoading}</div>
   <details class="mermaid-source">
     <summary>{sourceSummary}</summary>
     <pre><code class="mermaid-source-code">{sourceLoading}</code></pre>

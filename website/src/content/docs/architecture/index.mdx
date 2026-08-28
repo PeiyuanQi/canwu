@@ -20,6 +20,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/architecture/model-ownership/">查看模型归属</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/culture-law/">文化和法律制度系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
@@ -46,7 +48,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
 5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重演的记录。
 
-## 四个深入页面
+## 深入页面
 
 <CardGrid>
   <LinkCard
@@ -68,6 +70,11 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     title="世界与事件模型归属"
     href="/architecture/model-ownership/"
     description="查看每个公开世界与事件类型应保留、迁移还是在满足条件后退役。"
+  />
+  <LinkCard
+    title="文化和法律制度系统"
+    href="/architecture/culture-law/"
+    description="从文化内容编写、生命周期和社会信号，到授权程序、法律版本与可重演制度。"
   />
 </CardGrid>
 
@@ -106,32 +113,11 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 实验性的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
 它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
 和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
-主机显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
+上层应用显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
 边界系统注册、规范化信号准入和增量聚合仍是后续工作。
-详见[文化系统编写与生命周期设计](/architecture/#文化系统编写与生命周期)。
+详见独立的[文化和法律制度系统](/architecture/culture-law/)，其中合并说明文化编写、生命周期和法律制度化设计。
 
-## 文化系统编写与生命周期
-
-这是面向开发者的扩展层。参考内容包声明目标、cohort、渠道、转移、制度和下游效果绑定；编译器
-生成由社会传播运行时消费的确定性计划。跨扩展输入和输出使用有界的下一边界批次，不使用同步回调。
-
-文化目标在配置的静默窗口内没有参与人口或准入工作后进入 `Dormant`。显式调用 society 生命周期同步后，
-休眠目标停止运行由文化计划编译的转移规则；进入 `Retired` 后还会释放可重建分布、空的文化 binding 与派生状态，
-但保留紧凑墓碑以及历史领域记录、事件、角色知识和归档引用。推荐的组合 API 先准备 runtime delta，只有生命周期
-发生变化时才暂存 society；活依赖会让退休失败且两边都不提交。主机仍须在同一权威边界中持久化结果与生命周期转移。
-显式重新激活会创建新一代目标，不会改写旧历史。
-
-计划中的 `canwu-law` 法律制度化扩展会消费文化信号，通过 `DecisionTicket`、授权命令和版本化领域记录
-落盘法律规则；文化系统不能直接写法律状态。详见[法律制度化设计](/architecture/#法律制度化设计)。
-
-## 法律制度化设计
-
-法律扩展把文化信号当作有证据的社会输入，而不是法律权限。它通过法律提案、机构程序和控制者绑定的
-`DecisionTicket` 生成选项；只有经过验证的规范化法律命令才能提交 `LawVersion`。已经制定的法律
-不会因文化目标 `Retired` 自动消失；动态支持度结束只触发法律扩展自己的复核、到期或废止规则。
-完整契约见[法律制度化框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)。
-
-### crate 直接依赖 DAG
+## crate 直接依赖 DAG
 
 下图只展示第一方 workspace crate 在 Cargo manifest 中声明的普通直接依赖。
 `A → B` 表示 **A 依赖 B**；外部依赖和开发依赖未列入。
@@ -139,6 +125,11 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 <div class="crate-dependency-dag">
 <MermaidDiagram
   label="参伍 workspace crate 直接依赖有向无环图；箭头从使用者指向它依赖的 crate"
+  zoomable
+  zoomControlsLabel="依赖图缩放"
+  zoomInLabel="放大依赖图"
+  zoomOutLabel="缩小依赖图"
+  resetZoomLabel="重置依赖图缩放"
   diagramLoading="正在渲染 crate 依赖图……"
   sourceSummary="查看依赖图源码"
   sourceLoading="依赖图源码将在预览加载时显示。"
@@ -223,7 +214,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 
 ## 从领域扩展到可运行套件
 
-参伍不仅提供内核契约。通用领域扩展提供可复用机制，参考内容包提供可
+参伍不仅提供内核契约。通用模拟领域扩展提供可复用机制，参考内容包提供可
 替换的领域数据，参考整合包把这些能力接入一个小型世界，入门套件则把
 它们组合成开发者可以直接运行和改造的纵向切片。这些层都在内核之上，
 不会把某个历史世界写入 `canwu-core`。
@@ -241,7 +232,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
   noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
   definition={`flowchart TB
     Core["模拟内核"] --> Api["canwu-api"]
-    Api --> Domain["通用领域扩展"]
+    Api --> Domain["通用模拟领域扩展"]
     Domain --> Pack["参考内容包"]
     Domain --> Integration["参考整合包"]
     Pack --> Integration

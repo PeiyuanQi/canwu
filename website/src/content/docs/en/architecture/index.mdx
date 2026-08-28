@@ -20,6 +20,8 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/en/architecture/model-ownership/">Review model ownership</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/culture-law/">Culture and legal systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/architecture/">中文架构</a>
 </nav>
 
@@ -52,7 +54,7 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.
 5. **Evidence boundary:** commands, events, settlement, random draws, state changes, and hashes form an inspectable replay record.
 
-## Four deep dives
+## Deep dives
 
 <CardGrid>
   <LinkCard
@@ -74,6 +76,11 @@ are CM content and ruleset integrations, not Canwu kernel modules.
     title="World and event model ownership"
     href="/en/architecture/model-ownership/"
     description="See which public world and event types stay, move, or retire after explicit compatibility gates."
+  />
+  <LinkCard
+    title="Culture and legal institutional systems"
+    href="/en/architecture/culture-law/"
+    description="From culture authoring, lifecycle, and social signals to authorized procedure, law versions, and replayable institutions."
   />
 </CardGrid>
 
@@ -118,43 +125,10 @@ cadence. Dormant targets leave the culture hot index and stop compiled culture t
 after explicit society synchronization; retired targets additionally release
 target-scoped dynamic society state while historical evidence remains available.
 Boundary-system registration, canonical signal admission, and incremental
-aggregation remain follow-up work. See the [culture authoring and lifecycle design](/en/architecture/#culture-authoring-and-lifecycle).
+aggregation remain follow-up work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
+which combines culture authoring, lifecycle, and legal institutionalization design.
 
-## Culture authoring and lifecycle
-
-The SDK is an experimental developer-facing layer. A content pack declares targets,
-cohorts, channels, transitions, institutions, and downstream effect bindings;
-the compiler produces a deterministic plan consumed by the social diffusion
-runtime. Cross-extension inputs and outputs use bounded next-boundary batches,
-not synchronous callbacks.
-
-Culture targets become `Dormant` after a quiet window with no engaged
-population or admitted work. Explicit society lifecycle synchronization stops
-their compiled culture transition rules. A `Retired` target additionally releases
-rebuildable distributions, empty culture-owned bindings, and derived state, but
-keeps a compact tombstone and all historical domain-record, event, knowledge,
-and archive references. The preferred combined API prepares a runtime delta and
-stages society only when a lifecycle transition occurs; a live dependency rejects
-retirement without committing either. The host must still persist the result and
-lifecycle transition in one authoritative boundary. Explicit reactivation creates
-a new generation and never rewrites the old history.
-
-The proposed `canwu-law` legal institutionalization extension will consume
-cultural signals and commit legal rules through `DecisionTicket`, authorized
-commands, and versioned domain records; culture cannot write legal state
-directly. See the [legal institutionalization design](/en/architecture/#legal-institutionalization-design).
-
-## Legal institutionalization design
-
-The legal extension treats cultural signals as evidence-bearing social input,
-not legal authority. It turns them into legal proposals and controller-bound
-`DecisionTicket` options; only a validated canonical legal command can commit a
-`LawVersion`. An enacted law does not disappear when its culture
-target becomes `Retired`; ending a dynamic support level only triggers the law
-extension's own review, expiry, or repeal rule. The complete contract is in the
-[legal institutionalization framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md).
-
-### Direct crate dependency DAG
+## Direct crate dependency DAG
 
 This graph shows normal, direct dependencies declared between first-party
 workspace crates in their Cargo manifests. `A → B` means **A depends on B**;
@@ -163,6 +137,11 @@ external and development dependencies are omitted.
 <div class="crate-dependency-dag">
 <MermaidDiagram
   label="Directed acyclic graph of direct Canwu workspace crate dependencies; arrows point from dependents to their dependencies"
+  zoomable
+  zoomControlsLabel="Dependency graph zoom"
+  zoomInLabel="Zoom in on dependency graph"
+  zoomOutLabel="Zoom out of dependency graph"
+  resetZoomLabel="Reset dependency graph zoom"
   diagramLoading="Rendering crate dependency graph…"
   sourceSummary="View dependency graph source"
   sourceLoading="Dependency graph source loads with the preview."

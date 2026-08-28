@@ -1,0 +1,322 @@
+---
+title: Culture and legal institutional systems
+description: How culture is authored, compiled, settled, and retired, and how cultural signals become replayable law through authorized institutional procedure.
+template: doc
+sidebar:
+  order: 6
+  label: Culture and legal systems
+hero:
+  tagline: "From versioned cultural content to authoritative law versions: signals provide evidence, while institutions decide outcomes."
+---
+
+<nav class="architecture-links" aria-label="Culture and legal systems navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/">Back to architecture overview</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/events/">Explore the event system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/culture-law/">中文版</a>
+</nav>
+
+This page describes two optional domain extensions as one architectural path:
+the experimental `canwu-culture` culture system SDK and the proposed
+`canwu-law` legal institutionalization extension. Both build on the public API
+and social diffusion simulation module, but neither puts historical culture,
+legal semantics, or a particular period into the Canwu simulation core.
+
+The governing rule is: **culture produces evidence-bearing social signals;
+law interprets those signals through an authorized institutional procedure and
+commits versioned law.** Cultural support is evidence, not legal authority, and
+never becomes a statute automatically.
+
+## Ownership and layering
+
+`canwu-culture` is an authoring and compilation extension above
+`canwu-society`. It accepts versioned reference content, validates cardinality,
+expanded fan-out, memory, state, and boundary-work budgets, and produces an
+externally immutable execution plan bound to a content hash.
+`canwu-society` remains the runtime for sparse population distributions, social
+influence edges, organization topology, institutional inputs, and
+actor-relative projections.
+
+The proposed `canwu-law` extension is downstream from cultural signals. It owns
+jurisdictions, legal institutions, procedures, proposals, enacted rules,
+effective times, amendment, repeal, expiry, and legal interpretation. Political,
+election, administration, education, justice, and enforcement extensions own
+their own processes and consume enacted law at declared settlement boundaries.
+
+```text
+reference content pack
+        |
+        v
+canwu-culture authoring and compiler
+        |
+        v
+canwu-society sparse social runtime
+        |
+        +--> CulturalSignalBatch (bounded, causal, next-boundary ingress)
+                    |
+                    v
+             canwu-law (proposal -> procedure -> LawVersion)
+                    |
+                    v
+       political / election / administration / education / justice / enforcement adapters
+```
+
+The dependency direction is one way: information and correspondence may feed
+culture; culture may emit generic signals; law may consume them. `canwu-core`,
+`canwu-sim`, and `canwu-api` do not depend on legal semantics. Extensions use
+canonical next-boundary ingress and bounded batches, never a synchronous event
+bus, mutable callback, or cross-extension state write.
+
+## Culture authoring contract
+
+A reference content pack supplies an owned, serializable `CultureDefinition`.
+A Rust builder and JSON/TOML loader should share one validator, so authored and
+generated content have identical deterministic rules. A run rejects definitions
+that exceed any cardinality, clause, fan-out, memory, state, or per-boundary
+work budget before settlement begins.
+
+### Definition components
+
+| Component | Purpose | Contract |
+| --- | --- | --- |
+| Target | Idea, norm, movement, practice, school, or affiliation variant | Neutral profile defaults, ancestry, metadata, provenance, and lifecycle policy |
+| Cohort | Aggregate population with territory and integer headcount | Application-defined classifications such as language, occupation, education, or status |
+| Channel | Exposure or reinforcement opportunity | Reach, trust, interpretation fidelity, delay, capacity, and policy modifiers |
+| Transition | Maps named signals to social state | Uses the existing awareness, private assent, practice, public alignment, organization tie, mobilization, and visibility dimensions |
+| Institution and policy binding | Declares external decision pressure | Can change access, support, enforcement, censorship, disruption, or migration pressure, but never private assent directly |
+| Effect binding | Declares an output for another extension | Signal kind, scope, cadence, persistence class, evidence, and bounded batch/fan-out |
+
+Named traits and affinities may exist at the authoring boundary, but the runtime
+compiles them into bounded rule factors or channel signals. It must not attach
+an unbounded value map to every population bucket or create a second
+per-person solver.
+
+### Compiled plan and hot path
+
+`CompiledCulturePlan` is compile-only and externally immutable for one
+scenario/run revision. It contains interned numeric IDs; canonical sorted rule
+tables and reverse indexes; compact channel, transition, effect, and institution
+tables; scoped keys; lifecycle indexes; declared plan, state, and boundary
+budgets; and a content hash. Changing a definition or compiled ordering creates
+a new semantic plan revision instead of mutating an existing run.
+
+## Incremental settlement and scale
+
+Settlement is driven by a dirty set of active `(cohort, target)` pairs. An
+admitted exposure, policy change, organization change, or reactivation marks
+affected relationships. A transition boundary then:
+
+1. consumes admitted signals in canonical order;
+2. evaluates dirty pairs and bounded dependants;
+3. updates aggregate counters incrementally;
+4. refreshes projections only for observers that can see changed pairs; and
+5. emits bounded effect batches for the next eligible consumer boundary.
+
+For `D` active pairs, `Delta` dirty pairs, `B` buckets per pair, `E_delta`
+affected edges, and `V_delta` affected observer entries, intended steady-state
+work is approximately `O(Delta * B + E_delta + V_delta)`. Full plan rebuilds are
+for definition changes, migration, or explicit maintenance. The current
+full-state society path may remain a compatibility fallback, but new APIs must
+not make full scans appear free.
+
+## Culture lifecycle
+
+Every target has an explicit generation and one of `Active`, `Dormant`, or
+`Retired` state:
+
+```text
+Active -> Dormant -> Retired
+             ^          |
+             +----------+
+        explicit reactivation creates a new generation
+```
+
+### Active and dormant
+
+An `Active` target has engaged population, active propagation,
+institutional/policy inputs, or a scheduled reactivation path. Its
+distributions, rules, and projections are eligible for ordinary settlement.
+
+A target becomes `Dormant` after a configured quiet window with no engaged
+population and no admitted work. Engaged headcount is not the distribution
+total: a neutral-only relationship does not keep a target alive. Dormancy
+removes the target from culture hot and dirty indexes and, after explicit
+society synchronization, stops its compiled culture transition rules. Existing
+society distributions and a compact reactivation descriptor remain available.
+Dormancy is reversible and does not erase history.
+
+### Retirement and atomic synchronization
+
+After its retention policy, a dormant target is eligible for `Retired` only
+after all signals admitted for the boundary have been applied and no live
+transition, organization, institution, policy, effect batch, admitted input, or
+scheduled continuation requires its current generation.
+
+Retirement writes a compact `RetiredTargetTombstone` with target identity and
+generation, last active simulation time and revision, retirement reason and
+policy hash, any explicit successor, and the evidence references needed for
+replay and audit. It releases only rebuildable target-scoped society state.
+Historical domain-record versions, events, actor knowledge, and archived
+evidence remain queryable.
+
+Hosts should use `settle_culture_society_boundary`: it prepares a bounded
+runtime delta and stages society changes only when a lifecycle transition
+occurs. A live external dependency rejects retirement before caller-owned state
+changes. The host persists the culture record, society state, and typed
+lifecycle transition in one authoritative transaction. The full
+`synchronize_society_lifecycle` scan is for load repair and explicit maintenance
+checkpoints.
+
+Retirement never deletes another extension's live organization, policy,
+influence edge, rule, or binding. New exposure for a retired generation is
+rejected unless an explicit reactivation command or ingress is admitted.
+Reactivation initializes only required active relationships, cites the old
+tombstone, and creates a new generation; it does not rewrite history or revive
+every former cohort silently.
+
+## From cultural signal to law
+
+Information and correspondence first resolve access and interpretation, then
+may emit a bounded `CultureExposureSignalBatch`. Culture settlement updates
+awareness, private assent, practice, public alignment, organization tie, and
+mobilization, then emits a bounded `CulturalSignalBatch` containing target
+generation, scope, strength, persistence class, cadence, and evidence. This
+batch is a legal input, not an authority grant.
+
+The legal bridge processes only dirty jurisdictions and proposals:
+
+1. Reverse indexes map signal kind and scope to affected jurisdictions and open
+   proposals; unrelated law is not scanned.
+2. The extension creates or refreshes a controller-bound `DecisionTicket` with
+   options such as adopt, amend, reject, defer, or refer. The ticket contains
+   actor-relative facts and evidence, not mutable runtime references.
+3. An authorized controller selects an existing option. The attempt and
+   `DecisionTrace` are persisted, and the selected option becomes a validated
+   legal command through canonical ingress.
+4. The command validates jurisdiction, institutional authority, procedure,
+   revision and effective-time guards, clause/evidence limits, and signal
+   generation references.
+5. A successful command atomically creates or updates `LegalProposal` and
+   `LawVersion`. Downstream adapters consume the result at their own declared
+   boundary.
+
+```text
+CulturalSignalBatch
+  -> LegalProposal / DecisionTicket
+  -> authorized DecisionAttempt / DecisionTrace
+  -> validated legal command ingress
+  -> LawVersion
+  -> downstream enforcement and feedback evidence
+```
+
+No synchronous cross-extension callback is allowed. A consumer that cannot
+accept a batch records a rejection or defers it; it never partially mutates
+culture or law.
+
+## Legal records and procedure
+
+`LegalJurisdiction` binds a stable jurisdiction ID to its parent, territory
+scope, competent institutions, and procedure profile. `LegalInstitution` binds
+an institution entity to a jurisdiction, authority seats, quorum, vote or
+appointment rules, and the command subject allowed to adopt law. Both are
+domain records, not new core entity kinds.
+
+`LegalProposal` is a non-enacted, versioned proceeding input. It records the
+jurisdiction, sponsor and subjects, bounded typed clauses or eligibility rules,
+required procedure and deadline, status (`draft`, `submitted`, `deliberating`,
+`adopted`, `rejected`, `expired`, or `withdrawn`), signal and evidence
+references, and the open ticket identity and option version. A target
+generation may be cited as evidence but never receives permission to mutate or
+enact the proposal.
+
+`LawVersion` is the authoritative legal result. It records a stable law ID and
+monotonic version, jurisdiction and bounded scope, typed clauses,
+`effective_from` and optional `effective_until`, adopting institution,
+authorized decision origin, procedure result, causal/evidence references, and
+explicit amendment, successor, repeal, or expiry links. Amendment and repeal
+are new legal commands and append-only versions. An enacted law does not
+disappear when its cultural target retires.
+
+### Effect persistence semantics
+
+| Culture effect | Legal interpretation |
+| --- | --- |
+| `Pulse` | Opens or updates a proposal opportunity; no durable law exists yet. |
+| `Level` | Supplies current support or legitimacy pressure; its end may trigger review, never automatic repeal. |
+| `Commitment` | Once accepted by legal command, provides provenance for durable `LawVersion`; culture retirement cannot retract it. |
+| `Evidence` | Historical citation only; it cannot open or mutate a proceeding directly. |
+
+When a legal rule intentionally depends on a live cultural level, the legal
+extension records that dependency and owns its review, expiry, or renewal rule.
+Culture emits the end of the level; it does not silently repeal law. A
+commitment accepted into law does not keep a culture target hot, so the target
+may retire while the law remains active.
+
+## Authority, visibility, and replay
+
+Legal commands use the ordinary authority chain:
+
+```text
+legal facts -> DecisionTicket -> controller selection
+  -> DecisionAttempt / DecisionTrace
+  -> canonical command ingress
+  -> legal authority and procedure validation
+  -> LawVersion commit
+```
+
+The command subject must be the competent legal institution. Its context carries
+the validated controller ID, decision origin, seat, permission profile, request
+identity, and expected revision/time guards. An external service or model may
+recommend an option, but cannot manufacture authority or submit a raw law
+payload that bypasses the ticket.
+
+Public enacted law may be exposed through a domain projection. Private drafts,
+dissent, and actor-specific knowledge use `ViewerContext` and the holder ledger;
+there is no truth fallback. Culture and legal records implement
+`DomainRecordType` with strict schemas, typed references, explicit mutation
+policies, and retained version bodies where evidence needs exact historical
+meaning.
+
+The persisted plugin semantic environment includes plan hashes, budgets,
+lifecycle policies, target generations, legal procedure profiles, and law
+schema versions. Exact replay consumes recorded signal ingress, decision
+ingress, legal command ingress, boundary records, and evidence. It never reruns
+a human, service, or model policy. Forks copy validated state and continue with
+new causal inputs. Failed boundaries restore indexes, tombstones, counters,
+evidence, and random positions atomically.
+
+## Bounded work and conformance
+
+The legal plan compiles numeric IDs for jurisdictions, institutions, proposals,
+clauses, and procedure profiles; reverse indexes by signal kind and scope;
+dirty proposal and jurisdiction sets; per-procedure limits for clauses,
+evidence, options, fan-out, and pending continuations; and a plan hash and
+budget manifest. For `P_delta` dirty proposals, `C_delta` affected clauses, and
+`V_delta` observer entries, intended steady-state work is approximately
+`O(P_delta + C_delta + V_delta)`. Retired targets and historical law catalogs
+must not increase active proposal settlement cost.
+
+Conformance evidence should prove that:
+
+- cultural signals cannot directly mutate legal records;
+- only a controller-bound authorized command can enact, amend, or repeal law;
+- stale proposal, ticket, and law revisions become safe persisted rejections;
+- a commitment accepted into law survives cultural retirement;
+- an unresolved live-level dependency blocks culture retirement;
+- proposal, law, evidence, archive, snapshot, fork, and exact replay remain
+  consistent; and
+- unrelated targets, observers, and retired catalog entries do not perturb
+  keyed results or declared work budgets.
+
+A women's suffrage content pack might emit public-alignment, organization-
+capacity, and legitimacy-pressure signals. A competent assembly selects a
+voting-eligibility option through `DecisionTicket`; a legal command commits a
+`VotingEligibilityRule` with a deterministic effective date; and the election
+adapter reads the law. Retiring the culture target later stops new propagation
+while the enacted rule and enforcement history remain intact.
+
+See the repository's [culture authoring and lifecycle design](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)
+and [legal institutionalization framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)
+for the complete implementation contracts.

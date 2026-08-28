@@ -50,13 +50,13 @@ cohort、渠道、转移、制度和下游效果；SDK 校验预算并把定义�
 运行时可完整恢复待处理关系集合（dirty set）、热目标、休眠调度和效果 cadence。退休目标经显式 society 同步后
 不再参与目标相关热计算；增量聚合仍是后续工作。
 
-普通宿主结算应使用 `settle_culture_society_boundary`。它只针对 active、到期 dormant 和显式观测目标准备
+上层应用的常规结算应使用 `settle_culture_society_boundary`。它只针对 active、到期 dormant 和显式观测目标准备
 runtime delta，并且只更新生命周期发生变化的目标所对应的 society binding。完整的
 `synchronize_society_lifecycle` 扫描只用于加载修复和显式维护检查点。
 
 文化目标有 `Active`、`Dormant` 和 `Retired` 三种状态。休眠目标会离开文化热索引并保留重新激活描述；
 退休目标会在同步时释放动态社会状态，同时保留墓碑和历史证据。重新激活必须显式且绑定代际；规范化输入适配器仍待实现。
-详见[文化系统编写与生命周期设计](/architecture/#文化系统编写与生命周期)。
+详见[文化和法律制度系统](/architecture/culture-law/)。
 
 ## 生命周期规则
 

@@ -470,31 +470,14 @@ the restored simulation is returned. Optional materialization timestamps keep
 `SimTime::EPOCH` and negative simulation times available as real boundary
 times. Fork and exact replay use the same serialized authoritative state.
 
-The experimental `canwu-culture` authoring layer sits above this runtime. It
-accepts versioned reference content, validates cardinality and fan-out budgets,
-and compiles string-heavy definitions into a deterministic execution plan. It
-does not add culture-specific types to the simulation core or expose a second
-per-person solver. Its public dirty-set API tracks active `(cohort, target)`
-pairs and its effect model produces bounded, compiled-binding signal batches
-suitable for next-boundary ingress. A complete state record restores lifecycle
-schedules, hot/dirty indexes, and effect cadence cursors. Boundary-system and
-canonical-ingress integration plus incremental society aggregate/projection
-refreshes remain follow-up work. See the [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md).
-
-Culture targets have an explicit `Active`, `Dormant`, or `Retired` lifecycle.
-Dormant targets leave the culture hot/dirty indexes; explicit society lifecycle
-synchronization stops their compiled culture transition rules. Retired targets additionally
-release target-scoped society distributions, signal inputs, and derived state
-while retaining a tombstone. The preferred combined helper stages both runtime
-and society changes and rejects live dependencies without committing either;
-the host must still persist the resulting record and transition in its boundary transaction. Historical domain-record versions,
-events, knowledge, and archived evidence are never deleted. Reactivation creates
-a new generation explicitly, so old history cannot be silently rewritten.
-
-The proposed `canwu-law` extension consumes those cultural signal batches and
-uses `DecisionTicket`, authorized command ingress, versioned domain records,
-`CauseRef`, and actor-relative projections to institutionalize legal rules. It
-does not allow culture to write legal state directly. See the [legal institutionalization framework](proposals/legal-institutionalization-framework.md).
+The culture authoring layer and downstream legal institutionalization extension
+are specified together in the [culture and legal institutional systems](architecture-culture-law.md).
+That design covers authored definitions, deterministic compilation, dirty-set
+settlement, Active/Dormant/Retired lifecycle, bounded cultural signal batches,
+controller-mediated legal procedure, versioned law records, authority,
+visibility, persistence, and exact replay. The detailed implementation proposals
+remain [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md)
+and [legal institutionalization framework](proposals/legal-institutionalization-framework.md).
 
 ### Technology and historical research / 技术与历史研究
 
