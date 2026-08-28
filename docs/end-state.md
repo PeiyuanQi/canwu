@@ -268,6 +268,38 @@ abstraction is not specific to belief or religion, and a separate compatibility 
 migration decision. Until then, `canwu-api` must not depend on or re-export
 `canwu-society`.
 
+The next usability layer is the experimental `canwu-culture` authoring
+extension. It compiles versioned culture definitions into bounded execution
+plans above `canwu-society`, so a content author can define targets, cohorts,
+channels, transitions, institutions, and cross-extension effects without
+hand-building runtime indexes. The current crate provides the compiler,
+society adapter, dirty-set API, lifecycle index, tombstones, explicit
+reactivation, complete state hydration, compiled effect cadence, and atomic
+combined runtime/society lifecycle synchronization. Boundary-system admission and incremental
+society aggregation/projection settlement remain follow-up work. The plan is
+externally immutable for a run revision and carries its content hash and
+cardinality budgets.
+
+Culture targets have an explicit `Active`, `Dormant`, or `Retired` lifecycle.
+A target with no engaged population may become `Dormant` after a configured
+quiet window and leave the culture hot/dirty indexes; an explicit society sync
+also stops its compiled culture transition rules. Continued dormancy may produce a `Retired`
+tombstone. Society synchronization then removes target-scoped dynamic
+distributions, derived state, and signal inputs while preserving historical
+references. Only an explicit reactivation may create a new target generation.
+The complete runtime state is snapshot-compatible, while authoritative
+boundary/replay integration remains a host responsibility in this first slice.
+This is a hot-state optimization, not historical deletion.
+
+The complete authoring, incremental settlement, lifecycle, and benchmark
+contract is specified in the [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md).
+
+Legal institutionalization is a separate proposed downstream extension. It
+consumes cultural signals, creates controller-bound `DecisionTicket` options,
+and commits versioned legal records only through authorized canonical commands.
+The [legal institutionalization framework](proposals/legal-institutionalization-framework.md)
+defines this boundary and the retention of enacted law after culture retirement.
+
 ### Reference content and starter kits
 
 Canwu should ship or maintain a first-party collection of reference content

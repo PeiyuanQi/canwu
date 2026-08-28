@@ -29,6 +29,7 @@ flowchart BT
     information["canwu-information"]
     correspondence["canwu-correspondence"]
     society["canwu-society"]
+    culture["canwu-culture"]
     technology["canwu-technology"]
     history["canwu-history-research"]
     debug["canwu-debug"]
@@ -43,6 +44,7 @@ flowchart BT
         information
         correspondence
         society
+        culture
         technology
         history
     end
@@ -98,6 +100,8 @@ flowchart BT
     api --> correspondence
     information --> correspondence
     api --> society
+    society --> culture
+    api --> culture
     api --> technology
     api --> history
     technology --> history
@@ -115,7 +119,7 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-technology`, `canwu-history-research` | Published experimental domain implementations built on the public API; historical research remains an optional downstream consumer of technology | Published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the public API; culture remains downstream from society and historical research remains downstream from technology | Mixed |
 | `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
@@ -130,7 +134,7 @@ each completed group to become resolvable before continuing:
 4. `canwu-transport`
 5. `canwu-api`
 6. `canwu-information`, `canwu-society`, `canwu-technology`
-7. `canwu-correspondence`, `canwu-history-research`
+7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and

@@ -1,6 +1,6 @@
 # Social Belief and Institutional Diffusion Framework
 
-Status: implemented as a published experimental social diffusion simulation module and domain extension.
+Status: implemented as a published experimental social diffusion simulation module and domain extension. The first `canwu-culture` authoring and lifecycle slice is implemented; boundary-driven ingress, incremental settlement, and benchmark work remain specified in the [culture authoring SDK and lifecycle design](culture-authoring-sdk-and-lifecycle.md).
 
 Implementation baseline: Canwu `main` at
 `d026c669c91fcf5546a87c2b28e669b154a0745a` on 2026-08-20. DecisionTicket is
@@ -89,6 +89,15 @@ The social diffusion simulation module may consume information-derived exposure
 inputs through public records or ingress, but it must not own documents,
 printing, interception, translation, or interpretation. It may produce
 actor-estimate drafts, but the kernel owns authorization and actor-relative knowledge publication.
+
+The proposed `canwu-culture` layer is an authoring/compiler convenience above
+this module. It supplies validated definitions and a deterministic execution
+plan; it does not change the generic society solver's ownership boundary. Its
+`Active`/`Dormant`/`Retired` target lifecycle removes inactive targets from the
+culture hot index; explicit society synchronization releases retired
+target-scoped dynamic state while retaining tombstones and historical evidence. The complete
+contract, including reactivation and benchmark gates, is maintained in the
+[culture authoring SDK and lifecycle design](culture-authoring-sdk-and-lifecycle.md).
 
 ## Authoritative model
 
@@ -470,7 +479,9 @@ active outputs, while inactive catalog growth does not materialize a dense
 9. Measure sparse scaling and finish repository verification.
 10. Stop before historical content, CM integration, additional tutorial cases,
     public release, or core promotion; each requires a separate explicit scope
-    decision.
+    decision. Culture authoring, lifecycle, and retirement are a separate
+    follow-up milestone and do not turn this generic module into a historical
+    case library.
 
 ## Hidden cost
 

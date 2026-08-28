@@ -43,6 +43,21 @@ Canwu 的内核保持领域中立。应用通过 `SimulationPlugin`、公开 sch
 Canwu 按固定阶段运行这些系统，验证声明访问，完成确定性分配，并原子提交边界结果。
 完整例子见[阶段边界与资源分配教程](/tutorials/phased-boundary/)。
 
+## 文化系统 SDK
+
+实验性的 `canwu-culture` SDK 是建立在 `canwu-society` 之上的面向开发者的编写层。参考内容包声明目标、
+cohort、渠道、转移、制度和下游效果；SDK 校验预算并把定义编译成外部不可变、绑定内容哈希的文化执行计划。
+运行时可完整恢复待处理关系集合（dirty set）、热目标、休眠调度和效果 cadence。退休目标经显式 society 同步后
+不再参与目标相关热计算；增量聚合仍是后续工作。
+
+普通宿主结算应使用 `settle_culture_society_boundary`。它只针对 active、到期 dormant 和显式观测目标准备
+runtime delta，并且只更新生命周期发生变化的目标所对应的 society binding。完整的
+`synchronize_society_lifecycle` 扫描只用于加载修复和显式维护检查点。
+
+文化目标有 `Active`、`Dormant` 和 `Retired` 三种状态。休眠目标会离开文化热索引并保留重新激活描述；
+退休目标会在同步时释放动态社会状态，同时保留墓碑和历史证据。重新激活必须显式且绑定代际；规范化输入适配器仍待实现。
+详见[文化系统编写与生命周期设计](/architecture/#文化系统编写与生命周期)。
+
 ## 生命周期规则
 
 - 在依赖插件的命令、场景验证或加载发生前注册插件。

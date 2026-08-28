@@ -98,9 +98,38 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-information` | 实验性权威信息生命周期扩展 |
 | `canwu-correspondence` | 实验性通信模拟领域扩展与模拟插件 |
 | `canwu-society` | 实验性社会传播模拟模块 |
+| `canwu-culture` | 实验性文化编写、编译与生命周期扩展 |
 | `canwu-technology` | 实验性、证据驱动的通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
 | `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
+
+实验性的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
+它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
+和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
+主机显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
+边界系统注册、规范化信号准入和增量聚合仍是后续工作。
+详见[文化系统编写与生命周期设计](/architecture/#文化系统编写与生命周期)。
+
+## 文化系统编写与生命周期
+
+这是面向开发者的扩展层。参考内容包声明目标、cohort、渠道、转移、制度和下游效果绑定；编译器
+生成由社会传播运行时消费的确定性计划。跨扩展输入和输出使用有界的下一边界批次，不使用同步回调。
+
+文化目标在配置的静默窗口内没有参与人口或准入工作后进入 `Dormant`。显式调用 society 生命周期同步后，
+休眠目标停止运行由文化计划编译的转移规则；进入 `Retired` 后还会释放可重建分布、空的文化 binding 与派生状态，
+但保留紧凑墓碑以及历史领域记录、事件、角色知识和归档引用。推荐的组合 API 先准备 runtime delta，只有生命周期
+发生变化时才暂存 society；活依赖会让退休失败且两边都不提交。主机仍须在同一权威边界中持久化结果与生命周期转移。
+显式重新激活会创建新一代目标，不会改写旧历史。
+
+计划中的 `canwu-law` 法律制度化扩展会消费文化信号，通过 `DecisionTicket`、授权命令和版本化领域记录
+落盘法律规则；文化系统不能直接写法律状态。详见[法律制度化设计](/architecture/#法律制度化设计)。
+
+## 法律制度化设计
+
+法律扩展把文化信号当作有证据的社会输入，而不是法律权限。它通过法律提案、机构程序和控制者绑定的
+`DecisionTicket` 生成选项；只有经过验证的规范化法律命令才能提交 `LawVersion`。已经制定的法律
+不会因文化目标 `Retired` 自动消失；动态支持度结束只触发法律扩展自己的复核、到期或废止规则。
+完整契约见[法律制度化框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)。
 
 ### crate 直接依赖 DAG
 
@@ -120,6 +149,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
         Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
+        Culture["canwu-culture"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
         ReferenceWorld["canwu-reference-world"]
@@ -151,6 +181,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
     Correspondence --> Information
     Information --> Api
     Society --> Api
+    Culture --> Society
+    Culture --> Api
     Technology --> Api
     History --> Api
     History --> Technology

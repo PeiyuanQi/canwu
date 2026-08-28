@@ -289,6 +289,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-culture"
+version = "0.6.0"
+dependencies = [
+ "canwu-api",
+ "canwu-society",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-debug"
 version = "0.6.0"
 dependencies = [

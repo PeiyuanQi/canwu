@@ -62,6 +62,12 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 实现公开插件契约并注册到参伍运行时的执行单位；其名称、版本和语义哈希标识加载与精确重放所需的可执行语义。 |
 | [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域交付包，可包含一个或多个插件、领域类型、schema、命令、查询和辅助 API；没有要求实现的 `DomainExtension` trait。 |
 | [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整模拟能力名称，例如“社会传播模拟模块”；它可以由一个领域扩展及其插件实现，但本身不是引擎契约。 |
+| 文化系统 SDK | culture system SDK | `canwu-culture` | 实验性的可选文化编写、编译与生命周期扩展，建立在 `canwu-society` 之上；负责校验内容并生成确定性执行计划，不进入模拟内核。 |
+| 法律制度化 | legal institutionalization | `canwu-law`（提案） | 位于文化下游的扩展：将已准入的文化信号转成由控制者决定的法律提案和版本化法律记录；文化不能直接写入法律状态。 |
+| 法律版本 | law version | `LawVersion`（提案） | 不可变的版本化法律规则记录，包含辖区、权威、有效区间、因果引用和执行元数据。 |
+| 文化执行计划 | compiled culture plan | `CompiledCulturePlan` | 从文化定义编译出的外部不可变、绑定内容哈希的运行时计划，包含紧凑 ID、反向索引、预算和生命周期策略。 |
+| 休眠目标 | dormant target | `Dormant` | 没有参与人口或已准入工作的文化目标；它离开热结算索引，但保留显式重新激活描述。 |
+| 退休目标 | retired target | `Retired` | 从动态热状态移除的文化目标；历史身份和证据仍通过墓碑与归档契约保留。 |
 | [技术模拟扩展](/tutorials/technology-diffusion/) | technology simulation extension | `canwu-technology` | 处理技术修订、证据、本地能力、实施、按用途采用和传播机会的可选通用扩展，不是全局科技树。 |
 | [历史研究插件](/tutorials/technology-diffusion/) | historical research plugin | `canwu-history-research` | 记录研究者对证据所作有界评估的可选模拟插件，不会改变基础技术真值。 |
 | [命令插件](/tutorials/command-plugin/) | command plugin | `register_command()` | 注册带 schema 校验命令及其处理器的模拟插件。 |

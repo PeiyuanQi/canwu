@@ -97,6 +97,8 @@ cargo run -p canwu-correspondence --example routed_correspondence
   通信模拟领域扩展和模拟插件
 - `canwu-society`：已发布的实验性社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
+- `canwu-culture`：实验性文化编写、编译与生命周期扩展，建立在
+  `canwu-society` 之上
 - `canwu-technology`：已发布的通用技术模拟扩展，负责证据、本地能力、实施、
   按用途采用和传播机会
 - `canwu-history-research`：已发布、位于基础技术真值下游的三个可选历史研究评估插件

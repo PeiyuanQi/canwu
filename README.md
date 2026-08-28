@@ -108,6 +108,8 @@ cargo run -p canwu-correspondence --example routed_correspondence
   extension and simulation plugin built on routing, transport, and information
 - `canwu-society`: published experimental social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
+- `canwu-culture`: experimental culture authoring, compilation, and
+  lifecycle extension built on `canwu-society`
 - `canwu-technology`: published generic technology extension for evidence,
   local capability, implementation, use-specific adoption, and diffusion
 - `canwu-history-research`: published optional historical assessment plugins
