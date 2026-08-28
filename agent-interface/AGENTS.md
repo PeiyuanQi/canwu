@@ -14,3 +14,6 @@ tools, not runtime `SimulationPlugin` implementations.
 - Keep skill instructions short and link to repository source-of-truth docs.
 - Validate every `SKILL.md`, `agents/openai.yaml`, and plugin manifest after a
   change.
+- `canwu-developer-design` is additionally exposed through the repository-local
+  `.agent/`, `.agents/`, and `.claude/` skill loaders; keep those loaders pointed
+  at the packaged source.
