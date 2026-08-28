@@ -65,6 +65,11 @@ Contributor and maintainer skills live in
 `canwu-developer-release` for release preparation, package inspection,
 third-party notices, and cross-platform release verification.
 
+The Canwu design skill is also available to repository-local agents through
+`.agent/skills/canwu-developer-design/`, `.agents/skills/canwu-developer-design/`,
+and `.claude/skills/canwu-developer-design/`. These are synchronized
+loaders for the packaged skill, not separate developer workflows.
+
 Engine-user skills live separately in
 `agent-interface/plugins/canwu-engine/skills/` so client guidance does not get
 mixed with repository-maintainer workflows.
