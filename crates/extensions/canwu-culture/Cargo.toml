@@ -1,0 +1,20 @@
+[package]
+name = "canwu-culture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Experimental culture authoring and lifecycle extension for Canwu"
+
+[dependencies]
+canwu-api.workspace = true
+canwu-society.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

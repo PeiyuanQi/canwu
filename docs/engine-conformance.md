@@ -326,6 +326,24 @@ active inputs rather than rule-by-edge or observer-by-distribution cross
 products, including valid EPOCH and negative-time boundaries. This is
 domain-extension evidence, not a claim that its types belong in Canwu core.
 
+The experimental culture authoring layer now provides a separate scale and
+lifecycle gate: compiled plans declare cardinality and fan-out budgets, the
+runtime dirty-set API follows active pairs, and retired targets are absent from
+the hot target index. The complete persisted state restores lifecycle schedules,
+dirty work, generations, and effect cadence. Explicit atomic society lifecycle
+synchronization removes retired target-scoped rules, distributions, signal
+inputs, and derived state. Host boundary registration, authoritative transition
+persistence, canonical signal admission, and incremental society aggregate /
+projection refreshes are not yet implemented. A dedicated benchmark must
+measure active/dirty pairs, cross-extension signal batches, observers, retired
+catalog size, snapshot bytes, validation, replay, and peak resident memory
+before the SDK is described as scalable.
+
+The proposed legal extension adds a second gate: only controller-bound legal
+commands may commit law versions; cultural commitment signals must survive
+culture retirement as legal provenance, while live level dependencies must be
+resolved before retirement.
+
 The complete profile remains in progress. The major remaining gaps include
 authority scopes that prevent human/AI double control, institution/advisor
 permission semantics, experiment lineage, and the remaining canonical

@@ -1,7 +1,9 @@
 # Social Belief Framework Implementation TODO
 
-Status: implementation and independent review complete; Git delivery is
-authorized.
+Status: baseline implementation and independent review complete. The first
+culture authoring and lifecycle implementation slice is also complete; its
+boundary-driven ingress, incremental settlement, and benchmark work remain
+follow-up items in the [culture authoring SDK and lifecycle design](culture-authoring-sdk-and-lifecycle.md).
 
 This checklist implements only the generic `canwu-society` social diffusion
 simulation module described in
@@ -102,3 +104,34 @@ tutorial case; it does not implement the three comparisons.
 - [x] Proper implementation completed and verified.
 - [x] Independent review authorized and completed.
 - [x] Commit and push requested.
+
+## Follow-up: culture authoring and retirement
+
+- [x] Define a serializable `CultureDefinition` authoring schema and structured
+      cardinality/fan-out budget errors.
+- [x] Compile definitions into an immutable, hash-bound execution plan with
+      numeric IDs, reverse indexes, and bounded adjacency.
+- [ ] Integrate dirty-set settlement with incremental society aggregate/projection
+      refreshes; the public dirty-set API and current full-state path now exist.
+- [x] Add `Active`, `Dormant`, and `Retired` target lifecycle records,
+      generation-bound tombstones, explicit reactivation, complete persisted
+      runtime hydration, and atomic society lifecycle synchronization.
+- [ ] Add next-boundary information-to-culture inputs and batched
+      culture-to-domain effect outputs.
+- [ ] Add society/culture benchmarks proving retired catalog growth does not
+      change active settlement cost and that work follows dirty state.
+- [ ] Add a historical content case only after the generic SDK and lifecycle
+      conformance gates pass.
+
+## Follow-up: legal institutionalization
+
+- [ ] Define jurisdiction, legal institution, proposal, procedure, and law
+      version schemas as a downstream `canwu-law` extension.
+- [ ] Bridge `CulturalSignalBatch` to dirty legal proposals and
+      controller-bound `DecisionTicket` options.
+- [ ] Commit, amend, repeal, and expire law versions through validated
+      canonical commands with causal evidence and exact replay.
+- [ ] Add actor-relative legal projections and election, administration,
+      education, and justice adapters.
+- [ ] Add legal active/dirty/procedure benchmarks before historical rights or
+      suffrage content is promoted to a first-party case.

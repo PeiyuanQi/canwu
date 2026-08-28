@@ -104,9 +104,55 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 | `canwu-information` | Experimental authoritative information lifecycle extension |
 | `canwu-correspondence` | Experimental correspondence domain extension and simulation plugin |
 | `canwu-society` | Experimental social diffusion simulation module |
+| `canwu-culture` | Experimental culture authoring, compilation, and lifecycle extension |
 | `canwu-technology` | Experimental evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-debug` | Reference client using the public API and reference-world integration |
+
+The experimental `canwu-culture` culture system SDK sits above
+`canwu-society`, not in the simulation core. It compiles versioned content into
+an externally immutable, content-hash-bound execution plan, enforces cardinality and
+expanded fan-out budgets, and provides dirty-set and hot-target indexes. Its
+complete state restores lifecycle schedules, hot/dirty indexes, and effect
+cadence. Dormant targets leave the culture hot index and stop compiled culture transition rules
+after explicit society synchronization; retired targets additionally release
+target-scoped dynamic society state while historical evidence remains available.
+Boundary-system registration, canonical signal admission, and incremental
+aggregation remain follow-up work. See the [culture authoring and lifecycle design](/en/architecture/#culture-authoring-and-lifecycle).
+
+## Culture authoring and lifecycle
+
+The SDK is an experimental developer-facing layer. A content pack declares targets,
+cohorts, channels, transitions, institutions, and downstream effect bindings;
+the compiler produces a deterministic plan consumed by the social diffusion
+runtime. Cross-extension inputs and outputs use bounded next-boundary batches,
+not synchronous callbacks.
+
+Culture targets become `Dormant` after a quiet window with no engaged
+population or admitted work. Explicit society lifecycle synchronization stops
+their compiled culture transition rules. A `Retired` target additionally releases
+rebuildable distributions, empty culture-owned bindings, and derived state, but
+keeps a compact tombstone and all historical domain-record, event, knowledge,
+and archive references. The preferred combined API prepares a runtime delta and
+stages society only when a lifecycle transition occurs; a live dependency rejects
+retirement without committing either. The host must still persist the result and
+lifecycle transition in one authoritative boundary. Explicit reactivation creates
+a new generation and never rewrites the old history.
+
+The proposed `canwu-law` legal institutionalization extension will consume
+cultural signals and commit legal rules through `DecisionTicket`, authorized
+commands, and versioned domain records; culture cannot write legal state
+directly. See the [legal institutionalization design](/en/architecture/#legal-institutionalization-design).
+
+## Legal institutionalization design
+
+The legal extension treats cultural signals as evidence-bearing social input,
+not legal authority. It turns them into legal proposals and controller-bound
+`DecisionTicket` options; only a validated canonical legal command can commit a
+`LawVersion`. An enacted law does not disappear when its culture
+target becomes `Retired`; ending a dynamic support level only triggers the law
+extension's own review, expiry, or repeal rule. The complete contract is in the
+[legal institutionalization framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md).
 
 ### Direct crate dependency DAG
 
@@ -127,6 +173,7 @@ external and development dependencies are omitted.
         Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
+        Culture["canwu-culture"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
         ReferenceWorld["canwu-reference-world"]
@@ -158,6 +205,8 @@ external and development dependencies are omitted.
     Correspondence --> Information
     Information --> Api
     Society --> Api
+    Culture --> Society
+    Culture --> Api
     Technology --> Api
     History --> Api
     History --> Technology

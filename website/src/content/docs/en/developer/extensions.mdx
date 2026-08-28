@@ -44,6 +44,29 @@ declares:
 Canwu runs these systems in fixed phase order, validates declared access, performs deterministic allocation, and commits
 the boundary atomically. See [phased boundary and allocation](/en/tutorials/phased-boundary/) for a complete example.
 
+## Culture system SDK
+
+The experimental `canwu-culture` SDK is a developer-facing authoring layer above
+`canwu-society`. A content pack declares targets, cohorts, channels,
+transitions, institutions, and downstream effects; the SDK validates budgets
+and compiles those definitions into an externally immutable, content-hash-bound execution plan.
+The runtime completely restores the dirty set, hot-target index, dormant
+schedule, and effect-cadence cursors. After explicit society synchronization, retired targets
+no longer participate in target-scoped hot work; incremental aggregation remains
+follow-up work.
+
+Use `settle_culture_society_boundary` for ordinary host settlement. It prepares
+a runtime delta over active, due-dormant, and explicitly observed targets, and
+touches society bindings only for targets whose lifecycle changes. The full
+`synchronize_society_lifecycle` scan is reserved for load repair and explicit
+maintenance checkpoints.
+
+Culture targets have `Active`, `Dormant`, and `Retired` states. A dormant target
+leaves the culture hot index while retaining a reactivation descriptor; a retired
+target releases dynamic society state during synchronization but keeps a tombstone
+and historical evidence. Reactivation is explicit and generation-bound; the
+canonical-ingress adapter remains follow-up work. See the [culture authoring and lifecycle design](/en/architecture/#culture-authoring-and-lifecycle).
+
 ## Lifecycle rules
 
 - Register plugins before commands, scenario validation, or loads that depend on them.

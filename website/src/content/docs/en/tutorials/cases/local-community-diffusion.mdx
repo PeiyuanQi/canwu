@@ -177,6 +177,16 @@ experimental domain extension that proves the public
 plugin contracts. Its current documented scope covers generic diffusion
 mechanics; historical content and domain-specific APIs remain downstream.
 
+For larger culture systems, the experimental `canwu-culture` SDK compiles these
+definitions into a bounded execution plan and exposes restorable dirty-relationship
+and hot-target indexes. Society aggregation still uses the full-state path;
+incremental refresh remains follow-up work. A target with no engaged population
+can become `Dormant` and leave the culture hot index; host-driven society sync
+then stops its compiled culture transition rules. If it later becomes `Retired`, synchronization
+releases target-scoped dynamic state while a tombstone preserves its history.
+Explicit reactivation creates a new generation. See the [lifecycle overview](/en/architecture/#culture-authoring-and-lifecycle)
+and the [complete benchmark contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md).
+
 ## 3. Where is the code?
 
 Read the runnable example first to follow the two-day settlement sequence and
