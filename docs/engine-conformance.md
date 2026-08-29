@@ -25,7 +25,7 @@ Canwu core.
    versioned experiment inputs. No public API exposes a mutable live state.
 5. Debug and research authority is explicit and cannot be reached by silently
    falling back from an actor-scoped API.
-6. Experimental domain extensions may prove these contracts while remaining
+6. Published domain extensions may prove these contracts while remaining
    optional and outside the `canwu-api` dependency graph. Their domain models
    do not become kernel conformance requirements merely by existing in the
    workspace, whether or not the extension crate is published.
@@ -311,8 +311,8 @@ randomness, save/load, exact replay, forking, rollback, tamper detection, and
 package-identity rejection. It proves those implemented architecture boundaries
 without adding application-specific types or rules to the kernel.
 
-The published experimental `canwu-society` social diffusion simulation module is an
-experimental domain extension. It additionally composes E01,
+The published `canwu-society` social diffusion simulation module is a
+domain extension. It additionally composes E01,
 E02, E04, E05, E07, E09, E10, E12, E13, and E15 through public `canwu-api`
 contracts. Its neutral local-community fixture proves conserved sparse cohort
 distributions, deterministic integer remainders, a DecisionTicket-backed
@@ -326,7 +326,7 @@ active inputs rather than rule-by-edge or observer-by-distribution cross
 products, including valid EPOCH and negative-time boundaries. This is
 domain-extension evidence, not a claim that its types belong in Canwu core.
 
-The experimental culture authoring layer now provides a separate scale and
+The published culture authoring layer now provides a separate scale and
 lifecycle gate: compiled plans declare cardinality and fan-out budgets, the
 runtime dirty-set API follows active pairs, and retired targets are absent from
 the hot target index. The complete persisted state restores lifecycle schedules,

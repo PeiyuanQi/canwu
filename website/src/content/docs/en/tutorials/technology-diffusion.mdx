@@ -10,7 +10,7 @@ import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 1. Do not begin with a global unlock
 
-`canwu-technology` is an experimental **technology simulation extension**. It
+`canwu-technology` is a published **technology simulation extension**. It
 does not provide a global technology tree, era levels, or research points.
 Instead, it separates technology change into evidence relationships that can
 be saved, disputed, and replayed:
@@ -29,10 +29,10 @@ apprenticeships. The game still owns resources, characters, economics,
 information artifacts, and narrative. The extension owns only bounded,
 deterministic, validated technology state.
 
-<Aside type="caution" title="Experimental extensions">
-  `canwu-technology` and `canwu-history-research` are published experimental
-  crates and are not re-exported by `canwu-api`. They prove an extension pattern
-  but do not yet promise a stable independent SemVer surface.
+<Aside type="note" title="Published extensions">
+  `canwu-technology` and `canwu-history-research` are officially released crates
+  and are not re-exported by `canwu-api`. They remain optional domain packages
+  and follow Canwu's pre-1.0 compatibility policy.
 </Aside>
 
 ## 2. Build play from orthogonal records

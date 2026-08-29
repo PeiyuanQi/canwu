@@ -1,10 +1,10 @@
 # Correspondence Orchestration / 通信编排机制
 
-Status: implemented experimental 0.5 milestone.
+Status: implemented 0.5 milestone and published as an official crate.
 
 This proposal defines the reusable integration between communication demand,
 holder-relative routing knowledge, transport execution, and the neutral
-information lifecycle. The first implementation is the published experimental
+information lifecycle. The first implementation is the published
 `canwu-correspondence` crate and its runnable Wuxi delivery example.
 
 ## Architectural position

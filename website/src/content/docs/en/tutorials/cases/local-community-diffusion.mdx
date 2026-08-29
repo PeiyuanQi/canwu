@@ -1,6 +1,6 @@
 ---
 title: Local community diffusion and institutional response
-description: Explore the experimental social diffusion simulation module through sparse population distributions, influence, an institutional decision, and actor-relative estimates.
+description: Explore the published social diffusion simulation module through sparse population distributions, influence, an institutional decision, and actor-relative estimates.
 sidebar:
   order: 3
   label: Community diffusion
@@ -10,7 +10,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 1. What problem are we solving?
 
-`canwu-society` is an experimental **social diffusion simulation module** and,
+`canwu-society` is a published **social diffusion simulation module** and,
 architecturally, a **domain extension** for Canwu. This example uses an abstract
 “new idea” to show how it composes group contact, private assent, public
 expression, organizational influence, institutional response, and actor-relative
@@ -39,8 +39,8 @@ This example needs to:
 
 The “new idea” is deliberately abstract. Historical doctrines, rituals,
 people, policy labels, cultural compatibility, conflict conditions, and
-narrative remain downstream domain concerns. `canwu-society` is currently a
-published experimental extension and is not re-exported by `canwu-api`. This
+narrative remain downstream domain concerns. `canwu-society` is a published
+optional extension and is not re-exported by `canwu-api`. This
 tutorial demonstrates an extension pattern, not a frozen
 universal social or religion API.
 
@@ -173,11 +173,11 @@ estimates. Historical doctrine, ritual, people, cultural compatibility, policy
 labels, conflict qualification, and narration remain downstream domain data.
 
 `canwu-society` is published but is not re-exported by `canwu-api`. It is an
-experimental domain extension that proves the public
+optional domain extension that uses the public
 plugin contracts. Its current documented scope covers generic diffusion
 mechanics; historical content and domain-specific APIs remain downstream.
 
-For larger culture systems, the experimental `canwu-culture` SDK compiles these
+For larger culture systems, the published `canwu-culture` SDK compiles these
 definitions into a bounded execution plan and exposes restorable dirty-relationship
 and hot-target indexes. Society aggregation still uses the full-state path;
 incremental refresh remains follow-up work. A target with no engaged population

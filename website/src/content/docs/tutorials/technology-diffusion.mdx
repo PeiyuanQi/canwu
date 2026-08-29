@@ -10,7 +10,7 @@ import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
 
 ## 1. 不要从“解锁科技”开始
 
-`canwu-technology` 是实验性的**技术模拟扩展**（technology simulation
+`canwu-technology` 是已正式发布的**技术模拟扩展**（technology simulation
 extension）。它不提供全局科技树、时代等级或研究点数，而是把技术变化拆成可以保存、
 质疑和重放的证据关系：
 
@@ -26,10 +26,10 @@ extension）。它不提供全局科技树、时代等级或研究点数，而�
 示范或师徒关系。游戏仍然决定资源、人物、经济、信息载体和叙事；参伍扩展只负责
 有界、确定、可验证的技术状态。
 
-<Aside type="caution" title="实验性扩展">
-  `canwu-technology` 和 `canwu-history-research` 当前都是已发布的实验性 crate，
-  也不会由 `canwu-api` 重新导出。它们验证扩展模式，但尚未承诺稳定的独立
-  SemVer 表面。
+<Aside type="note" title="已正式发布的扩展">
+  `canwu-technology` 和 `canwu-history-research` 当前都是正式发布的 crate，
+  也不会由 `canwu-api` 重新导出。它们仍是可选领域包，并遵循 Canwu 1.0 之前的
+  兼容性策略。
 </Aside>
 
 ## 2. 用正交记录构建玩法

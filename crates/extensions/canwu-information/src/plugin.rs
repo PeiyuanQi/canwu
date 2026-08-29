@@ -44,7 +44,7 @@ pub const INSTITUTIONAL_AUTHORITY_GRANT: &str = "interpret_as_assigned_role";
 pub const AUTHORITY_COMMAND_PRODUCER: &str = "canwu-authority";
 pub const AUTHORITY_COMMAND_TYPE: &str = "delegate_interpretation_v1";
 
-const PLUGIN_VERSION: &str = "0.2.0-experimental";
+const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SEMANTIC_HASH: &str = "8b20a4c41417220c920b8d0312a6011c4cf7ec98566bad61e82bbc5fada30bc8";
 const AUTHORITY_GRANTS_HASH: &str =
     "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";

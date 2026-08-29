@@ -1,6 +1,6 @@
 [package]
 name = "canwu-information"
-description = "Experimental authoritative information lifecycle extension for Canwu"
+description = "Authoritative information lifecycle extension for Canwu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

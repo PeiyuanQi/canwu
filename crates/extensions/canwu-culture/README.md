@@ -1,6 +1,6 @@
 # canwu-culture
 
-`canwu-culture` is an experimental authoring and lifecycle extension for
+`canwu-culture` is Canwu's published authoring and lifecycle extension for
 Canwu. It compiles declarative culture definitions into deterministic plans,
 adapts those plans to the generic `canwu-society` runtime, and retires inactive
 culture targets without deleting historical evidence.
@@ -26,4 +26,5 @@ performs full-state aggregation and projection. Dirty-pair settlement,
 canonical cross-extension ingress, and a published scale benchmark remain
 follow-up work.
 
-The API may change before the crate has an independent consumer.
+The crate is an official optional release. Its API follows Canwu's pre-1.0
+compatibility policy and may evolve in a future SemVer release.

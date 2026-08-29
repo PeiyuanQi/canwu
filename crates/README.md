@@ -3,8 +3,8 @@
 This directory is organized by dependency layer. The folder names help people
 navigate the repository; published Cargo package names remain unchanged.
 Applications should depend on `canwu-api`, not on the implementation crates
-below it. Experimental extensions are published packages, but remain optional
-and are not part of the supported public API surface.
+below it. Published domain extensions remain optional and are not part of the
+supported public API surface.
 
 ## Dependency graph
 
@@ -40,7 +40,7 @@ flowchart BT
     subgraph integrations["Reference integrations"]
         reference_world
     end
-    subgraph extensions["Experimental extensions"]
+    subgraph extensions["Published extensions"]
         information
         correspondence
         society
@@ -119,7 +119,7 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research` | Experimental domain implementations built on the public API; culture remains downstream from society and historical research remains downstream from technology | Mixed |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research` | Published domain implementations built on the public API; culture remains downstream from society and historical research remains downstream from technology | Published |
 | `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 

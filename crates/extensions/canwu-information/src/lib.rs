@@ -1,6 +1,6 @@
 //! Neutral information lifecycle records and validation for Canwu.
 //!
-//! This published experimental extension models content, representations, carrier
+//! This published extension models content, representations, carrier
 //! instances, dispatches, access, interpretation, audiences, releases, and the
 //! idempotent operations that create or advance them. It intentionally contains
 //! no application-specific subject matter, consequences, probabilities, or

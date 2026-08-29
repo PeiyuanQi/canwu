@@ -47,7 +47,7 @@ pub const OPPORTUNITY_INGRESS: &str = "communication_opportunity_v1";
 pub const KNOWLEDGE_INGRESS: &str = "install_correspondence_knowledge_v1";
 const RESOLUTION_INGRESS: &str = "resolve_correspondence_v1";
 
-const PLUGIN_VERSION: &str = "0.2.0-experimental";
+const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SEMANTIC_HASH: &str = "a6052380a8e6e041ba6d282db70eec65a8a99a702db71544cd44d9da036be698";
 const INPUT_HASH_DOMAIN: &str = "canwu.correspondence.input.v1";
 const OPPORTUNITY_HASH_DOMAIN: &str = "canwu.correspondence.opportunity.v1";

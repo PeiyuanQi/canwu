@@ -8,7 +8,7 @@ homepage.workspace = true
 readme = "README.md"
 rust-version.workspace = true
 publish = ["crates-io"]
-description = "Experimental culture authoring and lifecycle extension for Canwu"
+description = "Culture authoring and lifecycle extension for Canwu"
 
 [dependencies]
 canwu-api.workspace = true

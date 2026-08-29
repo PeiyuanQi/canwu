@@ -1,6 +1,6 @@
 //! Declarative culture authoring and lifecycle support for Canwu.
 //!
-//! This experimental extension compiles reference content into deterministic,
+//! This published extension compiles reference content into deterministic,
 //! budgeted plans and adapts those plans to the generic `canwu-society`
 //! runtime. It never writes legal or other downstream domain state directly.
 

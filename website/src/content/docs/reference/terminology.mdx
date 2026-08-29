@@ -62,7 +62,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [模拟插件](/developer/extensions/) | simulation plugin | `SimulationPlugin` | 实现公开插件契约并注册到参伍运行时的执行单位；其名称、版本和语义哈希标识加载与精确重放所需的可执行语义。 |
 | [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域交付包，可包含一个或多个插件、领域类型、schema、命令、查询和辅助 API；没有要求实现的 `DomainExtension` trait。 |
 | [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整模拟能力名称，例如“社会传播模拟模块”；它可以由一个领域扩展及其插件实现，但本身不是引擎契约。 |
-| [文化系统 SDK](/architecture/culture-law/) | culture system SDK | `canwu-culture` | 实验性的可选文化编写、编译与生命周期扩展，建立在 `canwu-society` 之上；负责校验内容并生成确定性执行计划，不进入模拟内核。 |
+| [文化系统 SDK](/architecture/culture-law/) | culture system SDK | `canwu-culture` | 已正式发布的可选文化编写、编译与生命周期扩展，建立在 `canwu-society` 之上；负责校验内容并生成确定性执行计划，不进入模拟内核。 |
 | [法律制度化](/architecture/culture-law/) | legal institutionalization | `canwu-law`（提案） | 位于文化下游的扩展：将已准入的文化信号转成由控制者决定的法律提案和版本化法律记录；文化不能直接写入法律状态。 |
 | [法律版本](/architecture/culture-law/) | law version | `LawVersion`（提案） | 不可变的版本化法律规则记录，包含辖区、权威、有效区间、因果引用和执行元数据。 |
 | [文化执行计划](/architecture/culture-law/) | compiled culture plan | `CompiledCulturePlan` | 从文化定义编译出的外部不可变、绑定内容哈希的运行时计划，包含紧凑 ID、反向索引、预算和生命周期策略。 |

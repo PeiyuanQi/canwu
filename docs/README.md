@@ -29,7 +29,7 @@ coding agents.
 
 Canwu calls an optional domain-specific module built on the public engine
 contracts a **domain extension** (**模拟领域扩展**). `canwu-society` is the
-current experimental **social diffusion simulation module**
+current published **social diffusion simulation module**
 (**社会传播模拟模块**) built at that layer.
 
 - [Social diffusion simulation module design](proposals/social-belief-framework.md)

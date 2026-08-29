@@ -5,7 +5,7 @@ the final verification/promotion gate tracked by
 `information-flow-mechanism-todo.md`.
 
 Baseline reconciled: Canwu `origin/main` at `2d337f4` on 2026-08-21. The
-persisted decision framework and experimental society extension are part of
+persisted decision framework and published society extension are part of
 the baseline, including engine-issued decision-controller provenance,
 plugin-owned domain records and projections, snapshot counters,
 domain-separated commitments, exact replay, compaction reservations, and the
@@ -23,7 +23,7 @@ Add two generic capabilities to the Canwu kernel:
 
 Build content lineage, representations, instances, dispatches, per-recipient
 delivery attempts, access, interpretation, audiences, and release as a
-published experimental authoritative `canwu-information` extension plugin that depends
+published authoritative `canwu-information` extension plugin that depends
 only on the supported public API (`canwu-api`). The extension, not an application
 plugin, owns the fixed information record namespace and is the only writer of
 those records.
@@ -99,7 +99,7 @@ Canwu kernel
   operation-keyed deterministic random draws
   atomic settlement, evidence, hashing, persistence, replay
 
-canwu-information (published experimental crate)
+canwu-information (published crate)
   authoritative extension plugin and fixed schema owner
   information content
   representations and derivation lineage
@@ -133,8 +133,8 @@ canwu-core <- canwu-knowledge <- canwu-sim <- canwu-api <- canwu-information
                                                         <- application packages
 ~~~
 
-`canwu-api` does not depend on or re-export `canwu-information` during the
-experimental period.
+`canwu-api` does not depend on or re-export the optional `canwu-information`
+extension.
 
 ## Terminology
 
@@ -2966,7 +2966,7 @@ contradiction, explanation, and replay may refer to older records.
 | canwu-api | re-exports, holder-relative query methods, restricted audit method |
 | canwu-debug | display generic records through canwu-api only |
 | docs | architecture, end-state, versioning, conformance, public API |
-| canwu-information | authoritative experimental plugin, record model, operations, and lifecycle helpers |
+| canwu-information | authoritative plugin, record model, operations, and lifecycle helpers |
 | website | two anonymous bilingual cases and case index updates |
 | agent-interface | documentation map for the new public capability |
 
@@ -3006,7 +3006,7 @@ second and counterexample profiles can constrain the model.
 
 Implement the smallest generic kernel publication and operation-keyed random
 primitives, keep the authoritative information lifecycle in its published
-experimental extension, and require two public cases plus the structurally
+extension, and require two public cases plus the structurally
 different conformance profiles before further compatibility promotion.
 
 This option has a larger proof burden than a case-specific plugin but preserves
@@ -3036,8 +3036,8 @@ Stop implementation and revise this design if any of the following occurs:
 
 ## Promotion gate
 
-`canwu-information` is published as an experimental crate. It remains optional
-and is not re-exported by `canwu-api`; future compatibility promotion requires:
+`canwu-information` is an official published crate. It remains optional and is
+not re-exported by `canwu-api`; any future compatibility promotion requires:
 
 - both anonymous public cases use the same public record and lifecycle types;
 - all internal conformance profiles pass unchanged;

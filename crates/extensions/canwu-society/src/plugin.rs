@@ -25,7 +25,7 @@ impl SimulationPlugin for SocietyPlugin {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0-experimental"
+        env!("CARGO_PKG_VERSION")
     }
 
     fn semantic_hash(&self) -> &'static str {

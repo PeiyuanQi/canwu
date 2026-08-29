@@ -1,6 +1,6 @@
 # Social Belief and Institutional Diffusion Framework
 
-Status: implemented as a published experimental social diffusion simulation module and domain extension. The first `canwu-culture` authoring and lifecycle slice is implemented; boundary-driven ingress, incremental settlement, and benchmark work remain specified in the [culture authoring SDK and lifecycle design](culture-authoring-sdk-and-lifecycle.md).
+Status: implemented as a published social diffusion simulation module and domain extension. The first `canwu-culture` authoring and lifecycle slice is implemented; boundary-driven ingress, incremental settlement, and benchmark work remain specified in the [culture authoring SDK and lifecycle design](culture-authoring-sdk-and-lifecycle.md).
 
 Implementation baseline: Canwu `main` at
 `d026c669c91fcf5546a87c2b28e669b154a0745a` on 2026-08-20. DecisionTicket is
@@ -12,14 +12,14 @@ existing authorized `ViewerContext` boundary and never fall back to truth.
 
 Do not add a `Religion` entity or religion-specific solver to Canwu core.
 
-Prototype a generic, published experimental `canwu-society` social diffusion simulation
+Build a generic, published `canwu-society` social diffusion simulation
 module as a domain extension that uses Canwu's public plugin, domain-record,
 boundary, persistence, and replay contracts. Keep historical beliefs, rituals,
 institutions, policies, people, and conflicts in downstream domain packages such
 as Celestial Mandate.
 
 Promote a capability into Canwu core only when an independent second system
-needs the same primitive and the experimental implementation has produced
+needs the same primitive and the published implementation has produced
 conformance evidence.
 
 ## Why this boundary
@@ -67,7 +67,7 @@ Canwu kernel
   stable identity, time, ingress, boundary settlement, allocation,
   actor knowledge, decisions, causality, persistence, replay, hashing
 
-Experimental official domain extensions
+Published official domain extensions
   canwu-information   content, representations, transfers, access,
                       interpretation, releases
   canwu-society       social diffusion simulation module: cohorts, sparse
@@ -81,9 +81,8 @@ Downstream domain packages
 ```
 
 `canwu-society` should depend on the supported public API (`canwu-api`). It must not
-be re-exported by `canwu-api`, and `canwu-api` must not depend on it. During the
-experimental period it is published to crates.io while retaining an explicitly
-unstable API surface.
+be re-exported by `canwu-api`, and `canwu-api` must not depend on it. It remains
+an optional crate and follows Canwu's pre-1.0 compatibility policy.
 
 The social diffusion simulation module may consume information-derived exposure
 inputs through public records or ingress, but it must not own documents,
@@ -340,13 +339,13 @@ leaders, rival organizations, and ordinary observers may have different,
 contradictory estimates with different confidence, fidelity, source, observed
 time, and learned time.
 
-Until generic actor knowledge publication exists, experimental authoritative
+Until generic actor knowledge publication exists, authoritative
 simulation may proceed, but no semantic or player-facing API may expose raw
 society domain records as an actor observation.
 
 ## Public extension surface
 
-The first experimental API should be narrow:
+The first public API should be narrow:
 
 ```rust
 SocietyPluginBuilder
@@ -463,7 +462,7 @@ active outputs, while inactive catalog growth does not materialize a dense
 1. Approve this proposal without declaring public API stability.
 2. Coordinate with the decision-framework worktree and information design so
    persistence, knowledge, and decision contracts are not implemented twice.
-3. Build the published experimental `canwu-society` social diffusion simulation module as
+3. Build the published `canwu-society` social diffusion simulation module as
    a domain extension on the existing plugin and domain-record contracts.
 4. Implement cohorts, sparse multidimensional disposition distributions, and
    deterministic transition remainders.
@@ -513,9 +512,9 @@ Stop and redesign if any of the following occurs:
 ## Approval boundary
 
 The user approved the bounded implementation scope. This document now records
-the implemented experimental domain extension and its remaining stop boundary:
-historical content, CM integration, additional tutorials, publication, and core
-promotion still require separate approval.
+the implemented published domain extension and its remaining stop boundary:
+historical content, CM integration, additional tutorials, and core promotion
+still require separate approval.
 
 Because the eventual work changes public APIs, actor knowledge, persistence,
 replay, and possibly conservation contracts, repository rules require an

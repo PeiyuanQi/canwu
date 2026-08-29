@@ -44,9 +44,9 @@ example above selects the immutable `0.6.0` release rather than the moving
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
 the public API. They are not separate compatibility surfaces for application code.
-The experimental domain extensions are also published as crates.io packages so
-applications can depend on a released extension version; they remain optional
-and may evolve independently before 1.0.
+The domain extensions are also published as crates.io packages so applications
+can depend on an officially released extension version; they remain optional and
+may evolve independently before 1.0.
 
 ## Quick start
 
@@ -76,7 +76,7 @@ For the social diffusion simulation module example:
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
-For the experimental evidence-based technology flow:
+For the evidence-based technology flow:
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
@@ -103,12 +103,12 @@ cargo run -p canwu-correspondence --example routed_correspondence
 - `canwu-reference-world`: replaceable example entities, detached projection,
   movement plugin, routing adapter, and runnable persistence/replay starter
 - `canwu-debug`: a small reference client built on the public API and reference integration
-- `canwu-information`: published experimental information-lifecycle extension
-- `canwu-correspondence`: published experimental correspondence domain
+- `canwu-information`: published information-lifecycle extension
+- `canwu-correspondence`: published correspondence domain
   extension and simulation plugin built on routing, transport, and information
-- `canwu-society`: published experimental social diffusion simulation module;
+- `canwu-society`: published social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
-- `canwu-culture`: experimental culture authoring, compilation, and
+- `canwu-culture`: published culture authoring, compilation, and
   lifecycle extension built on `canwu-society`
 - `canwu-technology`: published generic technology extension for evidence,
   local capability, implementation, use-specific adoption, and diffusion

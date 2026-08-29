@@ -108,15 +108,15 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 | `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
 | `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
 | `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
-| `canwu-information` | Experimental authoritative information lifecycle extension |
-| `canwu-correspondence` | Experimental correspondence domain extension and simulation plugin |
-| `canwu-society` | Experimental social diffusion simulation module |
-| `canwu-culture` | Experimental culture authoring, compilation, and lifecycle extension |
-| `canwu-technology` | Experimental evidence-based generic technology simulation extension |
+| `canwu-information` | Published authoritative information lifecycle extension |
+| `canwu-correspondence` | Published correspondence domain extension and simulation plugin |
+| `canwu-society` | Published social diffusion simulation module |
+| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
+| `canwu-technology` | Published evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-debug` | Reference client using the public API and reference-world integration |
 
-The experimental `canwu-culture` culture system SDK sits above
+The published `canwu-culture` culture system SDK sits above
 `canwu-society`, not in the simulation core. It compiles versioned content into
 an externally immutable, content-hash-bound execution plan, enforces cardinality and
 expanded fan-out budgets, and provides dirty-set and hot-target indexes. Its

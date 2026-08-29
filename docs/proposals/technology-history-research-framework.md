@@ -50,19 +50,19 @@ canwu core and canwu-api
   generic records, knowledge, commands, ingress, settlement, persistence,
   replay, hashing, actor-relative queries
 
-canwu-technology (published experimental; depends only on canwu-api)
+canwu-technology (published; depends only on canwu-api)
   generic immutable technique revisions, programs, attempts, observations,
   claims and assessments, capabilities, minimum production evidence,
   implementations, applications, adoption, teaching opportunities
 
-canwu-history-research (published experimental; optional; depends on canwu-technology)
+canwu-history-research (published; optional; depends on canwu-technology)
   three independently selectable assessment plugins and read-only analysis
 
 reference starter and profiles
   neutral playable vertical slice plus five data-only stress profiles
 ```
 
-Neither experimental crate is re-exported by `canwu-api`. Games that omit the
+Neither crate is re-exported by `canwu-api`. Games that omit the
 historical suite pay no historical-record or handler cost. Plugin descriptors
 in a snapshot fix the executable plugin set. Scenario, rule, evaluator, content,
 and source fingerprints are separately fixed by `RunManifest`.
@@ -171,7 +171,7 @@ a stale revision is rejected. Boundary views merge only the requested B-tree
 kind/page with overlays, proportional to `O(log N + page + overlay page)`.
 
 `canwu-technology` supplies validated snapshot/checkpoint/fork/exact-replay
-wrappers analogous to other experimental modules. Restoration scans bounded
+wrappers analogous to other published modules. Restoration scans bounded
 pages and revalidates limits, immutable revision ancestry, exact version refs,
 operation results, qualification predicates, adoption/use links, and rebuildable
 indexes. Core schema/manifest validation remains necessary but is not claimed

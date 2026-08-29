@@ -72,15 +72,15 @@ compact-archive cost. Recorded baselines are engineering evidence, not a
 machine-independent service-level objective.
 
 The first authoritative implementation was the
-`canwu-information` extension for the 0.5 line; it is now a published
-experimental crate. Publishing it makes the record vocabulary, lifecycle
+`canwu-information` extension for the 0.5 line; it is now a published crate.
+Publishing it makes the record vocabulary, lifecycle
 helpers, and high-fan-out continuation ergonomics available to independent
 consumers while keeping the extension optional.
 The kernel holder-ledger, evidence, archive, and keyed-random contracts are the
 stable reusable boundary; each extension remains a separately reviewed
 compatibility decision.
 
-The published experimental `canwu-correspondence` domain extension composes this neutral
+The published `canwu-correspondence` domain extension composes this neutral
 ledger with actor-relative route knowledge and transport execution. It owns
 communication opportunities, admitted sender/recipient intent, address
 resolution, accepted route evidence, incident policy, and cross-extension
@@ -227,7 +227,7 @@ diplomacy, migration, disease, and climate should remain separately testable
 plugins. The core may standardize broadly shared primitives only after at least
 two concrete systems need them.
 
-The first generic technology implementation is the published experimental
+The first generic technology implementation is the published
 `canwu-technology` domain extension. It demonstrates that invention and
 diffusion can be represented without a universal unlock tree: immutable
 technique revisions are tested through evidence-bearing attempts, qualified
@@ -253,8 +253,8 @@ incremental validation may raise that ceiling, but historical fidelity plugins
 are not a substitute for those kernel improvements.
 
 The first reference implementation of population-scale social diffusion is the
-published experimental `canwu-society` **social diffusion simulation module**.
-Architecturally, it is an experimental **domain extension** built on Canwu's
+published `canwu-society` **social diffusion simulation module**.
+Architecturally, it is a **domain extension** built on Canwu's
 public engine contracts. It keeps cohort distributions, influence
 edges, organization topology, institutional alignment, policy pressure,
 transition remainders, mobilization candidates, and actor estimates outside the
@@ -268,7 +268,7 @@ abstraction is not specific to belief or religion, and a separate compatibility 
 migration decision. Until then, `canwu-api` must not depend on or re-export
 `canwu-society`.
 
-The next usability layer is the experimental `canwu-culture` authoring
+The next usability layer is the published `canwu-culture` authoring
 extension. It compiles versioned culture definitions into bounded execution
 plans above `canwu-society`, so a content author can define targets, cohorts,
 channels, transitions, institutions, and cross-extension effects without

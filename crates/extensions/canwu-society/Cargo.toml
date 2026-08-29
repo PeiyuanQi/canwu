@@ -8,7 +8,7 @@ homepage.workspace = true
 readme = "README.md"
 rust-version.workspace = true
 publish = ["crates-io"]
-description = "Experimental social diffusion simulation module for Canwu"
+description = "Social diffusion simulation module for Canwu"
 
 [dependencies]
 canwu-api.workspace = true

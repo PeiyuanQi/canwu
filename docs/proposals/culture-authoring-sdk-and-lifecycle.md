@@ -1,6 +1,6 @@
 # Culture Authoring SDK and Lifecycle Design
 
-Status: first implementation slice complete as the experimental
+Status: first implementation slice complete as the published
 `canwu-culture` crate. The authoring schema, deterministic compiler, society
 adapter, dirty-set API, effect persistence classes, lifecycle index, tombstone,
 reactivation, complete runtime-state hydration, and explicit atomic lifecycle
@@ -108,7 +108,7 @@ let definition = CultureDefinition::builder("rights-tradition")
     .build()?;
 ```
 
-The example uses the current experimental Rust API. JSON/TOML loaders should
+The example uses the current public Rust API. JSON/TOML loaders should
 target the same serializable fields and validation rules.
 
 ### Definition components

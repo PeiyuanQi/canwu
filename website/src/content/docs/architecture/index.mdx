@@ -102,15 +102,15 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
 | `canwu-sim` | 私有运行时、调度、插件和结算 |
 | `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重演 |
-| `canwu-information` | 实验性权威信息生命周期扩展 |
-| `canwu-correspondence` | 实验性通信模拟领域扩展与模拟插件 |
-| `canwu-society` | 实验性社会传播模拟模块 |
-| `canwu-culture` | 实验性文化编写、编译与生命周期扩展 |
-| `canwu-technology` | 实验性、证据驱动的通用技术模拟扩展 |
+| `canwu-information` | 已正式发布的权威信息生命周期扩展 |
+| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件 |
+| `canwu-society` | 已正式发布的社会传播模拟模块 |
+| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展 |
+| `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
 | `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
 
-实验性的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
+已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
 它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
 和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
 上层应用显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。

@@ -83,7 +83,7 @@ where
     Self::Payload: Clone + serde::de::DeserializeOwned + Serialize,
 {
     const PLUGIN_NAME: &'static str;
-    const PLUGIN_VERSION: &'static str = "0.1.0-experimental";
+    const PLUGIN_VERSION: &'static str = env!("CARGO_PKG_VERSION");
     const SEMANTIC_HASH: &'static str;
 
     fn core(payload: &Self::Payload) -> &AssessmentCore;

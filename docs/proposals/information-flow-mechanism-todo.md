@@ -5,7 +5,7 @@ Status: revision-3 implementation checklist for
 final promotion gate.
 
 Baseline: `origin/main` at `2d337f4` on 2026-08-21. The persisted decision
-framework, engine-issued decision-controller provenance, experimental society
+framework, engine-issued decision-controller provenance, published society
 extension, commitment roots, exact replay, compaction reservations, and
 bilingual case navigation are part of the baseline and must not be
 reimplemented or bypassed.
@@ -608,7 +608,7 @@ extension's validated operations.
 
 ### Package and ownership
 
-- [x] Add published experimental `crates/extensions/canwu-information` depending only on
+- [x] Add the published `crates/extensions/canwu-information` depending only on
   `canwu-api`, serde, and serde_json.
 - [x] Add `InformationPlugin` with a fixed neutral namespace.
 - [x] Register channel, content, representation, instance, dispatch,

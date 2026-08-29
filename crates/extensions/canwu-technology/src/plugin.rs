@@ -29,7 +29,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub const TECHNOLOGY_COMMAND: &str = "apply_technology_operation_v1";
 pub(crate) const TECHNOLOGY_COMMAND_INGRESS: &str = "technology_command_v1";
 pub const TECHNOLOGY_RESULT_INGRESS: &str = "technology_result_v1";
-const PLUGIN_VERSION: &str = "0.1.0-experimental";
+const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 const SEMANTIC_HASH: &str = "ab7e52dd84e24e862e5c1f14f8048db2b473d108c7958a333b72d8e852a03080";
 pub(crate) const INPUT_HASH_DOMAIN: &str = "canwu.technology.operation-input.v1";
 pub(crate) const CONFLICT_HASH_DOMAIN: &str = "canwu.technology.operation-conflict.v1";

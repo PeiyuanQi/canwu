@@ -35,8 +35,8 @@ canwu-api = "=0.6.0"
 存档迁移时升级。上例选择不可变的 `0.6.0` 版本，而不是持续变化的 `main` 分支。
 
 `canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
-细节，不建议应用代码直接依赖，也不单独承诺兼容性。实验性模拟领域扩展也会
-作为 crates.io package 发布，应用可以固定已发布的扩展版本；但在 1.0 之前它们
+细节，不建议应用代码直接依赖，也不单独承诺兼容性。模拟领域扩展也会作为
+crates.io package 正式发布，应用可以固定已发布的扩展版本；但在 1.0 之前它们
 仍然是可选模块，API 可能独立演进。
 
 ## 快速开始
@@ -66,7 +66,7 @@ cargo run -p canwu-api --example decision_ticket
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
-如需运行基于证据的实验性技术流程：
+如需运行基于证据的技术流程：
 
 ```text
 cargo run -p canwu-technology --example technology_diffusion
@@ -92,12 +92,12 @@ cargo run -p canwu-correspondence --example routed_correspondence
 - `canwu-reference-world`：可替换的示例实体、脱离式投影、移动插件、路由适配器
   和可运行的持久化/重演入门示例
 - `canwu-debug`：建立在公开 API 与参考整合包之上的小型参考客户端
-- `canwu-information`：已发布的实验性信息生命周期扩展
-- `canwu-correspondence`：建立在寻路、运输与信息生命周期之上的已发布实验性
+- `canwu-information`：已正式发布的信息生命周期扩展
+- `canwu-correspondence`：建立在寻路、运输与信息生命周期之上的已正式发布
   通信模拟领域扩展和模拟插件
-- `canwu-society`：已发布的实验性社会传播模拟模块（`social diffusion simulation module`）；
+- `canwu-society`：已正式发布的社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
-- `canwu-culture`：实验性文化编写、编译与生命周期扩展，建立在
+- `canwu-culture`：已正式发布的文化编写、编译与生命周期扩展，建立在
   `canwu-society` 之上
 - `canwu-technology`：已发布的通用技术模拟扩展，负责证据、本地能力、实施、
   按用途采用和传播机会

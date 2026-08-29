@@ -19,7 +19,7 @@ or postponed scope.
 
 ## Technology extension
 
-- [x] Add published experimental `canwu-technology`, depending only on `canwu-api`.
+- [x] Add published `canwu-technology`, depending only on `canwu-api`.
 - [x] Implement bounded typed records, immutable revisions, exact version refs,
   schemas, deterministic reference evaluator, and semantic validation.
 - [x] Implement tracked command operations, passive/provider ingress, phase
@@ -41,7 +41,7 @@ or postponed scope.
 
 ## Historical research suite
 
-- [x] Add published experimental `canwu-history-research` with separately selectable
+- [x] Add published `canwu-history-research` with separately selectable
   sources, practice, and production-archaeology assessment plugins.
 - [x] Add bounded assessment ingestion, contradiction/supersession, exact
   evidence links, O(1) unrelated-ingress exit, and host-side read-only analysis.
