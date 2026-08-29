@@ -34,12 +34,12 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "=0.6.0"
+canwu-api = "=0.7.0"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
 release exactly and upgrade only alongside an explicit save migration. The
-example above selects the immutable `0.6.0` release rather than the moving
+example above selects the immutable `0.7.0` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
@@ -110,6 +110,8 @@ cargo run -p canwu-correspondence --example routed_correspondence
   architecturally, a domain extension built on `canwu-api`
 - `canwu-culture`: published culture authoring, compilation, and
   lifecycle extension built on `canwu-society`
+- `canwu-law`: experimental deterministic legal authoring, institutional
+  procedure, versioned law, applicability, succession, and retirement extension
 - `canwu-technology`: published generic technology extension for evidence,
   local capability, implementation, use-specific adoption, and diffusion
 - `canwu-history-research`: published optional historical assessment plugins

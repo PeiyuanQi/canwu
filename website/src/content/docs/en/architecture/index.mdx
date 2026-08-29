@@ -27,11 +27,11 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 Canwu is a headless historical simulation core. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
 
-## Format 6 and three simulation granularities
+## Format 7 and three simulation granularities
 
-Before 1.0, 0.6 uses a clean persistence break: snapshots and `ReplayJournal`
+Before 1.0, 0.7 uses a clean persistence break: snapshots and `ReplayJournal`
 carry declared run identity, initial scenario, commitments, authority root, and
-complete evidence. The kernel does not silently load format-4/5 saves.
+complete evidence. The kernel does not silently load format 2-6 saves.
 `SimulationGranularity` defines only the domain-neutral levels `aggregate`,
 `group`, and `actor`. Celestial Mandate may map them to Population, Special
 Group, and Character in its own reference integration; Southern Ming and WWII
@@ -112,6 +112,7 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 | `canwu-correspondence` | Published correspondence domain extension and simulation plugin |
 | `canwu-society` | Published social diffusion simulation module |
 | `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
+| `canwu-law` | Implemented experimental legal authoring, institutional procedure, versioned law, and applicability extension |
 | `canwu-technology` | Published evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
@@ -156,6 +157,7 @@ external and development dependencies are omitted.
         Information["canwu-information"]
         Society["canwu-society"]
         Culture["canwu-culture"]
+        Law["canwu-law"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
         Fiscal["canwu-fiscal"]
@@ -192,6 +194,7 @@ external and development dependencies are omitted.
     Society --> Api
     Culture --> Society
     Culture --> Api
+    Law --> Api
     Technology --> Api
     History --> Api
     History --> Technology

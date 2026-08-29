@@ -9,15 +9,15 @@ use super::{
     BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
     BoundarySystemContract, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef, Command,
     CommandAttemptId, CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId,
-    CommandIngress, CommandRecord, DecisionAction, DecisionAttemptErrorCode,
-    DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority, DecisionMutation,
-    DecisionState, DecisionTraceId, DeterministicRng, DomainHistoryCut, DomainRecord,
-    DomainRecordChange, DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory,
-    DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
-    EntityRef, ErrorCode, EventId, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass, IngressId,
-    IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy, Issuer,
-    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
-    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
+    CommandIngress, CommandRecord, DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction,
+    DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority,
+    DecisionMutation, DecisionState, DecisionTraceId, DeterministicRng, DomainHistoryCut,
+    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitStage,
+    DomainRecordHistory, DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef,
+    DomainRecordVersionSource, EntityRef, ErrorCode, EventId, EvidenceRef, GENESIS_BOUNDARY_HASH,
+    IngressClass, IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy,
+    Issuer, KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
+    LetterStatus, PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
     PluginIngressTarget, PluginRegistry, RandomDrawAddress, RandomDrawId, RandomDrawOutcome,
     RandomDrawProducer, RandomDrawRecord, ReservationAllocation, ReservationDisposition,
     ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
@@ -25,12 +25,12 @@ use super::{
     SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective,
     WorldSnapshot, authoritative_revision_count, base_schema, boundaries_before_attempts,
     boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
-    boundary_write_stage, canonical_text, canonicalize_scenario, commitment_roots_are_canonical,
-    component_key, compute_boundary_hash, domain_record_commit_stage, invalid_snapshot,
-    invalid_snapshot_error, is_canonical_hash, is_domain_record_state,
-    is_expected_command_rejection, manifest, plugins, random, record_change_affected_entities,
-    records, snapshot_boundary_head_state_hash, snapshot_checkpoint_hash,
-    snapshot_command_attempt_preflight_error, snapshot_commitment_roots,
+    boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
+    commitment_roots_are_canonical, component_key, compute_boundary_hash,
+    domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
+    is_domain_record_state, is_expected_command_rejection, manifest, plugins, random,
+    record_change_affected_entities, records, snapshot_boundary_head_state_hash,
+    snapshot_checkpoint_hash, snapshot_command_attempt_preflight_error, snapshot_commitment_roots,
     snapshot_is_at_boundary_head, validate_command_authority, validate_directives,
     validate_scenario, validate_strict_id_order, validate_type_schema,
 };
@@ -339,7 +339,7 @@ pub(super) fn validate_snapshot(
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return invalid_snapshot(
-            "format 6 snapshots require their manifest-bound initial scenario",
+            "format 7 snapshots require their manifest-bound initial scenario",
         );
     };
     let mut canonical = initial_scenario.clone();
@@ -1510,15 +1510,17 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             let persisted_attempt =
                 snapshot
                     .decisions
-                    .attempts
+                    .attempts()
                     .get(next_attempt)
                     .ok_or_else(|| {
                         invalid_snapshot_error(
                             "admitted decision ingress lacks its decision attempt",
                         )
                     })?;
+            let request_commitment = canonical_hash(DECISION_REQUEST_COMMITMENT_DOMAIN, request)?;
             let base_attempt = |outcome| DecisionAttemptRecord {
                 request_id: request.request_id,
+                request_commitment: request_commitment.clone(),
                 at: boundary.at,
                 revision_before: current_revision,
                 expected_revision: request.expected_revision,
@@ -1617,7 +1619,13 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
                                 trace_id,
                                 command_request_id,
                             });
-                            candidate.attempts.push(accepted.clone());
+                            candidate
+                                .append_attempt(accepted.clone())
+                                .map_err(|error| {
+                                    invalid_snapshot_error(format!(
+                                        "reconstructed decision attempt is invalid: {error}"
+                                    ))
+                                })?;
                             reconstructed = candidate;
                             if let Some(command_request_id) = command_request_id {
                                 let command_attempt = command_attempts_by_request
@@ -1653,7 +1661,13 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
                 expected_attempt.outcome,
                 DecisionAttemptOutcome::Rejected { .. }
             ) {
-                reconstructed.attempts.push(expected_attempt);
+                reconstructed
+                    .append_attempt(expected_attempt)
+                    .map_err(|error| {
+                        invalid_snapshot_error(format!(
+                            "reconstructed decision attempt is invalid: {error}"
+                        ))
+                    })?;
             }
             next_attempt += 1;
         }
@@ -1666,7 +1680,7 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     }
     if reconstructed != snapshot.decisions
         || next_trace_id != snapshot.next_decision_trace_id
-        || next_attempt != snapshot.decisions.attempts.len()
+        || next_attempt != snapshot.decisions.attempts().len()
     {
         return invalid_snapshot(
             "decision ingress history does not reconstruct the persisted decision state",
@@ -1948,7 +1962,7 @@ fn validate_ingress_records(
         .collect();
     let decision_attempts_by_request: BTreeMap<_, _> = snapshot
         .decisions
-        .attempts
+        .attempts()
         .iter()
         .map(|attempt| (attempt.request_id, attempt))
         .collect();

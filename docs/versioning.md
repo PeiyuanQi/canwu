@@ -1,17 +1,18 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 6 is a deliberate clean break: the 0.6 runtime
+Canwu is pre-1.0. Format 7 is a deliberate clean break: the 0.7 runtime
 writes and reads only its current contracts. There is no implicit loader or
-runtime migration for format 2, 3, 4, or 5 data. Applications that need old
+runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
 outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.6.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.7.0`. A live `SimulationSnapshot` has:
 
-- snapshot format `6`;
-- commitment format `2`;
+- snapshot format `7`;
+- commitment format `3`;
+- checkpoint/evidence-journal format `3`;
 - state revision format `2`;
 - admission cursor format `2`;
 - exact replay revision format `2`;
@@ -24,8 +25,14 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
+Format 7 adds a canonical commitment from every `DecisionAttemptRecord` to its
+complete admitted `DecisionIngressRequest`. This changes the decision-state
+commitment root. Format-6 snapshots, replay journals, checkpoints, and evidence
+segments therefore require the 0.6 engine or an explicit application-owned
+export; the 0.7 runtime rejects them before constructing mutable state.
+
 The runtime no longer contains `migration.rs` or `legacy_v4.rs`. An older
-snapshot must not be silently relabeled as format 6, and a legacy replay
+snapshot must not be silently relabeled as format 7, and a legacy replay
 journal cannot be promoted to exact replay.
 
 ## Self-contained exact replay
@@ -82,7 +89,9 @@ consume.
 
 ## Source compatibility
 
-The 0.6 change removes caller-supplied replay wrappers from the public facade.
+The 0.7 change removes caller-supplied replay wrappers from the public facade
+and adds schema-declared identity-only evidence dependencies plus compact,
+Merkle-bound plugin-ingress provenance.
 Use the constructor APIs for new runs, `snapshot`/`checkpoint` for persistence,
 `replay_from_journal` for exact replay, and `outbox_entries` for host delivery.
 Downstream crates must update their code to these contracts; no deprecated

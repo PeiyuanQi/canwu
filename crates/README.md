@@ -30,6 +30,7 @@ flowchart BT
     correspondence["canwu-correspondence"]
     society["canwu-society"]
     culture["canwu-culture"]
+    law["canwu-law"]
     technology["canwu-technology"]
     history["canwu-history-research"]
     fiscal["canwu-fiscal"]
@@ -52,6 +53,7 @@ flowchart BT
         correspondence
         society
         culture
+        law
         technology
         history
         fiscal
@@ -110,6 +112,7 @@ flowchart BT
     api --> society
     society --> culture
     api --> culture
+    api --> law
     api --> technology
     api --> history
     technology --> history
@@ -133,7 +136,7 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research`, `canwu-fiscal` | Published domain implementations built on the public API; culture remains downstream from society, historical research remains downstream from technology, and fiscal procedure remains independent from resource balances and physical transfers | Published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-law`, `canwu-technology`, `canwu-history-research`, `canwu-fiscal` | Domain implementations built on the public API; culture remains downstream from society, law consumes admitted social evidence through controller-mediated procedure, historical research remains downstream from technology, and fiscal procedure remains independent from resource balances and physical transfers | Published except for milestone-stage crates awaiting their release tag |
 | `reference-content/` | `canwu-ming-fiscal` | Versioned, source-cited historical definitions compiled by generic extensions | Published |
 | `integrations/` | `canwu-reference-world`, `canwu-ming-fiscal-reference` | Replaceable example worlds, adapters, scenario composition, and runnable starters | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
@@ -149,7 +152,7 @@ each completed group to become resolvable before continuing:
 4. `canwu-transport`
 5. `canwu-api`
 6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`
-7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`, `canwu-ming-fiscal`
+7. `canwu-culture`, `canwu-law`, `canwu-correspondence`, `canwu-history-research`, `canwu-ming-fiscal`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and

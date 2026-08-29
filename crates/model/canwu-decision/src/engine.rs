@@ -9,7 +9,7 @@ use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
 pub struct DecisionState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub controllers: BTreeMap<String, DecisionControllerBinding>,
@@ -18,7 +18,43 @@ pub struct DecisionState {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub traces: Vec<DecisionTrace>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub attempts: Vec<DecisionAttemptRecord>,
+    attempts: Vec<DecisionAttemptRecord>,
+    #[serde(skip)]
+    attempts_by_request: BTreeMap<canwu_core::DecisionRequestId, usize>,
+}
+
+impl<'de> Deserialize<'de> for DecisionState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct PersistedDecisionState {
+            #[serde(default)]
+            controllers: BTreeMap<String, DecisionControllerBinding>,
+            #[serde(default)]
+            tickets: BTreeMap<canwu_core::DecisionTicketId, DecisionTicket>,
+            #[serde(default)]
+            traces: Vec<DecisionTrace>,
+            #[serde(default)]
+            attempts: Vec<DecisionAttemptRecord>,
+        }
+
+        let persisted = PersistedDecisionState::deserialize(deserializer)?;
+        let attempts_by_request = persisted
+            .attempts
+            .iter()
+            .enumerate()
+            .map(|(index, attempt)| (attempt.request_id, index))
+            .collect();
+        Ok(Self {
+            controllers: persisted.controllers,
+            tickets: persisted.tickets,
+            traces: persisted.traces,
+            attempts: persisted.attempts,
+            attempts_by_request,
+        })
+    }
 }
 
 impl DecisionState {
@@ -40,11 +76,42 @@ impl DecisionState {
         self.tickets.get(&id)
     }
 
+    #[must_use]
+    pub fn attempt(&self, id: canwu_core::DecisionRequestId) -> Option<&DecisionAttemptRecord> {
+        self.attempts_by_request
+            .get(&id)
+            .and_then(|index| self.attempts.get(*index))
+    }
+
+    #[must_use]
+    pub fn attempts(&self) -> &[DecisionAttemptRecord] {
+        &self.attempts
+    }
+
+    pub fn append_attempt(&mut self, attempt: DecisionAttemptRecord) -> Result<(), DecisionError> {
+        if self.attempts_by_request.contains_key(&attempt.request_id) {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "decision attempts must use unique request IDs",
+            ));
+        }
+        let index = self.attempts.len();
+        self.attempts_by_request.insert(attempt.request_id, index);
+        self.attempts.push(attempt);
+        Ok(())
+    }
+
     pub fn open_tickets(&self) -> impl Iterator<Item = &DecisionTicket> {
         self.tickets.values().filter(|ticket| ticket.is_open())
     }
 
     pub fn validate(&self) -> Result<(), DecisionError> {
+        if self.attempts_by_request.len() != self.attempts.len() {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "decision attempt request index is inconsistent",
+            ));
+        }
         for (id, controller) in &self.controllers {
             if id != &controller.id {
                 return Err(DecisionError::new(
@@ -53,6 +120,18 @@ impl DecisionState {
                 ));
             }
             controller.validate()?;
+        }
+        if self.attempts.iter().any(|attempt| {
+            attempt.request_commitment.len() != 64
+                || !attempt
+                    .request_commitment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "decision attempts require a canonical request commitment",
+            ));
         }
         for (id, ticket) in &self.tickets {
             if id != &ticket.id || !self.controllers.contains_key(&ticket.assigned_controller) {
@@ -115,11 +194,17 @@ impl DecisionState {
             }
         }
         let mut request_ids = std::collections::BTreeSet::new();
-        for attempt in &self.attempts {
+        for (index, attempt) in self.attempts.iter().enumerate() {
             if attempt.request_id.get() == 0 || !request_ids.insert(attempt.request_id) {
                 return Err(DecisionError::new(
                     DecisionErrorCode::InvalidDecision,
                     "decision attempts must use unique nonzero request IDs",
+                ));
+            }
+            if self.attempts_by_request.get(&attempt.request_id) != Some(&index) {
+                return Err(DecisionError::new(
+                    DecisionErrorCode::InvalidDecision,
+                    "decision attempt request index is inconsistent",
                 ));
             }
             match &attempt.outcome {

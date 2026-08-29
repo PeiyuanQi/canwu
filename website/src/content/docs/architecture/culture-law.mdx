@@ -19,7 +19,7 @@ hero:
 </nav>
 
 这是一页关于两个可选领域扩展的统一架构说明：已正式发布的 `canwu-culture` 文化系统 SDK，
-以及规划中的 `canwu-law` 法律制度化扩展。它们都建立在公开 API 和社会传播模拟模块之上，
+以及已实现的实验性 `canwu-law` 法律制度化扩展。它们都建立在公开 API 和社会传播模拟模块之上，
 但不把历史文化、法律语义或某个具体时代写入参伍的模拟内核。
 
 核心原则很简单：**文化系统产生有证据的社会信号，法律系统通过经授权的制度程序解释这些信号并提交法律版本。**
@@ -31,7 +31,7 @@ hero:
 校验数量、展开扇出、内存、状态和边界工作预算，然后生成外部不可变、绑定内容哈希的文化执行计划。
 `canwu-society` 仍负责稀疏人口分布、社会影响边、组织拓扑、制度输入和角色相对投影。
 
-规划中的 `canwu-law` 位于文化信号的下游，拥有辖区、法律机构、程序、法律提案、已制定规则、
+`canwu-law` 位于文化信号的下游，拥有辖区、法律机构、程序、法律提案、已制定规则、
 生效时间、修订、废止、失效和法律解释。政治、选举、行政、教育、司法与执行扩展只拥有各自的过程，
 并在声明的结算边界中消费已制定法律。
 
@@ -47,7 +47,7 @@ canwu-society 稀疏社会运行时
     +--> CulturalSignalBatch（有界、带因果、下一边界准入）
                 |
                 v
-         canwu-law（提案 -> 程序 -> LawVersion）
+         canwu-law（法律提案 -> 程序 -> LawVersion）
                 |
                 v
       政治 / 选举 / 行政 / 教育 / 司法 / 执行适配器
@@ -155,13 +155,13 @@ Active -> Dormant -> Retired
 public alignment、organization tie 和 mobilization 等状态，并产生有界的 `CulturalSignalBatch`。批次包含 target generation、scope、strength、
 persistence class、cadence 和 evidence；它是法律输入，不是权限授予。
 
-法律桥接只处理 dirty 的辖区和提案：
+法律桥接只处理 dirty 或到期的辖区和提案：
 
 1. 根据 signal kind 与 scope 的反向索引找到受影响的辖区和开放提案，不扫描无关法律；
-2. 创建或刷新绑定控制者的 `DecisionTicket`，选项可以是 adopt、amend、reject、defer 或 refer；票据放入角色相对事实和证据，不放可变运行时引用；
-3. 授权控制者从既有选项中选择，持久化 `DecisionAttempt` 与 `DecisionTrace`，并把选项转成规范化法律命令；
-4. 法律命令校验辖区、机构权限、程序、revision 与 effective-time guard、条款/证据上限以及引用的 signal generation；
-5. 校验成功后，在一个边界内原子创建或更新 `LegalProposal` 和 `LawVersion`；选举、行政、教育、司法和执行适配器再在各自声明的边界消费结果。
+2. 类型化 `LegalMutation` 与 holder-context ingress 进入事件驱动的法律插件；插件校验聚合内嵌编译计划绑定、精确聚合版本、host-owned `expected_versions`、引用的文化 generation、信号提供者精确的 `(plugin, packet_type)`，以及内核提交的生产 boundary；host 直接注入同一 provider namespace 不构成证据，调用方自报的 signal kind 也不具权威性；公开事件还必须匹配保留的 provider payload（proposal、时间、媒介和辖区），一般习俗信号则采用身份与生产 boundary 证据；
+3. 程序创建绑定 holder 的决策 outbox。适配器先持久化预期 revision，每个精确席位 controller 最多注册一次，后续 ticket 复用它；只有所需结果都是 `Accepted` 且当前 controller/ticket 与持久化草案精确一致时，ACK 才会通过，ingress 归档不会破坏该证明；
+4. 授权控制者从既有选项中选择；被接受的命令只能安排有界的 pending legal intent，不能直接写法律；
+5. 后续法律插件边界重新校验权限、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子 compare-and-set 法律聚合；下游适配器在各自声明的边界消费结果。
 
 权威路径是：
 
@@ -169,7 +169,8 @@ persistence class、cadence 和 evidence；它是法律输入，不是权限授�
 CulturalSignalBatch
   -> LegalProposal / DecisionTicket
   -> 授权的 DecisionAttempt / DecisionTrace
-  -> 经过验证的法律命令规范化输入
+  -> 已接受的法律命令 -> pending intent
+  -> 法律聚合原子 compare-and-set
   -> LawVersion
   -> 下游执行与反馈证据
 ```
@@ -180,7 +181,9 @@ CulturalSignalBatch
 
 `LegalJurisdiction` 把稳定辖区 ID 绑定到父辖区、领地范围、主管机构和 procedure profile。
 `LegalInstitution` 把机构实体绑定到辖区、权限席位、quorum、投票/任命规则和可采纳法律的 command subject。
-它们都是领域记录，不是新的 core entity kind。
+它们是单一类型化法律聚合的成员，不是新的 core entity kind，也不是可由 host 独立修改的记录。
+
+编译期要求每个程序席位只能解析到一个同时声明该程序与席位的机构，并把 holder、permission profile 与采用长度前缀的无碰撞 controller ID 冻结进计划。缺失或歧义的权限定义会在运行开始前失败。
 
 `LegalProposal` 是尚未制定的、带版本的程序输入。它至少记录：
 
@@ -188,13 +191,28 @@ CulturalSignalBatch
 - 有界的类型化条款或资格规则；
 - 所需程序、截止时间和状态：`draft`、`submitted`、`deliberating`、`adopted`、`rejected`、`expired` 或 `withdrawn`；
 - `CulturalSignalBatch` 与其他证据引用；
-- 开放中的 `DecisionTicket` 身份和 option version。
+- 开放中的 `DecisionTicket` 身份和 option version；
+- 主张的法律权限、瑕疵、效力状态，以及精确的裁决、协议或承继来源。
 
-提案可以引用某个 cultural target generation，但这只是证据，不能赋予文化扩展修改或制定法律的权限。
+内核授权只证明谁提交了命令，不能让一个越权行为自动取得世界内法律效力。提案可以引用某个 cultural target generation，
+但这只是证据，不能赋予文化扩展修改或制定法律的权限。
 
-`LawVersion` 是权威法律结果。它记录稳定 law identity 和单调递增版本、辖区和有界 scope、类型化条款、`effective_from` 与可选 `effective_until`、
-采纳机构、授权 decision origin、程序结果、提案/决策/文化信号的因果证据，以及明确的 amendment、successor、repeal 或 expiry 链接。
+机构权限采用默认拒绝：必须同时覆盖法律秩序、辖区、事项、渊源模式、操作、程序、法院和裁判权。每个渊源 profile 还显式声明程序机构或证据主张这两种 authority policy、允许的来源类型、公开政策与编译后的公开信号提供方、证据上下限、claimant 要求与追溯许可。公开事件只能在对应 provider ingress 实际发生的边界记录；未来公开计划不能冒充已发生事件。`Promulgated` 必须经过程序；`Agreed` 还会编译精确的文书 namespace/kind、至少两方当事人和批准证据。
+
+一个被接受的提案产生一条不可变 `LegalSourceVersion`、稳定 `LegalRule` 和一条不可变 `LawVersion`。
+法律渊源保存精确提案和裁决、协议或承继来源，其模式显式区分 `Promulgated`、`Adjudicated`、`Accreted`、`Agreed` 与 `Received`。
+规则把“最新主张”与“当前有效版本”分开，因此 `Purported` 或 `Contested` 的变更可见时，先前有效版本仍可继续支配。
+公开不是采纳时自动写入的字符串，而是绑定精确 proposal、时间、媒介、范围和证据的不可变 `LegalPublicityEvent`。`ValidityCondition` 缺少公开时会让采纳边界原子失败；`EffectivenessCondition` 则允许先采纳，但新版本在公开前保持惰性，也不会出现在早于公开时间的历史 read cut 中，而且公开不得晚于生效时间。延迟公开只追加事件并更新 proposal 生命周期与派生规则头，不会改写 create-only 的 source 或 law version。追溯效力还必须同时具备 profile 许可和显式追溯日期。
+
+`LawVersion` 记录稳定规则 ID、单调 legal ordinal、辖区和有界 scope、生效时间、渊源与来源、因果证据和前置版本。
+每个编译条款显式声明规范模态，不从显示文本猜测。权利和资格规则包含 holder、duty bearer、subject matter、condition、standing、forum 与 remedy profile。
 修订和废止都是新的法律命令与新的追加版本；文化目标退休不会删除已经制定的法律。
+
+适用性查询必须指定精确法律秩序与编译 profile，并在预算内完成时间、领地、主体、事项和辖区过滤、优先级决议与 trace 输出。条件和例外是编译 predicate：缺少事实返回 `Indeterminate`，条件为假或例外为真返回 `NotApplicable`。每个事实携带精确 evidence ref；actor-relative 查询还必须绑定 `KnowledgeReadCut` 和 holder knowledge-record ID。host-bound API 会校验 holder、完整 read cut、编译 knowledge schema、JSON 布尔指针、断言值和证据；detached API 拒绝 actor-relative 查询。
+未决效力返回 `Contested`，同时暴露先前有效版本与竞争主张。承继不会默认继受整个前法秩序：reception 先按 succession 的属人、属地 scope 与规则前缀选择最长匹配，再应用被接收规则自身的事项 scope；
+`Continue` 可直接延续前法，`Transform` 与 `Review` 则需要显式 `Receive` 来源并绑定精确 succession 与 predecessor；`Transform` 还必须绑定并实际使用一个编译条款。
+
+辖区查询使用按 relation kind/direction 编译的邻接表，每次查询只构造一个有预算的可达集合；总查询预算同时限制图边、规则、历史版本、effect/holder/predicate 访问、冲突索引扇出和冲突成员。每条 proposal、case、ruling 和 conflict 还必须在遍历前通过嵌套条目总预算。已解决冲突保存完整、支配与被排除的精确版本集合，以及类型化依据、辖区、记录时间、生效期间和理由；只有完整主张集合与时空范围匹配时才应用分区，分区既可提升争议主张，也可排除它。所有活跃分区同时合并；若同一版本同时被支配与排除，结果保持 `Contested`，不按冲突 ID 决胜。非时间性解决必须引用版本集合完全一致、绑定案件、处于有效状态且覆盖明确辖区的有权裁决。案件、finding 与 ruling 同样受编译 forum、proof、standing、remedy、precedent、期间、issue 和裁判权限约束。
 
 ### 效果持久性语义
 
@@ -206,7 +224,9 @@ CulturalSignalBatch
 | `Evidence` | 仅作为历史引用，不能直接打开或改变法律程序。 |
 
 如果法律规则刻意依赖一个 live cultural level，法律扩展必须记录该依赖并拥有自己的复核、到期或续期规则。
-文化运行时只发出 level 结束信号，不会静默废止法律。已被法律接受的 commitment 不会让文化目标继续留在 hot path，因此文化可以退休而法律仍然生效。
+文化运行时只发出 level 结束信号，不会静默废止法律。已被法律接受的 commitment 不会让文化目标继续留在 hot path，因此文化可以退休而法律仍然生效。生效法律只保留一份经过 Merkle 绑定的紧凑采纳证据 receipt；退休文化的传播状态、索引和旧 payload 不再进入热路径，废止或到期仍然必须经过显式法律操作。
+
+退休属于显式、有界的维护操作。v1 使用 `max_retirement_dependency_records` 限制聚合依赖证明扫描的外层记录数，每条记录内的依赖扇出另有上限；超出预算时会在文化或法律状态发生任何变化前拒绝。普通法律结算不承担这次扫描；后续分片运行时应以按目标索引的依赖表替代它。
 
 ## 权限、可见性与重放
 
@@ -220,22 +240,27 @@ CulturalSignalBatch
   -> LawVersion 提交
 ```
 
-命令 subject 必须是主管法律机构；context 携带已校验的 `decision_controller_id`、decision origin、seat、permission profile、request identity 以及预期 revision/time guard。
+命令 subject 必须是提案冻结的精确主体；机构是否具有世界内法律权限由独立 competence contract 判断。context 携带已校验的 `decision_controller_id`、decision origin、seat、permission profile、request identity 以及预期 revision/time guard。
 外部服务或模型可以推荐选项，但不能伪造权限，也不能提交绕过票据的原始法律 payload。
 
 已公开的法律可以通过领域投影提供。私人草案、异议和角色特定知识使用 `ViewerContext` 与 holder ledger，不能用真值回退。
 文化和法律记录实现 `DomainRecordType`，采用严格 schema、类型化引用、显式 mutation policy，并在证据需要时保留精确的历史版本正文。
 
-保存的插件语义环境包含 plan hash、预算、生命周期策略、target generation、法律 procedure profile 和 law schema version。
-精确重放消费已记录的信号输入、决策输入、法律命令、边界记录和证据，不重新运行人类、服务或模型策略。派生分支复制已验证状态后接受新的因果输入。
+单一持久化 `LegalRuntimeRecord` 包含编译计划、plan/content hash、预算、生命周期、target generation、procedure profile、记录和派生索引；加载时会重算并校验这些索引后才暴露状态。
+精确重放消费已记录的 mutation、信号、决策、命令、ACK、wake ingress 与边界证据，不重新运行人类、服务或模型策略。派生分支复制已验证状态后接受新的因果输入。
 失败边界必须原子恢复索引、tombstone、计数器、证据和随机位置。
+
+完整历史与派生索引校验只在冷加载/恢复时运行；实时边界校验不可变 plan/budget 绑定和局部 mutation guard，不再为每条 mutation 重扫全部法律历史。
+仍然存活的最新争议主张会保留其身份证据，直到后续主张取代它。
 
 ## 有界工作与验收门槛
 
 法律计划应编译辖区、机构、提案、条款和程序 profile 的数值 ID，维护按 signal kind/scope 的反向索引、dirty proposal/jurisdiction set，
 并为条款、证据、选项、扇出和待处理 continuation 声明上限，同时将 plan hash 与预算清单绑定到运行。
 对于 `P_delta` 个 dirty proposal、`C_delta` 个受影响条款和 `V_delta` 个 observer 条目，目标稳态成本约为 `O(P_delta + C_delta + V_delta)`。
-退休目标和历史法律目录不能改变活跃提案的结算成本。
+截止时间与未来生效工作使用有序索引，精确决策结果使用 request 索引，适用性删除和插入都计入 mutation 预算；退休目标和历史法律目录不能改变活跃提案的结算成本。
+
+这个复杂度只描述聚合解码后的法律结算，不代表整个内核事务。v1 的单一聚合和事务克隆使实时法律边界约为 `O(H_serialized + delta)`。发布模式下真实插件路径在 1k/10k/100k 历史记录时的中位数约为 37.472ms/507.535ms/6.017504s，而法律内部空闲结算均约 200ns。1k 已同时超过 60 FPS（16.7ms）和 30 FPS（33.3ms）帧预算，因此法律结算不是逐帧工作；10k 仅适合低频回合或后台处理，100k 仅适合离线/维护处理。在辖区分片和 COW 完成前，live manifest 应将保留记录硬上限设在远低于 1k 的范围，并在目标硬件上校准具体数值。
 
 实现完成前，测试和基准至少要证明：
 
@@ -244,11 +269,15 @@ CulturalSignalBatch
 - 过期 proposal、ticket 和 law revision 会成为安全且可持久化的拒绝；
 - 已接受的 commitment 在文化退休后仍然存在；
 - 未解决的 live level dependency 会阻止文化退休；
+- 未来生效的 live-level dependency 也会阻止提前退休；
+- 过期程序会同时过期未解决的 pending/enqueued outbox；
 - proposal、law、evidence、archive、snapshot、fork 和 exact replay 保持一致；
 - 无关目标、observer 和退休目录条目不会扰动有 key 的结果或已声明预算。
 
 一个典型的女性参政权内容包可以发出 public alignment、organization capacity 和 legitimacy pressure 信号；主管议会通过 `DecisionTicket` 选择投票资格规则，
-法律命令以确定性生效时间提交 `VotingEligibilityRule`，选举适配器再读取该法律。文化目标后来退休时，只停止新的传播，已制定法律和执行历史仍然保留。
+已接受的命令安排一项法律 intent，由后续法律边界以确定性生效时间提交 `VotingEligibilityRule`，选举适配器再读取该法律。这里的“成年女性”必须由具体内容包按历史语境定义：公民资格、种族、财产、婚姻、殖民地身份和登记制度都可能形成交叉排除。文化目标后来退休时，只停止新的传播，已制定法律和执行历史仍然保留。
+
+启蒙与人权内容包也不应写成一条从欧洲观念自动通往现代权利的直线。它可以把多元思想来源、翻译、印刷、教育与结社网络建模为不同传播通道，同时加入宗教、王朝、地方共同体和既得利益的反动员；这些信号只能改变公共 alignment、组织能力、合法性压力和决策证据。不同法律秩序仍可部分采纳、重新解释、延迟公布、选择性执行或拒绝相关主张。
 
 完整的实现契约见仓库中的[文化系统编写与生命周期设计](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)
 和[法律制度化框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)。

@@ -36,6 +36,7 @@ current published **social diffusion simulation module**
 - [Social framework implementation checklist](proposals/social-belief-framework-todo.md)
 - [Culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md)
 - [Legal institutionalization framework](proposals/legal-institutionalization-framework.md)
+- [Legal institutionalization consensus review](proposals/legal-institutionalization-review.md)
 
 ## Runnable cases, reference content, and starter kits
 

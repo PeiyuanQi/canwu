@@ -1,0 +1,19 @@
+[package]
+name = "canwu-law"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Deterministic legal authoring and institutional runtime extension for Canwu"
+
+[dependencies]
+canwu-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

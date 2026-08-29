@@ -1,13 +1,14 @@
 use super::{
-    ActorKnowledge, Army, ArmyId, BoundaryId, BoundaryKnowledgeChange, CanwuError, CommandId,
-    CommandRecord, DomainRecord, DomainRecordKind, DomainRecordRef, DomainRecordType,
-    DomainRecordVersionRef, EntityRef, ErrorCode, EventId, EvidenceRef, Government, GovernmentId,
-    HashSet, IngressId, IngressPayload, IngressRecord, KnowledgeHolderRef, KnowledgeQuery,
-    KnowledgeRecord, KnowledgeRecordId, Person, PersonId, PluginComponentKey,
-    PluginComponentRecord, RandomOperationTarget, RandomStreamKey, RefCell, ReservationAllocation,
-    ReservationRef, Route, RouteId, RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent,
-    SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value, component_key,
-    domain_record_candidates, random, records, retained_domain_record_version,
+    ActorKnowledge, Army, ArmyId, BoundaryId, BoundaryKnowledgeChange, CanwuError, CauseRef,
+    CommandId, CommandRecord, DecisionAttemptRecord, DecisionControllerBinding, DecisionRequestId,
+    DecisionTicket, DecisionTicketId, DomainRecord, DomainRecordKind, DomainRecordRef,
+    DomainRecordType, DomainRecordVersionRef, EntityRef, ErrorCode, EventId, EvidenceRef,
+    Government, GovernmentId, HashSet, IngressId, IngressPayload, IngressQueueKey, IngressRecord,
+    KnowledgeHolderRef, KnowledgeQuery, KnowledgeRecord, KnowledgeRecordId, Person, PersonId,
+    PluginComponentKey, PluginComponentRecord, RandomOperationTarget, RandomStreamKey, RefCell,
+    ReservationAllocation, ReservationRef, Route, RouteId, RuntimeCurrentState, RuntimeEvidence,
+    RuntimeState, SimEvent, SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value,
+    component_key, domain_record_candidates, random, records, retained_domain_record_version,
     validate_domain_record_page_request, validation,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -253,11 +254,199 @@ impl SimulationView<'_> {
         Ok(record)
     }
 
+    /// Matches retained, plugin-generated ingress provenance without exposing its payload.
+    ///
+    /// Durable evidence may cite ingress admitted at an earlier boundary, but a
+    /// generated record still waiting in the scheduler is not yet admissible.
+    /// Format-7 archive receipts retain a Merkle-bound compact producer proof,
+    /// so archived payload bytes do not need to return to the hot path.
+    pub fn plugin_ingress_matches(
+        &self,
+        id: IngressId,
+        plugin: &str,
+        packet_type: &str,
+    ) -> Result<bool, CanwuError> {
+        self.require_read(&StateKey::core_ingress())?;
+        let record = self.state.evidence().retained_ingress(id);
+        if record.is_none()
+            && let Some(receipt) = self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .get(&EvidenceRef::Ingress(id))
+        {
+            if self
+                .state
+                .runtime()
+                .scheduler
+                .pending_ingress
+                .iter()
+                .any(|key| key.id == id)
+            {
+                return Ok(false);
+            }
+            return Ok(receipt
+                .plugin_ingress_provenance
+                .as_ref()
+                .is_some_and(|provenance| {
+                    provenance.plugin == plugin && provenance.packet_type == packet_type
+                }));
+        }
+        let Some(record) = record else {
+            return Ok(false);
+        };
+        if self
+            .state
+            .runtime()
+            .scheduler
+            .pending_ingress
+            .contains(&IngressQueueKey::from_record(record))
+        {
+            return Ok(false);
+        }
+        if !matches!(
+            &record.payload,
+            IngressPayload::Plugin {
+                plugin: actual_plugin,
+                packet_type: actual_packet_type,
+                ..
+            } if actual_plugin == plugin && actual_packet_type == packet_type
+        ) {
+            return Ok(false);
+        }
+        let Some(CauseRef::Boundary(boundary_id)) = record.cause.as_ref() else {
+            return Ok(false);
+        };
+        let boundary = self.state.evidence().retained_boundary(*boundary_id);
+        if boundary.is_none()
+            && self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Boundary(*boundary_id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "ingress producer boundary is archived; provenance inspection requires an archive provider",
+            ));
+        }
+        Ok(boundary.is_some_and(|boundary| {
+            boundary
+                .generated_ingress
+                .iter()
+                .any(|generation| generation.ingress == id && generation.plugin == plugin)
+        }))
+    }
+
+    /// Matches a retained plugin ingress to an exact provider payload and
+    /// delivery time. Payload inspection is deliberately limited to retained
+    /// records: archived receipts prove producer identity, but cannot safely
+    /// be reused to authorize a different legal proposal without the original
+    /// bytes.
+    pub fn plugin_ingress_payload_matches(
+        &self,
+        id: IngressId,
+        plugin: &str,
+        packet_type: &str,
+        occurred_at: SimTime,
+        expected_payload: &Value,
+    ) -> Result<bool, CanwuError> {
+        self.require_read(&StateKey::core_ingress())?;
+        let Some(record) = self.state.evidence().retained_ingress(id) else {
+            if self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Ingress(id))
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::EvidenceContentUnavailable,
+                    "provider ingress payload is archived; exact legal signal binding requires retained content",
+                ));
+            }
+            return Ok(false);
+        };
+        if self
+            .state
+            .runtime()
+            .scheduler
+            .pending_ingress
+            .contains(&IngressQueueKey::from_record(record))
+        {
+            return Ok(false);
+        }
+        let IngressPayload::Plugin {
+            plugin: actual_plugin,
+            packet_type: actual_packet_type,
+            payload,
+            ..
+        } = &record.payload
+        else {
+            return Ok(false);
+        };
+        if actual_plugin != plugin
+            || actual_packet_type != packet_type
+            || record.due_at != occurred_at
+            || payload != expected_payload
+        {
+            return Ok(false);
+        }
+        let Some(CauseRef::Boundary(boundary_id)) = record.cause.as_ref() else {
+            return Ok(false);
+        };
+        let boundary = self.state.evidence().retained_boundary(*boundary_id);
+        if boundary.is_none()
+            && self
+                .state
+                .evidence()
+                .archived_evidence_receipts
+                .contains_key(&EvidenceRef::Boundary(*boundary_id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "provider ingress producer boundary is archived; exact legal signal binding requires retained content",
+            ));
+        }
+        Ok(boundary.is_some_and(|boundary| {
+            boundary
+                .generated_ingress
+                .iter()
+                .any(|generation| generation.ingress == id && generation.plugin == plugin)
+        }))
+    }
+
+    /// Returns the retained outcome for one exact decision request.
+    pub fn decision_attempt(
+        &self,
+        request_id: DecisionRequestId,
+    ) -> Result<Option<&DecisionAttemptRecord>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self.state.current().decisions.attempt(request_id))
+    }
+
+    /// Returns one current decision-controller binding after an explicit core read.
+    pub fn decision_controller(
+        &self,
+        id: &str,
+    ) -> Result<Option<&DecisionControllerBinding>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self.state.current().decisions.controller(id))
+    }
+
+    /// Returns one current decision ticket after an explicit core read.
+    pub fn decision_ticket(
+        &self,
+        id: DecisionTicketId,
+    ) -> Result<Option<&DecisionTicket>, CanwuError> {
+        self.require_read(&StateKey::core_decisions())?;
+        Ok(self.state.current().decisions.ticket(id))
+    }
+
     pub fn domain_record(
         &self,
         reference: &DomainRecordRef,
     ) -> Result<Option<&DomainRecord>, CanwuError> {
-        self.require_read(&records::record_state_key(&reference.kind))?;
+        self.require_domain_record_read(reference)?;
         Ok(self
             .record_overlay
             .and_then(|overlay| overlay.get(reference))
@@ -315,7 +504,7 @@ impl SimulationView<'_> {
         &self,
         reference: &DomainRecordVersionRef,
     ) -> Result<bool, CanwuError> {
-        self.require_read(&records::record_state_key(&reference.record.kind))?;
+        self.require_domain_record_read(&reference.record)?;
         if self
             .proposed_domain_record_version(&reference.record)?
             .is_some_and(|proposed| proposed == *reference)
@@ -329,6 +518,22 @@ impl SimulationView<'_> {
             ),
             validation::EvidenceAvailability::Missing
         ))
+    }
+
+    /// Checks that an exact domain-record version is both valid evidence and current.
+    pub fn domain_record_version_is_current(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<bool, CanwuError> {
+        self.require_domain_record_read(&reference.record)?;
+        let current = self
+            .record_overlay
+            .and_then(|overlay| overlay.get(&reference.record))
+            .or_else(|| self.state.current().domain_records.get(&reference.record));
+        Ok(
+            current.is_some_and(|record| record.version == reference.version)
+                && self.domain_record_version_evidence_exists(reference)?,
+        )
     }
 
     /// Returns whether a generic evidence identity is retained or archived.
@@ -646,6 +851,24 @@ impl SimulationView<'_> {
                     self.reader.unwrap_or("internal system"),
                     state.namespace,
                     state.name
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn require_domain_record_read(&self, reference: &DomainRecordRef) -> Result<(), CanwuError> {
+        let exact = records::record_state_key(&reference.kind);
+        if self.allowed_reads.is_some_and(|reads| {
+            !reads.contains(&exact) && !reads.contains(&StateKey::core_domain_records())
+        }) {
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredStateRead,
+                format!(
+                    "{} did not declare read access to {}.{}",
+                    self.reader.unwrap_or("internal system"),
+                    exact.namespace,
+                    exact.name
                 ),
             ));
         }

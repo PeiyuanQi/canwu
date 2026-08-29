@@ -28,11 +28,11 @@ Rust 应用应依赖官方支持的对外 API，而不是直接依赖实现 crat
 
 ```toml
 [dependencies]
-canwu-api = "=0.6.0"
+canwu-api = "=0.7.0"
 ```
 
 需要持久化 Canwu 存档的应用应固定已发布的引擎版本，并且只在同时提供明确
-存档迁移时升级。上例选择不可变的 `0.6.0` 版本，而不是持续变化的 `main` 分支。
+存档迁移时升级。上例选择不可变的 `0.7.0` 版本，而不是持续变化的 `main` 分支。
 
 `canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
 细节，不建议应用代码直接依赖，也不单独承诺兼容性。模拟领域扩展也会作为
@@ -99,6 +99,8 @@ cargo run -p canwu-correspondence --example routed_correspondence
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
 - `canwu-culture`：已正式发布的文化编写、编译与生命周期扩展，建立在
   `canwu-society` 之上
+- `canwu-law`：实验性的确定性法律编写、制度程序、版本化法律、适用、
+  承继与退休扩展
 - `canwu-technology`：已发布的通用技术模拟扩展，负责证据、本地能力、实施、
   按用途采用和传播机会
 - `canwu-history-research`：已发布、位于基础技术真值下游的三个可选历史研究评估插件

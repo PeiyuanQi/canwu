@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
 
-0.6 uses the Format 6 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, and `authority_root_seed`. The simulation core does not silently migrate format-4 or format-5 data.
+0.7 uses the Format 7 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, `authority_root_seed`, and exact decision-request commitments. The kernel does not silently migrate format 2-6 data.
 
 ## Checkpoint journals and exact replay
 
@@ -49,6 +49,16 @@ seal, the caller owns the returned `EvidenceJournalSegment` and can use
 `outbox_entries_for_segment` to regenerate the same identities. Boundary
 emissions remain paired with host delivery and acknowledgement state; sealing
 does not imply that an external effect was delivered or acknowledged.
+
+Format 7 lets a domain-record schema declare sorted, unique identity-only
+evidence dependencies. Sealing keeps only their Merkle receipts, without old
+payload bytes in the hot path. Receipts for plugin-generated ingress also bind
+the provider plugin, packet type, and producing boundary. A domain runtime may
+maintain the declaration incrementally with reference counts; cold load
+independently reconstructs and verifies both the set and counts. Direct sealing
+and prepare/store/commit sealing are atomic: a late validation failure such as
+a missing receipt leaves the live checkpoint unchanged. Only an explicit
+payload-required continuation reloads an old segment through `ArchiveProvider`.
 
 ## Counterfactuals and tests
 

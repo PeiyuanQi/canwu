@@ -3,16 +3,16 @@ use canwu_sim::{ErrorCode, Simulation};
 use serde_json::Value;
 
 #[test]
-fn format6_snapshot_is_strict_and_self_describing() {
+fn format7_snapshot_is_strict_and_self_describing() {
     let (simulation, _) = Simulation::demo(17).expect("demo should initialize");
     let mut wire: Value = serde_json::from_str(
         &simulation
             .snapshot_json()
-            .expect("format 6 snapshot should serialize"),
+            .expect("format 7 snapshot should serialize"),
     )
     .expect("snapshot JSON should be an object");
 
-    wire["snapshot_format_version"] = Value::from(5_u64);
+    wire["snapshot_format_version"] = Value::from(6_u64);
     let Err(error) = Simulation::from_snapshot_json(&wire.to_string()) else {
         panic!("old formats reject");
     };
@@ -21,7 +21,7 @@ fn format6_snapshot_is_strict_and_self_describing() {
     let mut wire: Value = serde_json::from_str(
         &simulation
             .snapshot_json()
-            .expect("format 6 snapshot should serialize"),
+            .expect("format 7 snapshot should serialize"),
     )
     .expect("snapshot JSON should be an object");
     wire["world"]["unexpected"] = Value::Bool(true);

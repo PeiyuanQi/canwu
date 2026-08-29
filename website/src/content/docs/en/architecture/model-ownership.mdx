@@ -21,7 +21,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads moved out of generic `EventKind`, and the example world moved into `canwu-reference-world` before its old package boundary was removed.
 
 <Aside type="note" title="Migration status">
-The ownership migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone. Format 6 snapshots carry their canonical entity registry and initial scenario; old format-4/5 saves are rejected instead of being implicitly migrated.
+The ownership migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone. Format 7 snapshots carry their canonical entity registry and initial scenario; format 2-6 saves are rejected instead of being implicitly migrated.
 </Aside>
 
 ## One ownership rule
@@ -78,12 +78,12 @@ Typed payloads for movement, army arrival, person travel, letter delivery, repor
 1. Representative JSON saves, event journals, `canwu-api` calls, and exact replay outcomes are frozen.
 2. `EventKind` is now a generic structured record and its concrete public variants are extracted without changing legacy JSON. A complete cross-integration namespace and payload-version contract remains future work.
 3. `canwu-reference-world` now owns the concrete entities, movement behavior, detached projection, and routing conversion through public APIs.
-4. Format 6 writes the entity registry and initial scenario into a self-describing snapshot; the runnable starter proves save/load, fork, and exact replay.
+4. Format 7 writes the entity registry and initial scenario into a self-describing snapshot; the runnable starter proves save/load, fork, and exact replay.
 5. `canwu-world` is retired after reaching zero normal consumers. The independent `canwu-event` decision remains separate.
 </Steps>
 
 ## Completion gates
 
-Old format-4/5 saves and journals must be rejected by Format 6. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
+Old format 2-6 saves and journals must be rejected by Format 7. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
 
 The canonical repository audit records the complete per-type rationale, dependency evidence, and gates.

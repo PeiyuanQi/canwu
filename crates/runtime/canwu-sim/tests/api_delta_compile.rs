@@ -26,11 +26,11 @@ fn compile_fixture(extra_args: &[&str]) -> Output {
 }
 
 #[test]
-fn format_6_construction_compiles() {
+fn format_7_construction_compiles() {
     let current = compile_fixture(&[]);
     assert!(
         current.status.success(),
-        "format-6 external fixture failed:\n{}",
+        "format-7 external fixture failed:\n{}",
         String::from_utf8_lossy(&current.stderr)
     );
 }

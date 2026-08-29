@@ -2,11 +2,12 @@ use super::knowledge::{KnowledgeLimitsV1, PluginKnowledgeSchema, validate_schema
 use super::records::DomainRecordSchema;
 use super::{
     BoundaryPhase, BoundarySystemContract, BoundarySystemHandler, BoundaryWriteStage,
-    CORE_STATE_NAMESPACE, CanwuError, CommandContext, EntityRef, ErrorCode, IngressClass,
-    PluginIngressDescriptor, RandomStreamKey, ReservationRef, SchemaRegistry, SimDuration,
-    SimEvent, SimulationView, StateKey, StateVisibility, SystemCadence, SystemContract, TypeSchema,
-    boundary_write_stage, canonical_text, invalid_snapshot, invalid_snapshot_error,
-    is_canonical_hash, is_domain_record_state, knowledge, records, validate_type_schema,
+    CORE_STATE_NAMESPACE, CanwuError, CommandContext, DomainRecord, EntityRef, ErrorCode,
+    IngressClass, PluginIngressDescriptor, RandomStreamKey, ReservationRef, SchemaRegistry,
+    SimDuration, SimEvent, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemContract, TypeSchema, boundary_write_stage, canonical_text, invalid_snapshot,
+    invalid_snapshot_error, is_canonical_hash, is_domain_record_state, knowledge, records,
+    validate_type_schema,
 };
 use canwu_event::EventAudience;
 use serde::{Deserialize, Serialize};
@@ -216,6 +217,15 @@ pub trait SimulationPlugin {
     /// registration descriptor remains structurally identical.
     fn semantic_hash(&self) -> &str;
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError>;
+
+    /// Validates plugin-owned records before the plugin becomes executable.
+    ///
+    /// This hook runs after record-schema validation during both initial
+    /// registration and snapshot rehydration. The kernel supplies only records
+    /// owned by this plugin; implementations must not mutate external state.
+    fn validate_activation(&self, _records: &[DomainRecord]) -> Result<(), CanwuError> {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]

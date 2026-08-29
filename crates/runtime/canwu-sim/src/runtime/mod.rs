@@ -50,7 +50,10 @@ pub use canwu_decision::{
     RulePolicy, UtilityEvaluator, UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator,
     WeightedUtilityPolicy,
 };
-pub use decision::{DecisionEvaluation, DecisionIngressRequest, PreparedDecisionIngress};
+pub use decision::{
+    DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
+    PreparedDecisionIngress,
+};
 pub use ingress::{
     IngressClass, IngressPayload, IngressReceipt, IngressRecord, PluginIngressDescriptor,
     PluginIngressRequest,
@@ -61,14 +64,16 @@ pub use knowledge::{
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use persistence::{
     ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, ArchivedEvidenceLocator,
-    ArchivedEvidenceReceipt, ArchivedSegmentHeader, CHECKPOINT_JOURNAL_FORMAT_VERSION,
-    CheckpointJournal, CompactedSimulation, EvidenceArchiveIndex, EvidenceCursor,
-    EvidenceDependency, EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind,
-    EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator, EvidenceRequirement,
-    EvidenceSealToken, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    ArchivedEvidenceReceipt, ArchivedPluginIngressProvenance, ArchivedSegmentHeader,
+    CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal, CompactedSimulation,
+    EvidenceArchiveIndex, EvidenceCursor, EvidenceDependency, EvidenceIndexEntry,
+    EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment,
+    EvidenceNestedLocator, EvidenceRequirement, EvidenceSealToken,
+    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
+    IdentityEvidenceDependenciesV1, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadRequiredEvidenceContinuationV1,
     PreparedEvidenceSeal, ReplayJournal, SimulationCheckpoint, SimulationSnapshot,
-    payload_required_evidence_continuation_property_v1,
+    identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
 };
 pub use policy::{
     CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
@@ -152,16 +157,16 @@ use validation::{
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Format 6 is the first pre-1.0 self-contained persistence contract. Older
+/// Format 7 binds every decision attempt to its complete ingress request. Older
 /// snapshots, journals, and sub-contract versions are rejected before any
 /// mutable runtime state is constructed.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 6;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
 /// Version of the authoritative revision commitment.
 pub const STATE_REVISION_FORMAT_VERSION: u32 = 2;
 /// Version of persisted monotonic boundary-admission cursors.
 pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 2;
 /// Version of the domain-separated checkpoint commitment contract.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 2;
+pub const COMMITMENT_FORMAT_VERSION: u32 = 3;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying
@@ -192,7 +197,11 @@ fn fresh_authority_root_seed(root_seed: u64, run_manifest_hash: &str) -> Result<
         })
 }
 
-fn reject_unknown_f6_fields(input: &Value, encoded: &Value, path: &str) -> Result<(), CanwuError> {
+fn reject_unknown_current_fields(
+    input: &Value,
+    encoded: &Value,
+    path: &str,
+) -> Result<(), CanwuError> {
     match (input, encoded) {
         (Value::Object(input), Value::Object(encoded)) => {
             for (key, value) in input {
@@ -203,20 +212,20 @@ fn reject_unknown_f6_fields(input: &Value, encoded: &Value, path: &str) -> Resul
                 };
                 let Some(expected) = encoded.get(key) else {
                     return Err(invalid_snapshot_error(format!(
-                        "format 6 wire contains unknown field `{field_path}`"
+                        "format 7 wire contains unknown field `{field_path}`"
                     )));
                 };
-                reject_unknown_f6_fields(value, expected, &field_path)?;
+                reject_unknown_current_fields(value, expected, &field_path)?;
             }
         }
         (Value::Array(input), Value::Array(encoded)) => {
             if input.len() != encoded.len() {
                 return Err(invalid_snapshot_error(format!(
-                    "format 6 wire array `{path}` changed shape during decoding"
+                    "format 7 wire array `{path}` changed shape during decoding"
                 )));
             }
             for (index, (value, expected)) in input.iter().zip(encoded).enumerate() {
-                reject_unknown_f6_fields(value, expected, &format!("{path}[{index}]"))?;
+                reject_unknown_current_fields(value, expected, &format!("{path}[{index}]"))?;
             }
         }
         _ => {}
@@ -224,24 +233,24 @@ fn reject_unknown_f6_fields(input: &Value, encoded: &Value, path: &str) -> Resul
     Ok(())
 }
 
-fn deserialize_f6_json<T>(json: &str, label: &str) -> Result<T, CanwuError>
+fn deserialize_current_json<T>(json: &str, label: &str) -> Result<T, CanwuError>
 where
     T: for<'de> Deserialize<'de> + Serialize,
 {
     let input: Value = serde_json::from_str(json).map_err(|error| {
-        invalid_snapshot_error(format!("could not parse format 6 {label}: {error}"))
+        invalid_snapshot_error(format!("could not parse format 7 {label}: {error}"))
     })?;
     let decoded: T = serde_json::from_value(input.clone()).map_err(|error| {
-        invalid_snapshot_error(format!("could not deserialize format 6 {label}: {error}"))
+        invalid_snapshot_error(format!("could not deserialize format 7 {label}: {error}"))
     })?;
     let encoded = serde_json::to_value(&decoded).map_err(|error| {
-        invalid_snapshot_error(format!("could not re-encode format 6 {label}: {error}"))
+        invalid_snapshot_error(format!("could not re-encode format 7 {label}: {error}"))
     })?;
-    reject_unknown_f6_fields(&input, &encoded, "")?;
+    reject_unknown_current_fields(&input, &encoded, "")?;
     Ok(decoded)
 }
 
-fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
+fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
     if snapshot.commitment_format_version != COMMITMENT_FORMAT_VERSION
         || snapshot.revision_format_version != STATE_REVISION_FORMAT_VERSION
         || snapshot.replay_revision_format_version != STATE_REVISION_FORMAT_VERSION
@@ -250,17 +259,17 @@ fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), Ca
         || snapshot.legacy_rng.is_some()
     {
         return Err(invalid_snapshot_error(
-            "format 6 snapshots must use the current commitment, revision, admission, and authority contracts",
+            "format 7 snapshots must use the current commitment, revision, admission, and authority contracts",
         ));
     }
     let Some(RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 6 snapshots require a declared run manifest",
+            "format 7 snapshots require a declared run manifest",
         ));
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 6 snapshots must retain their canonical initial scenario",
+            "format 7 snapshots must retain their canonical initial scenario",
         ));
     };
     if matches!(
@@ -270,7 +279,7 @@ fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), Ca
         )
     ) {
         return Err(invalid_snapshot_error(
-            "format 6 snapshots cannot use legacy or manifest-only run configuration provenance",
+            "format 7 snapshots cannot use legacy or manifest-only run configuration provenance",
         ));
     }
     manifest::validate(
@@ -281,13 +290,13 @@ fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), Ca
         manifest::hash(snapshot.run_manifest.as_ref().expect("checked above"))?;
     if snapshot.run_manifest_hash != expected_manifest_hash {
         return Err(invalid_snapshot_error(
-            "format 6 snapshot run manifest hash is inconsistent",
+            "format 7 snapshot run manifest hash is inconsistent",
         ));
     }
     let run_configuration = snapshot
         .run_configuration
         .as_ref()
-        .ok_or_else(|| invalid_snapshot_error("format 6 snapshots require run configuration"))?;
+        .ok_or_else(|| invalid_snapshot_error("format 7 snapshots require run configuration"))?;
     let (_, authority_manifest_hash) = authoritative_run_identity(
         snapshot.run_manifest.as_ref().expect("checked above"),
         &expected_manifest_hash,
@@ -297,7 +306,7 @@ fn validate_f6_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), Ca
         fresh_authority_root_seed(snapshot.root_seed, &authority_manifest_hash)?;
     if snapshot.authority_root_seed != expected_authority_root {
         return Err(invalid_snapshot_error(
-            "format 6 snapshot authority root is not bound to its run identity",
+            "format 7 snapshot authority root is not bound to its run identity",
         ));
     }
     Ok(())
@@ -563,6 +572,18 @@ impl StateKey {
     #[must_use]
     pub fn core_ingress() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "ingress")
+    }
+
+    /// Current decision controllers, tickets, and request outcomes.
+    #[must_use]
+    pub fn core_decisions() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "decisions")
+    }
+
+    /// Administrative read access to current plugin-owned domain records.
+    #[must_use]
+    pub fn core_domain_records() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "domain_records")
     }
 
     /// Retained or archived boundary and random-draw evidence identities.
@@ -1386,6 +1407,15 @@ impl Simulation {
                 self.state.scheduler.now,
                 &|entity| runtime_entity_exists(&self.state, entity),
             )?;
+            let activation_records = self
+                .state
+                .current
+                .domain_records
+                .values()
+                .filter(|record| record.owner == plugin_name)
+                .cloned()
+                .collect::<Vec<_>>();
+            plugin.validate_activation(&activation_records)?;
             for stream in self.plugins.random_stream_owners.keys() {
                 self.state
                     .current
@@ -1665,7 +1695,7 @@ impl Simulation {
     /// # Panics
     ///
     /// Panics only if a runtime object was constructed without its required
-    /// Format 6 initial scenario, which is prevented by the public loaders.
+    /// Format 7 initial scenario, which is prevented by the public loaders.
     #[must_use]
     pub fn replay_journal(&self) -> ReplayJournal {
         ReplayJournal {
@@ -1677,7 +1707,7 @@ impl Simulation {
                 .metadata
                 .initial_scenario
                 .clone()
-                .expect("Format 6 runs always retain their initial scenario"),
+                .expect("Format 7 runs always retain their initial scenario"),
             authority_root_seed: self.state.current.authority_root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
@@ -2099,11 +2129,11 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::UnsupportedSnapshotVersion,
                 format!(
-                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; legacy format-4/5 JSON is not supported"
+                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; formats 2-6 are not supported"
                 ),
             ));
         }
-        validate_f6_snapshot_contract(&snapshot)?;
+        validate_current_snapshot_contract(&snapshot)?;
         validate_scenario_state(&Scenario {
             start_time: snapshot.now,
             entities: snapshot.entities.clone(),
@@ -2125,7 +2155,7 @@ impl Simulation {
             .map(IngressQueueKey::from_record)
             .collect();
         let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
-            invalid_snapshot_error("format 6 validation requires an initial scenario")
+            invalid_snapshot_error("format 7 validation requires an initial scenario")
         })?);
         let initial_domain_record_indexes = initial_scenario
             .as_ref()
@@ -2281,7 +2311,7 @@ impl Simulation {
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
-        let snapshot: SimulationSnapshot = deserialize_f6_json(json, "snapshot")?;
+        let snapshot: SimulationSnapshot = deserialize_current_json(json, "snapshot")?;
         Self::from_snapshot(snapshot)
     }
 
@@ -2301,7 +2331,7 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let snapshot: SimulationSnapshot = deserialize_f6_json(json, "snapshot")?;
+        let snapshot: SimulationSnapshot = deserialize_current_json(json, "snapshot")?;
         Self::from_snapshot_with_plugins(snapshot, plugins)
     }
 

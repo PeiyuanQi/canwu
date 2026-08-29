@@ -15,7 +15,7 @@ into an externally immutable execution plan. `canwu-society` remains the
 runtime for sparse population dispositions, social influence, organization
 topology, institutional inputs, and actor-relative projections.
 
-The proposed `canwu-law` extension is downstream from cultural signals. It
+The implemented experimental `canwu-law` extension is downstream from cultural signals. It
 owns jurisdiction, legal institutions, procedures, enacted rules, effective
 dates, amendment, repeal, expiry, and legal interpretation. Political,
 election, administration, education, justice, and enforcement extensions own
@@ -40,7 +40,7 @@ canwu-society sparse social runtime
         +--> CulturalSignalBatch (bounded, causal, next-boundary input)
                     |
                     v
-             proposed canwu-law
+                 canwu-law
              proposal -> procedure -> LawVersion
                     |
                     v
@@ -173,23 +173,36 @@ that input and emits a bounded `CulturalSignalBatch` containing target
 generation, scope, strength, persistence class, cadence, and evidence. The
 batch is an input to law, not an authority grant.
 
-The legal bridge proceeds in fixed stages:
+The legal bridge proceeds in fixed, persisted stages:
 
 1. Reverse indexes map signal kind and scope to affected jurisdictions and open
    proposals; unrelated proposals are not scanned.
-2. The law extension evaluates dirty proceedings and creates or refreshes a
-   `DecisionTicket` with options such as adopt, amend, reject, defer, or refer.
-   The ticket contains actor-relative facts and evidence, not mutable runtime
-   state.
-3. An authorized controller selects an existing option. The decision attempt
-   and `DecisionTrace` are persisted, and the selected option enqueues a
-   validated legal command through canonical ingress.
-4. The command validates jurisdiction, institution authority, procedure,
+2. Typed `LegalMutation` ingress and holder-context ingress enter the
+   event-driven law plugin. It checks the embedded compiled-plan binding, exact
+   aggregate version, host-owned `expected_versions`, cited culture generation,
+   and each signal's compiled provider `(plugin, packet_type)` plus the
+   kernel-committed producing boundary before advancing only dirty or due
+   proceedings. Direct host injection into the provider namespace is not
+   evidence. It never trusts a caller-declared signal kind. Publicity events
+   additionally bind the retained provider payload to the exact proposal,
+   occurrence time, medium, and scope; generic practice signals remain
+   identity-and-boundary evidence.
+3. A proceeding creates a holder-bound decision outbox item. The adapter first
+   persists its expected revision, registers each exact seat controller at most
+   once, then submits ticket-open requests. Later tickets reuse that controller.
+   ACK is accepted only after the required decision outcomes are `Accepted` and
+   the current controller/ticket exactly match the persisted draft. This proof
+   survives ingress archival. Format 7 keeps schema-declared identity-only
+   receipts for unresolved proceedings and live law sources; generated ingress
+   receipts Merkle-bind the provider plugin, packet type, and producing
+   boundary, so verification does not hydrate old payloads.
+4. An authorized controller selects an existing option. The accepted command
+   can only schedule a bounded pending legal intent; it cannot write law.
+5. A later law-plugin boundary revalidates jurisdiction, competence, procedure,
    revision and effective-time guards, clause and evidence limits, and the
-   cited signal generation.
-5. A successful command atomically creates or updates a `LegalProposal` and a
-   `LawVersion`. Election, administration, education, justice, and enforcement
-   adapters consume the enacted result at their own declared boundary.
+   cited culture generation, then atomically compare-and-sets the aggregate.
+   Election, administration, education, justice, and enforcement adapters
+   consume the enacted result at their own declared boundary.
 
 The authoritative path is therefore:
 
@@ -197,7 +210,8 @@ The authoritative path is therefore:
 CulturalSignalBatch
   -> LegalProposal / DecisionTicket
   -> authorized DecisionAttempt / DecisionTrace
-  -> validated legal command ingress
+  -> accepted legal command -> pending intent
+  -> atomic law aggregate compare-and-set
   -> LawVersion
   -> downstream enforcement and feedback evidence
 ```
@@ -211,23 +225,87 @@ records a rejection or defers it; it does not partially mutate culture or law.
 competent institutions, and procedure profile. `LegalInstitution` binds an
 institution entity to a jurisdiction, authority seats, quorum, vote or
 appointment rules, and the command subject allowed to adopt law. Both are
-domain records, not new core entity kinds.
+members of the one typed legal aggregate, not new core entity kinds or
+independently mutable host records.
+
+Compilation requires each procedure seat to resolve to exactly one institution
+that declares both that procedure and seat. The holder, permission profile, and
+length-prefixed controller identity are frozen into the plan; missing, ambiguous,
+or collision-prone authority definitions fail before a run starts.
 
 `LegalProposal` is a non-enacted, versioned proceeding input. It records the
 jurisdiction, sponsor, subject references, bounded typed clauses or eligibility
 rules, required procedure and deadline, status (`draft`, `submitted`,
 `deliberating`, `adopted`, `rejected`, `expired`, or `withdrawn`), source signal
-and other evidence references, and the open ticket identity and option
-version. A cultural target generation may be cited as evidence but never gains
-permission to mutate or enact the proposal.
+and other evidence references, the open ticket identity and option version, and
+its claimed legal competence, defects, validity, and exact origin. Kernel
+authorization only proves who submitted the command; it does not make an
+in-world ultra vires act valid. A cultural target generation may be cited as
+evidence but never gains permission to mutate or enact the proposal.
 
-`LawVersion` is the authoritative legal result. It records a stable law ID and
-monotonic version, jurisdiction and bounded scope, typed clauses, effective
-simulation times, adopting institution, authorized decision origin, procedure
-result, causal/evidence references, and explicit amendment, successor, repeal,
-or expiry links. Amendment and repeal are new legal commands and append-only
-versioned results. An enacted law does not disappear when its cultural target
-retires.
+Compiled institutional competence is default-deny across legal order,
+jurisdiction, subject matter, source mode, operation, procedure, forum, and
+adjudicative power. Each source profile separately declares procedural or
+evidence-claim authority, exact origin policy, publicity policy and compiled
+publicity signal provider, evidence
+bounds, claimant rules, and retrospective permission.
+
+An accepted proposal creates one immutable `LegalSourceVersion`, the stable
+`LegalRule`, and one immutable `LawVersion`. The source keeps the exact proposal
+and ruling, agreement, or reception origin; its mode is explicitly
+`Promulgated`, `Adjudicated`, `Accreted`, `Agreed`, or `Received`. The rule owns
+the latest claim separately from the operative version. A `Purported` or
+`Contested` change can therefore remain visible while the prior valid version
+continues to govern.
+Publication is a separate immutable event with exact proposal, time, medium,
+scope, and evidence. A validity condition rejects adoption until the event
+exists. An effectiveness condition may accept the proposal first, but the new
+version stays inert and is excluded from every historical read cut until the
+event exists; publication must occur no later than the effective time. Delayed
+publication updates the proposal lifecycle and derived rule head without
+rewriting the create-only source or law version. Backdated effect additionally
+requires both profile permission and an explicit retrospective date.
+
+`LawVersion` records a stable rule ID and monotonic legal ordinal, jurisdiction
+and bounded scope, effective simulation times, source and origin, causal
+evidence, and explicit predecessor links. Each compiled clause declares its
+normative modality rather than deriving it from display text. Rights and
+eligibilities include holders, duty bearers, subject matter, conditions,
+standing, forum, and remedy profile. Amendment and repeal are new legal
+commands and append-only versions. An enacted law does not disappear when its
+cultural target retires.
+
+Applicability is a typed, bounded query over an exact legal order and compiled
+profile. It filters time, territory, persons, subject matter, and jurisdiction;
+applies evidence-bound condition/exception predicates and precedence; and
+returns the governing versions, displaced claims, conflicts, and a trace.
+Missing predicate facts return `Indeterminate`; false conditions or true
+exceptions return `NotApplicable`. Actor-relative queries bind an exact
+knowledge read cut plus one holder record per fact. Host-bound queries verify
+the holder, complete cut, compiled knowledge schema, JSON boolean pointer,
+asserted value, and evidence; detached actor-relative queries are rejected.
+Unresolved validity returns `Contested`, including both
+the prior operative version and the rival claim. Succession does not inherit a
+predecessor order by default: reception uses the longest matching rule prefix
+within the succession's declared personal and territorial scope, then applies
+the received rule's own subject-matter scope. `Continue`
+exposes the predecessor directly, while `Transform` and `Review` require an
+explicit `Receive` source with the exact succession and predecessor origin.
+
+Jurisdiction reachability uses compiled relation-kind/direction adjacency and
+one bounded reachable-set build per query. A total work budget also covers graph
+edges, rule/version and nested effect/predicate visits, conflict fan-out, and
+conflict members. A separate per-record nested-item budget bounds proposals,
+cases, rulings, and conflict partitions before traversal. A resolved conflict records exact
+total, governing, and displaced version sets plus a typed basis and rationale;
+non-temporal resolution requires an operative, case-bound competent ruling with matching
+version sets and an explicit covered jurisdiction. Overlapping active partitions
+are merged simultaneously and contradictory governing/displaced sets remain
+`Contested`. The complete claim set, jurisdiction, read time, and effective
+interval must match before its partition can promote or displace a claim.
+The query consumes that partition instead of guessing a winner. Cases, findings,
+and rulings are checked against compiled forum, proof, standing, remedy,
+precedent, interval, issue, and adjudicative-competence contracts.
 
 The culture effect persistence class determines how law may interpret a signal:
 
@@ -243,6 +321,16 @@ extension records that dependency and owns its review, expiry, or renewal rule.
 The culture runtime emits the end of the level; it does not silently repeal
 the law. A commitment already accepted into law does not keep the cultural
 target hot, so a target can retire while its law remains active.
+The active law keeps only a compact adoption-evidence receipt. The retired
+culture target and its propagation indexes leave the hot path, while repeal or
+expiry remains an explicit legal operation.
+
+Retirement runs as explicit bounded maintenance. In v1,
+`max_retirement_dependency_records` caps the outer records in the aggregate
+dependency proof; each record's dependency fan-out is separately bounded. An
+over-budget request fails before either culture or law state changes. Ordinary
+legal settlement does not pay this scan. A later sharded runtime should use a
+target-keyed dependency index.
 
 ## Authority, visibility, and persistence
 
@@ -256,7 +344,8 @@ legal facts -> DecisionTicket -> controller selection
   -> LawVersion commit
 ```
 
-The command subject is the competent legal institution. Its context carries
+The command subject is the proposal's exact frozen subject; separate compiled
+competence determines whether its institution has in-world legal power. The context carries
 the validated controller ID, decision origin, seat, permission profile,
 request identity, and expected revision/time guards. An external service or
 model may recommend an option but cannot manufacture authority or submit a raw
@@ -268,13 +357,23 @@ there is no truth fallback. Culture and law records implement `DomainRecordType`
 with strict schemas, typed references, explicit mutation policies, and retained
 version bodies where evidence needs exact historical meaning.
 
-The persisted plugin semantic environment includes plan hashes, budgets,
-lifecycle policies, target generations, legal procedure profiles, and law
-schema versions. Exact replay consumes recorded signal ingress, decision
-ingress, legal command ingress, boundary records, and evidence. It never
+The one persisted `LegalRuntimeRecord` includes the compiled plan, plan and
+content hashes, budgets, lifecycle state, target generations, procedure
+profiles, records, and all derived indexes. Load recomputes and validates the
+indexes before exposing state. Exact replay consumes recorded mutation,
+signal, decision, command, ACK, and wake ingress plus boundary evidence. It never
 reruns a human, service, or model policy. Forks copy the validated state and
 continue with new causal inputs. Failed boundaries restore indexes, tombstones,
 counters, evidence, and random positions atomically.
+
+Complete history and derived-index validation is a cold load/restore operation.
+The live plugin checks immutable plan and budget bindings plus local mutation
+guards; it does not repeat a full history scan for every mutation. In
+particular, the identity-only evidence dependency declaration and its reference
+counts are updated only for affected topology owners and fully reconstructed at
+cold validation. A mismatched set or count index is rejected. Evidence sealing
+is atomic even when a late dependency check fails. The latest live disputed
+claim retains its identity evidence until a replacement claim supersedes it.
 
 ## Bounded work and conformance
 
@@ -284,8 +383,21 @@ dirty proposal and jurisdiction sets; per-procedure limits for clauses,
 evidence, options, fan-out, and pending continuations; and a plan hash and
 budget manifest. For `P_delta` dirty proposals, `C_delta` affected clauses,
 and `V_delta` observer entries, intended steady-state work is approximately
-`O(P_delta + C_delta + V_delta)`. Retired targets and historical law catalogs
-must not increase active proposal settlement cost.
+`O(P_delta + C_delta + V_delta)`. Deadline and effective-time wakes use ordered
+indexes, exact decision-result proof uses a request index, and both deleted and
+inserted applicability rows consume the mutation budget. Retired targets and
+historical law catalogs must not increase active proposal settlement cost.
+
+That bound describes post-decode legal settlement, not the whole transaction.
+Because v1 persists one aggregate and the kernel clones transaction state, a live
+legal boundary is approximately `O(H_serialized + delta)`. Release measurements
+for 1k/10k/100k retained records were 37.472ms/507.535ms/6.017504s median for the real
+plugin path, while law-local idle settlement stayed at 200ns. Large hot legal
+histories therefore require budgets and event-driven cadence. The 1k result is
+already above both 60 FPS and 30 FPS frame budgets; 10k is low-frequency turn or
+background work, and 100k is offline/maintenance work. Until jurisdiction
+sharding and COW are implemented, manifests should cap live retained records
+well below 1k and calibrate the exact cap on target hardware.
 
 Conformance evidence should prove that:
 
@@ -294,6 +406,8 @@ Conformance evidence should prove that:
 - stale proposal, ticket, and law revisions become safe, persisted rejections;
 - a commitment accepted into law survives cultural retirement;
 - a live level dependency blocks retirement until law resolves it;
+- a future-effective live-level dependency also blocks early retirement;
+- expired procedures expire unresolved pending/enqueued outbox work;
 - proposal, law, evidence, archive, snapshot, fork, and exact replay remain
   consistent; and
 - unrelated targets, observers, and retired catalog entries do not perturb
