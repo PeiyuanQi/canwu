@@ -23,7 +23,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 - 保存每次尝试、评分和执行结果，使存档恢复与精确重放不必再次询问决策者。
 
 这个案例不对应具体历史人物。人物性格、情报来源和“为什么值得援助”等历史语义
-仍由你的领域包定义；Canwu 负责守住决策、权限、命令和证据之间的边界。
+仍由你的领域包定义；参伍负责守住决策、权限、命令和证据之间的边界。
 
 ## 2. 我们如何实现
 
@@ -32,7 +32,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 | 系统 | 在案例中的作用 | 相关文档 |
 | --- | --- | --- |
 | 决策 ticket、controller 与 policy | 保存问题、当前选项、决策身份和评分过程 | 本页下文 |
-| 权限与命令入口 | 把选中的 option 转成经过验证的命令 | [架构总览](/architecture/)、[接入并驱动仿真](/developer/integration/) |
+| 权限与命令入口 | 把选中的 option 转成经过验证的命令 | [架构总览](/architecture/)、[接入并驱动模拟运行](/developer/integration/) |
 | 结算边界 | 接纳 decision ingress，持久化 trace，再执行派生命令 | [结算系统](/architecture/settlement/) |
 | 角色相对信息 | 用军阀乙可见的事实构造 context，避免泄露全知状态 | [安全读取与呈现状态](/developer/reading-state/) |
 | 存档与精确重放 | 保存 ticket、attempt、trace 和命令证据 | [存档、重放与分支](/developer/persistence/) |
@@ -133,9 +133,9 @@ DecisionMutation::ReplaceOptions {
 更新后，ticket version 会递增。Human、External 或 LLM policy 如果仍提交旧版本
 答案，就会被拒绝，不会误选已经变化的 option 集合。
 
-`send-aid` 可以保存一个序列化的既有 Canwu command，但 policy 只能返回它的
+`send-aid` 可以保存一个序列化的既有参伍命令，但 policy 只能返回它的
 option ID。下面可运行的 `canwu-api` 示例是刻意保留的兼容性 fixture；它用旧版
-`Command::OrderMovement` 验证通用决策内核：
+`Command::OrderMovement` 验证通用决策框架：
 
 ```rust
 DecisionOption::new("send-aid", "Send the neighboring army").with_command(
@@ -188,7 +188,7 @@ canwu.step_canonical()?;
 这里始终保留两道边界：
 
 - Policy 只能选择 ticket 中已有且未 blocked 的 option。
-- Controller 从持久化 binding 派生 command authority；命令仍要通过 Canwu 的
+- Controller 从持久化 binding 派生 command authority；命令仍要通过参伍的
   普通权限、revision、time 和领域验证。
 
 所以，即使把 utility policy 换成玩家、外部服务或 LLM，也不会获得任意生成命令
@@ -205,7 +205,7 @@ command request ID。
 Snapshot 会保存 controller、ticket、当前 options、deadline、attempts 与 traces。
 Exact replay 消费已经记录的 decision ingress、decision attempt 和 command
 attempt，不会再次询问玩家、外部服务或模型。如果你要比较另一套 policy，应从
-snapshot fork 后产生新的 decision ingress；那是反事实分支，不是 exact replay。
+snapshot fork 后产生新的 decision ingress；那是平行现实，不是精确重放。
 
 可替换的决策方式包括：
 

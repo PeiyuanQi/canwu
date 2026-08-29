@@ -40,6 +40,9 @@ renamed by this policy.
 | [actor-relative view](/en/developer/reading-state/) | 角色相对视图 | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and authority rather than omniscient state. |
 | [read-only snapshot](/en/developer/reading-state/) | 只读快照 | `WorldSnapshot` | A detached state value for trusted reads, not a mutable reference to the live runtime. |
 | simulation granularity | 模拟粒度 | `SimulationGranularity` | A domain-neutral engine level: `aggregate`, `group`, or `actor`. A Celestial Mandate integration may map them to Population, Special Group, and Character. |
+| aggregate | 聚合层 | `SimulationGranularity::Aggregate` | Coarse population-, economy-, or region-scale state. A host application may map it to Population. |
+| group | 群体层 | `SimulationGranularity::Group` | A bounded social, institutional, military, or organizational group. A host application may map it to Special Group. |
+| actor | 角色层 | `SimulationGranularity::Actor` | A person or other principal with knowledge and authority. A host application may map it to Character. |
 
 ## Time, input, and settlement
 

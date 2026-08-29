@@ -28,8 +28,8 @@ cargo run -p canwu-api --example phased_boundary
 <Steps>
 1. `SupplyPlugin` 在 `ReservationAndAllocation` 阶段声明粮食池和容量。
 2. `DemandPlugin` 在同一阶段声明数量、优先级和确定性 tie-break。
-3. Canwu 完成分配后，`DomainDeltaProposal` 阶段通过 `SimulationView::reservation()` 读取授予结果。
-4. 插件返回组件更新与领域事件，Canwu 在边界中统一应用并记录证据。
+3. 参伍完成分配后，`DomainDeltaProposal` 阶段通过 `SimulationView::reservation()` 读取授予结果。
+4. 插件返回组件更新与领域事件，参伍在边界中统一应用并记录证据。
 </Steps>
 
 ## 为什么使用分阶段边界

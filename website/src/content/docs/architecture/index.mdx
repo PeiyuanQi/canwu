@@ -1,12 +1,12 @@
 ---
 title: 架构总览
-description: 了解 Canwu 如何用公开边界、确定性结算和可检查证据组织历史模拟运行时。
+description: 了解参伍如何用公开边界、确定性结算和可检查证据组织历史模拟运行时。
 template: doc
 sidebar:
   order: 1
   label: 架构总览
 hero:
-  tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重演的边界内协作。"
+  tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重放的边界内协作。"
 ---
 
 import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
@@ -25,7 +25,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
-Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless core）。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
+参伍是一个不负责渲染和用户界面的历史模拟内核（headless core）。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
 
 ## Format 6 与三种模拟粒度
 
@@ -36,8 +36,8 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | 层 | 责任 | 公开承诺 |
 | --- | --- | --- |
 | 客户端 | 地图、渲染、输入、研究工作流与智能体循环 | 自由选择界面，不拥有权威状态 |
-| `canwu-api` | 程序对外 API、命令、领域记录、事件、快照与重演 | 通过验证后的公开入口工作 |
-| `canwu-sim` | 调度、插件、结算、持久化与重演 | 唯一持有实时可变模拟状态 |
+| `canwu-api` | 程序对外 API、命令、领域记录、事件、快照与重放 | 通过验证后的公开入口工作 |
+| `canwu-sim` | 调度、插件、结算、持久化与重放 | 唯一持有实时可变模拟状态 |
 | 基础与模型 crate | ID、时间、事件、决策与角色知识 | 提供可序列化、跨平台的引擎契约 |
 
 ## 五条架构边界
@@ -46,7 +46,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 2. **读取边界**：对外 API 返回通用实体、领域记录和证据；领域整合生成脱离运行时的投影，`CanwuViewer` 限定角色知识。
 3. **确定性边界**：时间、队列、插件执行顺序、资源分配和随机流都有明确的规范排序。
 4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
-5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重演的记录。
+5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重放的记录。
 
 ## 深入页面
 
@@ -64,7 +64,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
   <LinkCard
     title="随机生成方法"
     href="/architecture/randomness/"
-    description="了解带命名版本的随机流、SplitMix64、抽样证据和精确重演。"
+    description="了解带命名版本的随机流、SplitMix64、抽样证据和精确重放。"
   />
   <LinkCard
     title="世界与事件模型归属"
@@ -74,7 +74,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
   <LinkCard
     title="文化和法律制度系统"
     href="/architecture/culture-law/"
-    description="从文化内容编写、生命周期和社会信号，到授权程序、法律版本与可重演制度。"
+    description="从文化内容编写、生命周期和社会信号，到授权程序、法律版本与可重放制度。"
   />
 </CardGrid>
 
@@ -101,7 +101,7 @@ Canwu 是一个不负责渲染和用户界面的历史模拟内核（headless co
 | `canwu-routing` | 确定性时变路由原语 |
 | `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
 | `canwu-sim` | 私有运行时、调度、插件和结算 |
-| `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重演 |
+| `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重放 |
 | `canwu-information` | 已正式发布的权威信息生命周期扩展 |
 | `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件 |
 | `canwu-society` | 已正式发布的社会传播模拟模块 |

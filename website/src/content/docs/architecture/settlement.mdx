@@ -1,6 +1,6 @@
 ---
 title: 结算系统
-description: 了解 Canwu 的十四阶段边界、资源分配、可见性、原子提交和失败回滚。
+description: 了解参伍的十四阶段边界、资源分配、可见性、原子提交和失败回滚。
 sidebar:
   order: 2
   label: 结算系统
@@ -31,7 +31,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Allocation["2. 确定性资源仲裁与分配"]
     Visibility["4. 可见性策略（附加属性）"]
     State["权威状态"]
-    Evidence["证据、重演与哈希"]
+    Evidence["证据、重放与哈希"]
     Inputs --> Immediate
     Inputs --> Boundary
     Claims --> Allocation
@@ -56,7 +56,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 2. 建立本边界的准入集合：命令尝试、已接受命令、已准入的入站输入和事件，以及适用的日历节奏。
 3. 取得不可变边界快照，让早期阶段读取同一个基线，而不是读取插件执行顺序造成的中间状态。
 4. 依次执行十四个阶段；同一阶段内按 `(plugin name, system name)` 排序。
-5. 持久化边界证据、原子提交、条件转移、视角/报告物化结果以及重演/诊断哈希。
+5. 持久化边界证据、原子提交、条件转移、视角/报告物化结果以及重放/诊断哈希。
 6. 若发生任何致命错误，则恢复时间、队列、状态、日志、随机流、计数器和边界记录。
 </Steps>
 
@@ -77,7 +77,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 11 | `ConditionalTransitionCommit` | 提交满足条件的历史转移 |
 | 12 | `StrategicAggregation` | 形成战略层聚合结果 |
 | 13 | `PerspectiveAndReportMaterialization` | 生成角色视角和报告物化结果 |
-| 14 | `SaveReplayAndDiagnosticHashing` | 保存证据并更新重演与诊断哈希 |
+| 14 | `SaveReplayAndDiagnosticHashing` | 保存证据并更新重放与诊断哈希 |
 
 ## 资源分配
 
@@ -101,7 +101,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 自己拥有的随机流；
 - 可发出的事件、领域记录和可见性。
 
-内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重演都要求包标识、版本和语义哈希匹配。
+模拟内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重放都要求包标识、版本和语义哈希匹配。
 
 ## 继续阅读
 

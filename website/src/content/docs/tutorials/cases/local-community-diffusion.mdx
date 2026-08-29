@@ -11,7 +11,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 ## 1. 要解决什么问题
 
 `canwu-society` 是一个已正式发布的**社会传播模拟模块**（`social diffusion simulation
-module`），在 Canwu 架构中属于**模拟领域扩展**（`domain extension`）。这个示例使用一个
+module`），在参伍架构中属于**模拟领域扩展**（`domain extension`）。这个示例使用一个
 抽象的“新观念”，展示它如何组合群体接触、私人接受、公开表达、组织影响、制度响应和角色相对
 估计。案例聚焦传播机制与引擎契约，便于把同一套模型适配到不同的历史或虚构情境。
 
@@ -41,7 +41,7 @@ module`），在 Canwu 架构中属于**模拟领域扩展**（`domain extension
 | --- | --- | --- |
 | `canwu-society` 模拟领域扩展 | 定义 cohort、分布、影响边、制度输入和角色投影 | [通过插件扩展](/developer/extensions/) |
 | 结算系统 | 按稳定顺序执行人口迁移，并把制度政策延迟到下一边界生效 | [结算系统](/architecture/settlement/) |
-| 决策与权威命令 | 让机构从已有 policy options 中选择，再提交插件命令 | [架构总览](/architecture/)、[接入并驱动仿真](/developer/integration/) |
+| 决策与权威命令 | 让机构从已有 policy options 中选择，再提交插件命令 | [架构总览](/architecture/)、[接入并驱动模拟运行](/developer/integration/) |
 | 角色相对读取 | 为观察者物化估计，拒绝 ground-truth fallback | [安全读取与呈现状态](/developer/reading-state/) |
 | 存档与精确重放 | 保存转化余数、插件状态、投影和 journal 证据 | [存档、重放与分支](/developer/persistence/) |
 
@@ -124,12 +124,12 @@ DecisionTicket -> controller-derived authority -> plugin command
 
 ### 第四步：为角色生成估计，而不是泄露真值
 
-`projection_for_viewer()` 要求 Canwu 签发的 `ViewerContext`，并且只返回在
+`projection_for_viewer()` 要求参伍签发的 `ViewerContext`，并且只返回在
 `PerspectiveAndReportMaterialization`（角色视角与报告物化）结算阶段已经为该
 actor 生成的 `SocietyProjection`。检测率、遮蔽和 false positive 会让估计与真实
 aggregate 不同；没有 observer profile 的角色会得到错误，不会自动获得社会根记录。
 
-示例通过 `from_society_snapshot_json()` 恢复存档。这个模块入口会在 Canwu 的通用
+示例通过 `from_society_snapshot_json()` 恢复存档。这个模块入口会在参伍的通用
 存档检查之后，重新核对社会 payload 使用的核心实体引用和所有已物化派生值，然后
 示例再验证 fork 与 journal replay 得到完全相同的权威状态。
 

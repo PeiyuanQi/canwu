@@ -1,6 +1,6 @@
 ---
 title: Save, replay, and fork
-description: Save and restore Canwu state, validate plugin environments, and build exact replay or counterfactual branches.
+description: Save and restore Canwu state, validate plugin environments, and build exact replay or alternative realities.
 sidebar:
   order: 4
   label: Persistence and replay
@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
 
-0.6 uses the Format 6 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, and `authority_root_seed`. The kernel does not silently migrate format-4 or format-5 data.
+0.6 uses the Format 6 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, and `authority_root_seed`. The simulation core does not silently migrate format-4 or format-5 data.
 
 ## Checkpoint journals and exact replay
 

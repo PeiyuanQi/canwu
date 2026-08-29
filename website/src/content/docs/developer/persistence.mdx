@@ -1,12 +1,12 @@
 ---
 title: 存档、重放与分支
-description: 保存和恢复 Canwu 状态，验证插件环境，并构建精确重放与反事实分支。
+description: 保存和恢复参伍状态，验证插件环境，并构建精确重放与平行现实。
 sidebar:
   order: 4
   label: 存档与重放
 ---
 
-存档不是序列化一个世界结构体。Canwu 的可恢复状态包含实体注册表、领域记录、命令、事件、边界、随机证据、插件语义和校验承诺。
+存档不是序列化一个世界结构体。参伍的可恢复状态包含实体注册表、领域记录、命令、事件、边界、随机证据、插件语义和校验承诺。
 
 ## 带插件的存档
 
@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 一旦状态包含插件领域记录，加载时必须提供与保存时相同的插件集合。插件名称、版本和 semantic hash 是环境承诺的一部分。
 
-0.6 使用 Format 6 clean break。快照必须带有声明式 `RunManifest`、运行配置、规范化 `initial_scenario`、完整 commitment roots 和 `authority_root_seed`；format-4/5 数据不会在内核中自动迁移。
+0.6 使用 Format 6 clean break。快照必须带有声明式 `RunManifest`、运行配置、规范化 `initial_scenario`、完整 commitment roots 和 `authority_root_seed`；format-4/5 数据不会由模拟内核自动迁移。
 
 ## checkpoint journal 与精确重放
 
@@ -39,11 +39,11 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 # Ok::<(), canwu_api::CanwuError>(())
 ```
 
-精确重放使用 journal 内的初始场景，不接受调用方另传的场景；引擎版本、运行身份和插件语义环境必须匹配。`Canwu::outbox_entries()` 返回边界产生的持久化外发项，宿主应按 `delivery_id` 做至少一次投递和幂等去重；精确重放不会重新发送外部副作用。
+精确重放使用 journal 内的初始场景，不接受调用方另传的场景；引擎版本、运行身份和插件语义环境必须匹配。`Canwu::outbox_entries()` 返回边界产生的持久化外发项，上层应用应按 `delivery_id` 做至少一次投递和幂等去重；精确重放不会重新发送外部副作用。
 
 调用 `Canwu::replay_from_journal_json()` 从 JSON 载入 journal；它会在精确重放开始前递归拒绝未知字段。
 
-`CompactedCanwu::outbox_entries()` 只返回当前保留证据尾部的外发项。证据封存后，调用方拥有返回的 `EvidenceJournalSegment`，可使用 `outbox_entries_for_segment` 重新生成相同的标识。边界外发记录仍应与宿主的投递及确认状态一同保存；封存本身不表示外部副作用已投递或已确认。
+`CompactedCanwu::outbox_entries()` 只返回当前保留证据尾部的外发项。证据封存后，调用方拥有返回的 `EvidenceJournalSegment`，可使用 `outbox_entries_for_segment` 重新生成相同的标识。边界外发记录仍应与上层应用的投递及确认状态一同保存；封存本身不表示外部副作用已投递或已确认。
 
 ## 反事实与测试
 

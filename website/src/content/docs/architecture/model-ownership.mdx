@@ -59,7 +59,7 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 | 公开类型 | 分类 | 目标归属 |
 | --- | --- | --- |
 | `CauseRef` | 通用引擎契约 | 保留命令、父事件、边界和系统因果语义及序列化兼容性 |
-| `EventAudience` | 通用引擎契约 | 保留默认私有、角色范围和可重演的可见性语义 |
+| `EventAudience` | 通用引擎契约 | 保留默认私有、角色范围和可重放的可见性语义 |
 | `SimEvent` | 通用事件信封 | 保留身份、时间、影响对象、摘要、因果和相关标识语义 |
 | `EventKind` | 通用类型标签和扁平化结构字段记录 | 保持旧 JSON 线形状；领域所有者在本 crate 外定义强类型载荷，并通过通用编码与解码 API 使用 |
 
@@ -75,10 +75,10 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 ## 安全迁移顺序
 
 <Steps>
-1. 已固定代表性的 JSON 存档、事件日志、`canwu-api` 调用与精确重演结果。
+1. 已固定代表性的 JSON 存档、事件日志、`canwu-api` 调用与精确重放结果。
 2. 已把 `EventKind` 改为通用结构化记录，并在不改变旧 JSON 形状的前提下迁出具体公开变体；完整的跨整合包命名空间与载荷版本仍是后续契约。
 3. `canwu-reference-world` 已通过公开 API 接管具体实体、移动行为、脱离式投影和路由转换。
-4. Format 6 将实体注册与初始场景写入自描述快照；可运行入门示例证明保存、加载、派生分支与精确重演。
+4. Format 6 将实体注册与初始场景写入自描述快照；可运行入门示例证明保存、加载、派生分支与精确重放。
 5. `canwu-world` 在普通消费者归零后已退役；`canwu-event` 的独立边界仍留待单独决策。
 </Steps>
 

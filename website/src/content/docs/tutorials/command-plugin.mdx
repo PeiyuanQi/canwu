@@ -15,7 +15,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个示例注册一个 `set_stance` 领域命令，并继续遵守 Canwu 的验证、权限和审计边界。
+这个示例注册一个 `set_stance` 领域命令，并继续遵守参伍的验证、权限和审计边界。
 
 ## 运行
 
@@ -29,7 +29,7 @@ cargo run -p canwu-api --example plugin
 1. 实现 `SimulationPlugin`，提供稳定的名称、版本和 semantic hash。
 2. 用 `PluginActionDescriptor` 声明载荷结构，以及命令会读取和写入哪些 `StateKey`。
 3. 在处理器中通过只读 `SimulationView` 查询军队，并验证发令者是军队指挥官。
-4. 返回 `SystemDirective::SetComponent`，由 Canwu 应用变化；插件不直接取得可变世界引用。
+4. 返回 `SystemDirective::SetComponent`，由参伍应用变化；插件不直接取得可变世界引用。
 5. 通过公开 `Command::Plugin` 和 `CommandEnvelope` 提交命令。
 </Steps>
 
@@ -38,6 +38,6 @@ cargo run -p canwu-api --example plugin
 - `payload` 在处理器执行前经过结构验证。
 - 权限检查依赖 command context，而不是 UI 假设。
 - 读写集合是插件契约的一部分，便于验证和审计。
-- 处理器描述意图，最终状态变化仍由 Canwu 统一执行。
+- 处理器描述意图，最终状态变化仍由参伍统一执行。
 
 如果你需要在固定模拟边界上协调多个系统，继续阅读[阶段边界与资源分配](/tutorials/phased-boundary/)。

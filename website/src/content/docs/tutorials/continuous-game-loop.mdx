@@ -15,7 +15,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个参考实现面向持续运行、可以暂停和变速的策略游戏。游戏程序负责记录现实时间、处理倍速、累积不足一分钟的余量并维护画面状态；Canwu 只接收以整数分钟表示的确定性模拟时间。
+这个参考实现面向持续运行、可以暂停和变速的策略游戏。游戏程序负责记录现实时间、处理倍速、累积不足一分钟的余量并维护画面状态；参伍只接收以整数分钟表示的确定性模拟时间。
 
 ## 运行
 
@@ -26,21 +26,21 @@ cargo run -p canwu-api --example continuous_game_loop
 ## 三个时钟
 
 - **现实时钟（wall clock）**：来自渲染器或游戏框架的帧时长。示例预先准备了两组帧时长，分别接近 60 FPS 和 30 FPS，不读取系统时钟，也不会 `sleep()`。
-- **模拟时钟（simulation clock）**：Canwu 的权威整数分钟时间。只有累加器达到一分钟时，游戏程序才调用 `advance_canonical()`。
-- **表现时钟（presentation clock）**：Canwu 时间加上游戏程序保留的亚分钟余量，只用于视觉插值。
+- **模拟时钟（simulation clock）**：参伍的权威整数分钟时间。只有累加器达到一分钟时，游戏程序才调用 `advance_canonical()`。
+- **表现时钟（presentation clock）**：参伍时间加上游戏程序保留的亚分钟余量，只用于视觉插值。
 
 <Steps>
 1. 将帧时长按游戏程序选择的日历速率和 `Paused`、`1x`、`5x`、`20x` 倍速换算成期望模拟时间。
 2. 把结果累积为高精度整数纳秒，不丢弃不足一个 `SimDuration` 分钟的余量。
-3. 每达到一个模拟时间量子，就通过 `advance_canonical(SimDuration::minutes(1))` 推进 Canwu。
+3. 每达到一个模拟时间量子，就通过 `advance_canonical(SimDuration::minutes(1))` 推进参伍。
 4. 从公开 `WorldSnapshot` 中复制军队的在途信息到画面状态，并计算只读的移动进度。
 </Steps>
 
 ## 命令排序与 FPS 无关
 
-玩家命令通过 `enqueue_command()` 进入公开 API。示例为帧间输入定义了统一的向上取整策略：半分钟捕获的输入排到下一个可表示的 Canwu 分钟。这个时间戳策略由游戏程序定义，并且必须独立于“哪一帧刚好轮询到输入”。
+玩家命令通过 `enqueue_command()` 进入公开 API。示例为帧间输入定义了统一的向上取整策略：半分钟捕获的输入排到下一个可表示的参伍分钟。这个时间戳策略由游戏程序定义，并且必须独立于“哪一帧刚好轮询到输入”。
 
-最后，两个渲染帧序列比较 Canwu 时间、`world`、`commands`、`events`、权威状态哈希、检查点哈希与规范边界数量。渲染帧数不同，权威结果完全相同。
+最后，两个渲染帧序列比较参伍时间、`world`、`commands`、`events`、权威状态哈希、检查点哈希与规范边界数量。渲染帧数不同，权威结果完全相同。
 
 ## 平滑表现不写回模拟
 
@@ -51,6 +51,6 @@ visual_progress =
   (presentation_time - departed_at) / (arrives_at - departed_at)
 ```
 
-这个浮点进度不会写回 Canwu。暂停期间渲染帧继续运行，但模拟时间、亚分钟余量和视觉进度都保持不变。
+这个浮点进度不会写回参伍。暂停期间渲染帧继续运行，但模拟时间、亚分钟余量和视觉进度都保持不变。
 
-应用侧接入原则见[接入并驱动仿真](/developer/integration/)。
+应用侧接入原则见[接入并驱动模拟运行](/developer/integration/)。

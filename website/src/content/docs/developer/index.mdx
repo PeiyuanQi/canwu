@@ -1,14 +1,14 @@
 ---
 title: 开发者指南
-description: 面向将 Canwu 嵌入游戏、研究工具、智能体系统及其他上层应用的开发者指南。
+description: 面向将参伍嵌入游戏、研究工具、智能体系统及其他上层应用的开发者指南。
 template: doc
 sidebar:
   order: 1
   label: 开发者指南
 hero:
-  tagline: 按接入、读取、存档和扩展等常见任务了解 Canwu 的公开 API。
+  tagline: 按接入、读取、存档和扩展等常见任务了解参伍的公开 API。
   actions:
-    - text: 接入 Canwu
+    - text: 接入参伍
       link: /developer/integration/
       icon: right-arrow
     - text: 查看教程
@@ -26,16 +26,16 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 
 <AgentDevelopmentNote locale="zh-CN" />
 
-这组文档写给**使用 Canwu 构建产品的开发者**。它不记录项目路线、维护流程、
+这组文档写给**使用参伍构建产品的开发者**。它不记录项目路线、维护流程、
 品牌规范或内部设计提案，而是解释上层应用如何正确使用 `canwu-api`。
 
 ## 你会在这里找到什么
 
 <CardGrid>
   <LinkCard
-    title="接入并驱动仿真"
+    title="接入并驱动模拟运行"
     href="/developer/integration/"
-    description="添加依赖、创建仿真、选择命令入口，并把现实时间转换为 Canwu 模拟时间。"
+    description="添加依赖、创建模拟运行、选择命令入口，并把现实时间转换为参伍模拟时间。"
   />
   <LinkCard
     title="安全读取与呈现状态"
@@ -45,7 +45,7 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
   <LinkCard
     title="存档、重放与分支"
     href="/developer/persistence/"
-    description="选择快照或 checkpoint journal，恢复插件环境，并构建精确重放与反事实分支。"
+    description="选择快照或 checkpoint journal，恢复插件环境，并构建精确重放与平行现实。"
   />
   <LinkCard
     title="通过插件扩展"
@@ -66,5 +66,5 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 1. 应用代码通过 `canwu-api` 接入；具体领域规则选择公开整合包，不依赖内部 crate 作为兼容接口。
 2. 外部修改通过命令、语义动作或规范化输入进入，不直接改写世界状态。
 3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的上层应用逻辑和调试工具。
-4. 现实时间、渲染和输入由上层应用负责；Canwu 只接收能准确表示的模拟时间。
+4. 现实时间、渲染和输入由上层应用负责；参伍只接收能准确表示的模拟时间。
 5. 需要存档时固定引擎版本，并在加载和重放时恢复相同的插件语义环境。

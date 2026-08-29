@@ -89,7 +89,7 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 <Steps>
 1. A client or domain integration submits a typed command through `canwu-api`; the kernel validates authority, preconditions, revision, and request identity.
 2. An accepted command emits a causally linked event and schedules follow-up work using representable simulation time.
-3. At a settlement boundary, the kernel cuts the admission set and immutable snapshot, then runs systems in fixed phase order.
+3. In a transaction, the simulation core cuts the admission set and immutable snapshot, then runs systems in fixed phase order.
 4. Systems propose reservations, state changes, domain records, and events; the kernel validates declared access and commits atomically.
 5. The boundary stores events, random draws, allocations, changes, producer provenance, and hashes before clients read snapshots or actor-scoped observations.
 </Steps>
