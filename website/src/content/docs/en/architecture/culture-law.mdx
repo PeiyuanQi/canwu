@@ -396,15 +396,27 @@ inserted applicability rows consume the mutation budget. Retired targets and
 historical law catalogs must not increase active proposal settlement cost.
 
 That complexity describes post-decode legal settlement, not the whole kernel
-transaction. The single v1 aggregate and transaction clone make a live legal
-boundary approximately `O(H_serialized + delta)`. Release measurements for
+transaction. The single v1 aggregate makes a live legal boundary approximately
+`O(H_serialized + delta)`. Release measurements for
 1k/10k/100k retained records were 37.472ms/507.535ms/6.017504s median on the real plugin
 path, while law-local idle settlement remained 200ns. Large hot histories need
 strict budgets and event-driven cadence. The 1k result already exceeds both 60
 FPS and 30 FPS frame budgets; 10k is low-frequency turn/background work, and
-100k is offline/maintenance work. Until jurisdiction sharding and COW land, live
-manifests should cap retained records well below 1k and calibrate the exact cap
-on target hardware.
+100k is offline/maintenance work.
+
+Boundary checkpoints now share the generic domain-record map root in O(1).
+The first domain-record write still copies the whole map, decision state is
+still cloned and retained as one value, and the law plugin remains one
+`LegalRuntimeRecord`. A private test-only scaffold exercises deterministic
+record-and-byte-budgeted compaction selection, per-shard membership roots, and
+the archive reachability state machine, but it is not a public API, save format,
+or replay path. This is not yet the complete format-8 sharded page-delta
+cutover. Until jurisdiction shards, content-addressed pages, typed decision
+history placement, and provider-verified archive-commit ingress all land, live
+manifests should still cap retained records well below 1k and calibrate the
+exact cap on target hardware.
+Archiving changes historical payload placement, not current law, and culture
+retirement does not automatically repeal enacted human-rights or voting eligibility rules.
 
 Conformance evidence should prove that:
 
@@ -439,6 +451,7 @@ alignment, organizational capacity, legitimacy pressure, and decision evidence;
 different legal orders can still adopt only part of a claim, reinterpret it,
 delay publicity, enforce it selectively, or reject it.
 
-See the repository's [culture authoring and lifecycle design](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)
-and [legal institutionalization framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)
+See the repository's [culture authoring and lifecycle design](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md),
+[legal institutionalization framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md),
+and [legal storage sharding, COW, delta persistence, and cold archive proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-storage-sharding-compaction.md)
 for the complete implementation contracts.

@@ -260,7 +260,9 @@ CulturalSignalBatch
 对于 `P_delta` 个 dirty proposal、`C_delta` 个受影响条款和 `V_delta` 个 observer 条目，目标稳态成本约为 `O(P_delta + C_delta + V_delta)`。
 截止时间与未来生效工作使用有序索引，精确决策结果使用 request 索引，适用性删除和插入都计入 mutation 预算；退休目标和历史法律目录不能改变活跃提案的结算成本。
 
-这个复杂度只描述聚合解码后的法律结算，不代表整个内核事务。v1 的单一聚合和事务克隆使实时法律边界约为 `O(H_serialized + delta)`。发布模式下真实插件路径在 1k/10k/100k 历史记录时的中位数约为 37.472ms/507.535ms/6.017504s，而法律内部空闲结算均约 200ns。1k 已同时超过 60 FPS（16.7ms）和 30 FPS（33.3ms）帧预算，因此法律结算不是逐帧工作；10k 仅适合低频回合或后台处理，100k 仅适合离线/维护处理。在辖区分片和 COW 完成前，live manifest 应将保留记录硬上限设在远低于 1k 的范围，并在目标硬件上校准具体数值。
+这个复杂度只描述聚合解码后的法律结算，不代表整个内核事务。v1 的单一聚合使实时法律边界约为 `O(H_serialized + delta)`。发布模式下真实插件路径在 1k/10k/100k 历史记录时的中位数约为 37.472ms/507.535ms/6.017504s，而法律内部空闲结算均约 200ns。1k 已同时超过 60 FPS（16.7ms）和 30 FPS（33.3ms）帧预算，因此法律结算不是逐帧工作；10k 仅适合低频回合或后台处理，100k 仅适合离线/维护处理。
+
+当前边界检查点已能以 O(1) 共享通用领域记录映射的根；但第一次写入领域记录时仍会复制整个映射，决策状态仍作为一个完整值复制并常驻，法律插件也仍是单一 `LegalRuntimeRecord`。仓库内还有一个仅供私有测试使用的脚手架，用于验证受记录数与源字节双重预算约束的确定性压缩选择、逐分片成员根和归档对象可达性状态机；它不是公开 API、存档格式或重放路径。因此这还不是 format-8 的完整分片与页面增量切换。在辖区分片、内容寻址页面、类型化决策历史存放和由归档提供者验证的归档提交输入全部落地前，live manifest 仍应把保留记录硬上限设在远低于 1k 的范围，并在目标硬件上校准具体数值。归档只改变历史载荷的位置，不会撤销当前法律；文化退休同样不会自动废止已经制定的人权或投票资格规则。
 
 实现完成前，测试和基准至少要证明：
 
@@ -279,5 +281,6 @@ CulturalSignalBatch
 
 启蒙与人权内容包也不应写成一条从欧洲观念自动通往现代权利的直线。它可以把多元思想来源、翻译、印刷、教育与结社网络建模为不同传播通道，同时加入宗教、王朝、地方共同体和既得利益的反动员；这些信号只能改变公共 alignment、组织能力、合法性压力和决策证据。不同法律秩序仍可部分采纳、重新解释、延迟公布、选择性执行或拒绝相关主张。
 
-完整的实现契约见仓库中的[文化系统编写与生命周期设计](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)
-和[法律制度化框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)。
+完整的实现契约见仓库中的[文化系统编写与生命周期设计](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)、
+[法律制度化框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-institutionalization-framework.md)
+以及[法律存储分片、写时复制、增量持久化与冷归档方案](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/legal-storage-sharding-compaction.md)。

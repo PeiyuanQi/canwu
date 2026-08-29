@@ -666,7 +666,7 @@ impl Simulation {
             .collect();
         let mut stage_record_changes = BTreeMap::new();
         if !mutation_requests.is_empty() {
-            let (next_records, applied) = records::apply_mutation_bundle(
+            let (next_records, applied) = records::apply_mutation_bundle_cow(
                 &self.state.current.domain_records,
                 &self.plugins.record_schemas,
                 self.state.scheduler.now,
@@ -1938,7 +1938,7 @@ fn extend_boundary_domain_record_overlay(
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
 ) -> Result<(), CanwuError> {
-    let mut base = context.current.domain_records.clone();
+    let mut base = context.current.domain_records.as_ref().clone();
     base.extend(
         overlay
             .iter()

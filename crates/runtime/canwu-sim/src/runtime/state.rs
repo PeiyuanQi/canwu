@@ -10,6 +10,7 @@ use super::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct RuntimeEvidence {
@@ -484,7 +485,10 @@ pub(super) struct RuntimeCurrentState {
     pub(super) armies: BTreeMap<ArmyId, Army>,
     pub(super) knowledge: KnowledgeSnapshot,
     pub(super) plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    pub(super) domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    /// Persistent current-state roots. Boundary checkpoints and forks clone
+    /// the domain-record handle in O(1); the first writer receives a private
+    /// map copy. Decision storage remains format-7 compatible.
+    pub(super) domain_records: Arc<BTreeMap<DomainRecordRef, DomainRecord>>,
     pub(super) decisions: DecisionState,
     pub(super) root_seed: u64,
     /// Persisted authority credential root. It is intentionally separate from

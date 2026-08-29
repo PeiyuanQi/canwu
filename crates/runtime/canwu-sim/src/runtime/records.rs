@@ -8,6 +8,11 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+type SharedDomainRecordMap = Arc<BTreeMap<DomainRecordRef, DomainRecord>>;
+type SharedDomainMutationResult =
+    Result<(SharedDomainRecordMap, Vec<DomainRecordChange>), CanwuError>;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -458,7 +463,7 @@ pub(crate) fn apply_mutation_bundle(
     schemas: &DomainRecordSchemas,
     now: SimTime,
     core_exists: &dyn Fn(&EntityRef) -> bool,
-    mut requests: Vec<DomainMutationRequest<'_>>,
+    requests: Vec<DomainMutationRequest<'_>>,
 ) -> Result<
     (
         BTreeMap<DomainRecordRef, DomainRecord>,
@@ -466,6 +471,42 @@ pub(crate) fn apply_mutation_bundle(
     ),
     CanwuError,
 > {
+    let mut next = records.clone();
+    let changes =
+        apply_mutation_bundle_in_place(records, &mut next, schemas, now, core_exists, requests)?;
+    Ok((next, changes))
+}
+
+/// Applies one canonical boundary mutation bundle to a structurally shared
+/// record root. Capturing the previous root is O(1), and `Arc::make_mut`
+/// materializes a private map only for a boundary that actually writes.
+pub(crate) fn apply_mutation_bundle_cow(
+    records: &SharedDomainRecordMap,
+    schemas: &DomainRecordSchemas,
+    now: SimTime,
+    core_exists: &dyn Fn(&EntityRef) -> bool,
+    requests: Vec<DomainMutationRequest<'_>>,
+) -> SharedDomainMutationResult {
+    let mut next = Arc::clone(records);
+    let changes = apply_mutation_bundle_in_place(
+        records.as_ref(),
+        Arc::make_mut(&mut next),
+        schemas,
+        now,
+        core_exists,
+        requests,
+    )?;
+    Ok((next, changes))
+}
+
+fn apply_mutation_bundle_in_place(
+    records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    next: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    schemas: &DomainRecordSchemas,
+    now: SimTime,
+    core_exists: &dyn Fn(&EntityRef) -> bool,
+    mut requests: Vec<DomainMutationRequest<'_>>,
+) -> Result<Vec<DomainRecordChange>, CanwuError> {
     requests.sort_by(|left, right| left.mutation.target().cmp(right.mutation.target()));
     if requests
         .windows(2)
@@ -483,7 +524,6 @@ pub(crate) fn apply_mutation_bundle(
         })
         .collect::<BTreeSet<_>>();
 
-    let mut next = records.clone();
     let mut changes = Vec::with_capacity(requests.len());
     for request in requests {
         if !canonical_text(request.summary) {
@@ -540,7 +580,7 @@ pub(crate) fn apply_mutation_bundle(
             } => {
                 let mut draft = record.clone();
                 draft.canonicalize();
-                let previous = require_mutable_record(&next, target, *expected_version)?.clone();
+                let previous = require_mutable_record(next, target, *expected_version)?.clone();
                 let version = next_record_version(previous.version)?;
                 let current = DomainRecord {
                     reference: draft.reference,
@@ -559,7 +599,7 @@ pub(crate) fn apply_mutation_bundle(
                 expected_version,
                 successor,
             } => {
-                let previous = require_mutable_record(&next, record, *expected_version)?.clone();
+                let previous = require_mutable_record(next, record, *expected_version)?.clone();
                 validate_new_successor(record, successor.as_ref(), records, &created_records)?;
                 let mut current = previous.clone();
                 current.version = next_record_version(previous.version)?;
@@ -609,8 +649,8 @@ pub(crate) fn apply_mutation_bundle(
             summary: request.summary.to_owned(),
         });
     }
-    validate_record_store(&next, schemas, now, core_exists)?;
-    Ok((next, changes))
+    validate_record_store(next, schemas, now, core_exists)?;
+    Ok(changes)
 }
 
 pub(crate) fn domain_entity_exists(

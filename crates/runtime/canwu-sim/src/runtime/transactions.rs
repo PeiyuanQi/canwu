@@ -5,6 +5,7 @@ use super::{
     RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey, ScheduledAction, SimTime,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 pub(super) struct RejectionTransactionCheckpoint {
     next_command_attempt_id: u64,
@@ -139,7 +140,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    domain_records: BTreeMap<DomainRecordRef, DomainRecord>,
+    domain_records: Arc<BTreeMap<DomainRecordRef, DomainRecord>>,
     decisions: DecisionState,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
     scheduler: RuntimeScheduler,
@@ -292,5 +293,22 @@ impl ClockTransactionCheckpoint {
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
         state.metadata.commitment_cache = self.commitment_cache;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Scenario, Simulation};
+
+    #[test]
+    fn boundary_checkpoint_shares_domain_record_root() {
+        let simulation = Simulation::new(7, Scenario::new(SimTime::EPOCH, Vec::new())).unwrap();
+        let checkpoint = BoundaryTransactionCheckpoint::capture(&simulation.state);
+
+        assert!(Arc::ptr_eq(
+            &checkpoint.domain_records,
+            &simulation.state.current.domain_records
+        ));
     }
 }

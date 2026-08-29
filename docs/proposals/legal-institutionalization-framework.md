@@ -737,15 +737,19 @@ the total query-work budget permits. This scan is required to honor explicit
 retrospective dates that precede a version's ordinary effective-time index key.
 
 This is not a whole-engine history-independent complexity claim. The current
-single `LegalRuntimeRecord` must be decoded and encoded as a whole, and the kernel
-transaction path clones the domain-record store and decision state. Decision
-state also retains tickets, attempts, and traces, although exact outcome proof
-uses an O(log n) request index. A live legal boundary is therefore approximately
+single `LegalRuntimeRecord` must be decoded and encoded as a whole. Boundary
+checkpoint capture now shares the domain-record map root in O(1), but the first
+domain-record write still copies that whole map. Decision state is still cloned
+as one resident value and retains tickets, attempts, and traces; exact outcome
+proof uses an O(log n) request index, but storage-aware decision-history APIs
+remain part of the format-8 proposal rather than the format-7 implementation. A
+live legal boundary is therefore approximately
 `O(H_serialized + P_delta + C_delta + J_delta + V_delta)`, where `H_serialized`
-is the persisted aggregate and surrounding transaction state. Until law state is
-sharded and kernel delta/COW transactions plus closed-decision archival exist,
-the run manifest must cap those populations. `canwu-law` claims only that its
-post-decode settlement algorithms do not rescan the historical catalog.
+is the persisted aggregate and first-write transaction state. Until law state
+is sharded and content-addressed page deltas plus closed-decision payload
+archival exist, the run manifest must cap those populations. `canwu-law` claims
+only that its post-decode settlement algorithms do not rescan the historical
+catalog.
 
 The reproducible release probe is:
 
@@ -761,15 +765,37 @@ These are regression baselines, not cross-machine guarantees. The second curve
 means that even the 1k result exceeds both a 60 FPS frame budget (16.7 ms) and a
 30 FPS frame budget (33.3 ms), so legal settlement is not per-frame work. The 10k
 result is suitable only for low-frequency turn or background work, and the 100k
-result only for offline or maintenance processing. Before jurisdiction sharding
-and kernel delta/COW transactions land, a live manifest should therefore set its
-hard retained-record cap well below 1k and calibrate that cap on target hardware.
-Sharding/COW is a scale milestone, not an optional polish item.
+result only for offline or maintenance processing. The implemented
+domain-record root sharing removes that map's full checkpoint copy, but not
+aggregate serialization, decision-state cloning, or first-write map copies.
+The legal archive state-machine code is currently a private test-only scaffold,
+not an activated persistence path. Before jurisdiction sharding and page-delta
+persistence land, a live manifest should therefore set its hard retained-record
+cap well below 1k and calibrate that cap on target hardware. Sharding/page COW
+is a scale milestone, not optional polish.
+
+The complete proposed milestone is now defined by
+[Legal storage sharding, COW, delta persistence, and cold archive](legal-storage-sharding-compaction.md).
+It treats the four changes as one persistence boundary: shard-local legal hot
+state alone is insufficient while the kernel clones and checkpoints all domain
+records, and kernel COW alone is insufficient while one legal aggregate still
+serializes all history. The design also distinguishes cultural retirement,
+legal repeal, cold archive placement, and physical garbage collection so an
+enacted right does not disappear merely because its originating culture or old
+procedure leaves the hot path.
+
+Cross-plugin retirement is kernel-coordinated and owner-authorized: the culture
+plugin prepares only its culture-record mutation, the law plugin prepares only
+its target-keyed dependency-record mutation, and the kernel commits both or
+neither. Decision history APIs likewise distinguish bounded hot state from
+provider-backed cold history instead of promising that every old attempt and
+trace remains resident.
 
 Before multi-shard support, cross-jurisdiction proceedings remain in the single
-canonical shard. A future design should use jurisdiction as the primary shard
-key and a persisted deterministic coordinator for cross-shard proceedings; no
-shard may independently perform the final legal write.
+canonical shard. The proposed format-8 design uses one normative order shard,
+jurisdiction projection/procedure shards, target-keyed culture dependency
+records, and a persisted deterministic coordinator for cross-shard proceedings;
+no shard may independently perform the final legal write.
 
 ## Examples
 

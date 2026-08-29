@@ -115,6 +115,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 use event_payloads::{
     DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
@@ -1286,11 +1287,13 @@ impl Simulation {
                         .collect(),
                     knowledge: scenario.knowledge,
                     plugin_components: BTreeMap::new(),
-                    domain_records: scenario
-                        .domain_records
-                        .into_iter()
-                        .map(|record| (record.reference.clone(), record))
-                        .collect(),
+                    domain_records: Arc::new(
+                        scenario
+                            .domain_records
+                            .into_iter()
+                            .map(|record| (record.reference.clone(), record))
+                            .collect(),
+                    ),
                     decisions: DecisionState::default(),
                     root_seed: seed,
                     authority_root_seed,
@@ -2224,11 +2227,13 @@ impl Simulation {
                             )
                         })
                         .collect(),
-                    domain_records: snapshot
-                        .domain_records
-                        .into_iter()
-                        .map(|record| (record.reference.clone(), record))
-                        .collect(),
+                    domain_records: Arc::new(
+                        snapshot
+                            .domain_records
+                            .into_iter()
+                            .map(|record| (record.reference.clone(), record))
+                            .collect(),
+                    ),
                     decisions: snapshot.decisions,
                     root_seed: snapshot.root_seed,
                     authority_root_seed: snapshot.authority_root_seed,

@@ -395,9 +395,24 @@ for 1k/10k/100k retained records were 37.472ms/507.535ms/6.017504s median for th
 plugin path, while law-local idle settlement stayed at 200ns. Large hot legal
 histories therefore require budgets and event-driven cadence. The 1k result is
 already above both 60 FPS and 30 FPS frame budgets; 10k is low-frequency turn or
-background work, and 100k is offline/maintenance work. Until jurisdiction
-sharding and COW are implemented, manifests should cap live retained records
-well below 1k and calibrate the exact cap on target hardware.
+background work, and 100k is offline/maintenance work. Boundary checkpoints now
+share the generic domain-record map root in O(1), but the first domain-record
+write still copies the whole map, decision state is still cloned as one value,
+and `canwu-law` still persists one aggregate. A private test-only scaffold checks
+the proposed legal archive state machine, but it is not a public API, save
+format, or replay path. Until jurisdiction shards, content-addressed page
+deltas, decision-history placement, and provider-verified archive ingress
+replace those paths together, manifests should cap live retained records well
+below 1k and calibrate the exact cap on target hardware.
+
+The proposed format-8 scale milestone is specified in
+[Legal storage sharding, COW, delta persistence, and cold archive](proposals/legal-storage-sharding-compaction.md).
+It combines legal-order/jurisdiction hot shards with kernel COW stores,
+content-addressed checkpoint deltas, and staged fail-closed cold archives. A
+kernel owner-authorized coordinator lets culture and law plugins update only
+their own records while committing retirement dependency changes atomically.
+The design keeps current enacted effects hot while moving closed history out of
+ordinary settlement; archiving and cultural retirement do not repeal law.
 
 Conformance evidence should prove that:
 

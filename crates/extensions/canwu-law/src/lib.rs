@@ -24,6 +24,10 @@ mod compiler;
 mod model;
 mod plugin;
 mod runtime;
+// Format-8 storage work remains a private, non-loadable test scaffold until
+// the page store, replay ingress, and persistence-format switch land together.
+#[cfg(test)]
+mod storage;
 
 pub use compiler::{compile_law, validate_compiled_law_plan, validate_definition};
 pub use model::*;
