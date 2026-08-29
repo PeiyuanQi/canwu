@@ -64,13 +64,16 @@ the `canwu-contributor-*` namespace. Use `canwu-contributor-design` for engine
 design work and `canwu-contributor-release` for release preparation, package
 inspection, third-party notices, and cross-platform release verification.
 
-Claude-compatible entry points live under `.claude/skills/` and point to the
-canonical `.agents` skills. Keep those loaders synchronized; do not create a
-second contributor workflow under `agent-interface`.
+Claude-compatible contributor entry points live under `.claude/skills/` and
+point to the canonical `.agents` skills. Keep those loaders synchronized; do
+not create a second contributor workflow under `agent-interface`.
 
 Engine-user skills live separately in
 `agent-interface/plugins/canwu-engine/skills/` so client guidance does not get
-mixed with repository-maintainer workflows.
+mixed with repository-maintainer workflows. Skills for downstream developers
+building games and historical simulations live in
+`agent-interface/plugins/canwu-developer/skills/`. Their Claude-compatible
+loaders point into that package; they do not belong under `.agents/skills/`.
 
 ## Contribution licensing
 

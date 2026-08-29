@@ -1,0 +1,6 @@
+interface:
+  display_name: "Build a Canwu Run Explorer"
+  short_description: "Compare seeded runs and actor-relative timelines"
+  default_prompt: "Use $canwu-developer-build-run-explorer to add reproducible seed runs and a perspective timeline."
+policy:
+  allow_implicit_invocation: true

@@ -175,11 +175,18 @@ External users can invoke
 [`$canwu-engine-docs`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 to find and explain official tutorials and design documents, then use
 [`$canwu-engine-usage`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-for implementation guidance. Contributors and maintainers use the native
+for public API guidance. Downstream game and historical-simulation developers
+can use
+[`$canwu-developer-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-developer-create-simulation/SKILL.md)
+to build a runnable vertical slice and
+[`$canwu-developer-build-run-explorer`](agent-interface/plugins/canwu-developer/skills/canwu-developer-build-run-explorer/SKILL.md)
+for seeded reruns and actor-relative timelines. Contributors and maintainers use
+the native
 [`canwu-contributor-design`](.agents/skills/canwu-contributor-design/SKILL.md)
 and
 [`canwu-contributor-release`](.agents/skills/canwu-contributor-release/SKILL.md)
-skills. Claude-compatible loaders live under [`.claude/skills`](.claude/skills/).
+skills. Claude-compatible loaders live under [`.claude/skills`](.claude/skills/)
+and point to the appropriate canonical skill.
 The human-readable package and registry procedure is documented in
 [`docs/releasing.md`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/releasing.md).
 

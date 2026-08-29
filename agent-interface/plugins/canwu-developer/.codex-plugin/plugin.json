@@ -1,0 +1,33 @@
+{
+  "name": "canwu-developer",
+  "version": "0.1.0",
+  "description": "Build games and historical simulations on Canwu",
+  "author": {
+    "name": "Canwu Project",
+    "url": "https://github.com/PeiyuanQi/canwu"
+  },
+  "repository": "https://github.com/PeiyuanQi/canwu",
+  "license": "Apache-2.0",
+  "keywords": [
+    "canwu",
+    "game-development",
+    "historical-simulation",
+    "scenario",
+    "determinism",
+    "timeline"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Canwu Developer",
+    "shortDescription": "Build games and historical simulations with Canwu.",
+    "longDescription": "Downstream workflows for designing runnable Canwu scenarios, composing public domain extensions, rerunning deterministic experiments, and exploring actor-relative timelines.",
+    "developerName": "Canwu Project",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": [
+      "Create a historical simulation on Canwu.",
+      "Build a multi-seed actor-perspective timeline.",
+      "Prototype five villages evolving from the Stone Age to the Bronze Age."
+    ]
+  }
+}

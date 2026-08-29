@@ -1,0 +1,6 @@
+interface:
+  display_name: "Create a Canwu Simulation"
+  short_description: "Build a downstream game or historical simulation"
+  default_prompt: "Use $canwu-developer-create-simulation to build a runnable downstream simulation on Canwu."
+policy:
+  allow_implicit_invocation: true

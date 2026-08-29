@@ -80,11 +80,14 @@
   generated third-party notice bundle.
 - `benchmarks`: deterministic non-CI performance harnesses and recorded
   baselines; measurement tooling, not authoritative runtime code.
-- `agent-interface`: packaged skills for external Canwu engine users. Follow
-  its nested `AGENTS.md`; these are user tools, not runtime simulation plugins.
+- `agent-interface`: packaged skills for external Canwu users. `canwu-engine`
+  covers documentation and public API usage; `canwu-developer` helps downstream
+  developers build games and historical simulations. Follow its nested
+  `AGENTS.md`; these are user tools, not runtime simulation plugins.
 - `.agents/skills`: canonical repo-local skills for contributors changing
-  Canwu itself. `.claude/skills` contains thin Claude-compatible loaders that
-  must remain pointed at those canonical skills.
+  Canwu itself. `.claude/skills` contains thin Claude-compatible loaders;
+  contributor loaders point here, while downstream-user loaders point to their
+  canonical packaged skills under `agent-interface`.
 - `website` and `assets`: community site and project media, outside the
   authoritative simulation runtime.
 - `.github`: CI workflows, the pull-request template, and repository automation.
@@ -105,7 +108,7 @@
 | Performance or scaling behavior | `benchmarks`; affected runtime paths; deterministic workload counts; allocation, elapsed-time, snapshot-size, and growth evidence before and after |
 | Public API behavior or types | `canwu-api`; crate re-exports; public examples; rustdoc; debug client; compatibility notes |
 | Repository contributor skills | `.agents/skills`; matching `.claude/skills` loader; affected `SKILL.md` and `agents/openai.yaml`; skill validation |
-| Engine-user skill or plugin packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; plugin validation |
+| Engine-user or downstream-developer skill packaging | `agent-interface/AGENTS.md`; affected `SKILL.md`; `.codex-plugin/plugin.json`; any `agents/openai.yaml`; optional `.claude/skills` loader; plugin validation |
 | Dependencies, licensing, or release metadata | workspace and crate manifests; `Cargo.lock`; `docs/legal`; `tools/licenses`; contribution/release docs; packaged plugin notices |
 | Website or branding | `website`; `assets`; `docs/community/branding.md`; community-facing README links; site-specific checks |
 | Public documentation | Canonical `docs`; matching pages under `website/src/content/docs` in every supported language; website build |

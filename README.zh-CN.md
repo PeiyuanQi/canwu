@@ -155,11 +155,16 @@ Claude 兼容入口位于 `.claude/skills`。这些工具不是运行时模拟�
 [`$canwu-engine-docs`](agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 查找并解读官方教程与设计文档，再使用
 [`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-获得实现指导。贡献者和维护者原生使用
+获得公共 API 指导。使用参伍开发游戏或历史模拟的下游开发者可以调用
+[`$canwu-developer-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-developer-create-simulation/SKILL.md)
+构建可运行的纵向切片，再使用
+[`$canwu-developer-build-run-explorer`](agent-interface/plugins/canwu-developer/skills/canwu-developer-build-run-explorer/SKILL.md)
+实现按随机种子重跑和角色相对时间线。贡献者和维护者原生使用
 [`canwu-contributor-design`](.agents/skills/canwu-contributor-design/SKILL.md)
 和
 [`canwu-contributor-release`](.agents/skills/canwu-contributor-release/SKILL.md)
-技能；Claude 兼容入口位于 [`.claude/skills`](.claude/skills/)。
+技能；Claude 兼容入口位于 [`.claude/skills`](.claude/skills/)，并指向对应的
+权威技能文件。
 面向维护者的软件包与 registry 操作步骤见
 [`docs/releasing.md`](docs/releasing.md)。
 
