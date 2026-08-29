@@ -8,9 +8,9 @@ description: "Build or improve a shared Canwu run explorer for games and histori
 Build this interface in the downstream host application, not in Canwu core.
 Use Canwu through `canwu-api`. If the simulation model does not exist yet, also
 follow the applicable creator skill:
-[`canwu-game-create-simulation`](../canwu-game-create-simulation/SKILL.md) for a
+[`canwu-game-create`](../canwu-game-create/SKILL.md) for a
 game or
-[`canwu-history-create-simulation`](../canwu-history-create-simulation/SKILL.md)
+[`canwu-history-create`](../canwu-history-create/SKILL.md)
 for historical research.
 
 ## Define an immutable run identity

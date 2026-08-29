@@ -1,5 +1,5 @@
 ---
-name: canwu-game-create-simulation
+name: canwu-game-create
 description: "Create or extend a downstream game on Canwu. Use when turning a game premise into a runnable vertical slice; deciding what belongs in game content, a domain extension, an integration, or the host application; composing public Canwu APIs; modeling technology, society, information, movement, governance, or resources; or adding deterministic seed-based gameplay without changing the Canwu engine repository itself."
 ---
 
@@ -8,7 +8,7 @@ description: "Create or extend a downstream game on Canwu. Use when turning a ga
 Build the user's game as a downstream consumer of Canwu. This is not a
 contributor workflow for changing Canwu itself. Use `canwu-api`; do not depend
 directly on `canwu-sim` or expose mutable live state. For historical research
-simulations, use `$canwu-history-create-simulation` instead.
+simulations, use `$canwu-history-create` instead.
 When public API mechanics are unfamiliar and `$canwu-engine-usage` is
 available, follow that skill as supporting API guidance.
 

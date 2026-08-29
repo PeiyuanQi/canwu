@@ -162,9 +162,9 @@ Claude 兼容入口位于 `.claude/skills`。这些工具不是运行时模拟�
 查找并解读官方教程与设计文档，再使用
 [`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
 获得公共 API 指导。使用参伍开发游戏的下游开发者可以调用
-[`$canwu-game-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-game-create-simulation/SKILL.md)
+[`$canwu-game-create`](agent-interface/plugins/canwu-developer/skills/canwu-game-create/SKILL.md)
 构建可运行的游戏纵向切片；历史研究者和开发者可以调用
-[`$canwu-history-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-history-create-simulation/SKILL.md)
+[`$canwu-history-create`](agent-interface/plugins/canwu-developer/skills/canwu-history-create/SKILL.md)
 构建带有来源和不确定性的历史模拟。两者都可以再使用
 [`$canwu-common-build-run-explorer`](agent-interface/plugins/canwu-developer/skills/canwu-common-build-run-explorer/SKILL.md)
 实现按随机种子重跑和角色相对时间线。贡献者和维护者原生使用

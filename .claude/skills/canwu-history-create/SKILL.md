@@ -1,5 +1,5 @@
 ---
-name: canwu-history-create-simulation
+name: canwu-history-create
 description: "Create a historical research simulation on Canwu."
 ---
 
@@ -7,6 +7,6 @@ description: "Create a historical research simulation on Canwu."
 
 This is the repo-local Claude-compatible entry point for downstream researchers
 and developers who use Canwu to build historical simulations. Read and follow
-../../../agent-interface/plugins/canwu-developer/skills/canwu-history-create-simulation/SKILL.md
+../../../agent-interface/plugins/canwu-developer/skills/canwu-history-create/SKILL.md
 completely before acting. The packaged skill is the source of truth; do not
 create a divergent Claude-specific workflow.

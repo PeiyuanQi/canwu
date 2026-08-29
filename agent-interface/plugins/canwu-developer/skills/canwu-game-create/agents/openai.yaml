@@ -1,6 +1,6 @@
 interface:
   display_name: "Create a Canwu Game"
   short_description: "Build a downstream game on Canwu"
-  default_prompt: "Use $canwu-game-create-simulation to build a runnable game on Canwu."
+  default_prompt: "Use $canwu-game-create to build a runnable game on Canwu."
 policy:
   allow_implicit_invocation: true

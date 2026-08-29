@@ -1,6 +1,6 @@
 interface:
   display_name: "Create a Canwu Historical Simulation"
   short_description: "Build a historical research simulation"
-  default_prompt: "Use $canwu-history-create-simulation to build a reproducible historical research simulation on Canwu."
+  default_prompt: "Use $canwu-history-create to build a reproducible historical research simulation on Canwu."
 policy:
   allow_implicit_invocation: true

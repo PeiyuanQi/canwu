@@ -1,5 +1,5 @@
 ---
-name: canwu-history-create-simulation
+name: canwu-history-create
 description: "Create or extend a downstream historical research simulation on Canwu. Use when turning a historical question, period, or comparative interpretation into a runnable simulation; representing source provenance, uncertainty, and competing hypotheses; modeling technology, society, information, movement, governance, or resources; or running deterministic seed-based sensitivity analysis without changing the Canwu engine repository itself."
 ---
 
@@ -9,7 +9,7 @@ Build the user's historical research simulation as a downstream consumer of
 Canwu. This is not a contributor workflow for changing Canwu itself. Use
 `canwu-api`; do not depend directly on `canwu-sim` or expose mutable live state.
 For a playable game rather than a research-oriented simulation, use
-`$canwu-game-create-simulation`.
+`$canwu-game-create`.
 
 ## Establish the research contract
 

@@ -182,10 +182,10 @@ External users can invoke
 to find and explain official tutorials and design documents, then use
 [`$canwu-engine-usage`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
 for public API guidance. Downstream game developers can use
-[`$canwu-game-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-game-create-simulation/SKILL.md)
+[`$canwu-game-create`](agent-interface/plugins/canwu-developer/skills/canwu-game-create/SKILL.md)
 to build a runnable game vertical slice. Historical researchers and developers
 can use
-[`$canwu-history-create-simulation`](agent-interface/plugins/canwu-developer/skills/canwu-history-create-simulation/SKILL.md)
+[`$canwu-history-create`](agent-interface/plugins/canwu-developer/skills/canwu-history-create/SKILL.md)
 to build a source-aware historical simulation. Both can use
 [`$canwu-common-build-run-explorer`](agent-interface/plugins/canwu-developer/skills/canwu-common-build-run-explorer/SKILL.md)
 for seeded reruns and actor-relative timelines. Contributors and maintainers use
