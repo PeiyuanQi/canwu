@@ -61,8 +61,9 @@ crates.io can resolve every completed group before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
-6. `canwu-information`, `canwu-society`, `canwu-technology`
-7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`
+6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`
+7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`,
+   `canwu-ming-fiscal`
 
 For each package, first run its dry-run and then publish the exact locked
 source:

@@ -1,0 +1,17 @@
+{
+  "id": "wanli-1581",
+  "label": "Wanli regional Single Whip variation, 1581",
+  "historical_year": 1581,
+  "mode": "recorded_baseline",
+  "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+  "adoptions": [
+    { "adoption_id": "adopt.lower-yangzi.single-whip", "rule_id": "single_whip_lower_yangzi", "scope_id": "scope.lower-yangzi.land", "stage": "entrenched" },
+    { "adoption_id": "adopt.southeast.single-whip", "rule_id": "single_whip_southeast", "scope_id": "scope.southeast.land", "stage": "implemented" },
+    { "adoption_id": "adopt.north.silver-commutation", "rule_id": "silver_tax_commutation_1436", "scope_id": "scope.north.land", "stage": "implemented" },
+    { "adoption_id": "adopt.southwest.silver-commutation", "rule_id": "silver_tax_commutation_1436", "scope_id": "scope.southwest.land", "stage": "implemented" },
+    { "adoption_id": "adopt.southwest.single-whip", "rule_id": "single_whip_southwest", "scope_id": "scope.southwest.land", "stage": "accepted" }
+  ],
+  "expected_active_period_ids": ["single_whip_spread"],
+  "expected_transition_ids": ["adopt_single_whip_north", "adopt_single_whip_southwest"],
+  "design_note": "Models 1581 as a comparison of regional adoption stages, not an empire-wide reform switch."
+}

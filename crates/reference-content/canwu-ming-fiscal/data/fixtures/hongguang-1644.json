@@ -1,0 +1,18 @@
+{
+  "id": "hongguang-1644",
+  "label": "Hongguang court fiscal crisis, 1644",
+  "historical_year": 1644,
+  "mode": "research_replay",
+  "region_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+  "adoptions": [
+    { "adoption_id": "adopt.southern-court.emergency", "rule_id": "southern_ming_emergency_levies", "scope_id": "scope.southern-court.surcharge", "stage": "accepted" },
+    { "adoption_id": "adopt.southeast.commander-emergency", "rule_id": "southern_ming_emergency_levies", "scope_id": "scope.southeast.commander-surcharge", "stage": "accepted" },
+    { "adoption_id": "adopt.southeast.legacy-taicang", "rule_id": "taicang_silver_treasury_1442", "scope_id": "scope.southeast.treasury", "stage": "implemented" },
+    { "adoption_id": "adopt.southern-court.treasury", "rule_id": "southern_ming_regional_treasuries", "scope_id": "scope.southern-court.treasury", "stage": "accepted" },
+    { "adoption_id": "adopt.southeast.salt", "rule_id": "southern_ming_salt_finance", "scope_id": "scope.southeast.salt", "stage": "implemented" },
+    { "adoption_id": "adopt.southeast.credit", "rule_id": "southern_ming_merchant_credit", "scope_id": "scope.southeast.credit", "stage": "accepted" }
+  ],
+  "expected_active_period_ids": ["southern_ming_crisis"],
+  "expected_transition_ids": ["fragment_southern_ming_military_levy", "fragment_southern_ming_merchant_credit", "fragment_southern_ming_regional_treasury"],
+  "design_note": "Keeps court, commander, salt, merchant-credit, and regional remittance authority separate under rapidly changing territorial control."
+}

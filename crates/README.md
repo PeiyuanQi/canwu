@@ -32,6 +32,9 @@ flowchart BT
     culture["canwu-culture"]
     technology["canwu-technology"]
     history["canwu-history-research"]
+    fiscal["canwu-fiscal"]
+    ming_fiscal["canwu-ming-fiscal"]
+    ming_reference["canwu-ming-fiscal-reference"]
     debug["canwu-debug"]
 
     subgraph tools["Tools"]
@@ -39,6 +42,10 @@ flowchart BT
     end
     subgraph integrations["Reference integrations"]
         reference_world
+        ming_reference
+    end
+    subgraph reference_content["Reference content"]
+        ming_fiscal
     end
     subgraph extensions["Published extensions"]
         information
@@ -47,6 +54,7 @@ flowchart BT
         culture
         technology
         history
+        fiscal
     end
     subgraph PublicApi["Public API"]
         api
@@ -105,6 +113,12 @@ flowchart BT
     api --> technology
     api --> history
     technology --> history
+    api --> fiscal
+    fiscal --> ming_fiscal
+    api --> ming_reference
+    fiscal --> ming_reference
+    ming_fiscal --> ming_reference
+    reference_world --> ming_reference
     api --> debug
     api --> reference_world
     reference_world --> debug
@@ -119,8 +133,9 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research` | Published domain implementations built on the public API; culture remains downstream from society and historical research remains downstream from technology | Published |
-| `integrations/` | `canwu-reference-world` | Replaceable example world, projection, movement plugin, routing adapter, and runnable starter | Not published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-technology`, `canwu-history-research`, `canwu-fiscal` | Published domain implementations built on the public API; culture remains downstream from society, historical research remains downstream from technology, and fiscal procedure remains independent from resource balances and physical transfers | Published |
+| `reference-content/` | `canwu-ming-fiscal` | Versioned, source-cited historical definitions compiled by generic extensions | Published |
+| `integrations/` | `canwu-reference-world`, `canwu-ming-fiscal-reference` | Replaceable example worlds, adapters, scenario composition, and runnable starters | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
 ## Registry order
@@ -133,8 +148,8 @@ each completed group to become resolvable before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
-6. `canwu-information`, `canwu-society`, `canwu-technology`
-7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`
+6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`
+7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`, `canwu-ming-fiscal`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and

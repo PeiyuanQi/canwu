@@ -1,0 +1,20 @@
+[package]
+name = "canwu-fiscal"
+description = "Generic fiscal institutions and procedure domain extension for Canwu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+publish = ["crates-io"]
+
+[dependencies]
+canwu-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+
+[lints]
+workspace = true

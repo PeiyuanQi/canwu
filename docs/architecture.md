@@ -146,6 +146,9 @@ flowchart TB
         Culture["canwu-culture"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        Fiscal["canwu-fiscal"]
+        MingFiscal["canwu-ming-fiscal"]
+        MingReference["canwu-ming-fiscal-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -180,6 +183,13 @@ flowchart TB
     Technology --> Api
     History --> Api
     History --> Technology
+    Fiscal --> Api
+    MingFiscal --> Api
+    MingFiscal --> Fiscal
+    MingReference --> Api
+    MingReference --> Fiscal
+    MingReference --> MingFiscal
+    MingReference --> ReferenceWorld
 
     Api --> Core
     Api --> Decision
@@ -234,11 +244,12 @@ flowchart TB
         Info["Information<br/>content access and delivery"]
         Correspondence["Correspondence<br/>demand, address, and delivery orchestration"]
         Society["Society<br/>population and social diffusion"]
+        Fiscal["Fiscal procedure<br/>law, adoption, assessment, receipts"]
         Production["Production / economy<br/>assets, recipes, markets"]
     end
 
     subgraph Kits["Reference content and starter kits / 参考内容与入门套件"]
-        Packs["Reference content packs<br/>technology, society, economy data"]
+        Packs["Reference content packs<br/>technology, society, fiscal, economy data"]
         Integrations["Reference integrations<br/>world and economy adapters"]
         Starters["Starter hosts<br/>runnable vertical slices"]
         Packs --> Integrations

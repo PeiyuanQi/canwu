@@ -374,10 +374,15 @@ pub(crate) fn validate_holder_for_publication(
     record_schemas: &DomainRecordSchemas,
 ) -> Result<(), CanwuError> {
     let allowed = match holder {
-        KnowledgeHolderRef::Person(id) => current.people.contains_key(id),
-        KnowledgeHolderRef::Entity(EntityRef::Army(id)) => current.armies.contains_key(id),
+        KnowledgeHolderRef::Person(id) => {
+            current.entities.contains(&EntityRef::Person(*id)) || current.people.contains_key(id)
+        }
+        KnowledgeHolderRef::Entity(EntityRef::Army(id)) => {
+            current.entities.contains(&EntityRef::Army(*id)) || current.armies.contains_key(id)
+        }
         KnowledgeHolderRef::Entity(EntityRef::Government(id)) => {
-            current.governments.contains_key(id)
+            current.entities.contains(&EntityRef::Government(*id))
+                || current.governments.contains_key(id)
         }
         KnowledgeHolderRef::Entity(
             EntityRef::Organization(_)
@@ -414,10 +419,15 @@ fn validate_historical_holder(
     record_schemas: &DomainRecordSchemas,
 ) -> Result<(), CanwuError> {
     let allowed = match holder {
-        KnowledgeHolderRef::Person(id) => current.people.contains_key(id),
-        KnowledgeHolderRef::Entity(EntityRef::Army(id)) => current.armies.contains_key(id),
+        KnowledgeHolderRef::Person(id) => {
+            current.entities.contains(&EntityRef::Person(*id)) || current.people.contains_key(id)
+        }
+        KnowledgeHolderRef::Entity(EntityRef::Army(id)) => {
+            current.entities.contains(&EntityRef::Army(*id)) || current.armies.contains_key(id)
+        }
         KnowledgeHolderRef::Entity(EntityRef::Government(id)) => {
-            current.governments.contains_key(id)
+            current.entities.contains(&EntityRef::Government(*id))
+                || current.governments.contains_key(id)
         }
         KnowledgeHolderRef::Entity(
             EntityRef::Organization(_)
@@ -535,17 +545,25 @@ fn subject_matches(
 
 fn entity_exists(current: &RuntimeCurrentState, entity: &EntityRef) -> bool {
     match entity {
-        EntityRef::Army(id) => current.armies.contains_key(id),
-        EntityRef::Government(id) => current.governments.contains_key(id),
-        EntityRef::Organization(_) | EntityRef::Resource(_) => false,
-        EntityRef::Person(id) => current.people.contains_key(id),
+        EntityRef::Army(id) => current.entities.contains(entity) || current.armies.contains_key(id),
+        EntityRef::Government(id) => {
+            current.entities.contains(entity) || current.governments.contains_key(id)
+        }
+        EntityRef::Organization(_) | EntityRef::Resource(_) => current.entities.contains(entity),
+        EntityRef::Person(id) => {
+            current.entities.contains(entity) || current.people.contains_key(id)
+        }
         EntityRef::Domain(reference) => {
             current.domain_records.get(reference).is_some_and(|record| {
                 !record.is_deleted() && record.class == DomainRecordClass::Entity
             })
         }
-        EntityRef::Route(id) => current.routes.contains_key(id),
-        EntityRef::Territory(id) => current.territories.contains_key(id),
+        EntityRef::Route(id) => {
+            current.entities.contains(entity) || current.routes.contains_key(id)
+        }
+        EntityRef::Territory(id) => {
+            current.entities.contains(entity) || current.territories.contains_key(id)
+        }
     }
 }
 
@@ -748,6 +766,17 @@ mod tests {
                 .expect_err("ineligible core holder aliases must be rejected");
             assert_eq!(error.code, ErrorCode::InvalidKnowledgeHolder);
         }
+    }
+
+    #[test]
+    fn generic_person_registry_is_an_eligible_person_holder() {
+        let person = PersonId::new(7);
+        let holder = KnowledgeHolderRef::Person(person);
+        let mut current = current_state(vec![]);
+        current.entities.insert(EntityRef::Person(person));
+
+        assert!(validate_holder_for_publication(&holder, &current, &BTreeMap::new()).is_ok());
+        assert!(validate_historical_holder(&holder, &current, &BTreeMap::new()).is_ok());
     }
 
     #[test]

@@ -15,7 +15,10 @@ members = [
     "crates/extensions/canwu-culture",
     "crates/extensions/canwu-society",
     "crates/extensions/canwu-technology",
+    "crates/extensions/canwu-fiscal",
+    "crates/reference-content/canwu-ming-fiscal",
     "crates/integrations/canwu-reference-world",
+    "crates/integrations/canwu-ming-fiscal-reference",
     "crates/tools/canwu-debug",
 ]
 resolver = "2"
@@ -47,12 +50,16 @@ canwu-routing = { path = "crates/mechanisms/canwu-routing", version = "=0.6.0" }
 canwu-sim = { path = "crates/runtime/canwu-sim", version = "=0.6.0" }
 canwu-society = { path = "crates/extensions/canwu-society", version = "=0.6.0" }
 canwu-technology = { path = "crates/extensions/canwu-technology", version = "=0.6.0" }
+canwu-fiscal = { path = "crates/extensions/canwu-fiscal", version = "=0.6.0" }
+canwu-ming-fiscal = { path = "crates/reference-content/canwu-ming-fiscal", version = "=0.6.0" }
+canwu-ming-fiscal-reference = { path = "crates/integrations/canwu-ming-fiscal-reference", version = "=0.6.0" }
 canwu-time = { path = "crates/foundation/canwu-time", version = "=0.6.0" }
 canwu-transport = { path = "crates/mechanisms/canwu-transport", version = "=0.6.0" }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+semver = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

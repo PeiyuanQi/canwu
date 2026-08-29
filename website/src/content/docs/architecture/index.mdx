@@ -108,6 +108,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展 |
 | `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
+| `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
+| `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
+| `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
 | `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
 
 已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
@@ -143,6 +146,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         Culture["canwu-culture"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        Fiscal["canwu-fiscal"]
+        MingFiscal["canwu-ming-fiscal"]
+        MingReference["canwu-ming-fiscal-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -177,6 +183,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Technology --> Api
     History --> Api
     History --> Technology
+    Fiscal --> Api
+    MingFiscal --> Api
+    MingFiscal --> Fiscal
+    MingReference --> Api
+    MingReference --> Fiscal
+    MingReference --> MingFiscal
+    MingReference --> ReferenceWorld
     ReferenceWorld --> Api
     Debug --> ReferenceWorld
 

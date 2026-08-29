@@ -102,6 +102,12 @@ cargo run -p canwu-correspondence --example routed_correspondence
 - `canwu-technology`：已发布的通用技术模拟扩展，负责证据、本地能力、实施、
   按用途采用和传播机会
 - `canwu-history-research`：已发布、位于基础技术真值下游的三个可选历史研究评估插件
+- `canwu-fiscal`：已发布的通用财政程序扩展，负责地区法规采纳、核算、减免、
+  授权、执行凭证与报告
+- `canwu-ming-fiscal`：带出处的明代财政参考内容，核心范围为 1368-1662 年，
+  并提供延伸至 1683 年的可选郑氏分支
+- `canwu-ming-fiscal-reference`：组合财政插件与参考世界插件的洪武、万历和
+  弘光可运行场景
 
 [crate 结构图](crates/README.md)展示仓库分层、精确的依赖 DAG 和发布顺序。
 [文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。`agent-interface`

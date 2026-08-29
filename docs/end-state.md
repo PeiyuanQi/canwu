@@ -327,6 +327,14 @@ boundaries, expose actor-relative reads where relevant, and prove save/load,
 fork, and exact replay. It is reference code and content that users can copy or
 replace, not a privileged compatibility path.
 
+The first complete implementation is the
+[Ming fiscal reference package](ming-fiscal-reference.md): `canwu-fiscal` owns
+generic procedure, `canwu-ming-fiscal` owns source-cited longitudinal content,
+and `canwu-ming-fiscal-reference` composes three runnable starts with the
+reference world. Resource truth remains in host resource and logistics domains;
+fiscal completion is admitted only through exact external record-version
+evidence.
+
 ## Debug client
 
 The first-party client remains a reference consumer. It should prioritize world

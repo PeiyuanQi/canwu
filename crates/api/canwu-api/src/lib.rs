@@ -9,8 +9,8 @@ pub use canwu_core::{
     DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
     EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
     KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
-    PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry, SimulationGranularity,
-    TerritoryId, TypeSchema, TypedDomainRecordRef,
+    OrganizationId, PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry,
+    SimulationGranularity, TerritoryId, TypeSchema, TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{

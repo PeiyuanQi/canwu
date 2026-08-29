@@ -82,6 +82,10 @@ renamed by this policy.
 | 参考内容包 | reference content pack | — | A first-party or downstream package of versioned, namespaced, serializable domain definitions, scenario data, localization, and provenance. It supplies content to a domain extension; it is not a kernel subsystem or a solver. |
 | 参考整合包 | reference integration | — | A replaceable public-API implementation that maps generic domain capabilities to a small world, production, information, or society model. It may contain runtime plugins and host-adapter code. |
 | 入门套件 | starter kit | — | A runnable host and composition example that combines compatible reference content and integrations into a complete vertical slice. It is reference code, not a privileged engine path. |
+| [财政模拟扩展](../website/src/content/docs/reference/ming-fiscal.mdx) | fiscal simulation extension | `canwu-fiscal` | The generic fiscal-procedure domain extension. It owns law, regional adoption, assessment, authorization, remission, receipt, audit, aggregates, and holder-relative knowledge reports, but not resource balances or transfers. |
+| [历史财政语境](../website/src/content/docs/reference/ming-fiscal.mdx) | fiscal historical context | `FiscalHistoricalContext` | The explicit historical year and mode used to evaluate active periods and reform candidates. It changes through canonical ingress and never applies reforms automatically. |
+| [财政覆盖单元](../website/src/content/docs/reference/ming-fiscal.mdx) | fiscal coverage cell | `FiscalCoverageCell` | One period-region-mechanism cell resolved to supported, archetype fallback, explicit unknown, or not applicable by deterministic priority. |
+| [财政执行凭证](../website/src/content/docs/reference/ming-fiscal.mdx) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | A settlement request citing exact typed adapter-result versions. The admitted receipt derives externally observed quantity and disposition from those results. Within one fiscal runtime state, each exact version and each `(evidence kind, external_operation_id)` pair can settle at most one receipt. It does not own resource truth. |
 
 ## Evidence, randomness, and persistence
 

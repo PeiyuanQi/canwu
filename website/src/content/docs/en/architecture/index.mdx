@@ -114,6 +114,9 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 | `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
 | `canwu-technology` | Published evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
+| `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
+| `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
+| `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
 | `canwu-debug` | Reference client using the public API and reference-world integration |
 
 The published `canwu-culture` culture system SDK sits above
@@ -155,6 +158,9 @@ external and development dependencies are omitted.
         Culture["canwu-culture"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
+        Fiscal["canwu-fiscal"]
+        MingFiscal["canwu-ming-fiscal"]
+        MingReference["canwu-ming-fiscal-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -189,6 +195,13 @@ external and development dependencies are omitted.
     Technology --> Api
     History --> Api
     History --> Technology
+    Fiscal --> Api
+    MingFiscal --> Api
+    MingFiscal --> Fiscal
+    MingReference --> Api
+    MingReference --> Fiscal
+    MingReference --> MingFiscal
+    MingReference --> ReferenceWorld
     ReferenceWorld --> Api
     Debug --> ReferenceWorld
 

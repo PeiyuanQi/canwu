@@ -51,6 +51,7 @@ these packages. The first starter kit should become the canonical path from a
 selected content pack to a saved and replayable simulation.
 
 - [Governance transition case](governance-transition-case.md)
+- [Ming fiscal reference package](ming-fiscal-reference.md)
 
 ## Agent access
 

@@ -1,0 +1,15 @@
+{
+  "id": "hongwu-1391",
+  "label": "Hongwu registration and grain obligations, 1391",
+  "historical_year": 1391,
+  "mode": "recorded_baseline",
+  "region_ids": ["empire_center", "lower_yangzi", "north_china"],
+  "adoptions": [
+    { "adoption_id": "adopt.lower-yangzi.land", "rule_id": "yellow_register_land_assessment", "scope_id": "scope.lower-yangzi.land", "stage": "implemented" },
+    { "adoption_id": "adopt.lower-yangzi.labor", "rule_id": "lijia_labor_service", "scope_id": "scope.lower-yangzi.labor", "stage": "implemented" },
+    { "adoption_id": "adopt.lower-yangzi.grain", "rule_id": "canal_grain_tribute", "scope_id": "scope.lower-yangzi.grain", "stage": "implemented" }
+  ],
+  "expected_active_period_ids": ["founding_reconstruction"],
+  "expected_transition_ids": [],
+  "design_note": "Tests registration-based obligations without assuming registered totals equal actual population or receipts."
+}

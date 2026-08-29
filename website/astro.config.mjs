@@ -82,7 +82,10 @@ export default defineConfig({
         {
           label: "参考",
           translations: { en: "Reference" },
-          items: [{ slug: "reference/terminology" }],
+          items: [
+            { slug: "reference/terminology" },
+            { slug: "reference/ming-fiscal" },
+          ],
         },
         {
           label: "GitHub 示例",

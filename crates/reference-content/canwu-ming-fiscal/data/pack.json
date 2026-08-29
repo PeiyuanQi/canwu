@@ -1,0 +1,1099 @@
+{
+  "manifest": {
+    "pack_id": "ming-fiscal-reference",
+    "pack_version": "1.0.0",
+    "schema_version": 1,
+    "license": "Apache-2.0",
+    "title": "Ming Fiscal Institutions, 1368-1683",
+    "historical_scope": { "start": 1368, "end": 1683 },
+    "period_ids": [
+      "founding_reconstruction",
+      "hereditary_registration",
+      "silver_commutation",
+      "regional_consolidation",
+      "single_whip_spread",
+      "wartime_surcharges",
+      "southern_ming_crisis",
+      "zheng_continuation"
+    ],
+    "region_ids": [
+      "empire_center",
+      "liaodong_frontier",
+      "lower_yangzi",
+      "north_china",
+      "southeast_coast",
+      "southern_ming_courts",
+      "southwest",
+      "taiwan_zheng"
+    ],
+    "mechanisms": [
+      "land_tax",
+      "labor_service",
+      "grain_tribute",
+      "military_farm",
+      "salt_monopoly",
+      "commercial_tax",
+      "miscellaneous_levy",
+      "treasury_and_remittance",
+      "military_surcharge",
+      "merchant_credit",
+      "relief_reserve"
+    ]
+  },
+  "periods": [
+    { "id": "founding_reconstruction", "label": "Founding reconstruction", "window": { "start": 1368, "end": 1392 }, "branch": null },
+    { "id": "hereditary_registration", "label": "Registration-centered early Ming", "window": { "start": 1393, "end": 1429 }, "branch": null },
+    { "id": "silver_commutation", "label": "Silver commutation and treasury consolidation", "window": { "start": 1430, "end": 1499 }, "branch": null },
+    { "id": "regional_consolidation", "label": "Regional levy consolidation", "window": { "start": 1500, "end": 1579 }, "branch": null },
+    { "id": "single_whip_spread", "label": "Regional spread of Single Whip practices", "window": { "start": 1580, "end": 1617 }, "branch": null },
+    { "id": "wartime_surcharges", "label": "Late Ming wartime surcharges", "window": { "start": 1618, "end": 1643 }, "branch": null },
+    { "id": "southern_ming_crisis", "label": "Southern Ming fiscal fragmentation", "window": { "start": 1644, "end": 1662 }, "branch": null },
+    { "id": "zheng_continuation", "label": "Zheng maritime continuation", "window": { "start": 1663, "end": 1683 }, "branch": "optional_zheng_continuation" }
+  ],
+  "regions": [
+    { "id": "empire_center", "label": "Central court and metropolitan treasuries" },
+    { "id": "liaodong_frontier", "label": "Liaodong and northeastern frontier" },
+    { "id": "lower_yangzi", "label": "Lower Yangzi fiscal heartland" },
+    { "id": "north_china", "label": "North China provinces" },
+    { "id": "southeast_coast", "label": "Fujian, Guangdong, and maritime southeast" },
+    { "id": "southern_ming_courts", "label": "Successive Southern Ming court zones" },
+    { "id": "southwest", "label": "Southwestern provinces and frontier administrations" },
+    { "id": "taiwan_zheng", "label": "Zheng Taiwan and maritime network" }
+  ],
+  "institutions": [
+    {
+      "id": "ministry_of_revenue",
+      "label": "Ministry of Revenue",
+      "institution_kind": "central_fiscal_ministry",
+      "region_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "provenance_ids": ["huang1974", "ming_shilu"]
+    },
+    {
+      "id": "taicang_treasury",
+      "label": "Taicang silver treasury",
+      "institution_kind": "central_silver_treasury",
+      "region_ids": ["empire_center"],
+      "provenance_ids": ["huang1974"]
+    },
+    {
+      "id": "lijia_registration",
+      "label": "Lijia registration and service organization",
+      "institution_kind": "local_registration_and_service",
+      "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "provenance_ids": ["ho1959", "huang1974"]
+    },
+    {
+      "id": "salt_administration",
+      "label": "Regional salt administrations",
+      "institution_kind": "monopoly_administration",
+      "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southern_ming_courts"],
+      "provenance_ids": ["von_glahn1996", "huang1974"]
+    },
+    {
+      "id": "provincial_grand_coordinators",
+      "label": "Provincial and regional fiscal coordinators",
+      "institution_kind": "regional_fiscal_coordination",
+      "region_ids": ["liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "provenance_ids": ["huang1974", "dardess2012"]
+    },
+    {
+      "id": "southern_ming_court_finance",
+      "label": "Southern Ming court fiscal offices",
+      "institution_kind": "mobile_and_regional_court_finance",
+      "region_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "provenance_ids": ["struve1984"]
+    },
+    {
+      "id": "zheng_maritime_administration",
+      "label": "Zheng maritime fiscal administration",
+      "institution_kind": "maritime_military_fiscal_network",
+      "region_ids": ["southeast_coast", "taiwan_zheng"],
+      "provenance_ids": ["hang2015"]
+    }
+  ],
+  "rules": [
+    {
+      "id": "yellow_register_land_assessment",
+      "revision": 1,
+      "label": "Land and household assessment through registered quotas",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1368, "end": 1580 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "registered_land_and_households",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["grain", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["central_quota", "local_retention"],
+      "provenance_ids": ["ho1959", "huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "lijia_labor_service",
+      "revision": 1,
+      "label": "Registered labor and service obligations",
+      "mechanism": "labor_service",
+      "legal_window": { "start": 1368, "end": 1617 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "registered_households",
+      "assessment_basis": "labor_service",
+      "payment_forms": ["labor", "silver", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["local_service", "official_transport"],
+      "provenance_ids": ["ho1959", "huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "canal_grain_tribute",
+      "revision": 1,
+      "label": "Tax grain and canal tribute remittance",
+      "mechanism": "grain_tribute",
+      "legal_window": { "start": 1368, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china"],
+      "subject_scope": "tax_grain_quota",
+      "assessment_basis": "tax_grain_quota",
+      "payment_forms": ["grain", "silver"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["capital_supply", "northern_garrisons"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "weisuo_military_farms",
+      "revision": 1,
+      "label": "Hereditary garrison military-farm contribution",
+      "mechanism": "military_farm",
+      "legal_window": { "start": 1368, "end": 1643 },
+      "jurisdiction_ids": ["liaodong_frontier", "north_china", "southwest"],
+      "subject_scope": "garrison_households_and_fields",
+      "assessment_basis": "military_farm_output",
+      "payment_forms": ["grain", "labor"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["garrison_supply"],
+      "provenance_ids": ["dardess2012", "huang1974"],
+      "confidence": "medium"
+    },
+    {
+      "id": "kaizhong_salt_certificates",
+      "revision": 1,
+      "label": "Salt certificates exchanged for frontier provisioning",
+      "mechanism": "salt_monopoly",
+      "legal_window": { "start": 1370, "end": 1499 },
+      "jurisdiction_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china"],
+      "subject_scope": "licensed_salt_merchants",
+      "assessment_basis": "salt_certificate",
+      "payment_forms": ["grain", "salt_certificate"],
+      "commutation": "disabled",
+      "earmark_ids": ["frontier_supply"],
+      "provenance_ids": ["von_glahn1996"],
+      "confidence": "high"
+    },
+    {
+      "id": "early_commercial_customs",
+      "revision": 1,
+      "label": "Market, gate, and commercial customs",
+      "mechanism": "commercial_tax",
+      "legal_window": { "start": 1368, "end": 1499 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+      "subject_scope": "licensed_commercial_flows",
+      "assessment_basis": "commercial_flow",
+      "payment_forms": ["coin", "goods", "silver"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["central_quota", "local_retention"],
+      "provenance_ids": ["brook1998", "von_glahn1996"],
+      "confidence": "medium"
+    },
+    {
+      "id": "local_miscellaneous_services",
+      "revision": 1,
+      "label": "Local miscellaneous levies and service procurement",
+      "mechanism": "miscellaneous_levy",
+      "legal_window": { "start": 1368, "end": 1643 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "registered_local_taxpayers",
+      "assessment_basis": "registered_household",
+      "payment_forms": ["labor", "goods", "silver"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["local_administration"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "medium"
+    },
+    {
+      "id": "dual_capital_treasury_remittance",
+      "revision": 1,
+      "label": "Central quota allocation and remittance",
+      "mechanism": "treasury_and_remittance",
+      "legal_window": { "start": 1368, "end": 1441 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china"],
+      "subject_scope": "provincial_quota_accounts",
+      "assessment_basis": "treasury_allocation",
+      "payment_forms": ["grain", "goods", "coin"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["court", "capital_supply"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "medium"
+    },
+    {
+      "id": "ever_normal_relief_reserves",
+      "revision": 1,
+      "label": "Local and regional grain relief reserves",
+      "mechanism": "relief_reserve",
+      "legal_window": { "start": 1368, "end": 1643 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "county_and_prefectural_reserves",
+      "assessment_basis": "treasury_allocation",
+      "payment_forms": ["grain", "silver"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["famine_relief", "price_stabilization"],
+      "provenance_ids": ["will1991"],
+      "confidence": "medium"
+    },
+    {
+      "id": "silver_tax_commutation_1436",
+      "revision": 1,
+      "label": "Expanded silver commutation of grain and service quotas",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1436, "end": 1617 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "registered_land_and_households",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["grain", "silver"],
+      "commutation": "allowed",
+      "earmark_ids": ["central_quota", "local_retention"],
+      "provenance_ids": ["atwell2002", "huang1974", "von_glahn1996"],
+      "confidence": "high"
+    },
+    {
+      "id": "taicang_silver_treasury_1442",
+      "revision": 1,
+      "label": "Taicang receipt and disbursement of central silver revenue",
+      "mechanism": "treasury_and_remittance",
+      "legal_window": { "start": 1442, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "central_and_provincial_quota_accounts",
+      "assessment_basis": "treasury_allocation",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["central_treasury", "military_pay", "court"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "salt_certificate_debt_chain",
+      "revision": 1,
+      "label": "Delayed salt-certificate redemption and merchant claims",
+      "mechanism": "merchant_credit",
+      "legal_window": { "start": 1450, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+      "subject_scope": "licensed_salt_merchants_and_certificate_holders",
+      "assessment_basis": "negotiated_credit",
+      "payment_forms": ["salt_certificate", "credit", "silver"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["salt_revenue", "frontier_supply"],
+      "provenance_ids": ["von_glahn1996"],
+      "confidence": "medium"
+    },
+    {
+      "id": "late_salt_certificate_sales",
+      "revision": 1,
+      "label": "Later salt-certificate quota sales and regional monopoly revenue",
+      "mechanism": "salt_monopoly",
+      "legal_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+      "subject_scope": "licensed_salt_merchants_and_regional_quotas",
+      "assessment_basis": "salt_certificate",
+      "payment_forms": ["silver", "salt_certificate", "credit"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["central_quota", "regional_administration"],
+      "provenance_ids": ["von_glahn1996"],
+      "confidence": "medium"
+    },
+    {
+      "id": "single_whip_lower_yangzi",
+      "revision": 1,
+      "label": "Lower Yangzi consolidation of land and service liabilities in silver",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1522, "end": 1643 },
+      "jurisdiction_ids": ["lower_yangzi"],
+      "subject_scope": "consolidated_registered_land_liability",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["consolidated_quota"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "single_whip_southeast",
+      "revision": 1,
+      "label": "Southeastern consolidation of land and service liabilities in silver",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1550, "end": 1643 },
+      "jurisdiction_ids": ["southeast_coast"],
+      "subject_scope": "consolidated_registered_land_liability",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["consolidated_quota"],
+      "provenance_ids": ["huang1974", "brook1998"],
+      "confidence": "medium"
+    },
+    {
+      "id": "single_whip_north",
+      "revision": 1,
+      "label": "Northern consolidation of land and service liabilities in silver",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1570, "end": 1643 },
+      "jurisdiction_ids": ["north_china"],
+      "subject_scope": "consolidated_registered_land_liability",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["silver", "grain"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["consolidated_quota", "capital_supply"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "medium"
+    },
+    {
+      "id": "single_whip_southwest",
+      "revision": 1,
+      "label": "Southwestern regional consolidation of fiscal liabilities",
+      "mechanism": "land_tax",
+      "legal_window": { "start": 1580, "end": 1643 },
+      "jurisdiction_ids": ["southwest"],
+      "subject_scope": "consolidated_registered_liability",
+      "assessment_basis": "registered_land",
+      "payment_forms": ["silver", "grain", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["regional_quota"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "low"
+    },
+    {
+      "id": "late_ming_commercial_silver",
+      "revision": 1,
+      "label": "Commercial levies assessed and settled increasingly in silver",
+      "mechanism": "commercial_tax",
+      "legal_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+      "subject_scope": "commercial_flows_and_licensed_markets",
+      "assessment_basis": "commercial_flow",
+      "payment_forms": ["silver", "coin", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["central_quota", "local_retention"],
+      "provenance_ids": ["brook1998", "von_glahn1996"],
+      "confidence": "medium"
+    },
+    {
+      "id": "liaodong_military_surcharge",
+      "revision": 1,
+      "label": "Liaodong military surcharge",
+      "mechanism": "military_surcharge",
+      "legal_window": { "start": 1618, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "land_tax_surcharge_base",
+      "assessment_basis": "emergency_surcharge",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["liaodong_armies"],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "suppression_military_surcharge",
+      "revision": 1,
+      "label": "Internal-rebellion suppression surcharge",
+      "mechanism": "military_surcharge",
+      "legal_window": { "start": 1630, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "land_tax_surcharge_base",
+      "assessment_basis": "emergency_surcharge",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["internal_campaigns"],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "training_military_surcharge",
+      "revision": 1,
+      "label": "Military training surcharge",
+      "mechanism": "military_surcharge",
+      "legal_window": { "start": 1639, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "subject_scope": "land_tax_surcharge_base",
+      "assessment_basis": "emergency_surcharge",
+      "payment_forms": ["silver"],
+      "commutation": "required",
+      "earmark_ids": ["army_training"],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "late_ming_merchant_advances",
+      "revision": 1,
+      "label": "Negotiated merchant advances to military and court finance",
+      "mechanism": "merchant_credit",
+      "legal_window": { "start": 1580, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "southeast_coast"],
+      "subject_scope": "licensed_merchants_and_brokers",
+      "assessment_basis": "negotiated_credit",
+      "payment_forms": ["credit", "silver", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["military_pay", "court_supply"],
+      "provenance_ids": ["brook1998", "von_glahn1996"],
+      "confidence": "medium"
+    },
+    {
+      "id": "southern_ming_emergency_levies",
+      "revision": 1,
+      "label": "Southern Ming emergency and military levies",
+      "mechanism": "military_surcharge",
+      "legal_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "subject_scope": "controlled_territories_and_negotiated_tax_bases",
+      "assessment_basis": "emergency_surcharge",
+      "payment_forms": ["silver", "grain", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["court_survival", "field_armies"],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "southern_ming_regional_treasuries",
+      "revision": 1,
+      "label": "Fragmented regional court remittance",
+      "mechanism": "treasury_and_remittance",
+      "legal_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "subject_scope": "regional_court_and_commander_accounts",
+      "assessment_basis": "treasury_allocation",
+      "payment_forms": ["silver", "grain", "goods", "credit"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["court", "regional_armies"],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "southern_ming_salt_finance",
+      "revision": 1,
+      "label": "Regional salt revenue and certificate finance",
+      "mechanism": "salt_monopoly",
+      "legal_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts"],
+      "subject_scope": "controlled_salt_routes_and_merchants",
+      "assessment_basis": "salt_certificate",
+      "payment_forms": ["silver", "salt_certificate", "credit"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["regional_armies", "court_survival"],
+      "provenance_ids": ["struve1984", "von_glahn1996"],
+      "confidence": "low"
+    },
+    {
+      "id": "southern_ming_merchant_credit",
+      "revision": 1,
+      "label": "Merchant and notable credit for Southern Ming regimes",
+      "mechanism": "merchant_credit",
+      "legal_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "subject_scope": "merchants_notables_and_commanders",
+      "assessment_basis": "negotiated_credit",
+      "payment_forms": ["credit", "silver", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["army_supply", "court_survival"],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "zheng_maritime_customs",
+      "revision": 1,
+      "label": "Zheng maritime customs and licensed trade revenue",
+      "mechanism": "commercial_tax",
+      "legal_window": { "start": 1663, "end": 1683 },
+      "jurisdiction_ids": ["southeast_coast", "taiwan_zheng"],
+      "subject_scope": "maritime_trade_and_licensed_junks",
+      "assessment_basis": "commercial_flow",
+      "payment_forms": ["silver", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["fleet", "administration"],
+      "provenance_ids": ["hang2015"],
+      "confidence": "medium"
+    },
+    {
+      "id": "zheng_merchant_military_credit",
+      "revision": 1,
+      "label": "Zheng merchant-network military credit",
+      "mechanism": "merchant_credit",
+      "legal_window": { "start": 1663, "end": 1683 },
+      "jurisdiction_ids": ["southeast_coast", "taiwan_zheng"],
+      "subject_scope": "maritime_merchants_and_commanders",
+      "assessment_basis": "negotiated_credit",
+      "payment_forms": ["credit", "silver", "goods"],
+      "commutation": "regional_practice",
+      "earmark_ids": ["fleet", "garrisons"],
+      "provenance_ids": ["hang2015"],
+      "confidence": "medium"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "expand_silver_commutation",
+      "label": "Authorize broader silver commutation",
+      "from_rule_ids": ["yellow_register_land_assessment"],
+      "to_rule_ids": ["silver_tax_commutation_1436"],
+      "observed_window": { "start": 1436, "end": 1499 },
+      "eligibility_window": { "start": 1400, "end": 1617 },
+      "jurisdiction_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": [],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "establish_taicang_silver_flow",
+      "label": "Consolidate central silver remittance in Taicang",
+      "from_rule_ids": ["dual_capital_treasury_remittance"],
+      "to_rule_ids": ["taicang_silver_treasury_1442"],
+      "observed_window": { "start": 1442, "end": 1499 },
+      "eligibility_window": { "start": 1400, "end": 1617 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china"],
+      "supersedes_or_suspends": ["dual_capital_treasury_remittance"],
+      "prerequisite_ids": [],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "adopt_single_whip_lower_yangzi",
+      "label": "Adopt consolidated silver assessment in the Lower Yangzi",
+      "from_rule_ids": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "to_rule_ids": ["single_whip_lower_yangzi"],
+      "observed_window": { "start": 1522, "end": 1581 },
+      "eligibility_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["lower_yangzi"],
+      "supersedes_or_suspends": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "prerequisite_ids": ["expand_silver_commutation"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "high"
+    },
+    {
+      "id": "adopt_single_whip_southeast",
+      "label": "Adopt consolidated silver assessment in the Southeast",
+      "from_rule_ids": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "to_rule_ids": ["single_whip_southeast"],
+      "observed_window": { "start": 1550, "end": 1600 },
+      "eligibility_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["southeast_coast"],
+      "supersedes_or_suspends": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "prerequisite_ids": ["expand_silver_commutation"],
+      "provenance_ids": ["huang1974", "brook1998"],
+      "confidence": "medium"
+    },
+    {
+      "id": "adopt_single_whip_north",
+      "label": "Adopt consolidated assessment in North China",
+      "from_rule_ids": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "to_rule_ids": ["single_whip_north"],
+      "observed_window": { "start": 1570, "end": 1617 },
+      "eligibility_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["north_china"],
+      "supersedes_or_suspends": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "prerequisite_ids": ["expand_silver_commutation"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "medium"
+    },
+    {
+      "id": "adopt_single_whip_southwest",
+      "label": "Adopt regionally adapted consolidated assessment in the Southwest",
+      "from_rule_ids": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "to_rule_ids": ["single_whip_southwest"],
+      "observed_window": { "start": 1580, "end": 1617 },
+      "eligibility_window": { "start": 1500, "end": 1643 },
+      "jurisdiction_ids": ["southwest"],
+      "supersedes_or_suspends": ["lijia_labor_service", "silver_tax_commutation_1436"],
+      "prerequisite_ids": ["expand_silver_commutation"],
+      "provenance_ids": ["huang1974"],
+      "confidence": "low"
+    },
+    {
+      "id": "impose_liaodong_surcharge",
+      "label": "Impose the Liaodong military surcharge",
+      "from_rule_ids": ["taicang_silver_treasury_1442"],
+      "to_rule_ids": ["liaodong_military_surcharge"],
+      "observed_window": { "start": 1618, "end": 1629 },
+      "eligibility_window": { "start": 1580, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": [],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "stack_suppression_surcharge",
+      "label": "Add the internal suppression surcharge",
+      "from_rule_ids": ["liaodong_military_surcharge"],
+      "to_rule_ids": ["suppression_military_surcharge"],
+      "observed_window": { "start": 1630, "end": 1638 },
+      "eligibility_window": { "start": 1618, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": ["impose_liaodong_surcharge"],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "stack_training_surcharge",
+      "label": "Add the military training surcharge",
+      "from_rule_ids": ["liaodong_military_surcharge", "suppression_military_surcharge"],
+      "to_rule_ids": ["training_military_surcharge"],
+      "observed_window": { "start": 1639, "end": 1643 },
+      "eligibility_window": { "start": 1618, "end": 1643 },
+      "jurisdiction_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": ["stack_suppression_surcharge"],
+      "provenance_ids": ["dardess2012", "ming_shilu"],
+      "confidence": "high"
+    },
+    {
+      "id": "fragment_southern_ming_military_levy",
+      "label": "Authorize regional Southern Ming military levies",
+      "from_rule_ids": ["taicang_silver_treasury_1442", "late_ming_merchant_advances"],
+      "to_rule_ids": ["southern_ming_emergency_levies"],
+      "observed_window": { "start": 1644, "end": 1662 },
+      "eligibility_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": [],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "fragment_southern_ming_merchant_credit",
+      "label": "Authorize regional Southern Ming merchant credit",
+      "from_rule_ids": ["taicang_silver_treasury_1442", "late_ming_merchant_advances"],
+      "to_rule_ids": ["southern_ming_merchant_credit"],
+      "observed_window": { "start": 1644, "end": 1662 },
+      "eligibility_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": [],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "fragment_southern_ming_regional_treasury",
+      "label": "Authorize regional Southern Ming treasury control",
+      "from_rule_ids": ["taicang_silver_treasury_1442", "late_ming_merchant_advances"],
+      "to_rule_ids": ["southern_ming_regional_treasuries"],
+      "observed_window": { "start": 1644, "end": 1662 },
+      "eligibility_window": { "start": 1644, "end": 1662 },
+      "jurisdiction_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+      "supersedes_or_suspends": ["taicang_silver_treasury_1442"],
+      "prerequisite_ids": [],
+      "provenance_ids": ["struve1984"],
+      "confidence": "medium"
+    },
+    {
+      "id": "continue_zheng_maritime_finance",
+      "label": "Continue resistance finance through the Zheng maritime network",
+      "from_rule_ids": ["southern_ming_merchant_credit", "southern_ming_regional_treasuries"],
+      "to_rule_ids": ["zheng_maritime_customs", "zheng_merchant_military_credit"],
+      "observed_window": { "start": 1663, "end": 1683 },
+      "eligibility_window": { "start": 1644, "end": 1683 },
+      "jurisdiction_ids": ["southeast_coast", "taiwan_zheng"],
+      "supersedes_or_suspends": [],
+      "prerequisite_ids": [],
+      "provenance_ids": ["hang2015"],
+      "confidence": "medium"
+    }
+  ],
+  "coverage": [
+    {
+      "id": "default_explicit_unknown",
+      "priority": 0,
+      "selector": { "period_ids": [], "region_ids": [], "mechanisms": [] },
+      "status": "explicit_unknown",
+      "definition_ids": [],
+      "provenance_ids": []
+    },
+    {
+      "id": "early_registered_land",
+      "priority": 10,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["land_tax"]
+      },
+      "status": "supported",
+      "definition_ids": ["yellow_register_land_assessment", "lijia_registration"],
+      "provenance_ids": ["ho1959", "huang1974"]
+    },
+    {
+      "id": "early_lijia_service",
+      "priority": 10,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["labor_service", "miscellaneous_levy"]
+      },
+      "status": "supported",
+      "definition_ids": ["lijia_labor_service", "local_miscellaneous_services", "lijia_registration"],
+      "provenance_ids": ["ho1959", "huang1974"]
+    },
+    {
+      "id": "early_grain_and_garrison",
+      "priority": 10,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southwest"],
+        "mechanisms": ["grain_tribute", "military_farm"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["canal_grain_tribute", "weisuo_military_farms"],
+      "provenance_ids": ["dardess2012", "huang1974"]
+    },
+    {
+      "id": "early_grain_supported_regions",
+      "priority": 11,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china"],
+        "mechanisms": ["grain_tribute"]
+      },
+      "status": "supported",
+      "definition_ids": ["canal_grain_tribute"],
+      "provenance_ids": ["huang1974"]
+    },
+    {
+      "id": "early_military_farm_supported_regions",
+      "priority": 11,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["liaodong_frontier", "north_china", "southwest"],
+        "mechanisms": ["military_farm"]
+      },
+      "status": "supported",
+      "definition_ids": ["weisuo_military_farms"],
+      "provenance_ids": ["dardess2012", "huang1974"]
+    },
+    {
+      "id": "early_salt_and_commerce",
+      "priority": 10,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast"],
+        "mechanisms": ["salt_monopoly", "commercial_tax"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["early_commercial_customs", "kaizhong_salt_certificates", "salt_administration"],
+      "provenance_ids": ["brook1998", "von_glahn1996"]
+    },
+    {
+      "id": "early_salt_supported_regions",
+      "priority": 11,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china"],
+        "mechanisms": ["salt_monopoly"]
+      },
+      "status": "supported",
+      "definition_ids": ["kaizhong_salt_certificates", "salt_administration"],
+      "provenance_ids": ["von_glahn1996"]
+    },
+    {
+      "id": "early_commerce_supported_regions",
+      "priority": 11,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+        "mechanisms": ["commercial_tax"]
+      },
+      "status": "supported",
+      "definition_ids": ["early_commercial_customs"],
+      "provenance_ids": ["brook1998", "von_glahn1996"]
+    },
+    {
+      "id": "early_treasury_and_relief",
+      "priority": 10,
+      "selector": {
+        "period_ids": ["founding_reconstruction", "hereditary_registration"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["treasury_and_remittance", "relief_reserve"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["dual_capital_treasury_remittance", "ever_normal_relief_reserves", "ministry_of_revenue"],
+      "provenance_ids": ["huang1974", "will1991"]
+    },
+    {
+      "id": "commutation_land_and_treasury",
+      "priority": 20,
+      "selector": {
+        "period_ids": ["silver_commutation", "regional_consolidation"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["land_tax", "labor_service", "treasury_and_remittance"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["expand_silver_commutation", "lijia_labor_service", "silver_tax_commutation_1436", "taicang_silver_treasury_1442", "taicang_treasury"],
+      "provenance_ids": ["huang1974", "von_glahn1996"]
+    },
+    {
+      "id": "commutation_land_and_labor_supported_regions",
+      "priority": 21,
+      "selector": {
+        "period_ids": ["silver_commutation", "regional_consolidation"],
+        "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["land_tax", "labor_service"]
+      },
+      "status": "supported",
+      "definition_ids": ["expand_silver_commutation", "lijia_labor_service", "silver_tax_commutation_1436"],
+      "provenance_ids": ["huang1974", "von_glahn1996"]
+    },
+    {
+      "id": "commutation_treasury_supported_regions",
+      "priority": 21,
+      "selector": {
+        "period_ids": ["silver_commutation", "regional_consolidation"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["treasury_and_remittance"]
+      },
+      "status": "supported",
+      "definition_ids": ["taicang_silver_treasury_1442", "taicang_treasury"],
+      "provenance_ids": ["huang1974"]
+    },
+    {
+      "id": "middle_grain_local_and_relief",
+      "priority": 20,
+      "selector": {
+        "period_ids": ["silver_commutation", "regional_consolidation", "single_whip_spread"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["grain_tribute", "miscellaneous_levy", "relief_reserve"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["canal_grain_tribute", "ever_normal_relief_reserves", "local_miscellaneous_services"],
+      "provenance_ids": ["huang1974", "will1991"]
+    },
+    {
+      "id": "middle_salt_credit_commerce",
+      "priority": 20,
+      "selector": {
+        "period_ids": ["silver_commutation", "regional_consolidation", "single_whip_spread"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+        "mechanisms": ["salt_monopoly", "commercial_tax", "merchant_credit"]
+      },
+      "status": "supported",
+      "definition_ids": ["early_commercial_customs", "kaizhong_salt_certificates", "late_ming_commercial_silver", "late_ming_merchant_advances", "late_salt_certificate_sales", "salt_certificate_debt_chain", "salt_administration"],
+      "provenance_ids": ["brook1998", "von_glahn1996"]
+    },
+    {
+      "id": "single_whip_regional_variation",
+      "priority": 30,
+      "selector": {
+        "period_ids": ["regional_consolidation", "single_whip_spread", "wartime_surcharges"],
+        "region_ids": ["lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["land_tax", "labor_service"]
+      },
+      "status": "supported",
+      "definition_ids": ["adopt_single_whip_lower_yangzi", "adopt_single_whip_north", "adopt_single_whip_southeast", "adopt_single_whip_southwest", "lijia_labor_service", "single_whip_lower_yangzi", "single_whip_north", "single_whip_southeast", "single_whip_southwest"],
+      "provenance_ids": ["brook1998", "huang1974"]
+    },
+    {
+      "id": "late_wartime_surcharges",
+      "priority": 40,
+      "selector": {
+        "period_ids": ["wartime_surcharges"],
+        "region_ids": ["empire_center", "liaodong_frontier", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["military_surcharge"]
+      },
+      "status": "supported",
+      "definition_ids": ["impose_liaodong_surcharge", "liaodong_military_surcharge", "stack_suppression_surcharge", "stack_training_surcharge", "suppression_military_surcharge", "training_military_surcharge"],
+      "provenance_ids": ["dardess2012", "ming_shilu"]
+    },
+    {
+      "id": "late_treasury_and_credit",
+      "priority": 40,
+      "selector": {
+        "period_ids": ["wartime_surcharges"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["treasury_and_remittance", "merchant_credit"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["late_ming_merchant_advances", "salt_certificate_debt_chain", "taicang_silver_treasury_1442", "taicang_treasury"],
+      "provenance_ids": ["huang1974", "von_glahn1996"]
+    },
+    {
+      "id": "late_treasury_supported_regions",
+      "priority": 41,
+      "selector": {
+        "period_ids": ["wartime_surcharges"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast", "southwest"],
+        "mechanisms": ["treasury_and_remittance"]
+      },
+      "status": "supported",
+      "definition_ids": ["taicang_silver_treasury_1442", "taicang_treasury"],
+      "provenance_ids": ["huang1974"]
+    },
+    {
+      "id": "late_credit_supported_regions",
+      "priority": 41,
+      "selector": {
+        "period_ids": ["wartime_surcharges"],
+        "region_ids": ["empire_center", "lower_yangzi", "north_china", "southeast_coast"],
+        "mechanisms": ["merchant_credit"]
+      },
+      "status": "supported",
+      "definition_ids": ["late_ming_merchant_advances", "salt_certificate_debt_chain"],
+      "provenance_ids": ["huang1974", "von_glahn1996"]
+    },
+    {
+      "id": "southern_ming_crisis_finance",
+      "priority": 50,
+      "selector": {
+        "period_ids": ["southern_ming_crisis"],
+        "region_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+        "mechanisms": ["military_surcharge", "treasury_and_remittance", "merchant_credit", "salt_monopoly"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["fragment_southern_ming_military_levy", "fragment_southern_ming_merchant_credit", "fragment_southern_ming_regional_treasury", "southern_ming_court_finance", "southern_ming_emergency_levies", "southern_ming_merchant_credit", "southern_ming_regional_treasuries", "southern_ming_salt_finance"],
+      "provenance_ids": ["struve1984"]
+    },
+    {
+      "id": "southern_ming_crisis_supported_core",
+      "priority": 51,
+      "selector": {
+        "period_ids": ["southern_ming_crisis"],
+        "region_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+        "mechanisms": ["military_surcharge", "treasury_and_remittance", "merchant_credit"]
+      },
+      "status": "supported",
+      "definition_ids": ["fragment_southern_ming_military_levy", "fragment_southern_ming_merchant_credit", "fragment_southern_ming_regional_treasury", "southern_ming_emergency_levies", "southern_ming_merchant_credit", "southern_ming_regional_treasuries"],
+      "provenance_ids": ["struve1984"]
+    },
+    {
+      "id": "southern_ming_salt_supported_regions",
+      "priority": 51,
+      "selector": {
+        "period_ids": ["southern_ming_crisis"],
+        "region_ids": ["southeast_coast", "southern_ming_courts"],
+        "mechanisms": ["salt_monopoly"]
+      },
+      "status": "supported",
+      "definition_ids": ["southern_ming_salt_finance"],
+      "provenance_ids": ["struve1984", "von_glahn1996"]
+    },
+    {
+      "id": "southern_ming_legacy_assessments",
+      "priority": 50,
+      "selector": {
+        "period_ids": ["southern_ming_crisis"],
+        "region_ids": ["southeast_coast", "southern_ming_courts", "southwest"],
+        "mechanisms": ["land_tax", "labor_service", "grain_tribute", "commercial_tax", "miscellaneous_levy", "relief_reserve"]
+      },
+      "status": "archetype_fallback",
+      "definition_ids": ["canal_grain_tribute", "ever_normal_relief_reserves", "late_ming_commercial_silver", "lijia_labor_service", "local_miscellaneous_services", "single_whip_southeast", "single_whip_southwest"],
+      "provenance_ids": ["struve1984"]
+    },
+    {
+      "id": "zheng_maritime_finance",
+      "priority": 60,
+      "selector": {
+        "period_ids": ["zheng_continuation"],
+        "region_ids": ["southeast_coast", "taiwan_zheng"],
+        "mechanisms": ["commercial_tax", "merchant_credit"]
+      },
+      "status": "supported",
+      "definition_ids": ["continue_zheng_maritime_finance", "zheng_maritime_administration", "zheng_maritime_customs", "zheng_merchant_military_credit"],
+      "provenance_ids": ["hang2015"]
+    },
+    {
+      "id": "zheng_other_mechanisms",
+      "priority": 60,
+      "selector": {
+        "period_ids": ["zheng_continuation"],
+        "region_ids": ["southeast_coast", "taiwan_zheng"],
+        "mechanisms": ["land_tax", "labor_service", "grain_tribute", "military_farm", "salt_monopoly", "miscellaneous_levy", "treasury_and_remittance", "military_surcharge", "relief_reserve"]
+      },
+      "status": "explicit_unknown",
+      "definition_ids": [],
+      "provenance_ids": ["hang2015"]
+    }
+  ],
+  "provenance": [
+    {
+      "id": "atwell2002",
+      "citation": "William S. Atwell, Time, Money, and the Weather: Ming China and the Great Depression of the Mid-Fifteenth Century, Journal of Asian Studies 61.1 (2002)",
+      "url": "https://doi.org/10.2307/2700190",
+      "claim_scope": "Mid-fifteenth-century monetary and climatic stress; not a complete provincial revenue series.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not project a mid-fifteenth monetary crisis directly onto the seventeenth-century surcharge system."]
+    },
+    {
+      "id": "brook1998",
+      "citation": "Timothy Brook, The Confusions of Pleasure: Commerce and Culture in Ming China (University of California Press, 1998)",
+      "url": "https://www.ucpress.edu/books/the-confusions-of-pleasure/paper",
+      "claim_scope": "Commercialization, silver use, merchant networks, and regional variation.",
+      "confidence": "medium",
+      "forbidden_inferences": ["Do not convert qualitative commercialization into unsupported annual tax totals."]
+    },
+    {
+      "id": "dardess2012",
+      "citation": "John W. Dardess, Ming China, 1368-1644: A Concise History of a Resilient Empire (Rowman & Littlefield, 2012)",
+      "url": "https://rowman.com/ISBN/9781442204911",
+      "claim_scope": "Dynastic chronology, institutions, frontier war, and late-Ming crisis context.",
+      "confidence": "medium",
+      "forbidden_inferences": ["Do not treat an empire-wide narrative as proof of identical county practice."]
+    },
+    {
+      "id": "hang2015",
+      "citation": "Xing Hang, Conflict and Commerce in Maritime East Asia: The Zheng Family and the Shaping of the Modern World, c.1620-1720 (Cambridge University Press, 2015)",
+      "url": "https://doi.org/10.1017/CBO9781316401224",
+      "claim_scope": "Zheng maritime commerce, military organization, and fiscal networks after the Southern Ming court sequence.",
+      "confidence": "medium",
+      "forbidden_inferences": ["Do not label the optional Zheng continuation as an unbroken central Ming tax administration."]
+    },
+    {
+      "id": "ho1959",
+      "citation": "Ping-ti Ho, Studies on the Population of China, 1368-1953 (Harvard University Press, 1959)",
+      "url": "https://www.degruyterbrill.com/document/doi/10.4159/harvard.9780674184510/html",
+      "claim_scope": "Registration, population records, and the limitations of official household totals.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not equate registered households with actual population or collectible capacity."]
+    },
+    {
+      "id": "huang1974",
+      "citation": "Ray Huang, Taxation and Governmental Finance in Sixteenth-Century Ming China (Cambridge University Press, 1974)",
+      "url": "https://doi.org/10.1017/CBO9780511735400",
+      "claim_scope": "Fiscal institutions, quotas, commutation, Single Whip regionalism, treasuries, and sixteenth-century administration.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not model Single Whip as a simultaneous empire-wide switch in 1581.", "Do not infer actual receipts directly from statutory quotas."]
+    },
+    {
+      "id": "ming_shilu",
+      "citation": "Ming Shilu, translated extracts and research guide, Geoff Wade, National University of Singapore",
+      "url": "https://epress.nus.edu.sg/msl/",
+      "claim_scope": "Dated court actions and institutional terminology; use with source criticism.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not treat an imperial order as evidence of uniform local implementation."]
+    },
+    {
+      "id": "struve1984",
+      "citation": "Lynn A. Struve, The Southern Ming, 1644-1662 (Yale University Press, 1984)",
+      "url": "https://search.worldcat.org/title/10147369",
+      "claim_scope": "Successive Southern Ming regimes, regional military politics, and fiscal fragmentation.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not combine successive courts into one synchronized treasury.", "Do not infer stable territorial control from court claims."]
+    },
+    {
+      "id": "von_glahn1996",
+      "citation": "Richard von Glahn, Fountain of Fortune: Money and Monetary Policy in China, 1000-1700 (University of California Press, 1996)",
+      "url": "https://www.ucpress.edu/books/fountain-of-fortune/hardcover",
+      "claim_scope": "Silver monetization, monetary institutions, salt certificates, and credit relationships.",
+      "confidence": "high",
+      "forbidden_inferences": ["Do not treat silver as a stable unit without an external market or price record."]
+    },
+    {
+      "id": "will1991",
+      "citation": "Pierre-Etienne Will and R. Bin Wong, Nourish the People: The State Civilian Granary System in China, 1650-1850 (University of Michigan Center for Chinese Studies, 1991)",
+      "url": "https://press.umich.edu/Books/N/Nourish-the-People",
+      "claim_scope": "Granary administration as a comparative archetype; Ming local detail remains deliberately low-confidence.",
+      "confidence": "low",
+      "forbidden_inferences": ["Do not project mature Qing granary procedures backward as documented Ming facts."]
+    }
+  ]
+}

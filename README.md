@@ -114,6 +114,12 @@ cargo run -p canwu-correspondence --example routed_correspondence
   local capability, implementation, use-specific adoption, and diffusion
 - `canwu-history-research`: published optional historical assessment plugins
   kept downstream from base technology truth
+- `canwu-fiscal`: published generic fiscal-procedure extension for regional
+  law adoption, assessment, remission, authorization, receipts, and reports
+- `canwu-ming-fiscal`: source-cited Ming reference content from 1368-1662,
+  plus an optional Zheng continuation through 1683
+- `canwu-ming-fiscal-reference`: runnable Hongwu, Wanli, and Hongguang scenario
+  composition using the fiscal and reference-world plugins
 
 The [crate map](crates/README.md) shows the repository layers, exact dependency
 DAG, and publication order. The [documentation index](docs/README.md) links the

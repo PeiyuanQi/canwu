@@ -331,6 +331,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-fiscal"
+version = "0.6.0"
+dependencies = [
+ "canwu-api",
+ "semver",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "canwu-history-research"
 version = "0.6.0"
 dependencies = [
@@ -356,6 +366,28 @@ dependencies = [
  "blake3",
  "canwu-core",
  "canwu-time",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-ming-fiscal"
+version = "0.6.0"
+dependencies = [
+ "canwu-api",
+ "canwu-fiscal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-ming-fiscal-reference"
+version = "0.6.0"
+dependencies = [
+ "canwu-api",
+ "canwu-fiscal",
+ "canwu-ming-fiscal",
+ "canwu-reference-world",
  "serde",
  "serde_json",
 ]

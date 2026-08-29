@@ -15,7 +15,7 @@ notices that the generator does not collect.
 
 ## Current dependency set
 
-The inventory was reviewed against the locked dependency graph on August 16,
+The inventory was reviewed against the locked dependency graph on August 28,
 2026. `cargo metadata --locked --format-version 1` reports 316 external
 packages, and every package in that graph declares license metadata.
 
@@ -46,6 +46,7 @@ licenses. An `AND` means all listed terms apply to the relevant code or assets.
 | `blake3` | 1.8.6 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | `eframe` | 0.32.3 | MIT OR Apache-2.0 |
 | `image` | 0.25.10 | MIT OR Apache-2.0 |
+| `semver` | 1.0.28 | MIT OR Apache-2.0 |
 | `serde` | 1.0.229 | MIT OR Apache-2.0 |
 | `serde_json` | 1.0.151 | MIT OR Apache-2.0 |
 
