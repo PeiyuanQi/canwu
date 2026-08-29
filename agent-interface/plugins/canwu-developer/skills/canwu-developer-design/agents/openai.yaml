@@ -1,6 +1,0 @@
-interface:
-  display_name: "Canwu Developer Design"
-  short_description: "Design Canwu capabilities within engine boundaries"
-  default_prompt: "Use $canwu-developer-design to design or review a Canwu capability."
-policy:
-  allow_implicit_invocation: true

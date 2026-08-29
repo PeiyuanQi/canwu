@@ -59,16 +59,17 @@ same time. Agents working in this repository must also follow `AGENTS.md`.
 
 ## Agent skills
 
-Contributor and maintainer skills live in
-`agent-interface/plugins/canwu-developer/skills/`. Their names must begin with
-`canwu-developer-`. Use
+Contributor and maintainer skills live in the existing package at
+`agent-interface/plugins/canwu-developer/skills/`. Keep the existing
+`canwu-developer-release` name for compatibility; new contributor skills use
+the `canwu-contributor-*` namespace. Use
 `canwu-developer-release` for release preparation, package inspection,
 third-party notices, and cross-platform release verification.
 
-The Canwu design skill is also available to repository-local agents through
-`.agent/skills/canwu-developer-design/`, `.agents/skills/canwu-developer-design/`,
-and `.claude/skills/canwu-developer-design/`. These are synchronized
-loaders for the packaged skill, not separate developer workflows.
+The Canwu contributor design skill is also available to repository-local agents
+through `.agents/skills/canwu-contributor-design/` for Codex and
+`.claude/skills/canwu-contributor-design/` for Claude. These are synchronized
+loaders for the packaged contributor skill, not separate engine-user workflows.
 
 Engine-user skills live separately in
 `agent-interface/plugins/canwu-engine/skills/` so client guidance does not get

@@ -1,14 +1,17 @@
 ---
-name: canwu-developer-design
-description: "Design or review Canwu capabilities, domain extensions, reference content, integrations, and host contracts while preserving ownership, authority, knowledge, determinism, persistence, replay, and scale boundaries. Do not use for release packaging or ordinary client integration."
+name: canwu-contributor-design
+description: "Design or review changes to the Canwu engine repository, including public contracts, domain extensions, persistence, replay, and scale boundaries. Use for Canwu contributors; do not use for developers building a game or historical simulation on top of Canwu."
 ---
 
-# Design Canwu
+# Design Canwu Contributions
 
-Use this skill to turn a proposed Canwu capability into an implementable,
-evidence-backed design. Prefer the smallest model that explains the required
-causal behavior. A good design says what belongs in Canwu, what belongs in a
-domain package, and what must remain in the host application.
+Use this skill when contributing to the Canwu engine repository. Turn a
+proposed engine capability into an implementable, evidence-backed design.
+Prefer the smallest model that explains the required causal behavior. A good
+design says what belongs in Canwu, what belongs in a domain package, and what
+must remain in an engine user's host application. For a game or historical
+simulation built on Canwu, use the engine-user documentation and usage skills
+instead.
 
 ## Establish the baseline
 
@@ -26,9 +29,9 @@ domain package, and what must remain in the host application.
    contradictions, and superseded plans. Treat session output as an unmerged
    proposal until the current checkout, origin/main, documentation, and source
    confirm it. Do not inherit a session's branch or worktree assumptions.
-5. State the invariant, the user or game goal, the actors and observers, the
-   simulation granularity (aggregate, group, or actor), the time horizon, and
-   the evidence that will prove the design.
+5. State the invariant, the contributor problem and intended engine outcome,
+   the actors and observers, the simulation granularity (aggregate, group, or
+   actor), the time horizon, and the evidence that will prove the design.
 
 ## Place the responsibility
 

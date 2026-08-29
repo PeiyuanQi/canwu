@@ -1,0 +1,6 @@
+interface:
+  display_name: "Canwu Contributor Design"
+  short_description: "Design Canwu engine changes as a contributor"
+  default_prompt: "Use $canwu-contributor-design to design or review a Canwu engine contribution."
+policy:
+  allow_implicit_invocation: true

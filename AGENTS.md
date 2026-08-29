@@ -82,10 +82,11 @@
   baselines; measurement tooling, not authoritative runtime code.
 - `agent-interface`: Codex plugin packages and skills. Follow its nested
   `AGENTS.md`; these are development/user tools, not runtime simulation plugins.
-- Repo-local developer skill entry points are mirrored under `.agent/skills/`,
-  `.agents/skills/`, and `.claude/skills/`. Their packaged source remains under
+- Repo-local Canwu contributor skill entry points are available under
+  `.agents/skills/` for Codex and `.claude/skills/` for Claude. Their packaged
+  source remains under the existing contributor package at
   `agent-interface/plugins/canwu-developer/skills/`; keep the entry points
-  synchronized rather than creating separate design guidance.
+  synchronized rather than creating separate guidance.
 - `website` and `assets`: community site and project media, outside the
   authoritative simulation runtime.
 - `.github`: CI workflows, the pull-request template, and repository automation.
