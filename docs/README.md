@@ -37,9 +37,9 @@ current published **social diffusion simulation module**
 - [Culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md)
 - [Legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 
-## Reference content and starter kits
+## Runnable cases, reference content, and starter kits
 
-The engine will also maintain a growing first-party collection for developers
+The engine also maintains a growing first-party collection for developers
 who need a complete starting point rather than isolated API examples. Reference
 content packs provide reusable, versioned domain data; reference integrations
 map that data to small public-API world and economy models; starter kits compose
@@ -47,11 +47,11 @@ both into runnable vertical slices. They remain downstream of the engine and
 are designed to be replaced or extended by games such as Celestial Mandate.
 
 The architecture document defines the ownership and persistence boundary for
-these packages. The first starter kit should become the canonical path from a
-selected content pack to a saved and replayable simulation.
+these packages. Once reference content and integrations are composed into a
+runnable vertical slice, the documentation presents that slice as a case.
 
 - [Governance transition case](governance-transition-case.md)
-- [Ming fiscal reference package](ming-fiscal-reference.md)
+- [Ming fiscal case](ming-fiscal-case.md)
 
 ## Agent access
 

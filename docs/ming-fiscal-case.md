@@ -1,13 +1,13 @@
-# Ming fiscal reference package / 明代财政参考包
+# Ming fiscal case / 明代财政案例
 
 ## Outcome / 交付结果
 
-Canwu ships a complete, replaceable fiscal reference stack for game and
-research prototypes. The stack covers the Ming founding in 1368 through the
+This case uses Canwu's complete, replaceable fiscal reference stack for game
+and research prototypes. The stack covers the Ming founding in 1368 through the
 Southern Ming in 1662, with 1663-1683 exposed as an optional Zheng maritime
 continuation. It does not add Ming-specific rules to the simulation core.
 
-参伍提供一套可替换、可运行的财政参考栈，适合游戏原型和研究工具。核心历史
+这个案例使用参伍提供的可替换、可运行财政参考栈，适合游戏原型和研究工具。核心历史
 范围从 1368 年明朝建立延伸到 1662 年南明终结；1663-1683 年郑氏海上政权作为
 显式可选延续。明代专属规则不进入模拟内核。
 

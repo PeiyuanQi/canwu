@@ -9,6 +9,8 @@ const legacyDocsRedirects = {
   "/en/docs/architecture": "/en/architecture/",
   "/docs/continuous-game-loop": "/tutorials/continuous-game-loop/",
   "/en/docs/continuous-game-loop": "/en/tutorials/continuous-game-loop/",
+  "/reference/ming-fiscal": "/tutorials/cases/ming-fiscal/",
+  "/en/reference/ming-fiscal": "/en/tutorials/cases/ming-fiscal/",
 };
 
 export default defineConfig({
@@ -82,10 +84,7 @@ export default defineConfig({
         {
           label: "参考",
           translations: { en: "Reference" },
-          items: [
-            { slug: "reference/terminology" },
-            { slug: "reference/ming-fiscal" },
-          ],
+          items: [{ slug: "reference/terminology" }],
         },
         {
           label: "GitHub 示例",
