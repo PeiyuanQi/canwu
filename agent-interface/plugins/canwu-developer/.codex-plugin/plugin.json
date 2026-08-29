@@ -25,9 +25,9 @@
     "category": "Developer Tools",
     "capabilities": ["Read", "Write"],
     "defaultPrompt": [
-      "Create a historical simulation on Canwu.",
-      "Build a multi-seed actor-perspective timeline.",
-      "Prototype five villages evolving from the Stone Age to the Bronze Age."
+      "Prototype a downstream game on Canwu.",
+      "Create a historical research simulation.",
+      "Build a multi-seed actor-perspective timeline."
     ]
   }
 }

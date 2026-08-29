@@ -1,14 +1,17 @@
 ---
-name: canwu-developer-build-run-explorer
-description: "Build or improve a downstream Canwu run explorer. Use when a game or historical simulation needs explicit random-seed reruns, exact same-seed reproduction, cross-seed comparisons, a simulation-time slider, collapsible tree tables, actor- or institution-relative perspectives, causal event inspection, save/fork/replay controls, or trusted research views without leaking authoritative ground truth."
+name: canwu-common-build-run-explorer
+description: "Build or improve a shared Canwu run explorer for games and historical research simulations. Use when a Canwu client needs explicit random-seed reruns, exact same-seed reproduction, cross-seed comparisons, a simulation-time slider, collapsible tree tables, actor- or institution-relative perspectives, causal event inspection, save/fork/replay controls, or trusted research views without leaking authoritative ground truth."
 ---
 
-# Build a Canwu Run Explorer
+# Build a Common Canwu Run Explorer
 
 Build this interface in the downstream host application, not in Canwu core.
 Use Canwu through `canwu-api`. If the simulation model does not exist yet, also
-follow
-[`canwu-developer-create-simulation`](../canwu-developer-create-simulation/SKILL.md).
+follow the applicable creator skill:
+[`canwu-game-create-simulation`](../canwu-game-create-simulation/SKILL.md) for a
+game or
+[`canwu-history-create-simulation`](../canwu-history-create-simulation/SKILL.md)
+for historical research.
 
 ## Define an immutable run identity
 

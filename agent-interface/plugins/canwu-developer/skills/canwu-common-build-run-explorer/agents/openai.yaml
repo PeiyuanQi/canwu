@@ -1,0 +1,6 @@
+interface:
+  display_name: "Build a Common Canwu Run Explorer"
+  short_description: "Compare seeded runs across Canwu clients"
+  default_prompt: "Use $canwu-common-build-run-explorer to add reproducible seed runs and a perspective timeline."
+policy:
+  allow_implicit_invocation: true
