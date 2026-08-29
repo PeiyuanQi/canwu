@@ -105,6 +105,16 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
 ```
 
+追加 `--days <N>` 可以让 starter 在这次 sample cycle 之后继续按确定性的模拟时间
+运行；`--cadence daily|monthly|annual` 选择 calendar boundary 标记，`--step-days <N>`
+可以覆盖默认步长。月度和年度默认使用固定的 30 和 365 个模拟日，因为 `SimTime`
+本身是分钟刻度，不宣称 Gregorian 日历。最后不足一个完整周期时，会用不带 cadence
+的边界收尾，避免提前触发月度或年度系统。比如：
+
+```text
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
+```
+
 每条命令都会运行从核算到报告的完整垂直链。参考整合注册
 `ReferenceWorldPlugin`、`MingFiscalExecutionAdapterPlugin` 和配置后的
 `FiscalPlugin`；恢复与重放辅助函数会提供同一插件集合并运行语义校验。三个起点

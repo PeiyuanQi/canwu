@@ -150,6 +150,18 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
 ```
 
+Add `--days <N>` to continue the deterministic simulation after the one-off
+sample cycle. `--cadence daily|monthly|annual` selects the calendar-boundary
+marker, and `--step-days <N>` overrides its fixed simulation-day quantum. The
+monthly and annual defaults use 30 and 365 simulation days because `SimTime` is
+minute-based and does not claim a Gregorian calendar. A partial final period is
+captured by a cadence-free boundary, so monthly or annual systems do not run
+early. For example:
+
+```text
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
+```
+
 Each command runs assessment, authorization, typed external execution,
 receipt, report materialization, and semantic validation. The integration
 registers `ReferenceWorldPlugin`, `MingFiscalExecutionAdapterPlugin`, and a

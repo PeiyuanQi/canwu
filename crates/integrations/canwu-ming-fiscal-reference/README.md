@@ -29,8 +29,23 @@ artifacts/traces/ming-fiscal-reference/<fixture>/steps.jsonl
 
 Run it with `cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391`.
 Pass `--trace-dir <path>` after the fixture ID to override the root directory,
-or set `CANWU_TRACE_DIR`. Each JSONL row contains the canonical boundary receipt,
-the persisted boundary evidence, the complete fiscal state snapshot, and any
-holder-relative fiscal projections that are available at that boundary. This
-layout is intentionally stable so a future HTML viewer can scan the manifest
-and stream `steps.jsonl` without understanding the Rust runtime.
+or set `CANWU_TRACE_DIR`. To continue after the one-off sample cycle, pass
+`--days <N>`; the starter schedules one deterministic calendar boundary per
+step and writes every returned receipt. `--cadence daily|monthly|annual`
+selects the cadence marker, while `--step-days <N>` overrides its fixed
+simulation-day quantum. Monthly and annual defaults are 30 and 365 simulation
+days because `SimTime` is minute-based and does not claim a Gregorian calendar.
+If the horizon ends partway through a period, the starter records a final
+cadence-free boundary instead of triggering monthly or annual systems early.
+
+For example:
+
+```text
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
+```
+
+Each JSONL row contains the canonical boundary receipt, the persisted boundary
+evidence, the complete fiscal state snapshot, and any holder-relative fiscal
+projections that are available at that boundary. This layout is intentionally
+stable so the HTML viewer can scan the manifest and stream `steps.jsonl`
+without understanding the Rust runtime.
