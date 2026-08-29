@@ -97,7 +97,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let build_started = Instant::now();
     let (scenario, revision) = fixture(dimensions)?;
-    let replay_scenario = scenario.clone();
     let technology = TechnologyPlugin;
     let history = HistoricalResearchSuite::plugins();
     let plugins: [&dyn SimulationPlugin; 4] = [&technology, history[0], history[1], history[2]];
@@ -161,11 +160,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let checkpoint_load_ms = milliseconds(checkpoint_load_started.elapsed());
 
     let replay_started = Instant::now();
-    let replayed = canwu_technology::replay_technology_from_journal(
-        replay_scenario,
-        &plugins,
-        &persistence.replay_journal,
-    )?;
+    let replayed =
+        canwu_technology::replay_technology_from_journal(&plugins, &persistence.replay_journal)?;
     validate_historical_research_runtime(&replayed)?;
     let replay_ms = milliseconds(replay_started.elapsed());
     if replayed.snapshot() != monthly.snapshot() {

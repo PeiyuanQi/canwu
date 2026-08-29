@@ -370,6 +370,13 @@ pub enum SagaState {
     Failed,
 }
 
+/// Result of reconciling the information-system delivery attempt.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum ReconciliationOutcome {
+    Success,
+    Failure { error: String },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DeliverySaga {
     pub operation_key: String,
@@ -433,18 +440,24 @@ impl TransportExecution {
             .legs
             .iter()
             .enumerate()
-            .map(|(index, _)| LegExecution {
-                id: LegExecutionId(index as u64 + 1),
-                itinerary_revision: revision.id,
-                leg_index: index,
-                status: LegExecutionStatus::Planned,
-                actual_departure_at: None,
-                actual_arrival_at: None,
-                failed_at: None,
-                failure_reason: None,
-                evidence: Vec::new(),
+            .map(|(index, _)| {
+                let id = u64::try_from(index)
+                    .ok()
+                    .and_then(|index| index.checked_add(1))
+                    .ok_or(TransportError::Overflow)?;
+                Ok(LegExecution {
+                    id: LegExecutionId(id),
+                    itinerary_revision: revision.id,
+                    leg_index: index,
+                    status: LegExecutionStatus::Planned,
+                    actual_departure_at: None,
+                    actual_arrival_at: None,
+                    failed_at: None,
+                    failure_reason: None,
+                    evidence: Vec::new(),
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, TransportError>>()?;
         self.revisions.push(revision);
         self.state = TransportExecutionState::Planning;
         Ok(())
@@ -482,12 +495,12 @@ impl TransportExecution {
             .ok_or(TransportError::Overflow)?;
         let mut legs = Vec::with_capacity(revision.plan.legs.len());
         for (index, _) in revision.plan.legs.iter().enumerate() {
+            let id = u64::try_from(index)
+                .ok()
+                .and_then(|index| next_leg_id.checked_add(index))
+                .ok_or(TransportError::Overflow)?;
             legs.push(LegExecution {
-                id: LegExecutionId(
-                    next_leg_id
-                        .checked_add(index as u64)
-                        .ok_or(TransportError::Overflow)?,
-                ),
+                id: LegExecutionId(id),
                 itinerary_revision: revision.id,
                 leg_index: index,
                 status: LegExecutionStatus::Planned,
@@ -583,7 +596,11 @@ impl TransportExecution {
             .iter()
             .filter(|leg| leg.itinerary_revision == active)
             .count();
-        let final_leg = self.current_leg_index.saturating_add(1) >= active_leg_count;
+        let next_leg_index = self
+            .current_leg_index
+            .checked_add(1)
+            .ok_or(TransportError::Overflow)?;
+        let final_leg = next_leg_index >= active_leg_count;
         if final_leg && self.saga.is_none() {
             return Err(TransportError::MissingSaga);
         }
@@ -608,7 +625,7 @@ impl TransportExecution {
         leg.status = LegExecutionStatus::Arrived;
         leg.actual_arrival_at = Some(at);
         self.current_endpoint = Some(endpoint);
-        self.current_leg_index = self.current_leg_index.saturating_add(1);
+        self.current_leg_index = next_leg_index;
         if self.current_leg_index >= active_leg_count {
             self.state = TransportExecutionState::ArrivalPending;
             self.mark_arrival_pending()?;
@@ -733,19 +750,21 @@ impl TransportExecution {
 
     pub fn reconcile_information(
         &mut self,
-        success: bool,
-        error: Option<String>,
+        outcome: ReconciliationOutcome,
     ) -> Result<(), TransportError> {
         let saga = self.saga.as_mut().ok_or(TransportError::MissingSaga)?;
         saga.step = saga.step.checked_add(1).ok_or(TransportError::Overflow)?;
-        if success {
-            saga.state = SagaState::Settled;
-            saga.last_error = None;
-            self.state = TransportExecutionState::Settled;
-        } else {
-            saga.state = SagaState::CompensationPending;
-            saga.last_error = error;
-            self.state = TransportExecutionState::Failed;
+        match outcome {
+            ReconciliationOutcome::Success => {
+                saga.state = SagaState::Settled;
+                saga.last_error = None;
+                self.state = TransportExecutionState::Settled;
+            }
+            ReconciliationOutcome::Failure { error } => {
+                saga.state = SagaState::CompensationPending;
+                saga.last_error = Some(error);
+                self.state = TransportExecutionState::Failed;
+            }
         }
         Ok(())
     }

@@ -489,7 +489,10 @@ impl AdmittedOperation {
 
     fn summary_hash(&self) -> Result<String, CanwuError> {
         if self.input_hashes.len() == 1 {
-            return Ok(self.input_hashes.first().cloned().expect("one input hash"));
+            let Some(hash) = self.input_hashes.first() else {
+                return Err(invalid("a single technology input hash is missing"));
+            };
+            return Ok(hash.clone());
         }
         canonical_hash(
             CONFLICT_HASH_DOMAIN,

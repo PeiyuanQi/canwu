@@ -512,7 +512,7 @@ impl DecisionController {
                 "only open tickets can be evaluated",
             ));
         }
-        if ticket.assigned_controller != controller.id || policy.identity() != controller.policy {
+        if ticket.assigned_controller != controller.id || policy.identity() != &controller.policy {
             return Err(DecisionError::new(
                 DecisionErrorCode::PolicyMismatch,
                 "runtime policy identity does not match the ticket controller binding",

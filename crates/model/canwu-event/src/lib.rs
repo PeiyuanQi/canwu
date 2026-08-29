@@ -30,7 +30,7 @@ pub enum CauseRef {
 #[derive(Clone, Debug)]
 pub struct EventKind {
     event_type: String,
-    fields: Vec<(String, EventValue)>,
+    fields: BTreeMap<String, EventValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +40,7 @@ enum EventValue {
     Number(Number),
     String(String),
     Array(Vec<Self>),
-    Object(Vec<(String, Self)>),
+    Object(BTreeMap<String, Self>),
 }
 
 impl PartialEq for EventValue {
@@ -51,15 +51,7 @@ impl PartialEq for EventValue {
             (Self::Number(left), Self::Number(right)) => left == right,
             (Self::String(left), Self::String(right)) => left == right,
             (Self::Array(left), Self::Array(right)) => left == right,
-            (Self::Object(left), Self::Object(right)) => {
-                left.len() == right.len()
-                    && left.iter().all(|(key, value)| {
-                        right
-                            .iter()
-                            .find_map(|(candidate, value)| (candidate == key).then_some(value))
-                            == Some(value)
-                    })
-            }
+            (Self::Object(left), Self::Object(right)) => left == right,
             _ => false,
         }
     }
@@ -69,13 +61,7 @@ impl Eq for EventValue {}
 
 impl PartialEq for EventKind {
     fn eq(&self, other: &Self) -> bool {
-        self.event_type == other.event_type
-            && self.fields.len() == other.fields.len()
-            && self.fields.iter().all(|(key, value)| {
-                other
-                    .field_value(key)
-                    .is_some_and(|candidate| candidate == value)
-            })
+        self.event_type == other.event_type && self.fields == other.fields
     }
 }
 
@@ -135,9 +121,7 @@ impl Serialize for EventValue {
             Self::Array(values) => values.serialize(serializer),
             Self::Object(fields) => {
                 let mut map = serializer.serialize_map(Some(fields.len()))?;
-                let mut ordered = fields.iter().collect::<Vec<_>>();
-                ordered.sort_by(|left, right| left.0.cmp(&right.0));
-                for (key, value) in ordered {
+                for (key, value) in fields {
                     map.serialize_entry(key, value)?;
                 }
                 map.end()
@@ -219,14 +203,13 @@ impl<'de> Deserialize<'de> for EventValue {
             where
                 A: MapAccess<'de>,
             {
-                let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                let mut fields = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
-                    if fields.iter().any(|(existing, _)| existing == &key) {
+                    if fields.insert(key.clone(), map.next_value()?).is_some() {
                         return Err(de::Error::custom(format!(
                             "event field object contains duplicate key {key}"
                         )));
                     }
-                    fields.push((key, map.next_value()?));
                 }
                 Ok(EventValue::Object(fields))
             }
@@ -243,9 +226,7 @@ impl Serialize for EventKind {
     {
         let mut map = serializer.serialize_map(Some(self.fields.len() + 1))?;
         map.serialize_entry("type", &self.event_type)?;
-        let mut ordered = self.fields.iter().collect::<Vec<_>>();
-        ordered.sort_by(|left, right| left.0.cmp(&right.0));
-        for (key, value) in ordered {
+        for (key, value) in &self.fields {
             map.serialize_entry(key, value)?;
         }
         map.end()
@@ -271,20 +252,17 @@ impl<'de> Deserialize<'de> for EventKind {
                 A: MapAccess<'de>,
             {
                 let mut event_type = None;
-                let mut fields = Vec::with_capacity(map.size_hint().unwrap_or(1).saturating_sub(1));
+                let mut fields = BTreeMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     if key == "type" {
                         if event_type.is_some() {
                             return Err(de::Error::duplicate_field("type"));
                         }
                         event_type = Some(map.next_value::<String>()?);
-                    } else {
-                        if fields.iter().any(|(existing, _)| existing == &key) {
-                            return Err(de::Error::custom(format!(
-                                "event payload contains duplicate field {key}"
-                            )));
-                        }
-                        fields.push((key, map.next_value()?));
+                    } else if fields.insert(key.clone(), map.next_value()?).is_some() {
+                        return Err(de::Error::custom(format!(
+                            "event payload contains duplicate field {key}"
+                        )));
                     }
                 }
                 let event_type = event_type.ok_or_else(|| de::Error::missing_field("type"))?;
@@ -460,7 +438,10 @@ impl EventKind {
         if fields.iter().any(|(key, _)| key == "type") {
             return Err(EventKindError::ReservedTypeField);
         }
-        Ok(Self { event_type, fields })
+        Ok(Self {
+            event_type,
+            fields: fields.into_iter().collect(),
+        })
     }
 
     /// Constructs the compatibility wire identity for a plugin event.
@@ -468,13 +449,13 @@ impl EventKind {
     pub fn plugin(plugin: impl Into<String>, event_type: impl Into<String>) -> Self {
         Self {
             event_type: "plugin".to_owned(),
-            fields: vec![
+            fields: BTreeMap::from([
                 ("plugin".to_owned(), EventValue::String(plugin.into())),
                 (
                     "event_type".to_owned(),
                     EventValue::String(event_type.into()),
                 ),
-            ],
+            ]),
         }
     }
 
@@ -492,8 +473,7 @@ impl EventKind {
     pub fn fields(&self) -> BTreeMap<String, Value> {
         self.fields
             .iter()
-            .cloned()
-            .map(|(key, value)| (key, value.into_json()))
+            .map(|(key, value)| (key.clone(), value.clone().into_json()))
             .collect()
     }
 
@@ -513,10 +493,9 @@ impl EventKind {
         let replacement = serde_json::from_slice::<EventValue>(&encoded)?;
         let field = self
             .fields
-            .iter_mut()
-            .find(|(key, _)| key == name)
+            .get_mut(name)
             .ok_or_else(|| EventKindError::MissingField(name.to_owned()))?;
-        field.1 = replacement;
+        *field = replacement;
         Ok(())
     }
 
@@ -526,7 +505,7 @@ impl EventKind {
     ///
     /// Returns an error when the fields do not deserialize as `T`.
     pub fn decode_payload<T: DeserializeOwned>(&self) -> Result<T, EventKindError> {
-        struct Payload<'a>(&'a [(String, EventValue)]);
+        struct Payload<'a>(&'a BTreeMap<String, EventValue>);
 
         impl Serialize for Payload<'_> {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -586,9 +565,7 @@ impl EventKind {
     }
 
     fn field_value(&self, name: &str) -> Option<&EventValue> {
-        self.fields
-            .iter()
-            .find_map(|(key, value)| (key == name).then_some(value))
+        self.fields.get(name)
     }
 }
 
@@ -607,13 +584,27 @@ pub struct SimEvent {
 mod tests {
     use super::EventKind;
     use canwu_core::{ArmyId, TerritoryId};
-    use serde::{Deserialize, Serialize};
+    use serde::{Deserialize, Serialize, ser::SerializeMap};
     use serde_json::json;
 
     #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
     struct ArmyArrived {
         army: ArmyId,
         territory: TerritoryId,
+    }
+
+    struct DuplicateFields;
+
+    impl Serialize for DuplicateFields {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            let mut map = serializer.serialize_map(Some(2))?;
+            map.serialize_entry("value", &1_u8)?;
+            map.serialize_entry("value", &2_u8)?;
+            map.end()
+        }
     }
 
     #[test]
@@ -656,6 +647,18 @@ mod tests {
             serde_json::to_string(&supply).unwrap(),
             r#"{"type":"plugin","event_type":"grain_allocated","plugin":"example-supply"}"#
         );
+    }
+
+    #[test]
+    fn typed_payload_and_field_replacement_reject_duplicate_serialized_keys() {
+        assert!(EventKind::from_payload("duplicate", &DuplicateFields).is_err());
+
+        let mut event = EventKind::from_fields(
+            "replacement",
+            std::collections::BTreeMap::from([("payload".to_owned(), json!({}))]),
+        )
+        .expect("event fixture should build");
+        assert!(event.set_field("payload", &DuplicateFields).is_err());
     }
 
     #[test]

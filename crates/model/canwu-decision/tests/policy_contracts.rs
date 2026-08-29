@@ -78,14 +78,16 @@ fn asynchronous_policies_reject_stale_ticket_versions() {
     let current = ticket(2);
 
     let mut human = QueuedHumanPolicy::new("human-seat", "1");
-    human.submit(
-        current.id,
-        HumanDecisionResponse {
-            ticket_version: 1,
-            option_id: "send-aid".to_owned(),
-            operator_id: "operator-9".to_owned(),
-        },
-    );
+    human
+        .submit(
+            current.id,
+            HumanDecisionResponse {
+                ticket_version: 1,
+                option_id: "send-aid".to_owned(),
+                operator_id: "operator-9".to_owned(),
+            },
+        )
+        .expect("first human response should be accepted");
     assert_eq!(
         human
             .decide(&current)
@@ -102,7 +104,9 @@ fn asynchronous_policies_reject_stale_ticket_versions() {
         metadata: BTreeMap::new(),
     };
     let mut external = QueuedExternalPolicy::new("external-service", "1");
-    external.submit(current.id, stale_external.clone());
+    external
+        .submit(current.id, stale_external.clone())
+        .expect("first external response should be accepted");
     assert_eq!(
         external
             .decide(&current)
@@ -120,27 +124,94 @@ fn asynchronous_policies_reject_stale_ticket_versions() {
             prompt_contract: "select-existing-option.v1".to_owned(),
         },
     );
-    llm.submit(current.id, stale_external);
+    llm.submit(current.id, stale_external)
+        .expect("first LLM response should be accepted");
     assert_eq!(
         llm.decide(&current).expect_err("stale LLM response").code,
         DecisionErrorCode::VersionConflict
     );
 
-    llm.submit(
-        current.id,
-        ExternalDecisionResponse {
-            ticket_version: current.version,
-            option_id: "send-aid".to_owned(),
+    let mut current_llm = QueuedLlmPolicy::new(
+        "llm-adapter",
+        "1",
+        LlmModelIdentity {
             provider: "policy-service".to_owned(),
-            request_id: "request-2".to_owned(),
-            metadata: BTreeMap::new(),
+            model: "decision-model".to_owned(),
+            prompt_contract: "select-existing-option.v1".to_owned(),
         },
     );
-    let decision = llm.decide(&current).expect("current LLM response");
+    current_llm
+        .submit(
+            current.id,
+            ExternalDecisionResponse {
+                ticket_version: current.version,
+                option_id: "send-aid".to_owned(),
+                provider: "policy-service".to_owned(),
+                request_id: "request-2".to_owned(),
+                metadata: BTreeMap::new(),
+            },
+        )
+        .expect("the first current LLM response should be accepted");
+    let decision = current_llm.decide(&current).expect("current LLM response");
     let evidence = decision.external.expect("LLM trace evidence");
     assert_eq!(evidence.model.as_deref(), Some("decision-model"));
     assert_eq!(
         evidence.prompt_contract.as_deref(),
         Some("select-existing-option.v1")
+    );
+}
+
+#[test]
+fn asynchronous_policies_reject_duplicate_responses() {
+    let current = ticket(2);
+    let response = HumanDecisionResponse {
+        ticket_version: current.version,
+        option_id: "send-aid".to_owned(),
+        operator_id: "operator-9".to_owned(),
+    };
+    let mut human = QueuedHumanPolicy::new("human-seat", "1");
+    human
+        .submit(current.id, response.clone())
+        .expect("first response should be accepted");
+    assert_eq!(
+        human
+            .submit(current.id, response)
+            .expect_err("duplicate response should be rejected")
+            .code,
+        DecisionErrorCode::DuplicateResponse
+    );
+}
+
+#[test]
+fn asynchronous_policies_allow_a_newer_response_to_replace_a_stale_one() {
+    let current = ticket(2);
+    let mut human = QueuedHumanPolicy::new("human-seat", "1");
+    human
+        .submit(
+            current.id,
+            HumanDecisionResponse {
+                ticket_version: 1,
+                option_id: "send-aid".to_owned(),
+                operator_id: "operator-old".to_owned(),
+            },
+        )
+        .expect("stale response should be queued for later reconciliation");
+    human
+        .submit(
+            current.id,
+            HumanDecisionResponse {
+                ticket_version: current.version,
+                option_id: "send-aid".to_owned(),
+                operator_id: "operator-current".to_owned(),
+            },
+        )
+        .expect("newer response should replace the stale response");
+
+    let decision = human
+        .decide(&current)
+        .expect("current response should be authoritative");
+    assert_eq!(
+        decision.external.and_then(|evidence| evidence.request_id),
+        Some("operator-current".to_owned())
     );
 }

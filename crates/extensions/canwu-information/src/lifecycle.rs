@@ -768,7 +768,9 @@ fn validate_access_audience(
     if audiences.len() != 1 {
         return Err("access contexts resolve to different audiences".to_owned());
     }
-    let audience = audiences.into_iter().next().expect("length was checked");
+    let Some(audience) = audiences.into_iter().next() else {
+        return Err("access context did not resolve to an audience".to_owned());
+    };
     let record = records.required(&audience)?;
     let payload = record.decode_payload::<Audience>().map_err(stringify)?;
     let holder_entity = holder_entity(holder);
@@ -1684,9 +1686,12 @@ fn single_entity_role(references: &[DomainReference], role: &str) -> Result<Enti
             "information record requires exactly one {role} entity reference"
         ));
     }
-    Ok(target_entity(
-        values.into_iter().next().expect("length was checked"),
-    ))
+    let Some(value) = values.into_iter().next() else {
+        return Err(format!(
+            "information record requires exactly one {role} entity reference"
+        ));
+    };
+    Ok(target_entity(value))
 }
 
 fn single_holder_role(
@@ -1699,9 +1704,12 @@ fn single_holder_role(
             "information record requires exactly one {role} holder reference"
         ));
     }
-    Ok(holder_from_target(
-        values.into_iter().next().expect("length was checked"),
-    ))
+    let Some(value) = values.into_iter().next() else {
+        return Err(format!(
+            "information record requires exactly one {role} holder reference"
+        ));
+    };
+    Ok(holder_from_target(value))
 }
 
 fn holder_from_target(target: DomainReferenceTarget) -> KnowledgeHolderRef {

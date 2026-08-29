@@ -3756,10 +3756,11 @@ impl LegalRuntime {
             .map(|(effective_at, _)| *effective_at)
             .collect::<Vec<_>>();
         for effective_at in due_times {
-            let mut references = self
-                .scheduled_versions_by_time
-                .remove(&effective_at)
-                .expect("due effective-time key was indexed");
+            let Some(mut references) = self.scheduled_versions_by_time.remove(&effective_at) else {
+                return Err(invalid(
+                    "scheduled law version index is missing its due-time entry",
+                ));
+            };
             references.sort_by(|left, right| {
                 let left = &self.law_versions[&left.id];
                 let right = &self.law_versions[&right.id];
@@ -5605,10 +5606,11 @@ impl LegalRuntime {
             return Err(invalid("legal evidence dependency count underflowed"));
         }
         for reference in dependencies {
-            let count = self
-                .retained_evidence_dependency_counts
-                .get_mut(&reference)
-                .expect("dependency count was preflighted");
+            let Some(count) = self.retained_evidence_dependency_counts.get_mut(&reference) else {
+                return Err(invalid(
+                    "legal evidence dependency count disappeared during removal",
+                ));
+            };
             *count -= 1;
             if *count == 0 {
                 self.retained_evidence_dependency_counts.remove(&reference);

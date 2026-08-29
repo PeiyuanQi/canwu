@@ -230,7 +230,6 @@ struct Options {
 
 struct GrowthFixture {
     simulation: Canwu,
-    scenario: Scenario,
 }
 
 struct ProfilePlugin;
@@ -336,7 +335,6 @@ impl SimulationPlugin for InformationFlowPlugin {
 
 struct InformationFixture {
     simulation: Canwu,
-    scenario: Scenario,
     plugin: InformationFlowPlugin,
 }
 
@@ -637,7 +635,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         let checkpoint_journal_json = fixture.simulation.checkpoint_journal_json()?;
         let journal = fixture.simulation.replay_journal();
         let checkpoint_hash = fixture.simulation.checkpoint_hash().to_owned();
-        let scenario = fixture.scenario.clone();
         let next_request_id = checked_request_id(scale)?;
         let accepted = measure_case(
             options.mode,
@@ -762,10 +759,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             options.mode,
             options.warmup,
             options.samples,
-            || Ok::<_, CanwuError>((scenario.clone(), journal.clone())),
-            |(scenario, journal)| {
-                Canwu::replay_from_journal(scenario.clone(), &[&ProfilePlugin], journal)
-            },
+            || Ok::<_, CanwuError>(journal.clone()),
+            |journal| Canwu::replay_from_journal(&[&ProfilePlugin], journal),
         )?;
         let live_archive_seal = measure_case(
             options.mode,
@@ -1176,11 +1171,7 @@ fn run_information_flow(options: &Options) -> Result<(), Box<dyn Error>> {
             || Ok::<_, Box<dyn Error>>(()),
             |_| build_information_fixture(scale),
         )?;
-        let InformationFixture {
-            simulation,
-            scenario,
-            plugin,
-        } = build_information_fixture(scale)?;
+        let InformationFixture { simulation, plugin } = build_information_fixture(scale)?;
         validate_information_counts(&simulation, scale)?;
         let inputs = InformationBenchmarkInputs::new(scale)?;
         let checkpoint_hash = simulation.checkpoint_hash().to_owned();
@@ -1315,15 +1306,9 @@ fn run_information_flow(options: &Options) -> Result<(), Box<dyn Error>> {
             || {
                 let file = File::open(&inputs.journal)?;
                 let journal: ReplayJournal = serde_json::from_reader(BufReader::new(file))?;
-                Ok::<_, Box<dyn Error>>((scenario.clone(), journal))
+                Ok::<_, Box<dyn Error>>(journal)
             },
-            |(scenario, journal)| {
-                Ok::<_, Box<dyn Error>>(Canwu::replay_from_journal(
-                    scenario.clone(),
-                    &[&plugin],
-                    journal,
-                )?)
-            },
+            |journal| Ok::<_, Box<dyn Error>>(Canwu::replay_from_journal(&[&plugin], journal)?),
         )?;
         let replay_ns = median(&exact_replay.elapsed_ns);
         let replay_records_per_second = if replay_ns == 0 {
@@ -1451,11 +1436,7 @@ fn build_information_runtime(target_records: usize) -> Result<InformationFixture
     let plugin = InformationFlowPlugin { target_records };
     let mut simulation = Canwu::new(INFORMATION_SEED, scenario.clone())?;
     simulation.register_plugin(&plugin)?;
-    Ok(InformationFixture {
-        simulation,
-        scenario,
-        plugin,
-    })
+    Ok(InformationFixture { simulation, plugin })
 }
 
 fn build_information_fixture(target_records: usize) -> Result<InformationFixture, Box<dyn Error>> {
@@ -1693,10 +1674,7 @@ fn build_growth_fixture(scale: usize) -> Result<GrowthFixture, Box<dyn Error>> {
             BoundaryRequest::at(simulation.time()).with_cadence(SystemCadence::Daily),
         )?;
     }
-    Ok(GrowthFixture {
-        simulation,
-        scenario,
-    })
+    Ok(GrowthFixture { simulation })
 }
 
 fn build_compacted_growth(scale: usize) -> Result<(), Box<dyn Error>> {
@@ -2447,7 +2425,7 @@ mod tests {
         assert_eq!(first.simulation.snapshot(), second.simulation.snapshot());
 
         let journal = first.simulation.replay_journal();
-        let replayed = Canwu::replay_from_journal(first.scenario, &[&ProfilePlugin], &journal)
+        let replayed = Canwu::replay_from_journal(&[&ProfilePlugin], &journal)
             .expect("fixture should replay exactly");
         assert_eq!(replayed.snapshot(), second.simulation.snapshot());
     }
@@ -2467,7 +2445,7 @@ mod tests {
         assert_eq!(hot_records, 500);
 
         let journal = fixture.simulation.replay_journal();
-        let replayed = Canwu::replay_from_journal(fixture.scenario, &[&fixture.plugin], &journal)
+        let replayed = Canwu::replay_from_journal(&[&fixture.plugin], &journal)
             .expect("information fixture should replay exactly");
         assert_eq!(replayed.snapshot(), fixture.simulation.snapshot());
     }

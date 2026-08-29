@@ -4,10 +4,11 @@ use crate::{
     DecisionPolicyKind, DecisionTicket, PolicyDecision,
 };
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 pub trait DecisionPolicy {
-    fn identity(&self) -> DecisionPolicyIdentity;
+    fn identity(&self) -> &DecisionPolicyIdentity;
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError>;
 }
 
@@ -120,8 +121,8 @@ impl UtilityEvaluator for WeightedUtilityPolicy {
 }
 
 impl DecisionPolicy for WeightedUtilityPolicy {
-    fn identity(&self) -> DecisionPolicyIdentity {
-        self.identity.clone()
+    fn identity(&self) -> &DecisionPolicyIdentity {
+        &self.identity
     }
 
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError> {
@@ -199,8 +200,8 @@ impl RulePolicy for OrderedRulePolicy {
 }
 
 impl DecisionPolicy for OrderedRulePolicy {
-    fn identity(&self) -> DecisionPolicyIdentity {
-        self.identity.clone()
+    fn identity(&self) -> &DecisionPolicyIdentity {
+        &self.identity
     }
 
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError> {
@@ -266,8 +267,25 @@ impl QueuedHumanPolicy {
         &mut self,
         ticket_id: canwu_core::DecisionTicketId,
         response: HumanDecisionResponse,
-    ) {
+    ) -> Result<(), DecisionError> {
+        if let Some(existing) = self.responses.get(&ticket_id) {
+            return match existing.ticket_version.cmp(&response.ticket_version) {
+                Ordering::Less => {
+                    self.responses.insert(ticket_id, response);
+                    Ok(())
+                }
+                Ordering::Equal => Err(DecisionError::new(
+                    DecisionErrorCode::DuplicateResponse,
+                    "a response has already been submitted for this decision ticket version",
+                )),
+                Ordering::Greater => Err(DecisionError::new(
+                    DecisionErrorCode::VersionConflict,
+                    "a stale decision response cannot replace a newer queued response",
+                )),
+            };
+        }
         self.responses.insert(ticket_id, response);
+        Ok(())
     }
 }
 
@@ -278,8 +296,8 @@ impl HumanPolicy for QueuedHumanPolicy {
 }
 
 impl DecisionPolicy for QueuedHumanPolicy {
-    fn identity(&self) -> DecisionPolicyIdentity {
-        self.identity.clone()
+    fn identity(&self) -> &DecisionPolicyIdentity {
+        &self.identity
     }
 
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError> {
@@ -387,8 +405,25 @@ impl QueuedExternalPolicy {
         &mut self,
         ticket_id: canwu_core::DecisionTicketId,
         response: ExternalDecisionResponse,
-    ) {
+    ) -> Result<(), DecisionError> {
+        if let Some(existing) = self.responses.get(&ticket_id) {
+            return match existing.ticket_version.cmp(&response.ticket_version) {
+                Ordering::Less => {
+                    self.responses.insert(ticket_id, response);
+                    Ok(())
+                }
+                Ordering::Equal => Err(DecisionError::new(
+                    DecisionErrorCode::DuplicateResponse,
+                    "a response has already been submitted for this decision ticket version",
+                )),
+                Ordering::Greater => Err(DecisionError::new(
+                    DecisionErrorCode::VersionConflict,
+                    "a stale decision response cannot replace a newer queued response",
+                )),
+            };
+        }
         self.responses.insert(ticket_id, response);
+        Ok(())
     }
 }
 
@@ -399,8 +434,8 @@ impl ExternalPolicy for QueuedExternalPolicy {
 }
 
 impl DecisionPolicy for QueuedExternalPolicy {
-    fn identity(&self) -> DecisionPolicyIdentity {
-        self.identity.clone()
+    fn identity(&self) -> &DecisionPolicyIdentity {
+        &self.identity
     }
 
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError> {
@@ -462,8 +497,25 @@ impl QueuedLlmPolicy {
         &mut self,
         ticket_id: canwu_core::DecisionTicketId,
         response: ExternalDecisionResponse,
-    ) {
+    ) -> Result<(), DecisionError> {
+        if let Some(existing) = self.responses.get(&ticket_id) {
+            return match existing.ticket_version.cmp(&response.ticket_version) {
+                Ordering::Less => {
+                    self.responses.insert(ticket_id, response);
+                    Ok(())
+                }
+                Ordering::Equal => Err(DecisionError::new(
+                    DecisionErrorCode::DuplicateResponse,
+                    "a response has already been submitted for this decision ticket version",
+                )),
+                Ordering::Greater => Err(DecisionError::new(
+                    DecisionErrorCode::VersionConflict,
+                    "a stale decision response cannot replace a newer queued response",
+                )),
+            };
+        }
         self.responses.insert(ticket_id, response);
+        Ok(())
     }
 }
 
@@ -480,8 +532,8 @@ impl LlmPolicy for QueuedLlmPolicy {
 }
 
 impl DecisionPolicy for QueuedLlmPolicy {
-    fn identity(&self) -> DecisionPolicyIdentity {
-        self.identity.clone()
+    fn identity(&self) -> &DecisionPolicyIdentity {
+        &self.identity
     }
 
     fn decide(&self, ticket: &DecisionTicket) -> Result<PolicyDecision, DecisionError> {

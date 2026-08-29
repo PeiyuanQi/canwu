@@ -16,7 +16,10 @@ const OPERATION_TEXT_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RandomAlgorithm {
+    /// Current unbiased `SplitMix64` range reduction.
     #[default]
+    SplitMix64V2,
+    /// Historical modulo-reduction behavior retained for existing journals.
     SplitMix64V1,
 }
 
@@ -52,7 +55,7 @@ impl RandomStreamState {
         let seed = derive_stream_seed(root_seed, &key);
         Self {
             key,
-            algorithm: RandomAlgorithm::SplitMix64V1,
+            algorithm: RandomAlgorithm::SplitMix64V2,
             seed,
             position: 0,
             generator_state: seed,
@@ -60,9 +63,10 @@ impl RandomStreamState {
     }
 
     pub(crate) fn is_coherent(&self, root_seed: u64) -> bool {
-        self.algorithm == RandomAlgorithm::SplitMix64V1
-            && self.seed == derive_stream_seed(root_seed, &self.key)
-            && self.generator_state == DeterministicRng::state_after(self.seed, self.position)
+        matches!(
+            self.algorithm,
+            RandomAlgorithm::SplitMix64V1 | RandomAlgorithm::SplitMix64V2
+        ) && self.seed == derive_stream_seed(root_seed, &self.key)
     }
 }
 
@@ -256,7 +260,10 @@ impl RandomSession {
         })?;
         let position = state.position;
         let mut generator = DeterministicRng::from_seed(state.generator_state);
-        let value = generator.range(upper_exclusive);
+        let value = match state.algorithm {
+            RandomAlgorithm::SplitMix64V1 => generator.range_modulo(upper_exclusive),
+            RandomAlgorithm::SplitMix64V2 => generator.range(upper_exclusive),
+        };
         state.position = next_position;
         state.generator_state = generator.state();
         self.draws.push(PendingRandomDraw {
@@ -988,5 +995,41 @@ mod tests {
         let value = operation_value_v1(17, &stream, &first, upper_exclusive, &purpose)
             .expect("rejection reduction must find a later candidate");
         assert!(value < upper_exclusive);
+    }
+
+    #[test]
+    fn sequential_rejection_sampling_replays_the_actual_generator_state() {
+        let stream = fixture_stream();
+        let upper_exclusive = (1_u64 << 63) + 1;
+        let rejection_threshold = upper_exclusive.wrapping_neg() % upper_exclusive;
+        let (root_seed, initial) = (1_u64..)
+            .find_map(|root_seed| {
+                let initial = RandomStreamState::initial(root_seed, stream.clone());
+                let mut probe = DeterministicRng::from_seed(initial.generator_state);
+                (probe.next_u64() < rejection_threshold).then_some((root_seed, initial))
+            })
+            .expect("fixture search should find a sequential rejection");
+        let mut session = RandomSession::new(
+            &BTreeMap::from([(stream.clone(), initial.clone())]),
+            std::slice::from_ref(&stream),
+            root_seed,
+            "fixture-random",
+            &BTreeMap::new(),
+        )
+        .expect("session should initialize");
+        let value = session
+            .range(&stream, upper_exclusive, "sequential rejection")
+            .expect("sequential rejection draw should succeed");
+        let execution = session.finish();
+        let final_state = &execution.states[&stream];
+
+        let mut replay = DeterministicRng::from_seed(initial.generator_state);
+        assert_eq!(replay.range(upper_exclusive), value);
+        assert_eq!(replay.state(), final_state.generator_state);
+        assert_eq!(final_state.position, 1);
+        assert_ne!(
+            final_state.generator_state,
+            DeterministicRng::state_after(initial.seed, final_state.position)
+        );
     }
 }

@@ -7,11 +7,11 @@ use super::{
     ActorKnowledge, ArmyId, ArmyKnowledge, AssertUnwindSafe, BTreeMap, BoundaryId, CanwuError,
     CauseRef, ClockTransactionCheckpoint, CommitmentDomains, DeterministicRng, EntityRef,
     ErrorCode, EstimateRange, EventId, EventKind, KnowledgeSource, LetterId, LetterStatus,
-    PendingBoundaryRandomDraw, PersonId, RandomDrawAddress, RandomDrawId, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, RandomStreamKey, RuntimeValidationContext,
-    ScheduledBatchTransactionCheckpoint, SimDuration, SimEvent, SimTime, Simulation,
-    SimulationView, SimulationViewState, StateKey, SystemDirective, TerritoryId, catch_unwind,
-    claim_counter, random, validate_directives_with_context,
+    PendingBoundaryRandomDraw, PersonId, RandomAlgorithm, RandomDrawAddress, RandomDrawId,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomStreamKey,
+    RuntimeValidationContext, ScheduledBatchTransactionCheckpoint, SimDuration, SimEvent, SimTime,
+    Simulation, SimulationView, SimulationViewState, StateKey, SystemDirective, TerritoryId,
+    catch_unwind, claim_counter, random, validate_directives_with_context,
 };
 use serde::{Deserialize, Serialize};
 
@@ -793,7 +793,10 @@ impl Simulation {
         })?;
         let position = state.position;
         let mut generator = DeterministicRng::from_seed(state.generator_state);
-        let value = generator.range(upper_exclusive);
+        let value = match state.algorithm {
+            RandomAlgorithm::SplitMix64V1 => generator.range_modulo(upper_exclusive),
+            RandomAlgorithm::SplitMix64V2 => generator.range(upper_exclusive),
+        };
         state.position = next_position;
         state.generator_state = generator.state();
         self.state.counters.next_random_draw_id = next_random_draw_id;

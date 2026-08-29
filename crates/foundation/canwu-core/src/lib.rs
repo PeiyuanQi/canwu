@@ -23,14 +23,17 @@ macro_rules! define_id {
             Serialize,
         )]
         #[serde(transparent)]
+        #[doc = concat!("Stable numeric identifier for [`", stringify!($name), "`].")]
         pub struct $name(pub u64);
 
         impl $name {
+            /// Creates an identifier from its wire value.
             #[must_use]
             pub const fn new(value: u64) -> Self {
                 Self(value)
             }
 
+            /// Returns the identifier's wire value.
             #[must_use]
             pub const fn get(self) -> u64 {
                 self.0
@@ -217,7 +220,7 @@ pub enum KnowledgeHolderRef {
 
 impl KnowledgeHolderRef {
     #[must_use]
-    pub fn is_person_entity(&self) -> bool {
+    pub const fn is_person_entity(&self) -> bool {
         matches!(self, Self::Entity(EntityRef::Person(_)))
     }
 }
@@ -537,14 +540,51 @@ impl DeterministicRng {
         value ^ (value >> 31)
     }
 
-    /// Returns a value in `[0, upper_exclusive)`. Zero returns zero.
+    /// Returns a uniformly distributed value in `[0, upper_exclusive)`.
+    ///
+    /// Zero returns zero. Rejection sampling is used so non-power-of-two
+    /// bounds do not introduce modulo bias.
     pub fn range(&mut self, upper_exclusive: u64) -> u64 {
+        if upper_exclusive == 0 {
+            return 0;
+        }
+        let rejection_threshold = upper_exclusive.wrapping_neg() % upper_exclusive;
+        loop {
+            let value = self.next_u64();
+            if value >= rejection_threshold {
+                return value % upper_exclusive;
+            }
+        }
+    }
+
+    /// Returns the historical modulo-reduction value for the V1 random-stream
+    /// contract.
+    #[must_use]
+    pub fn range_modulo(&mut self, upper_exclusive: u64) -> u64 {
         if upper_exclusive == 0 {
             return 0;
         }
         self.next_u64() % upper_exclusive
     }
 }
+
+/// Error returned when a schema registration would replace an existing type.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SchemaRegistryError {
+    DuplicateType(String),
+}
+
+impl Display for SchemaRegistryError {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DuplicateType(type_name) => {
+                write!(formatter, "schema type {type_name} is already registered")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SchemaRegistryError {}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FieldSchema {
@@ -568,8 +608,24 @@ pub struct SchemaRegistry {
 }
 
 impl SchemaRegistry {
-    pub fn register(&mut self, schema: TypeSchema) {
+    /// Registers a schema without replacing a different existing definition.
+    ///
+    /// Re-registering an identical definition is accepted for idempotent
+    /// plugin registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchemaRegistryError::DuplicateType`] when the type name is
+    /// already registered with a different definition.
+    pub fn register(&mut self, schema: TypeSchema) -> Result<(), SchemaRegistryError> {
+        if let Some(existing) = self.types.get(&schema.type_name) {
+            if existing == &schema {
+                return Ok(());
+            }
+            return Err(SchemaRegistryError::DuplicateType(schema.type_name));
+        }
         self.types.insert(schema.type_name.clone(), schema);
+        Ok(())
     }
 
     #[must_use]
@@ -714,6 +770,48 @@ mod tests {
                     }
                 }
             })
+        );
+    }
+
+    #[test]
+    fn deterministic_range_stays_bounded_for_non_power_of_two_limits() {
+        for seed in 0..32 {
+            let mut rng = DeterministicRng::from_seed(seed);
+            assert_eq!(rng.range(0), 0);
+            for _ in 0..128 {
+                assert!(rng.range(7) < 7);
+            }
+        }
+    }
+
+    #[test]
+    fn schema_registration_is_idempotent_but_rejects_definition_replacement() {
+        let schema = TypeSchema {
+            type_name: "fixture.office".to_owned(),
+            description: "An office".to_owned(),
+            fields: vec![FieldSchema {
+                name: "name".to_owned(),
+                value_type: "string".to_owned(),
+                description: "The office name".to_owned(),
+                reference_type: None,
+                writable_via_debug_command: false,
+            }],
+        };
+        let mut registry = SchemaRegistry::default();
+        registry
+            .register(schema.clone())
+            .expect("the first schema registration should succeed");
+        registry
+            .register(schema.clone())
+            .expect("an identical schema registration should be idempotent");
+
+        let mut conflicting = schema;
+        conflicting.description = "A different office".to_owned();
+        assert_eq!(
+            registry
+                .register(conflicting)
+                .expect_err("a different definition must not replace the registered schema"),
+            SchemaRegistryError::DuplicateType("fixture.office".to_owned())
         );
     }
 }

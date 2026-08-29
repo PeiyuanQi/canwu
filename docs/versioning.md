@@ -35,6 +35,12 @@ The runtime no longer contains `migration.rs` or `legacy_v4.rs`. An older
 snapshot must not be silently relabeled as format 7, and a legacy replay
 journal cannot be promoted to exact replay.
 
+Random streams persist their reduction algorithm. Existing
+`SplitMix64V1` streams retain their historical modulo reduction, while new
+streams use `SplitMix64V2`, which applies unbiased rejection sampling. This
+keeps old format-7 journals replayable while making the current behavior
+explicit in the persisted state.
+
 ## Self-contained exact replay
 
 `ReplayJournal` is the complete replay boundary. It carries the canonical
