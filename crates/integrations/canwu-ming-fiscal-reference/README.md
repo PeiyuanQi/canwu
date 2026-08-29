@@ -19,3 +19,18 @@ boundary and derives receipt quantity and disposition from them. The
 integration's semantic validator repeats the complete match during validation
 and restore. Within one fiscal runtime state, an exact result version or one
 `(evidence kind, external_operation_id)` pair cannot settle different receipts.
+
+The starter example also writes a human-oriented trace by default:
+
+```text
+artifacts/traces/ming-fiscal-reference/<fixture>/manifest.json
+artifacts/traces/ming-fiscal-reference/<fixture>/steps.jsonl
+```
+
+Run it with `cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391`.
+Pass `--trace-dir <path>` after the fixture ID to override the root directory,
+or set `CANWU_TRACE_DIR`. Each JSONL row contains the canonical boundary receipt,
+the persisted boundary evidence, the complete fiscal state snapshot, and any
+holder-relative fiscal projections that are available at that boundary. This
+layout is intentionally stable so a future HTML viewer can scan the manifest
+and stream `steps.jsonl` without understanding the Rust runtime.

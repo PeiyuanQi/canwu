@@ -303,6 +303,7 @@ name = "canwu-debug"
 version = "0.6.0"
 dependencies = [
  "canwu-api",
+ "canwu-ming-fiscal-reference",
  "canwu-reference-world",
  "eframe",
  "image",

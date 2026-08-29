@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Canwu Trace Viewer</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">CANWU / OBSERVABILITY TOOL</p>
+          <h1>Trace Viewer</h1>
+          <p class="lede">按结算边界查看一次模拟运行的输入、变化、知识与领域状态。</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="loadDefaultButton" class="button button-primary" type="button">
+            读取默认样例
+          </button>
+          <span id="loadStatus" class="status-text" aria-live="polite">等待载入 trace</span>
+        </div>
+      </header>
+
+      <div class="app-grid">
+        <aside class="source-panel" aria-label="Trace source">
+          <section class="source-card">
+            <div class="section-kicker">SOURCE</div>
+            <h2>载入运行证据</h2>
+            <p class="muted">通用格式：一个 manifest JSON，加一个 JSONL steps 文件。</p>
+            <div id="dropZone" class="drop-zone" tabindex="0">
+              <div class="drop-icon" aria-hidden="true">↘</div>
+              <strong>拖入 trace 文件</strong>
+              <span>支持 manifest.json、steps.jsonl 或整个目录</span>
+            </div>
+            <div class="file-actions">
+              <label class="button button-secondary">
+                选择 manifest
+                <input id="manifestInput" type="file" accept=".json,application/json" />
+              </label>
+              <label class="button button-secondary">
+                选择 steps
+                <input id="stepsInput" type="file" accept=".jsonl,.ndjson,.txt,application/json" />
+              </label>
+              <label class="button button-secondary">
+                选择目录
+                <input id="folderInput" type="file" webkitdirectory directory multiple />
+              </label>
+            </div>
+            <div id="errorBox" class="error-box" role="alert" hidden></div>
+          </section>
+
+          <section class="source-card">
+            <div class="section-kicker">RUN</div>
+            <h2>运行信息</h2>
+            <dl class="meta-list">
+              <div><dt>fixture</dt><dd id="metaFixture">—</dd></div>
+              <div><dt>engine</dt><dd id="metaEngine">—</dd></div>
+              <div><dt>status</dt><dd id="metaStatus">—</dd></div>
+              <div><dt>steps file</dt><dd id="metaStepsFile">—</dd></div>
+            </dl>
+          </section>
+
+          <section class="source-card filter-card">
+            <div class="section-kicker">FILTER</div>
+            <label for="phaseFilter">结算阶段</label>
+            <select id="phaseFilter" class="select-control">
+              <option value="all">全部阶段</option>
+            </select>
+            <p id="filterStatus" class="muted">尚未载入数据</p>
+          </section>
+        </aside>
+
+        <main class="main-panel">
+          <section id="emptyState" class="empty-state">
+            <div class="empty-mark" aria-hidden="true">◎</div>
+            <h2>先载入一次模拟运行</h2>
+            <p>可以读取仓库里的默认样例，也可以把任意 Canwu trace 的 manifest 和 JSONL 文件拖进来。</p>
+            <button id="emptyLoadButton" class="button button-primary" type="button">读取默认样例</button>
+          </section>
+
+          <section id="viewerState" hidden>
+            <div class="overview-grid" aria-label="Run overview">
+              <article class="stat-card">
+                <span class="stat-label">结算边界</span>
+                <strong id="statSteps" class="stat-value">—</strong>
+                <span class="stat-context">JSONL frames</span>
+              </article>
+              <article class="stat-card">
+                <span class="stat-label">当前模拟时间</span>
+                <strong id="statTime" class="stat-value">—</strong>
+                <span class="stat-context">latest settled boundary</span>
+              </article>
+              <article class="stat-card">
+                <span class="stat-label">领域版本</span>
+                <strong id="statDomainRevision" class="stat-value">—</strong>
+                <span class="stat-context">domain adapter revision</span>
+              </article>
+              <article class="stat-card stat-card-wide">
+                <span class="stat-label">当前 checkpoint</span>
+                <strong id="statCheckpoint" class="stat-value hash-value">—</strong>
+                <span class="stat-context">state commitment</span>
+              </article>
+            </div>
+
+            <div class="viewer-grid">
+              <section class="timeline-panel" aria-label="Boundary timeline">
+                <div class="panel-heading">
+                  <div>
+                    <div class="section-kicker">TIMELINE</div>
+                    <h2>结算边界时间线</h2>
+                  </div>
+                  <span id="timelineCount" class="count-label">0 / 0</span>
+                </div>
+                <div id="timeline" class="timeline-list"></div>
+              </section>
+
+              <section class="detail-panel" aria-live="polite" aria-label="Selected boundary detail">
+                <div id="detail"></div>
+              </section>
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+    <script src="app.js" defer></script>
+  </body>
+</html>

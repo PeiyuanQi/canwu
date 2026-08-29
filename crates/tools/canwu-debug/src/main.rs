@@ -2,10 +2,16 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-use canwu_api::{Canwu, EntityRef, KnowledgeHolderRef, KnowledgeQuery, SimDuration};
+use canwu_api::{
+    BoundaryReceipt, Canwu, EntityRef, KnowledgeHolderRef, KnowledgeQuery, SimDuration,
+};
+use canwu_ming_fiscal_reference::{
+    DEFAULT_SEED, MingFiscalTraceFrame, MingFiscalTracePhase, MingFiscalTraceWriter,
+    capture_ming_fiscal_trace_frame, ming_fiscal_reference_scenario, new_ming_fiscal_reference,
+    restore_ming_fiscal_reference, trace_error,
+};
 use canwu_reference_world::{
-    MapPoint, ReferenceWorldIds, ReferenceWorldPlugin, WorldSnapshot, demo_scenario,
-    snapshot as reference_snapshot,
+    MapPoint, ReferenceWorldIds, WorldSnapshot, snapshot as reference_snapshot,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use serde_json::Value;
@@ -13,6 +19,7 @@ use std::time::{Duration, Instant};
 
 const ENGLISH_LOGO_PNG: &[u8] = include_bytes!("../../../../assets/branding/canwu-logo-en.png");
 const CHINESE_LOGO_PNG: &[u8] = include_bytes!("../../../../assets/branding/canwu-logo-zh-cn.png");
+const DEBUG_FIXTURE: &str = "hongwu-1391";
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -43,6 +50,9 @@ struct DebugApp {
     selected: Option<EntityRef>,
     search: String,
     saved_snapshot: Option<String>,
+    trace_writer: Option<MingFiscalTraceWriter>,
+    trace_frames: Vec<MingFiscalTraceFrame>,
+    trace_sequence: usize,
     map_pan: Vec2,
     map_zoom: f32,
     status: String,
@@ -51,6 +61,12 @@ struct DebugApp {
 impl DebugApp {
     fn new(context: &egui::Context) -> Self {
         let (canwu, ids) = new_reference_run();
+        let trace_writer =
+            MingFiscalTraceWriter::create(DEBUG_FIXTURE, DEFAULT_SEED, canwu.time()).ok();
+        let status = trace_writer.as_ref().map_or_else(
+            || "Ready (trace dump unavailable)".to_owned(),
+            |writer| format!("Ready · trace={}", writer.paths().steps.display()),
+        );
         Self {
             canwu,
             ids,
@@ -62,24 +78,104 @@ impl DebugApp {
             selected: Some(EntityRef::Army(ids.army)),
             search: String::new(),
             saved_snapshot: None,
+            trace_writer,
+            trace_frames: Vec::new(),
+            trace_sequence: 0,
             map_pan: Vec2::ZERO,
             map_zoom: 1.0,
-            status: "Ready".to_owned(),
+            status,
         }
     }
 
     fn reset(&mut self) {
+        if let Some(mut writer) = self.trace_writer.take() {
+            let _ = writer.finish(&self.canwu);
+        }
         (self.canwu, self.ids) = new_reference_run();
         self.running = false;
         self.selected = Some(EntityRef::Army(self.ids.army));
-        "Scenario reset through the lifecycle API".clone_into(&mut self.status);
+        self.trace_frames.clear();
+        self.trace_sequence = 0;
+        self.trace_writer = self.new_trace_writer();
+        "Scenario reset through the lifecycle API; trace restarted".clone_into(&mut self.status);
+    }
+
+    fn new_trace_writer(&self) -> Option<MingFiscalTraceWriter> {
+        MingFiscalTraceWriter::create(DEBUG_FIXTURE, DEFAULT_SEED, self.canwu.time()).ok()
     }
 
     fn advance(&mut self, duration: SimDuration) {
-        match self.canwu.advance(duration) {
-            Ok(events) => {
-                self.status = format!("Advanced; {} event(s) emitted", events.len());
+        match self.canwu.advance_canonical(duration) {
+            Ok(receipts) => {
+                let count = receipts.len();
+                for receipt in receipts {
+                    self.record_trace(MingFiscalTracePhase::CanonicalBoundary, receipt);
+                }
+                self.status = format!("Advanced canonically; {count} boundary(ies) settled");
             }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn step_canonical(&mut self) {
+        match self.canwu.step_canonical() {
+            Ok(Some(receipt)) => {
+                let boundary_id = format!("{:?}", receipt.boundary_id);
+                self.record_trace(MingFiscalTracePhase::CanonicalBoundary, receipt);
+                self.status = format!("Canonical step settled: {boundary_id}");
+            }
+            Ok(None) => {
+                "No canonical boundary is currently scheduled".clone_into(&mut self.status);
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
+    fn record_trace(&mut self, phase: MingFiscalTracePhase, receipt: BoundaryReceipt) {
+        let sequence = self.trace_sequence;
+        match capture_ming_fiscal_trace_frame(&self.canwu, sequence, phase, receipt) {
+            Ok(frame) => {
+                self.trace_sequence = self.trace_sequence.saturating_add(1);
+                let write_error = self
+                    .trace_writer
+                    .as_mut()
+                    .and_then(|writer| writer.write_frame(&frame).err());
+                if let Some(error) = write_error {
+                    self.trace_writer = None;
+                    self.status = format!("Trace dump stopped: {error}");
+                }
+                self.trace_frames.push(frame);
+            }
+            Err(error) => self.status = format!("Trace capture failed: {error}"),
+        }
+    }
+
+    fn run_fiscal_sample(&mut self) {
+        let mut writer = self.trace_writer.take();
+        let mut sequence = self.trace_sequence;
+        let mut frames = Vec::new();
+        let id_prefix = format!("debug.{DEBUG_FIXTURE}.{}", self.canwu.revision());
+        let result = canwu_ming_fiscal_reference::run_ming_fiscal_sample_cycle_with_trace(
+            &mut self.canwu,
+            &id_prefix,
+            |canwu, phase, receipt| {
+                let frame =
+                    capture_ming_fiscal_trace_frame(canwu, sequence, phase, receipt.clone())?;
+                sequence = sequence.saturating_add(1);
+                if let Some(writer) = writer.as_mut() {
+                    writer
+                        .write_frame(&frame)
+                        .map_err(|error| trace_error(&error))?;
+                }
+                frames.push(frame);
+                Ok(())
+            },
+        );
+        self.trace_writer = writer;
+        self.trace_sequence = sequence;
+        self.trace_frames.extend(frames);
+        match result {
+            Ok(()) => "Ming fiscal sample cycle completed".clone_into(&mut self.status),
             Err(error) => self.status = error.to_string(),
         }
     }
@@ -94,16 +190,16 @@ impl DebugApp {
                 self.last_tick = Instant::now();
             }
             if ui.button("Step").clicked() {
-                match self.canwu.step() {
-                    Ok(events) => self.status = format!("Step emitted {} event(s)", events.len()),
-                    Err(error) => self.status = error.to_string(),
-                }
+                self.step_canonical();
             }
             if ui.button("+6 hours").clicked() {
                 self.advance(SimDuration::hours(6));
             }
             if ui.button("+1 day").clicked() {
                 self.advance(SimDuration::days(1));
+            }
+            if ui.button("Run fiscal sample").clicked() {
+                self.run_fiscal_sample();
             }
             if ui.button("Reset").clicked() {
                 self.reset();
@@ -123,11 +219,16 @@ impl DebugApp {
                 .clicked()
                 && let Some(snapshot) = &self.saved_snapshot
             {
-                let plugin = ReferenceWorldPlugin;
-                match Canwu::from_snapshot_json_with_plugins(snapshot, &[&plugin]) {
+                match restore_ming_fiscal_reference(snapshot) {
                     Ok(canwu) => {
+                        if let Some(mut writer) = self.trace_writer.take() {
+                            let _ = writer.finish(&self.canwu);
+                        }
                         self.canwu = canwu;
                         self.running = false;
+                        self.trace_frames.clear();
+                        self.trace_sequence = 0;
+                        self.trace_writer = self.new_trace_writer();
                         "Snapshot restored".clone_into(&mut self.status);
                     }
                     Err(error) => self.status = error.to_string(),
@@ -301,6 +402,61 @@ impl DebugApp {
 
     fn event_log(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            ui.heading("Fiscal Trace");
+            ui.label(format!("{} boundary frame(s)", self.trace_frames.len()));
+        });
+        if let Some(writer) = &self.trace_writer {
+            ui.weak(format!("dump: {}", writer.paths().steps.display()));
+        }
+        egui::ScrollArea::vertical()
+            .max_height(170.0)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                for frame in self.trace_frames.iter().rev().take(100).rev() {
+                    let counts = &frame.fiscal.counts;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(format!(
+                            "#{} · {} · {}",
+                            frame.sequence, frame.receipt.settled_at, frame.phase
+                        ));
+                        ui.label(format!(
+                            "assessments={} requests={} receipts={} audits={}",
+                            counts.assessments,
+                            counts.execution_requests,
+                            counts.execution_receipts,
+                            counts.audits
+                        ));
+                    });
+                }
+            });
+        if let Some(frame) = self.trace_frames.last() {
+            ui.separator();
+            ui.heading("Latest Boundary Detail");
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!("phase={}", frame.phase));
+                ui.monospace(format!("boundary={:?}", frame.receipt.boundary_id));
+                ui.monospace(format!("revision={}", frame.revision));
+                ui.monospace(format!("checkpoint={}", frame.checkpoint_hash));
+            });
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "changes={} records={} knowledge={} allocations={}",
+                    frame.receipt.change_count,
+                    frame.receipt.record_change_count,
+                    frame.receipt.knowledge_record_count,
+                    frame.receipt.allocations.len()
+                ));
+                ui.label(format!(
+                    "fiscal assessments={} requests={} receipts={} aggregates={}",
+                    frame.fiscal.counts.assessments,
+                    frame.fiscal.counts.execution_requests,
+                    frame.fiscal.counts.execution_receipts,
+                    frame.fiscal.counts.aggregates
+                ));
+            });
+        }
+        ui.separator();
+        ui.horizontal(|ui| {
             ui.heading("Event / Causality Log");
             ui.label(format!("{} event(s)", self.canwu.events().len()));
         });
@@ -414,10 +570,11 @@ impl DebugApp {
 }
 
 fn new_reference_run() -> (Canwu, ReferenceWorldIds) {
-    let (scenario, ids) = demo_scenario().expect("reference scenario must be valid");
-    let plugin = ReferenceWorldPlugin;
-    let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])
-        .expect("reference scenario must initialize");
+    let reference = ming_fiscal_reference_scenario(DEBUG_FIXTURE)
+        .expect("Ming fiscal reference scenario must be valid");
+    let ids = reference.world_ids;
+    let canwu = new_ming_fiscal_reference(DEFAULT_SEED, DEBUG_FIXTURE)
+        .expect("Ming fiscal reference scenario must initialize");
     (canwu, ids)
 }
 

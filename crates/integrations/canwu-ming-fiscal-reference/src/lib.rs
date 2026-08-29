@@ -3,11 +3,18 @@
 #![allow(clippy::missing_errors_doc)]
 
 mod adapter;
+mod trace;
 
 pub use adapter::{
     MingFiscalExecutionAdapterPlugin, ReferenceFiscalExecutionEvidence,
     ReferenceFiscalExecutionEvidenceRecord, enqueue_reference_execution_result,
     reference_execution_evidence_ref, reference_execution_evidence_version,
+};
+pub use trace::{
+    DEFAULT_TRACE_DIRECTORY, MingFiscalTraceCounts, MingFiscalTraceFiscalState,
+    MingFiscalTraceFrame, MingFiscalTraceManifest, MingFiscalTracePaths, MingFiscalTracePhase,
+    MingFiscalTraceWriter, TRACE_FORMAT_VERSION, TRACE_MANIFEST_FILE, TRACE_STEPS_FILE,
+    TraceDumpError, capture_ming_fiscal_trace_frame, default_trace_directory, trace_error,
 };
 
 use canwu_api::{
@@ -311,6 +318,17 @@ pub fn validate_ming_fiscal_reference(canwu: &Canwu) -> Result<(), CanwuError> {
 }
 
 pub fn run_ming_fiscal_sample_cycle(canwu: &mut Canwu, id_prefix: &str) -> Result<(), CanwuError> {
+    run_ming_fiscal_sample_cycle_with_trace(canwu, id_prefix, |_canwu, _phase, _receipt| Ok(()))
+}
+
+pub fn run_ming_fiscal_sample_cycle_with_trace<F>(
+    canwu: &mut Canwu,
+    id_prefix: &str,
+    mut on_boundary: F,
+) -> Result<(), CanwuError>
+where
+    F: FnMut(&Canwu, MingFiscalTracePhase, &canwu_api::BoundaryReceipt) -> Result<(), CanwuError>,
+{
     let plan = sample_cycle_plan(canwu, id_prefix)?;
     let SampleCyclePlan {
         actor,
@@ -322,7 +340,7 @@ pub fn run_ming_fiscal_sample_cycle(canwu: &mut Canwu, id_prefix: &str) -> Resul
         period_id,
         payment_form,
     } = plan;
-    submit_reference_action(
+    submit_reference_action_with_trace(
         canwu,
         actor,
         &FiscalActionRequest {
@@ -340,10 +358,12 @@ pub fn run_ming_fiscal_sample_cycle(canwu: &mut Canwu, id_prefix: &str) -> Resul
                 commutation_quote: None,
             },
         },
+        MingFiscalTracePhase::OpenAssessment,
+        &mut on_boundary,
     )?;
 
     let request_id = format!("{id_prefix}.execution");
-    submit_reference_action(
+    submit_reference_action_with_trace(
         canwu,
         actor,
         &FiscalActionRequest {
@@ -362,15 +382,18 @@ pub fn run_ming_fiscal_sample_cycle(canwu: &mut Canwu, id_prefix: &str) -> Resul
                 purpose: "reference fiscal sample collection".to_owned(),
             },
         },
+        MingFiscalTracePhase::AuthorizeExecution,
+        &mut on_boundary,
     )?;
 
-    settle_sample_execution(
+    settle_sample_execution_with_trace(
         canwu,
         id_prefix,
         request_id,
         actor,
         institution,
         payment_form,
+        &mut on_boundary,
     )?;
     validate_ming_fiscal_reference(canwu)
 }
@@ -445,14 +468,18 @@ fn sample_cycle_plan(canwu: &Canwu, id_prefix: &str) -> Result<SampleCyclePlan, 
     })
 }
 
-fn settle_sample_execution(
+fn settle_sample_execution_with_trace<F>(
     canwu: &mut Canwu,
     id_prefix: &str,
     request_id: String,
     actor: PersonId,
     institution: EntityRef,
     payment_form: FiscalPaymentForm,
-) -> Result<(), CanwuError> {
+    on_boundary: &mut F,
+) -> Result<(), CanwuError>
+where
+    F: FnMut(&Canwu, MingFiscalTracePhase, &canwu_api::BoundaryReceipt) -> Result<(), CanwuError>,
+{
     let evidence = ReferenceFiscalExecutionEvidence {
         id: format!("{id_prefix}.execution-evidence"),
         request_id: request_id.clone(),
@@ -468,7 +495,13 @@ fn settle_sample_execution(
     };
     let now = canwu.time();
     enqueue_reference_execution_result(canwu, now, &evidence)?;
-    canwu.advance_canonical(SimDuration::minutes(1))?;
+    let receipts = canwu.advance_canonical(SimDuration::minutes(1))?;
+    notify_trace(
+        on_boundary,
+        canwu,
+        MingFiscalTracePhase::AdapterEvidence,
+        &receipts,
+    )?;
     let evidence_version = reference_execution_evidence_version(canwu, &evidence.id)
         .ok_or_else(|| invalid_reference("sample execution evidence version is unavailable"))?;
     let now = canwu.time();
@@ -481,15 +514,26 @@ fn settle_sample_execution(
             external_evidence: [evidence_version].into_iter().collect(),
         },
     )?;
-    canwu.advance_canonical(SimDuration::minutes(1))?;
+    let receipts = canwu.advance_canonical(SimDuration::minutes(1))?;
+    notify_trace(
+        on_boundary,
+        canwu,
+        MingFiscalTracePhase::FiscalExecutionReceipt,
+        &receipts,
+    )?;
     Ok(())
 }
 
-fn submit_reference_action(
+fn submit_reference_action_with_trace<F>(
     canwu: &mut Canwu,
     actor: PersonId,
     request: &FiscalActionRequest,
-) -> Result<(), CanwuError> {
+    phase: MingFiscalTracePhase,
+    on_boundary: &mut F,
+) -> Result<(), CanwuError>
+where
+    F: FnMut(&Canwu, MingFiscalTracePhase, &canwu_api::BoundaryReceipt) -> Result<(), CanwuError>,
+{
     let request_id = canwu
         .revision()
         .checked_add(1)
@@ -505,7 +549,8 @@ fn submit_reference_action(
             CommandEnvelope::new(Issuer::Actor(actor), command).at_time(canwu.time()),
         ),
     )?;
-    canwu.advance_canonical(SimDuration::minutes(1))?;
+    let receipts = canwu.advance_canonical(SimDuration::minutes(1))?;
+    notify_trace(on_boundary, canwu, phase, &receipts)?;
     let state = canwu
         .typed_domain_record(&fiscal_state_reference())
         .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable"))?
@@ -519,6 +564,21 @@ fn submit_reference_action(
             "sample fiscal action {} was rejected: {}",
             request.action_id, outcome.reason
         )));
+    }
+    Ok(())
+}
+
+fn notify_trace<F>(
+    on_boundary: &mut F,
+    canwu: &Canwu,
+    phase: MingFiscalTracePhase,
+    receipts: &[canwu_api::BoundaryReceipt],
+) -> Result<(), CanwuError>
+where
+    F: FnMut(&Canwu, MingFiscalTracePhase, &canwu_api::BoundaryReceipt) -> Result<(), CanwuError>,
+{
+    for receipt in receipts {
+        on_boundary(canwu, phase, receipt)?;
     }
     Ok(())
 }
