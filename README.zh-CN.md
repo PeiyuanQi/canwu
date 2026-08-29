@@ -105,7 +105,8 @@ cargo run -p canwu-correspondence --example routed_correspondence
 
 [crate 结构图](crates/README.md)展示仓库分层、精确的依赖 DAG 和发布顺序。
 [文档索引](docs/README.md)汇总架构契约、社区指南和法律声明。`agent-interface`
-保存供引擎使用者和仓库维护者使用的技能工具，它们不是运行时模拟插件。
+保存面向引擎使用者的打包技能；仓库贡献者技能原生位于 `.agents/skills`，
+Claude 兼容入口位于 `.claude/skills`。这些工具不是运行时模拟插件。
 `website` 和 `assets` 保存社区网站与项目素材。
 
 修改架构边界前，请先阅读[架构说明](docs/architecture.md)和
@@ -149,15 +150,16 @@ cargo run -p canwu-correspondence --example routed_correspondence
 
 ## 智能体技能
 
-智能体接口和技能位于 [`agent-interface`](agent-interface/) 目录。外部使用者可以
+面向引擎使用者的智能体接口和技能位于 [`agent-interface`](agent-interface/) 目录。外部使用者可以
 调用
 [`$canwu-engine-docs`](agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 查找并解读官方教程与设计文档，再使用
 [`$canwu-engine-usage`](agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-获得实现指导。贡献者和维护者使用
-[`canwu-developer`](agent-interface/plugins/canwu-developer/skills/) 下的技能；发布
-流程使用
-[`canwu-developer-release`](agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md)。
+获得实现指导。贡献者和维护者原生使用
+[`canwu-contributor-design`](.agents/skills/canwu-contributor-design/SKILL.md)
+和
+[`canwu-contributor-release`](.agents/skills/canwu-contributor-release/SKILL.md)
+技能；Claude 兼容入口位于 [`.claude/skills`](.claude/skills/)。
 面向维护者的软件包与 registry 操作步骤见
 [`docs/releasing.md`](docs/releasing.md)。
 

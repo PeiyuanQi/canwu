@@ -1,9 +1,9 @@
 ---
-name: canwu-developer-release
+name: canwu-contributor-release
 description: Prepare and verify Canwu releases, packages, tags, and release artifacts. Use for SemVer decisions, cross-platform release checks, Cargo packaging, Apache-2.0 license integrity, NOTICE preservation, third-party dependency audits, notice generation, or any request to publish or distribute Canwu source crates or compiled binaries.
 ---
 
-# Release Canwu
+# Release Canwu As A Contributor
 
 Work from the Canwu repository root. Read `AGENTS.md`, `CONTRIBUTING.md`,
 `docs/versioning.md`, `LICENSE`, `NOTICE`, `docs/community/branding.md`, and

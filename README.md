@@ -118,9 +118,10 @@ cargo run -p canwu-correspondence --example routed_correspondence
 The [crate map](crates/README.md) shows the repository layers, exact dependency
 DAG, and publication order. The [documentation index](docs/README.md) links the
 architectural contracts, community guidance, and legal notices.
-`agent-interface` contains skills for engine users and repository maintainers;
-these are tooling, not runtime simulation plugins. The `website` and `assets`
-directories contain the community site and project media.
+`agent-interface` contains packaged skills for engine users. Repo-local
+contributor skills live under `.agents/skills`, with Claude-compatible loaders
+under `.claude/skills`; these are tooling, not runtime simulation plugins. The
+`website` and `assets` directories contain the community site and project media.
 
 Read [the architecture](docs/architecture.md) and
 [end-state design](docs/end-state.md) before changing boundaries.
@@ -169,15 +170,16 @@ The detailed project hierarchy and change-surface map live in
 
 ## Agent skills
 
-Agent-facing integrations live under [`agent-interface`](https://github.com/PeiyuanQi/canwu/tree/v0.5.1/agent-interface).
+Agent-facing engine integrations live under [`agent-interface`](https://github.com/PeiyuanQi/canwu/tree/v0.5.1/agent-interface).
 External users can invoke
 [`$canwu-engine-docs`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-docs/SKILL.md)
 to find and explain official tutorials and design documents, then use
 [`$canwu-engine-usage`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-engine/skills/canwu-engine-usage/SKILL.md)
-for implementation guidance. Contributors and maintainers use skills under
-[`canwu-developer`](https://github.com/PeiyuanQi/canwu/tree/v0.5.1/agent-interface/plugins/canwu-developer/skills); the release
-workflow is
-[`canwu-developer-release`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/agent-interface/plugins/canwu-developer/skills/canwu-developer-release/SKILL.md).
+for implementation guidance. Contributors and maintainers use the native
+[`canwu-contributor-design`](.agents/skills/canwu-contributor-design/SKILL.md)
+and
+[`canwu-contributor-release`](.agents/skills/canwu-contributor-release/SKILL.md)
+skills. Claude-compatible loaders live under [`.claude/skills`](.claude/skills/).
 The human-readable package and registry procedure is documented in
 [`docs/releasing.md`](https://github.com/PeiyuanQi/canwu/blob/v0.5.1/docs/releasing.md).
 

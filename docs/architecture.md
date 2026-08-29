@@ -695,11 +695,12 @@ sequenceDiagram
 - Debug API: trusted entity/domain-record/event reads. The reference UI uses
   the same command dispatcher and reference-world plugin as every other client.
 
-Repository agent skills live under `agent-interface/`. The `canwu-engine`
-plugin teaches external agents to use the public API and domain integrations. The
-`canwu-developer` plugin contains contributor and release workflows. These
-Codex skill plugins are development interfaces and are separate from runtime
-`SimulationPlugin` implementations registered in `canwu-sim`.
+Packaged engine-user skills live under `agent-interface/`; the `canwu-engine`
+plugin teaches external agents to use the public API and domain integrations.
+Repository contributor skills live natively under `.agents/skills/`, with
+Claude-compatible loaders under `.claude/skills/`. These agent tools are
+development interfaces and are separate from runtime `SimulationPlugin`
+implementations registered in `canwu-sim`.
 
 ## Knowledge model
 

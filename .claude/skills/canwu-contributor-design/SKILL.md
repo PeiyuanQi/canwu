@@ -7,6 +7,6 @@ description: "Design or review Canwu engine contributions within repository boun
 
 This is the repo-local Claude-compatible entry point for contributors to the
 Canwu engine repository. Read and follow
-../../../agent-interface/plugins/canwu-developer/skills/canwu-contributor-design/SKILL.md
-completely before acting. The packaged file is the source of truth; do not
-create a divergent local variant.
+../../../.agents/skills/canwu-contributor-design/SKILL.md completely before
+acting. The `.agents` file is the source of truth; do not create a divergent
+Claude-specific variant.
