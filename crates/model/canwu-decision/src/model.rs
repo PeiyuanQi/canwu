@@ -13,6 +13,7 @@ use std::fmt::{Display, Formatter};
 pub enum DecisionErrorCode {
     ClosedTicket,
     DuplicateController,
+    DuplicateResponse,
     DuplicateTicket,
     InvalidController,
     InvalidDecision,
@@ -30,6 +31,7 @@ pub enum DecisionAttemptErrorCode {
     EntityUnavailable,
     ClosedTicket,
     DuplicateController,
+    DuplicateResponse,
     DuplicateTicket,
     InvalidController,
     InvalidDecision,
@@ -44,6 +46,7 @@ impl From<DecisionErrorCode> for DecisionAttemptErrorCode {
         match value {
             DecisionErrorCode::ClosedTicket => Self::ClosedTicket,
             DecisionErrorCode::DuplicateController => Self::DuplicateController,
+            DecisionErrorCode::DuplicateResponse => Self::DuplicateResponse,
             DecisionErrorCode::DuplicateTicket => Self::DuplicateTicket,
             DecisionErrorCode::InvalidController => Self::InvalidController,
             DecisionErrorCode::InvalidDecision => Self::InvalidDecision,

@@ -369,7 +369,31 @@ pub enum RoutingError {
 
 impl fmt::Display for RoutingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{self:?}")
+        match self {
+            Self::InvalidNetwork(message) => {
+                write!(formatter, "invalid routing network: {message}")
+            }
+            Self::InvalidSnapshot(message) => {
+                write!(formatter, "invalid planning snapshot: {message}")
+            }
+            Self::UnknownOrigin => {
+                formatter.write_str("routing origin is not present in the network")
+            }
+            Self::UnknownDestination => {
+                formatter.write_str("routing destination is not present in the network")
+            }
+            Self::NoKnownRoute => formatter.write_str("no route satisfies the routing policy"),
+            Self::SearchHorizonExceeded => {
+                formatter.write_str("route departure is outside the planning snapshot horizon")
+            }
+            Self::ExpansionBudgetExceeded => {
+                formatter.write_str("routing expansion budget was exceeded")
+            }
+            Self::RequirementsUnsatisfied => {
+                formatter.write_str("routing requirements are not satisfied")
+            }
+            Self::ArithmeticOverflow => formatter.write_str("routing arithmetic overflowed"),
+        }
     }
 }
 
@@ -447,14 +471,22 @@ fn better(left: &Label, right: &Label) -> bool {
     left.key() < right.key()
 }
 
+fn adjacency(network: &RoutingNetwork) -> BTreeMap<RoutingNodeRef, Vec<&RoutingConnection>> {
+    let mut index = BTreeMap::new();
+    for connection in &network.connections {
+        index
+            .entry(connection.from.clone())
+            .or_insert_with(Vec::new)
+            .push(connection);
+    }
+    index
+}
+
 fn outgoing<'a>(
-    network: &'a RoutingNetwork,
+    index: &'a BTreeMap<RoutingNodeRef, Vec<&'a RoutingConnection>>,
     node: &RoutingNodeRef,
 ) -> impl Iterator<Item = &'a RoutingConnection> {
-    network
-        .connections
-        .iter()
-        .filter(move |connection| &connection.from == node)
+    index.get(node).into_iter().flatten().copied()
 }
 
 fn extend(label: &Label, connection: &RoutingConnection, policy: &RoutingPolicy) -> Option<Label> {
@@ -494,8 +526,8 @@ fn extend(label: &Label, connection: &RoutingConnection, policy: &RoutingPolicy)
 }
 
 fn solve_dijkstra(
-    snapshot: &PlanningSnapshot,
     request: &RoutingRequest,
+    index: &BTreeMap<RoutingNodeRef, Vec<&RoutingConnection>>,
 ) -> Result<Label, RoutingError> {
     let mut labels = BTreeMap::<RoutingNodeRef, Label>::new();
     let start = Label {
@@ -529,7 +561,7 @@ fn solve_dijkstra(
         if entry.node == request.destination {
             return Ok(current);
         }
-        for connection in outgoing(&snapshot.network, &entry.node) {
+        for connection in outgoing(index, &entry.node) {
             let Some(candidate) = extend(&current, connection, &request.policy) else {
                 continue;
             };
@@ -546,8 +578,8 @@ fn solve_dijkstra(
 }
 
 fn solve_label_correcting(
-    snapshot: &PlanningSnapshot,
     request: &RoutingRequest,
+    index: &BTreeMap<RoutingNodeRef, Vec<&RoutingConnection>>,
 ) -> Result<Label, RoutingError> {
     let mut labels = BTreeMap::<RoutingNodeRef, Vec<Label>>::new();
     let start = Label {
@@ -566,7 +598,7 @@ fn solve_label_correcting(
         if expanded > request.policy.max_expanded_nodes {
             return Err(RoutingError::ExpansionBudgetExceeded);
         }
-        for connection in outgoing(&snapshot.network, &current.node) {
+        for connection in outgoing(index, &current.node) {
             let Some(candidate) = extend(&current, connection, &request.policy) else {
                 continue;
             };
@@ -634,9 +666,10 @@ pub fn plan_route(
         plan.digest = canonical_digest(&plan_without_digest(&plan));
         return Ok(plan);
     }
+    let index = adjacency(&snapshot.network);
     let label = match request.policy.algorithm {
-        RoutingAlgorithm::FifoDijkstraV1 => solve_dijkstra(snapshot, request)?,
-        RoutingAlgorithm::BoundedLabelCorrectingV1 => solve_label_correcting(snapshot, request)?,
+        RoutingAlgorithm::FifoDijkstraV1 => solve_dijkstra(request, &index)?,
+        RoutingAlgorithm::BoundedLabelCorrectingV1 => solve_label_correcting(request, &index)?,
     };
     let mut plan = RoutePlan {
         algorithm_version: ROUTING_ALGORITHM_VERSION.to_owned(),

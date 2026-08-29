@@ -277,7 +277,12 @@ fn admit_legal_ingress(
         }
         let mutation_budget = runtime
             .as_ref()
-            .expect("known legal ingress loaded the runtime")
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDomainRecord,
+                    "legal runtime could not be loaded for admitted legal ingress",
+                )
+            })?
             .budgets
             .max_mutations_per_boundary;
         if packet_type == LAW_INTENT_INGRESS {
@@ -455,7 +460,12 @@ fn admit_legal_ingress(
     let record = view.typed_domain_record(&reference)?.ok_or_else(|| {
         CanwuError::new(ErrorCode::InvalidDomainRecord, "legal runtime is missing")
     })?;
-    let mut runtime = runtime.expect("non-empty legal ingress loaded the runtime");
+    let Some(mut runtime) = runtime else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDomainRecord,
+            "legal runtime could not be loaded for admitted legal ingress",
+        ));
+    };
     let plan = runtime.plan.clone();
     runtime.validate_live_plan_binding(&plan)?;
     wake_requested.sort();

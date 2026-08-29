@@ -263,7 +263,7 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
             "format 7 snapshots must use the current commitment, revision, admission, and authority contracts",
         ));
     }
-    let Some(RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
+    let Some(run_manifest @ RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
         return Err(invalid_snapshot_error(
             "format 7 snapshots require a declared run manifest",
         ));
@@ -283,12 +283,8 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
             "format 7 snapshots cannot use legacy or manifest-only run configuration provenance",
         ));
     }
-    manifest::validate(
-        snapshot.run_manifest.as_ref().expect("checked above"),
-        Some(initial_scenario),
-    )?;
-    let expected_manifest_hash =
-        manifest::hash(snapshot.run_manifest.as_ref().expect("checked above"))?;
+    manifest::validate(run_manifest, Some(initial_scenario))?;
+    let expected_manifest_hash = manifest::hash(run_manifest)?;
     if snapshot.run_manifest_hash != expected_manifest_hash {
         return Err(invalid_snapshot_error(
             "format 7 snapshot run manifest hash is inconsistent",
@@ -298,11 +294,8 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
         .run_configuration
         .as_ref()
         .ok_or_else(|| invalid_snapshot_error("format 7 snapshots require run configuration"))?;
-    let (_, authority_manifest_hash) = authoritative_run_identity(
-        snapshot.run_manifest.as_ref().expect("checked above"),
-        &expected_manifest_hash,
-        run_configuration,
-    )?;
+    let (_, authority_manifest_hash) =
+        authoritative_run_identity(run_manifest, &expected_manifest_hash, run_configuration)?;
     let expected_authority_root =
         fresh_authority_root_seed(snapshot.root_seed, &authority_manifest_hash)?;
     if snapshot.authority_root_seed != expected_authority_root {
@@ -1994,17 +1987,21 @@ impl Simulation {
             ));
         }
         let needs = {
-            let cache = if let Some(cache) = self.state.metadata.commitment_cache.as_mut() {
-                cache
-            } else {
+            if self.state.metadata.commitment_cache.is_none() {
                 self.state.metadata.commitment_cache =
                     Some(RuntimeCommitmentCache::from_evidence(&self.state.evidence)?);
-                self.state
-                    .metadata
-                    .commitment_cache
-                    .as_mut()
-                    .expect("the commitment cache was initialized")
-            };
+            }
+            let cache = self
+                .state
+                .metadata
+                .commitment_cache
+                .as_mut()
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidSnapshot,
+                        "commitment cache is unavailable while refreshing runtime roots",
+                    )
+                })?;
             cache.sync(&self.state.evidence)?;
             cache.needs()
         };
@@ -2029,7 +2026,12 @@ impl Simulation {
                 .metadata
                 .commitment_cache
                 .as_mut()
-                .expect("the commitment cache was initialized");
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidSnapshot,
+                        "commitment cache is unavailable while applying root updates",
+                    )
+                })?;
             cache.apply(updates);
             (cache.domain_roots()?, cache.roots())
         };
@@ -3327,11 +3329,13 @@ fn snapshot_command_attempt_preflight_error(
         Ok(authority) => authority,
         Err(error) => return Some(error),
     };
+    let Some(run_configuration) = snapshot.run_configuration.as_ref() else {
+        return Some(invalid_snapshot_error(
+            "snapshot run configuration is required before command attempts",
+        ));
+    };
     if let Err(error) = validate_command_ingress_policy(
-        snapshot
-            .run_configuration
-            .as_ref()
-            .expect("snapshot run configuration is validated before command attempts"),
+        run_configuration,
         &attempt.envelope.issuer,
         &authority,
         CommandAdmission {

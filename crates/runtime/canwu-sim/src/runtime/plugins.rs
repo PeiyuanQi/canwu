@@ -489,7 +489,9 @@ impl PluginRegistrar<'_> {
                 ));
             }
         } else {
-            candidate_schema.register(schema);
+            candidate_schema.register(schema).map_err(|error| {
+                CanwuError::new(ErrorCode::InvalidPluginRegistration, error.to_string())
+            })?;
         }
         let descriptor = candidate_registry
             .descriptors

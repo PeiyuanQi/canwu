@@ -18,15 +18,15 @@ use super::{
     IngressClass, IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy,
     Issuer, KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
     LetterStatus, PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
-    PluginIngressTarget, PluginRegistry, RandomDrawAddress, RandomDrawId, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, ReservationAllocation, ReservationDisposition,
-    ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot, RunManifest,
-    RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction,
-    SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective,
-    WorldSnapshot, authoritative_revision_count, base_schema, boundaries_before_attempts,
-    boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
-    boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
-    commitment_roots_are_canonical, component_key, compute_boundary_hash,
+    PluginIngressTarget, PluginRegistry, RandomAlgorithm, RandomDrawAddress, RandomDrawId,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, ReservationAllocation,
+    ReservationDisposition, ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot,
+    RunManifest, RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey,
+    ScheduledAction, SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence,
+    SystemDirective, WorldSnapshot, authoritative_revision_count, base_schema,
+    boundaries_before_attempts, boundary_has_event_ingress, boundary_state_hash_format,
+    boundary_system_due, boundary_write_stage, canonical_hash, canonical_text,
+    canonicalize_scenario, commitment_roots_are_canonical, component_key, compute_boundary_hash,
     domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
     is_domain_record_state, is_expected_command_rejection, manifest, plugins, random,
     record_change_affected_entities, records, snapshot_boundary_head_state_hash,
@@ -1200,7 +1200,7 @@ fn validate_random_evidence(
     let mut replayed: BTreeMap<_, _> = snapshot
         .random_streams
         .iter()
-        .map(|state| (state.key.clone(), (0_u64, state.seed)))
+        .map(|state| (state.key.clone(), (0_u64, state.seed, state.algorithm)))
         .collect();
     let mut previous_draw = None;
     let mut max_correlation_id = 0;
@@ -1227,7 +1227,7 @@ fn validate_random_evidence(
         {
             return invalid_snapshot("random draw journal is not canonical");
         }
-        let Some((position, generator_state)) = replayed.get_mut(&draw.stream) else {
+        let Some((position, generator_state, algorithm)) = replayed.get_mut(&draw.stream) else {
             return invalid_snapshot("random draw references an unknown stream");
         };
         match &draw.address {
@@ -1238,7 +1238,11 @@ fn validate_random_evidence(
                     return invalid_snapshot("random draw positions are not contiguous per stream");
                 }
                 let mut generator = DeterministicRng::from_seed(*generator_state);
-                if generator.range(draw.upper_exclusive) != draw.value {
+                let value = match algorithm {
+                    RandomAlgorithm::SplitMix64V1 => generator.range_modulo(draw.upper_exclusive),
+                    RandomAlgorithm::SplitMix64V2 => generator.range(draw.upper_exclusive),
+                };
+                if value != draw.value {
                     return invalid_snapshot("random draw value does not match its stream state");
                 }
                 *position = position.checked_add(1).ok_or_else(|| {
@@ -1369,7 +1373,9 @@ fn validate_random_evidence(
     }
 
     for state in &snapshot.random_streams {
-        if replayed.get(&state.key) != Some(&(state.position, state.generator_state)) {
+        if replayed.get(&state.key)
+            != Some(&(state.position, state.generator_state, state.algorithm))
+        {
             return invalid_snapshot("random draw journal does not reproduce stream state");
         }
     }

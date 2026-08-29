@@ -387,59 +387,69 @@ fn field(name: &str, value_type: &str, description: &str) -> FieldSchema {
 
 pub(super) fn base_schema() -> SchemaRegistry {
     let mut schema = SchemaRegistry::default();
-    schema.register(TypeSchema {
-        type_name: "person".to_owned(),
-        description: "Historical actor with roles and a location".to_owned(),
-        fields: vec![
-            field("id", "PersonId", "Stable person identifier"),
-            field("name", "String", "Display name"),
-            field("government", "GovernmentId", "Government membership"),
-            field("current_location", "TerritoryId", "Current territory"),
-            field("roles", "Vec<String>", "Offices and authorities"),
-        ],
-    });
-    schema.register(TypeSchema {
-        type_name: "army".to_owned(),
-        description: "Mobile military organization".to_owned(),
-        fields: vec![
-            field("id", "ArmyId", "Stable army identifier"),
-            field("commander", "PersonId", "Commanding person"),
-            field("location", "TerritoryId", "Ground-truth territory"),
-            field("strength", "u32", "Ground-truth personnel strength"),
-            FieldSchema {
-                name: "morale".to_owned(),
-                value_type: "u16".to_owned(),
-                description: "Morale from 0 through 100".to_owned(),
-                reference_type: None,
-                writable_via_debug_command: true,
-            },
-            field("transit", "Option<TransitState>", "Pending movement"),
-        ],
-    });
-    schema.register(TypeSchema {
-        type_name: "territory".to_owned(),
-        description: "Administrative and geographic unit".to_owned(),
-        fields: vec![
-            field("id", "TerritoryId", "Stable territory identifier"),
-            field("controller", "GovernmentId", "Controlling government"),
-            field("position", "MapPoint", "Abstract visualization point"),
-        ],
-    });
-    schema.register(TypeSchema {
-        type_name: "route".to_owned(),
-        description: "Travel connection between territories".to_owned(),
-        fields: vec![
-            field("from", "TerritoryId", "First route endpoint"),
-            field("to", "TerritoryId", "Second route endpoint"),
-            field("travel_minutes", "i64", "Deterministic travel duration"),
-            field("terrain", "String", "Terrain classification"),
-        ],
-    });
-    schema.register(TypeSchema {
-        type_name: "event".to_owned(),
-        description: "Inspectable state-change or information event".to_owned(),
-        fields: vec![field("timestamp", "SimTime", "Simulation occurrence time")],
-    });
+    schema
+        .register(TypeSchema {
+            type_name: "person".to_owned(),
+            description: "Historical actor with roles and a location".to_owned(),
+            fields: vec![
+                field("id", "PersonId", "Stable person identifier"),
+                field("name", "String", "Display name"),
+                field("government", "GovernmentId", "Government membership"),
+                field("current_location", "TerritoryId", "Current territory"),
+                field("roles", "Vec<String>", "Offices and authorities"),
+            ],
+        })
+        .expect("base schema types are unique");
+    schema
+        .register(TypeSchema {
+            type_name: "army".to_owned(),
+            description: "Mobile military organization".to_owned(),
+            fields: vec![
+                field("id", "ArmyId", "Stable army identifier"),
+                field("commander", "PersonId", "Commanding person"),
+                field("location", "TerritoryId", "Ground-truth territory"),
+                field("strength", "u32", "Ground-truth personnel strength"),
+                FieldSchema {
+                    name: "morale".to_owned(),
+                    value_type: "u16".to_owned(),
+                    description: "Morale from 0 through 100".to_owned(),
+                    reference_type: None,
+                    writable_via_debug_command: true,
+                },
+                field("transit", "Option<TransitState>", "Pending movement"),
+            ],
+        })
+        .expect("base schema types are unique");
+    schema
+        .register(TypeSchema {
+            type_name: "territory".to_owned(),
+            description: "Administrative and geographic unit".to_owned(),
+            fields: vec![
+                field("id", "TerritoryId", "Stable territory identifier"),
+                field("controller", "GovernmentId", "Controlling government"),
+                field("position", "MapPoint", "Abstract visualization point"),
+            ],
+        })
+        .expect("base schema types are unique");
+    schema
+        .register(TypeSchema {
+            type_name: "route".to_owned(),
+            description: "Travel connection between territories".to_owned(),
+            fields: vec![
+                field("from", "TerritoryId", "First route endpoint"),
+                field("to", "TerritoryId", "Second route endpoint"),
+                field("travel_minutes", "i64", "Deterministic travel duration"),
+                field("terrain", "String", "Terrain classification"),
+            ],
+        })
+        .expect("base schema types are unique");
+    schema
+        .register(TypeSchema {
+            type_name: "event".to_owned(),
+            description: "Inspectable state-change or information event".to_owned(),
+            fields: vec![field("timestamp", "SimTime", "Simulation occurrence time")],
+        })
+        .expect("base schema types are unique");
     schema
 }
 

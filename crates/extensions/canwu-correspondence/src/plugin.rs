@@ -21,9 +21,10 @@ use canwu_api::{
     DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceRef, IngressClass, IngressPayload,
     KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeWriteGrant, PayloadSchema,
     PluginActionDescriptor, PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar,
-    RandomOperationTarget, RandomStreamKey, RoutingRequest, SimDuration, SimTime, SimulationPlugin,
-    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective, TransportExecution,
-    TransportExecutionState, TypedDomainRecordRef, canonical_hash, plan_route,
+    RandomOperationTarget, RandomStreamKey, ReconciliationOutcome, RoutingRequest, SimDuration,
+    SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemDirective, TransportExecution, TransportExecutionState, TypedDomainRecordRef,
+    canonical_hash, plan_route,
 };
 use canwu_information::{
     Access, AccessPayload, AddressedDeliveryAttemptDraft, Channel, DeliveryAttempt,
@@ -980,10 +981,13 @@ fn reconcile_information(
             let delivered = attempt.status == DeliveryAttemptStatus::Delivered;
             operation
                 .execution
-                .reconcile_information(
-                    delivered,
-                    (!delivered).then(|| "delivery attempt failed".to_owned()),
-                )
+                .reconcile_information(if delivered {
+                    ReconciliationOutcome::Success
+                } else {
+                    ReconciliationOutcome::Failure {
+                        error: "delivery attempt failed".to_owned(),
+                    }
+                })
                 .map_err(transport_error)?;
             if !delivered {
                 operation.pending_information = None;
