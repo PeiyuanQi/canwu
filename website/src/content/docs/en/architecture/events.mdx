@@ -22,7 +22,7 @@ Every `SimEvent` contains:
 | `cause` | Command, event, boundary, or system that produced it |
 | `correlation_id` | Correlates evidence from one processing chain |
 
-`EventKind` itself owns no domain-event enum. It stores only a stable `type` tag and flattened structured fields. A domain or integration can define a typed payload in its own crate, encode it with `from_payload`, and recover it with `decode_payload`. Format 6 fixes the current tags and canonical field order; new domain events belong to their plugin and declare provenance, audience, and boundary ownership through registration contracts.
+`EventKind` itself owns no domain-event enum. It stores only a stable `type` tag and flattened structured fields. A domain or integration can define a typed payload in its own crate, encode it with `from_payload`, and recover it with `decode_payload`. Format 7 fixes the current tags and canonical field order; new domain events belong to their plugin and declare provenance, audience, and boundary ownership through registration contracts.
 
 ## Causal chain
 

@@ -66,8 +66,12 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [模拟领域扩展](/tutorials/cases/local-community-diffusion/) | domain extension | — | 建立在公开引擎契约上的可选领域交付包，可包含一个或多个插件、领域类型、schema、命令、查询和辅助 API；没有要求实现的 `DomainExtension` trait。 |
 | [模拟模块](/tutorials/cases/local-community-diffusion/) | simulation module | — | 面向人的完整模拟能力名称，例如“社会传播模拟模块”；它可以由一个领域扩展及其插件实现，但本身不是引擎契约。 |
 | [文化系统 SDK](/architecture/culture-law/) | culture system SDK | `canwu-culture` | 已正式发布的可选文化编写、编译与生命周期扩展，建立在 `canwu-society` 之上；负责校验内容并生成确定性执行计划，不进入模拟内核。 |
-| [法律制度化](/architecture/culture-law/) | legal institutionalization | `canwu-law`（提案） | 位于文化下游的扩展：将已准入的文化信号转成由控制者决定的法律提案和版本化法律记录；文化不能直接写入法律状态。 |
-| [法律版本](/architecture/culture-law/) | law version | `LawVersion`（提案） | 不可变的版本化法律规则记录，包含辖区、权威、有效区间、因果引用和执行元数据。 |
+| [法律制度化](/architecture/culture-law/) | legal institutionalization | `canwu-law` | 位于文化等社会证据下游的实验性扩展：推进法律程序，经控制者决策记录待处理法律意图，并在插件边界内原子写入法律渊源、规则和不可变版本；文化不能直接写入法律状态。 |
+| [法律渊源版本](/architecture/culture-law/) | legal source version | `LegalSourceVersion` | 不可变的法律渊源记录，可表示制定文书、判决、协议、习惯认可结论、法律承受表或其他由内容配置的法律主张依据。 |
+| [法律规则](/architecture/culture-law/) | legal rule | `LegalRule` | 一项有界规范规则的稳定身份与可变 head；其不可变变更保存在 `LawVersion` 记录中。 |
+| [法律版本](/architecture/culture-law/) | law version | `LawVersion` | 绑定稳定 `LegalRule` 的仅创建、不可变规范变更记录，保存确切渊源与前序引用、规范关系、适用范围、生效与效力状态以及证据；执行情况另行建模。 |
+| [法律聚合记录引用](/architecture/culture-law/) | legal aggregate record reference | `LegalRecordRef` | 法律聚合内部记录的精确 kind 与身份；法律局部记录作为一个聚合提交，因此它不是内核 `DomainRecordVersionRef`。 |
+| [文化目标代际引用](/architecture/culture-law/) | cultural target generation reference | `CulturalTargetGenerationRef` | 法律提案或版本引用的精确目标与 generation，防止退休或重新激活把旧证据静默绑定到新一代。 |
 | [文化执行计划](/architecture/culture-law/) | compiled culture plan | `CompiledCulturePlan` | 从文化定义编译出的外部不可变、绑定内容哈希的运行时计划，包含紧凑 ID、反向索引、预算和生命周期策略。 |
 | [休眠目标](/architecture/culture-law/) | dormant target | `Dormant` | 没有参与人口或已准入工作的文化目标；它离开热结算索引，但保留显式重新激活描述。 |
 | [退休目标](/architecture/culture-law/) | retired target | `Retired` | 从动态热状态移除的文化目标；历史身份和证据仍通过墓碑与归档契约保留。 |

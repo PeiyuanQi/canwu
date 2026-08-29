@@ -67,6 +67,35 @@ target releases dynamic society state during synchronization but keeps a tombsto
 and historical evidence. Reactivation is explicit and generation-bound; the
 canonical-ingress adapter remains follow-up work. See the [culture and legal institutional systems](/en/architecture/culture-law/).
 
+## Legal institutionalization SDK
+
+The experimental `canwu-law` crate compiles legal authoring definitions into a
+deterministic plan and provides jurisdiction relations, institutional seats,
+frozen procedures, per-seat participation, a decision outbox, pending legal
+intents, immutable legal sources and law versions, stable rules, cases and
+rulings, applicability, and succession. Authors must declare clause modality and distinguish legal
+competence, defects, validity, and exact origin. Kernel command authorization
+does not imply in-world validity. Rights and eligibility clauses also declare
+holders, duty bearers, subject matter, standing, and remedy relations. Canonical `LegalMutation` and pending-
+intent ingress are revalidated by the event-driven plugin and update the
+aggregate atomically in one `DomainDeltaProposal` using its exact record
+version. The three-stage outbox adapter persists the expected revision, settles
+decision ingress, then proves accepted controller and ticket-open outcomes plus
+the exact ticket binding from the persistent decision journal. The proof does
+not depend on retaining ingress payloads. Actor contexts come from bounded
+holder `KnowledgeQuery` results.
+
+Persisted indexes cover open procedures, deadlines, latest participation,
+dispatched outbox identities, due versions, decision outcomes, and dirty rules. Applicability queries require
+an order partition and exact compiled profile; succession uses bounded reception
+scope and rule-prefix matching rather than inheriting a whole predecessor order by default. Retirement names an exact culture
+generation: adoption evidence can retire without deleting enacted law, while
+an operative live-level dependency blocks retirement. Only the law's own
+review, expiry, repeal, or succession operation changes its legal effect.
+Retirement is bounded maintenance: `max_retirement_dependency_records` fails
+closed before mutation when the v1 aggregate dependency proof is too large.
+See the [culture and legal institutional systems](/en/architecture/culture-law/).
+
 ## Fiscal simulation extension
 
 `canwu-fiscal` owns generic fiscal procedure: rules, regional adoption,

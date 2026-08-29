@@ -556,6 +556,9 @@ pub enum DecisionAttemptOutcome {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DecisionAttemptRecord {
     pub request_id: DecisionRequestId,
+    /// Canonical commitment to the complete admitted decision ingress request.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_commitment: String,
     pub at: SimTime,
     /// Authoritative revision immediately before decision admission.
     pub revision_before: u64,

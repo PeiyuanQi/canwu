@@ -21,7 +21,7 @@ fn construct_record() -> RandomDrawRecord {
         operation_evidence: None,
         upper_exclusive: 10,
         value: 4,
-        purpose: "compile the format-6 shape".to_owned(),
+        purpose: "compile the format-7 shape".to_owned(),
         producer: RandomDrawProducer::CoreSystem {
             system: "api-delta".to_owned(),
         },
@@ -42,7 +42,7 @@ fn exercise_information_flow_api_delta() {
         visibility: StateVisibility::SameBoundary,
         producer_correlation: Some("fixture-correlation".to_owned()),
         records: Vec::new(),
-        summary: "exercise the format-6 publication shape".to_owned(),
+        summary: "exercise the format-7 publication shape".to_owned(),
     };
     let cross_plugin_ingress = BoundaryDirective::SchedulePluginIngress {
         target_plugin: "fixture-target".to_owned(),

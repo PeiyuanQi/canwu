@@ -294,11 +294,27 @@ This is a hot-state optimization, not historical deletion.
 The complete authoring, incremental settlement, lifecycle, and benchmark
 contract is specified in the [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md).
 
-Legal institutionalization is a separate proposed downstream extension. It
-consumes cultural signals, creates controller-bound `DecisionTicket` options,
-and commits versioned legal records only through authorized canonical commands.
+Legal institutionalization is implemented as the experimental downstream
+`canwu-law` extension. It
+consumes admitted social evidence and materializes holder-bound decision outbox
+items. A three-stage host adapter durably prepares the revision, enqueues and
+settles controller-bound `DecisionTicket` options, then acknowledges exact
+accepted outcomes and ticket bindings from the persistent decision journal.
+An authorized command writes only a pending legal intent, and a later canonical
+law boundary atomically compare-and-sets immutable source and law versions plus
+the stable rule. Legal validity, knowledge, applicability, enforcement, and
+compliance remain separate.
 The [legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 defines this boundary and the retention of enacted law after culture retirement.
+The generic crate covers compilation, institutional procedure, authorized
+pending intents, immutable sources and law versions, scheduled operations,
+cases, findings, rulings, applicability, succession, and sparse retirement
+indexes. The crate provides typed `LegalMutation` ingress, deterministic outbox
+dispatch through the public decision API, indexed wake/expiry work, and actor
+contexts derived through bounded holder knowledge queries. The plugin owns
+atomic aggregate persistence; the application owns orchestration and all
+concrete election, administration, justice, and
+enforcement systems.
 
 ### Reference content and starter kits
 

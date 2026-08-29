@@ -1,9 +1,9 @@
-use canwu_core::{DecisionTicketId, EntityRef, PersonId};
+use canwu_core::{DecisionRequestId, DecisionTicketId, EntityRef, PersonId};
 use canwu_decision::{
-    DecisionAction, DecisionContext, DecisionErrorCode, DecisionOption, DecisionPolicy,
-    DecisionTicket, DecisionTicketState, ExternalDecisionResponse, ExternalPolicy,
-    HumanDecisionResponse, LlmModelIdentity, QueuedExternalPolicy, QueuedHumanPolicy,
-    QueuedLlmPolicy,
+    DecisionAction, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionContext,
+    DecisionErrorCode, DecisionOption, DecisionPolicy, DecisionState, DecisionTicket,
+    DecisionTicketState, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
+    LlmModelIdentity, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy,
 };
 use canwu_time::SimTime;
 use serde_json::json;
@@ -31,6 +31,33 @@ fn ticket(version: u64) -> DecisionTicket {
         version,
         state: DecisionTicketState::Open,
     }
+}
+
+#[test]
+fn decision_attempt_index_rebuilds_from_the_persisted_journal() {
+    let request_id = DecisionRequestId::new(41);
+    let attempt = DecisionAttemptRecord {
+        request_id,
+        request_commitment: "a".repeat(64),
+        at: SimTime::EPOCH,
+        revision_before: 7,
+        expected_revision: 7,
+        outcome: DecisionAttemptOutcome::Accepted {
+            trace_id: None,
+            command_request_id: None,
+        },
+    };
+    let mut state = DecisionState::default();
+    state
+        .append_attempt(attempt.clone())
+        .expect("unique attempt should append");
+    let encoded = serde_json::to_string(&state).expect("decision state should serialize");
+    assert!(!encoded.contains("attempts_by_request"));
+
+    let restored: DecisionState =
+        serde_json::from_str(&encoded).expect("decision state should deserialize");
+    assert_eq!(restored.attempt(request_id), Some(&attempt));
+    restored.validate().expect("rebuilt index should validate");
 }
 
 #[test]

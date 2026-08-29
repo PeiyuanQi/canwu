@@ -9,6 +9,8 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
+pub const DECISION_REQUEST_COMMITMENT_DOMAIN: &str = "canwu.decision.ingress-request.v1";
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DecisionIngressRequest {
     pub request_id: DecisionRequestId,
@@ -70,7 +72,12 @@ impl Simulation {
 
     #[must_use]
     pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
-        &self.state.current.decisions.attempts
+        self.state.current.decisions.attempts()
+    }
+
+    #[must_use]
+    pub fn decision_attempt(&self, id: DecisionRequestId) -> Option<&DecisionAttemptRecord> {
+        self.state.current.decisions.attempt(id)
     }
 
     pub fn prepare_decision(
@@ -333,13 +340,15 @@ impl Simulation {
         &mut self,
         request: DecisionIngressRequest,
     ) -> Result<Option<CommandOutcome>, CanwuError> {
+        let request_commitment = canonical_hash(DECISION_REQUEST_COMMITMENT_DOMAIN, &request)?;
         let decision_request_id = request.request_id;
         let decision_expected_revision = request.expected_revision;
         let revision_before = self.revision();
         if request.expected_revision != self.revision() {
-            return Ok(self.record_decision_rejection(
+            return self.record_decision_rejection(
                 request.request_id,
                 request.expected_revision,
+                request_commitment.clone(),
                 DecisionAttemptErrorCode::SimulationRevisionConflict,
                 format!(
                     "decision request {} expected revision {}, current revision is {}",
@@ -347,28 +356,30 @@ impl Simulation {
                     request.expected_revision,
                     self.revision()
                 ),
-            ));
+            );
         }
         if let Some(command) = &request.command
             && !self.command_request_id_is_unique_for_admitted_decision(command.request_id)
         {
-            return Ok(self.record_decision_rejection(
+            return self.record_decision_rejection(
                 request.request_id,
                 request.expected_revision,
+                request_commitment.clone(),
                 DecisionAttemptErrorCode::CommandRequestConflict,
                 format!(
                     "nested decision command request {} is not unique at admission",
                     command.request_id
                 ),
-            ));
+            );
         }
         if let Err(error) = self.validate_decision_mutation_entities(&request.mutation) {
-            return Ok(self.record_decision_rejection(
+            return self.record_decision_rejection(
                 request.request_id,
                 request.expected_revision,
+                request_commitment.clone(),
                 DecisionAttemptErrorCode::EntityUnavailable,
                 error.message,
-            ));
+            );
         }
         let trace_claim = if matches!(request.mutation, DecisionMutation::Resolve { .. }) {
             let (id, next_id) = claim_counter(
@@ -387,12 +398,13 @@ impl Simulation {
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
-                return Ok(self.record_decision_rejection(
+                return self.record_decision_rejection(
                     request.request_id,
                     request.expected_revision,
+                    request_commitment.clone(),
                     error.code.into(),
                     error.message,
-                ));
+                );
             }
         };
         let controller = prepared
@@ -405,12 +417,13 @@ impl Simulation {
                 let expected: Command = match serde_json::from_value(command.clone()) {
                     Ok(command) => command,
                     Err(error) => {
-                        return Ok(self.record_decision_rejection(
+                        return self.record_decision_rejection(
                             decision_request_id,
                             decision_expected_revision,
+                            request_commitment.clone(),
                             DecisionAttemptErrorCode::InvalidDecision,
                             format!("decision option contains an invalid command: {error}"),
-                        ));
+                        );
                     }
                 };
                 if request.envelope.command != expected
@@ -421,12 +434,13 @@ impl Simulation {
                         .and_then(|trace| trace.command_request_id)
                         != Some(request.request_id)
                 {
-                    return Ok(self.record_decision_rejection(
+                    return self.record_decision_rejection(
                         decision_request_id,
                         decision_expected_revision,
+                        request_commitment.clone(),
                         DecisionAttemptErrorCode::InvalidDecision,
                         "nested command does not match the selected decision option".to_owned(),
-                    ));
+                    );
                 }
                 let controller = controller.ok_or_else(|| {
                     invalid_snapshot_error("decision trace does not resolve its controller binding")
@@ -436,36 +450,41 @@ impl Simulation {
                         != Some(&controller_authority(controller))
                     || request.envelope.expected_time != Some(self.state.scheduler.now)
                 {
-                    return Ok(self.record_decision_rejection(
+                    return self.record_decision_rejection(
                         decision_request_id,
                         decision_expected_revision,
+                        request_commitment.clone(),
                         DecisionAttemptErrorCode::InvalidDecision,
                         "nested command issuer, authority, or time guard was not derived from the decision controller".to_owned(),
-                    ));
+                    );
                 }
             }
             (Some(DecisionAction::None) | None, None) => {}
             _ => {
-                return Ok(self.record_decision_rejection(
+                return self.record_decision_rejection(
                     decision_request_id,
                     decision_expected_revision,
+                    request_commitment.clone(),
                     DecisionAttemptErrorCode::InvalidDecision,
                     "decision action and nested command disagree".to_owned(),
-                ));
+                );
             }
         }
         let trace_id = prepared.trace.as_ref().map(|trace| trace.id);
         let command_request_id = request.command.as_ref().map(|request| request.request_id);
-        decisions.attempts.push(DecisionAttemptRecord {
-            request_id: decision_request_id,
-            at: self.state.scheduler.now,
-            revision_before,
-            expected_revision: decision_expected_revision,
-            outcome: DecisionAttemptOutcome::Accepted {
-                trace_id,
-                command_request_id,
-            },
-        });
+        decisions
+            .append_attempt(DecisionAttemptRecord {
+                request_id: decision_request_id,
+                request_commitment,
+                at: self.state.scheduler.now,
+                revision_before,
+                expected_revision: decision_expected_revision,
+                outcome: DecisionAttemptOutcome::Accepted {
+                    trace_id,
+                    command_request_id,
+                },
+            })
+            .map_err(decision_error)?;
         if let Some((_, next_id)) = trace_claim {
             self.state.counters.next_decision_trace_id = next_id;
         }
@@ -494,22 +513,24 @@ impl Simulation {
         &mut self,
         request_id: DecisionRequestId,
         expected_revision: u64,
+        request_commitment: String,
         code: DecisionAttemptErrorCode,
         message: String,
-    ) -> Option<CommandOutcome> {
+    ) -> Result<Option<CommandOutcome>, CanwuError> {
         self.state
             .current
             .decisions
-            .attempts
-            .push(DecisionAttemptRecord {
+            .append_attempt(DecisionAttemptRecord {
                 request_id,
+                request_commitment,
                 at: self.state.scheduler.now,
                 revision_before: self.revision(),
                 expected_revision,
                 outcome: DecisionAttemptOutcome::Rejected { code, message },
-            });
+            })
+            .map_err(decision_error)?;
         self.invalidate_commitments(super::CommitmentDomains::DECISIONS);
-        None
+        Ok(None)
     }
 
     pub(super) fn command_request_id_is_in_use(&self, request_id: CommandRequestId) -> bool {

@@ -313,6 +313,84 @@ fn cached_mutable_commitments_match_independent_snapshot_roots_after_each_mutati
 }
 
 #[test]
+fn format6_decision_attempt_fixture_is_rejected_before_format7_construction() {
+    let scenario = Scenario::new(SimTime::EPOCH, vec![EntityRef::Person(PersonId::new(1))]);
+    let mut simulation = Simulation::new(109, scenario).expect("decision fixture should load");
+    simulation
+        .enqueue_decision(
+            SimTime::EPOCH,
+            0,
+            DecisionIngressRequest::new(
+                DecisionRequestId::new(1),
+                0,
+                DecisionMutation::RegisterController {
+                    controller: DecisionControllerBinding::new(
+                        "legacy-controller",
+                        DecisionPolicyIdentity::new(DecisionPolicyKind::Rule, "legacy", "1"),
+                        DecisionAuthority::Actor {
+                            actor: PersonId::new(1),
+                        },
+                    ),
+                },
+            ),
+        )
+        .expect("decision ingress should enqueue");
+    simulation
+        .enqueue_decision(
+            SimTime::EPOCH,
+            0,
+            DecisionIngressRequest::new(
+                DecisionRequestId::new(2),
+                0,
+                DecisionMutation::RegisterController {
+                    controller: DecisionControllerBinding::new(
+                        "legacy-controller",
+                        DecisionPolicyIdentity::new(
+                            DecisionPolicyKind::Rule,
+                            "conflicting-legacy",
+                            "1",
+                        ),
+                        DecisionAuthority::Actor {
+                            actor: PersonId::new(1),
+                        },
+                    ),
+                },
+            ),
+        )
+        .expect("stale decision ingress should enqueue");
+    simulation
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+        .expect("decision ingress should settle");
+    assert!(matches!(
+        simulation.decision_attempts()[0].outcome,
+        DecisionAttemptOutcome::Accepted { .. }
+    ));
+    assert!(matches!(
+        simulation.decision_attempts()[1].outcome,
+        DecisionAttemptOutcome::Rejected { .. }
+    ));
+
+    let mut legacy_wire =
+        serde_json::to_value(simulation.snapshot()).expect("snapshot should encode");
+    legacy_wire["engine_version"] = Value::from("0.6.0");
+    legacy_wire["snapshot_format_version"] = Value::from(6);
+    legacy_wire["commitment_format_version"] = Value::from(2);
+    for attempt in legacy_wire["decisions"]["attempts"]
+        .as_array_mut()
+        .expect("attempts should be an array")
+    {
+        attempt
+            .as_object_mut()
+            .expect("attempt should be an object")
+            .remove("request_commitment");
+    }
+    let Err(error) = Simulation::from_snapshot_json(&legacy_wire.to_string()) else {
+        panic!("format 6 attempts require the 0.6 engine or an external migration");
+    };
+    assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
+}
+
+#[test]
 fn rejection_transaction_restores_private_commitment_state_after_hash_failure() {
     let (scenario, ids) = demo_scenario();
     let mut simulation =
@@ -1418,7 +1496,7 @@ fn snapshot_round_trip_preserves_pending_work() {
     unmigrated_engine.engine_version = "0.4.0-other".to_owned();
     refresh_snapshot_commitments_and_checkpoint(&mut unmigrated_engine);
     let Err(error) = Simulation::from_snapshot(unmigrated_engine) else {
-        panic!("snapshots from another engine must be rejected before Format 6 loading");
+        panic!("snapshots from another engine must be rejected before Format 7 loading");
     };
     assert_eq!(error.code, ErrorCode::UnsupportedSnapshotVersion);
 

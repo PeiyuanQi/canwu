@@ -17,6 +17,7 @@ members = [
     "crates/extensions/canwu-technology",
     "crates/extensions/canwu-fiscal",
     "crates/reference-content/canwu-ming-fiscal",
+    "crates/extensions/canwu-law",
     "crates/integrations/canwu-reference-world",
     "crates/integrations/canwu-ming-fiscal-reference",
     "crates/tools/canwu-debug",
@@ -24,7 +25,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/PeiyuanQi/canwu"
@@ -36,25 +37,26 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 blake3 = "1"
-canwu-api = { path = "crates/api/canwu-api", version = "=0.6.0" }
-canwu-core = { path = "crates/foundation/canwu-core", version = "=0.6.0" }
-canwu-decision = { path = "crates/model/canwu-decision", version = "=0.6.0" }
-canwu-event = { path = "crates/model/canwu-event", version = "=0.6.0" }
-canwu-information = { path = "crates/extensions/canwu-information", version = "=0.6.0" }
-canwu-history-research = { path = "crates/extensions/canwu-history-research", version = "=0.6.0" }
-canwu-correspondence = { path = "crates/extensions/canwu-correspondence", version = "=0.6.0" }
-canwu-culture = { path = "crates/extensions/canwu-culture", version = "=0.6.0" }
-canwu-knowledge = { path = "crates/model/canwu-knowledge", version = "=0.6.0" }
-canwu-reference-world = { path = "crates/integrations/canwu-reference-world", version = "=0.6.0" }
-canwu-routing = { path = "crates/mechanisms/canwu-routing", version = "=0.6.0" }
-canwu-sim = { path = "crates/runtime/canwu-sim", version = "=0.6.0" }
-canwu-society = { path = "crates/extensions/canwu-society", version = "=0.6.0" }
-canwu-technology = { path = "crates/extensions/canwu-technology", version = "=0.6.0" }
-canwu-fiscal = { path = "crates/extensions/canwu-fiscal", version = "=0.6.0" }
-canwu-ming-fiscal = { path = "crates/reference-content/canwu-ming-fiscal", version = "=0.6.0" }
-canwu-ming-fiscal-reference = { path = "crates/integrations/canwu-ming-fiscal-reference", version = "=0.6.0" }
-canwu-time = { path = "crates/foundation/canwu-time", version = "=0.6.0" }
-canwu-transport = { path = "crates/mechanisms/canwu-transport", version = "=0.6.0" }
+canwu-api = { path = "crates/api/canwu-api", version = "=0.7.0" }
+canwu-core = { path = "crates/foundation/canwu-core", version = "=0.7.0" }
+canwu-decision = { path = "crates/model/canwu-decision", version = "=0.7.0" }
+canwu-event = { path = "crates/model/canwu-event", version = "=0.7.0" }
+canwu-information = { path = "crates/extensions/canwu-information", version = "=0.7.0" }
+canwu-history-research = { path = "crates/extensions/canwu-history-research", version = "=0.7.0" }
+canwu-correspondence = { path = "crates/extensions/canwu-correspondence", version = "=0.7.0" }
+canwu-culture = { path = "crates/extensions/canwu-culture", version = "=0.7.0" }
+canwu-knowledge = { path = "crates/model/canwu-knowledge", version = "=0.7.0" }
+canwu-reference-world = { path = "crates/integrations/canwu-reference-world", version = "=0.7.0" }
+canwu-routing = { path = "crates/mechanisms/canwu-routing", version = "=0.7.0" }
+canwu-sim = { path = "crates/runtime/canwu-sim", version = "=0.7.0" }
+canwu-society = { path = "crates/extensions/canwu-society", version = "=0.7.0" }
+canwu-technology = { path = "crates/extensions/canwu-technology", version = "=0.7.0" }
+canwu-fiscal = { path = "crates/extensions/canwu-fiscal", version = "=0.7.0" }
+canwu-law = { path = "crates/extensions/canwu-law", version = "=0.7.0" }
+canwu-ming-fiscal = { path = "crates/reference-content/canwu-ming-fiscal", version = "=0.7.0" }
+canwu-ming-fiscal-reference = { path = "crates/integrations/canwu-ming-fiscal-reference", version = "=0.7.0" }
+canwu-time = { path = "crates/foundation/canwu-time", version = "=0.7.0" }
+canwu-transport = { path = "crates/mechanisms/canwu-transport", version = "=0.7.0" }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

@@ -153,9 +153,9 @@ pub struct ReplayJournal {
 }
 
 /// Version of current-state checkpoints plus append-only evidence segments.
-pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 2;
+pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 3;
 const ARCHIVED_SEGMENT_MANIFEST_DOMAIN: &str = "canwu.evidence.archived-segment-manifest.v1";
-const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v1";
+const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v2";
 const EVIDENCE_DEPENDENCY_DOMAIN: &str = "canwu.evidence.dependencies.v1";
 const KEYED_RESERVATION_DOMAIN: &str = "canwu.random.keyed-reservations.v1";
 /// Reserved domain-record payload field declaring a payload-reading continuation.
@@ -163,6 +163,10 @@ pub const PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD: &str =
     "canwu_payload_required_evidence_continuation";
 /// Current wire version of [`PayloadRequiredEvidenceContinuationV1`].
 pub const PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION: u32 = 1;
+/// Reserved domain-record payload field declaring retained identity proofs.
+pub const IDENTITY_EVIDENCE_DEPENDENCIES_FIELD: &str = "canwu_identity_evidence_dependencies";
+/// Current wire version of [`IdentityEvidenceDependenciesV1`].
+pub const IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -201,7 +205,16 @@ pub struct ArchivedEvidenceReceipt {
     pub locator: ArchivedEvidenceLocator,
     pub evidence_index_leaf: u64,
     pub item_commitment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_ingress_provenance: Option<ArchivedPluginIngressProvenance>,
     pub merkle_path: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ArchivedPluginIngressProvenance {
+    pub plugin: String,
+    pub packet_type: String,
+    pub producer_boundary: super::BoundaryId,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -209,6 +222,8 @@ pub struct EvidenceIndexEntry {
     pub reference: EvidenceRef,
     pub item: EvidenceItemLocator,
     pub item_commitment: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_ingress_provenance: Option<ArchivedPluginIngressProvenance>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -286,6 +301,39 @@ pub fn payload_required_evidence_continuation_property_v1() -> PayloadProperty {
         required: true,
     }
 }
+
+/// Authoritative identity-only evidence dependencies for a live domain record.
+///
+/// Unlike a payload-required continuation, this compact contract retains only
+/// the Merkle receipt needed to prove identity and typed provenance. Empty
+/// dependencies are the canonical terminal form and release old receipts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdentityEvidenceDependenciesV1 {
+    pub format_version: u32,
+    pub dependencies: Vec<EvidenceRef>,
+}
+
+impl IdentityEvidenceDependenciesV1 {
+    /// Builds a V1 dependency declaration. Dependencies must be sorted and unique.
+    #[must_use]
+    pub const fn new(dependencies: Vec<EvidenceRef>) -> Self {
+        Self {
+            format_version: IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
+            dependencies,
+        }
+    }
+}
+
+/// Returns the reserved property a domain-record schema must declare to
+/// authoritatively produce `IdentityOnly` dependencies.
+#[must_use]
+pub fn identity_evidence_dependencies_property_v1() -> PayloadProperty {
+    PayloadProperty {
+        value_type: PayloadValueType::Object,
+        required: true,
+    }
+}
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct EvidenceDependency {
     pub reference: EvidenceRef,
@@ -340,6 +388,7 @@ struct EvidenceIndexLeafMaterial<'a> {
     reference: &'a EvidenceRef,
     item: &'a EvidenceItemLocator,
     item_commitment: &'a str,
+    plugin_ingress_provenance: &'a Option<ArchivedPluginIngressProvenance>,
 }
 
 #[derive(Serialize)]
@@ -438,6 +487,101 @@ fn schema_declares_payload_required_continuation(schema: &DomainRecordSchema) ->
             if properties.get(PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD)
                 == Some(&payload_required_evidence_continuation_property_v1())
     )
+}
+
+fn schema_declares_identity_evidence_dependencies(schema: &DomainRecordSchema) -> bool {
+    matches!(
+        &schema.payload_schema,
+        PayloadSchema::Object { properties, .. }
+            if properties.get(IDENTITY_EVIDENCE_DEPENDENCIES_FIELD)
+                == Some(&identity_evidence_dependencies_property_v1())
+    )
+}
+
+fn add_identity_evidence_dependencies(
+    dependencies: &mut BTreeMap<EvidenceRef, EvidenceRequirement>,
+    record: &DomainRecord,
+    schema: &DomainRecordSchema,
+) -> Result<(), CanwuError> {
+    if !record.is_active() || !schema_declares_identity_evidence_dependencies(schema) {
+        return Ok(());
+    }
+    let declaration = record
+        .payload
+        .get(IDENTITY_EVIDENCE_DEPENDENCIES_FIELD)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                format!(
+                    "identity-evidence record {} is missing its schema-declared field",
+                    record.reference
+                ),
+            )
+        })?;
+    let declaration: IdentityEvidenceDependenciesV1 = serde_json::from_value(declaration.clone())
+        .map_err(|error| {
+        CanwuError::new(
+            ErrorCode::ArchiveNotReady,
+            format!(
+                "identity-evidence record {} is invalid: {error}",
+                record.reference
+            ),
+        )
+    })?;
+    if declaration.format_version != IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION {
+        return Err(CanwuError::new(
+            ErrorCode::ArchiveNotReady,
+            format!(
+                "identity-evidence record {} uses unsupported format {}",
+                record.reference, declaration.format_version
+            ),
+        ));
+    }
+    if declaration
+        .dependencies
+        .windows(2)
+        .any(|pair| pair[0] >= pair[1])
+    {
+        return Err(CanwuError::new(
+            ErrorCode::ArchiveNotReady,
+            format!(
+                "identity-evidence record {} needs sorted unique dependencies",
+                record.reference
+            ),
+        ));
+    }
+    if declaration.dependencies.iter().any(|reference| {
+        matches!(
+            reference,
+            EvidenceRef::DomainRecordVersion(version)
+                if version.record == record.reference && version.version == record.version
+        )
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::ArchiveNotReady,
+            format!(
+                "identity-evidence record {} cannot depend on its own version",
+                record.reference
+            ),
+        ));
+    }
+    for reference in declaration.dependencies {
+        if matches!(
+            &reference,
+            EvidenceRef::DomainRecordVersion(version)
+                if matches!(version.established_by, DomainRecordVersionSource::InitialScenario)
+        ) {
+            return Err(CanwuError::new(
+                ErrorCode::ArchiveNotReady,
+                format!(
+                    "identity-evidence record {} cannot archive initial-scenario evidence",
+                    record.reference
+                ),
+            ));
+        }
+        promote_dependency(dependencies, reference, EvidenceRequirement::IdentityOnly);
+    }
+    Ok(())
 }
 
 fn add_payload_required_continuation_dependencies(
@@ -650,12 +794,13 @@ fn add_command_outcome_dependencies(
 
 fn archive_leaf(entry: &EvidenceIndexEntry) -> Result<[u8; 32], CanwuError> {
     let hash = super::canonical_hash(
-        "canwu.evidence.index.leaf.v1",
+        "canwu.evidence.index.leaf.v2",
         &EvidenceIndexLeafMaterial {
-            format_version: 1,
+            format_version: 2,
             reference: &entry.reference,
             item: &entry.item,
             item_commitment: &entry.item_commitment,
+            plugin_ingress_provenance: &entry.plugin_ingress_provenance,
         },
     )?;
     decode_hash(&hash, "evidence-index leaf")
@@ -734,7 +879,12 @@ pub(crate) fn evidence_archive_index(
         )?,
     };
     let mut entries = Vec::new();
-    let mut add = |reference: EvidenceRef, journal, absolute_index, nested, commitment: String| {
+    let mut add = |reference: EvidenceRef,
+                   journal,
+                   absolute_index,
+                   nested,
+                   commitment: String,
+                   plugin_ingress_provenance| {
         entries.push(EvidenceIndexEntry {
             reference,
             item: EvidenceItemLocator {
@@ -743,6 +893,7 @@ pub(crate) fn evidence_archive_index(
                 nested,
             },
             item_commitment: commitment,
+            plugin_ingress_provenance,
         });
     };
     for (offset, event) in segment.events.iter().enumerate() {
@@ -752,6 +903,7 @@ pub(crate) fn evidence_archive_index(
             segment.start.event_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
             item_commitment(EvidenceJournalKind::Event, event)?,
+            None,
         );
     }
     for (offset, command) in segment.commands.iter().enumerate() {
@@ -761,6 +913,7 @@ pub(crate) fn evidence_archive_index(
             segment.start.command_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
             item_commitment(EvidenceJournalKind::Command, command)?,
+            None,
         );
     }
     for (offset, attempt) in segment.command_attempts.iter().enumerate() {
@@ -770,15 +923,40 @@ pub(crate) fn evidence_archive_index(
             segment.start.command_attempt_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
             item_commitment(EvidenceJournalKind::CommandAttempt, attempt)?,
+            None,
         );
     }
     for (offset, ingress) in segment.ingress.iter().enumerate() {
+        let plugin_ingress_provenance = match (&ingress.payload, ingress.cause.as_ref()) {
+            (
+                IngressPayload::Plugin {
+                    plugin,
+                    packet_type,
+                    ..
+                },
+                Some(CauseRef::Boundary(producer_boundary)),
+            ) if segment.boundaries.iter().any(|boundary| {
+                boundary.id == *producer_boundary
+                    && boundary.generated_ingress.iter().any(|generation| {
+                        generation.ingress == ingress.id && generation.plugin == *plugin
+                    })
+            }) =>
+            {
+                Some(ArchivedPluginIngressProvenance {
+                    plugin: plugin.clone(),
+                    packet_type: packet_type.clone(),
+                    producer_boundary: *producer_boundary,
+                })
+            }
+            _ => None,
+        };
         add(
             EvidenceRef::Ingress(ingress.id),
             EvidenceJournalKind::Ingress,
             segment.start.ingress_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
             item_commitment(EvidenceJournalKind::Ingress, ingress)?,
+            plugin_ingress_provenance,
         );
     }
     for (offset, boundary) in segment.boundaries.iter().enumerate() {
@@ -790,6 +968,7 @@ pub(crate) fn evidence_archive_index(
             absolute_index,
             EvidenceNestedLocator::None,
             commitment.clone(),
+            None,
         );
         for (change_index, change) in boundary.record_changes.iter().enumerate() {
             add(
@@ -807,6 +986,7 @@ pub(crate) fn evidence_archive_index(
                     change_index: change_index as u64,
                 },
                 commitment.clone(),
+                None,
             );
         }
     }
@@ -817,6 +997,7 @@ pub(crate) fn evidence_archive_index(
             segment.start.random_draw_count + offset as u64 + 1,
             EvidenceNestedLocator::None,
             item_commitment(EvidenceJournalKind::RandomDraw, draw)?,
+            None,
         );
     }
     entries.sort();
@@ -832,7 +1013,7 @@ pub(crate) fn evidence_archive_index(
     let entry_count = u64::try_from(entries.len())
         .map_err(|_| archive_error("evidence-index entry count exceeds u64"))?;
     let segment_id = super::canonical_hash(
-        "canwu.evidence.segment.v2",
+        "canwu.evidence.segment.v3",
         &ArchivedSegmentHeaderMaterial {
             start: segment.start,
             end: segment.end,
@@ -861,6 +1042,7 @@ pub(crate) fn evidence_archive_index(
             },
             evidence_index_leaf: index as u64,
             item_commitment: entry.item_commitment.clone(),
+            plugin_ingress_provenance: entry.plugin_ingress_provenance.clone(),
             merkle_path,
         })
         .collect();
@@ -882,6 +1064,7 @@ fn verify_archive_receipt(
         reference: receipt.evidence.clone(),
         item: receipt.locator.item.clone(),
         item_commitment: receipt.item_commitment.clone(),
+        plugin_ingress_provenance: receipt.plugin_ingress_provenance.clone(),
     };
     let mut hash = archive_leaf(&entry)?;
     let mut position = receipt.evidence_index_leaf;
@@ -1360,7 +1543,14 @@ impl CompactedSimulation {
                 "payload-required continuations must use prepare/store/commit sealing",
             ));
         }
-        self.simulation.seal_retained_evidence()
+        let before = self.simulation.fork();
+        match self.simulation.seal_retained_evidence() {
+            Ok(segment) => Ok(segment),
+            Err(error) => {
+                self.simulation = before;
+                Err(error)
+            }
+        }
     }
 
     /// Builds an immutable, content-addressed archive candidate.
@@ -1769,6 +1959,7 @@ impl Simulation {
                         ),
                     )
                 })?;
+            add_identity_evidence_dependencies(&mut dependencies, record, schema)?;
             add_payload_required_continuation_dependencies(&mut dependencies, record, schema)?;
             let retained = self
                 .state
@@ -2319,10 +2510,17 @@ impl Simulation {
             &dependencies,
             &self.state.evidence.keyed_draw_reservations,
         );
-        for dependency in dependencies
-            .iter()
-            .filter(|dependency| dependency.requirement == EvidenceRequirement::PayloadRequired)
-        {
+        for dependency in &dependencies {
+            if matches!(
+                &dependency.reference,
+                EvidenceRef::DomainRecordVersion(version)
+                    if matches!(
+                        version.established_by,
+                        DomainRecordVersionSource::InitialScenario
+                    )
+            ) {
+                continue;
+            }
             if !self
                 .state
                 .evidence
@@ -2331,7 +2529,7 @@ impl Simulation {
             {
                 return Err(CanwuError::new(
                     ErrorCode::ArchiveNotReady,
-                    "payload-required evidence was not present in the sealed archive prefix",
+                    "declared evidence was not present in the sealed archive prefix",
                 ));
             }
         }
@@ -2745,7 +2943,8 @@ impl Simulation {
 
     /// Deserializes and restores a portable checkpoint-journal JSON bundle.
     pub fn from_checkpoint_journal_json(json: &str) -> Result<Self, CanwuError> {
-        let bundle: CheckpointJournal = super::deserialize_f6_json(json, "checkpoint journal")?;
+        let bundle: CheckpointJournal =
+            super::deserialize_current_json(json, "checkpoint journal")?;
         Self::from_checkpoint_journal(bundle)
     }
 
@@ -2754,7 +2953,8 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let bundle: CheckpointJournal = super::deserialize_f6_json(json, "checkpoint journal")?;
+        let bundle: CheckpointJournal =
+            super::deserialize_current_json(json, "checkpoint journal")?;
         Self::from_checkpoint_journal_with_plugins(bundle, plugins)
     }
 }
@@ -2774,6 +2974,73 @@ mod tests {
     use canwu_core::{BoundaryId, CommandId, DomainRecordKind, PersonId};
     use serde_json::{Map, Value, json};
     use std::cell::RefCell;
+
+    #[test]
+    fn archived_plugin_ingress_provenance_is_merkle_bound() {
+        let provenance = ArchivedPluginIngressProvenance {
+            plugin: "fixture-provider".to_owned(),
+            packet_type: "recognized-practice".to_owned(),
+            producer_boundary: BoundaryId::new(7),
+        };
+        let entry = EvidenceIndexEntry {
+            reference: EvidenceRef::Ingress(super::super::IngressId::new(9)),
+            item: EvidenceItemLocator {
+                journal: EvidenceJournalKind::Ingress,
+                absolute_index: 9,
+                nested: EvidenceNestedLocator::None,
+            },
+            item_commitment: "0101010101010101010101010101010101010101010101010101010101010101"
+                .to_owned(),
+            plugin_ingress_provenance: Some(provenance.clone()),
+        };
+        let (root, proofs) = archive_merkle(std::slice::from_ref(&entry)).expect("build proof");
+        let header = ArchivedSegmentHeader {
+            segment_id: "0202020202020202020202020202020202020202020202020202020202020202"
+                .to_owned(),
+            start: EvidenceCursor {
+                ingress_count: 8,
+                ..EvidenceCursor::default()
+            },
+            end: EvidenceCursor {
+                ingress_count: 9,
+                ..EvidenceCursor::default()
+            },
+            journal_roots: EvidenceJournalRoots {
+                events: archive_empty_root(),
+                commands: archive_empty_root(),
+                command_attempts: archive_empty_root(),
+                ingress: archive_empty_root(),
+                boundaries: archive_empty_root(),
+                random_draws: archive_empty_root(),
+            },
+            evidence_index_root: root,
+            evidence_index_entry_count: 1,
+        };
+        let mut receipt = ArchivedEvidenceReceipt {
+            evidence: entry.reference,
+            locator: ArchivedEvidenceLocator {
+                segment_id: header.segment_id.clone(),
+                item: entry.item,
+            },
+            evidence_index_leaf: 0,
+            item_commitment: entry.item_commitment,
+            plugin_ingress_provenance: Some(provenance),
+            merkle_path: proofs.into_iter().next().expect("one proof"),
+        };
+        verify_archive_receipt(&receipt, &header).expect("canonical provenance proof");
+
+        receipt
+            .plugin_ingress_provenance
+            .as_mut()
+            .expect("provenance")
+            .plugin = "forged-provider".to_owned();
+        assert_eq!(
+            verify_archive_receipt(&receipt, &header)
+                .expect_err("tampered provenance must break the proof")
+                .code,
+            ErrorCode::InvalidArchive
+        );
+    }
 
     #[derive(Default)]
     struct TestArchive {

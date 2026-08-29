@@ -356,7 +356,7 @@ fn domain_record_lifecycle_is_atomic_replayable_and_tamper_evident() {
         .expect("record-free compatibility fixture should load");
     let record_free_snapshot = record_free.snapshot();
     let mut record_free_restored = Simulation::from_snapshot(record_free_snapshot)
-        .expect("a pristine Format 6 snapshot should restore");
+        .expect("a pristine Format 7 snapshot should restore");
     record_free
         .register_plugin(&RecordLifecyclePlugin)
         .expect("the original pristine runtime should accept record schemas");

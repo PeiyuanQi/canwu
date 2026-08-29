@@ -170,7 +170,7 @@ pub struct KnowledgeQueryResult {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-/// Holder-relative generic knowledge ledger used by the format-5 snapshot.
+/// Holder-relative generic knowledge ledger used by the current snapshot.
 pub struct GenericKnowledgeLedger {
     pub records: BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
 }

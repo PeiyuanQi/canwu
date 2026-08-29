@@ -7,12 +7,12 @@ fourteen independent algorithms. At the lowest level, the runtime combines two
 state-write paths, one deterministic allocation primitive, and one
 cross-cutting visibility policy:
 
-## Format 6 contract / Format 6 契约
+## Format 7 contract / Format 7 契约
 
-Before 1.0, Canwu uses a clean persistence break. Format 6 requires a declared
+Before 1.0, Canwu uses a clean persistence break. Format 7 requires a declared
 run manifest, declared run configuration, canonical initial scenario, versioned
 commitments, and a self-contained replay journal. The engine does not load or
-silently migrate format-4/5 saves. `SimulationGranularity` supplies the generic
+silently migrate format 2-6 saves. `SimulationGranularity` supplies the generic
 `aggregate` / `group` / `actor` levels; Population, Special Group, and Character
 are Celestial Mandate mappings owned by a downstream reference integration.
 Southern Ming and WWII content therefore does not belong in Canwu core.
@@ -144,6 +144,7 @@ flowchart TB
         Information["canwu-information"]
         Society["canwu-society"]
         Culture["canwu-culture"]
+        Law["canwu-law"]
         Technology["canwu-technology"]
         History["canwu-history-research"]
         Fiscal["canwu-fiscal"]
@@ -180,6 +181,7 @@ flowchart TB
     Society --> Api
     Culture --> Society
     Culture --> Api
+    Law --> Api
     Technology --> Api
     History --> Api
     History --> Technology
@@ -336,23 +338,23 @@ That ownership split is now complete: `canwu-reference-world` owns the model,
 movement behavior, detached projection, and routing adapter; the source
 `canwu-world` package has been retired from the workspace and dependency DAG.
 The remaining `WorldSnapshot` projection is a current reference/runtime API,
-not a persistence migration surface. Format 6 does not load old saves.
+not a persistence migration surface. Format 7 does not load old saves.
 `canwu-event` now contains only generic contracts: `EventKind` is a type label
 plus flattened structured fields, while concrete movement, arrival, letter,
 report, knowledge, and debug payload structs live outside that crate. / 按此
 方向，这项迁移已经完成：`canwu-reference-world` 拥有模型、移动行为、脱离式
 投影和路由适配器；`canwu-world` 源码包已从 workspace 与依赖 DAG 退役。
-当前 `WorldSnapshot` 只作为参考整合与运行时投影保留；Format 6 不加载旧存档。
+当前 `WorldSnapshot` 只作为参考整合与运行时投影保留；Format 7 不加载旧存档。
 `canwu-event` 现在只包含通用契约：`EventKind` 由类型标签和扁平化结构
 字段组成，具体移动、到达、信件、报告、知识和调试载荷结构均位于该 crate 之外。
 
 The event extraction is a Rust source-API break: callers replace enum
 construction and exhaustive matching with `from_payload`, `event_type`,
-`is_type`, and typed field/payload decoding. Format 6 also fixes canonical
-field ordering and commitment versions; old format-4/5 snapshots and journals
+`is_type`, and typed field/payload decoding. Format 7 also fixes canonical
+field ordering and commitment versions; old format 2-6 snapshots and journals
 are rejected rather than migrated. / 事件迁出会破坏 Rust 源 API：调用方需以通用
-构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。Format 6 同时固定
-规范字段顺序并提升承诺版本；旧 format-4/5 快照和日志会被拒绝，不在内核中迁移。
+构造、类型标签和强类型字段或载荷解码替代枚举构造与穷举匹配。Format 7 同时固定
+规范字段顺序并提升承诺版本；旧 format 2-6 快照和日志会被拒绝，不在内核中迁移。
 
 ## Decision framework
 
@@ -489,6 +491,17 @@ controller-mediated legal procedure, versioned law records, authority,
 visibility, persistence, and exact replay. The detailed implementation proposals
 remain [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md)
 and [legal institutionalization framework](proposals/legal-institutionalization-framework.md).
+
+The experimental `canwu-law` crate now implements that legal boundary. Its
+compiled plan and all law-local records live in one versioned aggregate. Typed
+`LegalMutation` ingress, holder context, expected host-record versions, and
+decision outcomes are revalidated inside the plugin boundary before one
+kernel-atomic aggregate compare-and-set. The decision outbox uses a durable
+prepare/decision/ACK protocol whose ACK proves accepted controller and ticket
+outcomes, so ingress archival does not invalidate recovery. Persistent dirty,
+deadline, scheduled-version, live-culture-dependency, participation, outbox,
+and applicability indexes keep ordinary settlement proportional to due or
+changed work rather than immutable history.
 
 ### Technology and historical research / 技术与历史研究
 
@@ -923,8 +936,8 @@ Declared seat institutions must exist both in manifest-bound genesis and in the
 persisted final state.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
-admission. Format 6 snapshots validate this evidence and require exact plugin
-identity and descriptor rehydration before continuation. Format-4 and format-5
+admission. Format 7 snapshots validate this evidence and require exact plugin
+identity and descriptor rehydration before continuation. Format 2 through 6
 saves and journals are rejected before runtime construction; no legacy
 migration path exists in the pre-1.0 engine.
 Boundary-aware replay uses command admission lists to reconstruct operation
@@ -937,13 +950,13 @@ the cursors after the boundary record commits, so admission work is proportional
 to newly admitted evidence instead of all prior boundaries and journals. The
 cursors are persisted derived metadata: loading validates them against the
 global boundary-prefix proof, and failed settlement restores them with the rest
-of the transaction. Format 6 does not derive them for older snapshots because
+of the transaction. Format 7 does not derive them for older snapshots because
 older snapshots are outside the supported load contract.
 
 Append-only events, commands, command attempts, ingress, boundary records, and
 random draws have one internal owner, `RuntimeEvidence`, separate from mutable
 world/knowledge/plugin state. Public flat snapshots and replay journals retain
-their existing serialized shapes. Checkpoint-journal format 2 adds a separate
+their existing serialized shapes. Checkpoint-journal format 3 adds a separate
 incremental persistence path: `SimulationCheckpoint` captures current state,
 scheduler, counters, metadata, and the already-computed full commitment roots
 while leaving every append-only evidence array empty. `EvidenceCursor` records
@@ -979,6 +992,10 @@ content-addressed segments, lets the host store them idempotently, then commits
 only the exact prepared token. Segment manifests, receipt roots, dependency
 roots, and operation-keyed random reservations are part of the compact
 checkpoint commitment and are recomputed during reconstruction.
+A live domain-record schema can declare sorted identity-only evidence
+dependencies; their compact receipts remain reachable without retaining or
+hydrating payload bytes. Generated plugin-ingress receipts also Merkle-bind the
+provider plugin, packet type, and producing boundary.
 
 The runtime keeps compact canonical request commitments and original
 outcomes/receipts for exact idempotency, plus the prior boundary-chain head and
@@ -986,8 +1003,8 @@ evidence-family flags needed for safe continuation. Commitment accumulators keep
 their already-validated prefix state and consume only the new retained tail.
 Ordinary `Simulation` history slices, flat snapshots, and replay journals keep
 their full-history behavior; compaction is available only through the dedicated
-type, so evidence never disappears implicitly. Checkpoint-journal format 2
-wraps the current snapshot format 6 contract. Older checkpoint-journal
+type, so evidence never disappears implicitly. Checkpoint-journal format 3
+wraps the current snapshot format 7 contract. Older checkpoint-journal
 envelopes are rejected rather than reinterpreted or migrated in place.
 
 Boundary emissions enter the next boundary's admission cut, so an emitting
@@ -1045,7 +1062,7 @@ domain `canwu.checkpoint.v4` combines those domain-separated roots with the
 exact run-manifest hash and authoritative revision contract. Loading recomputes
 and compares every root before accepting the outer checkpoint.
 
-Format 6 boundaries write a `v1:`-tagged commitment over the current canonical
+Format 7 boundaries write a `v1:`-tagged commitment over the current canonical
 roots with the prior boundary-chain head, so settlement no longer serializes and
 hashes the complete retained journals. When a snapshot is exactly at its
 boundary head, loading derives the expected contract from the tag and compares
@@ -1154,7 +1171,7 @@ root, run manifest, run configuration, plugin descriptors, the plugin-registrati
 lifecycle state, accepted commands, accepted/rejected command attempts, canonical
 ingress, boundaries, final time, and final checkpoint hash plus the final
 authoritative revision before executing anything. Automatic package discovery
-remains later work. Format 6 rejects older revision provenance and cannot export
+remains later work. Format 7 rejects older revision provenance and cannot export
 a journal that claims current exact replay from an unsupported save. New plugin
 registration closes after the first recorded tracked attempt (accepted or
 expected-rejected), successful compatibility command, time advance, or phased

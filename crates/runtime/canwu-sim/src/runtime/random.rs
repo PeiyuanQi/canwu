@@ -93,7 +93,7 @@ pub enum RandomDrawOutcome {
 
 /// Stable application target for an operation-addressed random draw.
 ///
-/// Format-6 target for the enabled byte-exact keyed algorithm.
+/// Format-7 target for the enabled byte-exact keyed algorithm.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum RandomOperationTarget {

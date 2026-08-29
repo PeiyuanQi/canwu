@@ -480,18 +480,21 @@ pub struct PreparedEvidenceSeal {
 }
 ~~~
 
-Format-5 segment sealing derives a sorted `EvidenceIndexEntry` for every exact
+Format-7 segment sealing derives a sorted `EvidenceIndexEntry` for every exact
 command, event, ingress, boundary, random draw, and boundary-nested
 domain-record version in the segment. Each entry contains the exact evidence
-reference, typed locator, and top-level item commitment. The segment stores the
-entries, builds a binary Merkle root over domain-separated canonical leaves, and
-places that `evidence_index_root` plus separate per-journal item roots in its
-header. Entries sort by `(reference, item)` and duplicates are invalid. The
-leaf is exactly
-`canonical_hash("canwu.evidence.index.leaf.v1", EvidenceIndexLeafMaterial {
-format_version: 1, reference, item, item_commitment })`, using the existing
-canonical JSON encoder and this frozen struct field order. Its lower-case hex
-result is decoded to the 32-byte leaf value. Interior nodes are
+reference, typed locator, top-level item commitment, and an optional compact
+plugin-ingress provenance proof. That proof exists only when a plugin-generated
+ingress matches its committed producing boundary; direct host ingress has no
+proof. The segment stores the entries, builds a binary Merkle root over
+domain-separated canonical leaves, and places that `evidence_index_root` plus
+separate per-journal item roots in its header. Entries sort by `(reference,
+item)` and duplicates are invalid. The leaf is exactly
+`canonical_hash("canwu.evidence.index.leaf.v2", EvidenceIndexLeafMaterial {
+format_version: 2, reference, item, item_commitment,
+plugin_ingress_provenance })`, using the existing canonical JSON encoder and
+this frozen struct field order. Its lower-case hex result is decoded to the
+32-byte leaf value. Interior nodes are
 `BLAKE3("canwu.evidence.index.node.v1" || 0x00 || left[32] || right[32])`.
 Odd levels duplicate the final hash; the empty root is
 `BLAKE3("canwu.evidence.index.empty.v1" || 0x00)`. The committed entry count
@@ -512,14 +515,14 @@ The journal-root domain strings are exactly:
 Each is passed to `canonical_hash` with that journal's ordered top-level item
 array. Array order is absolute-index order and an empty journal uses the
 canonical hash of an empty array. `segment_id` is lower-case BLAKE3 of
-`"canwu.evidence.segment.v2" || 0x00 ||
+`"canwu.evidence.segment.v3" || 0x00 ||
 canonical(ArchivedSegmentHeaderMaterial)`; material field order is frozen as
 shown, and `segment_id` itself is never part of the input.
 
-The segment Merkle material contains only `EvidenceItemLocator`; it never
-contains `segment_id`. A receipt wraps that item locator with the verified
-segment ID only after the header and content-addressed segment ID have been
-computed, so segment construction has no hash cycle.
+The segment Merkle material contains the `EvidenceItemLocator`, item commitment,
+and optional provenance, but never `segment_id`. A receipt wraps that material
+with the verified segment ID only after the header and content-addressed segment
+ID have been computed, so segment construction has no hash cycle.
 
 The compact checkpoint retains the ordered `ArchivedSegmentHeader` list and
 commits it as `archived_segment_manifest_root`. The list grows per segment, not
@@ -528,6 +531,16 @@ is stored only for references reachable from current domain state, current
 knowledge origins, pending operations, keyed-random reservations, or explicit
 retry indexes. Receipts are sorted by evidence reference and committed by a
 separate skipped-when-empty receipt root. They are not copies of the payload.
+The Format-7 receipt-root domain is
+`canwu.evidence.archived-receipts.v2`.
+
+A live domain-record schema may declare the required reserved
+`canwu_identity_evidence_dependencies` object. Its sorted unique references
+retain only identity receipts, including compact provider provenance, without
+requiring archived payload hydration. Removing a dependency from the next
+committed live record releases the receipt at the next seal. Payload-reading
+continuations continue to use the separate
+`canwu_payload_required_evidence_continuation` contract.
 
 Locator legality is exhaustive: `Command`, `CommandAttempt`, `Event`,
 `Ingress`, `Boundary`, and `RandomDraw` use their matching journal plus
