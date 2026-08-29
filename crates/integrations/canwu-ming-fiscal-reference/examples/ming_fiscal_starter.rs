@@ -1,7 +1,8 @@
 use canwu_api::{BoundaryRequest, SimDuration, SystemCadence};
 use canwu_ming_fiscal_reference::{
-    DEFAULT_SEED, MingFiscalTraceWriter, capture_ming_fiscal_trace_frame,
-    new_ming_fiscal_reference, run_ming_fiscal_sample_cycle_with_trace, trace_error,
+    DEFAULT_SEED, MingFiscalTracePaths, MingFiscalTraceWriter, capture_ming_fiscal_trace_frame,
+    new_ming_fiscal_reference, run_ming_fiscal_sample_cycle_with_trace, start_trace_viewer,
+    trace_error,
 };
 use std::path::PathBuf;
 
@@ -58,6 +59,8 @@ struct Options {
     days: u64,
     cadence: ContinuousCadence,
     step_days: Option<i64>,
+    open_viewer: bool,
+    viewer_port: u16,
 }
 
 impl Options {
@@ -78,6 +81,8 @@ impl Options {
             days: 0,
             cadence: ContinuousCadence::Daily,
             step_days: None,
+            open_viewer: env_flag("CANWU_OPEN_TRACE_VIEWER"),
+            viewer_port: 0,
         };
 
         while let Some(argument) = args.next() {
@@ -113,6 +118,22 @@ impl Options {
                     }
                     options.step_days = Some(step_days);
                 }
+                "--open-viewer" => {
+                    options.open_viewer = true;
+                }
+                "--viewer-port" => {
+                    options.viewer_port = args
+                        .next()
+                        .ok_or_else(|| {
+                            "--viewer-port requires a TCP port (0 selects an available port)"
+                                .to_owned()
+                        })?
+                        .parse()
+                        .map_err(|_| {
+                            "--viewer-port requires a TCP port (0 selects an available port)"
+                                .to_owned()
+                        })?;
+                }
                 "--help" | "-h" => return Err(help_text().to_owned()),
                 unknown => {
                     return Err(format!("unknown argument {unknown}; use --help for usage"));
@@ -132,6 +153,8 @@ options:\n\
   --days <N>               continue for N total simulation days after the sample cycle\n\
   --cadence <kind>         daily, monthly, or annual (default: daily)\n\
   --step-days <N>          fixed simulation-day quantum; overrides cadence default\n\
+  --open-viewer             start localhost viewer and open the generated trace\n\
+  --viewer-port <N>        viewer TCP port; 0 selects an available port (default)\n\
   --help                   show this help"
 }
 
@@ -226,5 +249,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         paths.manifest.display(),
         paths.steps.display(),
     );
+    open_viewer_if_requested(&options, &paths);
     Ok(())
+}
+
+fn open_viewer_if_requested(options: &Options, paths: &MingFiscalTracePaths) {
+    if !options.open_viewer {
+        return;
+    }
+    match workspace_root().and_then(|root| {
+        start_trace_viewer(&root, &paths.directory, options.viewer_port)
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(viewer) => {
+            if let Err(error) = viewer.open_browser() {
+                eprintln!("trace_viewer_browser_warning={error}");
+            }
+            println!("trace_viewer_url={}", viewer.url());
+            viewer.wait();
+        }
+        Err(error) => {
+            eprintln!("trace_viewer_warning={error}");
+        }
+    }
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).ok().as_deref(),
+        Some("1" | "true" | "TRUE" | "yes" | "on")
+    )
+}
+
+fn workspace_root() -> Result<PathBuf, String> {
+    if let Some(path) = std::env::var_os("CANWU_WORKSPACE_ROOT") {
+        let path = PathBuf::from(path);
+        if path
+            .join("tools")
+            .join("trace-viewer")
+            .join("index.html")
+            .is_file()
+        {
+            return Ok(path);
+        }
+        return Err(format!(
+            "CANWU_WORKSPACE_ROOT does not contain tools/trace-viewer/index.html: {}",
+            path.display()
+        ));
+    }
+    let mut current = std::env::current_dir().map_err(|error| error.to_string())?;
+    loop {
+        if current.join("Cargo.toml").is_file()
+            && current.join("crates").is_dir()
+            && current
+                .join("tools")
+                .join("trace-viewer")
+                .join("index.html")
+                .is_file()
+        {
+            return Ok(current);
+        }
+        if !current.pop() {
+            break;
+        }
+    }
+    Err("could not locate the Canwu workspace root; set CANWU_WORKSPACE_ROOT".to_owned())
 }

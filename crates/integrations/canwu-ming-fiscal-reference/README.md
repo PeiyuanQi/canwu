@@ -37,11 +37,18 @@ simulation-day quantum. Monthly and annual defaults are 30 and 365 simulation
 days because `SimTime` is minute-based and does not claim a Gregorian calendar.
 If the horizon ends partway through a period, the starter records a final
 cadence-free boundary instead of triggering monthly or annual systems early.
+For interactive inspection, add `--open-viewer`; this starts a localhost-only
+server, opens the default browser, and loads the generated trace automatically.
+Use `--viewer-port <N>` to request a port (`0` selects an available port).
+The same behavior can be enabled with `CANWU_OPEN_TRACE_VIEWER=1`. The viewer
+requires the command to run from the Canwu workspace, or
+`CANWU_WORKSPACE_ROOT` can point to that workspace explicitly.
 
 For example:
 
 ```text
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --open-viewer
 ```
 
 Each JSONL row contains the canonical boundary receipt, the persisted boundary

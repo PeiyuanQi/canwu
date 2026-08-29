@@ -115,6 +115,10 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- honggu
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
 ```
 
+追加 `--open-viewer` 可以在模拟完成后自动启动仅监听本机的 trace viewer，打开默认浏览器并
+载入这次运行生成的 `manifest.json` 与 `steps.jsonl`。`--viewer-port <N>` 可以指定端口，
+传入 `0`（默认）会自动选择可用端口；终端保持运行时按 `Ctrl+C` 停止 viewer。
+
 每条命令都会运行从核算到报告的完整垂直链。参考整合注册
 `ReferenceWorldPlugin`、`MingFiscalExecutionAdapterPlugin` 和配置后的
 `FiscalPlugin`；恢复与重放辅助函数会提供同一插件集合并运行语义校验。三个起点

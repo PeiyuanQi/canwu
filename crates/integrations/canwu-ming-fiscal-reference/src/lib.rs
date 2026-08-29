@@ -4,6 +4,7 @@
 
 mod adapter;
 mod trace;
+mod trace_viewer;
 
 pub use adapter::{
     MingFiscalExecutionAdapterPlugin, ReferenceFiscalExecutionEvidence,
@@ -16,6 +17,7 @@ pub use trace::{
     MingFiscalTraceWriter, TRACE_FORMAT_VERSION, TRACE_MANIFEST_FILE, TRACE_STEPS_FILE,
     TraceDumpError, capture_ming_fiscal_trace_frame, default_trace_directory, trace_error,
 };
+pub use trace_viewer::{TraceViewerError, TraceViewerHandle, start_trace_viewer};
 
 use canwu_api::{
     Canwu, CanwuError, CommandEnvelope, CommandRequest, CommandRequestId, DomainRecordKind,

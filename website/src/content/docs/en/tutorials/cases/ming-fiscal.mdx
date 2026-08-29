@@ -130,6 +130,12 @@ early. For example:
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
 ```
 
+Add `--open-viewer` to start a localhost-only trace viewer when the simulation
+finishes. It opens the default browser and loads the generated `manifest.json`
+and `steps.jsonl`. Use `--viewer-port <N>` to request a port; `0` (the default)
+selects an available port. Keep the terminal open while viewing and press
+`Ctrl+C` to stop the viewer.
+
 Each command runs the full assessment-to-report slice. The integration
 registers `ReferenceWorldPlugin`, `MingFiscalExecutionAdapterPlugin`, and a
 configured `FiscalPlugin`. Its restore and replay helpers supply that same set

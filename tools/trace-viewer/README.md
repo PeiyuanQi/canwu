@@ -20,6 +20,12 @@
 
 ## 使用
 
+查看器会把 `SimTime`（单位：分钟）转换成便于阅读的公元日期时间。若 trace 提供
+`fiscal.historical_year` 或 `fiscal.state.historical_context.year`，则将该年份的
+`1 月 1 日 00:00:00` 作为模拟起点；否则使用 `1970-01-01 00:00:00`。界面同时保留
+原始 `SimTime` 分钟值，避免把展示日期误认为引擎的权威时间类型。该转换是展示约定，
+不改变 Canwu 的无日历模拟时间模型。
+
 先在 Canwu 仓库根目录生成样例：
 
 ```powershell
@@ -33,6 +39,16 @@ python -m http.server 8000
 ```
 
 打开 `/tools/trace-viewer/`，点击“读取默认样例”。也可以直接双击 `index.html`，再通过“选择 manifest”和“选择 steps”载入文件；浏览器出于 `file://` 安全限制无法直接读取默认路径时，这是预期行为。
+
+也可以让 starter 在模拟完成后自动启动 viewer：
+
+```powershell
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --open-viewer
+```
+
+该选项会启动仅监听 `127.0.0.1` 的临时静态服务器，打开浏览器并通过 URL
+参数自动载入本次运行生成的 trace。终端会保持运行以提供静态文件，按
+`Ctrl+C` 停止；使用 `--viewer-port 0`（默认）自动选择可用端口。
 
 默认样例路径为：
 
