@@ -1,7 +1,7 @@
 use super::records::{DomainRecordClass, DomainRecordSchemas};
 use super::{
-    CanwuError, ErrorCode, PayloadSchema, RuntimeCurrentState, SimulationSnapshot, canonical_text,
-    component_key, is_canonical_hash,
+    CanwuError, ErrorCode, PayloadSchema, PersistentDomainRecordStore, RuntimeCurrentState,
+    SimulationSnapshot, canonical_text, component_key, is_canonical_hash,
 };
 use canwu_core::{
     CoreEntityKind, DomainRecordKind, EntityRef, KnowledgeHolderPolicy, KnowledgeHolderRef,
@@ -13,7 +13,6 @@ use canwu_knowledge::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeLimitsV1 {
@@ -322,14 +321,14 @@ pub(crate) fn validate_snapshot_records(
                 )
             })
             .collect(),
-        domain_records: Arc::new(
+        domain_records: PersistentDomainRecordStore::from_records(
             snapshot
                 .domain_records
                 .iter()
                 .cloned()
                 .map(|record| (record.reference.clone(), record))
                 .collect(),
-        ),
+        )?,
         decisions: snapshot.decisions.clone(),
         root_seed: snapshot.root_seed,
         authority_root_seed: snapshot.authority_root_seed,
@@ -627,7 +626,6 @@ mod tests {
     use canwu_time::SimTime;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
-    use std::sync::Arc;
 
     fn knowledge_kind() -> KnowledgeRecordKind {
         KnowledgeRecordKind::new("fixture.knowledge", "assessment")
@@ -655,12 +653,13 @@ mod tests {
             armies: BTreeMap::new(),
             knowledge: KnowledgeSnapshot::default(),
             plugin_components: BTreeMap::new(),
-            domain_records: Arc::new(
+            domain_records: PersistentDomainRecordStore::from_records(
                 domain_records
                     .into_iter()
                     .map(|record| (record.reference.clone(), record))
                     .collect(),
-            ),
+            )
+            .unwrap(),
             decisions: DecisionState::default(),
             root_seed: 1,
             authority_root_seed: 1,

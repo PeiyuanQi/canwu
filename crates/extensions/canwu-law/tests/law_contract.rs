@@ -1,24 +1,311 @@
 use canwu_api::{
     ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryContext, BoundaryDirective,
     BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRequest, BoundarySystemContract, Canwu,
-    CanwuError, Command, DecisionAction, DecisionAuthority, DecisionControllerBinding,
-    DecisionIngressRequest, DecisionMutation, DecisionPolicyIdentity, DecisionPolicyKind,
-    DecisionRequestId, DecisionTicketId, DomainRecord, DomainRecordClass, DomainRecordLifecycle,
-    DomainRecordRef, EntityRef, ErrorCode, EvidenceJournalSegment, EvidenceRef,
+    CanwuError, Command, DecisionAction, DecisionArchiveBlob, DecisionArchiveProvider,
+    DecisionAuthority, DecisionControllerBinding, DecisionError, DecisionIngressRequest,
+    DecisionMutation, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId,
+    DecisionTicketId, DomainRecord, DomainRecordClass, DomainRecordLifecycle, DomainRecordRef,
+    EntityRef, ErrorCode, EvidenceJournalSegment, EvidenceRef,
     IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IngressClass, IngressId, IngressPayload,
     KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
     KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeWriteGrant,
-    PayloadSchema, PersonId, PluginIngressDescriptor, PluginIngressRequest, PluginKnowledgeSchema,
-    PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, TerritoryId,
+    PayloadSchema, PersonId, PluginArchiveObjectProvider, PluginIngressDescriptor,
+    PluginIngressRequest, PluginKnowledgeSchema, PluginRegistrar, Scenario, SimDuration, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StatePageRetentionLedger, StateVisibility,
+    SystemCadence, TerritoryId,
 };
 use canwu_law::*;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
+fn persisted_law_records(runtime: &LegalRuntime) -> Vec<DomainRecord> {
+    runtime
+        .to_record_drafts()
+        .expect("encode Format-8 legal shards")
+        .into_iter()
+        .map(|draft| DomainRecord {
+            reference: draft.reference,
+            owner: PLUGIN_NAME.to_owned(),
+            class: DomainRecordClass::Record,
+            version: 1,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: draft.payload,
+            references: draft.references,
+        })
+        .collect()
+}
+
+fn assert_legal_archive_reachability_survives_restart(
+    canwu: &Canwu,
+    plan: &CompiledLawPlan,
+    archived: &LegalRuntime,
+    archive: &MemoryLegalArchive,
+    archived_object: &ArchiveObjectId,
+) {
+    let restarted = Canwu::new_with_plugins(
+        7,
+        Scenario::new(canwu.time(), Vec::new())
+            .with_domain_records(persisted_law_records(archived)),
+        &[&LawPlugin],
+    )
+    .expect("restart from root-only legal records");
+    let restarted_law = load_legal_runtime(&restarted, plan)
+        .expect("load root-only legal runtime after restart")
+        .expect("root-only legal runtime");
+    restarted_law
+        .validate_against_plan(plan)
+        .expect("root-only legal runtime remains valid");
+    let reachability = restarted
+        .archive_reachability_manifest(&[], &StatePageRetentionLedger::default(), archive, archive)
+        .expect("enumerate unified legal archive reachability after restart");
+    for (namespace, object_id) in [
+        ("canwu.law.archive.content", &archived_object.content_id),
+        ("canwu.law.archive.blob", &archived_object.blob_id),
+    ] {
+        assert!(
+            reachability
+                .plugin_objects
+                .get(namespace)
+                .is_some_and(|ids| ids.contains(object_id))
+        );
+    }
+    assert!(
+        reachability
+            .plugin_objects
+            .get("canwu.law.archive.index")
+            .is_some_and(|ids| !ids.is_empty())
+    );
+}
+
 #[derive(Default)]
 struct MemoryArchive {
     segments: RefCell<BTreeMap<String, EvidenceJournalSegment>>,
+}
+
+#[derive(Default)]
+struct MemoryLegalArchive {
+    blobs: RefCell<BTreeMap<String, LegalArchiveBlob>>,
+    memberships: RefCell<BTreeMap<LegalVersionRef, LegalArchiveMembership>>,
+    directories: RefCell<BTreeMap<String, LegalArchiveIndexDirectory>>,
+    membership_pages: RefCell<BTreeMap<String, LegalArchiveMembershipPage>>,
+    temporal_pages: RefCell<BTreeMap<String, LegalArchiveTemporalPage>>,
+    retention: RefCell<canwu_law::LegalArchiveRetentionLedger>,
+}
+
+impl DecisionArchiveProvider for MemoryLegalArchive {
+    fn load_decision_archive(
+        &self,
+        _locator: &str,
+    ) -> Result<Option<DecisionArchiveBlob>, DecisionError> {
+        Ok(None)
+    }
+}
+
+impl PluginArchiveObjectProvider for MemoryLegalArchive {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        let value = match namespace {
+            LEGAL_ARCHIVE_BLOB_NAMESPACE => self
+                .blobs
+                .borrow()
+                .get(object_id)
+                .map(serde_json::to_vec)
+                .transpose(),
+            LEGAL_ARCHIVE_INDEX_DIRECTORY_NAMESPACE => self
+                .directories
+                .borrow()
+                .get(object_id)
+                .map(serde_json::to_vec)
+                .transpose(),
+            LEGAL_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE => self
+                .membership_pages
+                .borrow()
+                .get(object_id)
+                .map(serde_json::to_vec)
+                .transpose(),
+            LEGAL_ARCHIVE_TEMPORAL_PAGE_NAMESPACE => self
+                .temporal_pages
+                .borrow()
+                .get(object_id)
+                .map(serde_json::to_vec)
+                .transpose(),
+            _ => return Ok(None),
+        };
+        value.map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("test plugin archive cannot be encoded: {error}"),
+            )
+        })
+    }
+}
+
+impl LegalArchiveProvider for MemoryLegalArchive {
+    fn load_legal_archive(&self, blob_id: &str) -> Result<Option<LegalArchiveBlob>, CanwuError> {
+        Ok(self.blobs.borrow().get(blob_id).cloned())
+    }
+
+    fn load_legal_archive_membership(
+        &self,
+        version: &LegalVersionRef,
+    ) -> Result<Option<LegalArchiveMembership>, CanwuError> {
+        Ok(self.memberships.borrow().get(version).cloned())
+    }
+
+    fn load_legal_archive_index_directory(
+        &self,
+        directory_id: &str,
+    ) -> Result<Option<LegalArchiveIndexDirectory>, CanwuError> {
+        Ok(self.directories.borrow().get(directory_id).cloned())
+    }
+
+    fn load_legal_archive_membership_page(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<LegalArchiveMembershipPage>, CanwuError> {
+        Ok(self.membership_pages.borrow().get(page_id).cloned())
+    }
+
+    fn load_legal_archive_temporal_page(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<LegalArchiveTemporalPage>, CanwuError> {
+        Ok(self.temporal_pages.borrow().get(page_id).cloned())
+    }
+}
+
+impl LegalArchiveStore for MemoryLegalArchive {
+    fn load_legal_archive_retention_handle(
+        &self,
+        handle_id: &str,
+    ) -> Result<Option<canwu_law::LegalArchiveRetentionHandle>, CanwuError> {
+        Ok(self.retention.borrow().handles.get(handle_id).cloned())
+    }
+
+    fn prepare_legal_archive_retention(
+        &self,
+        prepared: &canwu_law::PreparedLegalArchiveBatch,
+    ) -> Result<String, CanwuError> {
+        self.retention.borrow_mut().prepare(prepared)
+    }
+
+    fn verify_legal_archive_retention(
+        &self,
+        handle_id: &str,
+        directory: &LegalArchiveIndexDirectory,
+        new_objects: &BTreeSet<canwu_law::ArchiveObjectId>,
+    ) -> Result<(), CanwuError> {
+        self.retention
+            .borrow_mut()
+            .verify_and_bind(handle_id, directory, new_objects, self)
+    }
+
+    fn mark_legal_archive_retention_durable(&self, handle_id: &str) -> Result<(), CanwuError> {
+        self.retention.borrow_mut().mark_durable_ingress(handle_id)
+    }
+
+    fn commit_legal_archive_retention(
+        &self,
+        handle_id: &str,
+        target_root: &str,
+    ) -> Result<(), CanwuError> {
+        self.retention.borrow_mut().commit(handle_id, target_root)
+    }
+
+    fn reject_stale_legal_archive_retention(&self, handle_id: &str) -> Result<(), CanwuError> {
+        self.retention.borrow_mut().reject_stale(handle_id)
+    }
+
+    fn abandon_legal_archive_retention(&self, handle_id: &str) -> Result<(), CanwuError> {
+        self.retention.borrow_mut().abandon(handle_id)
+    }
+
+    fn store_legal_archive(
+        &self,
+        blob: &LegalArchiveBlob,
+    ) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+        let blob_id = blob.blob_id()?;
+        let mut blobs = self.blobs.borrow_mut();
+        if let Some(existing) = blobs.get(&blob_id) {
+            return if existing == blob {
+                Ok(LegalArchiveStoreOutcome::AlreadyStored)
+            } else {
+                Err(CanwuError::new(
+                    ErrorCode::InvalidArchive,
+                    "legal archive blob ID has conflicting bytes",
+                ))
+            };
+        }
+        blobs.insert(blob_id, blob.clone());
+        Ok(LegalArchiveStoreOutcome::Stored)
+    }
+
+    fn store_legal_archive_membership(
+        &self,
+        membership: &LegalArchiveMembership,
+    ) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+        let mut memberships = self.memberships.borrow_mut();
+        if let Some(existing) = memberships.get(&membership.version) {
+            return if existing == membership {
+                Ok(LegalArchiveStoreOutcome::AlreadyStored)
+            } else {
+                Err(CanwuError::new(
+                    ErrorCode::InvalidArchive,
+                    "legal archive membership has conflicting bytes",
+                ))
+            };
+        }
+        memberships.insert(membership.version.clone(), membership.clone());
+        Ok(LegalArchiveStoreOutcome::Stored)
+    }
+
+    fn store_legal_archive_index_directory(
+        &self,
+        directory: &LegalArchiveIndexDirectory,
+    ) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+        store_legal_test_object(
+            &self.directories,
+            directory.directory_id()?,
+            directory.clone(),
+        )
+    }
+
+    fn store_legal_archive_membership_page(
+        &self,
+        page: &LegalArchiveMembershipPage,
+    ) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+        store_legal_test_object(&self.membership_pages, page.page_id()?, page.clone())
+    }
+
+    fn store_legal_archive_temporal_page(
+        &self,
+        page: &LegalArchiveTemporalPage,
+    ) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+        store_legal_test_object(&self.temporal_pages, page.page_id()?, page.clone())
+    }
+}
+
+fn store_legal_test_object<T: Clone + PartialEq>(
+    objects: &RefCell<BTreeMap<String, T>>,
+    id: String,
+    object: T,
+) -> Result<LegalArchiveStoreOutcome, CanwuError> {
+    let mut objects = objects.borrow_mut();
+    if let Some(existing) = objects.get(&id) {
+        return if existing == &object {
+            Ok(LegalArchiveStoreOutcome::AlreadyStored)
+        } else {
+            Err(CanwuError::new(
+                ErrorCode::InvalidArchive,
+                "legal archive page ID has conflicting bytes",
+            ))
+        };
+    }
+    objects.insert(id, object);
+    Ok(LegalArchiveStoreOutcome::Stored)
 }
 
 impl ArchiveProvider for MemoryArchive {
@@ -1677,22 +1964,14 @@ fn host_adapter_enqueues_typed_ticket_before_marking_outbox() {
         .settle_boundary(&plan, SimTime::from_minutes(1), &[])
         .expect("materialize outbox");
     assert_eq!(boundary.emitted_outbox[0].draft.options.len(), 3);
-    let initial = runtime.to_record_draft().expect("encode runtime record");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         7,
         Scenario::new(
             SimTime::from_minutes(1),
             persons.into_iter().map(EntityRef::Person).collect(),
         )
-        .with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        .with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("law plugin registration");
@@ -1771,7 +2050,7 @@ fn host_adapter_enqueues_typed_ticket_before_marking_outbox() {
             .decision_ticket(DecisionTicketId::new(boundary.emitted_outbox[0].ticket_id))
             .is_some(),
         "{:#?}",
-        canwu.decision_attempts()
+        canwu.decision_hot_state()
     );
     for item in &boundary.emitted_outbox {
         assert_eq!(
@@ -1792,8 +2071,7 @@ fn host_adapter_enqueues_typed_ticket_before_marking_outbox() {
         .find(|item| {
             item.refresh_request_id.is_some_and(|request_id| {
                 canwu
-                    .decision_state()
-                    .attempt(DecisionRequestId::new(request_id))
+                    .decision_attempt(DecisionRequestId::new(request_id))
                     .is_none()
             })
         })
@@ -1915,22 +2193,14 @@ fn outbox_acknowledgement_binds_reserved_ids_to_exact_decision_mutations() {
     runtime
         .settle_boundary(&plan, SimTime::from_minutes(1), &[])
         .expect("materialize one outbox item");
-    let initial = runtime.to_record_draft().expect("encode runtime");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = Canwu::new_with_plugins(
         7,
         Scenario::new(
             SimTime::from_minutes(1),
             vec![EntityRef::Person(PersonId::new(1))],
         )
-        .with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        .with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("law host");
@@ -2034,18 +2304,10 @@ fn live_actor_context_is_derived_and_persisted_by_the_kernel() {
     runtime
         .submit_proposal(&plan, proposal())
         .expect("submit proposal");
-    let initial = runtime.to_record_draft().expect("encode runtime record");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("law plugin host");
@@ -2083,18 +2345,10 @@ fn live_actor_context_is_derived_and_persisted_by_the_kernel() {
 fn live_proposal_mutation_is_settled_inside_kernel_record_cas() {
     let plan = compile_law(&definition()).expect("compile legal plan");
     let runtime = LegalRuntime::new(&plan);
-    let initial = runtime.to_record_draft().expect("encode runtime record");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("law plugin host");
@@ -2118,8 +2372,8 @@ fn live_proposal_mutation_is_settled_inside_kernel_record_cas() {
     assert!(persisted.open_procedures.contains("procedure:suffrage"));
     assert_eq!(
         canwu
-            .typed_domain_record(&legal_runtime_reference())
-            .expect("legal aggregate")
+            .typed_domain_record(&legal_plan_state_reference())
+            .expect("legal plan state")
             .version,
         2
     );
@@ -2623,20 +2877,10 @@ fn succession_reception_is_rule_scoped_and_received_sources_keep_exact_origin() 
 #[allow(clippy::too_many_lines)]
 fn live_non_procedural_source_requires_exact_compiled_provider_ingress() {
     fn host(plan: &CompiledLawPlan) -> Canwu {
-        let initial = LegalRuntime::new(plan)
-            .to_record_draft()
-            .expect("encode initial law runtime");
+        let initial = persisted_law_records(&LegalRuntime::new(plan));
         Canwu::new_with_plugins(
             7,
-            Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-                reference: initial.reference,
-                owner: PLUGIN_NAME.to_owned(),
-                class: DomainRecordClass::Record,
-                version: 1,
-                lifecycle: DomainRecordLifecycle::Active,
-                payload: initial.payload,
-                references: initial.references,
-            }]),
+            Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
             &[&LawPlugin, &TestSocietyPlugin],
         )
         .expect("law and provider plugins")
@@ -2757,20 +3001,10 @@ fn active_legal_provider_evidence_survives_compaction_as_a_compact_proof() {
     let mut authored = definition();
     authored.source_profiles[0].required_signal_kinds = vec!["practice.recognized".to_owned()];
     let plan = compile_law(&authored).expect("compile provider-bound procedure");
-    let initial = LegalRuntime::new(&plan)
-        .to_record_draft()
-        .expect("encode initial law runtime");
+    let initial = persisted_law_records(&LegalRuntime::new(&plan));
     let mut canwu = Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin, &TestSocietyPlugin],
     )
     .expect("law and provider plugins");
@@ -2878,18 +3112,10 @@ fn active_legal_provider_evidence_survives_compaction_as_a_compact_proof() {
 }
 
 fn activation_error(runtime: &LegalRuntime) -> CanwuError {
-    let initial = runtime.to_record_draft().expect("encode corrupt runtime");
+    let initial = persisted_law_records(runtime);
     Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .err()
@@ -2914,19 +3140,15 @@ fn law_plugin_activation_rejects_a_forged_identity_evidence_declaration() {
     runtime
         .submit_proposal(&plan, submitted)
         .expect("submit evidence-bound proposal");
-    let mut initial = runtime.to_record_draft().expect("encode runtime");
-    initial.payload[IDENTITY_EVIDENCE_DEPENDENCIES_FIELD]["dependencies"] = serde_json::json!([]);
+    let mut initial = persisted_law_records(&runtime);
+    initial
+        .iter_mut()
+        .find(|record| record.reference.kind.name == LAW_PLAN_STATE)
+        .expect("plan state")
+        .payload[IDENTITY_EVIDENCE_DEPENDENCIES_FIELD]["dependencies"] = serde_json::json!([]);
     let error = Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .err()
@@ -2943,18 +3165,10 @@ fn compact_seal_rejects_a_declared_identity_without_evidence() {
     runtime
         .submit_proposal(&plan, submitted)
         .expect("detached authoring records the declared evidence identity");
-    let initial = runtime.to_record_draft().expect("encode runtime");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("structurally valid detached runtime");
@@ -3078,7 +3292,7 @@ fn law_plugin_activation_rebuilds_compiled_and_ledger_derived_topology() {
 }
 
 #[test]
-fn legal_persistence_exports_only_the_aggregate_runtime_record() {
+fn legal_persistence_exports_independently_versioned_format8_shards() {
     let plan = compile_law(&definition()).expect("compile legal plan");
     let mut runtime = LegalRuntime::new(&plan);
     let mut claim = proposal_change("mirrored-custom", LawOperation::Recognize, 1);
@@ -3096,7 +3310,7 @@ fn legal_persistence_exports_only_the_aggregate_runtime_record() {
         .expect("admit custom source");
     let records = runtime
         .to_record_drafts()
-        .expect("encode aggregate runtime")
+        .expect("encode sharded runtime")
         .into_iter()
         .map(|draft| DomainRecord {
             reference: draft.reference,
@@ -3108,17 +3322,1231 @@ fn legal_persistence_exports_only_the_aggregate_runtime_record() {
             references: draft.references,
         })
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0].reference.kind.name, LAW_RUNTIME_STATE);
+    assert_eq!(records.len(), 10);
+    assert!(
+        records
+            .iter()
+            .all(|record| record.reference.kind.name != LAW_RUNTIME_STATE)
+    );
+    assert!(
+        [
+            LAW_PLAN_STATE,
+            LAW_DIRECTORY_STATE,
+            LAW_SHARD_STATE,
+            LAW_ARCHIVE_HEAD_STATE,
+        ]
+        .into_iter()
+        .all(|kind| records
+            .iter()
+            .any(|record| record.reference.kind.name == kind))
+    );
     let canwu = canwu_api::Canwu::new_with_plugins(
         11,
         Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(records.clone()),
         &[&LawPlugin],
     )
-    .expect("aggregate legal persistence");
+    .expect("sharded legal persistence");
     load_legal_runtime(&canwu, &plan)
-        .expect("load aggregate runtime")
+        .expect("load sharded runtime")
         .expect("runtime");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn verified_legal_archive_commit_is_canonical_and_preserves_retired_culture_effects() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let targets = [
+        CulturalTargetGenerationRef {
+            target: "human-rights".to_owned(),
+            generation: 1,
+        },
+        CulturalTargetGenerationRef {
+            target: "women-suffrage".to_owned(),
+            generation: 1,
+        },
+    ];
+    for (offset, target) in targets.iter().enumerate() {
+        runtime
+            .retire_cultural_target_for_plan(
+                &plan,
+                target,
+                SimTime::from_minutes(i64::try_from(offset + 1).expect("time")),
+                "culture propagation retired; enacted law remains",
+            )
+            .expect("retire culture target");
+    }
+    let shard = LegalShardKey::culture_dependency(plan.definition_id.clone());
+    let prepared = runtime
+        .prepare_legal_archive(
+            &shard,
+            LegalCompactionBudgets {
+                max_records: 8,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare legal archive")
+        .expect("eligible retirement payloads");
+    let archive = MemoryLegalArchive::default();
+    let archived_version = prepared.compaction.candidates[0].version.clone();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("store and verify legal archive");
+    let mut canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("Format-8 law host");
+    let forged = canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            PLUGIN_NAME,
+            LAW_ARCHIVE_COMMIT_INGRESS,
+            canwu.time(),
+            serde_json::json!({ "commit": verified }),
+        ))
+        .expect_err("host must not author plugin-owned archive ingress");
+    assert_eq!(forged.code, ErrorCode::InvalidAuthority);
+    let retention_receipt = enqueue_legal_archive(&mut canwu, &prepared, &archive)
+        .expect("queue canonical archive maintenance");
+    assert!(
+        archive.retention.borrow_mut().begin_gc_epoch().is_ok(),
+        "durable ingress must remain marked across a new GC epoch"
+    );
+    let IngressPayload::Plugin {
+        archive_retention, ..
+    } = &canwu
+        .ingress_log()
+        .last()
+        .expect("legal archive ingress record")
+        .payload
+    else {
+        panic!("legal archive maintenance must use plugin ingress");
+    };
+    assert_eq!(archive_retention.len(), 1);
+    assert_eq!(
+        archive_retention[0].namespace,
+        LEGAL_ARCHIVE_INDEX_DIRECTORY_NAMESPACE
+    );
+    let assert_pending_retention = |host: &Canwu| {
+        let manifest = host
+            .archive_reachability_manifest(
+                &[],
+                &StatePageRetentionLedger::default(),
+                &archive,
+                &archive,
+            )
+            .expect("enumerate pending legal archive retention");
+        assert!(prepared.receipts.iter().all(|receipt| {
+            manifest
+                .plugin_objects
+                .get(LEGAL_ARCHIVE_BLOB_NAMESPACE)
+                .is_some_and(|ids| ids.contains(&receipt.object.blob_id))
+        }));
+        assert!(
+            manifest
+                .plugin_objects
+                .get(LEGAL_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
+                .is_some_and(|ids| !ids.is_empty())
+        );
+        assert!(
+            manifest
+                .plugin_objects
+                .get(LEGAL_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE)
+                .is_some_and(|ids| !ids.is_empty())
+        );
+        assert!(
+            manifest
+                .plugin_objects
+                .get(LEGAL_ARCHIVE_TEMPORAL_PAGE_NAMESPACE)
+                .is_some_and(|ids| !ids.is_empty())
+        );
+    };
+    assert_pending_retention(&canwu);
+    let restarted_pending = Canwu::from_snapshot_json_with_plugins(
+        &canwu
+            .snapshot_json()
+            .expect("encode pending archive snapshot"),
+        &[&LawPlugin],
+    )
+    .expect("restart with pending legal archive ingress");
+    assert_pending_retention(&restarted_pending);
+    assert_eq!(
+        load_legal_runtime(&canwu, &plan)
+            .expect("load before maintenance")
+            .expect("runtime")
+            .retirements
+            .len(),
+        2
+    );
+    canwu
+        .step_canonical()
+        .expect("settle archive maintenance")
+        .expect("maintenance boundary");
+    let authoritative_terminal = load_legal_runtime(&canwu, &plan)
+        .expect("load authoritative archive terminal")
+        .expect("authoritative legal runtime");
+    assert!(
+        authoritative_terminal
+            .archive_retention_terminals
+            .contains_key(&retention_receipt.retention_handle_id)
+    );
+    let mut forged_receipt = retention_receipt.clone();
+    forged_receipt.compaction_token = "0".repeat(64);
+    assert!(
+        finalize_legal_archive_retention(&mut canwu, &plan, &archive, &forged_receipt).is_err()
+    );
+    finalize_legal_archive_retention(&mut canwu, &plan, &archive, &retention_receipt)
+        .expect("transfer legal archive retention to committed root");
+    canwu
+        .step_canonical()
+        .expect("settle archive retention acknowledgement")
+        .expect("retention acknowledgement boundary");
+    assert!(
+        archive
+            .retention
+            .borrow()
+            .committed_roots
+            .contains_key(&retention_receipt.directory_root)
+    );
+    let archived = load_legal_runtime(&canwu, &plan)
+        .expect("load after maintenance")
+        .expect("runtime");
+    assert!(archived.retirements.is_empty());
+    assert_eq!(
+        archived.retired_cultural_targets,
+        targets.into_iter().collect()
+    );
+    assert!(!archived.storage.membership.contains_key(&archived_version));
+    assert!(!archived.storage.archived_membership_materialized);
+    assert_eq!(
+        archived
+            .load_archived_legal_record(&archived_version, &archive)
+            .expect("load exact archived retirement")
+            .expect("archive payload")
+            .version,
+        archived_version
+    );
+    assert_legal_archive_reachability_survives_restart(
+        &canwu,
+        &plan,
+        &archived,
+        &archive,
+        &prepared.receipts[0].object,
+    );
+    assert_pending_retention(&canwu);
+}
+
+#[test]
+fn production_runtime_archive_prepare_work_is_bounded_by_batch_not_debt() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let runtime = LegalRuntime::new(&plan);
+    let small = runtime
+        .format8_retirement_prepare_scale_probe(4_096, 128)
+        .expect("small production runtime probe");
+    let large = runtime
+        .format8_retirement_prepare_scale_probe(16_384, 128)
+        .expect("large production runtime probe");
+    for metrics in [&small, &large] {
+        assert_eq!(metrics.selected_candidates, 128);
+        assert_eq!(metrics.examined_candidates, 128);
+        assert_eq!(metrics.payload_materializations, 128);
+        assert_eq!(metrics.coordinator_restore_candidates, 0);
+        assert!(metrics.candidate_shard_bytes > metrics.coordinator_shard_bytes);
+    }
+    assert_eq!(small.coordinator_shard_bytes, large.coordinator_shard_bytes);
+}
+
+#[test]
+fn real_canwu_boundary_does_not_restore_or_rewrite_unrelated_candidate_debt() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let metrics = LegalRuntime::new(&plan)
+        .format8_canwu_boundary_scale_probe(
+            1_024,
+            &LegalMutation::SubmitProposal {
+                proposal: proposal(),
+            },
+        )
+        .expect("real Canwu scoped legal boundary");
+    assert_eq!(metrics.candidate_debt, 1_024);
+    assert_eq!(
+        metrics.candidate_shard_version_before,
+        metrics.candidate_shard_version_after
+    );
+    assert!(metrics.candidate_shard_bytes > 1_000_000);
+    assert!(metrics.candidate_shard_bytes < MAX_LEGAL_STATE_BYTES as u64);
+    assert_eq!(metrics.boundary_id, 2);
+    eprintln!("{metrics:#?}");
+}
+
+#[test]
+#[ignore = "release-only persisted Canwu boundary scale probe"]
+fn production_canwu_boundary_scales_with_large_admissible_candidate_fixture() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let metrics = LegalRuntime::new(&plan)
+        .format8_canwu_boundary_scale_probe(
+            16_384,
+            &LegalMutation::SubmitProposal {
+                proposal: proposal(),
+            },
+        )
+        .expect("release persisted Canwu scoped legal boundary");
+    assert_eq!(metrics.candidate_debt, 16_384);
+    assert_eq!(
+        metrics.candidate_shard_version_before,
+        metrics.candidate_shard_version_after
+    );
+    assert!(metrics.candidate_shard_bytes < MAX_LEGAL_STATE_BYTES as u64);
+    assert!(metrics.empty_boundary_elapsed_micros <= 16_700);
+    assert!(metrics.boundary_elapsed_micros <= 16_700);
+    eprintln!("{metrics:#?}");
+}
+
+#[test]
+#[ignore = "release-only million-candidate production runtime scale probe"]
+fn production_runtime_archive_prepare_scales_to_one_million_candidates() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let metrics = LegalRuntime::new(&plan)
+        .format8_retirement_prepare_scale_probe(1_000_000, 4_096)
+        .expect("million-candidate production runtime probe");
+    assert_eq!(metrics.candidate_debt, 1_000_000);
+    assert_eq!(metrics.selected_candidates, 4_096);
+    assert_eq!(metrics.examined_candidates, 4_096);
+    assert_eq!(metrics.payload_materializations, 4_096);
+    assert_eq!(metrics.coordinator_restore_candidates, 0);
+    assert!(metrics.candidate_shard_bytes > MAX_LEGAL_STATE_BYTES as u64);
+    eprintln!("{metrics:#?}");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn legal_compaction_token_is_identical_after_root_only_restart_between_batches() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut live = LegalRuntime::new(&plan);
+    for (offset, target) in ["human-rights", "women-suffrage"].into_iter().enumerate() {
+        live.retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: target.to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(i64::try_from(offset + 1).expect("time")),
+            "archive token restart equivalence",
+        )
+        .expect("retire culture target");
+    }
+    let shard = LegalShardKey::culture_dependency(plan.definition_id.clone());
+    let budgets = LegalCompactionBudgets {
+        max_records: 1,
+        max_source_bytes: 1024 * 1024,
+    };
+    let archive = MemoryLegalArchive::default();
+    let first = live
+        .prepare_legal_archive(&shard, budgets)
+        .expect("prepare first batch")
+        .expect("first batch");
+    let first_verified = first
+        .store_and_verify(&archive)
+        .expect("verify first batch");
+    let first_handle = serde_json::to_value(&first_verified).expect("encode first verified batch")
+        ["retention_handle_id"]
+        .as_str()
+        .expect("first retention handle")
+        .to_owned();
+    assert_eq!(
+        live.commit_verified_legal_archive_with_store(&first_verified, &archive)
+            .expect("commit first batch"),
+        LegalArchiveMaintenanceDisposition::Applied
+    );
+    let applied_once = live.clone();
+    assert_eq!(
+        live.commit_verified_legal_archive_with_store(&first_verified, &archive)
+            .expect("retry committed first batch"),
+        LegalArchiveMaintenanceDisposition::Applied
+    );
+    assert_eq!(live, applied_once);
+
+    let restarted = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&live)),
+        &[&LawPlugin],
+    )
+    .expect("restart from root-only legal state");
+    let restarted = load_legal_runtime(&restarted, &plan)
+        .expect("load restarted legal runtime")
+        .expect("restarted legal runtime");
+    let live_second = live
+        .prepare_legal_archive(&shard, budgets)
+        .expect("prepare live second batch")
+        .expect("live second batch");
+    let restarted_second = restarted
+        .prepare_legal_archive(&shard, budgets)
+        .expect("prepare restarted second batch")
+        .expect("restarted second batch");
+
+    assert_eq!(
+        live_second.compaction.source_membership_root,
+        restarted_second.compaction.source_membership_root
+    );
+    assert_eq!(
+        live_second.compaction.token,
+        restarted_second.compaction.token
+    );
+    assert_eq!(live_second.compaction, restarted_second.compaction);
+    assert_eq!(live_second.receipts, restarted_second.receipts);
+
+    let second_verified = live_second
+        .store_and_verify(&archive)
+        .expect("verify second batch");
+    let second_handle = serde_json::to_value(&second_verified)
+        .expect("encode second verified batch")["retention_handle_id"]
+        .as_str()
+        .expect("second retention handle")
+        .to_owned();
+    assert_eq!(
+        live.commit_verified_legal_archive_with_store(&second_verified, &archive)
+            .expect("commit second batch"),
+        LegalArchiveMaintenanceDisposition::Applied
+    );
+    assert_eq!(live.archive_retention_terminals.len(), 2);
+    assert!(live.archive_retention_terminals.contains_key(&first_handle));
+    assert!(
+        live.archive_retention_terminals
+            .contains_key(&second_handle)
+    );
+    let restarted = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&live)),
+        &[&LawPlugin],
+    )
+    .expect("restart two pending retention terminals");
+    let restarted = load_legal_runtime(&restarted, &plan)
+        .expect("load two pending retention terminals")
+        .expect("restarted legal runtime");
+    assert_eq!(
+        restarted.archive_retention_terminals,
+        live.archive_retention_terminals
+    );
+}
+
+#[test]
+fn synchronous_archive_rejects_jointly_tampered_roots_on_first_application() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    runtime
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "tampered-head".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(1),
+            "prepare tampered head fixture",
+        )
+        .expect("retire target");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &LegalShardKey::culture_dependency(plan.definition_id.clone()),
+            LegalCompactionBudgets {
+                max_records: 1,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare archive")
+        .expect("archive batch");
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared.store_and_verify(&archive).expect("verify archive");
+    let mut tampered = serde_json::to_value(&verified).expect("encode verified commit");
+    let forged_directory_root = "0".repeat(64);
+    tampered["pending_reachability"]["directory_root"] = serde_json::json!(forged_directory_root);
+    tampered["archive_head"]["membership_root"] = serde_json::json!(forged_directory_root);
+    tampered["archive_head"]["effective_time_root"] = serde_json::json!("1".repeat(64));
+    tampered["archive_head"]["recorded_time_root"] = serde_json::json!("2".repeat(64));
+    let tampered: VerifiedLegalArchiveCommit =
+        serde_json::from_value(tampered).expect("decode structurally valid tampered commit");
+    let before_runtime = runtime.clone();
+    let before_retention = archive.retention.borrow().clone();
+
+    assert!(
+        runtime
+            .commit_verified_legal_archive_with_store(&tampered, &archive)
+            .is_err()
+    );
+    assert_eq!(runtime, before_runtime);
+    assert_eq!(*archive.retention.borrow(), before_retention);
+
+    runtime
+        .commit_verified_legal_archive_with_store(&verified, &archive)
+        .expect("commit authentic archive");
+}
+
+#[test]
+fn closed_procedure_history_releases_all_selected_hot_payload_categories() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    runtime
+        .submit_proposal(&plan, proposal())
+        .expect("submit proposal");
+    stage_required_contexts(&mut runtime, &plan);
+    let opened = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(1), &[])
+        .expect("open procedure");
+    submit_two_votes(&mut runtime, &plan, &opened.emitted_outbox);
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(2), &[])
+        .expect("adopt proposal");
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist routed legal shards");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load routed legal runtime")
+        .expect("routed legal runtime");
+    let shard = LegalShardKey::order("state-code");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &shard,
+            LegalCompactionBudgets {
+                max_records: 64,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare closed procedure archive")
+        .expect("closed procedure archive batch");
+    let classes = prepared
+        .blobs
+        .iter()
+        .map(|blob| blob.record_class.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(classes.contains("procedure"));
+    assert!(classes.contains("participation"));
+    assert!(classes.contains("decision_outbox"));
+
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("verify procedure archive");
+    assert_eq!(
+        runtime
+            .commit_verified_legal_archive_with_store(&verified, &archive)
+            .expect("commit procedure archive"),
+        LegalArchiveMaintenanceDisposition::Applied
+    );
+    assert!(runtime.procedures.is_empty());
+    assert!(runtime.participations.is_empty());
+    assert!(runtime.outbox.is_empty());
+    runtime
+        .validate_against_plan(&plan)
+        .expect("archived procedure runtime remains valid");
+    let restarted = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("restart archived procedure runtime");
+    load_legal_runtime(&restarted, &plan)
+        .expect("load restarted procedure runtime")
+        .expect("restarted procedure runtime")
+        .validate_against_plan(&plan)
+        .expect("restarted procedure projection remains valid");
+}
+
+#[test]
+fn superseded_source_and_law_version_release_to_bounded_dependency_projections() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let practice = ["practice.recognized".to_owned()];
+    let mut base = proposal_change("archive-base", LawOperation::Establish, 1);
+    base.rule_id = "rule:archive-history".to_owned();
+    base.source_profile = "custom".to_owned();
+    base.procedure_profile.clear();
+    base.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
+    runtime
+        .admit_non_procedural_source(&plan, base, &practice, SimTime::from_minutes(1))
+        .expect("admit base source");
+    let mut amendment = proposal_change("archive-amendment", LawOperation::Amend, 2);
+    amendment.rule_id = "rule:archive-history".to_owned();
+    amendment.source_profile = "custom".to_owned();
+    amendment.procedure_profile.clear();
+    amendment.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(2))];
+    amendment.expected_rule_head = Some(LegalRecordRef {
+        kind: "law_version".to_owned(),
+        id: "law-version:rule:archive-history:1".to_owned(),
+    });
+    runtime
+        .admit_non_procedural_source(&plan, amendment, &practice, SimTime::from_minutes(2))
+        .expect("admit amendment source");
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist source history shards");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load source history")
+        .expect("source history");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &LegalShardKey::order("state-code"),
+            LegalCompactionBudgets {
+                max_records: 64,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare superseded history")
+        .expect("superseded history batch");
+    let classes = prepared
+        .blobs
+        .iter()
+        .map(|blob| blob.record_class.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(classes.contains("source"));
+    assert!(classes.contains("law_version"));
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("verify superseded history");
+    runtime
+        .commit_verified_legal_archive_with_store(&verified, &archive)
+        .expect("commit superseded history");
+    assert_eq!(runtime.sources.len(), 1);
+    assert_eq!(runtime.law_versions.len(), 1);
+    assert!(runtime.archived_dependency_versions.len() <= 4);
+    runtime
+        .validate_against_plan(&plan)
+        .expect("superseded source projection remains valid");
+    let restarted = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("restart superseded source runtime");
+    load_legal_runtime(&restarted, &plan)
+        .expect("load restarted source runtime")
+        .expect("restarted source runtime")
+        .validate_against_plan(&plan)
+        .expect("restarted source projection remains valid");
+}
+
+#[test]
+fn superseded_publicity_releases_after_its_source_enters_the_archive() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let mut base = proposal_change("publicity-base", LawOperation::Establish, 2);
+    base.rule_id = "rule:publicity-history".to_owned();
+    runtime
+        .submit_proposal(&plan, base)
+        .expect("submit base law");
+    stage_required_contexts(&mut runtime, &plan);
+    let opened = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(1), &[])
+        .expect("open base procedure");
+    submit_two_votes(&mut runtime, &plan, &opened.emitted_outbox);
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(2), &[])
+        .expect("adopt base law");
+
+    let mut amendment = proposal_change("publicity-amendment", LawOperation::Amend, 4);
+    amendment.rule_id = "rule:publicity-history".to_owned();
+    amendment.expected_rule_head = Some(LegalRecordRef {
+        kind: "law_version".to_owned(),
+        id: "law-version:rule:publicity-history:1".to_owned(),
+    });
+    runtime
+        .submit_proposal(&plan, amendment)
+        .expect("submit amendment");
+    stage_required_contexts(&mut runtime, &plan);
+    let opened = runtime
+        .settle_boundary(&plan, SimTime::from_minutes(3), &[])
+        .expect("open amendment procedure");
+    submit_two_votes(&mut runtime, &plan, &opened.emitted_outbox);
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(4), &[])
+        .expect("adopt amendment");
+
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(4), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist publicity history");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load publicity history")
+        .expect("publicity history");
+    let shard = LegalShardKey::order("state-code");
+    let budgets = LegalCompactionBudgets {
+        max_records: 64,
+        max_source_bytes: 4 * 1024 * 1024,
+    };
+    let archive = MemoryLegalArchive::default();
+    let first = runtime
+        .prepare_legal_archive(&shard, budgets)
+        .expect("prepare superseded source history")
+        .expect("superseded source history");
+    let first_verified = first
+        .store_and_verify(&archive)
+        .expect("verify source history");
+    runtime
+        .commit_verified_legal_archive_with_store(&first_verified, &archive)
+        .expect("commit source history");
+    let second = runtime
+        .prepare_legal_archive(&shard, budgets)
+        .expect("prepare superseded publicity")
+        .expect("superseded publicity batch");
+    assert_eq!(
+        second
+            .blobs
+            .iter()
+            .map(|blob| blob.record_class.as_str())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["publicity"])
+    );
+    let second_verified = second
+        .store_and_verify(&archive)
+        .expect("verify publicity history");
+    runtime
+        .commit_verified_legal_archive_with_store(&second_verified, &archive)
+        .expect("commit publicity history");
+    assert_eq!(runtime.publicity_events.len(), 1);
+    runtime
+        .validate_against_plan(&plan)
+        .expect("archived publicity runtime remains valid");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn closed_case_finding_and_ruling_payloads_release_together() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let mut claim = proposal_change("case-archive-source", LawOperation::Recognize, 1);
+    claim.source_profile = "custom".to_owned();
+    claim.procedure_profile.clear();
+    claim.rule_id = "rule:case-archive-source".to_owned();
+    claim.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
+    runtime
+        .admit_non_procedural_source(
+            &plan,
+            claim,
+            &["practice.recognized".to_owned()],
+            SimTime::from_minutes(1),
+        )
+        .expect("admit source for archived ruling");
+    let source = runtime
+        .law_versions
+        .values()
+        .next()
+        .expect("law version")
+        .source
+        .clone();
+    let version = LegalRecordRef {
+        kind: "law_version".to_owned(),
+        id: "law-version:rule:case-archive-source:1".to_owned(),
+    };
+    runtime
+        .record_case(
+            &plan,
+            LegalCase {
+                id: "case:archive".to_owned(),
+                legal_order: "state-code".to_owned(),
+                subject_matters: vec!["voting".to_owned()],
+                parties: Vec::new(),
+                claims: vec!["eligibility".to_owned()],
+                forum: "eligibility-court".to_owned(),
+                standing: Some("affected-voter".to_owned()),
+                proof_profile: "preponderance".to_owned(),
+                issues: vec!["scope".to_owned()],
+                deadline: SimTime::from_minutes(20),
+                remedies: vec!["declaration".to_owned()],
+                allegations: vec![EvidenceRef::Boundary(BoundaryId::new(1))],
+            },
+        )
+        .expect("record archived case");
+    runtime
+        .record_finding(
+            &plan,
+            LegalFindingVersion {
+                id: "finding:archive".to_owned(),
+                case_id: "case:archive".to_owned(),
+                issue: "scope".to_owned(),
+                finding: "practice applies".to_owned(),
+                accepted: true,
+                burden: "preponderance".to_owned(),
+                evidence: vec![EvidenceRef::Boundary(BoundaryId::new(1))],
+                at: SimTime::from_minutes(2),
+                predecessor: None,
+            },
+        )
+        .expect("record archived finding");
+    runtime
+        .record_ruling(
+            &plan,
+            LegalRulingVersion {
+                id: "ruling:archive".to_owned(),
+                case_id: "case:archive".to_owned(),
+                institution: "assembly".to_owned(),
+                issues: vec!["scope".to_owned()],
+                findings: vec![LegalRecordRef {
+                    kind: "finding".to_owned(),
+                    id: "finding:archive".to_owned(),
+                }],
+                sources: vec![source],
+                resolved_versions: vec![version.clone()],
+                selected_versions: vec![version],
+                scope: vec!["assembly-forum".to_owned()],
+                precedent_profile: Some("persuasive".to_owned()),
+                effective_from: SimTime::from_minutes(2),
+                effective_until: Some(SimTime::from_minutes(3)),
+                remedy: Some("declaration".to_owned()),
+                predecessors: Vec::new(),
+                disposition: OperativeDisposition::Operative,
+                evidence: vec![EvidenceRef::Boundary(BoundaryId::new(2))],
+            },
+        )
+        .expect("record archived ruling");
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(4), &[])
+        .expect("advance beyond ruling interval");
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(4), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist case history shards");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load case history")
+        .expect("case history");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &LegalShardKey::order("state-code"),
+            LegalCompactionBudgets {
+                max_records: 64,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare case history")
+        .expect("case history batch");
+    let classes = prepared
+        .blobs
+        .iter()
+        .map(|blob| blob.record_class.as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(classes.contains("case"));
+    assert!(classes.contains("finding"));
+    assert!(classes.contains("ruling"));
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("verify case history");
+    runtime
+        .commit_verified_legal_archive_with_store(&verified, &archive)
+        .expect("commit case history");
+    assert!(runtime.cases.is_empty());
+    assert!(runtime.findings.is_empty());
+    assert!(runtime.rulings.is_empty());
+    runtime
+        .validate_against_plan(&plan)
+        .expect("archived case runtime remains valid");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn succession_archives_full_history_but_keeps_no_provider_current_projection() {
+    let mut authored = definition();
+    authored.orders.push(LegalOrderDefinition {
+        id: "successor-code".to_owned(),
+        precedence_profile: "constitutional".to_owned(),
+    });
+    authored
+        .applicability_profiles
+        .push(ApplicabilityProfileDefinition {
+            id: "successor-choice".to_owned(),
+            legal_order: "successor-code".to_owned(),
+            temporal_conflict_rule: "later-in-time".to_owned(),
+            pipeline: ["scope", "jurisdiction", "validity", "conflict"]
+                .map(str::to_owned)
+                .to_vec(),
+            jurisdiction_traversal: Vec::new(),
+            max_candidates: 64,
+        });
+    let plan = compile_law(&authored).expect("compile succession plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    let mut claim = proposal_change("succession-base", LawOperation::Recognize, 1);
+    claim.source_profile = "custom".to_owned();
+    claim.procedure_profile.clear();
+    claim.rule_id = "rule:succession-base".to_owned();
+    claim.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(1))];
+    runtime
+        .admit_non_procedural_source(
+            &plan,
+            claim,
+            &["practice.recognized".to_owned()],
+            SimTime::from_minutes(1),
+        )
+        .expect("admit predecessor rule");
+    let territory = TerritoryId::new(9);
+    runtime
+        .record_succession_for_plan(
+            &plan,
+            LegalOrderSuccession {
+                id: "succession:archive-projection".to_owned(),
+                kind: SuccessionKind::ConstitutionalReplacement,
+                predecessors: vec!["state-code".to_owned()],
+                successors: vec!["successor-code".to_owned()],
+                effective_at: SimTime::from_minutes(2),
+                territorial_scope: vec![territory.to_string()],
+                personal_scope: Vec::new(),
+                institutions: vec!["assembly".to_owned()],
+                liabilities: vec!["legacy-liability".to_owned()],
+                archives: vec!["constitutional-archive".to_owned()],
+                reception: vec![ReceptionRule {
+                    rule_prefix: "rule:succession-base".to_owned(),
+                    action: ReceptionAction::Continue,
+                    transform: None,
+                }],
+                evidence: vec![EvidenceRef::Boundary(BoundaryId::new(2))],
+            },
+        )
+        .expect("record succession");
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(3), &[])
+        .expect("advance beyond succession");
+    let query = ApplicabilityQuery {
+        event_at: SimTime::from_minutes(3),
+        read_at: SimTime::from_minutes(3),
+        subject: None,
+        actor: None,
+        knowledge_read_cut: None,
+        territory: Some(territory),
+        subject_matter: None,
+        legal_order: "successor-code".to_owned(),
+        profile: "successor-choice".to_owned(),
+        jurisdiction: Some("assembly-forum".to_owned()),
+        facts: applicable_facts(),
+        fact_evidence: applicable_fact_evidence(),
+        fact_knowledge_records: BTreeMap::new(),
+    };
+    let before = runtime
+        .query_applicability_for_plan(&plan, &query)
+        .expect("query before succession archive");
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(3), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist succession history");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load succession history")
+        .expect("succession history");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &LegalShardKey::coordinator(plan.definition_id.clone()),
+            LegalCompactionBudgets {
+                max_records: 64,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare succession history")
+        .expect("succession history batch");
+    assert!(
+        prepared
+            .blobs
+            .iter()
+            .any(|blob| blob.record_class == "succession")
+    );
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("verify succession history");
+    runtime
+        .commit_verified_legal_archive_with_store(&verified, &archive)
+        .expect("commit succession history");
+    let projection = &runtime.successions[0];
+    assert!(projection.institutions.is_empty());
+    assert!(projection.liabilities.is_empty());
+    assert!(projection.archives.is_empty());
+    assert!(projection.evidence.is_empty());
+    assert_eq!(
+        runtime
+            .query_applicability_for_plan(&plan, &query)
+            .expect("query after succession archive"),
+        before
+    );
+    assert!(
+        runtime
+            .prepare_legal_archive(
+                &LegalShardKey::coordinator(plan.definition_id.clone()),
+                LegalCompactionBudgets {
+                    max_records: 64,
+                    max_source_bytes: 1024 * 1024,
+                },
+            )
+            .expect("recheck succession archive")
+            .is_none()
+    );
+}
+
+#[test]
+fn expired_conflict_payload_releases_from_its_jurisdiction_shard() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    for (id, rule, minute) in [
+        ("archive-conflict-a", "rule:archive-conflict-a", 1_u64),
+        ("archive-conflict-b", "rule:archive-conflict-b", 2_u64),
+    ] {
+        let mut claim = proposal_change(
+            id,
+            LawOperation::Recognize,
+            i64::try_from(minute).expect("fixture minute"),
+        );
+        claim.source_profile = "custom".to_owned();
+        claim.procedure_profile.clear();
+        claim.rule_id = rule.to_owned();
+        claim.evidence = vec![EvidenceRef::Boundary(BoundaryId::new(minute))];
+        runtime
+            .admit_non_procedural_source(
+                &plan,
+                claim,
+                &["practice.recognized".to_owned()],
+                SimTime::from_minutes(i64::try_from(minute).expect("fixture minute")),
+            )
+            .expect("admit conflict source");
+    }
+    let earlier = LegalRecordRef {
+        kind: "law_version".to_owned(),
+        id: "law-version:rule:archive-conflict-a:1".to_owned(),
+    };
+    let later = LegalRecordRef {
+        kind: "law_version".to_owned(),
+        id: "law-version:rule:archive-conflict-b:1".to_owned(),
+    };
+    runtime
+        .record_conflict(
+            &plan,
+            LegalConflict {
+                id: "conflict:archive-expired".to_owned(),
+                versions: vec![earlier.clone(), later.clone()],
+                governing_versions: vec![later.clone()],
+                displaced_versions: vec![earlier.clone()],
+                jurisdiction: Some("assembly-forum".to_owned()),
+                recorded_at: SimTime::from_minutes(2),
+                effective_from: SimTime::from_minutes(2),
+                effective_until: Some(SimTime::from_minutes(3)),
+                resolution: ApplicabilityOutcome::Displaced,
+                basis: ConflictResolutionBasis::Temporal,
+                rationale: "bounded expired conflict".to_owned(),
+                ruling: None,
+                trace: vec![earlier, later],
+            },
+        )
+        .expect("record expiring conflict");
+    runtime
+        .settle_boundary(&plan, SimTime::from_minutes(4), &[])
+        .expect("advance beyond conflict");
+    let canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(4), Vec::new())
+            .with_domain_records(persisted_law_records(&runtime)),
+        &[&LawPlugin],
+    )
+    .expect("persist conflict history");
+    let mut runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load conflict history")
+        .expect("conflict history");
+    let prepared = runtime
+        .prepare_legal_archive(
+            &LegalShardKey::jurisdiction(plan.definition_id.clone(), "assembly-forum"),
+            LegalCompactionBudgets {
+                max_records: 64,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare conflict history")
+        .expect("conflict history batch");
+    assert_eq!(prepared.blobs.len(), 1);
+    assert_eq!(prepared.blobs[0].record_class, "conflict");
+    let archive = MemoryLegalArchive::default();
+    let verified = prepared
+        .store_and_verify(&archive)
+        .expect("verify conflict history");
+    runtime
+        .commit_verified_legal_archive_with_store(&verified, &archive)
+        .expect("commit conflict history");
+    assert!(runtime.conflicts.is_empty());
+    runtime
+        .validate_against_plan(&plan)
+        .expect("archived conflict runtime remains valid");
+}
+
+#[test]
+fn stale_legal_archive_is_a_terminal_no_op() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut runtime = LegalRuntime::new(&plan);
+    runtime
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "human-rights".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(1),
+            "prepare source member",
+        )
+        .expect("retire source target");
+    let shard = LegalShardKey::culture_dependency(plan.definition_id.clone());
+    let stale_prepared = runtime
+        .prepare_legal_archive(
+            &shard,
+            LegalCompactionBudgets {
+                max_records: 1,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare stale archive")
+        .expect("stale candidate");
+    let stale_archive = MemoryLegalArchive::default();
+    let stale_verified = stale_prepared
+        .store_and_verify(&stale_archive)
+        .expect("verify stale archive before source changes");
+    let mut changed = runtime.clone();
+    changed
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "new-source-member".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(3),
+            "make the prepared membership root stale",
+        )
+        .expect("change legal archive source root");
+    assert_eq!(
+        changed
+            .commit_verified_legal_archive_with_store(&stale_verified, &stale_archive)
+            .expect("stale archive becomes a terminal no-op"),
+        LegalArchiveMaintenanceDisposition::RejectedStale
+    );
+    assert_eq!(
+        changed
+            .archive_last_terminal
+            .as_ref()
+            .expect("terminal receipt")
+            .disposition,
+        LegalArchiveMaintenanceDisposition::RejectedStale
+    );
+}
+
+#[test]
+fn stale_durable_legal_archive_ingress_releases_its_gc_retention() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let mut source = LegalRuntime::new(&plan);
+    source
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "stale-retention-source".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(1),
+            "prepare stale retained archive",
+        )
+        .expect("retire source target");
+    let shard = LegalShardKey::culture_dependency(plan.definition_id.clone());
+    let prepared = source
+        .prepare_legal_archive(
+            &shard,
+            LegalCompactionBudgets {
+                max_records: 1,
+                max_source_bytes: 1024 * 1024,
+            },
+        )
+        .expect("prepare stale retained archive")
+        .expect("stale retained candidate");
+    let mut changed = source;
+    changed
+        .retire_cultural_target_for_plan(
+            &plan,
+            &CulturalTargetGenerationRef {
+                target: "stale-retention-new-member".to_owned(),
+                generation: 1,
+            },
+            SimTime::from_minutes(2),
+            "change source root before durable admission",
+        )
+        .expect("change legal archive source root");
+    let archive = MemoryLegalArchive::default();
+    let mut canwu = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::from_minutes(2), Vec::new())
+            .with_domain_records(persisted_law_records(&changed)),
+        &[&LawPlugin],
+    )
+    .expect("host changed legal state");
+    let retention_receipt = enqueue_legal_archive(&mut canwu, &prepared, &archive)
+        .expect("queue stale durable archive ingress");
+    let before = canwu
+        .archive_reachability_manifest(
+            &[],
+            &StatePageRetentionLedger::default(),
+            &archive,
+            &archive,
+        )
+        .expect("mark pending stale archive");
+    assert!(
+        before
+            .plugin_objects
+            .get(LEGAL_ARCHIVE_BLOB_NAMESPACE)
+            .is_some_and(|ids| ids.contains(&prepared.receipts[0].object.blob_id))
+    );
+
+    canwu
+        .step_canonical()
+        .expect("settle stale archive ingress")
+        .expect("stale archive boundary");
+    finalize_legal_archive_retention(&mut canwu, &plan, &archive, &retention_receipt)
+        .expect("release stale legal archive retention");
+    canwu
+        .step_canonical()
+        .expect("settle stale retention acknowledgement")
+        .expect("stale retention acknowledgement boundary");
+    assert!(archive.retention.borrow().reachable().objects.is_empty());
+    let after = canwu
+        .archive_reachability_manifest(
+            &[],
+            &StatePageRetentionLedger::default(),
+            &archive,
+            &archive,
+        )
+        .expect("mark after stale rejection");
+    assert!(
+        !after
+            .plugin_objects
+            .get(LEGAL_ARCHIVE_BLOB_NAMESPACE)
+            .is_some_and(|ids| ids.contains(&prepared.receipts[0].object.blob_id))
+    );
+    let runtime = load_legal_runtime(&canwu, &plan)
+        .expect("load stale terminal runtime")
+        .expect("stale terminal runtime");
+    assert!(runtime.archive_retention_terminals.is_empty());
+    assert_eq!(
+        runtime
+            .archive_last_terminal
+            .as_ref()
+            .expect("stale terminal receipt")
+            .disposition,
+        LegalArchiveMaintenanceDisposition::RejectedStale
+    );
 }
 
 #[test]
@@ -3354,18 +4782,10 @@ fn kernel_wake_expires_unresolved_procedure_and_pending_outbox() {
     runtime
         .submit_proposal(&plan, proposal())
         .expect("submit expiring proposal");
-    let initial = runtime.to_record_draft().expect("encode runtime record");
+    let initial = persisted_law_records(&runtime);
     let mut canwu = canwu_api::Canwu::new_with_plugins(
         7,
-        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(vec![DomainRecord {
-            reference: initial.reference,
-            owner: PLUGIN_NAME.to_owned(),
-            class: DomainRecordClass::Record,
-            version: 1,
-            lifecycle: DomainRecordLifecycle::Active,
-            payload: initial.payload,
-            references: initial.references,
-        }]),
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
         &[&LawPlugin],
     )
     .expect("law plugin host");
@@ -3934,7 +5354,7 @@ fn recovery_rebuilds_latest_participation_index() {
 
 #[test]
 fn plugin_registers_all_legal_schemas_and_pending_intent_command() {
-    assert_eq!(law_record_schemas().len(), 1);
+    assert_eq!(law_record_schemas().len(), 4);
     assert_eq!(law_command_descriptor().name, LAW_COMMAND);
     canwu_api::Canwu::new_with_plugins(7, Scenario::new(SimTime::EPOCH, Vec::new()), &[&LawPlugin])
         .expect("law plugin registration");

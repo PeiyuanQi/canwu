@@ -1,13 +1,13 @@
 use canwu_api::{
     CanwuError, DecisionTicketDraft, DomainRecordRef, DomainRecordType, DomainRecordVersionRef,
     DomainValueKindClass, EntityRef, EvidenceRef, KnowledgeHolderRef, SimTime,
-    TypedDomainRecordRef,
+    TypedDomainRecordRef, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const LAW_SCHEMA_VERSION: u32 = 1;
-pub const LAW_PLAN_VERSION: u32 = 1;
+pub const LAW_SCHEMA_VERSION: u32 = 2;
+pub const LAW_PLAN_VERSION: u32 = 2;
 pub const LAW_PLAN_HASH_DOMAIN: &str = "canwu.law.compiled-plan.v1";
 /// Absolute activation ceiling. Authored plans may choose smaller limits but
 /// cannot enlarge the pre-decode trust boundary.
@@ -1157,6 +1157,18 @@ marker!(
 );
 marker!(LegalRetirementRecord, "retirement", LegalRetirement);
 marker!(LegalRuntimeRecord, "runtime", crate::LegalRuntime);
+marker!(LegalPlanStateRecord, "plan_state", crate::LegalPlanState);
+marker!(
+    LegalDirectoryStateRecord,
+    "directory_state",
+    crate::LegalDirectoryState
+);
+marker!(LegalShardStateRecord, "shard_state", crate::LegalShardState);
+marker!(
+    LegalArchiveHeadStateRecord,
+    "archive_head_state",
+    crate::LegalArchiveHeadState
+);
 
 pub fn typed_ref<T: DomainRecordType>(id: impl Into<String>) -> TypedDomainRecordRef<T> {
     TypedDomainRecordRef::new(id)
@@ -1165,6 +1177,34 @@ pub fn typed_ref<T: DomainRecordType>(id: impl Into<String>) -> TypedDomainRecor
 #[must_use]
 pub fn legal_runtime_reference() -> TypedDomainRecordRef<LegalRuntimeRecord> {
     TypedDomainRecordRef::new("root")
+}
+
+#[must_use]
+pub fn legal_plan_state_reference() -> TypedDomainRecordRef<LegalPlanStateRecord> {
+    TypedDomainRecordRef::new("plan")
+}
+
+#[must_use]
+pub fn legal_directory_state_reference() -> TypedDomainRecordRef<LegalDirectoryStateRecord> {
+    TypedDomainRecordRef::new("directory")
+}
+
+pub fn legal_shard_state_reference(
+    shard: &crate::LegalShardKey,
+) -> Result<TypedDomainRecordRef<LegalShardStateRecord>, CanwuError> {
+    Ok(TypedDomainRecordRef::new(format!(
+        "shard:{}",
+        canonical_hash("canwu.law.shard-record-id.v1", shard)?
+    )))
+}
+
+pub fn legal_archive_head_state_reference(
+    shard: &crate::LegalShardKey,
+) -> Result<TypedDomainRecordRef<LegalArchiveHeadStateRecord>, CanwuError> {
+    Ok(TypedDomainRecordRef::new(format!(
+        "archive:{}",
+        canonical_hash("canwu.law.archive-head-record-id.v1", shard)?
+    )))
 }
 
 pub(crate) fn invalid(message: impl Into<String>) -> CanwuError {

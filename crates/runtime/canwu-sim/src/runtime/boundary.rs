@@ -331,6 +331,10 @@ pub struct BoundaryRecord {
     pub record_changes: Vec<DomainRecordChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knowledge_changes: Vec<BoundaryKnowledgeChange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maintenance_changes: Vec<crate::MaintenanceChangeRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_terminal_root: Option<String>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     /// Untagged legacy full-state hash or a `v1:` incremental state commitment.

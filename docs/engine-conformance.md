@@ -173,7 +173,7 @@ The kernel owns ordering and visibility. Domain packages own their rules.
 - Save identity records engine, schema, rules, scenario/content, plugin/mod,
   localization-sensitive contract, run configuration, and source/provenance
   manifests as applicable.
-- Format 7 is a pre-1.0 clean break: unsupported older formats fail with stable
+- Format 8 is a pre-1.0 clean break: unsupported older formats fail with stable
   machine-readable reasons, and any migration/export of old data is owned by
   the application outside the Canwu runtime.
 - Replay restores the recorded plugin/rules environment before applying its
@@ -240,13 +240,13 @@ JSON escape hatch, or a narrow green demo test is not conformance evidence.
 
 ## Current baseline
 
-The v0.6 engine provides a public, deterministic fourteen-phase settlement API.
+The v0.8 engine provides a public, deterministic fourteen-phase settlement API.
 Boundary systems declare cadence, reads, writes, reservation participation,
 allocation reads, owned random streams, emissions, and visibility. The kernel
 provides stable allocation order, separately staged ordinary and conditional
 commits, same-boundary overlays, next-boundary visibility, full rollback on
 fatal error, scoped deterministic draws, and persisted boundary evidence with
-exact plugin/system provenance. Snapshot format 7 retains random draw journals,
+exact plugin/system provenance. Snapshot format 8 retains random draw journals,
 state and boundary hash chains, a current-state checkpoint commitment, hashed
 run/content/source manifests, exact plugin version and semantic identities, and
 an environment-bound replay journal that also verifies command-only and
@@ -263,7 +263,7 @@ replay ingress is kernel-only, so live callers cannot self-label around
 produce identical authoritative state/boundary hashes and RNG state. Every
 report dispatch must retain exactly one
 causally linked core random draw, and authoritative scheduling rejects time
-overflow rather than saturating. Format 7 checkpoints require an exact engine
+overflow rather than saturating. Format 8 checkpoints require an exact engine
 and contract-version match; rewriting older data is an application-owned export
 outside the runtime.
 E01 now has a public generic storage contract: plugins register namespaced
@@ -278,7 +278,7 @@ rollback, cycle-free succession, canonical save/load, exact replay,
 provenance-tamper rejection, historical-cut rejection for pre-creation and
 post-deletion evidence, rejection of cross-system same-stage creation use, and
 manifest-bound protection against shifting created records into genesis state.
-Format 7 rejects format 2 through 6 saves before runtime construction; any
+Format 8 rejects every pre-8 save before runtime construction; any
 historical export or conversion remains application-owned and outside Canwu.
 These complete the current E01 contract and are substantial but still partial
 implementations of E02, E04 through E09, and E11 through E13.
@@ -339,23 +339,25 @@ measure active/dirty pairs, cross-extension signal batches, observers, retired
 catalog size, snapshot bytes, validation, replay, and peak resident memory
 before the SDK is described as scalable.
 
-The experimental `canwu-law` extension now supplies a second executable gate.
+The `canwu-law` extension supplies a second executable gate.
 Only a controller-bound command may append a pending legal intent, and a later
-plugin boundary revalidates exact plan, aggregate, record-version, procedure,
-and decision evidence before one atomic compare-and-set creates immutable
-sources and law versions. Engine authorization remains distinct from legal
+plugin boundary revalidates exact plan, shard working set, record versions,
+procedure, and decision evidence before one atomic domain mutation bundle
+creates immutable sources and law versions. Engine authorization remains distinct from legal
 competence and validity; source, stable rule, and normative version are separate;
 and applicability, adjudication, scoped reception, archive-safe evidence, and
 culture retirement have contract tests. A cultural commitment survives culture
 retirement as legal provenance, while an unresolved operative or scheduled live
 level dependency blocks retirement.
 
-This does not remove the whole-engine scale gate. Law-local dirty and due work
-is indexed and budgeted, but the v1 legal ledger is one serialized aggregate and
-the current transaction path clones shared state. Release probes therefore show
-history-dependent plugin latency, and live manifests must remain well below 1k
-retained legal records until jurisdiction sharding and kernel COW/delta state
-exist.
+Format 8 closes the former whole-engine scale blocker with independently
+versioned legal shards, persistent domain/decision roots, affected-closure
+proposal validation, content-addressed checkpoint deltas, authenticated cold
+archives, and restart-safe retention. Release probes keep one million cold
+legal records outside the ordinary boundary curve and prove that a real legal
+ingress does not restore or rewrite an unrelated 38.40-MiB candidate shard.
+Live state remains bounded by the declared 128-MiB legal state/memory ceilings;
+historical payloads beyond that contract belong in the archive provider.
 
 The complete profile remains in progress. The major remaining gaps include
 authority scopes that prevent human/AI double control, institution/advisor

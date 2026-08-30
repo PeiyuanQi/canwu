@@ -24,26 +24,30 @@ mod compiler;
 mod model;
 mod plugin;
 mod runtime;
-// Format-8 storage work remains a private, non-loadable test scaffold until
-// the page store, replay ingress, and persistence-format switch land together.
-#[cfg(test)]
-mod storage;
+/// Format-8 legal shard, archive, and deterministic compaction contracts.
+pub mod storage;
 
 pub use compiler::{compile_law, validate_compiled_law_plan, validate_definition};
 pub use model::*;
 pub use plugin::{
-    LAW_ACTOR_CONTEXT_INGRESS, LAW_COMMAND, LAW_INTENT_INGRESS, LAW_MUTATION_INGRESS,
-    LAW_OUTBOX_ACK_INGRESS, LAW_OUTBOX_PREPARE_INGRESS, LAW_RUNTIME_STATE, LAW_WAKE_INGRESS,
-    LawPlugin, enqueue_legal_mutation, enqueue_legal_mutation_at, law_command_descriptor,
-    law_record_schemas, load_law_state_for_plan, load_legal_runtime,
+    LAW_ACTOR_CONTEXT_INGRESS, LAW_ARCHIVE_COMMIT_INGRESS, LAW_ARCHIVE_HEAD_STATE,
+    LAW_ARCHIVE_RETENTION_ACK_INGRESS, LAW_COMMAND, LAW_DIRECTORY_STATE, LAW_INTENT_INGRESS,
+    LAW_MUTATION_INGRESS, LAW_OUTBOX_ACK_INGRESS, LAW_OUTBOX_PREPARE_INGRESS, LAW_PLAN_STATE,
+    LAW_RUNTIME_STATE, LAW_SHARD_STATE, LAW_WAKE_INGRESS, LawPlugin, LegalArchiveIngressReceipt,
+    enqueue_legal_archive, enqueue_legal_mutation, enqueue_legal_mutation_at,
+    finalize_legal_archive_retention, law_command_descriptor, law_record_schemas,
+    load_law_state_for_plan, load_legal_runtime,
 };
 pub use runtime::{
-    LegalBoundaryResult, LegalMutation, LegalRuntime, LegalSignal, decision_controller_id,
+    LegalArchiveMaintenanceDisposition, LegalArchiveTerminalRecord, LegalBoundaryResult,
+    LegalCanwuBoundaryScaleMetrics, LegalMutation, LegalRuntime,
+    LegalRuntimeCompactionScaleMetrics, LegalSignal, decision_controller_id,
 };
+pub use storage::*;
 
 pub const PLUGIN_NAME: &str = "canwu-law";
 pub const PLUGIN_NAMESPACE: &str = "canwu.law";
 
 /// Stable semantic identity for the registered legal record and command contract.
 pub const LAW_SEMANTIC_HASH: &str =
-    "8989b95910c96fb6bd6a39298b1bdd30209c396147f32ddc24d5c98143d0cc1b";
+    "a4581d5d38806f38a1069add4ba6ad275afc7667322275698320614730dbcfcf";

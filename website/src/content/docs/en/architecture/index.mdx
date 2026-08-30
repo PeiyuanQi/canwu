@@ -27,11 +27,12 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 Canwu is a headless historical simulation core. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
 
-## Format 7 and three simulation granularities
+## Format 8 and three simulation granularities
 
-Before 1.0, 0.7 uses a clean persistence break: snapshots and `ReplayJournal`
+Before 1.0, 0.8 uses a clean persistence break. Snapshots and `ReplayJournal`
 carry declared run identity, initial scenario, commitments, authority root, and
-complete evidence. The kernel does not silently load format 2-6 saves.
+complete evidence. Format 8 separately adds content-addressed state pages for
+paged checkpoints. The kernel does not silently load pre-8 saves.
 `SimulationGranularity` defines only the domain-neutral levels `aggregate`,
 `group`, and `actor`. Celestial Mandate may map them to Population, Special
 Group, and Character in its own reference integration; Southern Ming and WWII

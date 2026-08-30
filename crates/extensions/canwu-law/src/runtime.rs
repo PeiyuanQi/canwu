@@ -1,16 +1,20 @@
 use crate::PLUGIN_NAMESPACE;
 use crate::model::*;
+use crate::storage::LegalStorageState;
 use canwu_api::{
-    Canwu, CanwuError, Command, CommandId, DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction,
-    DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority, DecisionContext,
-    DecisionControllerBinding, DecisionIngressRequest, DecisionMutation, DecisionOption,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketId, DomainRecordDraft, DomainRecordRef, EntityRef,
-    EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IdentityEvidenceDependenciesV1,
-    KnowledgeHolderRef, KnowledgeQuery, SimDuration, SimTime, canonical_hash,
+    ArchiveReachabilityManifest, Canwu, CanwuError, Command, CommandId,
+    DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction, DecisionAttemptOutcome,
+    DecisionAttemptRecord, DecisionAuthority, DecisionContext, DecisionControllerBinding,
+    DecisionIngressRequest, DecisionMutation, DecisionOption, DecisionPolicyIdentity,
+    DecisionPolicyKind, DecisionRequestId, DecisionTicket, DecisionTicketDraft, DecisionTicketId,
+    DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle, DomainRecordRef,
+    EntityRef, EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IdentityEvidenceDependenciesV1,
+    KnowledgeHolderRef, KnowledgeQuery, Scenario, SimDuration, SimTime, SystemCadence,
+    canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LegalSignal {
@@ -69,6 +73,77 @@ pub struct LegalBoundaryResult {
     pub emitted_outbox: Vec<LegalDecisionOutboxItem>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegalArchiveMaintenanceDisposition {
+    Applied,
+    RejectedStale,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalArchiveTerminalRecord {
+    pub sequence: u64,
+    pub retention_handle_id: String,
+    pub token: String,
+    pub directory_root: String,
+    pub disposition: LegalArchiveMaintenanceDisposition,
+    pub expected_source_root: String,
+    pub observed_source_root: String,
+    pub target_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_root: Option<String>,
+    pub chain_root: String,
+}
+
+struct LegalArchiveTerminalDraft {
+    retention_handle_id: String,
+    token: String,
+    directory_root: String,
+    disposition: LegalArchiveMaintenanceDisposition,
+    expected_source_root: String,
+    observed_source_root: String,
+    target_root: String,
+    reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchivedLegalDependency {
+    pub reference: LegalRecordRef,
+    pub version: crate::LegalVersionRef,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalRuntimeCompactionScaleMetrics {
+    pub candidate_debt: u64,
+    pub selected_candidates: u64,
+    pub examined_candidates: u64,
+    pub payload_materializations: u64,
+    pub prepare_elapsed_micros: u64,
+    pub persisted_shards: u64,
+    pub coordinator_shard_bytes: u64,
+    pub candidate_shard_bytes: u64,
+    pub coordinator_restore_candidates: u64,
+    pub coordinator_restore_elapsed_micros: u64,
+    pub source_root: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegalCanwuBoundaryScaleMetrics {
+    pub candidate_debt: u64,
+    pub candidate_shard_bytes: u64,
+    pub candidate_shard_version_before: u64,
+    pub candidate_shard_version_after: u64,
+    pub empty_boundary_elapsed_micros: u64,
+    pub boundary_elapsed_micros: u64,
+    pub boundary_id: u64,
+}
+
 /// Mutable, serializable legal ledger for one exact compiled plan.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LegalRuntime {
@@ -78,6 +153,14 @@ pub struct LegalRuntime {
     pub reserved_state_bytes: usize,
     pub boundary_index: u64,
     pub last_settled_at: SimTime,
+    #[serde(default)]
+    pub archive_terminal_sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_terminal_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_last_terminal: Option<LegalArchiveTerminalRecord>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub archive_retention_terminals: BTreeMap<String, LegalArchiveTerminalRecord>,
     pub next_outbox_sequence: u64,
     pub next_source_ordinal: u64,
     pub proposals: BTreeMap<String, LegalProposal>,
@@ -87,6 +170,8 @@ pub struct LegalRuntime {
     pub procedures_by_deadline: BTreeMap<SimTime, BTreeSet<String>>,
     pub capacity_allocations: BTreeMap<String, LegalCapacityAllocation>,
     pub participations: Vec<ProcedureParticipation>,
+    #[serde(default)]
+    participation_index_by_id: BTreeMap<String, usize>,
     pub latest_participation_by_key: BTreeMap<String, usize>,
     pub outbox: BTreeMap<u64, LegalDecisionOutboxItem>,
     pub outbox_keys: BTreeSet<String>,
@@ -96,6 +181,8 @@ pub struct LegalRuntime {
     pub pending_intents: BTreeMap<String, PendingLegalIntent>,
     pub consumed_intent_ids: BTreeSet<String>,
     pub intent_outcomes: Vec<LegalIntentOutcome>,
+    #[serde(default)]
+    intent_outcome_index_by_id: BTreeMap<String, usize>,
     pub sources: BTreeMap<String, LegalSourceVersion>,
     pub publicity_events: BTreeMap<String, LegalPublicityEvent>,
     pub rules: BTreeMap<String, LegalRule>,
@@ -115,15 +202,419 @@ pub struct LegalRuntime {
     pub conflicts: BTreeMap<String, LegalConflict>,
     pub conflict_ids_by_version: BTreeMap<String, BTreeSet<String>>,
     pub successions: Vec<LegalOrderSuccession>,
+    #[serde(default)]
+    succession_index_by_id: BTreeMap<String, usize>,
     pub succession_indexes_by_successor: BTreeMap<String, Vec<usize>>,
     pub retirements: Vec<LegalRetirement>,
+    #[serde(default)]
+    retirement_index_by_id: BTreeMap<String, usize>,
     pub retired_cultural_targets: BTreeSet<CulturalTargetGenerationRef>,
     pub retained_evidence_dependencies: BTreeSet<EvidenceRef>,
     #[serde(with = "evidence_dependency_counts_serde")]
     pub retained_evidence_dependency_counts: BTreeMap<EvidenceRef, usize>,
+    /// Exact archive identities retained only while a hot projection still
+    /// points at a released payload. This is bounded by hot references, not
+    /// by total archived history.
+    #[serde(default)]
+    pub archived_dependency_versions: BTreeSet<ArchivedLegalDependency>,
+    /// Full succession evidence/history may be archived while the bounded
+    /// no-provider reception projection remains hot.
+    #[serde(default)]
+    pub compacted_succession_versions: BTreeSet<crate::LegalVersionRef>,
+    /// Format-8 shard/archive directory and reachability state. The semantic
+    /// ledger remains authoritative; this projection owns placement and
+    /// compaction metadata and is validated as part of cold restore.
+    #[serde(default)]
+    pub storage: LegalStorageState,
+}
+
+struct LegalPersistenceImage {
+    plan: crate::LegalPlanState,
+    directory: crate::LegalDirectoryState,
+    shards: BTreeMap<crate::LegalShardKey, crate::LegalShardState>,
+    archive_heads: BTreeMap<crate::LegalShardKey, crate::LegalArchiveHeadState>,
+}
+
+const LEGAL_STORAGE_SHARDS_FIELD: &str = "storage_compaction_shards";
+
+fn partition_object_field(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    shards: &mut BTreeMap<crate::LegalShardKey, BTreeMap<String, serde_json::Value>>,
+    field: &str,
+    mut route: impl FnMut(&str, &serde_json::Value) -> crate::LegalShardKey,
+) -> Result<(), CanwuError> {
+    let value = root
+        .remove(field)
+        .ok_or_else(|| invalid(format!("legal runtime is missing field {field}")))?;
+    let entries = value
+        .as_object()
+        .ok_or_else(|| invalid(format!("legal runtime field {field} must be an object")))?;
+    if entries.is_empty() {
+        let fallback = shards
+            .keys()
+            .find(|shard| shard.kind == crate::LegalShardKind::Coordinator)
+            .cloned()
+            .ok_or_else(|| invalid("legal persistence image lacks a coordinator shard"))?;
+        shards
+            .entry(fallback)
+            .or_default()
+            .insert(field.to_owned(), serde_json::json!({}));
+        return Ok(());
+    }
+    for (id, value) in entries {
+        let shard = route(id, value);
+        let fields = shards.entry(shard).or_default();
+        let destination = fields
+            .entry(field.to_owned())
+            .or_insert_with(|| serde_json::json!({}));
+        let destination = destination
+            .as_object_mut()
+            .ok_or_else(|| invalid(format!("legal shard field {field} is not an object")))?;
+        if destination.insert(id.clone(), value.clone()).is_some() {
+            return Err(invalid(format!(
+                "legal shard field {field} contains duplicate key {id}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn merge_persisted_field(
+    root: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+    value: serde_json::Value,
+) -> Result<(), CanwuError> {
+    let Some(existing) = root.get_mut(field) else {
+        root.insert(field.to_owned(), value);
+        return Ok(());
+    };
+    match (existing, value) {
+        (serde_json::Value::Object(existing), serde_json::Value::Object(additional)) => {
+            for (key, value) in additional {
+                if existing.insert(key.clone(), value).is_some() {
+                    return Err(invalid(format!(
+                        "legal shards overlap field {field} key {key}"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        (serde_json::Value::Array(existing), serde_json::Value::Array(mut additional)) => {
+            existing.append(&mut additional);
+            Ok(())
+        }
+        _ => Err(invalid(format!(
+            "legal shards contain duplicate non-mergeable field {field}"
+        ))),
+    }
+}
+
+fn retirement_archive_version(
+    retirement: &LegalRetirement,
+    shard: &crate::LegalShardKey,
+) -> Result<crate::LegalVersionRef, CanwuError> {
+    let target = retirement
+        .cultural_target
+        .as_ref()
+        .ok_or_else(|| invalid("only exact culture-generation retirements are archiveable"))?;
+    let payload = serde_json::to_value(retirement)
+        .map_err(|error| invalid(format!("legal retirement cannot be encoded: {error}")))?;
+    Ok(crate::LegalVersionRef {
+        object: crate::LegalObjectId {
+            kind: crate::LegalObjectKind::Retirement,
+            id: retirement.id.clone(),
+            home_shard: shard.clone(),
+            local_discriminator: Some(format!("{}@{}", target.target, target.generation)),
+        },
+        version_ordinal: 1,
+        content_commitment: crate::legal_archive_content_commitment("retirement", &payload)?,
+    })
+}
+
+#[derive(Clone)]
+struct LegalArchivePayload {
+    candidate: crate::LegalCompactionCandidate,
+    payload: serde_json::Value,
+}
+
+fn legal_archive_payload(
+    kind: crate::LegalObjectKind,
+    id: &str,
+    shard: crate::LegalShardKey,
+    version_ordinal: u64,
+    record_class: &str,
+    closed_at: SimTime,
+    value: &impl Serialize,
+) -> Result<LegalArchivePayload, CanwuError> {
+    let payload = serde_json::to_value(value)
+        .map_err(|error| invalid(format!("legal archive payload cannot be encoded: {error}")))?;
+    let version = crate::LegalVersionRef {
+        object: crate::LegalObjectId {
+            kind,
+            id: id.to_owned(),
+            home_shard: shard,
+            local_discriminator: None,
+        },
+        version_ordinal,
+        content_commitment: crate::legal_archive_content_commitment(record_class, &payload)?,
+    };
+    let encoded_bytes = u64::try_from(
+        serde_json::to_vec(&payload)
+            .map_err(|error| invalid(format!("legal archive payload cannot be sized: {error}")))?
+            .len(),
+    )
+    .map_err(|_| invalid("legal archive payload byte count exceeds u64"))?;
+    Ok(LegalArchivePayload {
+        candidate: crate::LegalCompactionCandidate {
+            version,
+            record_class: record_class.to_owned(),
+            closed_at,
+            encoded_bytes,
+            dependencies_resolved: true,
+            current_projection_retained: true,
+        },
+        payload,
+    })
 }
 
 impl LegalRuntime {
+    fn format8_retirement_scale_fixture(
+        &self,
+        candidate_debt: usize,
+    ) -> Result<(Self, crate::LegalShardKey), CanwuError> {
+        if candidate_debt == 0 {
+            return Err(invalid(
+                "legal runtime scale fixture requires candidate debt",
+            ));
+        }
+        let mut runtime = self.clone();
+        let shard = crate::LegalShardKey::culture_dependency(runtime.plan.definition_id.clone());
+        if runtime.storage.has_compaction_candidates_for_shard(&shard)
+            || !runtime.retirements.is_empty()
+        {
+            return Err(invalid(
+                "legal runtime scale probe requires an empty retirement archive queue",
+            ));
+        }
+        runtime
+            .storage
+            .directory
+            .active_shards
+            .insert(shard.clone());
+        for ordinal in 1..=candidate_debt {
+            let ordinal = u64::try_from(ordinal)
+                .map_err(|_| invalid("legal runtime scale ordinal exceeds u64"))?;
+            let target = CulturalTargetGenerationRef {
+                target: format!("format8-runtime-scale-{ordinal}"),
+                generation: 1,
+            };
+            let retirement = LegalRetirement {
+                id: format!("retirement:format8-runtime-scale:{ordinal}"),
+                kind: "culture_target".to_owned(),
+                record: DomainRecordRef::new(
+                    PLUGIN_NAMESPACE,
+                    "cultural_target",
+                    format!("{}@{}", target.target, target.generation),
+                ),
+                cultural_target: Some(target.clone()),
+                retired_at: SimTime::from_minutes(
+                    i64::try_from(ordinal)
+                        .map_err(|_| invalid("legal runtime scale time exceeds i64"))?,
+                ),
+                successor: None,
+                reason: "Format-8 production runtime compaction scale probe".to_owned(),
+                evidence: Vec::new(),
+            };
+            let version = retirement_archive_version(&retirement, &shard)?;
+            let payload = serde_json::to_value(&retirement).map_err(|error| {
+                invalid(format!(
+                    "legal runtime scale retirement cannot encode: {error}"
+                ))
+            })?;
+            let encoded_bytes = serde_json::to_vec(&payload)
+                .map_err(|error| {
+                    invalid(format!(
+                        "legal runtime scale retirement cannot size: {error}"
+                    ))
+                })?
+                .len() as u64;
+            runtime.retired_cultural_targets.insert(target);
+            runtime
+                .retirement_index_by_id
+                .insert(retirement.id.clone(), runtime.retirements.len());
+            runtime.retirements.push(retirement);
+            runtime.storage.membership.insert(
+                version.clone(),
+                crate::LegalArchiveMembership {
+                    version: version.clone(),
+                    location: crate::LegalVersionLocation::Hot,
+                    effective_interval: None,
+                    recorded_interval: None,
+                },
+            );
+            runtime
+                .storage
+                .mark_compaction_candidate(crate::LegalCompactionCandidate {
+                    version,
+                    record_class: "retirement".to_owned(),
+                    closed_at: SimTime::from_minutes(
+                        i64::try_from(ordinal)
+                            .map_err(|_| invalid("legal runtime scale time exceeds i64"))?,
+                    ),
+                    encoded_bytes,
+                    dependencies_resolved: true,
+                    current_projection_retained: true,
+                })?;
+        }
+        Ok((runtime, shard))
+    }
+
+    pub fn format8_retirement_prepare_scale_probe(
+        &self,
+        candidate_debt: usize,
+        batch_size: usize,
+    ) -> Result<LegalRuntimeCompactionScaleMetrics, CanwuError> {
+        if candidate_debt == 0 || batch_size == 0 || batch_size > candidate_debt {
+            return Err(invalid("legal runtime scale probe budgets are invalid"));
+        }
+        let (runtime, shard) = self.format8_retirement_scale_fixture(candidate_debt)?;
+        let started = Instant::now();
+        let prepared = runtime
+            .prepare_legal_archive(
+                &shard,
+                crate::LegalCompactionBudgets {
+                    max_records: batch_size,
+                    max_source_bytes: u64::MAX,
+                },
+            )?
+            .ok_or_else(|| invalid("legal runtime scale probe produced no archive batch"))?;
+        let prepare_elapsed_micros = started.elapsed().as_micros() as u64;
+        let image = runtime.persistence_image()?;
+        let coordinator = crate::LegalShardKey::coordinator(runtime.plan.definition_id.clone());
+        let candidate_shard =
+            crate::LegalShardKey::culture_dependency(runtime.plan.definition_id.clone());
+        let coordinator_payload = image
+            .shards
+            .get(&coordinator)
+            .ok_or_else(|| invalid("legal scale image lacks its coordinator shard"))?;
+        let candidate_payload = image
+            .shards
+            .get(&candidate_shard)
+            .ok_or_else(|| invalid("legal scale image lacks its candidate shard"))?;
+        let coordinator_shard_bytes = serde_json::to_vec(coordinator_payload)
+            .map_err(|error| invalid(format!("legal coordinator shard cannot be sized: {error}")))?
+            .len() as u64;
+        let candidate_shard_bytes = serde_json::to_vec(candidate_payload)
+            .map_err(|error| invalid(format!("legal candidate shard cannot be sized: {error}")))?
+            .len() as u64;
+        let scoped_started = Instant::now();
+        let coordinator_runtime = Self::from_scoped_persistence_image(
+            &runtime.plan,
+            image.plan.clone(),
+            image.directory.clone(),
+            &BTreeMap::from([(coordinator.clone(), coordinator_payload.clone())]),
+            BTreeMap::from([(
+                coordinator.clone(),
+                image
+                    .archive_heads
+                    .get(&coordinator)
+                    .cloned()
+                    .ok_or_else(|| invalid("legal scale image lacks coordinator archive head"))?,
+            )]),
+            Some(&BTreeSet::from([coordinator])),
+        )?;
+        Ok(LegalRuntimeCompactionScaleMetrics {
+            candidate_debt: candidate_debt as u64,
+            selected_candidates: prepared.compaction.candidates.len() as u64,
+            examined_candidates: prepared.compaction.examined_candidates,
+            payload_materializations: prepared.blobs.len() as u64,
+            prepare_elapsed_micros,
+            persisted_shards: image.shards.len() as u64,
+            coordinator_shard_bytes,
+            candidate_shard_bytes,
+            coordinator_restore_candidates: coordinator_runtime.storage.compaction_candidates.len()
+                as u64,
+            coordinator_restore_elapsed_micros: scoped_started.elapsed().as_micros() as u64,
+            source_root: prepared.compaction.source_membership_root,
+        })
+    }
+
+    /// Exercises a real Canwu plugin boundary with persisted candidate debt in
+    /// an unrelated legal shard. Construction and cold activation are outside
+    /// the timed sample; the boundary must leave the candidate shard version
+    /// untouched while decoding and persisting only the mutation's scope.
+    pub fn format8_canwu_boundary_scale_probe(
+        &self,
+        candidate_debt: usize,
+        mutation: &LegalMutation,
+    ) -> Result<LegalCanwuBoundaryScaleMetrics, CanwuError> {
+        let (runtime, candidate_shard) = self.format8_retirement_scale_fixture(candidate_debt)?;
+        let candidate_reference =
+            crate::legal_shard_state_reference(&candidate_shard)?.into_untyped();
+        let records = runtime
+            .to_record_drafts()?
+            .into_iter()
+            .map(|draft| DomainRecord {
+                reference: draft.reference,
+                owner: crate::PLUGIN_NAME.to_owned(),
+                class: DomainRecordClass::Record,
+                version: 1,
+                lifecycle: DomainRecordLifecycle::Active,
+                payload: draft.payload,
+                references: draft.references,
+            })
+            .collect::<Vec<_>>();
+        let candidate_record = records
+            .iter()
+            .find(|record| record.reference == candidate_reference)
+            .ok_or_else(|| invalid("legal Canwu scale fixture lacks its candidate shard"))?;
+        let candidate_shard_bytes = u64::try_from(
+            serde_json::to_vec(&candidate_record.payload)
+                .map_err(|error| invalid(format!("candidate shard cannot be sized: {error}")))?
+                .len(),
+        )
+        .map_err(|_| invalid("candidate shard byte count exceeds u64"))?;
+        let candidate_shard_version_before = candidate_record.version;
+        let mut canwu = Canwu::new_with_plugins(
+            7,
+            Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(records),
+            &[&crate::LawPlugin],
+        )?;
+        canwu.schedule_calendar_boundary(SimTime::EPOCH, vec![SystemCadence::Daily])?;
+        let empty_started = Instant::now();
+        canwu
+            .step_canonical()?
+            .ok_or_else(|| invalid("legal Canwu scale fixture produced no empty boundary"))?;
+        let empty_boundary_elapsed_micros = u64::try_from(empty_started.elapsed().as_micros())
+            .map_err(|_| invalid("empty Canwu boundary duration exceeds u64"))?;
+        crate::enqueue_legal_mutation(&mut canwu, mutation)?;
+        let started = Instant::now();
+        let receipt = canwu
+            .step_canonical()?
+            .ok_or_else(|| invalid("legal Canwu scale ingress produced no boundary"))?;
+        let boundary_elapsed_micros = u64::try_from(started.elapsed().as_micros())
+            .map_err(|_| invalid("legal Canwu boundary duration exceeds u64"))?;
+        let candidate_shard_version_after = canwu
+            .domain_record(&candidate_reference)
+            .ok_or_else(|| invalid("legal Canwu boundary removed its candidate shard"))?
+            .version;
+        if candidate_shard_version_after != candidate_shard_version_before {
+            return Err(invalid(
+                "unrelated legal boundary rewrote the persisted candidate shard",
+            ));
+        }
+        Ok(LegalCanwuBoundaryScaleMetrics {
+            candidate_debt: u64::try_from(candidate_debt)
+                .map_err(|_| invalid("legal Canwu candidate debt exceeds u64"))?,
+            candidate_shard_bytes,
+            candidate_shard_version_before,
+            candidate_shard_version_after,
+            empty_boundary_elapsed_micros,
+            boundary_elapsed_micros,
+            boundary_id: receipt.boundary_id.get(),
+        })
+    }
+
     #[must_use]
     pub fn new(plan: &CompiledLawPlan) -> Self {
         let mut state = Self {
@@ -133,6 +624,10 @@ impl LegalRuntime {
             reserved_state_bytes: 0,
             boundary_index: 0,
             last_settled_at: SimTime::EPOCH,
+            archive_terminal_sequence: 0,
+            archive_terminal_root: None,
+            archive_last_terminal: None,
+            archive_retention_terminals: BTreeMap::new(),
             next_outbox_sequence: 1,
             next_source_ordinal: 1,
             proposals: BTreeMap::new(),
@@ -142,6 +637,7 @@ impl LegalRuntime {
             procedures_by_deadline: BTreeMap::new(),
             capacity_allocations: BTreeMap::new(),
             participations: Vec::new(),
+            participation_index_by_id: BTreeMap::new(),
             latest_participation_by_key: BTreeMap::new(),
             outbox: BTreeMap::new(),
             outbox_keys: BTreeSet::new(),
@@ -151,6 +647,7 @@ impl LegalRuntime {
             pending_intents: BTreeMap::new(),
             consumed_intent_ids: BTreeSet::new(),
             intent_outcomes: Vec::new(),
+            intent_outcome_index_by_id: BTreeMap::new(),
             sources: BTreeMap::new(),
             publicity_events: BTreeMap::new(),
             rules: BTreeMap::new(),
@@ -169,18 +666,26 @@ impl LegalRuntime {
             conflicts: BTreeMap::new(),
             conflict_ids_by_version: BTreeMap::new(),
             successions: Vec::new(),
+            succession_index_by_id: BTreeMap::new(),
             succession_indexes_by_successor: BTreeMap::new(),
             retirements: Vec::new(),
+            retirement_index_by_id: BTreeMap::new(),
             retired_cultural_targets: BTreeSet::new(),
             retained_evidence_dependencies: BTreeSet::new(),
             retained_evidence_dependency_counts: BTreeMap::new(),
+            archived_dependency_versions: BTreeSet::new(),
+            compacted_succession_versions: BTreeSet::new(),
+            storage: LegalStorageState::default(),
         };
         let initial = state.persisted_payload_len().unwrap_or(usize::MAX);
         state.reserved_state_bytes = initial.saturating_add(256);
         state
     }
 
-    pub fn from_state(plan: &CompiledLawPlan, state: Self) -> Result<Self, CanwuError> {
+    pub fn from_state(plan: &CompiledLawPlan, mut state: Self) -> Result<Self, CanwuError> {
+        state.rebuild_archive_payload_indexes()?;
+        state.rebuild_archive_projection()?;
+        state.reaccount_state_budget()?;
         state.validate_against_plan(plan)?;
         Ok(state)
     }
@@ -189,6 +694,255 @@ impl LegalRuntime {
         if self.plan != *plan || self.plan_hash != plan.content_hash || self.budgets != plan.budgets
         {
             return Err(invalid("legal runtime plan or budget identity mismatch"));
+        }
+        Ok(())
+    }
+
+    fn hot_internal_reference_exists(&self, reference: &LegalRecordRef) -> bool {
+        match reference.kind.as_str() {
+            "proposal" => self.proposals.contains_key(&reference.id),
+            "procedure" => self.procedures.contains_key(&reference.id),
+            "participation" => self
+                .participations
+                .iter()
+                .any(|record| record.id == reference.id),
+            "outbox" | "decision_outbox" => {
+                self.outbox.values().any(|record| record.id == reference.id)
+            }
+            "pending_intent" | "intent_outcome" => {
+                self.pending_intents.contains_key(&reference.id)
+                    || self
+                        .intent_outcomes
+                        .iter()
+                        .any(|record| record.intent == reference.id)
+            }
+            "source_version" => self.sources.contains_key(&reference.id),
+            "publicity" => self.publicity_events.contains_key(&reference.id),
+            "rule" => self.rules.contains_key(&reference.id),
+            "law_version" => self.law_versions.contains_key(&reference.id),
+            "case" => self.cases.contains_key(&reference.id),
+            "finding" => self.findings.contains_key(&reference.id),
+            "ruling" => self.rulings.contains_key(&reference.id),
+            "conflict" => self.conflicts.contains_key(&reference.id),
+            "succession" => self
+                .successions
+                .iter()
+                .any(|record| record.id == reference.id),
+            "retirement" => self
+                .retirements
+                .iter()
+                .any(|record| record.id == reference.id),
+            _ => false,
+        }
+    }
+
+    fn internal_reference_available(&self, reference: &LegalRecordRef) -> bool {
+        self.hot_internal_reference_exists(reference)
+            || self
+                .archived_dependency_versions
+                .iter()
+                .any(|dependency| dependency.reference == *reference)
+    }
+
+    fn collect_origin_references(
+        references: &mut BTreeSet<LegalRecordRef>,
+        origin: Option<&LegalOriginRef>,
+    ) {
+        match origin {
+            Some(LegalOriginRef::Ruling { ruling }) => {
+                references.insert(ruling.clone());
+            }
+            Some(LegalOriginRef::Reception {
+                succession,
+                predecessor,
+                ..
+            }) => {
+                references.insert(local_ref("succession", succession));
+                references.insert(predecessor.clone());
+            }
+            Some(LegalOriginRef::Agreement { .. }) | None => {}
+        }
+    }
+
+    fn current_internal_references(&self) -> BTreeSet<LegalRecordRef> {
+        let mut references = BTreeSet::new();
+        for proposal in self.proposals.values() {
+            references.extend(proposal.publicity.iter().cloned());
+            references.extend(proposal.source_version.iter().cloned());
+            references.extend(proposal.law_version.iter().cloned());
+            references.extend(proposal.expected_rule_head.iter().cloned());
+            references.extend(
+                proposal
+                    .active_procedure
+                    .iter()
+                    .map(|id| local_ref("procedure", id)),
+            );
+            Self::collect_origin_references(&mut references, proposal.origin.as_ref());
+        }
+        for procedure in self.procedures.values() {
+            references.insert(procedure.proposal.clone());
+        }
+        references.extend(
+            self.capacity_allocations
+                .keys()
+                .map(|id| local_ref("procedure", id)),
+        );
+        for participation in &self.participations {
+            references.insert(participation.procedure.clone());
+            references.extend(participation.replaced.iter().cloned());
+        }
+        for item in self.outbox.values() {
+            references.insert(item.proposal.clone());
+            references.insert(item.procedure.clone());
+        }
+        for intent in self.pending_intents.values() {
+            references.insert(intent.proposal.clone());
+            references.insert(intent.procedure.clone());
+        }
+        for outcome in &self.intent_outcomes {
+            references.extend(outcome.source.iter().cloned());
+            references.extend(outcome.law_versions.iter().cloned());
+        }
+        for source in self.sources.values() {
+            references.insert(source.proposal.clone());
+            references.extend(source.procedure.iter().cloned());
+            references.extend(source.publicity_event.iter().cloned());
+            Self::collect_origin_references(&mut references, source.origin.as_ref());
+        }
+        for rule in self.rules.values() {
+            references.extend(rule.latest_adopted_version.iter().cloned());
+            references.extend(rule.operative_version.iter().cloned());
+            references.extend(rule.scheduled_versions.iter().cloned());
+            references.extend(
+                rule.effects
+                    .iter()
+                    .flat_map(|effect| effect.source_refs.iter().cloned()),
+            );
+        }
+        for version in self.law_versions.values() {
+            references.insert(version.source.clone());
+            references.extend(version.predecessors.iter().cloned());
+            references.extend(
+                version
+                    .deltas
+                    .iter()
+                    .flat_map(|effect| effect.source_refs.iter().cloned()),
+            );
+            Self::collect_origin_references(&mut references, version.origin.as_ref());
+        }
+        for finding in self.findings.values() {
+            references.insert(local_ref("case", &finding.case_id));
+            references.extend(finding.predecessor.iter().cloned());
+        }
+        for ruling in self.rulings.values() {
+            references.insert(local_ref("case", &ruling.case_id));
+            references.extend(ruling.findings.iter().cloned());
+            references.extend(ruling.sources.iter().cloned());
+            references.extend(ruling.resolved_versions.iter().cloned());
+            references.extend(ruling.selected_versions.iter().cloned());
+            references.extend(ruling.predecessors.iter().cloned());
+        }
+        for result in self.applicability.values() {
+            references.extend(result.versions.iter().cloned());
+            references.extend(result.displaced.iter().cloned());
+            references.extend(result.trace.iter().cloned());
+        }
+        for conflict in self.conflicts.values() {
+            references.extend(conflict.versions.iter().cloned());
+            references.extend(conflict.governing_versions.iter().cloned());
+            references.extend(conflict.displaced_versions.iter().cloned());
+            references.extend(conflict.ruling.iter().cloned());
+            references.extend(conflict.trace.iter().cloned());
+        }
+        references
+    }
+
+    fn refresh_archived_dependency_versions(
+        &mut self,
+        newly_archived: &BTreeSet<crate::LegalVersionRef>,
+    ) -> Result<(), CanwuError> {
+        let mut available = self
+            .archived_dependency_versions
+            .iter()
+            .map(|dependency| (dependency.reference.clone(), dependency.version.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for version in newly_archived {
+            let Some(reference) = legal_archive_local_reference(version) else {
+                continue;
+            };
+            if let Some(existing) = available.insert(reference, version.clone())
+                && existing != *version
+            {
+                return Err(invalid(
+                    "one archived legal dependency identity has conflicting versions",
+                ));
+            }
+        }
+        let mut retained = BTreeMap::new();
+        for reference in self.current_internal_references() {
+            if self.hot_internal_reference_exists(&reference) {
+                continue;
+            }
+            let version = available.get(&reference).cloned().ok_or_else(|| {
+                invalid(format!(
+                    "hot legal projection references unavailable history {}:{}",
+                    reference.kind, reference.id
+                ))
+            })?;
+            retained.insert(reference, version);
+        }
+        self.archived_dependency_versions = retained
+            .into_iter()
+            .map(|(reference, version)| ArchivedLegalDependency { reference, version })
+            .collect();
+        Ok(())
+    }
+
+    fn validate_archived_dependency_versions(&self) -> Result<(), CanwuError> {
+        let missing = self
+            .current_internal_references()
+            .into_iter()
+            .filter(|reference| !self.hot_internal_reference_exists(reference))
+            .collect::<BTreeSet<_>>();
+        if missing
+            != self
+                .archived_dependency_versions
+                .iter()
+                .map(|dependency| dependency.reference.clone())
+                .collect()
+        {
+            return Err(invalid(
+                "archived legal dependency projection is incomplete or contains stale entries",
+            ));
+        }
+        for dependency in &self.archived_dependency_versions {
+            if legal_archive_local_reference(&dependency.version).as_ref()
+                != Some(&dependency.reference)
+                || !self
+                    .storage
+                    .archive_heads
+                    .contains_key(&dependency.version.object.home_shard)
+            {
+                return Err(invalid(
+                    "archived legal dependency projection is not bound to a committed shard head",
+                ));
+            }
+        }
+        for version in &self.compacted_succession_versions {
+            if version.object.kind != crate::LegalObjectKind::Succession
+                || !self
+                    .successions
+                    .iter()
+                    .any(|succession| succession.id == version.object.id)
+                || !self
+                    .storage
+                    .archive_heads
+                    .contains_key(&version.object.home_shard)
+            {
+                return Err(invalid(
+                    "compacted succession projection is not bound to committed history",
+                ));
+            }
         }
         Ok(())
     }
@@ -265,6 +1019,7 @@ impl LegalRuntime {
         {
             return Err(invalid("legal runtime plan hash mismatch"));
         }
+        self.validate_archive_terminal()?;
         // Reject an oversized cold snapshot before rebuilding any semantic
         // indexes. This keeps restore cost bounded by the serialized-state
         // budget instead of allowing an attacker to force full scans first.
@@ -309,6 +1064,7 @@ impl LegalRuntime {
         {
             return Err(invalid("legal runtime budget exceeded"));
         }
+        self.validate_archived_dependency_versions()?;
         let rebuilt_dependency_counts = self.rebuild_identity_evidence_dependency_counts();
         if self.retained_evidence_dependency_counts != rebuilt_dependency_counts
             || self.retained_evidence_dependencies
@@ -340,7 +1096,14 @@ impl LegalRuntime {
             let publicity_timeline_valid = match source_profile.publicity_policy {
                 PublicityPolicy::ValidityCondition => match proposal.status {
                     ProposalStatus::Adopted => proposal.adopted_at.is_some_and(|adopted| {
-                        publicity_event.is_some_and(|event| event.at <= adopted)
+                        publicity_event.map_or_else(
+                            || {
+                                proposal.publicity.as_ref().is_some_and(|reference| {
+                                    self.internal_reference_available(reference)
+                                })
+                            },
+                            |event| event.at <= adopted,
+                        )
                     }),
                     _ => proposal.publicity.is_none() || publicity_event.is_some(),
                 },
@@ -389,20 +1152,30 @@ impl LegalRuntime {
                 ProposalStatus::Adopted => {
                     proposal.adopted_at.is_some()
                         && proposal.source_version.as_ref().is_some_and(|reference| {
-                            self.sources.get(&reference.id).is_some_and(|source| {
-                                reference == &local_ref("source_version", &source.id)
-                                    && source.proposal == local_ref("proposal", &proposal.id)
-                            })
+                            self.sources.get(&reference.id).map_or_else(
+                                || self.internal_reference_available(reference),
+                                |source| {
+                                    reference == &local_ref("source_version", &source.id)
+                                        && source.proposal == local_ref("proposal", &proposal.id)
+                                },
+                            )
                         })
                         && proposal
                             .source_version
                             .as_ref()
                             .is_some_and(|source_reference| {
                                 proposal.law_version.as_ref().is_some_and(|reference| {
-                                    self.law_versions.get(&reference.id).is_some_and(|version| {
-                                        reference == &law_version_reference(version)
-                                            && version.source == *source_reference
-                                    })
+                                    self.law_versions.get(&reference.id).map_or_else(
+                                        || {
+                                            self.internal_reference_available(reference)
+                                                && self
+                                                    .internal_reference_available(source_reference)
+                                        },
+                                        |version| {
+                                            reference == &law_version_reference(version)
+                                                && version.source == *source_reference
+                                        },
+                                    )
                                 })
                             })
                 }
@@ -428,9 +1201,10 @@ impl LegalRuntime {
                     .expected_rule_head
                     .as_ref()
                     .is_some_and(|reference| {
-                        self.law_versions
-                            .get(&reference.id)
-                            .is_none_or(|version| reference != &law_version_reference(version))
+                        self.law_versions.get(&reference.id).map_or_else(
+                            || !self.internal_reference_available(reference),
+                            |version| reference != &law_version_reference(version),
+                        )
                     })
                 || !procedure_matches
                 || !publicity_timeline_valid
@@ -441,12 +1215,13 @@ impl LegalRuntime {
                 || canonical_proposal.cultural_dependencies != proposal.cultural_dependencies
                 || canonical_proposal.clauses != proposal.clauses
                 || proposal.publicity.as_ref().is_some_and(|reference| {
-                    self.publicity_events
-                        .get(&reference.id)
-                        .is_none_or(|event| {
+                    self.publicity_events.get(&reference.id).map_or_else(
+                        || !self.internal_reference_available(reference),
+                        |event| {
                             reference != &local_ref("publicity", &event.id)
                                 || event.proposal != local_ref("proposal", &proposal.id)
-                        })
+                        },
+                    )
                 })
             {
                 return Err(invalid(
@@ -664,14 +1439,15 @@ impl LegalRuntime {
                 || !legal_claim_fields_match(source.competence, &source.defects, source.validity)
                 || !source_origin_matches
                 || source.publicity_event.as_ref().is_some_and(|reference| {
-                    self.publicity_events
-                        .get(&reference.id)
-                        .is_none_or(|event| {
+                    self.publicity_events.get(&reference.id).map_or_else(
+                        || !self.internal_reference_available(reference),
+                        |event| {
                             reference != &local_ref("publicity", &event.id)
                                 || event.proposal != source.proposal
                                 || source.promulgated_at != Some(event.at)
                                 || source.publicity != event.medium
-                        })
+                        },
+                    )
                 })
                 || match source.publicity_policy {
                     PublicityPolicy::ValidityCondition => source.publicity_event.is_none(),
@@ -699,11 +1475,11 @@ impl LegalRuntime {
                     .any(|dependency| !source.evidence.contains(&dependency.evidence))
                 || source.procedure.as_ref().is_some_and(|reference| {
                     reference.kind != "procedure"
-                        || !self.procedures.contains_key(&reference.id)
+                        || !self.internal_reference_available(reference)
                         || self
                             .procedures
                             .get(&reference.id)
-                            .is_none_or(|procedure| reference != &procedure_reference(procedure))
+                            .is_some_and(|procedure| reference != &procedure_reference(procedure))
                 })
             {
                 return Err(invalid("legal source identity or provenance is invalid"));
@@ -754,18 +1530,36 @@ impl LegalRuntime {
             }
         }
         for version in self.law_versions.values() {
+            let reception_predecessor = match &version.origin {
+                Some(LegalOriginRef::Reception { predecessor, .. }) => Some(predecessor),
+                _ => None,
+            };
             let mut expected_predecessors = if version.legal_ordinal == 1 {
                 Vec::new()
-            } else {
-                let predecessor = versions_by_rule_ordinal
-                    .get(&(version.rule.as_str(), version.legal_ordinal - 1))
-                    .ok_or_else(|| invalid("legal version ordinal chain is not contiguous"))?;
+            } else if let Some(predecessor) =
+                versions_by_rule_ordinal.get(&(version.rule.as_str(), version.legal_ordinal - 1))
+            {
                 if version.effective_at < predecessor.effective_at {
                     return Err(invalid(
                         "legal version effective times must be monotonic within a rule",
                     ));
                 }
                 vec![law_version_reference(predecessor)]
+            } else {
+                let archived = version
+                    .predecessors
+                    .iter()
+                    .filter(|reference| Some(*reference) != reception_predecessor)
+                    .filter(|reference| {
+                        reference.kind == "law_version"
+                            && self.internal_reference_available(reference)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if archived.len() != 1 {
+                    return Err(invalid("legal version ordinal chain is not contiguous"));
+                }
+                archived
             };
             if let Some(LegalOriginRef::Reception { predecessor, .. }) = &version.origin {
                 expected_predecessors.push(predecessor.clone());
@@ -937,7 +1731,7 @@ impl LegalRuntime {
             .values()
             .map(|item| outbox_key(&item.procedure.id, item.stage, item.round, &item.seat))
             .collect::<BTreeSet<_>>();
-        if self.outbox_keys != expected_outbox {
+        if !expected_outbox.is_subset(&self.outbox_keys) {
             return Err(invalid("legal outbox index is inconsistent"));
         }
         let expected_outbox_sequences = self
@@ -950,7 +1744,16 @@ impl LegalRuntime {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        if self.outbox_sequence_by_key != expected_outbox_sequences {
+        if expected_outbox_sequences
+            .iter()
+            .any(|(key, sequence)| self.outbox_sequence_by_key.get(key) != Some(sequence))
+            || self
+                .outbox_sequence_by_key
+                .keys()
+                .cloned()
+                .collect::<BTreeSet<_>>()
+                != self.outbox_keys
+        {
             return Err(invalid("legal outbox sequence index is inconsistent"));
         }
         let expected_pending_outbox = self
@@ -963,10 +1766,10 @@ impl LegalRuntime {
             return Err(invalid("legal pending-outbox index is inconsistent"));
         }
         let expected_outbox_sequence = self
-            .outbox
-            .keys()
-            .next_back()
+            .outbox_sequence_by_key
+            .values()
             .copied()
+            .max()
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| invalid("legal outbox sequence overflowed"))?;
@@ -1100,7 +1903,12 @@ impl LegalRuntime {
             )
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
-        if self.consumed_intent_ids != expected_consumed_intents {
+        if !expected_consumed_intents.is_subset(&self.consumed_intent_ids)
+            || self
+                .consumed_intent_ids
+                .iter()
+                .any(|id| id.trim().is_empty())
+        {
             return Err(invalid("consumed legal intent index is inconsistent"));
         }
         let mut expected_schedule = BTreeMap::<SimTime, Vec<LegalRecordRef>>::new();
@@ -1480,8 +2288,44 @@ impl LegalRuntime {
                 }
             }
         }
-        if self.retired_cultural_targets != expected_retired_culture {
-            return Err(invalid("retired culture generation index is inconsistent"));
+        for (version, membership) in &self.storage.membership {
+            if version.object.kind != crate::LegalObjectKind::Retirement
+                || !matches!(
+                    membership.location,
+                    crate::LegalVersionLocation::Archived { .. }
+                )
+            {
+                continue;
+            }
+            let (target, generation) = version
+                .object
+                .local_discriminator
+                .as_deref()
+                .and_then(|value| value.rsplit_once('@'))
+                .ok_or_else(|| invalid("archived culture retirement route is invalid"))?;
+            let generation = generation
+                .parse::<u64>()
+                .map_err(|_| invalid("archived culture retirement generation is invalid"))?;
+            if !expected_retired_culture.insert(CulturalTargetGenerationRef {
+                target: target.to_owned(),
+                generation,
+            }) {
+                return Err(invalid("archived culture retirement is duplicated"));
+            }
+        }
+        if self.storage.archived_membership_materialized {
+            if self.retired_cultural_targets != expected_retired_culture {
+                return Err(invalid("retired culture generation index is inconsistent"));
+            }
+        } else if !expected_retired_culture.is_subset(&self.retired_cultural_targets)
+            || self
+                .retired_cultural_targets
+                .iter()
+                .any(|target| target.target.trim().is_empty() || target.generation == 0)
+        {
+            return Err(invalid(
+                "root-only retired culture projection is malformed or omits hot retirements",
+            ));
         }
         let mut expected_successions_by_successor = BTreeMap::<String, Vec<usize>>::new();
         for (index, succession) in self.successions.iter().enumerate() {
@@ -1521,6 +2365,7 @@ impl LegalRuntime {
         if indexed_applicability != self.applicability.keys().cloned().collect() {
             return Err(invalid("legal applicability index is incomplete"));
         }
+        self.storage.validate()?;
         Ok(())
     }
 
@@ -2633,7 +3478,12 @@ impl LegalRuntime {
         for procedure in &procedure_ids {
             self.dirty_procedures.remove(procedure);
         }
+        let first_outcome = self.intent_outcomes.len();
         self.intent_outcomes.extend(outcomes.clone());
+        for (index, outcome) in self.intent_outcomes.iter().enumerate().skip(first_outcome) {
+            self.intent_outcome_index_by_id
+                .insert(outcome.intent.clone(), index);
+        }
         Ok(LegalBoundaryResult {
             boundary: self.boundary_index,
             adopted_proposals: adopted,
@@ -3132,6 +3982,12 @@ impl LegalRuntime {
             command: Some(intent.command.clone()),
             replaced: replaced.map(|participation| local_ref("participation", &participation.id)),
         });
+        let participation = self
+            .participations
+            .last()
+            .expect("participation was just appended");
+        self.participation_index_by_id
+            .insert(participation.id.clone(), self.participations.len() - 1);
         self.latest_participation_by_key
             .insert(key, self.participations.len() - 1);
         self.acknowledge_intent_outbox(intent);
@@ -4196,6 +5052,142 @@ impl LegalRuntime {
             }
         }
         self.query_applicability_prevalidated(plan, query)
+    }
+
+    /// Resolves a historical read cut by hydrating only provider-authenticated
+    /// legal versions whose persisted bitemporal cells intersect the query.
+    pub fn query_applicability_with_archive_provider(
+        &self,
+        plan: &CompiledLawPlan,
+        query: &ApplicabilityQuery,
+        provider: &dyn crate::LegalArchiveProvider,
+        temporal_budget: crate::LegalTemporalQueryBudget,
+    ) -> Result<ApplicabilityResult, CanwuError> {
+        self.query_applicability_with_archive_provider_usage(plan, query, provider, temporal_budget)
+            .map(|(result, _)| result)
+    }
+
+    /// Same historical query with the end-to-end provider usage charged
+    /// across every selected shard, membership page, and hydrated blob.
+    pub fn query_applicability_with_archive_provider_usage(
+        &self,
+        plan: &CompiledLawPlan,
+        query: &ApplicabilityQuery,
+        provider: &dyn crate::LegalArchiveProvider,
+        temporal_budget: crate::LegalTemporalQueryBudget,
+    ) -> Result<(ApplicabilityResult, crate::LegalTemporalQueryUsage), CanwuError> {
+        if query.actor.is_some() {
+            return Err(invalid(
+                "actor-relative historical applicability must first bind host knowledge",
+            ));
+        }
+        let mut shards = BTreeSet::from([
+            crate::LegalShardKey::order(query.legal_order.clone()),
+            crate::LegalShardKey::coordinator(self.plan.definition_id.clone()),
+        ]);
+        if let Some(jurisdiction) = &query.jurisdiction {
+            shards.insert(crate::LegalShardKey::jurisdiction(
+                self.plan.definition_id.clone(),
+                jurisdiction.clone(),
+            ));
+        }
+        let mut hydrated = self.clone();
+        let mut versions = BTreeSet::new();
+        crate::storage::LegalTemporalQueryMeter::validate_budget(temporal_budget)?;
+        let mut temporal_meter = crate::storage::LegalTemporalQueryMeter::default();
+        for shard in shards {
+            versions.extend(self.storage.archived_versions_at_with_provider_meter(
+                &shard,
+                query.event_at,
+                query.read_at,
+                temporal_budget,
+                provider,
+                &mut temporal_meter,
+            )?);
+        }
+        for version in versions {
+            let Some(blob) = self.load_archived_legal_record_with_meter(
+                &version,
+                provider,
+                temporal_budget,
+                &mut temporal_meter,
+            )?
+            else {
+                return Err(invalid(
+                    "authenticated legal temporal member has no archived payload",
+                ));
+            };
+            match blob.record_class.as_str() {
+                "law_version" => {
+                    let value =
+                        serde_json::from_value::<LawVersion>(blob.payload).map_err(|error| {
+                            invalid(format!("archived law version is invalid: {error}"))
+                        })?;
+                    let reference = law_version_reference(&value);
+                    hydrated
+                        .law_versions_by_rule
+                        .entry(value.rule.clone())
+                        .or_default()
+                        .push(reference);
+                    hydrated.law_versions.insert(value.id.clone(), value);
+                }
+                "source" => {
+                    let value = serde_json::from_value::<LegalSourceVersion>(blob.payload)
+                        .map_err(|error| {
+                            invalid(format!("archived legal source is invalid: {error}"))
+                        })?;
+                    hydrated.sources.insert(value.id.clone(), value);
+                }
+                "publicity" => {
+                    let value = serde_json::from_value::<LegalPublicityEvent>(blob.payload)
+                        .map_err(|error| {
+                            invalid(format!("archived legal publicity is invalid: {error}"))
+                        })?;
+                    hydrated.publicity_events.insert(value.id.clone(), value);
+                }
+                "conflict" => {
+                    let value =
+                        serde_json::from_value::<LegalConflict>(blob.payload).map_err(|error| {
+                            invalid(format!("archived legal conflict is invalid: {error}"))
+                        })?;
+                    hydrated.conflicts.insert(value.id.clone(), value);
+                }
+                "succession" => {
+                    let value = serde_json::from_value::<LegalOrderSuccession>(blob.payload)
+                        .map_err(|error| {
+                            invalid(format!("archived legal succession is invalid: {error}"))
+                        })?;
+                    if !hydrated
+                        .successions
+                        .iter()
+                        .any(|existing| existing.id == value.id)
+                    {
+                        hydrated.successions.push(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for references in hydrated.law_versions_by_rule.values_mut() {
+            references.sort();
+            references.dedup();
+        }
+        hydrated.conflict_ids_by_version.clear();
+        for conflict in hydrated.conflicts.values() {
+            for version in &conflict.versions {
+                hydrated
+                    .conflict_ids_by_version
+                    .entry(version.id.clone())
+                    .or_default()
+                    .insert(conflict.id.clone());
+            }
+        }
+        hydrated.successions.sort_by(|left, right| {
+            (left.effective_at, left.id.as_str()).cmp(&(right.effective_at, right.id.as_str()))
+        });
+        hydrated.rebuild_succession_index();
+        let result = hydrated.query_applicability_prevalidated(plan, query)?;
+        Ok((result, temporal_meter.usage()))
     }
 
     fn query_applicability_bounded(
@@ -5343,10 +6335,8 @@ impl LegalRuntime {
                 "live legal decision dependency blocks culture retirement",
             ));
         }
-        self.reserve_state_growth(Self::encoded_growth(&(&target, &reason), 4)?)?;
-        self.retired_cultural_targets.insert(target.clone());
         let record_id = format!("{}@{}", target.target, target.generation);
-        self.retirements.push(LegalRetirement {
+        let retirement = LegalRetirement {
             id: format!("retirement:{}:{}", record_id, self.boundary_index),
             kind: "culture_target".to_owned(),
             record: DomainRecordRef::new(PLUGIN_NAMESPACE, "cultural_target", &record_id),
@@ -5355,7 +6345,44 @@ impl LegalRuntime {
             successor: None,
             reason,
             evidence: Vec::new(),
-        });
+        };
+        let culture = crate::LegalShardKey::culture_dependency(self.plan.definition_id.clone());
+        let version = retirement_archive_version(&retirement, &culture)?;
+        let payload = serde_json::to_value(&retirement)
+            .map_err(|error| invalid(format!("legal retirement cannot be encoded: {error}")))?;
+        let encoded_bytes = u64::try_from(
+            serde_json::to_vec(&payload)
+                .map_err(|error| invalid(format!("legal retirement cannot be sized: {error}")))?
+                .len(),
+        )
+        .map_err(|_| invalid("legal retirement byte count exceeds u64"))?;
+        let candidate = crate::LegalCompactionCandidate {
+            version: version.clone(),
+            record_class: "retirement".to_owned(),
+            closed_at: retirement.retired_at,
+            encoded_bytes,
+            dependencies_resolved: true,
+            current_projection_retained: true,
+        };
+        self.reserve_state_growth(Self::encoded_growth(
+            &(&target, &retirement, &candidate),
+            12,
+        )?)?;
+        self.retired_cultural_targets.insert(target.clone());
+        self.retirements.push(retirement.clone());
+        self.retirement_index_by_id
+            .insert(retirement.id.clone(), self.retirements.len() - 1);
+        self.storage.directory.active_shards.insert(culture);
+        self.storage.membership.insert(
+            version.clone(),
+            crate::LegalArchiveMembership {
+                version: version.clone(),
+                location: crate::LegalVersionLocation::Hot,
+                effective_interval: None,
+                recorded_interval: None,
+            },
+        );
+        self.storage.mark_compaction_candidate(candidate)?;
         Ok(())
     }
 
@@ -5372,14 +6399,39 @@ impl LegalRuntime {
         if self.retirements.len() > before
             && let Some(retirement) = self.retirements.last_mut()
         {
+            let shard = crate::LegalShardKey::culture_dependency(self.plan.definition_id.clone());
+            let previous = retirement_archive_version(retirement, &shard)?;
             retirement.evidence = vec![ingress];
+            let payload = serde_json::to_value(&*retirement)
+                .map_err(|error| invalid(format!("legal retirement cannot be encoded: {error}")))?;
+            let version = retirement_archive_version(retirement, &shard)?;
+            let encoded_bytes = u64::try_from(
+                serde_json::to_vec(&payload)
+                    .map_err(|error| invalid(format!("legal retirement cannot be sized: {error}")))?
+                    .len(),
+            )
+            .map_err(|_| invalid("legal retirement byte count exceeds u64"))?;
+            self.storage.replace_compaction_candidate(
+                &previous,
+                crate::LegalCompactionCandidate {
+                    version,
+                    record_class: "retirement".to_owned(),
+                    closed_at: retirement.retired_at,
+                    encoded_bytes,
+                    dependencies_resolved: true,
+                    current_projection_retained: true,
+                },
+            )?;
         }
         Ok(())
     }
 
     fn rebuild_succession_index(&mut self) {
         self.succession_indexes_by_successor.clear();
+        self.succession_index_by_id.clear();
         for (index, succession) in self.successions.iter().enumerate() {
+            self.succession_index_by_id
+                .insert(succession.id.clone(), index);
             for successor in &succession.successors {
                 self.succession_indexes_by_successor
                     .entry(successor.clone())
@@ -5389,19 +6441,36 @@ impl LegalRuntime {
         }
     }
 
-    pub fn to_record_draft(&self) -> Result<DomainRecordDraft, CanwuError> {
-        let reference = crate::legal_runtime_reference().into_untyped();
-        let payload = self.persisted_payload()?;
-        let encoded_bytes = serde_json::to_vec(&payload)
-            .map_err(|error| invalid(format!("legal runtime cannot be encoded: {error}")))?
-            .len();
-        if encoded_bytes > self.reserved_state_bytes
-            || encoded_bytes > self.budgets.max_state_bytes
-            || encoded_bytes > self.budgets.max_memory_bytes
+    fn rebuild_archive_payload_indexes(&mut self) -> Result<(), CanwuError> {
+        self.participation_index_by_id = self
+            .participations
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.id.clone(), index))
+            .collect();
+        self.intent_outcome_index_by_id = self
+            .intent_outcomes
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.intent.clone(), index))
+            .collect();
+        self.retirement_index_by_id = self
+            .retirements
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (value.id.clone(), index))
+            .collect();
+        self.rebuild_succession_index();
+        if self.participation_index_by_id.len() != self.participations.len()
+            || self.intent_outcome_index_by_id.len() != self.intent_outcomes.len()
+            || self.succession_index_by_id.len() != self.successions.len()
+            || self.retirement_index_by_id.len() != self.retirements.len()
         {
-            return Err(invalid("legal persisted payload budget exceeded"));
+            return Err(invalid(
+                "legal archive payload indexes contain duplicate identities",
+            ));
         }
-        Ok(DomainRecordDraft::new(reference, payload))
+        Ok(())
     }
 
     fn persisted_payload(&self) -> Result<serde_json::Value, CanwuError> {
@@ -5620,13 +6689,1893 @@ impl LegalRuntime {
         Ok(())
     }
 
-    /// Encodes the sole persisted aggregate record owned by this extension.
+    fn archive_payload_catalog(
+        &self,
+    ) -> Result<BTreeMap<crate::LegalVersionRef, LegalArchivePayload>, CanwuError> {
+        let coordinator = crate::LegalShardKey::coordinator(self.plan.definition_id.clone());
+        let culture = crate::LegalShardKey::culture_dependency(self.plan.definition_id.clone());
+        let route = |id: &str| {
+            self.storage
+                .directory
+                .object_routes
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| coordinator.clone())
+        };
+        let mut catalog = BTreeMap::new();
+        let mut insert = |item: LegalArchivePayload| -> Result<(), CanwuError> {
+            if catalog
+                .insert(item.candidate.version.clone(), item)
+                .is_some()
+            {
+                return Err(invalid(
+                    "legal archive catalog contains a duplicate version",
+                ));
+            }
+            Ok(())
+        };
+
+        for procedure in self
+            .procedures
+            .values()
+            .filter(|procedure| procedure.closed)
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Procedure,
+                &procedure.id,
+                route(&procedure.proposal.id),
+                1,
+                "procedure",
+                procedure.deadline,
+                procedure,
+            )?)?;
+        }
+        for participation in self.participations.iter().filter(|participation| {
+            self.procedures
+                .get(&participation.procedure.id)
+                .is_some_and(|procedure| procedure.closed)
+        }) {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Participation,
+                &participation.id,
+                route(&participation.procedure.id),
+                1,
+                "participation",
+                participation.admitted_at,
+                participation,
+            )?)?;
+        }
+        for item in self.outbox.values().filter(|item| {
+            matches!(
+                item.dispatch,
+                DispatchState::Acknowledged | DispatchState::Expired | DispatchState::Blocked
+            )
+        }) {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Outbox,
+                &item.id,
+                route(&item.procedure.id),
+                item.sequence,
+                "decision_outbox",
+                item.expires_at,
+                item,
+            )?)?;
+        }
+        for outcome in &self.intent_outcomes {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::PendingIntent,
+                &outcome.intent,
+                coordinator.clone(),
+                1,
+                "intent_outcome",
+                outcome.at,
+                outcome,
+            )?)?;
+        }
+        let retained_law_versions = self
+            .rules
+            .values()
+            .flat_map(|rule| {
+                rule.latest_adopted_version
+                    .iter()
+                    .chain(rule.operative_version.iter())
+                    .chain(rule.scheduled_versions.iter())
+            })
+            .map(|reference| reference.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let retained_sources = self
+            .law_versions
+            .values()
+            .filter(|version| retained_law_versions.contains(version.id.as_str()))
+            .map(|version| version.source.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for source in self
+            .sources
+            .values()
+            .filter(|source| !retained_sources.contains(source.id.as_str()))
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Source,
+                &source.id,
+                crate::LegalShardKey::order(source.legal_order.clone()),
+                source.ordinal,
+                "source",
+                source.expires_at.unwrap_or(self.last_settled_at),
+                source,
+            )?)?;
+        }
+        for version in self
+            .law_versions
+            .values()
+            .filter(|version| !retained_law_versions.contains(version.id.as_str()))
+        {
+            let order = self
+                .rules
+                .get(&version.rule)
+                .map(|rule| rule.legal_order.clone())
+                .unwrap_or_else(|| self.plan.definition_id.clone());
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::LawVersion,
+                &version.id,
+                crate::LegalShardKey::order(order),
+                version.legal_ordinal,
+                "law_version",
+                self.last_settled_at,
+                version,
+            )?)?;
+        }
+        let ruled_cases = self
+            .rulings
+            .values()
+            .map(|ruling| ruling.case_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for case in self
+            .cases
+            .values()
+            .filter(|case| ruled_cases.contains(case.id.as_str()))
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Case,
+                &case.id,
+                crate::LegalShardKey::order(case.legal_order.clone()),
+                1,
+                "case",
+                case.deadline,
+                case,
+            )?)?;
+        }
+        let ruled_findings = self
+            .rulings
+            .values()
+            .flat_map(|ruling| ruling.findings.iter().map(|finding| finding.id.as_str()))
+            .collect::<BTreeSet<_>>();
+        for finding in self
+            .findings
+            .values()
+            .filter(|finding| ruled_findings.contains(finding.id.as_str()))
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Finding,
+                &finding.id,
+                route(&finding.case_id),
+                1,
+                "finding",
+                finding.at,
+                finding,
+            )?)?;
+        }
+        for ruling in self.rulings.values().filter(|ruling| {
+            ruling
+                .effective_until
+                .is_some_and(|until| until <= self.last_settled_at)
+        }) {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Ruling,
+                &ruling.id,
+                route(&ruling.case_id),
+                1,
+                "ruling",
+                ruling.effective_until.unwrap_or(self.last_settled_at),
+                ruling,
+            )?)?;
+        }
+        let resident_publicity = self
+            .sources
+            .values()
+            .filter(|source| {
+                source
+                    .expires_at
+                    .is_none_or(|expires_at| expires_at > self.last_settled_at)
+            })
+            .filter_map(|source| {
+                source
+                    .publicity_event
+                    .as_ref()
+                    .map(|event| event.id.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+        for publicity in self
+            .publicity_events
+            .values()
+            .filter(|publicity| !resident_publicity.contains(publicity.id.as_str()))
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Publicity,
+                &publicity.id,
+                route(&publicity.proposal.id),
+                1,
+                "publicity",
+                publicity.at,
+                publicity,
+            )?)?;
+        }
+        for conflict in self.conflicts.values().filter(|conflict| {
+            conflict
+                .effective_until
+                .is_some_and(|until| until <= self.last_settled_at)
+        }) {
+            let shard = conflict.jurisdiction.as_ref().map_or_else(
+                || coordinator.clone(),
+                |jurisdiction| {
+                    crate::LegalShardKey::jurisdiction(
+                        self.plan.definition_id.clone(),
+                        jurisdiction.clone(),
+                    )
+                },
+            );
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Conflict,
+                &conflict.id,
+                shard,
+                1,
+                "conflict",
+                conflict.effective_until.unwrap_or(conflict.recorded_at),
+                conflict,
+            )?)?;
+        }
+        for succession in self
+            .successions
+            .iter()
+            .filter(|succession| succession.effective_at < self.last_settled_at)
+            .filter(|succession| {
+                !self
+                    .compacted_succession_versions
+                    .iter()
+                    .any(|version| version.object.id == succession.id)
+            })
+        {
+            insert(legal_archive_payload(
+                crate::LegalObjectKind::Succession,
+                &succession.id,
+                coordinator.clone(),
+                1,
+                "succession",
+                succession.effective_at,
+                succession,
+            )?)?;
+        }
+        for retirement in self
+            .retirements
+            .iter()
+            .filter(|retirement| retirement.cultural_target.is_some())
+        {
+            let version = retirement_archive_version(retirement, &culture)?;
+            let payload = serde_json::to_value(retirement)
+                .map_err(|error| invalid(format!("legal retirement cannot be encoded: {error}")))?;
+            let encoded_bytes = u64::try_from(
+                serde_json::to_vec(&payload)
+                    .map_err(|error| invalid(format!("legal retirement cannot be sized: {error}")))?
+                    .len(),
+            )
+            .map_err(|_| invalid("legal retirement byte count exceeds u64"))?;
+            insert(LegalArchivePayload {
+                candidate: crate::LegalCompactionCandidate {
+                    version,
+                    record_class: "retirement".to_owned(),
+                    closed_at: retirement.retired_at,
+                    encoded_bytes,
+                    dependencies_resolved: true,
+                    current_projection_retained: retirement
+                        .cultural_target
+                        .as_ref()
+                        .is_none_or(|target| self.retired_cultural_targets.contains(target)),
+                },
+                payload,
+            })?;
+        }
+        Ok(catalog)
+    }
+
+    fn archive_payload_for_candidate(
+        &self,
+        candidate: &crate::LegalCompactionCandidate,
+    ) -> Result<serde_json::Value, CanwuError> {
+        let coordinator = crate::LegalShardKey::coordinator(self.plan.definition_id.clone());
+        let route = |id: &str| {
+            self.storage
+                .directory
+                .object_routes
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| coordinator.clone())
+        };
+        let id = candidate.version.object.id.as_str();
+        let item = match candidate.version.object.kind {
+            crate::LegalObjectKind::Procedure => {
+                let value = self
+                    .procedures
+                    .get(id)
+                    .ok_or_else(|| invalid("legal procedure archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Procedure,
+                    id,
+                    route(&value.proposal.id),
+                    1,
+                    "procedure",
+                    value.deadline,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Participation => {
+                let value = self
+                    .participation_index_by_id
+                    .get(id)
+                    .and_then(|index| self.participations.get(*index))
+                    .filter(|value| value.id == id)
+                    .ok_or_else(|| invalid("legal participation archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Participation,
+                    id,
+                    route(&value.procedure.id),
+                    1,
+                    "participation",
+                    value.admitted_at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Outbox => {
+                let value = self
+                    .outbox
+                    .get(&candidate.version.version_ordinal)
+                    .filter(|value| value.id == id)
+                    .ok_or_else(|| invalid("legal outbox archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Outbox,
+                    id,
+                    route(&value.procedure.id),
+                    value.sequence,
+                    "decision_outbox",
+                    value.expires_at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::PendingIntent => {
+                let value = self
+                    .intent_outcome_index_by_id
+                    .get(id)
+                    .and_then(|index| self.intent_outcomes.get(*index))
+                    .filter(|value| value.intent == id)
+                    .ok_or_else(|| invalid("legal intent outcome archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::PendingIntent,
+                    id,
+                    coordinator,
+                    1,
+                    "intent_outcome",
+                    value.at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Source => {
+                let value = self
+                    .sources
+                    .get(id)
+                    .ok_or_else(|| invalid("legal source archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Source,
+                    id,
+                    crate::LegalShardKey::order(value.legal_order.clone()),
+                    value.ordinal,
+                    "source",
+                    value.expires_at.unwrap_or(self.last_settled_at),
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::LawVersion => {
+                let value = self
+                    .law_versions
+                    .get(id)
+                    .ok_or_else(|| invalid("legal version archive payload is missing"))?;
+                let order = self
+                    .rules
+                    .get(&value.rule)
+                    .map(|rule| rule.legal_order.clone())
+                    .unwrap_or_else(|| self.plan.definition_id.clone());
+                legal_archive_payload(
+                    crate::LegalObjectKind::LawVersion,
+                    id,
+                    crate::LegalShardKey::order(order),
+                    value.legal_ordinal,
+                    "law_version",
+                    self.last_settled_at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Case => {
+                let value = self
+                    .cases
+                    .get(id)
+                    .ok_or_else(|| invalid("legal case archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Case,
+                    id,
+                    crate::LegalShardKey::order(value.legal_order.clone()),
+                    1,
+                    "case",
+                    value.deadline,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Finding => {
+                let value = self
+                    .findings
+                    .get(id)
+                    .ok_or_else(|| invalid("legal finding archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Finding,
+                    id,
+                    route(&value.case_id),
+                    1,
+                    "finding",
+                    value.at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Ruling => {
+                let value = self
+                    .rulings
+                    .get(id)
+                    .ok_or_else(|| invalid("legal ruling archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Ruling,
+                    id,
+                    route(&value.case_id),
+                    1,
+                    "ruling",
+                    value.effective_until.unwrap_or(self.last_settled_at),
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Publicity => {
+                let value = self
+                    .publicity_events
+                    .get(id)
+                    .ok_or_else(|| invalid("legal publicity archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Publicity,
+                    id,
+                    route(&value.proposal.id),
+                    1,
+                    "publicity",
+                    value.at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Conflict => {
+                let value = self
+                    .conflicts
+                    .get(id)
+                    .ok_or_else(|| invalid("legal conflict archive payload is missing"))?;
+                let shard = value.jurisdiction.as_ref().map_or_else(
+                    || crate::LegalShardKey::coordinator(self.plan.definition_id.clone()),
+                    |jurisdiction| {
+                        crate::LegalShardKey::jurisdiction(
+                            self.plan.definition_id.clone(),
+                            jurisdiction.clone(),
+                        )
+                    },
+                );
+                legal_archive_payload(
+                    crate::LegalObjectKind::Conflict,
+                    id,
+                    shard,
+                    1,
+                    "conflict",
+                    value.effective_until.unwrap_or(value.recorded_at),
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Succession => {
+                let value = self
+                    .succession_index_by_id
+                    .get(id)
+                    .and_then(|index| self.successions.get(*index))
+                    .filter(|value| value.id == id)
+                    .ok_or_else(|| invalid("legal succession archive payload is missing"))?;
+                legal_archive_payload(
+                    crate::LegalObjectKind::Succession,
+                    id,
+                    crate::LegalShardKey::coordinator(self.plan.definition_id.clone()),
+                    1,
+                    "succession",
+                    value.effective_at,
+                    value,
+                )?
+            }
+            crate::LegalObjectKind::Retirement => {
+                let value = self
+                    .retirement_index_by_id
+                    .get(id)
+                    .and_then(|index| self.retirements.get(*index))
+                    .filter(|value| value.id == id)
+                    .ok_or_else(|| invalid("legal retirement archive payload is missing"))?;
+                let payload = serde_json::to_value(value).map_err(|error| {
+                    invalid(format!("legal retirement cannot be encoded: {error}"))
+                })?;
+                LegalArchivePayload {
+                    candidate: crate::LegalCompactionCandidate {
+                        version: retirement_archive_version(
+                            value,
+                            &candidate.version.object.home_shard,
+                        )?,
+                        record_class: "retirement".to_owned(),
+                        closed_at: value.retired_at,
+                        encoded_bytes: u64::try_from(
+                            serde_json::to_vec(&payload)
+                                .map_err(|error| {
+                                    invalid(format!("legal retirement cannot be sized: {error}"))
+                                })?
+                                .len(),
+                        )
+                        .map_err(|_| invalid("legal retirement byte count exceeds u64"))?,
+                        dependencies_resolved: true,
+                        current_projection_retained: true,
+                    },
+                    payload,
+                }
+            }
+            _ => {
+                return Err(invalid(
+                    "legal archive candidate kind is not payload-backed",
+                ));
+            }
+        };
+        if item.candidate != *candidate {
+            return Err(invalid(
+                "legal archive candidate no longer matches its indexed payload",
+            ));
+        }
+        Ok(item.payload)
+    }
+
+    fn rebuild_archive_projection(&mut self) -> Result<(), CanwuError> {
+        let archived_membership = self
+            .storage
+            .membership
+            .iter()
+            .filter(|(_, membership)| {
+                matches!(
+                    membership.location,
+                    crate::LegalVersionLocation::Archived { .. }
+                )
+            })
+            .map(|(version, membership)| (version.clone(), membership.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut storage = crate::LegalStorageState {
+            directory: self.storage.directory.clone(),
+            membership: archived_membership,
+            archive_heads: self.storage.archive_heads.clone(),
+            reachability: self.storage.reachability.clone(),
+            archived_membership_materialized: self.storage.archived_membership_materialized,
+            ..crate::LegalStorageState::default()
+        };
+        for item in self.archive_payload_catalog()?.into_values() {
+            let version = item.candidate.version.clone();
+            storage
+                .directory
+                .active_shards
+                .insert(version.object.home_shard.clone());
+            if storage.membership.contains_key(&version) {
+                continue;
+            }
+            storage.membership.insert(
+                version.clone(),
+                crate::LegalArchiveMembership {
+                    version: version.clone(),
+                    location: crate::LegalVersionLocation::Hot,
+                    effective_interval: None,
+                    recorded_interval: None,
+                },
+            );
+            storage.mark_compaction_candidate(item.candidate)?;
+        }
+        storage.validate()?;
+        self.storage = storage;
+        Ok(())
+    }
+
+    pub fn prepare_legal_archive(
+        &self,
+        shard: &crate::LegalShardKey,
+        budgets: crate::LegalCompactionBudgets,
+    ) -> Result<Option<crate::PreparedLegalArchiveBatch>, CanwuError> {
+        let Some(compaction) = self.storage.select_compaction_batch(shard, budgets)? else {
+            return Ok(None);
+        };
+        let mut blobs = Vec::with_capacity(compaction.candidates.len());
+        let mut receipts = Vec::with_capacity(compaction.candidates.len());
+        for (index, candidate) in compaction.candidates.iter().enumerate() {
+            let blob = crate::LegalArchiveBlob {
+                format_version: crate::LEGAL_ARCHIVE_BLOB_FORMAT_VERSION,
+                version: candidate.version.clone(),
+                record_class: candidate.record_class.clone(),
+                payload: self.archive_payload_for_candidate(candidate)?,
+            };
+            let encoded_bytes = u64::try_from(
+                serde_json::to_vec(&blob)
+                    .map_err(|error| invalid(format!("legal archive cannot be encoded: {error}")))?
+                    .len(),
+            )
+            .map_err(|_| invalid("legal archive byte count exceeds u64"))?;
+            receipts.push(crate::ArchiveObjectReceipt {
+                object: crate::ArchiveObjectId {
+                    content_id: blob.content_id()?,
+                    blob_id: blob.blob_id()?,
+                },
+                owner_shard: shard.clone(),
+                archive_batch_sequence: compaction.archive_batch_sequence,
+                member_index: u64::try_from(index)
+                    .map_err(|_| invalid("legal archive member index exceeds u64"))?,
+                codec: "json-canonical-v1".to_owned(),
+                stored_bytes: encoded_bytes,
+                decoded_bytes: encoded_bytes,
+                source_root: compaction.source_membership_root.clone(),
+                verified_plan_hash: compaction.token.clone(),
+            });
+            blobs.push(blob);
+        }
+        Ok(Some(crate::PreparedLegalArchiveBatch {
+            format_version: crate::LEGAL_ARCHIVE_BLOB_FORMAT_VERSION,
+            compaction,
+            blobs,
+            receipts,
+            previous_archive_head: self.storage.archive_heads.get(shard).cloned(),
+        }))
+    }
+
+    /// Commits a verified archive directly against a store-side retention
+    /// ledger. This synchronous helper mirrors the canonical ingress lifecycle:
+    /// it first marks the verified lease durable, applies or rejects the runtime
+    /// transition, then transfers or releases retention. Every store operation
+    /// is idempotent, so a caller may retry after a finalization failure.
+    pub fn commit_verified_legal_archive_with_store(
+        &mut self,
+        verified: &crate::VerifiedLegalArchiveCommit,
+        store: &dyn crate::LegalArchiveStore,
+    ) -> Result<LegalArchiveMaintenanceDisposition, CanwuError> {
+        verified.authenticate_store_binding(store)?;
+        store.mark_legal_archive_retention_durable(&verified.retention_handle_id)?;
+        let mut next = self.clone();
+        let disposition = match next.commit_verified_legal_archive(verified) {
+            Ok(disposition) => disposition,
+            Err(error) => {
+                let _ = store.abandon_legal_archive_retention(&verified.retention_handle_id);
+                return Err(error);
+            }
+        };
+        match disposition {
+            LegalArchiveMaintenanceDisposition::Applied => store.commit_legal_archive_retention(
+                &verified.retention_handle_id,
+                &verified.pending_reachability.directory_root,
+            )?,
+            LegalArchiveMaintenanceDisposition::RejectedStale => {
+                store.reject_stale_legal_archive_retention(&verified.retention_handle_id)?;
+            }
+        }
+        *self = next;
+        Ok(disposition)
+    }
+
+    /// Applies a verified archive transition after the caller has authenticated
+    /// its store binding or admitted it through canonical ingress. Keeping this
+    /// primitive crate-private prevents detached hosts from bypassing the
+    /// retention ledger and authenticated archive closure.
+    pub(crate) fn commit_verified_legal_archive(
+        &mut self,
+        verified: &crate::VerifiedLegalArchiveCommit,
+    ) -> Result<LegalArchiveMaintenanceDisposition, CanwuError> {
+        verified.validate()?;
+        if verified.receipts.iter().all(|receipt| {
+            self.storage.membership.values().any(|membership| {
+                matches!(
+                    &membership.location,
+                    crate::LegalVersionLocation::Archived { receipt: existing }
+                        if existing.as_ref() == receipt
+                )
+            })
+        }) {
+            if self.storage.archive_heads.get(&verified.compaction.shard)
+                != Some(&verified.archive_head)
+            {
+                return Err(invalid(
+                    "idempotent legal archive retry disagrees with the installed archive head",
+                ));
+            }
+            return Ok(LegalArchiveMaintenanceDisposition::Applied);
+        }
+        if verified.compaction.candidates.iter().any(|candidate| {
+            self.storage.compaction_candidates.get(&candidate.version) != Some(candidate)
+        }) {
+            return Err(invalid(
+                "verified legal archive is not backed by the persisted candidate index",
+            ));
+        }
+        let reserved_state_bytes = self.ensure_state_growth(Self::encoded_growth(verified, 2)?)?;
+        let observed_source_root = self
+            .storage
+            .source_membership_root_for_shard(&verified.compaction.shard)?;
+        if observed_source_root != verified.compaction.source_membership_root {
+            self.append_archive_terminal(LegalArchiveTerminalDraft {
+                retention_handle_id: verified.retention_handle_id.clone(),
+                token: verified.compaction.token.clone(),
+                directory_root: verified.pending_reachability.directory_root.clone(),
+                disposition: LegalArchiveMaintenanceDisposition::RejectedStale,
+                expected_source_root: verified.compaction.source_membership_root.clone(),
+                observed_source_root: observed_source_root.clone(),
+                target_root: observed_source_root,
+                reason: Some(
+                    "legal archive source root changed after durable admission".to_owned(),
+                ),
+            })?;
+            self.reserved_state_bytes = reserved_state_bytes;
+            self.validate_live_plan_binding(&self.plan.clone())?;
+            return Ok(LegalArchiveMaintenanceDisposition::RejectedStale);
+        }
+        let expected = self
+            .prepare_legal_archive(
+                &verified.compaction.shard,
+                crate::LegalCompactionBudgets {
+                    max_records: verified.compaction.candidates.len(),
+                    max_source_bytes: verified.compaction.source_bytes,
+                },
+            )?
+            .ok_or_else(|| invalid("verified legal archive has no eligible hot members"))?;
+        if expected.compaction != verified.compaction || expected.receipts != verified.receipts {
+            return Err(invalid("verified legal archive is stale or altered"));
+        }
+        let newly_unreferenced_publicity = verified
+            .compaction
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.version.object.kind == crate::LegalObjectKind::Source)
+            .filter_map(|candidate| self.sources.get(&candidate.version.object.id))
+            .filter_map(|source| source.publicity_event.as_ref())
+            .map(|reference| reference.id.clone())
+            .collect::<BTreeSet<_>>();
+        for receipt in &verified.receipts {
+            self.storage.advance_reachability(
+                receipt.object.clone(),
+                crate::ArchiveReachabilityState::Stored,
+            )?;
+            self.storage.advance_reachability(
+                receipt.object.clone(),
+                crate::ArchiveReachabilityState::Verified,
+            )?;
+            self.storage.advance_reachability(
+                receipt.object.clone(),
+                crate::ArchiveReachabilityState::DurableIngress,
+            )?;
+        }
+        self.storage.commit_verified_compaction(
+            &verified.compaction,
+            &verified.receipts,
+            &verified.archive_head,
+        )?;
+        let archived_versions = verified
+            .compaction
+            .candidates
+            .iter()
+            .map(|candidate| candidate.version.clone())
+            .collect::<BTreeSet<_>>();
+        if verified
+            .compaction
+            .candidates
+            .iter()
+            .all(|candidate| candidate.version.object.kind == crate::LegalObjectKind::Retirement)
+        {
+            self.release_archived_retirements_bounded(&verified.compaction.candidates)?;
+        } else {
+            self.release_archived_hot_payloads(&archived_versions, &verified.compaction.shard)?;
+        }
+        self.register_unreferenced_publicity_candidates(&newly_unreferenced_publicity)?;
+        let target_root = self
+            .storage
+            .source_membership_root_for_shard(&verified.compaction.shard)?;
+        self.append_archive_terminal(LegalArchiveTerminalDraft {
+            retention_handle_id: verified.retention_handle_id.clone(),
+            token: verified.compaction.token.clone(),
+            directory_root: verified.pending_reachability.directory_root.clone(),
+            disposition: LegalArchiveMaintenanceDisposition::Applied,
+            expected_source_root: verified.compaction.source_membership_root.clone(),
+            observed_source_root: verified.compaction.source_membership_root.clone(),
+            target_root,
+            reason: None,
+        })?;
+        self.reserved_state_bytes = reserved_state_bytes;
+        self.validate_live_plan_binding(&self.plan.clone())?;
+        Ok(LegalArchiveMaintenanceDisposition::Applied)
+    }
+
+    fn register_unreferenced_publicity_candidates(
+        &mut self,
+        publicity_ids: &BTreeSet<String>,
+    ) -> Result<(), CanwuError> {
+        let coordinator = crate::LegalShardKey::coordinator(self.plan.definition_id.clone());
+        for id in publicity_ids {
+            if self.sources.values().any(|source| {
+                source
+                    .publicity_event
+                    .as_ref()
+                    .is_some_and(|reference| reference.id == *id)
+            }) {
+                continue;
+            }
+            let publicity = self
+                .publicity_events
+                .get(id)
+                .ok_or_else(|| invalid("archived source publicity event is missing"))?;
+            let shard = self
+                .storage
+                .directory
+                .object_routes
+                .get(&publicity.proposal.id)
+                .cloned()
+                .unwrap_or_else(|| coordinator.clone());
+            let item = legal_archive_payload(
+                crate::LegalObjectKind::Publicity,
+                id,
+                shard,
+                1,
+                "publicity",
+                publicity.at,
+                publicity,
+            )?;
+            if self
+                .storage
+                .membership
+                .contains_key(&item.candidate.version)
+            {
+                continue;
+            }
+            self.storage.membership.insert(
+                item.candidate.version.clone(),
+                crate::LegalArchiveMembership {
+                    version: item.candidate.version.clone(),
+                    location: crate::LegalVersionLocation::Hot,
+                    effective_interval: None,
+                    recorded_interval: None,
+                },
+            );
+            self.storage.mark_compaction_candidate(item.candidate)?;
+        }
+        Ok(())
+    }
+
+    fn release_archived_retirements_bounded(
+        &mut self,
+        candidates: &[crate::LegalCompactionCandidate],
+    ) -> Result<(), CanwuError> {
+        for candidate in candidates {
+            let id = candidate.version.object.id.as_str();
+            let index = self
+                .retirement_index_by_id
+                .remove(id)
+                .ok_or_else(|| invalid("archived legal retirement index is missing"))?;
+            if self
+                .retirements
+                .get(index)
+                .is_none_or(|retirement| retirement.id != id)
+            {
+                return Err(invalid("archived legal retirement index is stale"));
+            }
+            let removed = self.retirements.swap_remove(index);
+            self.remove_identity_evidence_component(removed.evidence.into_iter().collect())?;
+            if let Some(moved) = self.retirements.get(index) {
+                self.retirement_index_by_id.insert(moved.id.clone(), index);
+            }
+        }
+        Ok(())
+    }
+
+    fn release_archived_hot_payloads(
+        &mut self,
+        archived: &BTreeSet<crate::LegalVersionRef>,
+        shard: &crate::LegalShardKey,
+    ) -> Result<(), CanwuError> {
+        let ids = |kind| {
+            archived
+                .iter()
+                .filter(|version| version.object.kind == kind)
+                .map(|version| version.object.id.as_str())
+                .collect::<BTreeSet<_>>()
+        };
+
+        let procedure_ids = ids(crate::LegalObjectKind::Procedure);
+        self.procedures
+            .retain(|id, _| !procedure_ids.contains(id.as_str()));
+        self.open_procedures
+            .retain(|id| !procedure_ids.contains(id.as_str()));
+        self.dirty_procedures
+            .retain(|id| !procedure_ids.contains(id.as_str()));
+        self.procedures_by_deadline
+            .retain(|_, procedure_ids_at_time| {
+                procedure_ids_at_time.retain(|id| !procedure_ids.contains(id.as_str()));
+                !procedure_ids_at_time.is_empty()
+            });
+        self.capacity_allocations
+            .retain(|id, _| !procedure_ids.contains(id.as_str()));
+
+        let participation_ids = ids(crate::LegalObjectKind::Participation);
+        self.participations
+            .retain(|participation| !participation_ids.contains(participation.id.as_str()));
+        self.latest_participation_by_key.clear();
+        for (index, participation) in self.participations.iter().enumerate() {
+            self.latest_participation_by_key.insert(
+                participation_key(
+                    &participation.procedure.id,
+                    &participation.stage,
+                    participation.round,
+                    &participation.seat,
+                ),
+                index,
+            );
+        }
+
+        let outbox_ids = ids(crate::LegalObjectKind::Outbox);
+        self.outbox
+            .retain(|_, item| !outbox_ids.contains(item.id.as_str()));
+        self.pending_outbox_sequences
+            .retain(|sequence| self.outbox.contains_key(sequence));
+
+        let intent_ids = ids(crate::LegalObjectKind::PendingIntent);
+        self.intent_outcomes
+            .retain(|outcome| !intent_ids.contains(outcome.intent.as_str()));
+
+        let source_ids = ids(crate::LegalObjectKind::Source);
+        self.sources
+            .retain(|id, _| !source_ids.contains(id.as_str()));
+
+        let publicity_ids = ids(crate::LegalObjectKind::Publicity);
+        self.publicity_events
+            .retain(|id, _| !publicity_ids.contains(id.as_str()));
+
+        let law_version_ids = ids(crate::LegalObjectKind::LawVersion);
+        self.law_versions
+            .retain(|id, _| !law_version_ids.contains(id.as_str()));
+        self.law_versions_by_rule.clear();
+        for version in self.law_versions.values() {
+            self.law_versions_by_rule
+                .entry(version.rule.clone())
+                .or_default()
+                .push(law_version_reference(version));
+        }
+        for references in self.law_versions_by_rule.values_mut() {
+            references.sort_by(|left, right| {
+                let left = &self.law_versions[&left.id];
+                let right = &self.law_versions[&right.id];
+                (left.effective_at, left.legal_ordinal, &left.id).cmp(&(
+                    right.effective_at,
+                    right.legal_ordinal,
+                    &right.id,
+                ))
+            });
+        }
+        self.scheduled_versions_by_time.retain(|_, references| {
+            references.retain(|reference| self.law_versions.contains_key(&reference.id));
+            !references.is_empty()
+        });
+        self.scheduled_live_dependencies.retain(|_, references| {
+            references.retain(|reference| self.law_versions.contains_key(&reference.id));
+            !references.is_empty()
+        });
+
+        let case_ids = ids(crate::LegalObjectKind::Case);
+        self.cases.retain(|id, _| !case_ids.contains(id.as_str()));
+
+        let finding_ids = ids(crate::LegalObjectKind::Finding);
+        self.findings
+            .retain(|id, _| !finding_ids.contains(id.as_str()));
+
+        let ruling_ids = ids(crate::LegalObjectKind::Ruling);
+        self.rulings
+            .retain(|id, _| !ruling_ids.contains(id.as_str()));
+
+        let conflict_ids = ids(crate::LegalObjectKind::Conflict);
+        self.conflicts
+            .retain(|id, _| !conflict_ids.contains(id.as_str()));
+        self.conflict_ids_by_version.clear();
+        for conflict in self.conflicts.values() {
+            for version in &conflict.versions {
+                self.conflict_ids_by_version
+                    .entry(version.id.clone())
+                    .or_default()
+                    .insert(conflict.id.clone());
+            }
+        }
+
+        let succession_ids = ids(crate::LegalObjectKind::Succession);
+        for succession in self
+            .successions
+            .iter_mut()
+            .filter(|succession| succession_ids.contains(succession.id.as_str()))
+        {
+            succession.institutions.clear();
+            succession.liabilities.clear();
+            succession.archives.clear();
+            succession.evidence.clear();
+        }
+        self.compacted_succession_versions.extend(
+            archived
+                .iter()
+                .filter(|version| version.object.kind == crate::LegalObjectKind::Succession)
+                .cloned(),
+        );
+        self.rebuild_succession_index();
+
+        self.retirements.retain(|retirement| {
+            retirement_archive_version(retirement, shard)
+                .map_or(true, |version| !archived.contains(&version))
+        });
+        self.retained_evidence_dependency_counts =
+            self.rebuild_identity_evidence_dependency_counts();
+        self.retained_evidence_dependencies = self
+            .retained_evidence_dependency_counts
+            .keys()
+            .cloned()
+            .collect();
+        self.refresh_archived_dependency_versions(archived)
+    }
+
+    fn append_archive_terminal(
+        &mut self,
+        draft: LegalArchiveTerminalDraft,
+    ) -> Result<(), CanwuError> {
+        let LegalArchiveTerminalDraft {
+            retention_handle_id,
+            token,
+            directory_root,
+            disposition,
+            expected_source_root,
+            observed_source_root,
+            target_root,
+            reason,
+        } = draft;
+        if let Some(existing) = self.archive_retention_terminals.get(&retention_handle_id) {
+            if existing.token == token
+                && existing.directory_root == directory_root
+                && existing.disposition == disposition
+                && existing.expected_source_root == expected_source_root
+                && existing.observed_source_root == observed_source_root
+                && existing.target_root == target_root
+                && existing.reason == reason
+            {
+                return Ok(());
+            }
+            return Err(invalid(
+                "legal archive retention handle has a conflicting terminal outcome",
+            ));
+        }
+        let sequence = self
+            .archive_terminal_sequence
+            .checked_add(1)
+            .ok_or_else(|| invalid("legal archive terminal sequence is exhausted"))?;
+        let previous_root = self.archive_terminal_root.clone();
+        let chain_root = canonical_hash(
+            "canwu.law.archive-terminal-root.v2",
+            &(
+                previous_root.as_deref(),
+                sequence,
+                &retention_handle_id,
+                &token,
+                &directory_root,
+                disposition,
+                &expected_source_root,
+                &observed_source_root,
+                &target_root,
+                &reason,
+            ),
+        )?;
+        self.archive_terminal_sequence = sequence;
+        self.archive_terminal_root = Some(chain_root.clone());
+        let record = LegalArchiveTerminalRecord {
+            sequence,
+            retention_handle_id: retention_handle_id.clone(),
+            token,
+            directory_root,
+            disposition,
+            expected_source_root,
+            observed_source_root,
+            target_root,
+            reason,
+            previous_root,
+            chain_root,
+        };
+        self.archive_last_terminal = Some(record.clone());
+        self.archive_retention_terminals
+            .insert(retention_handle_id, record);
+        Ok(())
+    }
+
+    pub fn archive_retention_terminal(
+        &self,
+        retention_handle_id: &str,
+        token: &str,
+        directory_root: &str,
+    ) -> Result<&LegalArchiveTerminalRecord, CanwuError> {
+        let record = self
+            .archive_retention_terminals
+            .get(retention_handle_id)
+            .ok_or_else(|| invalid("legal archive retention terminal is not persisted"))?;
+        if record.retention_handle_id != retention_handle_id
+            || record.token != token
+            || record.directory_root != directory_root
+        {
+            return Err(invalid(
+                "legal archive retention receipt disagrees with its authoritative terminal",
+            ));
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn acknowledge_archive_retention_terminal(
+        &mut self,
+        retention_handle_id: &str,
+        token: &str,
+        directory_root: &str,
+        disposition: LegalArchiveMaintenanceDisposition,
+        chain_root: &str,
+    ) -> Result<(), CanwuError> {
+        let Some(record) = self.archive_retention_terminals.get(retention_handle_id) else {
+            return Ok(());
+        };
+        if record.token != token
+            || record.directory_root != directory_root
+            || record.disposition != disposition
+            || record.chain_root != chain_root
+        {
+            return Err(invalid(
+                "legal archive retention acknowledgement disagrees with its terminal",
+            ));
+        }
+        self.archive_retention_terminals.remove(retention_handle_id);
+        Ok(())
+    }
+
+    fn validate_archive_terminal(&self) -> Result<(), CanwuError> {
+        if self.archive_terminal_sequence == 0 {
+            if self.archive_terminal_root.is_some()
+                || self.archive_last_terminal.is_some()
+                || !self.archive_retention_terminals.is_empty()
+            {
+                return Err(invalid("legal archive terminal state is inconsistent"));
+            }
+            return Ok(());
+        }
+        let record = self
+            .archive_last_terminal
+            .as_ref()
+            .ok_or_else(|| invalid("legal archive terminal record is missing"))?;
+        if record.sequence != self.archive_terminal_sequence
+            || self.archive_terminal_root.as_ref() != Some(&record.chain_root)
+            || record.retention_handle_id.len() != 64
+            || record.token.len() != 64
+            || record.directory_root.len() != 64
+            || record.expected_source_root.len() != 64
+            || record.observed_source_root.len() != 64
+            || record.target_root.len() != 64
+            || record.chain_root.len() != 64
+        {
+            return Err(invalid("legal archive terminal record is malformed"));
+        }
+        let expected = canonical_hash(
+            "canwu.law.archive-terminal-root.v2",
+            &(
+                record.previous_root.as_deref(),
+                record.sequence,
+                &record.retention_handle_id,
+                &record.token,
+                &record.directory_root,
+                record.disposition,
+                &record.expected_source_root,
+                &record.observed_source_root,
+                &record.target_root,
+                &record.reason,
+            ),
+        )?;
+        if expected != record.chain_root {
+            return Err(invalid("legal archive terminal chain root is invalid"));
+        }
+        for (handle_id, terminal) in &self.archive_retention_terminals {
+            if handle_id != &terminal.retention_handle_id
+                || terminal.sequence == 0
+                || terminal.sequence > self.archive_terminal_sequence
+                || terminal.retention_handle_id.len() != 64
+                || terminal.token.len() != 64
+                || terminal.directory_root.len() != 64
+                || terminal.expected_source_root.len() != 64
+                || terminal.observed_source_root.len() != 64
+                || terminal.target_root.len() != 64
+                || terminal.chain_root.len() != 64
+            {
+                return Err(invalid(
+                    "persisted legal archive retention terminal is malformed",
+                ));
+            }
+            let expected = canonical_hash(
+                "canwu.law.archive-terminal-root.v2",
+                &(
+                    terminal.previous_root.as_deref(),
+                    terminal.sequence,
+                    &terminal.retention_handle_id,
+                    &terminal.token,
+                    &terminal.directory_root,
+                    terminal.disposition,
+                    &terminal.expected_source_root,
+                    &terminal.observed_source_root,
+                    &terminal.target_root,
+                    &terminal.reason,
+                ),
+            )?;
+            if expected != terminal.chain_root {
+                return Err(invalid(
+                    "persisted legal archive retention terminal chain root is invalid",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn load_archived_legal_record(
+        &self,
+        version: &crate::LegalVersionRef,
+        provider: &dyn crate::LegalArchiveProvider,
+    ) -> Result<Option<crate::LegalArchiveBlob>, CanwuError> {
+        let owned_membership;
+        let membership = if let Some(membership) = self.storage.membership.get(version) {
+            membership
+        } else {
+            owned_membership = self
+                .storage
+                .authenticated_archive_membership(version, provider)?;
+            let Some(membership) = owned_membership.as_ref() else {
+                return Ok(None);
+            };
+            membership
+        };
+        if membership.version != *version {
+            return Err(invalid(
+                "legal archive provider returned membership for a different version",
+            ));
+        }
+        let crate::LegalVersionLocation::Archived { receipt } = &membership.location else {
+            return Ok(None);
+        };
+        let blob = provider
+            .load_legal_archive(&receipt.object.blob_id)?
+            .ok_or_else(|| invalid("committed legal archive blob is unavailable"))?;
+        blob.validate()?;
+        if blob.version != *version
+            || blob.content_id()? != receipt.object.content_id
+            || blob.blob_id()? != receipt.object.blob_id
+        {
+            return Err(invalid(
+                "legal archive provider returned content outside the committed receipt",
+            ));
+        }
+        Ok(Some(blob))
+    }
+
+    fn load_archived_legal_record_with_meter(
+        &self,
+        version: &crate::LegalVersionRef,
+        provider: &dyn crate::LegalArchiveProvider,
+        budget: crate::LegalTemporalQueryBudget,
+        meter: &mut crate::storage::LegalTemporalQueryMeter,
+    ) -> Result<Option<crate::LegalArchiveBlob>, CanwuError> {
+        let owned_membership;
+        let membership = if let Some(membership) = self.storage.membership.get(version) {
+            membership
+        } else {
+            owned_membership = self
+                .storage
+                .authenticated_archive_membership_with_meter(version, provider, budget, meter)?;
+            let Some(membership) = owned_membership.as_ref() else {
+                return Ok(None);
+            };
+            membership
+        };
+        if membership.version != *version {
+            return Err(invalid(
+                "legal archive provider returned membership for a different version",
+            ));
+        }
+        let crate::LegalVersionLocation::Archived { receipt } = &membership.location else {
+            return Ok(None);
+        };
+        meter.begin_provider_call(budget, false)?;
+        let blob = provider
+            .load_legal_archive(&receipt.object.blob_id)?
+            .ok_or_else(|| invalid("committed legal archive blob is unavailable"))?;
+        meter.record_decoded(&blob, budget)?;
+        blob.validate()?;
+        if blob.version != *version
+            || blob.content_id()? != receipt.object.content_id
+            || blob.blob_id()? != receipt.object.blob_id
+        {
+            return Err(invalid(
+                "legal archive provider returned content outside the committed receipt",
+            ));
+        }
+        Ok(Some(blob))
+    }
+
+    /// Extends the kernel GC mark set with every committed or leased legal
+    /// archive payload and authenticated sparse-index page.
+    pub fn extend_archive_reachability(
+        &self,
+        manifest: &mut ArchiveReachabilityManifest,
+        provider: &dyn crate::LegalArchiveProvider,
+    ) -> Result<(), CanwuError> {
+        let reachable = self.storage.archive_reachability_with_provider(provider)?;
+        for object in reachable.objects {
+            manifest.insert_plugin_object("canwu.law.archive.content", object.content_id);
+            manifest.insert_plugin_object("canwu.law.archive.blob", object.blob_id.clone());
+            manifest.insert_plugin_object(crate::LEGAL_ARCHIVE_BLOB_NAMESPACE, object.blob_id);
+        }
+        for page_id in &reachable.index_page_ids {
+            manifest.insert_plugin_object("canwu.law.archive.index", page_id.clone());
+        }
+        for page_id in reachable.directory_ids {
+            manifest.insert_plugin_object(crate::LEGAL_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, page_id);
+        }
+        for page_id in reachable.membership_page_ids {
+            manifest.insert_plugin_object(crate::LEGAL_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE, page_id);
+        }
+        for page_id in reachable.temporal_page_ids {
+            manifest.insert_plugin_object(crate::LEGAL_ARCHIVE_TEMPORAL_PAGE_NAMESPACE, page_id);
+        }
+        Ok(())
+    }
+
+    /// Encodes the complete Format-8 legal state as independently versioned
+    /// plan, directory, shard, and archive-head records.
     ///
-    /// Law-local records intentionally remain inside this aggregate; exposing
-    /// them as independent Canwu records would require kernel-issued version
-    /// provenance that a detached extension cannot manufacture honestly.
+    /// The returned drafts are sorted by canonical record identity. A caller
+    /// must apply the complete set in one kernel mutation bundle; no shard is
+    /// an independently committable legal transaction.
     pub fn to_record_drafts(&self) -> Result<Vec<DomainRecordDraft>, CanwuError> {
-        Ok(vec![self.to_record_draft()?])
+        let image = self.persistence_image()?;
+        let mut drafts = Vec::with_capacity(2 + image.shards.len() + image.archive_heads.len());
+        drafts.push(DomainRecordDraft::from_typed(
+            crate::legal_plan_state_reference(),
+            &image.plan,
+        )?);
+        drafts.push(DomainRecordDraft::from_typed(
+            crate::legal_directory_state_reference(),
+            &image.directory,
+        )?);
+        for (shard, payload) in &image.shards {
+            drafts.push(DomainRecordDraft::from_typed(
+                crate::legal_shard_state_reference(shard)?,
+                payload,
+            )?);
+        }
+        for (shard, payload) in &image.archive_heads {
+            drafts.push(DomainRecordDraft::from_typed(
+                crate::legal_archive_head_state_reference(shard)?,
+                payload,
+            )?);
+        }
+        drafts.sort_by(|left, right| left.reference.cmp(&right.reference));
+        let encoded_bytes = drafts.iter().try_fold(0_usize, |total, draft| {
+            let bytes = serde_json::to_vec(&draft.payload)
+                .map_err(|error| invalid(format!("legal shard cannot be encoded: {error}")))?
+                .len();
+            total
+                .checked_add(bytes)
+                .ok_or_else(|| invalid("legal sharded payload byte count overflowed"))
+        })?;
+        if encoded_bytes > self.budgets.max_state_bytes
+            || encoded_bytes > self.budgets.max_memory_bytes
+        {
+            return Err(invalid("legal sharded payload budget exceeded"));
+        }
+        Ok(drafts)
+    }
+
+    fn persistence_image(&self) -> Result<LegalPersistenceImage, CanwuError> {
+        let declaration = self.identity_evidence_dependencies();
+        let mut root = serde_json::to_value(self)
+            .map_err(|error| invalid(format!("legal runtime cannot be encoded: {error}")))?
+            .as_object()
+            .cloned()
+            .ok_or_else(|| invalid("legal runtime payload must be an object"))?;
+
+        let mut plan_fields = BTreeMap::new();
+        for field in [
+            "plan",
+            "plan_hash",
+            "budgets",
+            "reserved_state_bytes",
+            "boundary_index",
+            "last_settled_at",
+            "next_outbox_sequence",
+            "next_source_ordinal",
+        ] {
+            let value = root
+                .remove(field)
+                .ok_or_else(|| invalid(format!("legal runtime is missing field {field}")))?;
+            plan_fields.insert(field.to_owned(), value);
+        }
+
+        let coordinator = crate::LegalShardKey::coordinator(self.plan.definition_id.clone());
+        let culture = crate::LegalShardKey::culture_dependency(self.plan.definition_id.clone());
+        let mut fields_by_shard =
+            BTreeMap::<crate::LegalShardKey, BTreeMap<String, serde_json::Value>>::new();
+        fields_by_shard.entry(coordinator.clone()).or_default();
+        fields_by_shard.entry(culture.clone()).or_default();
+        for order in &self.plan.orders {
+            fields_by_shard
+                .entry(crate::LegalShardKey::order(order.source_id.clone()))
+                .or_default();
+        }
+        for jurisdiction in &self.plan.jurisdictions {
+            fields_by_shard
+                .entry(crate::LegalShardKey::jurisdiction(
+                    self.plan.definition_id.clone(),
+                    jurisdiction.source_id.clone(),
+                ))
+                .or_default();
+        }
+
+        partition_object_field(&mut root, &mut fields_by_shard, "proposals", |id, _| {
+            self.proposals
+                .get(id)
+                .map(|proposal| crate::LegalShardKey::order(proposal.legal_order.clone()))
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+        partition_object_field(&mut root, &mut fields_by_shard, "procedures", |id, _| {
+            self.procedures
+                .get(id)
+                .and_then(|procedure| self.proposals.get(&procedure.proposal.id))
+                .map(|proposal| crate::LegalShardKey::order(proposal.legal_order.clone()))
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+        partition_object_field(&mut root, &mut fields_by_shard, "sources", |id, _| {
+            self.sources
+                .get(id)
+                .map(|source| crate::LegalShardKey::order(source.legal_order.clone()))
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+        partition_object_field(
+            &mut root,
+            &mut fields_by_shard,
+            "publicity_events",
+            |id, _| {
+                self.publicity_events
+                    .get(id)
+                    .and_then(|event| self.proposals.get(&event.proposal.id))
+                    .map(|proposal| crate::LegalShardKey::order(proposal.legal_order.clone()))
+                    .unwrap_or_else(|| coordinator.clone())
+            },
+        )?;
+        partition_object_field(&mut root, &mut fields_by_shard, "rules", |id, _| {
+            self.rules
+                .get(id)
+                .map(|rule| crate::LegalShardKey::order(rule.legal_order.clone()))
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+        for field in ["law_versions", "law_versions_by_rule"] {
+            partition_object_field(&mut root, &mut fields_by_shard, field, |id, _| {
+                let rule_id = self
+                    .law_versions
+                    .get(id)
+                    .map(|version| version.rule.as_str())
+                    .unwrap_or(id);
+                self.rules
+                    .get(rule_id)
+                    .map(|rule| crate::LegalShardKey::order(rule.legal_order.clone()))
+                    .unwrap_or_else(|| coordinator.clone())
+            })?;
+        }
+        partition_object_field(
+            &mut root,
+            &mut fields_by_shard,
+            "rule_ids_by_order",
+            |order, _| crate::LegalShardKey::order(order.to_owned()),
+        )?;
+        partition_object_field(&mut root, &mut fields_by_shard, "cases", |id, _| {
+            self.cases
+                .get(id)
+                .map(|case| crate::LegalShardKey::order(case.legal_order.clone()))
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+        for field in ["findings", "rulings"] {
+            partition_object_field(&mut root, &mut fields_by_shard, field, |id, _| {
+                let case_id = self
+                    .findings
+                    .get(id)
+                    .map(|finding| finding.case_id.as_str())
+                    .or_else(|| self.rulings.get(id).map(|ruling| ruling.case_id.as_str()));
+                case_id
+                    .and_then(|case_id| self.cases.get(case_id))
+                    .map(|case| crate::LegalShardKey::order(case.legal_order.clone()))
+                    .unwrap_or_else(|| coordinator.clone())
+            })?;
+        }
+        partition_object_field(&mut root, &mut fields_by_shard, "conflicts", |id, _| {
+            self.conflicts
+                .get(id)
+                .and_then(|conflict| conflict.jurisdiction.as_ref())
+                .map(|jurisdiction| {
+                    crate::LegalShardKey::jurisdiction(
+                        self.plan.definition_id.clone(),
+                        jurisdiction.clone(),
+                    )
+                })
+                .unwrap_or_else(|| coordinator.clone())
+        })?;
+
+        root.remove("storage")
+            .ok_or_else(|| invalid("legal runtime is missing storage state"))?;
+        let storage_shards = self.storage.shard_states()?;
+        let mut persisted_storage = self.storage.clone();
+        persisted_storage.archived_membership_materialized = false;
+        persisted_storage.clear_sharded_hot_indexes();
+        persisted_storage
+            .reachability
+            .retain(|_, state| *state != crate::ArchiveReachabilityState::Committed);
+        persisted_storage.archive_heads.clear();
+        persisted_storage.directory = crate::LegalDirectoryRecord {
+            schema_version: crate::LEGAL_STORAGE_FORMAT_VERSION,
+            ..crate::LegalDirectoryRecord::default()
+        };
+        root.insert(
+            "storage".to_owned(),
+            serde_json::to_value(persisted_storage).map_err(|error| {
+                invalid(format!("legal hot storage cannot be encoded: {error}"))
+            })?,
+        );
+        for storage_shard in storage_shards {
+            let shard = storage_shard.shard.clone();
+            fields_by_shard.entry(shard).or_default().insert(
+                LEGAL_STORAGE_SHARDS_FIELD.to_owned(),
+                serde_json::to_value(vec![storage_shard]).map_err(|error| {
+                    invalid(format!("legal storage shard cannot be encoded: {error}"))
+                })?,
+            );
+        }
+
+        for (field, value) in root {
+            let target = if matches!(
+                field.as_str(),
+                "scheduled_live_dependencies"
+                    | "retirements"
+                    | "retirement_index_by_id"
+                    | "retired_cultural_targets"
+            ) {
+                &culture
+            } else {
+                &coordinator
+            };
+            fields_by_shard
+                .entry(target.clone())
+                .or_default()
+                .insert(field, value);
+        }
+
+        let mut directory = self.storage.directory.clone();
+        directory.schema_version = crate::LEGAL_STORAGE_FORMAT_VERSION;
+        directory
+            .active_shards
+            .extend(fields_by_shard.keys().cloned());
+        for archived in directory.archive_only_shards.clone() {
+            directory.active_shards.remove(&archived);
+        }
+        for proposal in self.proposals.values() {
+            directory.object_routes.insert(
+                proposal.id.clone(),
+                crate::LegalShardKey::order(proposal.legal_order.clone()),
+            );
+        }
+        for procedure in self.procedures.values() {
+            if let Some(route) = directory.object_routes.get(&procedure.proposal.id).cloned() {
+                directory.object_routes.insert(procedure.id.clone(), route);
+            }
+        }
+        for source in self.sources.values() {
+            directory.object_routes.insert(
+                source.id.clone(),
+                crate::LegalShardKey::order(source.legal_order.clone()),
+            );
+        }
+        for rule in self.rules.values() {
+            directory.object_routes.insert(
+                rule.id.clone(),
+                crate::LegalShardKey::order(rule.legal_order.clone()),
+            );
+        }
+        for version in self.law_versions.values() {
+            if let Some(route) = directory.object_routes.get(&version.rule).cloned() {
+                directory.object_routes.insert(version.id.clone(), route);
+            }
+        }
+        for case in self.cases.values() {
+            directory.object_routes.insert(
+                case.id.clone(),
+                crate::LegalShardKey::order(case.legal_order.clone()),
+            );
+        }
+        for finding in self.findings.values() {
+            if let Some(route) = directory.object_routes.get(&finding.case_id).cloned() {
+                directory.object_routes.insert(finding.id.clone(), route);
+            }
+        }
+        for ruling in self.rulings.values() {
+            if let Some(route) = directory.object_routes.get(&ruling.case_id).cloned() {
+                directory.object_routes.insert(ruling.id.clone(), route);
+            }
+        }
+        for conflict in self.conflicts.values() {
+            let route = conflict.jurisdiction.as_ref().map_or_else(
+                || coordinator.clone(),
+                |jurisdiction| {
+                    crate::LegalShardKey::jurisdiction(
+                        self.plan.definition_id.clone(),
+                        jurisdiction.clone(),
+                    )
+                },
+            );
+            directory.object_routes.insert(conflict.id.clone(), route);
+        }
+        for sequence in self.outbox.keys() {
+            directory
+                .object_routes
+                .insert(format!("outbox:{sequence}"), coordinator.clone());
+        }
+        for (due_at, procedures) in &self.procedures_by_deadline {
+            for procedure in procedures {
+                if let Some(route) = directory.object_routes.get(procedure).cloned() {
+                    directory
+                        .due_shards
+                        .entry(*due_at)
+                        .or_default()
+                        .insert(route);
+                }
+            }
+        }
+        for (due_at, versions) in &self.scheduled_versions_by_time {
+            for version in versions {
+                if let Some(route) = directory.object_routes.get(&version.id).cloned() {
+                    directory
+                        .due_shards
+                        .entry(*due_at)
+                        .or_default()
+                        .insert(route);
+                }
+            }
+        }
+        let mut shard_record_ids = BTreeMap::new();
+        let mut archive_head_record_ids = BTreeMap::new();
+        for shard in directory
+            .active_shards
+            .iter()
+            .chain(directory.archive_only_shards.iter())
+        {
+            shard_record_ids.insert(
+                shard.clone(),
+                crate::legal_shard_state_reference(shard)?
+                    .as_untyped()
+                    .id
+                    .clone(),
+            );
+            archive_head_record_ids.insert(
+                shard.clone(),
+                crate::legal_archive_head_state_reference(shard)?
+                    .as_untyped()
+                    .id
+                    .clone(),
+            );
+        }
+
+        let shards = directory
+            .active_shards
+            .iter()
+            .chain(directory.archive_only_shards.iter())
+            .cloned()
+            .map(|shard| {
+                let payload = crate::LegalShardState {
+                    format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
+                    shard: shard.clone(),
+                    fields: fields_by_shard.remove(&shard).unwrap_or_default(),
+                    evidence_dependencies: IdentityEvidenceDependenciesV1::new(Vec::new()),
+                };
+                (shard, payload)
+            })
+            .collect();
+        let archive_heads = directory
+            .active_shards
+            .iter()
+            .chain(directory.archive_only_shards.iter())
+            .cloned()
+            .map(|shard| {
+                let payload = crate::LegalArchiveHeadState {
+                    format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
+                    shard: shard.clone(),
+                    head: self.storage.archive_heads.get(&shard).cloned(),
+                    evidence_dependencies: IdentityEvidenceDependenciesV1::new(Vec::new()),
+                };
+                (shard, payload)
+            })
+            .collect();
+        Ok(LegalPersistenceImage {
+            plan: crate::LegalPlanState {
+                format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
+                plan_hash: self.plan_hash.clone(),
+                fields: plan_fields,
+                evidence_dependencies: declaration.clone(),
+            },
+            directory: crate::LegalDirectoryState {
+                format_version: crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION,
+                directory,
+                shard_record_ids,
+                archive_head_record_ids,
+                evidence_dependencies: declaration,
+            },
+            shards,
+            archive_heads,
+        })
+    }
+
+    pub(crate) fn from_persistence_image(
+        plan: &CompiledLawPlan,
+        plan_state: crate::LegalPlanState,
+        directory_state: crate::LegalDirectoryState,
+        shards: &BTreeMap<crate::LegalShardKey, crate::LegalShardState>,
+        archive_heads: BTreeMap<crate::LegalShardKey, crate::LegalArchiveHeadState>,
+    ) -> Result<Self, CanwuError> {
+        Self::from_scoped_persistence_image(
+            plan,
+            plan_state,
+            directory_state,
+            shards,
+            archive_heads,
+            None,
+        )
+    }
+
+    pub(crate) fn from_scoped_persistence_image(
+        plan: &CompiledLawPlan,
+        plan_state: crate::LegalPlanState,
+        directory_state: crate::LegalDirectoryState,
+        shards: &BTreeMap<crate::LegalShardKey, crate::LegalShardState>,
+        archive_heads: BTreeMap<crate::LegalShardKey, crate::LegalArchiveHeadState>,
+        loaded_scope: Option<&BTreeSet<crate::LegalShardKey>>,
+    ) -> Result<Self, CanwuError> {
+        if plan_state.format_version != crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION
+            || directory_state.format_version != crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION
+            || plan_state.plan_hash != plan.content_hash
+        {
+            return Err(invalid(
+                "legal persistence image has an unsupported format or plan",
+            ));
+        }
+        let declaration = &plan_state.evidence_dependencies;
+        if directory_state.evidence_dependencies != *declaration {
+            return Err(invalid(
+                "legal directory evidence declaration differs from the plan record",
+            ));
+        }
+        directory_state
+            .directory
+            .active_shards
+            .iter()
+            .try_for_each(|shard| {
+                let expected = crate::legal_shard_state_reference(shard)?
+                    .as_untyped()
+                    .id
+                    .clone();
+                if directory_state.shard_record_ids.get(shard) != Some(&expected) {
+                    return Err(invalid("legal directory shard identity is inconsistent"));
+                }
+                Ok(())
+            })?;
+
+        let mut root = if loaded_scope.is_some() {
+            serde_json::to_value(Self::new(plan))
+                .map_err(|error| {
+                    invalid(format!("empty legal runtime cannot be encoded: {error}"))
+                })?
+                .as_object()
+                .cloned()
+                .ok_or_else(|| invalid("empty legal runtime payload must be an object"))?
+        } else {
+            serde_json::Map::new()
+        };
+        root.extend(plan_state.fields);
+        let mut initialized_scoped_fields = BTreeSet::new();
+        for shard in directory_state
+            .directory
+            .active_shards
+            .iter()
+            .chain(directory_state.directory.archive_only_shards.iter())
+        {
+            if loaded_scope.is_some_and(|scope| !scope.contains(shard)) {
+                continue;
+            }
+            let payload = shards
+                .get(shard)
+                .ok_or_else(|| invalid("legal directory references a missing shard"))?;
+            if payload.format_version != crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION
+                || payload.shard != *shard
+                || payload.evidence_dependencies != IdentityEvidenceDependenciesV1::new(Vec::new())
+            {
+                return Err(invalid("legal shard payload identity is inconsistent"));
+            }
+            for (field, value) in &payload.fields {
+                if loaded_scope.is_some() && initialized_scoped_fields.insert(field.clone()) {
+                    root.remove(field);
+                }
+                merge_persisted_field(&mut root, field, value.clone())?;
+            }
+        }
+        let storage_shards = root
+            .remove(LEGAL_STORAGE_SHARDS_FIELD)
+            .map(serde_json::from_value::<Vec<crate::storage::LegalStorageShardState>>)
+            .transpose()
+            .map_err(|error| invalid(format!("legal storage shards are invalid: {error}")))?
+            .unwrap_or_default();
+        let mut runtime = serde_json::from_value::<Self>(serde_json::Value::Object(root))
+            .map_err(|error| invalid(format!("legal shards cannot be assembled: {error}")))?;
+        for storage_shard in storage_shards {
+            runtime.storage.install_shard_state(storage_shard)?;
+        }
+        runtime.storage.directory = directory_state.directory;
+        runtime.storage.archive_heads.clear();
+        for (shard, payload) in archive_heads {
+            if payload.format_version != crate::LEGAL_SHARD_PAYLOAD_FORMAT_VERSION
+                || payload.shard != shard
+                || payload.evidence_dependencies != IdentityEvidenceDependenciesV1::new(Vec::new())
+            {
+                return Err(invalid(
+                    "legal archive-head payload identity is inconsistent",
+                ));
+            }
+            if let Some(head) = payload.head {
+                runtime.storage.archive_heads.insert(shard, head);
+            }
+        }
+        if loaded_scope.is_none() && runtime.identity_evidence_dependencies() != *declaration {
+            return Err(invalid(
+                "legal shard evidence declarations do not match the assembled ledger",
+            ));
+        }
+        runtime.rebuild_archive_payload_indexes()?;
+        if loaded_scope.is_some() {
+            // Shard records persist their ordered candidate queue and accumulator.
+            // Scoped restore therefore validates only the selected shard fragments
+            // and never scans unrelated global compaction debt.
+            runtime.reaccount_state_budget()?;
+            runtime.validate_live_plan_binding(plan)?;
+        } else {
+            // A full cold restore is the one production boundary where an O(total
+            // hot history) migration/reconciliation pass is permitted. Ordinary
+            // archive preparation remains bounded by the persisted candidate index.
+            runtime.rebuild_archive_projection()?;
+            runtime.reaccount_state_budget()?;
+            runtime.validate_against_plan(plan)?;
+        }
+        Ok(runtime)
     }
 
     /// Persist the exact Canwu revision that a later decision enqueue must compare against.
@@ -5652,13 +8601,11 @@ impl LegalRuntime {
                 continue;
             }
             if canwu
-                .decision_state()
-                .attempt(DecisionRequestId::new(item.create_request_id))
+                .decision_attempt(DecisionRequestId::new(item.create_request_id))
                 .is_some()
                 || item.refresh_request_id.is_some_and(|request_id| {
                     canwu
-                        .decision_state()
-                        .attempt(DecisionRequestId::new(request_id))
+                        .decision_attempt(DecisionRequestId::new(request_id))
                         .is_some()
                 })
                 || canwu
@@ -5670,8 +8617,7 @@ impl LegalRuntime {
                 ));
             }
             if canwu
-                .decision_state()
-                .controller(&item.decision_controller_id)
+                .decision_controller(&item.decision_controller_id)
                 .is_some_and(|controller| match expected_decision_controller(item) {
                     Ok(expected) => controller != &expected,
                     Err(_) => true,
@@ -5767,10 +8713,7 @@ impl LegalRuntime {
             let controller_request_id = item
                 .refresh_request_id
                 .ok_or_else(|| invalid("legal outbox controller request ID is missing"))?;
-            match canwu
-                .decision_state()
-                .controller(&item.decision_controller_id)
-            {
+            match canwu.decision_controller(&item.decision_controller_id) {
                 Some(existing) if existing != &controller => {
                     return Err(invalid(
                         "legal decision controller conflicts with the persisted draft",
@@ -5822,21 +8765,18 @@ impl LegalRuntime {
             let controller_request_id = item
                 .refresh_request_id
                 .ok_or_else(|| invalid("legal outbox controller request ID is missing"))?;
-            let controller_attempt = canwu
-                .decision_state()
-                .attempt(DecisionRequestId::new(controller_request_id));
+            let controller_attempt =
+                canwu.decision_attempt(DecisionRequestId::new(controller_request_id));
             if controller_attempt.is_some_and(|attempt| !accepted_without_command(attempt)) {
                 return Err(invalid(
                     "legal decision-controller request did not settle as accepted",
                 ));
             }
             let open_attempt = canwu
-                .decision_state()
-                .attempt(DecisionRequestId::new(item.create_request_id))
+                .decision_attempt(DecisionRequestId::new(item.create_request_id))
                 .ok_or_else(|| invalid("legal ticket-open request has not settled"))?;
             let controller = canwu
-                .decision_state()
-                .controller(&item.decision_controller_id)
+                .decision_controller(&item.decision_controller_id)
                 .ok_or_else(|| invalid("legal decision controller is missing"))?;
             let ticket = canwu
                 .decision_ticket(DecisionTicketId::new(item.ticket_id))
@@ -6756,6 +9696,28 @@ fn local_ref(kind: &str, id: &str) -> LegalRecordRef {
         kind: kind.to_owned(),
         id: id.to_owned(),
     }
+}
+
+fn legal_archive_local_reference(version: &crate::LegalVersionRef) -> Option<LegalRecordRef> {
+    let kind = match version.object.kind {
+        crate::LegalObjectKind::Proposal => "proposal",
+        crate::LegalObjectKind::Procedure => "procedure",
+        crate::LegalObjectKind::Participation => "participation",
+        crate::LegalObjectKind::PendingIntent => "intent_outcome",
+        crate::LegalObjectKind::Outbox => "outbox",
+        crate::LegalObjectKind::Source => "source_version",
+        crate::LegalObjectKind::Publicity => "publicity",
+        crate::LegalObjectKind::Rule => "rule",
+        crate::LegalObjectKind::LawVersion => "law_version",
+        crate::LegalObjectKind::Case => "case",
+        crate::LegalObjectKind::Finding => "finding",
+        crate::LegalObjectKind::Ruling => "ruling",
+        crate::LegalObjectKind::Conflict => "conflict",
+        crate::LegalObjectKind::Succession => "succession",
+        crate::LegalObjectKind::Coordinator => return None,
+        crate::LegalObjectKind::Retirement => "retirement",
+    };
+    Some(local_ref(kind, &version.object.id))
 }
 
 fn increment_dependency_counts(

@@ -13,6 +13,7 @@ publish = ["crates-io"]
 description = "Deterministic legal authoring and institutional runtime extension for Canwu"
 
 [dependencies]
+blake3.workspace = true
 canwu-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -1,11 +1,10 @@
 use super::{
-    Army, ArmyId, CommitmentRoots, DecisionState, DomainRecord, DomainRecordRef, IngressQueueKey,
-    KnowledgeSnapshot, LetterCargo, LetterId, Person, PersonId, PluginComponentKey,
+    Army, ArmyId, CommitmentRoots, DecisionState, IngressQueueKey, KnowledgeSnapshot, LetterCargo,
+    LetterId, PersistentDomainRecordStore, Person, PersonId, PluginComponentKey,
     PluginComponentRecord, RandomStreamKey, RandomStreamState, RuntimeCommitmentCache,
     RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey, ScheduledAction, SimTime,
 };
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 pub(super) struct RejectionTransactionCheckpoint {
     next_command_attempt_id: u64,
@@ -140,7 +139,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    domain_records: Arc<BTreeMap<DomainRecordRef, DomainRecord>>,
+    domain_records: PersistentDomainRecordStore,
     decisions: DecisionState,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
     scheduler: RuntimeScheduler,
@@ -306,9 +305,10 @@ mod tests {
         let simulation = Simulation::new(7, Scenario::new(SimTime::EPOCH, Vec::new())).unwrap();
         let checkpoint = BoundaryTransactionCheckpoint::capture(&simulation.state);
 
-        assert!(Arc::ptr_eq(
-            &checkpoint.domain_records,
-            &simulation.state.current.domain_records
-        ));
+        assert!(
+            checkpoint
+                .domain_records
+                .shares_root_with(&simulation.state.current.domain_records)
+        );
     }
 }

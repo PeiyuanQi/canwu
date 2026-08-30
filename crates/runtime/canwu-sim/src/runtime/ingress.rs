@@ -278,6 +278,65 @@ pub struct PluginIngressRequest {
     pub affected_entities: Vec<EntityRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<CauseRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_retention: Vec<PluginArchiveRetention>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginArchiveRetention {
+    pub namespace: String,
+    pub object_id: String,
+}
+
+/// Opaque capability issued only while a plugin registers a kernel-internal
+/// ingress type. Hosts can pass the capability back but cannot construct or
+/// alter it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginIngressPermit {
+    pub(super) plugin: String,
+    pub(super) packet_type: String,
+    pub(super) semantic_hash: String,
+    pub(super) token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "maintenance", rename_all = "snake_case")]
+pub enum MaintenanceIngressRequest {
+    DecisionArchive {
+        commit: super::VerifiedDecisionArchiveCommit,
+    },
+    OwnerAuthorized {
+        commit: super::VerifiedOwnerAuthorizedMaintenanceCommit,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MaintenanceDisposition {
+    Applied,
+    RejectedStale,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceRejectionReceipt {
+    pub token: String,
+    pub expected_source_root: String,
+    pub observed_source_root: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceChangeRecord {
+    pub kind: String,
+    pub token: String,
+    pub disposition: MaintenanceDisposition,
+    pub source_root: String,
+    pub target_root: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<MaintenanceRejectionReceipt>,
 }
 
 impl PluginIngressRequest {
@@ -296,6 +355,7 @@ impl PluginIngressRequest {
             payload,
             affected_entities: Vec::new(),
             cause: None,
+            archive_retention: Vec::new(),
         }
     }
 
@@ -316,6 +376,15 @@ impl PluginIngressRequest {
         self.cause = Some(cause);
         self
     }
+
+    #[must_use]
+    pub fn with_archive_retention(
+        mut self,
+        retention: impl IntoIterator<Item = PluginArchiveRetention>,
+    ) -> Self {
+        self.archive_retention.extend(retention);
+        self
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -329,12 +398,17 @@ pub enum IngressPayload {
         packet_type: String,
         payload: Value,
         affected_entities: Vec<EntityRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        archive_retention: Vec<PluginArchiveRetention>,
     },
     Calendar {
         cadences: Vec<SystemCadence>,
     },
     Decision {
         request: Box<super::DecisionIngressRequest>,
+    },
+    Maintenance {
+        request: Box<MaintenanceIngressRequest>,
     },
 }
 
@@ -489,16 +563,45 @@ impl Simulation {
 
     pub fn enqueue_plugin_ingress(
         &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.enqueue_plugin_ingress_inner(request, None, false)
+    }
+
+    /// Queues a plugin-owned internal ingress through an opaque capability
+    /// returned by [`super::plugins::PluginRegistrar::register_internal_ingress`].
+    pub fn enqueue_permitted_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+        permit: &PluginIngressPermit,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.enqueue_plugin_ingress_inner(request, Some(permit), false)
+    }
+
+    pub(super) fn replay_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.enqueue_plugin_ingress_inner(request, None, true)
+    }
+
+    fn enqueue_plugin_ingress_inner(
+        &mut self,
         mut request: PluginIngressRequest,
+        permit: Option<&PluginIngressPermit>,
+        replay: bool,
     ) -> Result<IngressReceipt, CanwuError> {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
-        if self
-            .state
-            .metadata
-            .run_configuration
-            .declared()
-            .is_some_and(|configuration| configuration.interaction == InteractionPolicy::ReadOnly)
+        if !replay
+            && self
+                .state
+                .metadata
+                .run_configuration
+                .declared()
+                .is_some_and(|configuration| {
+                    configuration.interaction == InteractionPolicy::ReadOnly
+                })
         {
             return Err(CanwuError::new(
                 ErrorCode::InteractionReadOnly,
@@ -515,6 +618,68 @@ impl Simulation {
                 ),
             )
         })?;
+        let internal = self.plugins.internal_ingress.contains(&key);
+        if internal && !replay {
+            let semantic_hash = self
+                .plugins
+                .descriptors
+                .get(&request.plugin)
+                .map(|descriptor| descriptor.semantic_hash.as_str())
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::PluginNotActive,
+                        "internal plugin ingress owner is unavailable",
+                    )
+                })?;
+            let expected_token = super::canonical_hash(
+                "canwu.plugin.internal-ingress-permit.v1",
+                &(&request.plugin, &request.packet_type, semantic_hash),
+            )?;
+            if permit.is_none_or(|permit| {
+                permit.plugin != request.plugin
+                    || permit.packet_type != request.packet_type
+                    || permit.semantic_hash != semantic_hash
+                    || permit.token != expected_token
+            }) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "plugin-owned internal ingress requires its opaque registration permit",
+                ));
+            }
+        }
+        if !request.archive_retention.is_empty() && !internal && !replay {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "archive retention may be attached only to plugin-owned internal ingress",
+            ));
+        }
+        request.archive_retention.sort();
+        request.archive_retention.dedup();
+        if request.archive_retention.len() > 32_768
+            || request.archive_retention.iter().any(|retention| {
+                retention.namespace.is_empty()
+                    || retention.namespace.len() > 128
+                    || retention.object_id.is_empty()
+                    || retention.object_id.len() > 256
+                    || !retention.namespace.bytes().all(|byte| {
+                        byte.is_ascii_lowercase()
+                            || byte.is_ascii_digit()
+                            || matches!(byte, b'.' | b'-' | b'_')
+                    })
+                    || !retention.object_id.is_ascii()
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "plugin ingress archive retention is malformed or exceeds its hard limit",
+            ));
+        }
+        self.plugins.validate_archive_retention(
+            &request.plugin,
+            &request.packet_type,
+            &request.payload,
+            &request.archive_retention,
+        )?;
         descriptor.payload_schema.validate(&request.payload)?;
         request.affected_entities.sort();
         request.affected_entities.dedup();
@@ -549,6 +714,7 @@ impl Simulation {
                 packet_type: request.packet_type,
                 payload: request.payload,
                 affected_entities: request.affected_entities,
+                archive_retention: request.archive_retention,
             },
             request.cause,
             false,

@@ -2,19 +2,24 @@ use super::state::{ArchivedCommandRequestOutcome, ArchivedIngressRequest};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, BoundaryReceipt, BoundaryRecord, BoundaryRequest, CanwuError,
     CauseRef, CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandOutcome,
-    CommandReceipt, CommandRecord, CommandRequest, CommitmentRoots, DecisionState,
-    DeterministicRng, DomainRecord, DomainRecordRef, DomainRecordSchema, DomainRecordType,
-    DomainRecordVersionRef, DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef,
-    IngressPayload, IngressReceipt, IngressRecord, KeyedDrawReservation, KnowledgeSnapshot,
-    OutboxEntry, PayloadProperty, PayloadSchema, PayloadValueType, PluginComponentRecord,
-    PluginDescriptor, PluginIngressRequest, RandomDrawAddress, RandomDrawRecord, RandomStreamState,
-    RunConfigurationSnapshot, RunManifest, RuntimeEvidence, SNAPSHOT_FORMAT_VERSION,
-    STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledAction, ScheduledRecord, SchemaRegistry,
-    SimDuration, SimEvent, SimTime, Simulation, SimulationPlugin, SystemCadence,
-    TypedDomainRecordRef, WorldSnapshot, has_unqueued_command_history, invalid_snapshot_error,
-    is_one_u64, is_zero_u32, is_zero_u64, one_u64,
+    CommandReceipt, CommandRecord, CommandRequest, CommitmentRoots, DecisionArchiveBlob,
+    DecisionArchiveBucketPage, DecisionArchiveProvider, DecisionHistoryKey,
+    DecisionHistoryLocation, DecisionState, DeterministicRng, DomainRecord, DomainRecordPageRoots,
+    DomainRecordRef, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
+    DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef, IngressPayload,
+    IngressReceipt, IngressRecord, KeyedDrawReservation, KnowledgeSnapshot, OutboxEntry,
+    PayloadProperty, PayloadSchema, PayloadValueType, PluginComponentRecord, PluginDescriptor,
+    PluginIngressRequest, PreparedDecisionArchive, PreparedStateDelta, RandomDrawAddress,
+    RandomDrawRecord, RandomStreamState, RunConfigurationSnapshot, RunManifest, RuntimeEvidence,
+    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledAction,
+    ScheduledRecord, SchemaRegistry, SimDuration, SimEvent, SimTime, Simulation, SimulationPlugin,
+    StatePageBlob, StatePageProvider, StatePageRetentionLedger, StatePageStore, SystemCadence,
+    TypedDomainRecordRef, WorldSnapshot, canonical_byte_hash, has_unqueued_command_history,
+    invalid_snapshot_error, is_canonical_hash, is_one_u64, is_zero_u32, is_zero_u64, one_u64,
+    prepare_state_delta, verify_state_delta,
 };
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -112,6 +117,284 @@ pub struct SimulationSnapshot {
     pub(super) next_decision_trace_id: u64,
 }
 
+pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 4;
+const MAX_PAGED_DECISION_DIRECTORY_ENTRIES: usize = 1_024;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PagedSimulationCheckpoint {
+    pub format_version: u32,
+    pub root_page_id: String,
+    pub checkpoint_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreparedPagedSimulationCheckpoint {
+    pub checkpoint: PagedSimulationCheckpoint,
+    pub delta: PreparedStateDelta,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortablePagedSimulationCheckpoint {
+    pub checkpoint: PagedSimulationCheckpoint,
+    pub pages: Vec<StatePageBlob>,
+}
+
+/// Unified offline GC mark set for kernel-owned pages, evidence, decision
+/// blobs, and namespaced plugin archive objects.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveReachabilityManifest {
+    pub state_page_ids: BTreeSet<String>,
+    pub evidence_segment_ids: BTreeSet<String>,
+    pub decision_blob_ids: BTreeSet<String>,
+    pub plugin_objects: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl ArchiveReachabilityManifest {
+    pub fn insert_plugin_object(&mut self, namespace: impl Into<String>, id: impl Into<String>) {
+        self.plugin_objects
+            .entry(namespace.into())
+            .or_default()
+            .insert(id.into());
+    }
+
+    pub fn merge(&mut self, other: Self) {
+        self.state_page_ids.extend(other.state_page_ids);
+        self.evidence_segment_ids.extend(other.evidence_segment_ids);
+        self.decision_blob_ids.extend(other.decision_blob_ids);
+        for (namespace, ids) in other.plugin_objects {
+            self.plugin_objects
+                .entry(namespace)
+                .or_default()
+                .extend(ids);
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PagedCheckpointEnvelope {
+    format_version: u32,
+    checkpoint_without_paged_state: SimulationCheckpoint,
+    domain_records: DomainRecordPageRoots,
+    decision_manifest_page_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PagedDecisionManifest {
+    format_version: u32,
+    hot_page_id: String,
+    archive_receipt_root: String,
+    archive_receipt_count: u64,
+    archive_directory_page_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PagedDecisionDirectoryPage {
+    format_version: u32,
+    archive_bucket_pages: Vec<(super::DecisionArchivePageKey, String)>,
+}
+
+impl PagedDecisionDirectoryPage {
+    fn validate(&self) -> Result<(), CanwuError> {
+        if self.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
+            || self.archive_bucket_pages.is_empty()
+            || self.archive_bucket_pages.len() > MAX_PAGED_DECISION_DIRECTORY_ENTRIES
+            || self
+                .archive_bucket_pages
+                .windows(2)
+                .any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(invalid_snapshot_error(
+                "paged decision directory page is malformed",
+            ));
+        }
+        for (_, page_id) in &self.archive_bucket_pages {
+            if !is_canonical_hash(page_id) {
+                return Err(invalid_snapshot_error(
+                    "paged decision archive bucket page ID is malformed",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_paged_decision_manifest(manifest: &PagedDecisionManifest) -> Result<(), CanwuError> {
+    let unique_directory_ids = manifest
+        .archive_directory_page_ids
+        .iter()
+        .collect::<BTreeSet<_>>();
+    if manifest.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
+        || !is_canonical_hash(&manifest.hot_page_id)
+        || !is_canonical_hash(&manifest.archive_receipt_root)
+        || manifest
+            .archive_directory_page_ids
+            .iter()
+            .any(|page_id| !is_canonical_hash(page_id))
+        || unique_directory_ids.len() != manifest.archive_directory_page_ids.len()
+        || (manifest.archive_receipt_count == 0) != manifest.archive_directory_page_ids.is_empty()
+    {
+        return Err(invalid_snapshot_error(
+            "paged decision manifest directory is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn assemble_paged_decision_directory(
+    pages: Vec<PagedDecisionDirectoryPage>,
+) -> Result<BTreeMap<super::DecisionArchivePageKey, String>, CanwuError> {
+    let page_count = pages.len();
+    let mut archive_bucket_pages = BTreeMap::new();
+    let mut previous_page_key = None;
+    for (directory_ordinal, directory_page) in pages.into_iter().enumerate() {
+        directory_page.validate()?;
+        let expected_len = if directory_ordinal + 1 == page_count {
+            1..=MAX_PAGED_DECISION_DIRECTORY_ENTRIES
+        } else {
+            MAX_PAGED_DECISION_DIRECTORY_ENTRIES..=MAX_PAGED_DECISION_DIRECTORY_ENTRIES
+        };
+        if !expected_len.contains(&directory_page.archive_bucket_pages.len()) {
+            return Err(invalid_snapshot_error(
+                "paged decision directory uses noncanonical page chunking",
+            ));
+        }
+        for (page_key, page_id) in directory_page.archive_bucket_pages {
+            if previous_page_key.is_some_and(|previous| previous >= page_key) {
+                return Err(invalid_snapshot_error(
+                    "paged decision directory is not globally strictly ordered",
+                ));
+            }
+            previous_page_key = Some(page_key);
+            if archive_bucket_pages.insert(page_key, page_id).is_some() {
+                return Err(invalid_snapshot_error(
+                    "paged decision directory contains a duplicate bucket key",
+                ));
+            }
+        }
+    }
+    Ok(archive_bucket_pages)
+}
+
+impl PreparedPagedSimulationCheckpoint {
+    pub fn store_and_verify(&self, store: &dyn StatePageStore) -> Result<(), CanwuError> {
+        if self.checkpoint.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
+            || self.delta.target_root != self.checkpoint.root_page_id
+        {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint descriptor disagrees with its prepared delta",
+            ));
+        }
+        for page in &self.delta.new_pages {
+            let _ = store.store_state_page(page)?;
+        }
+        verify_state_delta(&self.delta, store)?;
+        let envelope = store
+            .load_state_page(&self.checkpoint.root_page_id)?
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    "paged checkpoint root is unavailable after storage",
+                )
+            })?;
+        envelope.validate()?;
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct EmbeddedPageProvider {
+    pages: BTreeMap<String, StatePageBlob>,
+}
+
+impl StatePageProvider for EmbeddedPageProvider {
+    fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        Ok(self.pages.get(page_id).cloned())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PagedCheckpointScaleMetrics {
+    pub decision_entries: u64,
+    pub decision_locator: super::DecisionLocatorScaleMetrics,
+    pub state_pages: u64,
+    pub decision_directory_pages: u64,
+    pub max_state_page_bytes: u64,
+    pub initial_delta_pages: u64,
+    pub repeat_delta_pages: u64,
+    pub single_page_change_delta_pages: u64,
+    pub initial_provider_calls: u64,
+    pub repeat_provider_calls: u64,
+    pub single_page_change_provider_calls: u64,
+    pub exact_restart_queries: u64,
+    pub restored_root_matches: bool,
+    pub replayed_root_matches: bool,
+    pub root_page_id: String,
+}
+
+struct Format8ScalePageStore {
+    pages: RefCell<BTreeMap<String, StatePageBlob>>,
+    decision_blobs: RefCell<BTreeMap<String, DecisionArchiveBlob>>,
+    provider_calls: RefCell<u64>,
+}
+
+impl StatePageProvider for Format8ScalePageStore {
+    fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        *self.provider_calls.borrow_mut() += 1;
+        Ok(self.pages.borrow().get(page_id).cloned())
+    }
+}
+
+impl StatePageStore for Format8ScalePageStore {
+    fn store_state_page(&self, page: &StatePageBlob) -> Result<ArchiveStoreOutcome, CanwuError> {
+        page.validate()?;
+        let mut pages = self.pages.borrow_mut();
+        if let Some(existing) = pages.get(&page.page_id) {
+            if existing != page {
+                return Err(invalid_snapshot_error(
+                    "Format-8 scale store page ID contains different bytes",
+                ));
+            }
+            return Ok(ArchiveStoreOutcome::AlreadyPresent);
+        }
+        pages.insert(page.page_id.clone(), page.clone());
+        Ok(ArchiveStoreOutcome::Stored)
+    }
+}
+
+impl DecisionArchiveProvider for Format8ScalePageStore {
+    fn load_decision_archive(
+        &self,
+        locator: &str,
+    ) -> Result<Option<DecisionArchiveBlob>, super::DecisionError> {
+        Ok(self.decision_blobs.borrow().get(locator).cloned())
+    }
+
+    fn load_decision_archive_bucket_page(
+        &self,
+        page_id: &str,
+    ) -> Result<Option<DecisionArchiveBucketPage>, super::DecisionError> {
+        let Some(page) = self.pages.borrow().get(page_id).cloned() else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&page.bytes)
+            .map(Some)
+            .map_err(|error| {
+                super::DecisionError::new(
+                    super::DecisionErrorCode::DecisionHistoryUnavailable,
+                    format!("cannot decode decision bucket state page: {error}"),
+                )
+            })
+    }
+}
+
 fn legacy_world_is_empty(world: &WorldSnapshot) -> bool {
     world.people.is_empty()
         && world.governments.is_empty()
@@ -153,7 +436,7 @@ pub struct ReplayJournal {
 }
 
 /// Version of current-state checkpoints plus append-only evidence segments.
-pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 3;
+pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 4;
 const ARCHIVED_SEGMENT_MANIFEST_DOMAIN: &str = "canwu.evidence.archived-segment-manifest.v1";
 const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v2";
 const EVIDENCE_DEPENDENCY_DOMAIN: &str = "canwu.evidence.dependencies.v1";
@@ -1475,6 +1758,32 @@ impl CompactedSimulation {
         self.simulation.checkpoint()
     }
 
+    /// Clones the retained evidence tail after `start`. Caller-owned sealed
+    /// prefixes must be supplied separately when restoring the checkpoint.
+    pub fn journal_segment_since(
+        &self,
+        start: EvidenceCursor,
+    ) -> Result<EvidenceJournalSegment, CanwuError> {
+        self.simulation.journal_segment_since(start)
+    }
+
+    /// Prepares an incremental content-addressed checkpoint for the compact
+    /// runtime without rehydrating archived evidence or decision payloads.
+    pub fn prepare_paged_checkpoint(
+        &self,
+        source: Option<&PagedSimulationCheckpoint>,
+        provider: &dyn StatePageProvider,
+    ) -> Result<PreparedPagedSimulationCheckpoint, CanwuError> {
+        self.simulation.prepare_paged_checkpoint(source, provider)
+    }
+
+    /// Returns the retained canonical boundary tail. Sealed prefixes remain
+    /// caller-owned evidence segments and are intentionally not rehydrated.
+    #[must_use]
+    pub fn boundaries(&self) -> &[BoundaryRecord] {
+        self.simulation.boundaries()
+    }
+
     /// Returns stable identities for committed boundary emissions still
     /// retained by this compact runtime. Sealed prefixes remain owned by the
     /// caller as archive segments and can be replayed from those segments.
@@ -1523,6 +1832,42 @@ impl CompactedSimulation {
             )
         })?;
         load_verified_archived_evidence_segment(receipt, provider)
+    }
+
+    /// Prepares a bounded terminal decision-history archive without mutating
+    /// the authoritative checkpoint. The returned blobs must be stored and
+    /// read back through the provider before commit.
+    pub fn prepare_decision_archive(
+        &self,
+        keys: &[DecisionHistoryKey],
+    ) -> Result<PreparedDecisionArchive, CanwuError> {
+        self.simulation
+            .state
+            .current
+            .decisions
+            .prepare_decision_archive(keys)
+            .map_err(super::decision::decision_error)
+    }
+
+    /// Verifies stored terminal decision payloads and queues the compact
+    /// receipt transition as canonical maintenance ingress. Hot payloads are
+    /// released only when that ingress is admitted at a normal boundary, so
+    /// replay reproduces the same archive transition and checkpoint root.
+    pub fn commit_decision_archive(
+        &mut self,
+        prepared: &PreparedDecisionArchive,
+        provider: &dyn DecisionArchiveProvider,
+    ) -> Result<IngressReceipt, CanwuError> {
+        let verified = self
+            .simulation
+            .state
+            .current
+            .decisions
+            .verify_decision_archive(prepared, provider)
+            .map_err(super::decision::decision_error)?;
+        let at = self.simulation.time();
+        self.simulation
+            .enqueue_decision_archive_commit(at, 0, verified)
     }
 
     /// Seals and releases the current retained evidence tail.
@@ -1726,23 +2071,48 @@ impl CompactedSimulation {
     }
 
     #[must_use]
-    pub const fn decision_state(&self) -> &super::DecisionState {
-        self.simulation.decision_state()
-    }
-
-    #[must_use]
     pub fn decision_ticket(&self, id: super::DecisionTicketId) -> Option<&super::DecisionTicket> {
         self.simulation.decision_ticket(id)
     }
 
     #[must_use]
-    pub fn decision_traces(&self) -> &[super::DecisionTrace] {
-        self.simulation.decision_traces()
+    pub fn decision_controller(&self, id: &str) -> Option<&super::DecisionControllerBinding> {
+        self.simulation.decision_controller(id)
     }
 
     #[must_use]
-    pub fn decision_attempts(&self) -> &[super::DecisionAttemptRecord] {
-        self.simulation.decision_attempts()
+    pub fn decision_trace(&self, id: super::DecisionTraceId) -> Option<&super::DecisionTrace> {
+        self.simulation.decision_trace(id)
+    }
+
+    #[must_use]
+    pub fn decision_attempt(
+        &self,
+        id: super::DecisionRequestId,
+    ) -> Option<&super::DecisionAttemptRecord> {
+        self.simulation.decision_attempt(id)
+    }
+
+    #[must_use]
+    pub fn decision_hot_state(&self) -> super::DecisionHotState {
+        self.simulation.decision_hot_state()
+    }
+
+    #[must_use]
+    pub fn decision_history_location(
+        &self,
+        key: &super::DecisionHistoryKey,
+    ) -> super::DecisionHistoryLocation {
+        self.simulation.decision_history_location(key)
+    }
+
+    pub fn decision_history_location_with_provider(
+        &self,
+        key: &super::DecisionHistoryKey,
+        provider: &dyn super::DecisionArchiveProvider,
+    ) -> Result<super::DecisionHistoryLocation, CanwuError> {
+        self.simulation
+            .decision_history_location_with_provider(key, provider)
     }
 
     #[must_use]
@@ -1778,6 +2148,15 @@ impl CompactedSimulation {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn enqueue_permitted_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+        permit: &super::PluginIngressPermit,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .enqueue_permitted_plugin_ingress(request, permit)
     }
 
     pub fn prepare_decision(
@@ -2349,7 +2728,9 @@ impl Simulation {
                             },
                         ));
                     }
-                    IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => {}
+                    IngressPayload::Plugin { .. }
+                    | IngressPayload::Calendar { .. }
+                    | IngressPayload::Maintenance { .. } => {}
                 }
             }
             Ok::<_, CanwuError>((
@@ -2537,6 +2918,13 @@ impl Simulation {
     }
 
     pub(super) fn checkpoint_state(&self) -> SimulationSnapshot {
+        self.checkpoint_state_with_paged_payloads(true)
+    }
+
+    fn checkpoint_state_with_paged_payloads(
+        &self,
+        include_paged_payloads: bool,
+    ) -> SimulationSnapshot {
         SimulationSnapshot {
             engine_version: ENGINE_VERSION.to_owned(),
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
@@ -2572,14 +2960,21 @@ impl Simulation {
                 .values()
                 .cloned()
                 .collect(),
-            domain_records: self
-                .state
-                .current
-                .domain_records
-                .values()
-                .cloned()
-                .collect(),
-            decisions: self.state.current.decisions.clone(),
+            domain_records: if include_paged_payloads {
+                self.state
+                    .current
+                    .domain_records
+                    .values()
+                    .cloned()
+                    .collect()
+            } else {
+                Vec::new()
+            },
+            decisions: if include_paged_payloads {
+                self.state.current.decisions.clone()
+            } else {
+                DecisionState::default()
+            },
             plugin_descriptors: self.plugins.descriptors().cloned().collect(),
             schema: self.schema.clone(),
             root_seed: self.state.current.root_seed,
@@ -2616,13 +3011,419 @@ impl Simulation {
         }
     }
 
+    fn build_paged_checkpoint_pages(
+        &self,
+        provider: Option<&dyn StatePageProvider>,
+    ) -> Result<(PagedSimulationCheckpoint, Vec<StatePageBlob>), CanwuError> {
+        let (domain_records, domain_pages) = match provider {
+            Some(provider) => self
+                .state
+                .current
+                .domain_records
+                .missing_state_pages(provider)?,
+            None => self.state.current.domain_records.state_pages()?,
+        };
+        let decisions = &self.state.current.decisions;
+        let hot_decisions = decisions.paged_checkpoint_hot_state();
+        let hot_decision_page =
+            StatePageBlob::new(serde_json::to_vec(&hot_decisions).map_err(|error| {
+                invalid_snapshot_error(format!("cannot encode paged hot decision state: {error}"))
+            })?)?;
+        let decision_bucket_pages = decisions
+            .decision_archive_bucket_page_ids()
+            .iter()
+            .map(|(bucket, page_id)| (*bucket, page_id.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut decision_pages = Vec::with_capacity(
+            decision_bucket_pages
+                .len()
+                .saturating_add(
+                    decision_bucket_pages
+                        .len()
+                        .div_ceil(MAX_PAGED_DECISION_DIRECTORY_ENTRIES),
+                )
+                .saturating_add(2),
+        );
+        for (bucket, expected_page_id) in &decision_bucket_pages {
+            let Some(bucket_page) = decisions
+                .decision_archive_bucket_page(*bucket)
+                .map_err(|error| invalid_snapshot_error(error.to_string()))?
+            else {
+                if provider.is_none() {
+                    return Err(invalid_snapshot_error(
+                        "portable decision checkpoint requires every archive bucket to be resident",
+                    ));
+                }
+                // A root-only restored state already authenticates these page IDs through
+                // its archive-receipt root. Reusing the directory commitment avoids one
+                // provider read per unchanged locator page; state-delta verification later
+                // authenticates the transitive page closure before it becomes durable.
+                continue;
+            };
+            let page = StatePageBlob::new(serde_json::to_vec(&bucket_page).map_err(|error| {
+                invalid_snapshot_error(format!(
+                    "cannot encode paged decision archive bucket: {error}"
+                ))
+            })?)?;
+            if page.page_id != *expected_page_id {
+                return Err(invalid_snapshot_error(
+                    "decision archive bucket page disagrees with its cached commitment",
+                ));
+            }
+            decision_pages.push(page);
+        }
+        let decision_bucket_directory = decision_bucket_pages.into_iter().collect::<Vec<_>>();
+        let mut archive_directory_page_ids = Vec::with_capacity(
+            decision_bucket_directory
+                .len()
+                .div_ceil(MAX_PAGED_DECISION_DIRECTORY_ENTRIES),
+        );
+        for chunk in decision_bucket_directory.chunks(MAX_PAGED_DECISION_DIRECTORY_ENTRIES) {
+            let directory_page = PagedDecisionDirectoryPage {
+                format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+                archive_bucket_pages: chunk.to_vec(),
+            };
+            directory_page.validate()?;
+            let page =
+                StatePageBlob::new(serde_json::to_vec(&directory_page).map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "cannot encode paged decision directory page: {error}"
+                    ))
+                })?)?;
+            archive_directory_page_ids.push(page.page_id.clone());
+            decision_pages.push(page);
+        }
+        let archive_receipt_count = u64::try_from(decisions.archived_history_count())
+            .map_err(|_| invalid_snapshot_error("decision archive receipt count exceeds u64"))?;
+        let decision_manifest_page = StatePageBlob::new(
+            serde_json::to_vec(&PagedDecisionManifest {
+                format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+                hot_page_id: hot_decision_page.page_id.clone(),
+                archive_receipt_root: self
+                    .state
+                    .current
+                    .decisions
+                    .archive_receipt_commitment()
+                    .map_err(|error| invalid_snapshot_error(error.to_string()))?,
+                archive_receipt_count,
+                archive_directory_page_ids,
+            })
+            .map_err(|error| {
+                invalid_snapshot_error(format!("cannot encode paged decision manifest: {error}"))
+            })?,
+        )?;
+        let checkpoint_without_paged_state = self.checkpoint_with_paged_payloads(false)?;
+        let envelope = PagedCheckpointEnvelope {
+            format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+            checkpoint_without_paged_state,
+            domain_records,
+            decision_manifest_page_id: decision_manifest_page.page_id.clone(),
+        };
+        let envelope_page =
+            StatePageBlob::new(serde_json::to_vec(&envelope).map_err(|error| {
+                invalid_snapshot_error(format!("cannot encode paged checkpoint envelope: {error}"))
+            })?)?;
+        let checkpoint = PagedSimulationCheckpoint {
+            format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+            root_page_id: envelope_page.page_id.clone(),
+            checkpoint_hash: envelope
+                .checkpoint_without_paged_state
+                .state
+                .checkpoint_hash
+                .clone(),
+        };
+        let mut pages = BTreeMap::new();
+        for page in domain_pages.into_iter().chain(decision_pages).chain([
+            hot_decision_page,
+            decision_manifest_page,
+            envelope_page,
+        ]) {
+            if let Some(existing) = pages.insert(page.page_id.clone(), page.clone())
+                && existing != page
+            {
+                return Err(invalid_snapshot_error(
+                    "one state-page ID resolved to conflicting canonical bytes",
+                ));
+            }
+        }
+        Ok((checkpoint, pages.into_values().collect()))
+    }
+
+    /// Prepares an incremental content-addressed checkpoint without changing
+    /// authoritative simulation state. Pages already readable from the
+    /// provider are omitted from the delta.
+    pub fn prepare_paged_checkpoint(
+        &self,
+        source: Option<&PagedSimulationCheckpoint>,
+        provider: &dyn StatePageProvider,
+    ) -> Result<PreparedPagedSimulationCheckpoint, CanwuError> {
+        if let Some(source) = source {
+            if source.format_version != PAGED_CHECKPOINT_FORMAT_VERSION {
+                return Err(invalid_snapshot_error(
+                    "paged checkpoint source uses an unsupported format",
+                ));
+            }
+            let page = provider
+                .load_state_page(&source.root_page_id)?
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::StatePageUnavailable,
+                        "paged checkpoint source root is unavailable",
+                    )
+                })?;
+            page.validate()?;
+            if page.page_id != source.root_page_id {
+                return Err(invalid_snapshot_error(
+                    "paged checkpoint source provider returned the wrong root",
+                ));
+            }
+        }
+        let (checkpoint, pages) = self.build_paged_checkpoint_pages(Some(provider))?;
+        let mut new_pages = Vec::new();
+        for page in pages {
+            match provider.load_state_page(&page.page_id)? {
+                Some(existing) => {
+                    existing.validate()?;
+                    if existing != page {
+                        return Err(invalid_snapshot_error(
+                            "state-page provider contains conflicting canonical bytes",
+                        ));
+                    }
+                }
+                None => new_pages.push(page),
+            }
+        }
+        let source_root = source.map_or_else(
+            || canonical_byte_hash("canwu.paged-checkpoint.genesis.v1", &[]),
+            |source| source.root_page_id.clone(),
+        );
+        let delta = prepare_state_delta(&source_root, &checkpoint.root_page_id, new_pages)?;
+        Ok(PreparedPagedSimulationCheckpoint { checkpoint, delta })
+    }
+
+    /// Builds a self-contained paged checkpoint suitable for transfer between
+    /// hosts without an external page provider.
+    pub fn portable_paged_checkpoint(
+        &self,
+    ) -> Result<PortablePagedSimulationCheckpoint, CanwuError> {
+        let (checkpoint, pages) = self.build_paged_checkpoint_pages(None)?;
+        Ok(PortablePagedSimulationCheckpoint { checkpoint, pages })
+    }
+
+    /// Restores a simulation from a verified paged checkpoint. Current domain
+    /// records are reconstructed from the committed Patricia roots; missing
+    /// pages fail closed instead of being interpreted as absent state.
+    pub fn from_paged_checkpoint(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+    ) -> Result<Self, CanwuError> {
+        Self::from_paged_checkpoint_and_journal(checkpoint, provider, Vec::new())
+    }
+
+    /// Restores a paged current-state checkpoint after proving the contiguous
+    /// evidence prefix named by its compact checkpoint metadata.
+    pub fn from_paged_checkpoint_and_journal(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        if checkpoint.format_version != PAGED_CHECKPOINT_FORMAT_VERSION {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint uses an unsupported format",
+            ));
+        }
+        let root_page = provider
+            .load_state_page(&checkpoint.root_page_id)?
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    "paged checkpoint root is unavailable",
+                )
+            })?;
+        root_page.validate()?;
+        if root_page.page_id != checkpoint.root_page_id {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint provider returned the wrong root page",
+            ));
+        }
+        let envelope: PagedCheckpointEnvelope =
+            serde_json::from_slice(&root_page.bytes).map_err(|error| {
+                invalid_snapshot_error(format!("invalid paged checkpoint envelope: {error}"))
+            })?;
+        if envelope.format_version != PAGED_CHECKPOINT_FORMAT_VERSION
+            || envelope
+                .checkpoint_without_paged_state
+                .state
+                .checkpoint_hash
+                != checkpoint.checkpoint_hash
+            || !envelope
+                .checkpoint_without_paged_state
+                .state
+                .domain_records
+                .is_empty()
+            || !envelope
+                .checkpoint_without_paged_state
+                .state
+                .decisions
+                .is_empty()
+        {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint envelope metadata is inconsistent",
+            ));
+        }
+        let decision_manifest_page = provider
+            .load_state_page(&envelope.decision_manifest_page_id)?
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    "paged decision manifest is unavailable",
+                )
+            })?;
+        decision_manifest_page.validate()?;
+        if decision_manifest_page.page_id != envelope.decision_manifest_page_id {
+            return Err(invalid_snapshot_error(
+                "paged decision provider returned the wrong manifest page",
+            ));
+        }
+        let decision_manifest: PagedDecisionManifest =
+            serde_json::from_slice(&decision_manifest_page.bytes).map_err(|error| {
+                invalid_snapshot_error(format!("invalid paged decision manifest: {error}"))
+            })?;
+        validate_paged_decision_manifest(&decision_manifest)?;
+        let hot_decision_page = provider
+            .load_state_page(&decision_manifest.hot_page_id)?
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    "paged hot decision state is unavailable",
+                )
+            })?;
+        hot_decision_page.validate()?;
+        if hot_decision_page.page_id != decision_manifest.hot_page_id {
+            return Err(invalid_snapshot_error(
+                "paged decision provider returned the wrong hot-state page",
+            ));
+        }
+        let hot_decisions: DecisionState = serde_json::from_slice(&hot_decision_page.bytes)
+            .map_err(|error| {
+                invalid_snapshot_error(format!("invalid paged hot decision state: {error}"))
+            })?;
+        let mut directory_pages =
+            Vec::with_capacity(decision_manifest.archive_directory_page_ids.len());
+        for directory_page_id in &decision_manifest.archive_directory_page_ids {
+            let directory_state_page =
+                provider
+                    .load_state_page(directory_page_id)?
+                    .ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::StatePageUnavailable,
+                            "paged decision directory page is unavailable",
+                        )
+                    })?;
+            directory_state_page.validate()?;
+            if directory_state_page.page_id != *directory_page_id {
+                return Err(invalid_snapshot_error(
+                    "paged decision provider returned the wrong directory page",
+                ));
+            }
+            let directory_page: PagedDecisionDirectoryPage =
+                serde_json::from_slice(&directory_state_page.bytes).map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid paged decision directory page: {error}"
+                    ))
+                })?;
+            directory_pages.push(directory_page);
+        }
+        let archive_bucket_pages = assemble_paged_decision_directory(directory_pages)?;
+        let required_dependency_pages = hot_decisions
+            .required_archived_dependency_page_keys()
+            .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+        let mut resident_dependency_pages = Vec::with_capacity(required_dependency_pages.len());
+        for page_key in required_dependency_pages {
+            let page_id = archive_bucket_pages.get(&page_key).ok_or_else(|| {
+                invalid_snapshot_error(
+                    "hot decision state references history absent from the archive directory",
+                )
+            })?;
+            let state_page = provider.load_state_page(page_id)?.ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::StatePageUnavailable,
+                    "decision dependency locator page is unavailable",
+                )
+            })?;
+            state_page.validate()?;
+            if state_page.page_id != *page_id {
+                return Err(invalid_snapshot_error(
+                    "paged decision provider returned the wrong dependency locator page",
+                ));
+            }
+            let page: DecisionArchiveBucketPage = serde_json::from_slice(&state_page.bytes)
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid decision dependency locator page: {error}"
+                    ))
+                })?;
+            page.validate()
+                .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+            if page.bucket != page_key.bucket
+                || page.segment != page_key.segment
+                || page
+                    .state_page_id()
+                    .map_err(|error| invalid_snapshot_error(error.to_string()))?
+                    != *page_id
+            {
+                return Err(invalid_snapshot_error(
+                    "decision dependency locator page disagrees with the committed directory",
+                ));
+            }
+            resident_dependency_pages.push(page);
+        }
+        let decisions = DecisionState::from_paged_checkpoint_root_with_resident_pages(
+            hot_decisions,
+            archive_bucket_pages.into(),
+            decision_manifest.archive_receipt_count,
+            &decision_manifest.archive_receipt_root,
+            resident_dependency_pages,
+        )
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+        let domain_records = super::PersistentDomainRecordStore::from_state_pages(
+            &envelope.domain_records,
+            provider,
+        )?;
+        let mut compact_checkpoint = envelope.checkpoint_without_paged_state;
+        compact_checkpoint.state.domain_records = domain_records.values().cloned().collect();
+        compact_checkpoint.state.decisions = decisions;
+        let mut simulation = Self::from_checkpoint_and_journal(compact_checkpoint, segments)?;
+        simulation.state.current.domain_records = domain_records;
+        Ok(simulation)
+    }
+
+    pub fn from_portable_paged_checkpoint(
+        portable: PortablePagedSimulationCheckpoint,
+    ) -> Result<Self, CanwuError> {
+        let mut provider = EmbeddedPageProvider::default();
+        for page in portable.pages {
+            page.validate()?;
+            if let Some(existing) = provider.pages.insert(page.page_id.clone(), page.clone())
+                && existing != page
+            {
+                return Err(invalid_snapshot_error(
+                    "portable paged checkpoint contains conflicting duplicate pages",
+                ));
+            }
+        }
+        Self::from_paged_checkpoint(&portable.checkpoint, &provider)
+    }
+
     /// Returns the current monotonic cut through every append-only journal.
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         EvidenceCursor::from_evidence(&self.state.evidence)
     }
 
-    /// Captures current authoritative state without cloning accumulated evidence.
-    pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
+    fn checkpoint_with_paged_payloads(
+        &self,
+        include_paged_payloads: bool,
+    ) -> Result<SimulationCheckpoint, CanwuError> {
         let archived_segment_headers = self.state.evidence.archived_segment_headers.clone();
         let evidence_dependencies = self.evidence_dependencies()?;
         let mut keyed_draw_reservations = self.state.evidence.keyed_draw_reservations.clone();
@@ -2642,7 +3443,7 @@ impl Simulation {
         let checkpoint = SimulationCheckpoint {
             format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
             journal_end: self.evidence_cursor()?,
-            state: self.checkpoint_state(),
+            state: self.checkpoint_state_with_paged_payloads(include_paged_payloads),
             archived_segment_manifest_root: skipped_commitment_root(
                 ARCHIVED_SEGMENT_MANIFEST_DOMAIN,
                 &archived_segment_headers,
@@ -2664,8 +3465,91 @@ impl Simulation {
             )?,
             keyed_draw_reservations,
         };
-        validate_compact_continuation(&checkpoint)?;
+        if include_paged_payloads {
+            validate_compact_continuation(&checkpoint)?;
+        }
         Ok(checkpoint)
+    }
+
+    /// Captures current authoritative state without cloning accumulated evidence.
+    pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
+        self.checkpoint_with_paged_payloads(true)
+    }
+
+    /// Builds the complete kernel and plugin mark set used before offline
+    /// archive garbage collection. Every registered plugin participant is
+    /// invoked automatically; callers cannot accidentally sweep a plugin
+    /// archive by forgetting a second, manual manifest-extension step.
+    pub fn archive_reachability_manifest(
+        &self,
+        retained_checkpoints: &[SimulationCheckpoint],
+        page_retention: &StatePageRetentionLedger,
+        decision_provider: &dyn DecisionArchiveProvider,
+        plugin_provider: &dyn super::PluginArchiveObjectProvider,
+    ) -> Result<ArchiveReachabilityManifest, CanwuError> {
+        let mut manifest = ArchiveReachabilityManifest {
+            state_page_ids: page_retention.reachable_page_ids(),
+            evidence_segment_ids: SimulationCheckpoint::reachable_archive_segment_ids(
+                retained_checkpoints,
+            )?,
+            ..ArchiveReachabilityManifest::default()
+        };
+        manifest.evidence_segment_ids.extend(
+            self.state
+                .evidence
+                .archived_segment_headers
+                .iter()
+                .map(|header| header.segment_id.clone()),
+        );
+        let decisions = self
+            .state
+            .current
+            .decisions
+            .archive_reachability(decision_provider)
+            .map_err(super::decision::decision_error)?;
+        manifest.state_page_ids.extend(decisions.bucket_page_ids);
+        manifest.decision_blob_ids.extend(decisions.blob_locators);
+        let pending_ingress_ids = self
+            .state
+            .scheduler
+            .pending_ingress
+            .iter()
+            .map(|key| key.id)
+            .collect::<BTreeSet<_>>();
+        for record in &self.state.evidence.ingress {
+            if let IngressPayload::Maintenance { request } = &record.payload
+                && let super::MaintenanceIngressRequest::DecisionArchive { commit } =
+                    request.as_ref()
+            {
+                manifest
+                    .decision_blob_ids
+                    .extend(commit.archive_locators().map(str::to_owned));
+            }
+            if pending_ingress_ids.contains(&record.id)
+                && let IngressPayload::Plugin {
+                    archive_retention, ..
+                } = &record.payload
+            {
+                for retention in archive_retention {
+                    manifest.insert_plugin_object(
+                        retention.namespace.clone(),
+                        retention.object_id.clone(),
+                    );
+                }
+            }
+        }
+        for (plugin, participant) in &self.plugins.archive_reachability_participants {
+            let reads = self
+                .plugins
+                .state_owners
+                .iter()
+                .filter_map(|(state, owner)| (owner == plugin).then_some(state.clone()))
+                .collect::<Vec<_>>();
+            let reader = format!("{plugin}.archive_reachability");
+            let view = self.plugin_view(&reader, &reads);
+            participant(&view, plugin_provider, &mut manifest)?;
+        }
+        Ok(manifest)
     }
 
     /// Clones only evidence appended after a previously persisted cursor.
@@ -2959,6 +3843,168 @@ impl Simulation {
     }
 }
 
+/// Runs the real `Simulation` paged-checkpoint boundary over a decision
+/// locator fixture, including storage, authenticated restore, empty-suffix
+/// replay, exact provider-backed lookups, and a zero-page repeat delta.
+pub fn format8_paged_checkpoint_scale_probe(
+    decision_count: usize,
+) -> Result<PagedCheckpointScaleMetrics, CanwuError> {
+    let fixture = canwu_decision::format8_decision_locator_scale_fixture(decision_count)
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+    let decision_metrics = fixture.metrics.clone();
+    let decision_blobs = fixture
+        .archive_blobs
+        .into_iter()
+        .map(|blob| {
+            blob.content_id()
+                .map(|content_id| (content_id, blob))
+                .map_err(|error| invalid_snapshot_error(error.to_string()))
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let store = Format8ScalePageStore {
+        pages: RefCell::new(BTreeMap::new()),
+        decision_blobs: RefCell::new(decision_blobs),
+        provider_calls: RefCell::new(0),
+    };
+    let mut simulation = Simulation::new(8, Scenario::new(SimTime::EPOCH, Vec::new()))?;
+    simulation.state.current.decisions = fixture.state;
+    simulation.state.metadata.plugin_registration_closed = true;
+    simulation.state.metadata.commitment_cache = None;
+    simulation.refresh_checkpoint_hash()?;
+
+    let prepared = simulation.prepare_paged_checkpoint(None, &store)?;
+    let initial_provider_calls = *store.provider_calls.borrow();
+    let initial_delta_pages = prepared.delta.new_pages.len() as u64;
+    prepared.store_and_verify(&store)?;
+    let root_page = store
+        .load_state_page(&prepared.checkpoint.root_page_id)?
+        .ok_or_else(|| invalid_snapshot_error("Format-8 scale root page is unavailable"))?;
+    let envelope: PagedCheckpointEnvelope = serde_json::from_slice(&root_page.bytes)
+        .map_err(|error| invalid_snapshot_error(format!("invalid scale envelope: {error}")))?;
+    let manifest_page = store
+        .load_state_page(&envelope.decision_manifest_page_id)?
+        .ok_or_else(|| invalid_snapshot_error("Format-8 scale manifest page is unavailable"))?;
+    let manifest: PagedDecisionManifest = serde_json::from_slice(&manifest_page.bytes)
+        .map_err(|error| invalid_snapshot_error(format!("invalid scale manifest: {error}")))?;
+
+    let restored = Simulation::from_paged_checkpoint(&prepared.checkpoint, &store)?;
+    let replayed =
+        Simulation::from_paged_checkpoint_and_journal(&prepared.checkpoint, &store, Vec::new())?;
+    let samples = [
+        1_usize,
+        decision_count.saturating_div(2).max(1),
+        decision_count,
+    ]
+    .into_iter()
+    .filter(|ordinal| *ordinal <= decision_count)
+    .collect::<BTreeSet<_>>();
+    for ordinal in &samples {
+        let key = DecisionHistoryKey::Attempt(canwu_core::DecisionRequestId::new(
+            u64::try_from(*ordinal)
+                .map_err(|_| invalid_snapshot_error("decision scale sample exceeds u64"))?,
+        ));
+        if !matches!(
+            restored.decision_history_location_with_provider(&key, &store)?,
+            DecisionHistoryLocation::Archived { .. }
+        ) || !matches!(
+            replayed.decision_history_location_with_provider(&key, &store)?,
+            DecisionHistoryLocation::Archived { .. }
+        ) {
+            return Err(invalid_snapshot_error(
+                "paged checkpoint scale restore lost exact decision history",
+            ));
+        }
+    }
+    *store.provider_calls.borrow_mut() = 0;
+    let repeat = restored.prepare_paged_checkpoint(Some(&prepared.checkpoint), &store)?;
+    let repeat_provider_calls = *store.provider_calls.borrow();
+    let replay_repeat = replayed.prepare_paged_checkpoint(Some(&prepared.checkpoint), &store)?;
+    let mut changed = restored;
+    let changed_request_id = canwu_core::DecisionRequestId::new(
+        u64::try_from(decision_count)
+            .map_err(|_| invalid_snapshot_error("decision scale count exceeds u64"))?
+            .checked_add(1)
+            .ok_or_else(|| invalid_snapshot_error("decision scale request ID overflowed"))?,
+    );
+    changed
+        .state
+        .current
+        .decisions
+        .append_attempt(super::DecisionAttemptRecord {
+            request_id: changed_request_id,
+            request_commitment: canonical_byte_hash(
+                "canwu.format8.single-page-change.v1",
+                &changed_request_id.get().to_be_bytes(),
+            ),
+            at: SimTime::from_minutes(
+                i64::try_from(changed_request_id.get())
+                    .map_err(|_| invalid_snapshot_error("decision scale time exceeds i64"))?,
+            ),
+            revision_before: 0,
+            expected_revision: 0,
+            outcome: super::DecisionAttemptOutcome::Rejected {
+                code: super::DecisionAttemptErrorCode::InvalidDecision,
+                message: "Format-8 single locator-page change".to_owned(),
+            },
+        })
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+    let changed_key = DecisionHistoryKey::Attempt(changed_request_id);
+    let changed_archive = changed
+        .state
+        .current
+        .decisions
+        .prepare_decision_archive(std::slice::from_ref(&changed_key))
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+    for blob in &changed_archive.blobs {
+        store.decision_blobs.borrow_mut().insert(
+            blob.content_id()
+                .map_err(|error| invalid_snapshot_error(error.to_string()))?,
+            blob.clone(),
+        );
+    }
+    let verified_change = changed
+        .state
+        .current
+        .decisions
+        .verify_decision_archive(&changed_archive, &store)
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+    changed.state.current.decisions = changed
+        .state
+        .current
+        .decisions
+        .commit_verified_decision_archive(&verified_change)
+        .map_err(|error| invalid_snapshot_error(error.to_string()))?;
+    changed.state.metadata.commitment_cache = None;
+    changed.refresh_checkpoint_hash()?;
+    *store.provider_calls.borrow_mut() = 0;
+    let single_page_change =
+        changed.prepare_paged_checkpoint(Some(&prepared.checkpoint), &store)?;
+    let single_page_change_provider_calls = *store.provider_calls.borrow();
+    let pages = store.pages.borrow();
+    Ok(PagedCheckpointScaleMetrics {
+        decision_entries: decision_metrics.entries,
+        decision_locator: decision_metrics,
+        state_pages: pages.len() as u64,
+        decision_directory_pages: manifest.archive_directory_page_ids.len() as u64,
+        max_state_page_bytes: pages
+            .values()
+            .map(|page| page.decoded_bytes)
+            .max()
+            .unwrap_or(0),
+        initial_delta_pages,
+        repeat_delta_pages: repeat.delta.new_pages.len() as u64,
+        single_page_change_delta_pages: single_page_change.delta.new_pages.len() as u64,
+        initial_provider_calls,
+        repeat_provider_calls,
+        single_page_change_provider_calls,
+        exact_restart_queries: samples.len() as u64,
+        restored_root_matches: repeat.checkpoint.root_page_id == prepared.checkpoint.root_page_id,
+        replayed_root_matches: replay_repeat.checkpoint.root_page_id
+            == prepared.checkpoint.root_page_id,
+        root_page_id: prepared.checkpoint.root_page_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unnecessary_literal_bound, clippy::unnecessary_wraps)]
@@ -2974,6 +4020,51 @@ mod tests {
     use canwu_core::{BoundaryId, CommandId, DomainRecordKind, PersonId};
     use serde_json::{Map, Value, json};
     use std::cell::RefCell;
+
+    fn decision_directory_page(start: u32, len: usize) -> PagedDecisionDirectoryPage {
+        PagedDecisionDirectoryPage {
+            format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+            archive_bucket_pages: (0..len)
+                .map(|offset| {
+                    let ordinal = start + u32::try_from(offset).expect("test offset fits u32");
+                    (
+                        super::super::DecisionArchivePageKey {
+                            bucket: u16::try_from(ordinal / 256).expect("bucket fits"),
+                            segment: u8::try_from(ordinal % 256).expect("segment fits"),
+                        },
+                        canonical_byte_hash(
+                            "canwu.test.decision-directory-page.v1",
+                            &ordinal.to_be_bytes(),
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn paged_decision_directory_rejects_noncanonical_cross_page_encodings() {
+        let first = decision_directory_page(0, MAX_PAGED_DECISION_DIRECTORY_ENTRIES);
+        let second = decision_directory_page(
+            u32::try_from(MAX_PAGED_DECISION_DIRECTORY_ENTRIES).expect("directory bound fits u32"),
+            1,
+        );
+        assemble_paged_decision_directory(vec![second.clone(), first.clone()])
+            .expect_err("swapped directory pages must fail");
+        assemble_paged_decision_directory(vec![decision_directory_page(0, 1), second])
+            .expect_err("a short middle directory page must fail");
+
+        let duplicate_id = canonical_byte_hash("canwu.test.duplicate-directory.v1", b"same");
+        let manifest = PagedDecisionManifest {
+            format_version: PAGED_CHECKPOINT_FORMAT_VERSION,
+            hot_page_id: canonical_byte_hash("canwu.test.hot.v1", b"hot"),
+            archive_receipt_root: canonical_byte_hash("canwu.test.archive.v1", b"archive"),
+            archive_receipt_count: 1,
+            archive_directory_page_ids: vec![duplicate_id.clone(), duplicate_id],
+        };
+        validate_paged_decision_manifest(&manifest)
+            .expect_err("duplicate directory page IDs must fail");
+    }
 
     #[test]
     fn archived_plugin_ingress_provenance_is_merkle_bound() {

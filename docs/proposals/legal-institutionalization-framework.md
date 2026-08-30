@@ -5,6 +5,13 @@ This document defines the path from social
 evidence to legal state without adding legal semantics to Canwu core, granting
 culture write authority, or bypassing the current plugin and decision APIs.
 
+Format 8 persistence note (2026-08-30): the institutional semantics in this
+document remain current, but references to one `LegalRuntimeRecord` describe
+the superseded v1 storage layout. The implemented runtime persists plan,
+directory, shard, coordinator, culture-dependency, and archive-head records and
+uses the archive/maintenance contracts in
+[Legal storage sharding, COW, delta persistence, and cold archive](legal-storage-sharding-compaction.md).
+
 ## Decision
 
 Add an optional `canwu-law` domain extension. It consumes bounded,
@@ -13,8 +20,8 @@ proceedings, and exposes actor-relative decision outbox items. A deterministic
 host adapter turns those outbox items into ordinary `DecisionIngressRequest`
 values. A selected legal option may issue an authorized plugin command, but the
 command writes only a bounded pending legal intent. A later canonical law-plugin
-boundary revalidates that intent and atomically compare-and-sets the one
-persisted legal aggregate. Non-controller operations enter through typed
+boundary revalidates that intent and atomically compare-and-sets the declared
+legal shard working set. Non-controller operations enter through typed
 `LegalMutation` ingress and settle inside the same kernel boundary; no live
 Canwu state is mutated through a detached `LegalRuntime` value.
 
@@ -309,7 +316,7 @@ aggregate, not standalone kernel domain records:
   event supplies promulgation semantics; optional retrospective application time;
   validity disposition by legal order; typed origin; and exact evidence refs.
 
-The v1 aggregate creates one source and one rule version per proposal; several
+The legal shard creates one source and one rule version per proposal; several
 clause deltas may share that version. An application groups proposals that came
 from one larger instrument through their exact external instrument, ruling, or
 reception origins. The generic model does not materialize one record per
@@ -437,24 +444,24 @@ fails the whole transaction.
 
 ## Transaction and phase flow
 
-The implementation uses one plugin-owned aggregate and canonical ingress:
+The implementation uses plugin-owned sharded state and canonical ingress:
 
 1. Signal providers schedule bounded law plugin ingress. A zero-delay schedule
    is still admitted no earlier than the next transaction.
-2. The event-driven law boundary loads the aggregate and its embedded compiled
-   plan, checks its immutable plan/budget binding, validates the record's expected
-   version plus every host-owned `expected_versions` guard, verifies signal
+2. The event-driven law boundary loads the declared directory/shard working set
+   and compiled plan, checks its immutable plan/budget binding, validates exact
+   expected versions plus every host-owned `expected_versions` guard, verifies signal
    provider generation proof, and applies typed `LegalMutation` values. Complete history
    and derived-index validation runs at cold load/restore, not once per mutation.
 3. The same `DomainDeltaProposal` validates all fallible work, consumes pending
    intents, advances only dirty or due procedures, applies due versions,
-   refreshes dirty applicability projections, and emits one aggregate update
-   with `expected_version` equal to the record it read. Kernel commit is atomic.
+   refreshes dirty applicability projections, and emits one owner-scoped shard
+   mutation bundle. Kernel commit is atomic across the complete bundle.
 4. Holder contexts enter through `legal_actor_context` ingress. The plugin
    executes the supplied bounded `KnowledgeQuery` against the named holder and
    derives facts from returned knowledge records; callers cannot inject a
    synthetic read cut or arbitrary JSON truth.
-5. After an aggregate commit materializes outbox work, the host runs the
+5. After the shard bundle materializes outbox work, the host runs the
    three-stage decision dispatch and accepted-outcome ACK protocol. A later
    accepted command schedules pending legal intent through canonical ingress.
 6. Indexed wake ingress is scheduled for procedure expiry and future law
@@ -529,7 +536,7 @@ whether law remains valid:
 | `Evidence` | Is retained as cited history and cannot itself open or mutate a proceeding. |
 
 Dependencies name an exact `CulturalTargetGenerationRef` and are either
-`AdoptionEvidence` or `LiveLevel`. The law aggregate blocks retirement while an
+`AdoptionEvidence` or `LiveLevel`. The law extension blocks retirement while an
 open procedure, pending intent, pending/enqueued outbox item, operative
 `LiveLevel`, or future scheduled version with a `LiveLevel` dependency still
 names that generation. Retirement is idempotent,
@@ -542,17 +549,18 @@ receipt; it does not keep the retired culture runtime, propagation indexes, or
 payload in the hot path.
 
 Retirement is an explicit maintenance operation, not ordinary boundary work.
-The v1 aggregate may inspect open procedures, pending intents/outbox items, and
-rules to prove that no live dependency remains, but the compiled
-`max_retirement_dependency_records` budget bounds the outer records scanned and
-rejects the whole operation before mutation when exhausted; per-record fan-out
-remains bounded by `max_evidence_per_record`. A target-keyed dependency index is
-the intended replacement after jurisdiction sharding.
+Format 8 maintains target-keyed culture-dependency records while proposals,
+intents, outbox items, rules, and scheduled versions change. The culture owner
+and every registered dependency resolver submit owner-scoped proposals against
+one domain root; the kernel rejects missing participants, live dependencies,
+stale versions, cross-owner writes, or budget overflow before atomically
+committing the full set. Per-record dependency fan-out remains bounded by
+`max_evidence_per_record`.
 
 An unadmitted culture effect batch is not visible inside `canwu-law`; the host
 culture/law coordinator must withhold culture retirement until that external
 queue is admitted or discarded. The law extension claims only the dependencies
-present in its own canonical aggregate.
+present in its own canonical shards.
 
 If a legal rule deliberately depends on a live cultural level, the law content
 must define its own review, expiry, or renewal operation. The culture runtime
@@ -736,43 +744,37 @@ most the compiled candidate limit from the order index, and scans only while
 the total query-work budget permits. This scan is required to honor explicit
 retrospective dates that precede a version's ordinary effective-time index key.
 
-This is not a whole-engine history-independent complexity claim. The current
-single `LegalRuntimeRecord` must be decoded and encoded as a whole. Boundary
-checkpoint capture now shares the domain-record map root in O(1), but the first
-domain-record write still copies that whole map. Decision state is still cloned
-as one resident value and retains tickets, attempts, and traces; exact outcome
-proof uses an O(log n) request index, but storage-aware decision-history APIs
-remain part of the format-8 proposal rather than the format-7 implementation. A
-live legal boundary is therefore approximately
-`O(H_serialized + P_delta + C_delta + J_delta + V_delta)`, where `H_serialized`
-is the persisted aggregate and first-write transaction state. Until law state
-is sharded and content-addressed page deltas plus closed-decision payload
-archival exist, the run manifest must cap those populations. `canwu-law` claims
-only that its post-decode settlement algorithms do not rescan the historical
-catalog.
-
-The reproducible release probe is:
+This remains a bounded-work claim, not a promise that every query is independent
+of admitted candidates. Format 8 removes total cold history from ordinary legal
+boundaries by persisting a declared shard working set, structurally shared
+domain/decision roots, and authenticated root-only archives. The reproducible
+release probes are:
 
 ```text
-cargo run --release -p canwu-law --example law_scale
+cargo run --release -p canwu-sim --example format8_scale -- 1000000
+cargo run --release -p canwu-law --example format8_legal_index_scale -- 1000000
+cargo run --release -p canwu-law --example law_scale -- cold
+cargo test -p canwu-law --release production_runtime_archive_prepare_scales_to_one_million_candidates -- --ignored --nocapture
+cargo test --release -p canwu-law --test law_contract production_canwu_boundary_scales_with_large_admissible_candidate_fixture -- --ignored --nocapture
 ```
 
-On the implementation workstation, 5,000 law-local idle settlements had a 200 ns
-median with 1,000, 10,000, and 100,000 retained retirement records. Five real
-Canwu plugin boundaries, including aggregate decode, transaction clone, CAS, and
-encode, had median times of 37,472 us, 507,535 us, and 6,017,504 us respectively.
-These are regression baselines, not cross-machine guarantees. The second curve
-means that even the 1k result exceeds both a 60 FPS frame budget (16.7 ms) and a
-30 FPS frame budget (33.3 ms), so legal settlement is not per-frame work. The 10k
-result is suitable only for low-frequency turn or background work, and the 100k
-result only for offline or maintenance processing. The implemented
-domain-record root sharing removes that map's full checkpoint copy, but not
-aggregate serialization, decision-state cloning, or first-write map copies.
-The legal archive state-machine code is currently a private test-only scaffold,
-not an activated persistence path. Before jurisdiction sharding and page-delta
-persistence land, a live manifest should therefore set its hard retained-record
-cap well below 1k and calibrate that cap on target hardware. Sharding/page COW
-is a scale milestone, not optional polish.
+On the 2026-08-30 implementation workstation, 50 ordinary dirty-shard
+boundaries with 100,000 and 1,000,000 authenticated cold legal members measured
+6,558/11,302 us and 6,920/11,733 us median/p95. The real one-million-member index
+used 65,536 membership, 65,536 effective-time, and 65,535 recorded-time pages;
+no page exceeded 37 entries or 37,335 canonical bytes. It was built through 245
+production archive batches while retaining at most 4,096 hot candidates. The
+standalone production-selector stress fixture held one million candidates and
+examined/materialized only the selected 4,096-record batch. Its 2.49-GB
+candidate shard intentionally exceeds the live 128-MiB legal state and memory
+ceilings, so it is algorithmic stress evidence rather than an admissible save.
+A separate real Canwu probe used an admissible 16,384-candidate, 38.40-MiB
+persisted shard: an empty boundary took 217 us, an unrelated legal ingress took
+2,563 us, and the candidate shard's domain-record version stayed unchanged.
+The production domain-store probe inserted and cold-audited one million records
+through the HAMT, key pages, and four Patricia indexes. See the
+[Format 8 scale artifact](../benchmarks/format8-2026-08-30.md) for exact roots,
+shape gates, and interpretation.
 
 The complete proposed milestone is now defined by
 [Legal storage sharding, COW, delta persistence, and cold archive](legal-storage-sharding-compaction.md).
@@ -791,8 +793,8 @@ neither. Decision history APIs likewise distinguish bounded hot state from
 provider-backed cold history instead of promising that every old attempt and
 trace remains resident.
 
-Before multi-shard support, cross-jurisdiction proceedings remain in the single
-canonical shard. The proposed format-8 design uses one normative order shard,
+Cross-jurisdiction proceedings use the persisted coordinator rather than
+letting one jurisdiction shard finalize independently. The implemented Format 8 layout uses one normative order shard,
 jurisdiction projection/procedure shards, target-keyed culture dependency
 records, and a persisted deterministic coordinator for cross-shard proceedings;
 no shard may independently perform the final legal write.
@@ -932,9 +934,10 @@ The single implementation milestone completed all of the following:
 1. Compile legal orders, jurisdiction relations, institutions, procedures,
    source modes, normative descriptors, applicability profiles, ID blocks, and
    budgets into a hashed plan.
-2. Persist one canonical typed runtime aggregate containing proposals,
-   procedures, sources, stable rules, immutable law versions, cases, findings,
-   rulings, participation, outcomes, pending intents, and outbox state.
+2. Persist independently versioned plan, directory, order/jurisdiction shard,
+   coordinator, culture-dependency, and archive-head records while retaining
+   current projections for proposals, sources, rules, law versions, cases,
+   findings, rulings, participation, outcomes, pending intents, and outbox state.
 3. Implement provider-bound signal admission, plan-bound legal settlement,
    semantic validation, deterministic reservations, and module-owned cold-load
    validation.

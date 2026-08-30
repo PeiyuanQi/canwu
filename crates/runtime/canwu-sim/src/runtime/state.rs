@@ -1,16 +1,15 @@
 use super::{
     ArchivedEvidenceReceipt, ArchivedSegmentHeader, Army, ArmyId, BoundaryRecord, CanwuError,
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
-    DecisionRequestId, DecisionState, DomainRecord, DomainRecordRef, EntityRef, ErrorCode,
-    EvidenceCursor, EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt,
-    IngressRecord, KeyedDrawReservation, KnowledgeSnapshot, Person, PersonId, PluginComponentKey,
-    PluginComponentRecord, RandomDrawRecord, RandomStreamKey, RandomStreamState, Route, RouteId,
-    RunConfigurationSnapshot, RunManifest, Scenario, ScheduleKey, ScheduledAction, SimEvent,
-    SimTime, Territory, TerritoryId,
+    DecisionRequestId, DecisionState, DomainRecordRef, EntityRef, ErrorCode, EvidenceCursor,
+    EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
+    KeyedDrawReservation, KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonId,
+    PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
+    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
+    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct RuntimeEvidence {
@@ -485,10 +484,9 @@ pub(super) struct RuntimeCurrentState {
     pub(super) armies: BTreeMap<ArmyId, Army>,
     pub(super) knowledge: KnowledgeSnapshot,
     pub(super) plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
-    /// Persistent current-state roots. Boundary checkpoints and forks clone
-    /// the domain-record handle in O(1); the first writer receives a private
-    /// map copy. Decision storage remains format-7 compatible.
-    pub(super) domain_records: Arc<BTreeMap<DomainRecordRef, DomainRecord>>,
+    /// Persistent current-state root. Boundary checkpoints and forks clone the
+    /// handle in O(1), while writes copy only paths in the persistent map.
+    pub(super) domain_records: PersistentDomainRecordStore,
     pub(super) decisions: DecisionState,
     pub(super) root_seed: u64,
     /// Persisted authority credential root. It is intentionally separate from

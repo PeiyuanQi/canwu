@@ -1,13 +1,17 @@
 use super::knowledge::{KnowledgeLimitsV1, PluginKnowledgeSchema, validate_schema_set};
+use super::maintenance::{
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantRole,
+};
 use super::records::DomainRecordSchema;
 use super::{
-    BoundaryPhase, BoundarySystemContract, BoundarySystemHandler, BoundaryWriteStage,
-    CORE_STATE_NAMESPACE, CanwuError, CommandContext, DomainRecord, EntityRef, ErrorCode,
-    IngressClass, PluginIngressDescriptor, RandomStreamKey, ReservationRef, SchemaRegistry,
-    SimDuration, SimEvent, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemContract, TypeSchema, boundary_write_stage, canonical_text, invalid_snapshot,
-    invalid_snapshot_error, is_canonical_hash, is_domain_record_state, knowledge, records,
-    validate_type_schema,
+    ArchiveReachabilityManifest, BoundaryPhase, BoundarySystemContract, BoundarySystemHandler,
+    BoundaryWriteStage, CORE_STATE_NAMESPACE, CanwuError, CommandContext, DomainRecord, EntityRef,
+    ErrorCode, IngressClass, PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit,
+    RandomStreamKey, ReservationRef, SchemaRegistry, SimDuration, SimEvent, SimulationView,
+    StateKey, StateVisibility, SystemCadence, SystemContract, TypeSchema, boundary_write_stage,
+    canonical_hash, canonical_text, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
+    is_domain_record_state, knowledge, records, validate_type_schema,
 };
 use canwu_event::EventAudience;
 use serde::{Deserialize, Serialize};
@@ -122,8 +126,35 @@ pub struct PluginActionDescriptor {
     pub writes: Vec<StateKey>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub const PLUGIN_DESCRIPTOR_FORMAT_VERSION: u32 = 1;
+
+/// Declares that a plugin must participate when a target namespace is retired
+/// through owner-authorized maintenance. The declaration is persisted in the
+/// plugin descriptor, so replay and restore cannot silently omit a dependent
+/// owner.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceDependencyResolverDescriptor {
+    pub target_namespace: String,
+}
+
+/// Declaratively binds the retained archive root of an internal ingress to
+/// one or more payload fields. The kernel can therefore reject a forged or
+/// mismatched restored packet without knowing the plugin's archive format.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginArchiveRetentionBinding {
+    pub packet_type: String,
+    pub namespace: String,
+    pub object_id_json_pointers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PluginDescriptor {
+    /// Explicit descriptor wire version. Missing on a 0.7 descriptor and
+    /// therefore decoded as zero so Format 8 rejects it before activation.
+    #[serde(default = "missing_descriptor_format")]
+    pub descriptor_format: u32,
     pub name: String,
     #[serde(default)]
     pub version: String,
@@ -139,11 +170,54 @@ pub struct PluginDescriptor {
     pub commands: Vec<PluginActionDescriptor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress: Vec<PluginIngressDescriptor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub internal_ingress: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archive_retention_bindings: Vec<PluginArchiveRetentionBinding>,
     pub schema_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub record_schemas: Vec<DomainRecordSchema>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub knowledge_schemas: Vec<PluginKnowledgeSchema>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maintenance_dependency_resolvers: Vec<MaintenanceDependencyResolverDescriptor>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub owner_authorized_maintenance_participant: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archive_reachability_participant: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn missing_descriptor_format() -> u32 {
+    0
+}
+
+impl Default for PluginDescriptor {
+    fn default() -> Self {
+        Self {
+            descriptor_format: PLUGIN_DESCRIPTOR_FORMAT_VERSION,
+            name: String::new(),
+            version: String::new(),
+            semantic_hash: String::new(),
+            event_audiences: BTreeMap::new(),
+            systems: Vec::new(),
+            boundary_systems: Vec::new(),
+            commands: Vec::new(),
+            ingress: Vec::new(),
+            internal_ingress: Vec::new(),
+            archive_retention_bindings: Vec::new(),
+            schema_types: Vec::new(),
+            record_schemas: Vec::new(),
+            knowledge_schemas: Vec::new(),
+            maintenance_dependency_resolvers: Vec::new(),
+            owner_authorized_maintenance_participant: false,
+            archive_reachability_participant: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -205,6 +279,46 @@ pub type SimulationSystemHandler =
 pub type PluginCommandHandler =
     fn(&SimulationView<'_>, &CommandContext, &Value) -> Result<Vec<SystemDirective>, CanwuError>;
 
+/// Plugin-owned callback used by the kernel maintenance coordinator. The
+/// callback receives a read-scoped immutable view and must author the exact
+/// proposal for its own schemas; callers never supply participant mutations.
+pub type OwnerAuthorizedMaintenanceParticipant =
+    fn(
+        &SimulationView<'_>,
+        &OwnerAuthorizedMaintenanceRequest,
+        OwnerAuthorizedParticipantRole,
+    ) -> Result<OwnerAuthorizedParticipantDraft, CanwuError>;
+
+/// Namespace-aware host access used only by offline archive mark/sweep. Plugin
+/// callbacks decode and authenticate their own object formats; the kernel never
+/// needs to depend on downstream archive crates.
+pub trait PluginArchiveObjectProvider {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError>;
+}
+
+impl PluginArchiveObjectProvider for () {
+    fn load_plugin_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        Ok(None)
+    }
+}
+
+/// Plugin-owned extension of the unified archive reachability manifest. The
+/// callback is registered with the plugin descriptor, so a restored runtime
+/// cannot silently omit a plugin archive from GC marking.
+pub type PluginArchiveReachabilityParticipant = fn(
+    &SimulationView<'_>,
+    &dyn PluginArchiveObjectProvider,
+    &mut ArchiveReachabilityManifest,
+) -> Result<(), CanwuError>;
+
 /// A stateless executable package whose persisted identity must change whenever
 /// its authoritative behavior changes.
 pub trait SimulationPlugin {
@@ -236,6 +350,9 @@ pub struct PluginRegistry {
     pub(super) boundary_systems: Vec<RegisteredBoundarySystem>,
     pub(super) commands: BTreeMap<(String, String), RegisteredCommand>,
     pub(super) ingress: BTreeMap<(String, String), PluginIngressDescriptor>,
+    pub(super) internal_ingress: BTreeSet<(String, String)>,
+    pub(super) archive_retention_bindings:
+        BTreeMap<(String, String), PluginArchiveRetentionBinding>,
     pub(super) state_owners: BTreeMap<StateKey, String>,
     pub(super) immediate_write_states: BTreeMap<StateKey, String>,
     pub(super) boundary_writers: BTreeMap<(BoundaryWriteStage, StateKey), (String, String)>,
@@ -244,6 +361,10 @@ pub struct PluginRegistry {
     pub(super) record_schemas: records::DomainRecordSchemas,
     pub(super) knowledge_schemas: knowledge::KnowledgeSchemas,
     pub(super) knowledge_kind_owners: knowledge::KnowledgeKindOwners,
+    pub(super) maintenance_dependency_resolvers: BTreeMap<String, BTreeSet<String>>,
+    pub(super) maintenance_participants: BTreeMap<String, OwnerAuthorizedMaintenanceParticipant>,
+    pub(super) archive_reachability_participants:
+        BTreeMap<String, PluginArchiveReachabilityParticipant>,
 }
 
 #[derive(Clone)]
@@ -273,6 +394,95 @@ pub struct PluginRegistrar<'a> {
 }
 
 impl PluginRegistrar<'_> {
+    pub fn register_archive_reachability_participant(
+        &mut self,
+        handler: PluginArchiveReachabilityParticipant,
+    ) -> Result<(), CanwuError> {
+        let mut candidate = self.registry.clone();
+        if candidate
+            .archive_reachability_participants
+            .insert(self.plugin.clone(), handler)
+            .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "archive reachability participant was registered twice",
+            ));
+        }
+        candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default()
+            .archive_reachability_participant = true;
+        *self.registry = candidate;
+        Ok(())
+    }
+
+    pub fn register_owner_authorized_maintenance_participant(
+        &mut self,
+        handler: OwnerAuthorizedMaintenanceParticipant,
+    ) -> Result<(), CanwuError> {
+        let mut candidate = self.registry.clone();
+        if candidate
+            .maintenance_participants
+            .insert(self.plugin.clone(), handler)
+            .is_some()
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "owner-authorized maintenance participant was registered twice",
+            ));
+        }
+        candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default()
+            .owner_authorized_maintenance_participant = true;
+        *self.registry = candidate;
+        Ok(())
+    }
+
+    pub fn register_maintenance_dependency_resolver(
+        &mut self,
+        target_namespace: impl Into<String>,
+    ) -> Result<(), CanwuError> {
+        let target_namespace = target_namespace.into();
+        if !canonical_text(&target_namespace) || target_namespace == CORE_STATE_NAMESPACE {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "maintenance dependency target namespace is invalid",
+            ));
+        }
+        let descriptor = MaintenanceDependencyResolverDescriptor {
+            target_namespace: target_namespace.clone(),
+        };
+        let mut candidate = self.registry.clone();
+        let plugin_descriptor = candidate
+            .descriptors
+            .entry(self.plugin.clone())
+            .or_default();
+        if plugin_descriptor
+            .maintenance_dependency_resolvers
+            .contains(&descriptor)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "maintenance dependency resolver was registered twice",
+            ));
+        }
+        plugin_descriptor
+            .maintenance_dependency_resolvers
+            .push(descriptor);
+        plugin_descriptor.maintenance_dependency_resolvers.sort();
+        candidate
+            .maintenance_dependency_resolvers
+            .entry(target_namespace)
+            .or_default()
+            .insert(self.plugin.clone());
+        *self.registry = candidate;
+        Ok(())
+    }
+
     pub fn register_record_schema(
         &mut self,
         mut schema: DomainRecordSchema,
@@ -823,9 +1033,143 @@ impl PluginRegistrar<'_> {
         *self.registry = candidate;
         Ok(())
     }
+
+    /// Registers an ingress that cannot be authored through the ordinary host
+    /// API and returns the opaque capability required to enqueue it.
+    pub fn register_internal_ingress(
+        &mut self,
+        descriptor: PluginIngressDescriptor,
+    ) -> Result<PluginIngressPermit, CanwuError> {
+        let packet_type = descriptor.name.clone();
+        self.register_ingress(descriptor)?;
+        let semantic_hash = self
+            .registry
+            .descriptors
+            .get(&self.plugin)
+            .map(|descriptor| descriptor.semantic_hash.clone())
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidPluginRegistration,
+                    "internal ingress owner has no plugin descriptor",
+                )
+            })?;
+        let token = canonical_hash(
+            "canwu.plugin.internal-ingress-permit.v1",
+            &(&self.plugin, &packet_type, &semantic_hash),
+        )?;
+        self.registry
+            .internal_ingress
+            .insert((self.plugin.clone(), packet_type.clone()));
+        let plugin_descriptor =
+            self.registry
+                .descriptors
+                .get_mut(&self.plugin)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidPluginRegistration,
+                        "internal ingress owner descriptor disappeared",
+                    )
+                })?;
+        plugin_descriptor.internal_ingress.push(packet_type.clone());
+        plugin_descriptor.internal_ingress.sort();
+        plugin_descriptor.internal_ingress.dedup();
+        Ok(PluginIngressPermit {
+            plugin: self.plugin.clone(),
+            packet_type,
+            semantic_hash,
+            token,
+        })
+    }
+
+    /// Registers an internal ingress whose single retained archive root must
+    /// equal every declared JSON-pointer field in its payload.
+    pub fn register_internal_ingress_with_archive_retention(
+        &mut self,
+        descriptor: PluginIngressDescriptor,
+        namespace: impl Into<String>,
+        object_id_json_pointers: Vec<String>,
+    ) -> Result<PluginIngressPermit, CanwuError> {
+        let binding = PluginArchiveRetentionBinding {
+            packet_type: descriptor.name.clone(),
+            namespace: namespace.into(),
+            object_id_json_pointers,
+        };
+        validate_archive_retention_binding(&binding)?;
+        let permit = self.register_internal_ingress(descriptor)?;
+        let key = (self.plugin.clone(), binding.packet_type.clone());
+        if self
+            .registry
+            .archive_retention_bindings
+            .get(&key)
+            .is_some_and(|existing| existing != &binding)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::PluginManifestMismatch,
+                "plugin changed its stored archive-retention binding",
+            ));
+        }
+        self.registry
+            .archive_retention_bindings
+            .insert(key, binding.clone());
+        let plugin_descriptor =
+            self.registry
+                .descriptors
+                .get_mut(&self.plugin)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidPluginRegistration,
+                        "archive-retention owner descriptor disappeared",
+                    )
+                })?;
+        plugin_descriptor.archive_retention_bindings.push(binding);
+        plugin_descriptor
+            .archive_retention_bindings
+            .sort_by(|left, right| left.packet_type.cmp(&right.packet_type));
+        Ok(permit)
+    }
 }
 
 impl PluginRegistry {
+    pub(super) fn validate_archive_retention(
+        &self,
+        plugin: &str,
+        packet_type: &str,
+        payload: &Value,
+        retention: &[PluginArchiveRetention],
+    ) -> Result<(), CanwuError> {
+        let Some(binding) = self
+            .archive_retention_bindings
+            .get(&(plugin.to_owned(), packet_type.to_owned()))
+        else {
+            return if retention.is_empty() {
+                Ok(())
+            } else {
+                Err(CanwuError::new(
+                    ErrorCode::InvalidPayload,
+                    "plugin ingress carries undeclared archive retention",
+                ))
+            };
+        };
+        if retention.len() != 1 || retention[0].namespace != binding.namespace {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "plugin ingress archive retention does not match its declared binding",
+            ));
+        }
+        let object_id = &retention[0].object_id;
+        if !is_canonical_hash(object_id)
+            || binding.object_id_json_pointers.iter().any(|pointer| {
+                payload.pointer(pointer).and_then(Value::as_str) != Some(object_id.as_str())
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "plugin ingress archive root is not bound to its authenticated payload roots",
+            ));
+        }
+        Ok(())
+    }
+
     pub fn register<P: SimulationPlugin + ?Sized>(
         &mut self,
         plugin: &P,
@@ -853,6 +1197,7 @@ impl PluginRegistry {
         candidate_registry.descriptors.insert(
             plugin_name.to_owned(),
             PluginDescriptor {
+                descriptor_format: PLUGIN_DESCRIPTOR_FORMAT_VERSION,
                 name: plugin_name.to_owned(),
                 version: plugin.version().to_owned(),
                 semantic_hash: plugin.semantic_hash().to_owned(),
@@ -917,6 +1262,8 @@ impl PluginRegistry {
             boundary_systems: Vec::new(),
             commands: BTreeMap::new(),
             ingress: BTreeMap::new(),
+            internal_ingress: BTreeSet::new(),
+            archive_retention_bindings: BTreeMap::new(),
             state_owners: BTreeMap::new(),
             immediate_write_states: BTreeMap::new(),
             boundary_writers: BTreeMap::new(),
@@ -925,11 +1272,15 @@ impl PluginRegistry {
             record_schemas: BTreeMap::new(),
             knowledge_schemas: BTreeMap::new(),
             knowledge_kind_owners: BTreeMap::new(),
+            maintenance_dependency_resolvers: BTreeMap::new(),
+            maintenance_participants: BTreeMap::new(),
+            archive_reachability_participants: BTreeMap::new(),
         };
         let mut previous_plugin = None;
         for mut descriptor in descriptors {
             let plugin = descriptor.name.trim().to_owned();
             if plugin.is_empty()
+                || descriptor.descriptor_format != PLUGIN_DESCRIPTOR_FORMAT_VERSION
                 || descriptor.name != plugin
                 || descriptor.version.trim().is_empty()
                 || descriptor.version != descriptor.version.trim()
@@ -1028,6 +1379,29 @@ impl PluginRegistry {
                 {
                     return invalid_snapshot("knowledge schema ID is duplicated");
                 }
+            }
+            if descriptor
+                .maintenance_dependency_resolvers
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            {
+                return invalid_snapshot(
+                    "plugin maintenance dependency resolvers are not in canonical order",
+                );
+            }
+            for resolver in &descriptor.maintenance_dependency_resolvers {
+                if !canonical_text(&resolver.target_namespace)
+                    || resolver.target_namespace == CORE_STATE_NAMESPACE
+                {
+                    return invalid_snapshot(
+                        "plugin maintenance dependency resolver target is invalid",
+                    );
+                }
+                registry
+                    .maintenance_dependency_resolvers
+                    .entry(resolver.target_namespace.clone())
+                    .or_default()
+                    .insert(plugin.clone());
             }
             if descriptor
                 .systems
@@ -1215,6 +1589,57 @@ impl PluginRegistry {
                     return invalid_snapshot("plugin descriptor has duplicate ingress types");
                 }
             }
+            if descriptor
+                .internal_ingress
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+                || descriptor.internal_ingress.iter().any(|name| {
+                    !descriptor
+                        .ingress
+                        .iter()
+                        .any(|ingress| &ingress.name == name)
+                })
+            {
+                return invalid_snapshot("plugin internal ingress declarations are not canonical");
+            }
+            registry.internal_ingress.extend(
+                descriptor
+                    .internal_ingress
+                    .iter()
+                    .map(|name| (plugin.clone(), name.clone())),
+            );
+            if descriptor
+                .archive_retention_bindings
+                .windows(2)
+                .any(|pair| pair[0].packet_type >= pair[1].packet_type)
+            {
+                return invalid_snapshot(
+                    "plugin archive-retention bindings are not in canonical order",
+                );
+            }
+            for binding in &descriptor.archive_retention_bindings {
+                validate_archive_retention_binding(binding).map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "invalid plugin archive-retention binding: {error}"
+                    ))
+                })?;
+                if !descriptor
+                    .internal_ingress
+                    .iter()
+                    .any(|name| name == &binding.packet_type)
+                    || registry
+                        .archive_retention_bindings
+                        .insert(
+                            (plugin.clone(), binding.packet_type.clone()),
+                            binding.clone(),
+                        )
+                        .is_some()
+                {
+                    return invalid_snapshot(
+                        "plugin archive-retention binding lacks one internal ingress owner",
+                    );
+                }
+            }
             for (event_type, audience) in &descriptor.event_audiences {
                 validate_event_audience_name(event_type).map_err(|error| {
                     invalid_snapshot_error(format!("invalid plugin event audience: {error}"))
@@ -1263,6 +1688,34 @@ impl PluginRegistry {
             ),
         ))
     }
+}
+
+fn validate_archive_retention_binding(
+    binding: &PluginArchiveRetentionBinding,
+) -> Result<(), CanwuError> {
+    if binding.packet_type.trim().is_empty()
+        || binding.packet_type != binding.packet_type.trim()
+        || binding.namespace.is_empty()
+        || binding.namespace.len() > 128
+        || !binding.namespace.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
+        })
+        || binding.object_id_json_pointers.is_empty()
+        || binding
+            .object_id_json_pointers
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || binding
+            .object_id_json_pointers
+            .iter()
+            .any(|pointer| !pointer.starts_with('/') || pointer.len() > 256 || !pointer.is_ascii())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin archive-retention binding is malformed",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn validate_state_keys(keys: &mut Vec<StateKey>) -> Result<(), CanwuError> {
@@ -1867,6 +2320,41 @@ mod tests {
             payload_schema: PayloadSchema::Any,
             subjects: vec![],
         }
+    }
+
+    #[test]
+    fn archive_retention_binding_rejects_restored_root_mismatch() {
+        let root = "a".repeat(64);
+        let other = "b".repeat(64);
+        let binding = PluginArchiveRetentionBinding {
+            packet_type: "archive_commit".to_owned(),
+            namespace: "fixture.archive.directory".to_owned(),
+            object_id_json_pointers: vec![
+                "/commit/archive_head/membership_root".to_owned(),
+                "/commit/pending_reachability/directory_root".to_owned(),
+            ],
+        };
+        let mut registry = PluginRegistry::default();
+        registry
+            .archive_retention_bindings
+            .insert(("fixture".to_owned(), "archive_commit".to_owned()), binding);
+        let retention = vec![PluginArchiveRetention {
+            namespace: "fixture.archive.directory".to_owned(),
+            object_id: root.clone(),
+        }];
+        let payload = serde_json::json!({
+            "commit": {
+                "archive_head": { "membership_root": root },
+                "pending_reachability": { "directory_root": other },
+            }
+        });
+        assert_eq!(
+            registry
+                .validate_archive_retention("fixture", "archive_commit", &payload, &retention,)
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidPayload
+        );
     }
 
     #[test]

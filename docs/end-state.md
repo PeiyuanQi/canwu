@@ -163,17 +163,17 @@ event history, and command records. A
 snapshot also retains plugin descriptors and blocks continuation until matching
 stateless executable handlers are rehydrated. It can be forked into independent
 simulations. Current-state checkpoints and contiguous evidence-journal segments
-provide incremental persistence without changing the flat snapshot contract.
-The opt-in compact runtime can seal completed live tails into caller-owned
+provide incremental persistence without changing the canonical snapshot view.
+Format 8 additionally exposes content-addressed state-page deltas and typed
+decision-history locations so a host can keep only bounded hot state while
+retaining exact archive receipts. The opt-in compact runtime can seal completed live tails into caller-owned
 segments while preserving continuation, exact idempotency, commitments, and
 reconstruction through that same contract.
-Future work may add:
-
-- content-addressed archive adapters and indexed historical lookup
-- replay from command/event journals
-- branch metadata and lineage
-- world and outcome comparison across branches
-- historical dataset provenance
+Post-Format-8 work may add richer historical research adapters, branch metadata
+and lineage, world/outcome comparison across branches, and external dataset
+provenance. Provider-backed exact legal and decision hydration, typed
+availability failure, self-contained replay journals, and bounded temporal
+candidate indexes are part of Format 8 rather than deferred roadmap items.
 
 ## Geography
 
@@ -294,16 +294,16 @@ This is a hot-state optimization, not historical deletion.
 The complete authoring, incremental settlement, lifecycle, and benchmark
 contract is specified in the [culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md).
 
-Legal institutionalization is implemented as the experimental downstream
-`canwu-law` extension. It
+Legal institutionalization is implemented as the downstream `canwu-law`
+extension. It
 consumes admitted social evidence and materializes holder-bound decision outbox
 items. A three-stage host adapter durably prepares the revision, enqueues and
 settles controller-bound `DecisionTicket` options, then acknowledges exact
 accepted outcomes and ticket bindings from the persistent decision journal.
 An authorized command writes only a pending legal intent, and a later canonical
-law boundary atomically compare-and-sets immutable source and law versions plus
-the stable rule. Legal validity, knowledge, applicability, enforcement, and
-compliance remain separate.
+law boundary atomically commits the affected legal shards, including immutable
+source and law versions plus the stable rule. Legal validity, knowledge,
+applicability, enforcement, and compliance remain separate.
 The [legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 defines this boundary and the retention of enacted law after culture retirement.
 The generic crate covers compilation, institutional procedure, authorized
@@ -312,7 +312,7 @@ cases, findings, rulings, applicability, succession, and sparse retirement
 indexes. The crate provides typed `LegalMutation` ingress, deterministic outbox
 dispatch through the public decision API, indexed wake/expiry work, and actor
 contexts derived through bounded holder knowledge queries. The plugin owns
-atomic aggregate persistence; the application owns orchestration and all
+atomic sharded persistence and authenticated archive placement; the application owns orchestration and all
 concrete election, administration, justice, and
 enforcement systems.
 

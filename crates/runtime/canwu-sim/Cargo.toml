@@ -14,6 +14,7 @@ publish = ["crates-io"]
 
 [dependencies]
 blake3.workspace = true
+im.workspace = true
 canwu-core.workspace = true
 canwu-decision.workspace = true
 canwu-event.workspace = true

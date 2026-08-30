@@ -6,7 +6,9 @@ mod hashing;
 mod ingress;
 mod knowledge;
 mod legacy_world;
+mod maintenance;
 mod manifest;
+mod page_store;
 mod persistence;
 mod plugins;
 mod policy;
@@ -38,42 +40,72 @@ pub use canwu_core::{
     KnowledgeSchemaId,
 };
 pub use canwu_decision::{
-    ControllerDecision, DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome,
+    ControllerDecision, DECISION_ARCHIVE_BUCKET_PAGE_FORMAT_VERSION,
+    DECISION_ARCHIVE_FORMAT_VERSION, DecisionAction, DecisionArchiveBlob,
+    DecisionArchiveBucketPage, DecisionArchivePageKey, DecisionArchiveProvider,
+    DecisionArchiveReceipt, DecisionArchiveRecord, DecisionArchiveStore,
+    DecisionArchiveStoreOutcome, DecisionAttemptErrorCode, DecisionAttemptOutcome,
     DecisionAttemptRecord, DecisionAuthority, DecisionContext, DecisionController,
     DecisionControllerBinding, DecisionError, DecisionErrorCode, DecisionExternalEvidence,
-    DecisionFactorContribution, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
-    DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule,
-    DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace,
-    ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy,
-    HumanDecisionResponse, HumanPolicy, LlmModelIdentity, LlmPolicy, OrderedRulePolicy,
-    PolicyDecision, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice,
-    RulePolicy, UtilityEvaluator, UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator,
-    WeightedUtilityPolicy,
+    DecisionFactorContribution, DecisionHistoryCursor, DecisionHistoryKey, DecisionHistoryLocation,
+    DecisionHistoryPage, DecisionHistoryQueryBudget, DecisionHotState, DecisionLocatorScaleMetrics,
+    DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOutcome, DecisionPolicy,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule, DecisionState, DecisionTicket,
+    DecisionTicketDraft, DecisionTicketState, DecisionTrace, ExternalDecisionOption,
+    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
+    HumanPolicy, LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
+    MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE, OrderedRulePolicy,
+    PersistentDecisionLog, PolicyDecision, PreparedDecisionArchive, QueuedExternalPolicy,
+    QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice, RulePolicy, TraceLocatorScaleMetrics,
+    UtilityEvaluator, UtilityPolicy, UtilityProfile, VerifiedDecisionArchiveCommit,
+    WeightedUtilityEvaluator, WeightedUtilityPolicy, format8_decision_locator_scale_probe,
+    format8_trace_locator_scale_probe,
 };
 pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
     PreparedDecisionIngress,
 };
 pub use ingress::{
-    IngressClass, IngressPayload, IngressReceipt, IngressRecord, PluginIngressDescriptor,
-    PluginIngressRequest,
+    IngressClass, IngressPayload, IngressReceipt, IngressRecord, MaintenanceChangeRecord,
+    MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt,
+    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
 };
 pub use knowledge::{
     KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
 };
+pub use maintenance::{
+    MAX_OWNER_AUTHORIZED_MUTATIONS, MAX_OWNER_AUTHORIZED_PARTICIPANTS,
+    OWNER_AUTHORIZED_MAINTENANCE_FORMAT_VERSION, OwnerAuthorizedMaintenanceDraft,
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantProposal, OwnerAuthorizedParticipantRole,
+    OwnerAuthorizedRecordExpectation, VerifiedOwnerAuthorizedMaintenanceCommit,
+};
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
+pub use page_store::{
+    MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES, PreparedStateDelta, STATE_PAGE_CODEC,
+    STATE_PAGE_FORMAT_VERSION, STATE_PAGE_RETENTION_FORMAT_VERSION, StatePageBlob,
+    StatePageProvider, StatePageRetentionHandle, StatePageRetentionLedger, StatePageRetentionPhase,
+    StatePageStore, prepare_state_delta, state_page_id, verify_state_delta,
+};
 pub use persistence::{
-    ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, ArchivedEvidenceLocator,
-    ArchivedEvidenceReceipt, ArchivedPluginIngressProvenance, ArchivedSegmentHeader,
-    CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal, CompactedSimulation,
-    EvidenceArchiveIndex, EvidenceCursor, EvidenceDependency, EvidenceIndexEntry,
-    EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment,
-    EvidenceNestedLocator, EvidenceRequirement, EvidenceSealToken,
+    ArchiveProvider, ArchiveReachabilityManifest, ArchiveStore, ArchiveStoreOutcome,
+    ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedPluginIngressProvenance,
+    ArchivedSegmentHeader, CHECKPOINT_JOURNAL_FORMAT_VERSION, CheckpointJournal,
+    CompactedSimulation, EvidenceArchiveIndex, EvidenceCursor, EvidenceDependency,
+    EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots,
+    EvidenceJournalSegment, EvidenceNestedLocator, EvidenceRequirement, EvidenceSealToken,
     IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
-    IdentityEvidenceDependenciesV1, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadRequiredEvidenceContinuationV1,
-    PreparedEvidenceSeal, ReplayJournal, SimulationCheckpoint, SimulationSnapshot,
+    IdentityEvidenceDependenciesV1, PAGED_CHECKPOINT_FORMAT_VERSION,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PagedCheckpointScaleMetrics,
+    PagedSimulationCheckpoint, PayloadRequiredEvidenceContinuationV1,
+    PortablePagedSimulationCheckpoint, PreparedEvidenceSeal, PreparedPagedSimulationCheckpoint,
+    ReplayJournal, SimulationCheckpoint, SimulationSnapshot, format8_paged_checkpoint_scale_probe,
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
+};
+pub use plugins::{
+    MaintenanceDependencyResolverDescriptor, OwnerAuthorizedMaintenanceParticipant,
+    PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant,
 };
 pub use policy::{
     CommandPolicyContext, ControllerPolicy, InteractionPolicy, ObservationPolicy,
@@ -86,9 +118,11 @@ pub use random::{
     RandomStreamKey, RandomStreamState,
 };
 pub use records::{
-    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation, DomainRecordSchema,
-    DomainReference, DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind,
+    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,
+    DomainRecordDraft, DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy,
+    DomainRecordOperation, DomainRecordPageRoots, DomainRecordSchema, DomainReference,
+    DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, PatriciaStoreMetrics,
+    PersistentDomainRecordStore, format8_patricia_scale_probe,
 };
 
 use canwu_core::{
@@ -115,7 +149,6 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 
 use event_payloads::{
     DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
@@ -125,11 +158,11 @@ use hashing::{
     ControlCommitmentMaterial, StateHashMaterial, authoritative_run_identity,
     boundary_state_hash_for_commitments, checkpoint_hash_for_commitments,
     checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash,
-    decision_commitment_root, domain_record_commitment_root, identity_commitment_root,
-    is_canonical_hash, knowledge_commitment_root, plugin_component_commitment_root,
-    random_stream_commitment_root, runtime_commitment_roots, scheduler_commitment_root,
-    snapshot_boundary_head_state_hash, snapshot_checkpoint_hash, snapshot_commitment_roots,
-    snapshot_is_at_boundary_head, state_hash, world_commitment_root,
+    decision_commitment_root, identity_commitment_root, is_canonical_hash,
+    knowledge_commitment_root, plugin_component_commitment_root, random_stream_commitment_root,
+    runtime_commitment_roots, scheduler_commitment_root, snapshot_boundary_head_state_hash,
+    snapshot_checkpoint_hash, snapshot_commitment_roots, snapshot_is_at_boundary_head, state_hash,
+    world_commitment_root,
 };
 use ingress::IngressQueueKey;
 use revision::{
@@ -158,16 +191,17 @@ use validation::{
 };
 
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
-/// Format 7 binds every decision attempt to its complete ingress request. Older
+/// Format 8 binds every decision attempt to its complete ingress request and
+/// activates content-addressed state-page persistence. Older
 /// snapshots, journals, and sub-contract versions are rejected before any
 /// mutable runtime state is constructed.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 7;
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 8;
 /// Version of the authoritative revision commitment.
-pub const STATE_REVISION_FORMAT_VERSION: u32 = 2;
+pub const STATE_REVISION_FORMAT_VERSION: u32 = 3;
 /// Version of persisted monotonic boundary-admission cursors.
-pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 2;
+pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// Version of the domain-separated checkpoint commitment contract.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 3;
+pub const COMMITMENT_FORMAT_VERSION: u32 = 4;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying
@@ -213,7 +247,7 @@ fn reject_unknown_current_fields(
                 };
                 let Some(expected) = encoded.get(key) else {
                     return Err(invalid_snapshot_error(format!(
-                        "format 7 wire contains unknown field `{field_path}`"
+                        "format 8 wire contains unknown field `{field_path}`"
                     )));
                 };
                 reject_unknown_current_fields(value, expected, &field_path)?;
@@ -222,7 +256,7 @@ fn reject_unknown_current_fields(
         (Value::Array(input), Value::Array(encoded)) => {
             if input.len() != encoded.len() {
                 return Err(invalid_snapshot_error(format!(
-                    "format 7 wire array `{path}` changed shape during decoding"
+                    "format 8 wire array `{path}` changed shape during decoding"
                 )));
             }
             for (index, (value, expected)) in input.iter().zip(encoded).enumerate() {
@@ -239,16 +273,42 @@ where
     T: for<'de> Deserialize<'de> + Serialize,
 {
     let input: Value = serde_json::from_str(json).map_err(|error| {
-        invalid_snapshot_error(format!("could not parse format 7 {label}: {error}"))
+        invalid_snapshot_error(format!("could not parse format 8 {label}: {error}"))
     })?;
+    deserialize_current_value(&input, label)
+}
+
+fn deserialize_current_value<T>(input: &Value, label: &str) -> Result<T, CanwuError>
+where
+    T: for<'de> Deserialize<'de> + Serialize,
+{
     let decoded: T = serde_json::from_value(input.clone()).map_err(|error| {
-        invalid_snapshot_error(format!("could not deserialize format 7 {label}: {error}"))
+        invalid_snapshot_error(format!("could not deserialize format 8 {label}: {error}"))
     })?;
     let encoded = serde_json::to_value(&decoded).map_err(|error| {
-        invalid_snapshot_error(format!("could not re-encode format 7 {label}: {error}"))
+        invalid_snapshot_error(format!("could not re-encode format 8 {label}: {error}"))
     })?;
-    reject_unknown_current_fields(&input, &encoded, "")?;
+    reject_unknown_current_fields(input, &encoded, "")?;
     Ok(decoded)
+}
+
+fn deserialize_current_snapshot_json(json: &str) -> Result<SimulationSnapshot, CanwuError> {
+    let input: Value = serde_json::from_str(json).map_err(|error| {
+        invalid_snapshot_error(format!("could not parse format 8 snapshot: {error}"))
+    })?;
+    let engine_version = input.get("engine_version").and_then(Value::as_str);
+    let snapshot_format_version = input.get("snapshot_format_version").and_then(Value::as_u64);
+    if engine_version != Some(ENGINE_VERSION)
+        || snapshot_format_version != Some(u64::from(SNAPSHOT_FORMAT_VERSION))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::UnsupportedSnapshotVersion,
+            format!(
+                "the JSON snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; pre-8 formats are not supported"
+            ),
+        ));
+    }
+    deserialize_current_value(&input, "snapshot")
 }
 
 fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(), CanwuError> {
@@ -260,17 +320,17 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
         || snapshot.legacy_rng.is_some()
     {
         return Err(invalid_snapshot_error(
-            "format 7 snapshots must use the current commitment, revision, admission, and authority contracts",
+            "format 8 snapshots must use the current commitment, revision, admission, and authority contracts",
         ));
     }
     let Some(run_manifest @ RunManifest::Declared { .. }) = snapshot.run_manifest.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 7 snapshots require a declared run manifest",
+            "format 8 snapshots require a declared run manifest",
         ));
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return Err(invalid_snapshot_error(
-            "format 7 snapshots must retain their canonical initial scenario",
+            "format 8 snapshots must retain their canonical initial scenario",
         ));
     };
     if matches!(
@@ -280,27 +340,27 @@ fn validate_current_snapshot_contract(snapshot: &SimulationSnapshot) -> Result<(
         )
     ) {
         return Err(invalid_snapshot_error(
-            "format 7 snapshots cannot use legacy or manifest-only run configuration provenance",
+            "format 8 snapshots cannot use legacy or manifest-only run configuration provenance",
         ));
     }
     manifest::validate(run_manifest, Some(initial_scenario))?;
     let expected_manifest_hash = manifest::hash(run_manifest)?;
     if snapshot.run_manifest_hash != expected_manifest_hash {
         return Err(invalid_snapshot_error(
-            "format 7 snapshot run manifest hash is inconsistent",
+            "format 8 snapshot run manifest hash is inconsistent",
         ));
     }
     let run_configuration = snapshot
         .run_configuration
         .as_ref()
-        .ok_or_else(|| invalid_snapshot_error("format 7 snapshots require run configuration"))?;
+        .ok_or_else(|| invalid_snapshot_error("format 8 snapshots require run configuration"))?;
     let (_, authority_manifest_hash) =
         authoritative_run_identity(run_manifest, &expected_manifest_hash, run_configuration)?;
     let expected_authority_root =
         fresh_authority_root_seed(snapshot.root_seed, &authority_manifest_hash)?;
     if snapshot.authority_root_seed != expected_authority_root {
         return Err(invalid_snapshot_error(
-            "format 7 snapshot authority root is not bound to its run identity",
+            "format 8 snapshot authority root is not bound to its run identity",
         ));
     }
     Ok(())
@@ -338,24 +398,25 @@ fn validate_domain_record_page_request(
 }
 
 fn domain_record_candidates(
-    records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    records: &impl records::DomainRecordRead,
     kind: &DomainRecordKind,
     after: Option<&DomainRecordRef>,
     limit: usize,
 ) -> BTreeMap<DomainRecordRef, DomainRecord> {
-    use std::ops::Bound::{Excluded, Included, Unbounded};
-
-    let lower = after.map_or_else(
+    let (lower, excluded) = after.map_or_else(
         || {
-            Included(DomainRecordRef {
-                kind: kind.clone(),
-                id: String::new(),
-            })
+            (
+                DomainRecordRef {
+                    kind: kind.clone(),
+                    id: String::new(),
+                },
+                false,
+            )
         },
-        |cursor| Excluded(cursor.clone()),
+        |cursor| (cursor.clone(), true),
     );
     records
-        .range((lower, Unbounded))
+        .range_from(lower, excluded)
         .take_while(|(reference, _)| reference.kind == *kind)
         .take(limit)
         .map(|(reference, record)| (reference.clone(), record.clone()))
@@ -619,9 +680,9 @@ use scenario::{
 
 use plugins::PluginComponentKey;
 pub use plugins::{
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor, PluginCommandHandler,
-    PluginComponentRecord, PluginDescriptor, PluginRegistrar, PluginRegistry, SimulationPlugin,
-    SimulationSystemHandler, SystemDirective,
+    PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadProperty, PayloadSchema, PayloadValueType,
+    PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord, PluginDescriptor,
+    PluginRegistrar, PluginRegistry, SimulationPlugin, SimulationSystemHandler, SystemDirective,
 };
 
 pub use view::SimulationView;
@@ -1041,6 +1102,10 @@ fn ingress_record_slice_is_empty(value: &&[IngressRecord]) -> bool {
     value.is_empty()
 }
 
+fn maintenance_change_slice_is_empty(value: &&[MaintenanceChangeRecord]) -> bool {
+    value.is_empty()
+}
+
 const BOUNDARY_STATE_HASH_V1_PREFIX: &str = "v1:";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1280,13 +1345,13 @@ impl Simulation {
                         .collect(),
                     knowledge: scenario.knowledge,
                     plugin_components: BTreeMap::new(),
-                    domain_records: Arc::new(
+                    domain_records: PersistentDomainRecordStore::from_records(
                         scenario
                             .domain_records
                             .into_iter()
                             .map(|record| (record.reference.clone(), record))
                             .collect(),
-                    ),
+                    )?,
                     decisions: DecisionState::default(),
                     root_seed: seed,
                     authority_root_seed,
@@ -1433,13 +1498,12 @@ impl Simulation {
     }
 
     fn ensure_runtime_ready(&self) -> Result<(), CanwuError> {
-        self.plugins.ensure_active()?;
-        records::validate_record_store(
-            &self.state.current.domain_records,
-            &self.plugins.record_schemas,
-            self.state.scheduler.now,
-            &|entity| runtime_entity_exists(&self.state, entity),
-        )
+        // Initial construction, snapshot restore, and plugin activation perform
+        // the complete domain-record audit. Thereafter all public mutations go
+        // through affected-closure validation on the persistent store. Repeating
+        // the cold audit here would deserialize every untouched plugin payload
+        // before every ingress and boundary, defeating Format-8 shard isolation.
+        self.plugins.ensure_active()
     }
 
     fn bound_initial_scenario(&self) -> Option<&Scenario> {
@@ -1691,7 +1755,7 @@ impl Simulation {
     /// # Panics
     ///
     /// Panics only if a runtime object was constructed without its required
-    /// Format 7 initial scenario, which is prevented by the public loaders.
+    /// Format 8 initial scenario, which is prevented by the public loaders.
     #[must_use]
     pub fn replay_journal(&self) -> ReplayJournal {
         ReplayJournal {
@@ -1703,7 +1767,7 @@ impl Simulation {
                 .metadata
                 .initial_scenario
                 .clone()
-                .expect("Format 7 runs always retain their initial scenario"),
+                .expect("Format 8 runs always retain their initial scenario"),
             authority_root_seed: self.state.current.authority_root_seed,
             run_manifest: self.state.metadata.run_manifest.clone(),
             run_manifest_hash: self.state.metadata.run_manifest_hash.clone(),
@@ -1891,16 +1955,7 @@ impl Simulation {
             .transpose()?;
         let domain_records = needs
             .contains(CommitmentDomains::DOMAIN_RECORDS)
-            .then(|| {
-                let values: Vec<_> = self
-                    .state
-                    .current
-                    .domain_records
-                    .values()
-                    .cloned()
-                    .collect();
-                domain_record_commitment_root(&values)
-            })
+            .then(|| self.state.current.domain_records.commitment_root())
             .transpose()?;
         let decisions = needs
             .contains(CommitmentDomains::DECISIONS)
@@ -2134,7 +2189,7 @@ impl Simulation {
             return Err(CanwuError::new(
                 ErrorCode::UnsupportedSnapshotVersion,
                 format!(
-                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; formats 2-6 are not supported"
+                    "the typed snapshot loader accepts only engine {ENGINE_VERSION} format {SNAPSHOT_FORMAT_VERSION}; pre-8 formats are not supported"
                 ),
             ));
         }
@@ -2160,7 +2215,7 @@ impl Simulation {
             .map(IngressQueueKey::from_record)
             .collect();
         let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
-            invalid_snapshot_error("format 7 validation requires an initial scenario")
+            invalid_snapshot_error("format 8 validation requires an initial scenario")
         })?);
         let initial_domain_record_indexes = initial_scenario
             .as_ref()
@@ -2229,13 +2284,13 @@ impl Simulation {
                             )
                         })
                         .collect(),
-                    domain_records: Arc::new(
+                    domain_records: PersistentDomainRecordStore::from_records(
                         snapshot
                             .domain_records
                             .into_iter()
                             .map(|record| (record.reference.clone(), record))
                             .collect(),
-                    ),
+                    )?,
                     decisions: snapshot.decisions,
                     root_seed: snapshot.root_seed,
                     authority_root_seed: snapshot.authority_root_seed,
@@ -2318,7 +2373,7 @@ impl Simulation {
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
-        let snapshot: SimulationSnapshot = deserialize_current_json(json, "snapshot")?;
+        let snapshot = deserialize_current_snapshot_json(json)?;
         Self::from_snapshot(snapshot)
     }
 
@@ -2338,7 +2393,7 @@ impl Simulation {
         json: &str,
         plugins: &[&dyn SimulationPlugin],
     ) -> Result<Self, CanwuError> {
-        let snapshot: SimulationSnapshot = deserialize_current_json(json, "snapshot")?;
+        let snapshot = deserialize_current_snapshot_json(json)?;
         Self::from_snapshot_with_plugins(snapshot, plugins)
     }
 

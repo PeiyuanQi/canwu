@@ -258,7 +258,7 @@ impl Simulation {
         Ok(simulation)
     }
 
-    /// Deserializes a Format 7 replay journal with recursive unknown-field
+    /// Deserializes a Format 8 replay journal with recursive unknown-field
     /// rejection, then performs the exact environment-bound replay.
     pub fn replay_from_journal_json(
         plugins: &[&dyn SimulationPlugin],
@@ -389,7 +389,9 @@ impl Simulation {
                 IngressPayload::Decision { request } => {
                     request.command.as_ref().map(|command| command.request_id)
                 }
-                IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+                IngressPayload::Plugin { .. }
+                | IngressPayload::Calendar { .. }
+                | IngressPayload::Maintenance { .. } => None,
             })
             .collect();
         let mut next_ingress = 0;
@@ -549,6 +551,7 @@ fn enqueue_replay_ingress_cut(
                 packet_type,
                 payload,
                 affected_entities,
+                archive_retention,
             } => {
                 let mut request = PluginIngressRequest::new(
                     plugin.clone(),
@@ -559,7 +562,8 @@ fn enqueue_replay_ingress_cut(
                 .with_priority(record.priority);
                 request.affected_entities.clone_from(affected_entities);
                 request.cause.clone_from(&record.cause);
-                simulation.enqueue_plugin_ingress(request)?
+                request.archive_retention.clone_from(archive_retention);
+                simulation.replay_plugin_ingress(request)?
             }
             IngressPayload::Calendar { cadences } => {
                 simulation.schedule_calendar_boundary(record.due_at, cadences.clone())?
@@ -569,6 +573,20 @@ fn enqueue_replay_ingress_cut(
                 record.priority,
                 request.as_ref().clone(),
             )?,
+            IngressPayload::Maintenance { request } => match request.as_ref() {
+                super::MaintenanceIngressRequest::DecisionArchive { commit } => simulation
+                    .enqueue_decision_archive_commit(
+                        record.due_at,
+                        record.priority,
+                        commit.clone(),
+                    )?,
+                super::MaintenanceIngressRequest::OwnerAuthorized { commit } => simulation
+                    .enqueue_owner_authorized_maintenance(
+                        record.due_at,
+                        record.priority,
+                        commit.clone(),
+                    )?,
+            },
         };
         if receipt.ingress_id != record.id
             || simulation.state.evidence.ingress.last() != Some(record)

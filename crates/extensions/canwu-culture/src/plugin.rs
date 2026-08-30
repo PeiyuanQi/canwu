@@ -1,7 +1,9 @@
 use crate::{CultureStateRecord, PLUGIN_NAME, culture_state_reference};
 use canwu_api::{
-    CanwuError, DomainRecordSchema, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginRegistrar, SimulationPlugin,
+    CanwuError, DomainRecordMutation, DomainRecordSchema, ErrorCode,
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantRole, PayloadProperty, PayloadSchema, PayloadValueType,
+    PluginRegistrar, SimulationPlugin, SimulationView, StateVisibility,
 };
 use std::collections::BTreeMap;
 
@@ -61,8 +63,48 @@ impl SimulationPlugin for CulturePlugin {
             ]),
             allow_additional: false,
         };
-        registrar.register_record_schema(schema)
+        registrar.register_record_schema(schema)?;
+        registrar.register_owner_authorized_maintenance_participant(culture_maintenance_participant)
     }
+}
+
+fn culture_maintenance_participant(
+    view: &SimulationView<'_>,
+    request: &OwnerAuthorizedMaintenanceRequest,
+    role: OwnerAuthorizedParticipantRole,
+) -> Result<OwnerAuthorizedParticipantDraft, CanwuError> {
+    if role != OwnerAuthorizedParticipantRole::TargetOwner
+        || request.target.record != culture_state_reference().into_untyped()
+        || request
+            .payload
+            .get("operation")
+            .and_then(serde_json::Value::as_str)
+            != Some("retire_plugin_state")
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDomainRecord,
+            "culture maintenance authorizes only explicit retirement of its persisted plugin state",
+        ));
+    }
+    let record = view.domain_record(&request.target.record)?.ok_or_else(|| {
+        CanwuError::new(ErrorCode::InvalidDomainRecord, "culture state is missing")
+    })?;
+    Ok(OwnerAuthorizedParticipantDraft {
+        plugin: PLUGIN_NAME.to_owned(),
+        role,
+        accepted: true,
+        rejection_reason: None,
+        expected_records: vec![request.target.clone()],
+        mutations: vec![OwnerAuthorizedMutation {
+            mutation: DomainRecordMutation::Retire {
+                record: record.reference.clone(),
+                expected_version: record.version,
+                successor: None,
+            },
+            visibility: StateVisibility::NextBoundary,
+            summary: "Culture owner authorizes retirement of the persisted plugin state".to_owned(),
+        }],
+    })
 }
 
 /// Loads and validates the persisted lifecycle index against an exact plan.

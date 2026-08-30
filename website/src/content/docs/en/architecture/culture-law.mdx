@@ -190,7 +190,7 @@ The legal bridge processes only dirty or due jurisdictions and proposals:
 1. Reverse indexes map signal kind and scope to affected jurisdictions and open
    proposals; unrelated law is not scanned.
 2. Typed `LegalMutation` and holder-context ingress enter the event-driven law
-   plugin. It checks the embedded compiled-plan binding, exact aggregate version,
+   plugin. It checks the embedded compiled-plan binding, exact directory and shard versions,
    host-owned `expected_versions`, cited culture generation, exact compiled
    signal-provider `(plugin, packet_type)`, and the kernel-committed producing
    boundary. Direct host injection into the provider namespace is not evidence.
@@ -207,7 +207,7 @@ The legal bridge processes only dirty or due jurisdictions and proposals:
    can only schedule a bounded pending legal intent; it cannot write law.
 5. A later law-plugin boundary revalidates competence, procedure, revision and
    effective-time guards, clause/evidence limits, and the culture generation,
-   then atomically compare-and-sets the legal aggregate. Downstream adapters
+   then atomically commits the owner-scoped legal shard bundle. Downstream adapters
    consume the result at their own declared boundary.
 
 ```text
@@ -215,7 +215,7 @@ CulturalSignalBatch
   -> LegalProposal / DecisionTicket
   -> authorized DecisionAttempt / DecisionTrace
   -> accepted legal command -> pending intent
-  -> atomic law aggregate compare-and-set
+  -> atomic legal shard bundle commit
   -> LawVersion
   -> downstream enforcement and feedback evidence
 ```
@@ -230,7 +230,7 @@ culture or law.
 scope, competent institutions, and procedure profile. `LegalInstitution` binds
 an institution entity to a jurisdiction, authority seats, quorum, vote or
 appointment rules, and the command subject allowed to adopt law. Both are
-members of the one typed legal aggregate, not new core entity kinds or
+members of the typed legal shard state, not new core entity kinds or
 independently mutable host records.
 
 Compilation requires every procedure seat to resolve to exactly one institution
@@ -335,12 +335,13 @@ The active law keeps only a compact, Merkle-bound adoption-evidence receipt.
 The retired culture target, propagation indexes, and old payload leave the hot
 path; repeal or expiry remains an explicit legal operation.
 
-Retirement is explicit bounded maintenance. In v1,
-`max_retirement_dependency_records` caps the outer records in the aggregate
-dependency proof, while per-record fan-out is separately bounded. An over-budget
-request fails before culture or legal state changes. Ordinary legal settlement
-does not pay this scan; a later sharded runtime should replace it with a
-target-keyed dependency index.
+Retirement is explicit bounded maintenance. Format 8 keeps target-keyed culture
+dependency records and requires the culture owner plus every registered
+dependency resolver to contribute an owner-scoped proposal. The kernel
+preflights the complete set against one persistent domain root and commits all
+participants or none. Missing proposals, cross-owner writes, stale versions,
+and budget overflow fail before culture or legal state changes; ordinary legal
+settlement never scans total legal history to prove retirement safety.
 
 ## Authority, visibility, and replay
 
@@ -368,11 +369,12 @@ there is no truth fallback. Culture and legal records implement
 policies, and retained version bodies where evidence needs exact historical
 meaning.
 
-The one persisted `LegalRuntimeRecord` includes the compiled plan, plan and
-content hashes, budgets, lifecycle state, target generations, procedure
-profiles, records, and derived indexes. Load recomputes and validates those
-indexes before exposing state. Exact replay consumes mutation, signal,
-decision, command, ACK, and wake ingress plus boundary evidence. It never reruns
+Format 8 persists independently versioned plan, directory, order/jurisdiction
+shard, coordinator, culture-dependency, and archive-head records. Load admits
+only the declared working set and reconstructs derived indexes, authenticated
+archive roots, and hot projections before exposing state. Exact replay consumes
+mutation, signal, decision, command, ACK, and wake ingress plus boundary
+evidence. It never reruns
 a human, service, or model policy. Forks copy validated state and continue with
 new causal inputs. Failed boundaries restore indexes, tombstones, counters,
 evidence, and random positions atomically.
@@ -395,28 +397,41 @@ indexes, exact decision-result proof uses a request index, and both deleted and
 inserted applicability rows consume the mutation budget. Retired targets and
 historical law catalogs must not increase active proposal settlement cost.
 
-That complexity describes post-decode legal settlement, not the whole kernel
-transaction. The single v1 aggregate makes a live legal boundary approximately
-`O(H_serialized + delta)`. Release measurements for
-1k/10k/100k retained records were 37.472ms/507.535ms/6.017504s median on the real plugin
-path, while law-local idle settlement remained 200ns. Large hot histories need
-strict budgets and event-driven cadence. The 1k result already exceeds both 60
-FPS and 30 FPS frame budgets; 10k is low-frequency turn/background work, and
-100k is offline/maintenance work.
+That complexity describes shard-local semantic work. Format 8 uses persistent
+HAMT/Patricia structures, content-addressed page deltas, authenticated legal
+archive indexes, and root-only cold storage. In the 2026-08-30 release probe,
+50 ordinary dirty-shard boundaries with 100k and 1M cold legal records measured
+6.558/11.302ms and 6.920/11.733ms median/p95 respectively; cold history remained
+outside the ordinary boundary curve. The real one-million-record archive index
+uses 65,536 membership, 65,536 effective-time, and 65,535 recorded-time pages.
+Its largest page has 37 entries and 37,335 canonical bytes, with one candidate
+per sampled sparse point query. The full build uses 245 production archive
+batches and never retains more than 4,096 hot candidates. Boundary proposal
+validation applies small overlays to structurally shared roots and validates
+only the affected reference closure; empty stages do not materialize untouched
+records. A separate selector stress probe with one million candidates examines
+and materializes only the selected 4,096-record batch. Its 2.49-GB shard is
+deliberately outside the live 128-MiB legal state/memory contract. The real
+Canwu probe used an admissible 16,384-candidate, 38.40-MiB persisted shard: the
+empty boundary measured 0.169ms, the unrelated legal boundary 2.563ms, and the
+candidate record version remained unchanged.
 
-Boundary checkpoints now share the generic domain-record map root in O(1).
-The first domain-record write still copies the whole map, decision state is
-still cloned and retained as one value, and the law plugin remains one
-`LegalRuntimeRecord`. A private test-only scaffold exercises deterministic
-record-and-byte-budgeted compaction selection, per-shard membership roots, and
-the archive reachability state machine, but it is not a public API, save format,
-or replay path. This is not yet the complete format-8 sharded page-delta
-cutover. Until jurisdiction shards, content-addressed pages, typed decision
-history placement, and provider-verified archive-commit ingress all land, live
-manifests should still cap retained records well below 1k and calibrate the
-exact cap on target hardware.
 Archiving changes historical payload placement, not current law, and culture
-retirement does not automatically repeal enacted human-rights or voting eligibility rules.
+retirement does not automatically repeal enacted human-rights or voting
+eligibility rules. After restart, the unified GC reachability manifest still
+marks legal content/blob/index pages and decision locator/blob IDs. Dense
+same-time temporal cells are split into ordered authenticated segments while
+each page remains capped at 64 entries and 1 MiB. Pending verified maintenance
+ingress also retains its exact objects, transferring them to committed roots on
+apply or releasing them after terminal stale rejection. A missing provider
+reports explicit unavailability rather than treating unknown history as absent.
+Every canonical archive result remains attributable to its retention handle
+until the host completes store finalization. Finalization derives the recorded
+disposition from the reloaded authoritative runtime and queues a private
+acknowledgement that retires that recovery record. The synchronous helper
+authenticates the complete store-bound head and applies on a clone. Paged
+decision restore likewise loads only the exact archived ticket/trace locator
+pages still referenced by hot decision objects before validation.
 
 Conformance evidence should prove that:
 

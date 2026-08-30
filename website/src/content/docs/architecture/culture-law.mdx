@@ -158,10 +158,10 @@ persistence class、cadence 和 evidence；它是法律输入，不是权限授�
 法律桥接只处理 dirty 或到期的辖区和提案：
 
 1. 根据 signal kind 与 scope 的反向索引找到受影响的辖区和开放提案，不扫描无关法律；
-2. 类型化 `LegalMutation` 与 holder-context ingress 进入事件驱动的法律插件；插件校验聚合内嵌编译计划绑定、精确聚合版本、host-owned `expected_versions`、引用的文化 generation、信号提供者精确的 `(plugin, packet_type)`，以及内核提交的生产 boundary；host 直接注入同一 provider namespace 不构成证据，调用方自报的 signal kind 也不具权威性；公开事件还必须匹配保留的 provider payload（proposal、时间、媒介和辖区），一般习俗信号则采用身份与生产 boundary 证据；
+2. 类型化 `LegalMutation` 与 holder-context ingress 进入事件驱动的法律插件；插件校验内嵌编译计划绑定、精确 directory/shard 版本、host-owned `expected_versions`、引用的文化 generation、信号提供者精确的 `(plugin, packet_type)`，以及内核提交的生产 boundary；host 直接注入同一 provider namespace 不构成证据，调用方自报的 signal kind 也不具权威性；公开事件还必须匹配保留的 provider payload（proposal、时间、媒介和辖区），一般习俗信号则采用身份与生产 boundary 证据；
 3. 程序创建绑定 holder 的决策 outbox。适配器先持久化预期 revision，每个精确席位 controller 最多注册一次，后续 ticket 复用它；只有所需结果都是 `Accepted` 且当前 controller/ticket 与持久化草案精确一致时，ACK 才会通过，ingress 归档不会破坏该证明；
 4. 授权控制者从既有选项中选择；被接受的命令只能安排有界的 pending legal intent，不能直接写法律；
-5. 后续法律插件边界重新校验权限、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子 compare-and-set 法律聚合；下游适配器在各自声明的边界消费结果。
+5. 后续法律插件边界重新校验权限、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子提交 owner-scoped 法律分片 mutation bundle；下游适配器在各自声明的边界消费结果。
 
 权威路径是：
 
@@ -170,7 +170,7 @@ CulturalSignalBatch
   -> LegalProposal / DecisionTicket
   -> 授权的 DecisionAttempt / DecisionTrace
   -> 已接受的法律命令 -> pending intent
-  -> 法律聚合原子 compare-and-set
+  -> 法律分片 bundle 原子提交
   -> LawVersion
   -> 下游执行与反馈证据
 ```
@@ -181,7 +181,7 @@ CulturalSignalBatch
 
 `LegalJurisdiction` 把稳定辖区 ID 绑定到父辖区、领地范围、主管机构和 procedure profile。
 `LegalInstitution` 把机构实体绑定到辖区、权限席位、quorum、投票/任命规则和可采纳法律的 command subject。
-它们是单一类型化法律聚合的成员，不是新的 core entity kind，也不是可由 host 独立修改的记录。
+它们是类型化法律分片状态的成员，不是新的 core entity kind，也不是可由 host 独立修改的记录。
 
 编译期要求每个程序席位只能解析到一个同时声明该程序与席位的机构，并把 holder、permission profile 与采用长度前缀的无碰撞 controller ID 冻结进计划。缺失或歧义的权限定义会在运行开始前失败。
 
@@ -226,7 +226,7 @@ CulturalSignalBatch
 如果法律规则刻意依赖一个 live cultural level，法律扩展必须记录该依赖并拥有自己的复核、到期或续期规则。
 文化运行时只发出 level 结束信号，不会静默废止法律。已被法律接受的 commitment 不会让文化目标继续留在 hot path，因此文化可以退休而法律仍然生效。生效法律只保留一份经过 Merkle 绑定的紧凑采纳证据 receipt；退休文化的传播状态、索引和旧 payload 不再进入热路径，废止或到期仍然必须经过显式法律操作。
 
-退休属于显式、有界的维护操作。v1 使用 `max_retirement_dependency_records` 限制聚合依赖证明扫描的外层记录数，每条记录内的依赖扇出另有上限；超出预算时会在文化或法律状态发生任何变化前拒绝。普通法律结算不承担这次扫描；后续分片运行时应以按目标索引的依赖表替代它。
+退休属于显式、有界的维护操作。Format 8 由内核协调目标 schema 所有者与每个已登记的依赖解析插件；各参与者只能修改自己拥有的记录，完整提案集合针对同一领域根预检并原子提交。法律扩展使用按文化目标分片的依赖记录，因此退休无需扫描全部法律历史；缺少目标所有者提案、跨所有者写入、陈旧版本或超预算都会在根交换前失败。
 
 ## 权限、可见性与重放
 
@@ -246,7 +246,7 @@ CulturalSignalBatch
 已公开的法律可以通过领域投影提供。私人草案、异议和角色特定知识使用 `ViewerContext` 与 holder ledger，不能用真值回退。
 文化和法律记录实现 `DomainRecordType`，采用严格 schema、类型化引用、显式 mutation policy，并在证据需要时保留精确的历史版本正文。
 
-单一持久化 `LegalRuntimeRecord` 包含编译计划、plan/content hash、预算、生命周期、target generation、procedure profile、记录和派生索引；加载时会重算并校验这些索引后才暴露状态。
+Format 8 将法律状态持久化为独立版本的 plan、directory、order/jurisdiction shard、coordinator、culture-dependency 与 archive-head 记录；加载时只装载声明的工作集，并在暴露状态前重建和校验派生索引、认证归档根与热投影。
 精确重放消费已记录的 mutation、信号、决策、命令、ACK、wake ingress 与边界证据，不重新运行人类、服务或模型策略。派生分支复制已验证状态后接受新的因果输入。
 失败边界必须原子恢复索引、tombstone、计数器、证据和随机位置。
 
@@ -260,11 +260,13 @@ CulturalSignalBatch
 对于 `P_delta` 个 dirty proposal、`C_delta` 个受影响条款和 `V_delta` 个 observer 条目，目标稳态成本约为 `O(P_delta + C_delta + V_delta)`。
 截止时间与未来生效工作使用有序索引，精确决策结果使用 request 索引，适用性删除和插入都计入 mutation 预算；退休目标和历史法律目录不能改变活跃提案的结算成本。
 
-这个复杂度只描述聚合解码后的法律结算，不代表整个内核事务。v1 的单一聚合使实时法律边界约为 `O(H_serialized + delta)`。发布模式下真实插件路径在 1k/10k/100k 历史记录时的中位数约为 37.472ms/507.535ms/6.017504s，而法律内部空闲结算均约 200ns。1k 已同时超过 60 FPS（16.7ms）和 30 FPS（33.3ms）帧预算，因此法律结算不是逐帧工作；10k 仅适合低频回合或后台处理，100k 仅适合离线/维护处理。
+这个复杂度描述分片内语义工作。Format 8 使用持久化 HAMT/Patricia 结构、内容寻址页面 delta、认证法律归档索引和根式冷存储。2026-08-30 的发布探针中，100k 与 1M 冷法律记录下各 50 次普通脏分片边界的中位数/p95 分别为 6.558/11.302ms 与 6.920/11.733ms；冷历史没有进入普通边界增长曲线。100 万记录的真实认证归档索引使用 65,536 个 membership 页、65,536 个 effective-time 页和 65,535 个 recorded-time 页；最大页为 37 条/37,335 字节。100 个抽样稀疏单点查询中，每个查询最多返回一个交集候选。完整构建经过 245 个生产归档批次，热候选始终不超过 4,096 条。边界提案校验把小型 overlay 叠加到结构共享根上，只校验受影响引用闭包；空阶段不会物化未触及记录。独立的 100 万候选 selector 压力探针只检查并物化批次内的 4,096 条，但其候选分片为 2.49 GB，刻意超出实时法律状态与内存各 128 MiB 的契约，因此不是可接纳存档。真实 Canwu 探针使用可接纳的 16,384 候选、38.40 MiB 持久化分片：空边界为 0.169ms，无关法律边界为 2.563ms，候选记录版本保持不变。
 
-当前边界检查点已能以 O(1) 共享通用领域记录映射的根；但第一次写入领域记录时仍会复制整个映射，决策状态仍作为一个完整值复制并常驻，法律插件也仍是单一 `LegalRuntimeRecord`。仓库内还有一个仅供私有测试使用的脚手架，用于验证受记录数与源字节双重预算约束的确定性压缩选择、逐分片成员根和归档对象可达性状态机；它不是公开 API、存档格式或重放路径。因此这还不是 format-8 的完整分片与页面增量切换。在辖区分片、内容寻址页面、类型化决策历史存放和由归档提供者验证的归档提交输入全部落地前，live manifest 仍应把保留记录硬上限设在远低于 1k 的范围，并在目标硬件上校准具体数值。归档只改变历史载荷的位置，不会撤销当前法律；文化退休同样不会自动废止已经制定的人权或投票资格规则。
+归档只改变历史载荷的位置，不会撤销当前法律；文化退休同样不会自动废止已经制定的人权或投票资格规则。时间索引中的密集同时间单元会拆成有序认证分段，单页仍受 64 条与 1 MiB 上限约束。统一 GC 可达性清单在重启后仍标记法律内容/blob/索引页和决策 locator/blob；待处理的已验证维护 ingress 也会精确保留相关对象，应用后转交给已提交根，陈旧拒绝后释放。缺失 provider 会返回明确不可用错误，而不是把未知历史误报为不存在。
 
-实现完成前，测试和基准至少要证明：
+每个规范归档结果都会按 retention handle 保留，直到上层应用完成 store 侧交接。finalization 从重新加载的权威法律 runtime 推导已记录结果，并排入私有确认 ingress 来退休该恢复记录。同步 helper 会先认证与 store 绑定的完整 archive head，再在克隆上应用；错误根或失败的 store 转换不会提前释放热载荷。分页决策恢复也遵守相同的有界原则：校验前只加载仍被热决策对象引用的精确归档 ticket/trace locator 页面。
+
+测试和基准证明：
 
 - 文化信号不能直接修改法律记录；
 - 只有绑定控制者的授权命令能制定、修订或废止法律；

@@ -159,7 +159,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
         .expect("resolution")
         .expect("resolution boundary");
 
-    while canwu.decision_attempts().len() < 5 {
+    while canwu.decision_attempt(DecisionRequestId::new(99)).is_none() {
         canwu
             .step_canonical()
             .expect("advance to future decision")
@@ -167,8 +167,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
     }
     assert!(matches!(
         canwu
-            .decision_attempts()
-            .last()
+            .decision_attempt(DecisionRequestId::new(99))
             .map(|attempt| &attempt.outcome),
         Some(DecisionAttemptOutcome::Rejected {
             code: DecisionAttemptErrorCode::SimulationRevisionConflict,
@@ -176,7 +175,9 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
         })
     ));
 
-    let trace = canwu.decision_traces().last().expect("trace");
+    let trace = canwu
+        .decision_trace(canwu_api::DecisionTraceId::new(1))
+        .expect("trace");
     assert_eq!(
         trace.outcome,
         DecisionOutcome::Selected {
@@ -305,8 +306,7 @@ fn conflicting_decision_mutations_are_persisted_rejections_without_poisoning_the
     );
     assert!(matches!(
         canwu
-            .decision_attempts()
-            .last()
+            .decision_attempt(DecisionRequestId::new(4))
             .map(|attempt| &attempt.outcome),
         Some(DecisionAttemptOutcome::Rejected {
             code: DecisionAttemptErrorCode::VersionConflict,

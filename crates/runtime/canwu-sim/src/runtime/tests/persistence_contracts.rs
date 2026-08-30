@@ -362,11 +362,17 @@ fn format6_decision_attempt_fixture_is_rejected_before_format7_construction() {
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
         .expect("decision ingress should settle");
     assert!(matches!(
-        simulation.decision_attempts()[0].outcome,
+        simulation
+            .decision_attempt(DecisionRequestId::new(1))
+            .expect("first attempt")
+            .outcome,
         DecisionAttemptOutcome::Accepted { .. }
     ));
     assert!(matches!(
-        simulation.decision_attempts()[1].outcome,
+        simulation
+            .decision_attempt(DecisionRequestId::new(2))
+            .expect("second attempt")
+            .outcome,
         DecisionAttemptOutcome::Rejected { .. }
     ));
 
@@ -375,15 +381,19 @@ fn format6_decision_attempt_fixture_is_rejected_before_format7_construction() {
     legacy_wire["engine_version"] = Value::from("0.6.0");
     legacy_wire["snapshot_format_version"] = Value::from(6);
     legacy_wire["commitment_format_version"] = Value::from(2);
-    for attempt in legacy_wire["decisions"]["attempts"]
-        .as_array_mut()
-        .expect("attempts should be an array")
-    {
+    let mut legacy_attempts = legacy_wire["decisions"]["attempts"]["entries"]
+        .as_object()
+        .expect("current attempts should be an ordinal map")
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
+    for attempt in &mut legacy_attempts {
         attempt
             .as_object_mut()
             .expect("attempt should be an object")
             .remove("request_commitment");
     }
+    legacy_wire["decisions"]["attempts"] = Value::Array(legacy_attempts);
     let Err(error) = Simulation::from_snapshot_json(&legacy_wire.to_string()) else {
         panic!("format 6 attempts require the 0.6 engine or an external migration");
     };

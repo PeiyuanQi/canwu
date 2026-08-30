@@ -385,6 +385,7 @@ fn read_only_runs_reject_live_plugin_ingress_without_mutation() {
                 packet_type: "report".to_owned(),
                 payload: serde_json::json!({ "label": "forged live report" }),
                 affected_entities: Vec::new(),
+                archive_retention: Vec::new(),
             },
             None,
             false,

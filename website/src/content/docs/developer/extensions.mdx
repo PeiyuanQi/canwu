@@ -65,14 +65,14 @@ runtime delta，并且只更新生命周期发生变化的目标所对应的 soc
 作者必须在 `ClauseDefinition` 显式声明规范模态，并在 `LegalProposal` 区分法律权限、瑕疵、效力与精确来源；
 内核命令授权不等于世界内法律有效。权利与资格条款还必须声明 holder、duty bearer、subject matter、standing 和 remedy 关系。
 授权命令只能追加待处理意图；规范化的 `LegalMutation` 和 pending-intent ingress 由事件驱动插件在一个
-`DomainDeltaProposal` 中重新校验，并用精确 record version 原子更新聚合。crate 的三阶段 outbox 适配器会先
+`DomainDeltaProposal` 中重新校验，并用精确领域记录版本原子更新声明的法律分片工作集。crate 的三阶段 outbox 适配器会先
 持久化预期 revision，再结算 decision ingress，最后用持久化决策日志证明 controller 与 ticket-open 都已接受，
 且当前票据与草案精确绑定；该证明不依赖保留 ingress payload。角色上下文由有界的持有者 `KnowledgeQuery` 结果生成。
 
 开放程序、截止时间、最新参与、已分发 outbox、到期版本、决策结果和 dirty rule 都有持久化索引。适用性查询必须指定法律秩序
 分区和精确编译 profile；承继按有界 reception scope 与规则前缀匹配，不会默认继受整个前法秩序。文化退休引用精确目标代际：作为制定证据的文化可退休且不会删除既有法律，
 而仍有效的 `LiveLevel` 依赖会阻止退休；只有法律自身的复核、到期、废止或承继操作能改变其效力。
-退休是有界维护操作：v1 聚合的依赖证明超过 `max_retirement_dependency_records` 条外层记录时，会在 mutation 前失败关闭。
+退休是有界且由所有者授权的维护操作：按目标分片的依赖记录让内核针对同一个持久化根预检文化所有者和每个已登记解析器，然后原子提交全部 owner-scoped 改动或全部不提交，而不扫描全部法律历史。
 详见[文化和法律制度系统](/architecture/culture-law/)。
 
 ## 财政模拟扩展

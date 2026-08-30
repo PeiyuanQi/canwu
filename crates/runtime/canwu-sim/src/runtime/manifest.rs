@@ -4,7 +4,7 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 
-pub const RUN_MANIFEST_FORMAT_VERSION: u32 = 1;
+pub const RUN_MANIFEST_FORMAT_VERSION: u32 = 2;
 
 /// Stable identity for a scenario, ruleset, content pack, run policy,
 /// localization contract, or source ledger.

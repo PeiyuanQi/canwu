@@ -1,6 +1,6 @@
 //! Reference-world projection retained for the current runtime facade.
 //!
-//! This type is not a persistence migration path; Format 7 rejects old saves.
+//! This type is not a persistence migration path; Format 8 rejects old saves.
 
 use canwu_core::{
     ArmyId, EntityRef, GovernmentId, LetterId, PersonId, ResourceId, RouteId, TerritoryId,

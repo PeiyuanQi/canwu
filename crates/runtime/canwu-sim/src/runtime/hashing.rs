@@ -10,8 +10,8 @@ use super::{
     SchemaRegistry, SimEvent, SimTime, SimulationSnapshot, SystemCadence, WorldSnapshot,
     boundary_state_hash_format, command_attempt_id_slice_is_empty, command_attempt_slice_is_empty,
     component_key, domain_record_change_slice_is_empty, domain_record_slice_is_empty,
-    ingress_record_slice_is_empty, invalid_snapshot, invalid_snapshot_error, is_one_u64, manifest,
-    policy,
+    ingress_record_slice_is_empty, invalid_snapshot, invalid_snapshot_error, is_one_u64,
+    maintenance_change_slice_is_empty, manifest, policy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -278,16 +278,21 @@ pub(super) fn plugin_component_commitment_root(
 pub(super) fn domain_record_commitment_root(
     records: &[DomainRecord],
 ) -> Result<String, CanwuError> {
-    canonical_sorted_hash_by("canwu.commitment.domain-records.v1", records, |record| {
-        record.reference.clone()
-    })
+    let records = records
+        .iter()
+        .cloned()
+        .map(|record| (record.reference.clone(), record))
+        .collect();
+    super::PersistentDomainRecordStore::from_records(records)?.commitment_root()
 }
 
 pub(super) fn decision_commitment_root(decisions: &DecisionState) -> Result<String, CanwuError> {
     if decisions.is_empty() {
         return Ok(String::new());
     }
-    canonical_hash("canwu.commitment.decisions.v1", decisions)
+    decisions
+        .authoritative_commitment()
+        .map_err(super::decision::decision_error)
 }
 
 pub(super) fn scheduler_commitment_root(
@@ -888,6 +893,10 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         changes: &'a [BoundaryChange],
         #[serde(skip_serializing_if = "domain_record_change_slice_is_empty")]
         record_changes: &'a [DomainRecordChange],
+        #[serde(skip_serializing_if = "maintenance_change_slice_is_empty")]
+        maintenance_changes: &'a [super::MaintenanceChangeRecord],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maintenance_terminal_root: &'a Option<String>,
         emissions: &'a [BoundaryEmission],
         state_hash: &'a Option<String>,
         previous_hash: &'a str,
@@ -913,6 +922,8 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
             random_draws: &record.random_draws,
             changes: &record.changes,
             record_changes: &record.record_changes,
+            maintenance_changes: &record.maintenance_changes,
+            maintenance_terminal_root: &record.maintenance_terminal_root,
             emissions: &record.emissions,
             state_hash: &record.state_hash,
             previous_hash: &record.previous_hash,

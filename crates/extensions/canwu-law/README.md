@@ -94,26 +94,42 @@ culture hot work: adoption evidence, enacted sources, and law versions stay
 addressable, while an operative or future-scheduled live-level dependency
 blocks retirement.
 
-Retirement is explicit maintenance work rather than ordinary settlement. The
-v1 aggregate bounds its dependency scan with
-`max_retirement_dependency_records` and fails before mutation when the bound is
-exceeded. The unit is outer procedure/intent/outbox/rule records; dependency
-fan-out inside each record remains bounded by `max_evidence_per_record` and
-`max_nested_items_per_record`. A
-future sharded implementation may replace this bounded scan with a target-keyed
-dependency index.
+Retirement is explicit maintenance work rather than ordinary settlement.
+Format 8 persists target-keyed culture-dependency records and requires the
+culture owner plus every registered dependency resolver to submit an
+owner-scoped proposal. The kernel validates the complete set against one
+persistent domain root and commits all participants or none. Dependency fan-out
+inside each record remains bounded by `max_evidence_per_record` and
+`max_nested_items_per_record`.
 
-Run `cargo run --release -p canwu-law --example law_scale` to measure both idle
-law-local settlement and real Canwu plugin boundaries with 1,000, 10,000, and
-100,000 retained history records. The latter includes aggregate decode, kernel
-transaction clone, CAS, and encode. The law-local algorithm is delta-indexed,
-but the current single persisted aggregate still makes a live legal boundary
-linear in serialized legal history; large campaigns require strict budgets and
-event-driven cadence until jurisdiction sharding/COW is implemented. The current
-1k measurement already exceeds 60 FPS and 30 FPS frame budgets, 10k is suitable
-only for low-frequency turn/background work, and 100k only for offline
-maintenance. A live manifest should cap retained records well below 1k and
-calibrate that cap on target hardware.
+Format 8 persists independently versioned plan, directory, order/jurisdiction,
+coordinator, culture-dependency, and archive-head records. Closed history moves
+behind authenticated archive roots while current enacted effects stay in the
+hot projections. Kernel domain/decision state uses structural sharing, boundary
+proposal overlays validate only affected closures, and paged checkpoints emit
+content-addressed deltas.
+
+Archive retention uses a COW root handoff. Pending work protects only its new
+object delta and proposed current pages while the prior committed root protects
+older history. Commit moves the prior object closure into the new root, retires
+the superseded root, and leaves completed handles metadata-only; historical
+law and its current effects remain reachable through the replacement root.
+Synchronous commits authenticate the retention handle and the complete
+directory, membership, temporal, and blob closure before changing runtime
+state, apply on a clone, and publish the clone only after store finalization.
+Canonical boundaries persist one terminal outcome per retention handle.
+`finalize_legal_archive_retention` derives that outcome from the reloaded Canwu
+runtime, finalizes the store idempotently, and queues an internal acknowledgement
+that retires the recovery record on the next boundary.
+
+Run the release probes documented in
+`docs/benchmarks/format8-2026-08-30.md`. They cover one million archived legal
+versions, one million domain records and decision locators, bounded compaction
+selection, root-only restart, GC reachability, and a real Canwu boundary with a
+16,384-candidate, 38.40-MiB admissible shard. The separate one-million-candidate
+selector stress fixture is 2.49 GB and deliberately exceeds the production
+128-MiB legal state/memory ceilings; it proves selector work shape, not live-save
+admissibility.
 
 This crate is experimental and intentionally does not implement natural
 language interpretation, universal moral judgment, or a dense person-by-rule

@@ -2,7 +2,7 @@ use super::{CanwuError, ErrorCode, canonical_hash};
 use canwu_core::{EntityRef, PersonId};
 use serde::{Deserialize, Serialize};
 
-pub const RUN_CONFIGURATION_FORMAT_VERSION: u32 = 1;
+pub const RUN_CONFIGURATION_FORMAT_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

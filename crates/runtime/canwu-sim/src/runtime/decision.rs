@@ -4,8 +4,10 @@ use super::{
     DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority, DecisionController,
     DecisionError, DecisionMutation, DecisionPolicy, DecisionPolicyKind, DecisionRequestId,
     DecisionTicket, DecisionTicketId, DecisionTrace, DecisionTraceId, EntityRef, ErrorCode,
-    IngressClass, IngressPayload, IngressReceipt, Issuer, SimTime, Simulation, canonical_hash,
-    claim_counter, invalid_snapshot_error, runtime_entity_identity_exists,
+    IngressClass, IngressPayload, IngressReceipt, Issuer, MaintenanceChangeRecord,
+    MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt, SimTime,
+    Simulation, VerifiedDecisionArchiveCommit, canonical_hash, claim_counter,
+    invalid_snapshot_error, runtime_entity_identity_exists,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,28 +58,48 @@ pub struct PreparedDecisionIngress {
 
 impl Simulation {
     #[must_use]
-    pub const fn decision_state(&self) -> &super::DecisionState {
-        &self.state.current.decisions
-    }
-
-    #[must_use]
     pub fn decision_ticket(&self, id: DecisionTicketId) -> Option<&DecisionTicket> {
         self.state.current.decisions.ticket(id)
     }
 
     #[must_use]
-    pub fn decision_traces(&self) -> &[DecisionTrace] {
-        &self.state.current.decisions.traces
+    pub fn decision_controller(&self, id: &str) -> Option<&super::DecisionControllerBinding> {
+        self.state.current.decisions.controller(id)
     }
 
     #[must_use]
-    pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
-        self.state.current.decisions.attempts()
+    pub fn decision_trace(&self, id: DecisionTraceId) -> Option<&DecisionTrace> {
+        self.state.current.decisions.trace(id)
     }
 
     #[must_use]
     pub fn decision_attempt(&self, id: DecisionRequestId) -> Option<&DecisionAttemptRecord> {
         self.state.current.decisions.attempt(id)
+    }
+
+    #[must_use]
+    pub fn decision_hot_state(&self) -> super::DecisionHotState {
+        self.state.current.decisions.decision_hot_state()
+    }
+
+    #[must_use]
+    pub fn decision_history_location(
+        &self,
+        key: &super::DecisionHistoryKey,
+    ) -> super::DecisionHistoryLocation {
+        self.state.current.decisions.decision_locator(key)
+    }
+
+    pub fn decision_history_location_with_provider(
+        &self,
+        key: &super::DecisionHistoryKey,
+        provider: &dyn super::DecisionArchiveProvider,
+    ) -> Result<super::DecisionHistoryLocation, CanwuError> {
+        self.state
+            .current
+            .decisions
+            .decision_locator_with_provider(key, provider)
+            .map_err(decision_error)
     }
 
     pub fn prepare_decision(
@@ -312,6 +334,143 @@ impl Simulation {
             None,
             false,
         )
+    }
+
+    pub(super) fn enqueue_decision_archive_commit(
+        &mut self,
+        due_at: SimTime,
+        priority: i32,
+        commit: VerifiedDecisionArchiveCommit,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_runtime_ready()?;
+        self.ensure_canonical_ingress_can_start()?;
+        self.state
+            .current
+            .decisions
+            .commit_verified_decision_archive(&commit)
+            .map_err(decision_error)?;
+        for record in &self.state.evidence.ingress {
+            let IngressPayload::Maintenance { request } = &record.payload else {
+                continue;
+            };
+            let MaintenanceIngressRequest::DecisionArchive { commit: existing } = request.as_ref()
+            else {
+                continue;
+            };
+            if existing.token() == commit.token() {
+                if existing == &commit && record.due_at == due_at && record.priority == priority {
+                    return Ok(IngressReceipt {
+                        ingress_id: record.id,
+                        issued_at: record.issued_at,
+                        due_at: record.due_at,
+                    });
+                }
+                return Err(CanwuError::new(
+                    ErrorCode::IdempotencyConflict,
+                    "decision archive token is already queued with different content",
+                ));
+            }
+        }
+        self.append_ingress(
+            due_at,
+            IngressClass::ScheduledSystem,
+            priority,
+            IngressPayload::Maintenance {
+                request: Box::new(MaintenanceIngressRequest::DecisionArchive { commit }),
+            },
+            Some(super::CauseRef::System(
+                "canwu.core.decision-archive".to_owned(),
+            )),
+            false,
+        )
+    }
+
+    pub(super) fn apply_maintenance_request(
+        &mut self,
+        request: MaintenanceIngressRequest,
+    ) -> Result<MaintenanceChangeRecord, CanwuError> {
+        match request {
+            MaintenanceIngressRequest::DecisionArchive { commit } => {
+                let observed_source_root = self
+                    .state
+                    .current
+                    .decisions
+                    .hot_history_commitment()
+                    .map_err(decision_error)?;
+                if observed_source_root != commit.source_root() {
+                    return Ok(MaintenanceChangeRecord {
+                        kind: "decision_archive".to_owned(),
+                        token: commit.token().to_owned(),
+                        disposition: MaintenanceDisposition::RejectedStale,
+                        source_root: observed_source_root.clone(),
+                        target_root: observed_source_root.clone(),
+                        rejection: Some(MaintenanceRejectionReceipt {
+                            token: commit.token().to_owned(),
+                            expected_source_root: commit.source_root().to_owned(),
+                            observed_source_root,
+                            reason: "decision archive source root changed after durable admission"
+                                .to_owned(),
+                        }),
+                    });
+                }
+                self.state.current.decisions = self
+                    .state
+                    .current
+                    .decisions
+                    .commit_verified_decision_archive(&commit)
+                    .map_err(decision_error)?;
+                self.invalidate_commitments(super::CommitmentDomains::DECISIONS);
+                let target_root = self
+                    .state
+                    .current
+                    .decisions
+                    .hot_history_commitment()
+                    .map_err(decision_error)?;
+                Ok(MaintenanceChangeRecord {
+                    kind: "decision_archive".to_owned(),
+                    token: commit.token().to_owned(),
+                    disposition: MaintenanceDisposition::Applied,
+                    source_root: observed_source_root,
+                    target_root,
+                    rejection: None,
+                })
+            }
+            MaintenanceIngressRequest::OwnerAuthorized { commit } => {
+                let observed_source_root = canonical_hash(
+                    "canwu.owner-authorized.source-domain-root.v1",
+                    self.state.current.domain_records.roots(),
+                )?;
+                if observed_source_root != commit.source_root() {
+                    return Ok(MaintenanceChangeRecord {
+                        kind: "owner_authorized".to_owned(),
+                        token: commit.token().to_owned(),
+                        disposition: MaintenanceDisposition::RejectedStale,
+                        source_root: observed_source_root.clone(),
+                        target_root: observed_source_root.clone(),
+                        rejection: Some(MaintenanceRejectionReceipt {
+                            token: commit.token().to_owned(),
+                            expected_source_root: commit.source_root().to_owned(),
+                            observed_source_root,
+                            reason: "owner-authorized source root changed after durable admission"
+                                .to_owned(),
+                        }),
+                    });
+                }
+                self.apply_owner_authorized_maintenance(&commit)?;
+                let target_root = canonical_hash(
+                    "canwu.owner-authorized.source-domain-root.v1",
+                    self.state.current.domain_records.roots(),
+                )?;
+                Ok(MaintenanceChangeRecord {
+                    kind: "owner_authorized".to_owned(),
+                    token: commit.token().to_owned(),
+                    disposition: MaintenanceDisposition::Applied,
+                    source_root: observed_source_root,
+                    target_root,
+                    rejection: None,
+                })
+            }
+        }
     }
 
     pub fn drive_decision(
@@ -659,7 +818,9 @@ fn ingress_command_request_id(record: &super::IngressRecord) -> Option<CommandRe
         IngressPayload::Decision { request } => {
             request.command.as_ref().map(|request| request.request_id)
         }
-        IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+        IngressPayload::Plugin { .. }
+        | IngressPayload::Calendar { .. }
+        | IngressPayload::Maintenance { .. } => None,
     }
 }
 

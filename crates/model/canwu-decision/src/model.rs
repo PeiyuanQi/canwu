@@ -15,11 +15,13 @@ pub enum DecisionErrorCode {
     DuplicateController,
     DuplicateResponse,
     DuplicateTicket,
+    DecisionHistoryUnavailable,
     InvalidController,
     InvalidDecision,
     InvalidOption,
     PolicyMismatch,
     TicketNotFound,
+    QueryBudgetExceeded,
     VersionConflict,
 }
 
@@ -33,11 +35,13 @@ pub enum DecisionAttemptErrorCode {
     DuplicateController,
     DuplicateResponse,
     DuplicateTicket,
+    DecisionHistoryUnavailable,
     InvalidController,
     InvalidDecision,
     InvalidOption,
     PolicyMismatch,
     TicketNotFound,
+    QueryBudgetExceeded,
     VersionConflict,
 }
 
@@ -48,11 +52,13 @@ impl From<DecisionErrorCode> for DecisionAttemptErrorCode {
             DecisionErrorCode::DuplicateController => Self::DuplicateController,
             DecisionErrorCode::DuplicateResponse => Self::DuplicateResponse,
             DecisionErrorCode::DuplicateTicket => Self::DuplicateTicket,
+            DecisionErrorCode::DecisionHistoryUnavailable => Self::DecisionHistoryUnavailable,
             DecisionErrorCode::InvalidController => Self::InvalidController,
             DecisionErrorCode::InvalidDecision => Self::InvalidDecision,
             DecisionErrorCode::InvalidOption => Self::InvalidOption,
             DecisionErrorCode::PolicyMismatch => Self::PolicyMismatch,
             DecisionErrorCode::TicketNotFound => Self::TicketNotFound,
+            DecisionErrorCode::QueryBudgetExceeded => Self::QueryBudgetExceeded,
             DecisionErrorCode::VersionConflict => Self::VersionConflict,
         }
     }

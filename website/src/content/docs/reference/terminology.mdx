@@ -70,7 +70,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [法律渊源版本](/architecture/culture-law/) | legal source version | `LegalSourceVersion` | 不可变的法律渊源记录，可表示制定文书、判决、协议、习惯认可结论、法律承受表或其他由内容配置的法律主张依据。 |
 | [法律规则](/architecture/culture-law/) | legal rule | `LegalRule` | 一项有界规范规则的稳定身份与可变 head；其不可变变更保存在 `LawVersion` 记录中。 |
 | [法律版本](/architecture/culture-law/) | law version | `LawVersion` | 绑定稳定 `LegalRule` 的仅创建、不可变规范变更记录，保存确切渊源与前序引用、规范关系、适用范围、生效与效力状态以及证据；执行情况另行建模。 |
-| [法律聚合记录引用](/architecture/culture-law/) | legal aggregate record reference | `LegalRecordRef` | 法律聚合内部记录的精确 kind 与身份；法律局部记录作为一个聚合提交，因此它不是内核 `DomainRecordVersionRef`。 |
+| [法律记录引用](/architecture/culture-law/) | legal record reference | `LegalRecordRef` | 分片法律运行时中法律对象的精确 kind 与身份；法律插件拥有自己的对象/版本语义，并分别持久化 plan、directory、shard 与 archive-head 记录，因此它不是内核 `DomainRecordVersionRef`。 |
 | [文化目标代际引用](/architecture/culture-law/) | cultural target generation reference | `CulturalTargetGenerationRef` | 法律提案或版本引用的精确目标与 generation，防止退休或重新激活把旧证据静默绑定到新一代。 |
 | [文化执行计划](/architecture/culture-law/) | compiled culture plan | `CompiledCulturePlan` | 从文化定义编译出的外部不可变、绑定内容哈希的运行时计划，包含紧凑 ID、反向索引、预算和生命周期策略。 |
 | [休眠目标](/architecture/culture-law/) | dormant target | `Dormant` | 没有参与人口或已准入工作的文化目标；它离开热结算索引，但保留显式重新激活描述。 |

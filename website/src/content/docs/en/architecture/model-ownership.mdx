@@ -21,12 +21,19 @@ import { Aside, Steps } from "@astrojs/starlight/components";
 This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads moved out of generic `EventKind`, and the example world moved into `canwu-reference-world` before its old package boundary was removed.
 
 <Aside type="note" title="Migration status">
-The ownership migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone. Format 7 snapshots carry their canonical entity registry and initial scenario; format 2-6 saves are rejected instead of being implicitly migrated.
+The ownership migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone. Format 8 snapshots carry their canonical entity registry and initial scenario; pre-8 saves are rejected instead of being implicitly migrated.
 </Aside>
 
 ## One ownership rule
 
 Generic engine crates own deterministic simulation contracts. Reference integrations own concrete world entities such as armies, governments, territories, people, and letters, plus the event payloads that describe their domain behavior.
+
+Format 8 applies the same rule to cross-plugin maintenance. The kernel verifies
+the participant set, versions, budgets, and atomic commit; it does not invent
+domain semantics. Each participant may mutate only schemas owned by that
+plugin; the target owner must also include an exact mutation of the target
+record. Resolver registration is frozen in plugin descriptors, so callers
+cannot bypass the check by omitting a participant.
 
 That rule gives the two candidate crates different outcomes:
 
@@ -84,6 +91,6 @@ Typed payloads for movement, army arrival, person travel, letter delivery, repor
 
 ## Completion gates
 
-Old format 2-6 saves and journals must be rejected by Format 7. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
+Format 7 rejects Format 2–6 saves and journals. Format 8 preserves those migration contracts and additionally rejects Format 7 persistence. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
 
 The canonical repository audit records the complete per-type rationale, dependency evidence, and gates.

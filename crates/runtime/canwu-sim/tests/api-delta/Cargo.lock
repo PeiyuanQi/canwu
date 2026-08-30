@@ -9,6 +9,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
+name = "bitmaps"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "031043d04099746d8db04daf1fa424b2bc8bd69d92b25962dcde24da39ab64a2"
+dependencies = [
+ "typenum",
+]
+
+[[package]]
 name = "blake3"
 version = "1.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23,7 +32,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "canwu-core",
  "canwu-decision",
@@ -39,24 +48,26 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-decision"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
+ "blake3",
  "canwu-core",
  "canwu-time",
+ "im",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "canwu-event"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -66,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -89,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-routing"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -100,7 +111,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-sim"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -108,20 +119,21 @@ dependencies = [
  "canwu-event",
  "canwu-knowledge",
  "canwu-time",
+ "im",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "canwu-time"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-transport"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "canwu-core",
  "canwu-routing",
@@ -167,6 +179,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
+name = "im"
+version = "15.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0acd33ff0285af998aaf9b57342af478078f53492322fafc47450e09397e0e9"
+dependencies = [
+ "bitmaps",
+ "rand_core",
+ "rand_xoshiro",
+ "serde",
+ "sized-chunks",
+ "typenum",
+ "version_check",
+]
+
+[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -200,6 +227,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
+]
+
+[[package]]
+name = "rand_core"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
+
+[[package]]
+name = "rand_xoshiro"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
+dependencies = [
+ "rand_core",
 ]
 
 [[package]]
@@ -252,6 +294,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "sized-chunks"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16d69225bde7a69b235da73377861095455d298f2b970996eec25ddbb42b3d1e"
+dependencies = [
+ "bitmaps",
+ "typenum",
+]
+
+[[package]]
 name = "syn"
 version = "3.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -263,10 +315,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "typenum"
+version = "1.20.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "version_check"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "zmij"

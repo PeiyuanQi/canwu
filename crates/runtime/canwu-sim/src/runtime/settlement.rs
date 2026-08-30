@@ -16,8 +16,8 @@ use super::{
     ReservationRef, ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot,
     RuntimeCurrentState, RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation,
     SimulationView, SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective,
-    canonical_text, catch_unwind, claim_counter, component_key, compute_boundary_hash,
-    invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
+    canonical_hash, canonical_text, catch_unwind, claim_counter, component_key,
+    compute_boundary_hash, invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
     proposal_entity_identity_exists, random, record_change_affected_entities, records,
     runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
@@ -84,6 +84,7 @@ impl Simulation {
 
         let admitted_ingress = self.take_due_ingress(request.at);
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
+        let mut maintenance_changes = Vec::new();
         for ingress_id in &admitted_ingress {
             let record = self
                 .state
@@ -116,6 +117,9 @@ impl Simulation {
                 IngressPayload::Plugin { .. } => {}
                 IngressPayload::Decision { request } => {
                     self.apply_decision_request(*request)?;
+                }
+                IngressPayload::Maintenance { request } => {
+                    maintenance_changes.push(self.apply_maintenance_request(*request)?);
                 }
             }
         }
@@ -267,7 +271,6 @@ impl Simulation {
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
         let mut evidence = PendingBoundaryEvidence::default();
-
         for phase in BoundaryPhase::ALL {
             match phase {
                 BoundaryPhase::AtomicDomainCommit => {
@@ -580,6 +583,24 @@ impl Simulation {
             .evidence
             .boundary_head_hash()
             .map_or_else(|| GENESIS_BOUNDARY_HASH.to_owned(), str::to_owned);
+        let previous_maintenance_root = self
+            .state
+            .evidence
+            .boundaries
+            .last()
+            .and_then(|boundary| boundary.maintenance_terminal_root.as_deref());
+        let maintenance_terminal_root =
+            if previous_maintenance_root.is_some() || !maintenance_changes.is_empty() {
+                Some(canonical_hash(
+                    "canwu.maintenance.terminal-root.v1",
+                    &(
+                        previous_maintenance_root.unwrap_or(GENESIS_BOUNDARY_HASH),
+                        &maintenance_changes,
+                    ),
+                )?)
+            } else {
+                None
+            };
         let mut record = BoundaryRecord {
             id: boundary_id,
             at: request.at,
@@ -597,6 +618,8 @@ impl Simulation {
             changes: changes.clone(),
             record_changes: record_changes.clone(),
             knowledge_changes: pending_knowledge_changes.clone(),
+            maintenance_changes,
+            maintenance_terminal_root,
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -871,6 +894,7 @@ impl Simulation {
                             packet_type,
                             payload,
                             affected_entities: affected,
+                            archive_retention: Vec::new(),
                         },
                         Some(CauseRef::Boundary(boundary_id)),
                         true,
@@ -924,6 +948,7 @@ impl Simulation {
                             packet_type,
                             payload,
                             affected_entities: affected,
+                            archive_retention: Vec::new(),
                         },
                         Some(CauseRef::Boundary(boundary_id)),
                         true,
@@ -1224,6 +1249,7 @@ impl Simulation {
                             packet_type,
                             payload,
                             affected_entities: affected,
+                            archive_retention: Vec::new(),
                         },
                         Some(cause.clone()),
                         true,
@@ -1938,12 +1964,6 @@ fn extend_boundary_domain_record_overlay(
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
 ) -> Result<(), CanwuError> {
-    let mut base = context.current.domain_records.as_ref().clone();
-    base.extend(
-        overlay
-            .iter()
-            .map(|(reference, record)| (reference.clone(), record.clone())),
-    );
     let requests: Vec<_> = directives
         .iter()
         .filter(|staged| {
@@ -1969,8 +1989,9 @@ fn extend_boundary_domain_record_overlay(
     if requests.is_empty() {
         return Ok(());
     }
-    let (next, changes) = records::apply_mutation_bundle(
-        &base,
+    let (next, changes) = records::apply_mutation_bundle_cow_with_overlay(
+        &context.current.domain_records,
+        overlay,
         context.schemas,
         context.now,
         &|entity| runtime_current_entity_exists(context.current, entity),

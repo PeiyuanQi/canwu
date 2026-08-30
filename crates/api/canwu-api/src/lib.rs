@@ -27,56 +27,80 @@ pub use canwu_routing::{
 };
 use canwu_sim::Simulation;
 pub use canwu_sim::{
-    ADMISSION_CURSOR_FORMAT_VERSION, ArchiveProvider, ArchiveStore, ArchiveStoreOutcome,
-    ArchivedEvidenceLocator, ArchivedEvidenceReceipt, ArchivedPluginIngressProvenance,
-    ArchivedSegmentHeader, Army, ArtifactManifest, BoundaryChange, BoundaryContext,
-    BoundaryDirective, BoundaryEmission, BoundaryEmissionKind, BoundaryIngressGeneration,
-    BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
-    BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
-    CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION, CanwuError, CheckpointJournal,
-    Command, CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext,
-    CommandEnvelope, CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt,
-    CommandRecord, CommandRejection, CommandRequest, CommitmentRoots, CompactedSimulation,
-    ControllerDecision, ControllerPolicy, DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction,
+    ADMISSION_CURSOR_FORMAT_VERSION, ArchiveProvider, ArchiveReachabilityManifest, ArchiveStore,
+    ArchiveStoreOutcome, ArchivedEvidenceLocator, ArchivedEvidenceReceipt,
+    ArchivedPluginIngressProvenance, ArchivedSegmentHeader, Army, ArtifactManifest, BoundaryChange,
+    BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
+    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal,
+    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
+    CanwuError, CheckpointJournal, Command, CommandAttemptOutcome, CommandAttemptRecord,
+    CommandAuthority, CommandContext, CommandEnvelope, CommandIngress, CommandOutcome,
+    CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection, CommandRequest,
+    CommitmentRoots, CompactedSimulation, ControllerDecision, ControllerPolicy,
+    DECISION_ARCHIVE_BUCKET_PAGE_FORMAT_VERSION, DECISION_ARCHIVE_FORMAT_VERSION,
+    DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction, DecisionArchiveBlob,
+    DecisionArchiveBucketPage, DecisionArchiveProvider, DecisionArchiveReceipt,
+    DecisionArchiveRecord, DecisionArchiveStore, DecisionArchiveStoreOutcome,
     DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority,
     DecisionContext, DecisionController, DecisionControllerBinding, DecisionError,
     DecisionErrorCode, DecisionEvaluation, DecisionExternalEvidence, DecisionFactorContribution,
-    DecisionIngressRequest, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
+    DecisionHistoryCursor, DecisionHistoryKey, DecisionHistoryLocation, DecisionHistoryPage,
+    DecisionHistoryQueryBudget, DecisionHotState, DecisionIngressRequest,
+    DecisionLocatorScaleMetrics, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
     DecisionOrigin, DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind,
     DecisionRule, DecisionState, DecisionTicket, DecisionTicketDraft, DecisionTicketState,
-    DecisionTrace, DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordDraft,
-    DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation,
-    DomainRecordPage, DomainRecordSchema, DomainReference, DomainReferenceSchema,
-    DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode,
-    EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry, EvidenceItemLocator,
-    EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator,
-    EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
-    ExternalPolicy, Government, HumanDecisionResponse, HumanPolicy,
-    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
-    IdentityEvidenceDependenciesV1, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
-    InteractionPolicy, Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema,
-    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo, LetterStatus, LlmModelIdentity,
-    LlmPolicy, MapPoint, ObservationPolicy, OrderedRulePolicy, OutboxEntry,
+    DecisionTrace, DemoIds, DomainRecord, DomainRecordChange, DomainRecordClass,
+    DomainRecordCommitmentRoots, DomainRecordDraft, DomainRecordLifecycle, DomainRecordMutation,
+    DomainRecordMutationPolicy, DomainRecordOperation, DomainRecordPage, DomainRecordPageRoots,
+    DomainRecordSchema, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
+    DomainReferenceTargetKind, ENGINE_VERSION, ErrorCode, EvidenceArchiveIndex, EvidenceCursor,
+    EvidenceIndexEntry, EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots,
+    EvidenceJournalSegment, EvidenceNestedLocator, EvidenceSealToken, ExternalDecisionOption,
+    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, Government,
+    HumanDecisionResponse, HumanPolicy, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
+    IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION, IdentityEvidenceDependenciesV1, IngressClass,
+    IngressPayload, IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
+    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo,
+    LetterStatus, LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
+    MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE,
+    MAX_OWNER_AUTHORIZED_MUTATIONS, MAX_OWNER_AUTHORIZED_PARTICIPANTS, MAX_STATE_DELTA_PAGES,
+    MAX_STATE_PAGE_BYTES, MaintenanceChangeRecord, MaintenanceDependencyResolverDescriptor,
+    MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt, MapPoint,
+    OWNER_AUTHORIZED_MAINTENANCE_FORMAT_VERSION, ObservationPolicy, OrderedRulePolicy, OutboxEntry,
+    OwnerAuthorizedMaintenanceDraft, OwnerAuthorizedMaintenanceParticipant,
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantProposal, OwnerAuthorizedParticipantRole,
+    OwnerAuthorizedRecordExpectation, PAGED_CHECKPOINT_FORMAT_VERSION,
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
-    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PayloadProperty,
-    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType, Person,
-    PersonTransitState, PluginActionDescriptor, PluginCommandHandler, PluginComponentRecord,
-    PluginDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginIngressTarget,
-    PluginKnowledgeSchema, PluginRegistrar, PluginRegistry, PolicyDecision,
-    PreparedDecisionIngress, PreparedEvidenceSeal, QueuedExternalPolicy, QueuedHumanPolicy,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PLUGIN_DESCRIPTOR_FORMAT_VERSION,
+    PagedSimulationCheckpoint, PatriciaStoreMetrics, PayloadProperty,
+    PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType,
+    PersistentDomainRecordStore, Person, PersonTransitState, PluginActionDescriptor,
+    PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant, PluginArchiveRetention,
+    PluginCommandHandler, PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor,
+    PluginIngressPermit, PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema,
+    PluginRegistrar, PluginRegistry, PolicyDecision, PortablePagedSimulationCheckpoint,
+    PreparedDecisionArchive, PreparedDecisionIngress, PreparedEvidenceSeal,
+    PreparedPagedSimulationCheckpoint, PreparedStateDelta, QueuedExternalPolicy, QueuedHumanPolicy,
     QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
     RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
     RandomOperationAddressV1, RandomOperationTarget, RandomStreamKey, RandomStreamState,
     ReplayJournal, ReservationAllocation, ReservationDisposition, ReservationOffer,
     ReservationOfferRecord, ReservationPoolKey, ReservationRef, ReservationRequest,
     ReservationRequestRecord, Route, RuleChoice, RulePolicy, RunConfiguration,
-    RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
-    STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationCheckpoint,
-    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemContract, SystemDirective, Territory, TracePolicy,
-    TransitState, UtilityEvaluator, UtilityPolicy, UtilityProfile, WeightedUtilityEvaluator,
-    WeightedUtilityPolicy, WorldSnapshot, canonical_byte_hash, canonical_hash,
-    identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
+    RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION, STATE_PAGE_CODEC,
+    STATE_PAGE_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
+    SimulationCheckpoint, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler,
+    SimulationView, StateKey, StatePageBlob, StatePageProvider, StatePageRetentionHandle,
+    StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore, StateVisibility,
+    SystemCadence, SystemContract, SystemDirective, Territory, TracePolicy, TransitState,
+    UtilityEvaluator, UtilityPolicy, UtilityProfile, VerifiedDecisionArchiveCommit,
+    VerifiedOwnerAuthorizedMaintenanceCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
+    WorldSnapshot, canonical_byte_hash, canonical_hash, format8_decision_locator_scale_probe,
+    format8_patricia_scale_probe, identity_evidence_dependencies_property_v1,
+    payload_required_evidence_continuation_property_v1, prepare_state_delta, state_page_id,
+    verify_state_delta,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
@@ -360,23 +384,42 @@ impl Canwu {
     }
 
     #[must_use]
-    pub const fn decision_state(&self) -> &DecisionState {
-        self.simulation.decision_state()
-    }
-
-    #[must_use]
     pub fn decision_ticket(&self, id: DecisionTicketId) -> Option<&DecisionTicket> {
         self.simulation.decision_ticket(id)
     }
 
     #[must_use]
-    pub fn decision_traces(&self) -> &[DecisionTrace] {
-        self.simulation.decision_traces()
+    pub fn decision_controller(&self, id: &str) -> Option<&DecisionControllerBinding> {
+        self.simulation.decision_controller(id)
     }
 
     #[must_use]
-    pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
-        self.simulation.decision_attempts()
+    pub fn decision_trace(&self, id: DecisionTraceId) -> Option<&DecisionTrace> {
+        self.simulation.decision_trace(id)
+    }
+
+    #[must_use]
+    pub fn decision_attempt(&self, id: DecisionRequestId) -> Option<&DecisionAttemptRecord> {
+        self.simulation.decision_attempt(id)
+    }
+
+    #[must_use]
+    pub fn decision_hot_state(&self) -> DecisionHotState {
+        self.simulation.decision_hot_state()
+    }
+
+    #[must_use]
+    pub fn decision_history_location(&self, key: &DecisionHistoryKey) -> DecisionHistoryLocation {
+        self.simulation.decision_history_location(key)
+    }
+
+    pub fn decision_history_location_with_provider(
+        &self,
+        key: &DecisionHistoryKey,
+        provider: &dyn DecisionArchiveProvider,
+    ) -> Result<DecisionHistoryLocation, CanwuError> {
+        self.simulation
+            .decision_history_location_with_provider(key, provider)
     }
 
     #[must_use]
@@ -413,6 +456,21 @@ impl Canwu {
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
+    }
+
+    pub fn archive_reachability_manifest(
+        &self,
+        retained_checkpoints: &[SimulationCheckpoint],
+        page_retention: &StatePageRetentionLedger,
+        decision_provider: &dyn DecisionArchiveProvider,
+        plugin_provider: &dyn PluginArchiveObjectProvider,
+    ) -> Result<ArchiveReachabilityManifest, CanwuError> {
+        self.simulation.archive_reachability_manifest(
+            retained_checkpoints,
+            page_retention,
+            decision_provider,
+            plugin_provider,
+        )
     }
 
     pub fn journal_segment_since(
@@ -462,6 +520,15 @@ impl Canwu {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn enqueue_permitted_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+        permit: &PluginIngressPermit,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .enqueue_permitted_plugin_ingress(request, permit)
     }
 
     pub fn prepare_decision(
@@ -568,9 +635,8 @@ impl Canwu {
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::from_snapshot_json(json)?,
-        })
+        let simulation = Simulation::from_snapshot_json(json)?;
+        Ok(Self { simulation })
     }
 
     pub fn from_snapshot_json_with_plugins(
@@ -625,9 +691,8 @@ impl Canwu {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
-        Ok(Self {
-            simulation: Simulation::replay_from_journal(plugins, journal)?,
-        })
+        let simulation = Simulation::replay_from_journal(plugins, journal)?;
+        Ok(Self { simulation })
     }
 
     pub fn replay_from_journal_json(
@@ -967,23 +1032,42 @@ impl CompactedCanwu {
     }
 
     #[must_use]
-    pub const fn decision_state(&self) -> &DecisionState {
-        self.simulation.decision_state()
-    }
-
-    #[must_use]
     pub fn decision_ticket(&self, id: DecisionTicketId) -> Option<&DecisionTicket> {
         self.simulation.decision_ticket(id)
     }
 
     #[must_use]
-    pub fn decision_traces(&self) -> &[DecisionTrace] {
-        self.simulation.decision_traces()
+    pub fn decision_controller(&self, id: &str) -> Option<&DecisionControllerBinding> {
+        self.simulation.decision_controller(id)
     }
 
     #[must_use]
-    pub fn decision_attempts(&self) -> &[DecisionAttemptRecord] {
-        self.simulation.decision_attempts()
+    pub fn decision_trace(&self, id: DecisionTraceId) -> Option<&DecisionTrace> {
+        self.simulation.decision_trace(id)
+    }
+
+    #[must_use]
+    pub fn decision_attempt(&self, id: DecisionRequestId) -> Option<&DecisionAttemptRecord> {
+        self.simulation.decision_attempt(id)
+    }
+
+    #[must_use]
+    pub fn decision_hot_state(&self) -> DecisionHotState {
+        self.simulation.decision_hot_state()
+    }
+
+    #[must_use]
+    pub fn decision_history_location(&self, key: &DecisionHistoryKey) -> DecisionHistoryLocation {
+        self.simulation.decision_history_location(key)
+    }
+
+    pub fn decision_history_location_with_provider(
+        &self,
+        key: &DecisionHistoryKey,
+        provider: &dyn DecisionArchiveProvider,
+    ) -> Result<DecisionHistoryLocation, CanwuError> {
+        self.simulation
+            .decision_history_location_with_provider(key, provider)
     }
 
     pub fn submit(&mut self, envelope: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
@@ -1011,6 +1095,15 @@ impl CompactedCanwu {
         request: PluginIngressRequest,
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation.enqueue_plugin_ingress(request)
+    }
+
+    pub fn enqueue_permitted_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+        permit: &PluginIngressPermit,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .enqueue_permitted_plugin_ingress(request, permit)
     }
 
     pub fn prepare_decision(

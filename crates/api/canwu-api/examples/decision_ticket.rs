@@ -17,8 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     resolve_aid_request(&mut canwu)?;
 
     let trace = canwu
-        .decision_traces()
-        .last()
+        .decision_trace(canwu_api::DecisionTraceId::new(1))
         .expect("utility decision trace");
     println!("{}", serde_json::to_string_pretty(trace)?);
 
@@ -162,9 +161,23 @@ fn resolve_aid_request(canwu: &mut Canwu) -> Result<(), Box<dyn std::error::Erro
 
 fn verify_persistence_and_replay(canwu: &Canwu) -> Result<(), Box<dyn std::error::Error>> {
     let snapshot = canwu.snapshot();
+    verify_snapshot_round_trip(&snapshot)?;
+    verify_journal_replay(canwu, &snapshot)
+}
+
+fn verify_snapshot_round_trip(
+    snapshot: &canwu_api::SimulationSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
     let restored = Canwu::from_snapshot_json(&serde_json::to_string(&snapshot)?)?;
-    assert_eq!(restored.snapshot(), snapshot);
+    assert_eq!(restored.snapshot(), *snapshot);
+    Ok(())
+}
+
+fn verify_journal_replay(
+    canwu: &Canwu,
+    snapshot: &canwu_api::SimulationSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
     let replayed = Canwu::replay_from_journal(&[], &canwu.replay_journal())?;
-    assert_eq!(replayed.snapshot(), snapshot);
+    assert_eq!(replayed.snapshot(), *snapshot);
     Ok(())
 }

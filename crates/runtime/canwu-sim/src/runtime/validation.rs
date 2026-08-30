@@ -339,7 +339,7 @@ pub(super) fn validate_snapshot(
     };
     let Some(initial_scenario) = snapshot.initial_scenario.as_ref() else {
         return invalid_snapshot(
-            "format 7 snapshots require their manifest-bound initial scenario",
+            "format 8 snapshots require their manifest-bound initial scenario",
         );
     };
     let mut canonical = initial_scenario.clone();
@@ -1462,9 +1462,45 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     {
         return invalid_snapshot("decision ticket references an unknown decision maker");
     }
-    let expected_next_trace_id = u64::try_from(snapshot.decisions.traces.len())
-        .ok()
-        .and_then(|value| value.checked_add(1))
+    if snapshot.ingress.is_empty() && snapshot.boundaries.is_empty() {
+        let next_after_hot_trace = snapshot
+            .decisions
+            .traces
+            .iter()
+            .map(|trace| trace.id.get())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                invalid_snapshot_error("decision trace journal exceeds identifier space")
+            })?;
+        if snapshot.next_decision_trace_id < next_after_hot_trace {
+            return invalid_snapshot("decision trace counter precedes retained hot history");
+        }
+        // Checkpoint snapshots deliberately omit replay evidence. Their
+        // decision roots and counters are authenticated by the checkpoint
+        // commitment, while paged checkpoints may keep only the archive
+        // directory rather than hydrating historical receipt buckets.
+        return Ok(());
+    }
+    let expected_next_trace_id = snapshot
+        .decisions
+        .traces
+        .iter()
+        .map(|trace| trace.id.get())
+        .chain(
+            snapshot
+                .decisions
+                .archived_history_keys()
+                .filter_map(|key| match key {
+                    super::DecisionHistoryKey::Trace(id) => Some(id.get()),
+                    super::DecisionHistoryKey::Ticket(_)
+                    | super::DecisionHistoryKey::Attempt(_) => None,
+                }),
+        )
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
         .ok_or_else(|| invalid_snapshot_error("decision trace journal exceeds identifier space"))?;
     if snapshot.next_decision_trace_id != expected_next_trace_id {
         return invalid_snapshot("decision trace counter does not follow its journal");
@@ -1477,9 +1513,11 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
         .collect();
     let mut reconstructed = DecisionState::default();
     let mut next_trace_id = 1_u64;
-    let mut next_attempt = 0_usize;
     let mut current_revision = 0_u64;
+    let mut reconstructed_archive_commits = 0_u64;
+    let mut rejected_archive_commits = 0_u64;
     for boundary in &snapshot.boundaries {
+        let mut maintenance_change_index = 0_usize;
         for ingress_id in &boundary.admitted_ingress {
             let index = usize::try_from(ingress_id.get().saturating_sub(1)).map_err(|_| {
                 invalid_snapshot_error("decision ingress ID exceeds platform range")
@@ -1509,173 +1547,59 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
                 IngressPayload::Decision { .. }
                 | IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. } => {}
+                IngressPayload::Maintenance { request } => {
+                    let change = boundary
+                        .maintenance_changes
+                        .get(maintenance_change_index)
+                        .ok_or_else(|| {
+                            invalid_snapshot_error(
+                                "maintenance ingress lacks its terminal change record",
+                            )
+                        })?;
+                    maintenance_change_index += 1;
+                    match request.as_ref() {
+                        super::MaintenanceIngressRequest::DecisionArchive { commit } => {
+                            if change.kind != "decision_archive" || change.token != commit.token() {
+                                return invalid_snapshot(
+                                    "decision archive ingress and terminal change disagree",
+                                );
+                            }
+                            if change.disposition == super::MaintenanceDisposition::Applied {
+                                reconstructed = reconstructed
+                                    .commit_verified_decision_archive(commit)
+                                    .map_err(super::decision::decision_error)?;
+                                reconstructed_archive_commits += 1;
+                            } else {
+                                rejected_archive_commits += 1;
+                            }
+                        }
+                        super::MaintenanceIngressRequest::OwnerAuthorized { commit } => {
+                            if change.kind != "owner_authorized" || change.token != commit.token() {
+                                return invalid_snapshot(
+                                    "owner-authorized ingress and terminal change disagree",
+                                );
+                            }
+                        }
+                    }
+                }
             }
             let IngressPayload::Decision { request } = &record.payload else {
                 continue;
             };
-            let persisted_attempt =
-                snapshot
-                    .decisions
-                    .attempts()
-                    .get(next_attempt)
-                    .ok_or_else(|| {
-                        invalid_snapshot_error(
-                            "admitted decision ingress lacks its decision attempt",
-                        )
-                    })?;
-            let request_commitment = canonical_hash(DECISION_REQUEST_COMMITMENT_DOMAIN, request)?;
-            let base_attempt = |outcome| DecisionAttemptRecord {
-                request_id: request.request_id,
-                request_commitment: request_commitment.clone(),
-                at: boundary.at,
-                revision_before: current_revision,
-                expected_revision: request.expected_revision,
-                outcome,
-            };
-            let expected_attempt = if request.expected_revision != current_revision {
-                base_attempt(DecisionAttemptOutcome::Rejected {
-                    code: DecisionAttemptErrorCode::SimulationRevisionConflict,
-                    message: format!(
-                        "decision request {} expected revision {}, current revision is {}",
-                        request.request_id, request.expected_revision, current_revision
-                    ),
-                })
-            } else if let Some(message) =
-                snapshot_decision_entity_error(snapshot, &request.mutation)
-            {
-                base_attempt(DecisionAttemptOutcome::Rejected {
-                    code: DecisionAttemptErrorCode::EntityUnavailable,
-                    message,
-                })
-            } else {
-                let trace_id = matches!(request.mutation, DecisionMutation::Resolve { .. })
-                    .then(|| DecisionTraceId::new(next_trace_id));
-                let mut candidate = reconstructed.clone();
-                match candidate.apply(request.mutation.clone(), boundary.at, trace_id) {
-                    Err(error) => base_attempt(DecisionAttemptOutcome::Rejected {
-                        code: error.code.into(),
-                        message: error.message,
-                    }),
-                    Ok(prepared) => {
-                        let invalid_command = match (&prepared.action, &request.command) {
-                            (Some(DecisionAction::Command { command }), Some(command_request)) => {
-                                match serde_json::from_value::<Command>(command.clone()) {
-                                    Err(error) => Some(format!(
-                                        "decision option contains an invalid command: {error}"
-                                    )),
-                                    Ok(expected) => {
-                                        let controller = prepared
-                                            .trace
-                                            .as_ref()
-                                            .and_then(|trace| {
-                                                candidate.controller(&trace.controller_id)
-                                            })
-                                            .ok_or_else(|| {
-                                                invalid_snapshot_error(
-                                                    "decision command trace lacks its controller binding",
-                                                )
-                                            })?;
-                                        (command_request.envelope.command != expected
-                                            || command_request.expected_revision
-                                                != current_revision
-                                            || prepared
-                                                .trace
-                                                .as_ref()
-                                                .and_then(|trace| trace.command_request_id)
-                                                != Some(command_request.request_id))
-                                        .then_some(
-                                            "nested command does not match the selected decision option"
-                                                .to_owned(),
-                                        )
-                                        .or_else(|| {
-                                            (command_request.envelope.issuer
-                                                != super::decision::controller_issuer(controller)
-                                                || command_request.envelope.authority.as_ref()
-                                                    != Some(
-                                                        &super::decision::controller_authority(
-                                                            controller,
-                                                        ),
-                                                    )
-                                                || command_request.envelope.expected_time
-                                                    != Some(boundary.at))
-                                            .then_some("nested command issuer, authority, or time guard was not derived from the decision controller".to_owned())
-                                        })
-                                    }
-                                }
-                            }
-                            (Some(DecisionAction::None) | None, None) => None,
-                            _ => Some("decision action and nested command disagree".to_owned()),
-                        };
-                        if let Some(message) = invalid_command {
-                            base_attempt(DecisionAttemptOutcome::Rejected {
-                                code: DecisionAttemptErrorCode::InvalidDecision,
-                                message,
-                            })
-                        } else {
-                            if trace_id.is_some() {
-                                next_trace_id = next_trace_id.checked_add(1).ok_or_else(|| {
-                                    invalid_snapshot_error(
-                                        "decision trace identifier space is exhausted",
-                                    )
-                                })?;
-                            }
-                            let command_request_id =
-                                request.command.as_ref().map(|request| request.request_id);
-                            let accepted = base_attempt(DecisionAttemptOutcome::Accepted {
-                                trace_id,
-                                command_request_id,
-                            });
-                            candidate
-                                .append_attempt(accepted.clone())
-                                .map_err(|error| {
-                                    invalid_snapshot_error(format!(
-                                        "reconstructed decision attempt is invalid: {error}"
-                                    ))
-                                })?;
-                            reconstructed = candidate;
-                            if let Some(command_request_id) = command_request_id {
-                                let command_attempt = command_attempts_by_request
-                                    .get(&command_request_id)
-                                    .ok_or_else(|| {
-                                        invalid_snapshot_error(
-                                            "accepted decision command lacks its command attempt",
-                                        )
-                                    })?;
-                                if command_attempt.revision_before != current_revision {
-                                    return invalid_snapshot(
-                                        "decision command attempt and revision chronology disagree",
-                                    );
-                                }
-                                current_revision =
-                                    current_revision.checked_add(1).ok_or_else(|| {
-                                        invalid_snapshot_error(
-                                            "authoritative revision range is exhausted",
-                                        )
-                                    })?;
-                            }
-                            accepted
-                        }
-                    }
-                }
-            };
-            if &expected_attempt != persisted_attempt {
-                return invalid_snapshot(
-                    "persisted decision attempt does not match deterministic admission",
-                );
-            }
-            if matches!(
-                expected_attempt.outcome,
-                DecisionAttemptOutcome::Rejected { .. }
-            ) {
-                reconstructed
-                    .append_attempt(expected_attempt)
-                    .map_err(|error| {
-                        invalid_snapshot_error(format!(
-                            "reconstructed decision attempt is invalid: {error}"
-                        ))
-                    })?;
-            }
-            next_attempt += 1;
+            reconstruct_decision_ingress(
+                snapshot,
+                request,
+                boundary.at,
+                &command_attempts_by_request,
+                &mut reconstructed,
+                &mut next_trace_id,
+                &mut current_revision,
+            )?;
+        }
+        if maintenance_change_index != boundary.maintenance_changes.len() {
+            return invalid_snapshot(
+                "boundary contains a terminal maintenance record without ingress",
+            );
         }
         reconstructed.advance_time(boundary.at).map_err(|error| {
             invalid_snapshot_error(format!("decision deadline state is invalid: {error}"))
@@ -1684,13 +1608,191 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             .checked_add(1)
             .ok_or_else(|| invalid_snapshot_error("authoritative revision range is exhausted"))?;
     }
-    if reconstructed != snapshot.decisions
-        || next_trace_id != snapshot.next_decision_trace_id
-        || next_attempt != snapshot.decisions.attempts().len()
+    let controllers_match = reconstructed.controllers == snapshot.decisions.controllers;
+    let reconstructed_hot_root = reconstructed
+        .hot_history_commitment()
+        .map_err(super::decision::decision_error)?;
+    let persisted_hot_root = snapshot
+        .decisions
+        .hot_history_commitment()
+        .map_err(super::decision::decision_error)?;
+    let state_matches = controllers_match && reconstructed_hot_root == persisted_hot_root;
+    let reconstructed_archive_root = reconstructed
+        .archive_receipt_commitment()
+        .map_err(super::decision::decision_error)?;
+    let persisted_archive_root = snapshot
+        .decisions
+        .archive_receipt_commitment()
+        .map_err(super::decision::decision_error)?;
+    let trace_counter_matches = next_trace_id == snapshot.next_decision_trace_id;
+    if !state_matches
+        || reconstructed_archive_root != persisted_archive_root
+        || !trace_counter_matches
     {
-        return invalid_snapshot(
-            "decision ingress history does not reconstruct the persisted decision state",
-        );
+        return invalid_snapshot(format!(
+            "decision ingress history does not reconstruct the persisted decision state \
+             (state={state_matches}, archive_root={}, trace_counter={trace_counter_matches}, \
+             reconstructed_archived={}, persisted_archived={}, reconstructed_root={}, \
+             persisted_root={}, controllers={}, reconstructed_hot={}, persisted_hot={}, \
+             applied_archive_commits={}, rejected_archive_commits={})",
+            reconstructed_archive_root == persisted_archive_root,
+            reconstructed.archived_history_count(),
+            snapshot.decisions.archived_history_count(),
+            reconstructed_archive_root,
+            persisted_archive_root,
+            controllers_match,
+            reconstructed_hot_root,
+            persisted_hot_root,
+            reconstructed_archive_commits,
+            rejected_archive_commits,
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn reconstruct_decision_ingress(
+    snapshot: &SimulationSnapshot,
+    request: &super::DecisionIngressRequest,
+    at: super::SimTime,
+    command_attempts_by_request: &BTreeMap<canwu_core::CommandRequestId, &CommandAttemptRecord>,
+    reconstructed: &mut DecisionState,
+    next_trace_id: &mut u64,
+    current_revision: &mut u64,
+) -> Result<(), CanwuError> {
+    let request_commitment = canonical_hash(DECISION_REQUEST_COMMITMENT_DOMAIN, request)?;
+    let base_attempt = |outcome| DecisionAttemptRecord {
+        request_id: request.request_id,
+        request_commitment: request_commitment.clone(),
+        at,
+        revision_before: *current_revision,
+        expected_revision: request.expected_revision,
+        outcome,
+    };
+    let expected_attempt = if request.expected_revision != *current_revision {
+        base_attempt(DecisionAttemptOutcome::Rejected {
+            code: DecisionAttemptErrorCode::SimulationRevisionConflict,
+            message: format!(
+                "decision request {} expected revision {}, current revision is {}",
+                request.request_id, request.expected_revision, current_revision
+            ),
+        })
+    } else if let Some(message) = snapshot_decision_entity_error(snapshot, &request.mutation) {
+        base_attempt(DecisionAttemptOutcome::Rejected {
+            code: DecisionAttemptErrorCode::EntityUnavailable,
+            message,
+        })
+    } else {
+        let trace_id = matches!(request.mutation, DecisionMutation::Resolve { .. })
+            .then(|| DecisionTraceId::new(*next_trace_id));
+        let mut candidate = reconstructed.clone();
+        match candidate.apply(request.mutation.clone(), at, trace_id) {
+            Err(error) => base_attempt(DecisionAttemptOutcome::Rejected {
+                code: error.code.into(),
+                message: error.message,
+            }),
+            Ok(prepared) => {
+                let invalid_command = match (&prepared.action, &request.command) {
+                    (Some(DecisionAction::Command { command }), Some(command_request)) => {
+                        match serde_json::from_value::<Command>(command.clone()) {
+                            Err(error) => Some(format!(
+                                "decision option contains an invalid command: {error}"
+                            )),
+                            Ok(expected) => {
+                                let controller = prepared
+                                    .trace
+                                    .as_ref()
+                                    .and_then(|trace| candidate.controller(&trace.controller_id))
+                                    .ok_or_else(|| {
+                                        invalid_snapshot_error(
+                                            "decision command trace lacks its controller binding",
+                                        )
+                                    })?;
+                                (command_request.envelope.command != expected
+                                    || command_request.expected_revision != *current_revision
+                                    || prepared
+                                        .trace
+                                        .as_ref()
+                                        .and_then(|trace| trace.command_request_id)
+                                        != Some(command_request.request_id))
+                                .then_some(
+                                    "nested command does not match the selected decision option"
+                                        .to_owned(),
+                                )
+                                .or_else(|| {
+                                    (command_request.envelope.issuer
+                                        != super::decision::controller_issuer(controller)
+                                        || command_request.envelope.authority.as_ref()
+                                            != Some(&super::decision::controller_authority(
+                                                controller,
+                                            ))
+                                        || command_request.envelope.expected_time != Some(at))
+                                    .then_some("nested command issuer, authority, or time guard was not derived from the decision controller".to_owned())
+                                })
+                            }
+                        }
+                    }
+                    (Some(DecisionAction::None) | None, None) => None,
+                    _ => Some("decision action and nested command disagree".to_owned()),
+                };
+                if let Some(message) = invalid_command {
+                    base_attempt(DecisionAttemptOutcome::Rejected {
+                        code: DecisionAttemptErrorCode::InvalidDecision,
+                        message,
+                    })
+                } else {
+                    if trace_id.is_some() {
+                        *next_trace_id = next_trace_id.checked_add(1).ok_or_else(|| {
+                            invalid_snapshot_error("decision trace identifier space is exhausted")
+                        })?;
+                    }
+                    let command_request_id =
+                        request.command.as_ref().map(|request| request.request_id);
+                    let accepted = base_attempt(DecisionAttemptOutcome::Accepted {
+                        trace_id,
+                        command_request_id,
+                    });
+                    candidate
+                        .append_attempt(accepted.clone())
+                        .map_err(|error| {
+                            invalid_snapshot_error(format!(
+                                "reconstructed decision attempt is invalid: {error}"
+                            ))
+                        })?;
+                    *reconstructed = candidate;
+                    if let Some(command_request_id) = command_request_id {
+                        let command_attempt = command_attempts_by_request
+                            .get(&command_request_id)
+                            .ok_or_else(|| {
+                                invalid_snapshot_error(
+                                    "accepted decision command lacks its command attempt",
+                                )
+                            })?;
+                        if command_attempt.revision_before != *current_revision {
+                            return invalid_snapshot(
+                                "decision command attempt and revision chronology disagree",
+                            );
+                        }
+                        *current_revision = current_revision.checked_add(1).ok_or_else(|| {
+                            invalid_snapshot_error("authoritative revision range is exhausted")
+                        })?;
+                    }
+                    accepted
+                }
+            }
+        }
+    };
+    if matches!(
+        expected_attempt.outcome,
+        DecisionAttemptOutcome::Rejected { .. }
+    ) {
+        reconstructed
+            .append_attempt(expected_attempt)
+            .map_err(|error| {
+                invalid_snapshot_error(format!(
+                    "reconstructed decision attempt is invalid: {error}"
+                ))
+            })?;
     }
     Ok(())
 }
@@ -1836,6 +1938,7 @@ fn validate_ingress_records(
                 packet_type,
                 payload,
                 affected_entities,
+                archive_retention,
             } => {
                 let Some(descriptor) = plugins.ingress.get(&(plugin.clone(), packet_type.clone()))
                 else {
@@ -1851,6 +1954,39 @@ fn validate_ingress_records(
                 {
                     return invalid_snapshot("plugin ingress class or entity evidence is invalid");
                 }
+                if archive_retention.len() > 32_768
+                    || archive_retention.windows(2).any(|pair| pair[0] >= pair[1])
+                    || archive_retention.iter().any(|retention| {
+                        retention.namespace.is_empty()
+                            || retention.namespace.len() > 128
+                            || retention.object_id.is_empty()
+                            || retention.object_id.len() > 256
+                            || !retention.namespace.bytes().all(|byte| {
+                                byte.is_ascii_lowercase()
+                                    || byte.is_ascii_digit()
+                                    || matches!(byte, b'.' | b'-' | b'_')
+                            })
+                            || !retention.object_id.is_ascii()
+                    })
+                {
+                    return invalid_snapshot("plugin ingress archive retention is malformed");
+                }
+                if !archive_retention.is_empty()
+                    && !plugins
+                        .internal_ingress
+                        .contains(&(plugin.clone(), packet_type.clone()))
+                {
+                    return invalid_snapshot(
+                        "plugin ingress archive retention lacks internal ownership",
+                    );
+                }
+                plugins
+                    .validate_archive_retention(plugin, packet_type, payload, archive_retention)
+                    .map_err(|_| {
+                        invalid_snapshot_error(
+                            "plugin ingress archive retention is not bound to its payload roots",
+                        )
+                    })?;
                 match &record.cause {
                     Some(CauseRef::Boundary(boundary))
                         if generated_by_boundary.get(&record.id) == Some(boundary) => {}
@@ -1955,6 +2091,37 @@ fn validate_ingress_records(
                         || command.envelope.expected_time != Some(record.due_at))
                 {
                     return invalid_snapshot("queued decision command request is not canonical");
+                }
+            }
+            IngressPayload::Maintenance { request } => {
+                if record.class != IngressClass::ScheduledSystem {
+                    return invalid_snapshot("maintenance ingress is not canonical");
+                }
+                match request.as_ref() {
+                    super::MaintenanceIngressRequest::DecisionArchive { commit } => {
+                        if record.cause
+                            != Some(CauseRef::System("canwu.core.decision-archive".to_owned()))
+                        {
+                            return invalid_snapshot("decision archive ingress cause is invalid");
+                        }
+                        if !commit.has_current_nonempty_shape() {
+                            return invalid_snapshot(
+                                "decision archive maintenance payload is invalid",
+                            );
+                        }
+                    }
+                    super::MaintenanceIngressRequest::OwnerAuthorized { commit } => {
+                        if record.cause
+                            != Some(CauseRef::System(
+                                "canwu.core.owner-authorized-maintenance".to_owned(),
+                            ))
+                        {
+                            return invalid_snapshot(
+                                "owner-authorized maintenance ingress cause is invalid",
+                            );
+                        }
+                        super::maintenance::validate_verified_commit_shape(commit)?;
+                    }
                 }
             }
         }
@@ -2072,7 +2239,9 @@ fn validate_ingress_records(
                     IngressPayload::Calendar { cadences } => {
                         expected_cadences.extend(cadences.iter().cloned());
                     }
-                    IngressPayload::Plugin { .. } | IngressPayload::Command { .. } => {}
+                    IngressPayload::Plugin { .. }
+                    | IngressPayload::Command { .. }
+                    | IngressPayload::Maintenance { .. } => {}
                 }
             }
             pending.remove(&IngressQueueKey::from_record(record));
@@ -2346,6 +2515,7 @@ fn validate_boundary_records(
     let mut next_event = 0;
     let mut previous_boundary = None;
     let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
+    let mut previous_maintenance_root: Option<String> = None;
     let mut max_boundary_id = 0;
     let mut max_correlation_id = 0;
     let mut history = DomainRecordHistory::from_initial_records(&domain_record_values);
@@ -2422,6 +2592,43 @@ fn validate_boundary_records(
         if let Some(state_hash) = record.state_hash.as_deref() {
             boundary_state_hash_format(Some(state_hash))?;
         }
+        for change in &record.maintenance_changes {
+            if !canonical_text(&change.kind)
+                || !is_canonical_hash(&change.token)
+                || !is_canonical_hash(&change.source_root)
+                || !is_canonical_hash(&change.target_root)
+                || matches!(change.disposition, super::MaintenanceDisposition::Applied)
+                    != change.rejection.is_none()
+            {
+                return invalid_snapshot("boundary maintenance evidence is malformed");
+            }
+            if let Some(rejection) = &change.rejection
+                && (rejection.token != change.token
+                    || !is_canonical_hash(&rejection.expected_source_root)
+                    || rejection.observed_source_root != change.source_root
+                    || change.target_root != change.source_root
+                    || !canonical_text(&rejection.reason))
+            {
+                return invalid_snapshot("boundary stale-maintenance receipt is malformed");
+            }
+        }
+        let expected_maintenance_root =
+            if previous_maintenance_root.is_some() || !record.maintenance_changes.is_empty() {
+                Some(canonical_hash(
+                    "canwu.maintenance.terminal-root.v1",
+                    &(
+                        previous_maintenance_root
+                            .as_deref()
+                            .unwrap_or(GENESIS_BOUNDARY_HASH),
+                        &record.maintenance_changes,
+                    ),
+                )?)
+            } else {
+                None
+            };
+        if record.maintenance_terminal_root != expected_maintenance_root {
+            return invalid_snapshot("boundary maintenance terminal root is inconsistent");
+        }
         if record.previous_hash != previous_hash
             || !is_canonical_hash(&record.hash)
             || (requires_state_hash && record.state_hash.is_none())
@@ -2436,6 +2643,7 @@ fn validate_boundary_records(
         max_correlation_id = max_correlation_id.max(record.correlation_id);
         previous_boundary = Some((record.at, record.id));
         previous_hash.clone_from(&record.hash);
+        previous_maintenance_root.clone_from(&record.maintenance_terminal_root);
         history.apply_boundary(index + 1, &cuts)?;
     }
     let boundary_states: BTreeSet<_> = plugins
@@ -4074,7 +4282,9 @@ pub(super) fn has_unqueued_command_history(
             IngressPayload::Decision { request } => {
                 request.command.as_ref().map(|command| command.request_id)
             }
-            IngressPayload::Plugin { .. } | IngressPayload::Calendar { .. } => None,
+            IngressPayload::Plugin { .. }
+            | IngressPayload::Calendar { .. }
+            | IngressPayload::Maintenance { .. } => None,
         })
         .collect();
     commands.iter().any(|command| command.attempt_id.is_none())
@@ -4185,7 +4395,7 @@ pub(super) fn validate_domain_dependents_with_records(
     plugin_components: &BTreeMap<PluginComponentKey, PluginComponentRecord>,
     scheduled_actions: &BTreeMap<ScheduleKey, ScheduledAction>,
     run_configuration: &RunConfigurationSnapshot,
-    domain_records: &BTreeMap<DomainRecordRef, DomainRecord>,
+    domain_records: &impl records::DomainRecordRead,
 ) -> Result<(), CanwuError> {
     let unavailable = |entity: &EntityRef| matches!(entity, EntityRef::Domain(reference) if !records::domain_entity_exists(domain_records, reference));
     if plugin_components

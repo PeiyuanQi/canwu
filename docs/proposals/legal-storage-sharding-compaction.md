@@ -1,7 +1,7 @@
 # Legal Storage Sharding, COW, Delta Persistence, and Cold Archive
 
-Status: independently accepted 0.8 single-milestone design, revision 5, with
-private dormant groundwork added on 2026-08-29. The first draft
+Status: implemented and independently accepted as the 0.8 single-milestone
+contract on 2026-08-30. The first draft
 was reviewed on 2026-08-29 and rejected at 5.2/10 with structural
 blockers. Revision 2 closed most findings and scored 8.1/10, but four remaining
 blockers prevented implementation approval. Revision 3 closed those findings;
@@ -10,36 +10,112 @@ gaps. Revision 4 closed those gaps, scored 7.8/10, and exposed three remaining
 integration blockers. Revision 5 incorporates them and was independently
 approved at 9.4/10 with no remaining design blocker.
 
-The safe runtime groundwork is deliberately narrow: boundary checkpoints share
-the generic domain-record map root in O(1), while the first domain-record write
-still clones the complete map and the format-7 snapshot remains flat. Decision
-state is unchanged and is still cloned and retained as one resident value.
+The implementation uses canonical Patricia state pages for domain records,
+persistent decision maps and bounded multi-level archive locator pages, independently
+versioned legal plan/directory/shard/archive-head records, replay-visible
+decision and legal archive commits, persisted GC retention handoff, sparse
+bitemporal indexes, and a generic owner-authorized cross-plugin maintenance
+coordinator. The benchmark and conformance evidence is recorded in
+[`docs/benchmarks/format8-2026-08-30.md`](../benchmarks/format8-2026-08-30.md).
 
-`canwu-law` also contains a test-only, non-exported storage state-machine
-scaffold. Its contract tests exercise version/head monotonicity, deterministic
-record-and-byte-budgeted selection, per-shard membership roots, durable-ingress
-reachability, atomic archive commit, and deterministic serialization. The
-scaffold is not compiled into production builds, is not embedded in
-`LegalRuntimeRecord`, and is not a public API, provider format, snapshot field,
-or replay-visible maintenance ingress.
+The decision locator uses 4,096 stable primary buckets and 16 deterministic
+subsegments per bucket. A page contains at most 64 receipts and 1 MiB of
+canonical bytes, so exact lookup reads one segment and archive work remains
+bounded even after a primary bucket grows. The locator page table is chunked
+into authenticated directory pages of at most 1,024 page IDs, keeping the root
+manifest below the 4-MiB state-page ceiling at one million keys. The hot decision-history commitment
+is maintained incrementally with a restart-verified count/XOR/modular-sum
+accumulator.
 
-This groundwork deliberately does **not** claim that the format-8 cutover is
-complete. The current plugin still serializes one `LegalRuntimeRecord`;
-decision history remains resident; and content-addressed state pages,
-independent legal order/jurisdiction records, provider-verified archive commit
-ingress, typed decision-history locators, and removal of terminal decision
-payloads remain release gates below. Until those gates land together, the 0.7
-retained-record caps and benchmark guidance remain authoritative.
+The final implementation closes four scale and restart obligations discovered
+during independent review:
 
-This proposal closes the scale limit documented by the
+- decision verification emits full provider-authenticated page replacements,
+  each bound to the prior page ID, so replay-safe boundary commit can append to
+  an existing segment after root-only restore without reading the provider;
+- legal effective-time and recorded-time directory cells point to ordered page
+  segment vectors, allowing more than 64 versions in one time cell while every
+  page remains below the 64-entry and 1-MiB limits;
+- the production legal runtime persists a per-shard ordered compaction queue and
+  count/XOR/modular-sum candidate authenticator. Prepare range-iterates that
+  queue and materializes only the chosen batch; full catalog reconciliation is
+  confined to explicit full cold restore or migration; and
+- verified legal archive ingress carries one authenticated directory retention
+  root. The law reachability participant expands it into exact blob,
+  membership, and temporal marks before mark/sweep. The root survives snapshot
+  restore, applied commits transfer reachability to the installed roots, and
+  terminal stale rejection releases it. Persisted plugin descriptors retain
+  internal-ingress ownership so this authority cannot disappear on restart.
+
+The post-implementation scale review added five further closures:
+
+- the real `Simulation::prepare_paged_checkpoint` boundary stores the locator
+  directory as bounded pages and is exercised by million-key storage, restore,
+  provider-backed lookup, replay, and zero-page repeat-delta evidence;
+- paged checkpoint construction directly builds a body without paged record or
+  decision payloads instead of first cloning and then clearing total state;
+- canonical legal ingress remains one retention root regardless of accumulated
+  membership and temporal page counts, while restart/settle/GC conformance
+  proves transitive expansion;
+- provider-backed bitemporal queries stream segments and enforce provider-call,
+  segment, candidate, intersection, and decoded-byte budgets during I/O; and
+- hot trace location and archive commit use stable ordinal lookup rather than a
+  linear scan, with a trace-heavy scale gate targeting the final ordinal.
+
+The final implementation-hardening pass closes the remaining persistence and
+bounded-work findings:
+
+- every legal archive commit is bound to the exact authenticated directory
+  root, object count, shard, token, and expected source root rather than a
+  caller-supplied summary;
+- a persisted legal retention ledger records `Prepared`, `Verified`,
+  `DurableIngress`, and terminal states, interlocks each handoff with the active
+  GC epoch, keeps pending work as a new-object delta plus the proposed current
+  page closure, and resumes safely after restart. Commit moves the prior object
+  closure into the new root, retires the superseded root, and clears terminal
+  handle payloads instead of copying cumulative history into every batch;
+- legal compaction selection reads only the persisted ordered candidate range,
+  scoped restore never rebuilds the global candidate catalog, and real Canwu
+  ingress proves that an untouched candidate shard is neither restored nor
+  rewritten;
+- repeat decision checkpoints inspect only changed locator directory pages;
+  load rejects noncanonical directory placement and any cold object duplicated
+  in hot metadata;
+- one end-to-end legal temporal-query meter charges membership, temporal,
+  directory, and blob reads across all shards, so a caller cannot reset budgets
+  by crossing a shard boundary; and
+- boundary proposal overlays now apply record changes to structurally shared
+  roots and validate only their affected closure. Empty stages return before
+  touching the record store, so unrelated large record payloads do not enter
+  ordinary boundary cost.
+
+The final independent implementation review identified and closed three
+restart/finalization gaps:
+
+- paged decision restore now derives hot-to-archive ticket/trace dependencies
+  and authenticates only their exact locator pages before validating hot state;
+- synchronous legal archive commit authenticates the retention handle and full
+  directory/index/blob closure before applying on a clone, and publishes the
+  clone only after store finalization; idempotent retries must match the
+  installed archive head; and
+- canonical legal archive terminal outcomes are persisted by retention handle,
+  not only as one last record. Store finalization derives the disposition from
+  a reloaded authoritative runtime, then queues a private acknowledgement that
+  removes the per-handle recovery record after the store handoff succeeds; and
+- the detached archive-transition primitive is crate-private. Public
+  synchronous callers must use the store-authenticating helper, while live
+  simulations admit the same proof only through canonical ingress. A
+  first-application test jointly tampers the pending, membership, effective,
+  and recorded roots and proves both runtime and retention remain unchanged.
+
+This implementation closes the scale limit documented by the
 [legal institutionalization framework](legal-institutionalization-framework.md):
-the current `canwu-law` extension persists one complete legal aggregate. In the
-pre-groundwork baseline, the kernel also cloned the complete generic
-domain-record map at boundary capture and again while applying a mutation
-bundle. The narrow groundwork above removes the capture clone, but first-write
-mutation and full current-state checkpoint materialization remain linear.
-Splitting the law aggregate without changing those remaining kernel paths would
-only move the linear cost.
+the pre-Format-8 `canwu-law` extension persisted one complete legal aggregate,
+and the kernel cloned or materialized the complete generic domain-record map in
+transaction and boundary-overlay paths. Format 8 replaces both sides of that
+coupling: law state is independently sharded, while kernel rollback, mutation,
+proposal overlays, checkpoints, and decision history use persistent roots and
+content-addressed deltas.
 
 The work therefore ships as one release milestone with four inseparable
 capabilities:
@@ -168,7 +244,7 @@ The central semantic invariant is:
 > archive segments. Compaction may change placement, never identity, causal
 > meaning, query result, or replay result.
 
-## Current 0.7 bottleneck
+## Pre-Format-8 0.7 bottleneck
 
 The scale probe separates law-local work from the real kernel path:
 
@@ -376,6 +452,11 @@ contract follows the existing evidence archive pattern:
    rejects the whole operation before unbounded allocation;
 5. checkpoints retain root descriptors and current hot non-paged state, while a
    portable bundle can embed all reachable pages for transfer.
+
+The implemented paged-checkpoint envelope is format `3` and carries the compact
+`SimulationCheckpoint` plus page roots. A non-empty checkpoint journal cut is
+restorable only with the exact contiguous evidence prefix; a state-only restore
+is rejected rather than silently manufacturing an empty history.
 
 `PageId` is the hash of one unique canonical uncompressed page encoding, and
 `StatePageProvider::load_state_page(PageId)` returns exactly those canonical
@@ -728,13 +809,14 @@ DecisionHistoryKey = Ticket(DecisionTicketId)
 
 DecisionHistoryLocation = Hot
                         | Archived(DecisionArchiveLocator)
+                        | Unresolved(LocatorBucket)
                         | Absent
 ```
 
 Exact location is backed by a canonical state-page-resident
 `DecisionHistoryLocatorIndexRoot`, not a linear resident map. It maps every
 known typed key to its hot generation or exact archive locator; deletion from
-the index is forbidden within an exact run. `decision_locator(key, page_provider)`
+the index is forbidden within an exact run. Provider-backed exact location
 loads a bounded Merkle path and proves hit or absence. A missing page returns
 `StatePageUnavailable`, not `Absent`. Current retry and settlement paths use hot
 receipts/indexes and do not require this provider for arbitrary old keys.
@@ -758,7 +840,7 @@ and accepted-ingress identities instead.
 
 - `decision_hot_state()` and hot-only iterators expose bounded resident state;
 - `decision_receipt(request_id)` returns the compact current retry/result proof;
-- `decision_locator(DecisionHistoryKey)` returns the typed location above;
+- `decision_history_location(DecisionHistoryKey)` returns the typed location above;
 - hot exact ticket/attempt/trace accessors return a value only when the locator
   is `Hot`, rather than conflating archived and absent;
 - provider-backed exact lookup returns an owned, verified historical value;
@@ -1034,6 +1116,15 @@ Each projection has independent encoded-byte, nested-effect, reference, and
 trace ceilings; a small logical-record count cannot hide one unbounded current
 projection.
 
+When a historical payload is released, the hot runtime may retain only the
+exact identity of an archived dependency still named by a current projection.
+This cold-dependency set is rebuilt from current hot references after every
+release, so it scales with current law rather than total archived history.
+Succession archive follows the same rule: full institutional, liability,
+evidence, and archive history becomes cold, while the bounded current reception
+mapping needed by no-provider applicability remains hot and is bound to the
+committed archive head.
+
 Archive eligibility requires field-for-field equivalence between this hot
 materialization and an un-compacted current query. A closed case or old ruling
 cannot archive merely because appeal time ended if its holding still controls a
@@ -1225,8 +1316,8 @@ Implementation and fixtures use this complete clean-break matrix:
 | Legal shard/schema format | `2` |
 | Compiled legal plan format | `2` |
 | Segment content material format | `1` |
-| Legal archive object/index format | `1` |
-| Bitemporal archive index format | `1` |
+| Legal archive object format | `1` |
+| Legal archive membership/bitemporal index format | `2` |
 | Decision archive object/index format | `1` |
 | Decision archive locator/query-page format | `1` |
 | Durable archive ingress envelope format | `1` |
@@ -1403,11 +1494,31 @@ jurisdiction:
   paths, not all current records;
 - a 1,000,000-entry non-collision Patricia map has at most `2N - 1` logical
   nodes, no more reachable node-pages than logical nodes, canonical encoded
-  structural overhead at most 192 bytes per entry excluding domain payload, and
-  measured resident structural overhead at most 320 bytes per entry excluding
-  domain payload;
+  primary-page structural overhead at most 256 bytes per entry and measured
+  primary resident structural overhead at most 384 bytes per entry for the
+  benchmark record shape;
+- all four production Patricia indexes together use at most 640 encoded
+  structural bytes and 896 estimated resident structural bytes per source
+  record in that fixture; HAMT/key-page cardinalities are reported separately,
+  while process RSS remains host-specific evidence rather than a wire-format
+  guarantee;
 - representative 1,000,000-key root-to-leaf depth has p99 at most 64 branch
   nodes, while the format hard limit remains 256 discriminating bits;
+- the legal membership and both temporal index families use the full 16-bit
+  deterministic bucket space; every page rejects more than 64 entries or 1 MiB,
+  and the one-million fixture observed maxima of 37 entries and 37,335 bytes;
+- the production-path legal archive probe completes 245 batches while retaining
+  at most 4,096 hot compaction candidates and removing superseded index pages
+  after each committed root handoff. The one-million fixture retains one
+  committed root, one million exact objects, 245 metadata-only terminal
+  handles, and zero terminal-handle reachability items;
+- the ordered selector is stress-tested at one million candidates while
+  examining and materializing exactly 4,096. That synthetic fixture encodes to
+  2.49 GB and is intentionally not an admissible live Canwu state under the
+  128-MiB legal state/memory ceilings; production-boundary evidence instead
+  uses a 16,384-candidate, 38.40-MiB persisted shard, proves its domain-record
+  version is unchanged by an unrelated legal ingress, and rejects oversized
+  state through the ordinary byte-budget contract;
 - a configured compaction step remains within its declared CPU and byte budget;
 - one-record mutation, checkpoint restore, reachability enumeration, and one
   compaction step remain within frozen page-count, provider-call, byte, and peak
@@ -1644,5 +1755,13 @@ clarifications above record provider descriptors rather than instances,
 restrict prefix-completeness arithmetic to engine-issued IDs, and require
 numeric temporal-amplification gates before wire-format merge.
 
-The architecture is independently accepted. Implementation remains subject to
-all gates and review requirements in this document.
+### 0.8 implementation acceptance
+
+On 2026-08-30 an independent senior engine developer reviewed the completed
+single-milestone implementation and its scale, restart, authentication,
+retention, and finalization evidence. The review's blocking findings were
+resolved in the implementation-hardening and final independent-review closures
+recorded above. The last re-review found no remaining blocker and returned
+**ACCEPT**. The architecture and implementation are independently accepted;
+future changes remain subject to all gates and review requirements in this
+document.

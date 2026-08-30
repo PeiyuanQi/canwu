@@ -78,8 +78,8 @@ competence, defects, validity, and exact origin. Kernel command authorization
 does not imply in-world validity. Rights and eligibility clauses also declare
 holders, duty bearers, subject matter, standing, and remedy relations. Canonical `LegalMutation` and pending-
 intent ingress are revalidated by the event-driven plugin and update the
-aggregate atomically in one `DomainDeltaProposal` using its exact record
-version. The three-stage outbox adapter persists the expected revision, settles
+declared legal shard working set atomically in one `DomainDeltaProposal` using
+exact record versions. The three-stage outbox adapter persists the expected revision, settles
 decision ingress, then proves accepted controller and ticket-open outcomes plus
 the exact ticket binding from the persistent decision journal. The proof does
 not depend on retaining ingress payloads. Actor contexts come from bounded
@@ -92,8 +92,10 @@ scope and rule-prefix matching rather than inheriting a whole predecessor order 
 generation: adoption evidence can retire without deleting enacted law, while
 an operative live-level dependency blocks retirement. Only the law's own
 review, expiry, repeal, or succession operation changes its legal effect.
-Retirement is bounded maintenance: `max_retirement_dependency_records` fails
-closed before mutation when the v1 aggregate dependency proof is too large.
+Retirement is bounded owner-authorized maintenance: target-keyed dependency
+records let the kernel preflight the culture owner and every registered
+resolver against one persistent root, then commit all owner-scoped changes or
+none without scanning total legal history.
 See the [culture and legal institutional systems](/en/architecture/culture-law/).
 
 ## Fiscal simulation extension

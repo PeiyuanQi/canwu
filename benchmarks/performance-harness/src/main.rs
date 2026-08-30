@@ -1434,7 +1434,7 @@ fn build_information_runtime(target_records: usize) -> Result<InformationFixture
     }
     let scenario = information_scenario()?;
     let plugin = InformationFlowPlugin { target_records };
-    let mut simulation = Canwu::new(INFORMATION_SEED, scenario.clone())?;
+    let mut simulation = Canwu::new(INFORMATION_SEED, scenario)?;
     simulation.register_plugin(&plugin)?;
     Ok(InformationFixture { simulation, plugin })
 }
@@ -1624,7 +1624,7 @@ fn benchmark_error(message: &str) -> CanwuError {
 
 fn build_growth_fixture(scale: usize) -> Result<GrowthFixture, Box<dyn Error>> {
     let scenario = profile_scenario(scale)?;
-    let mut simulation = Canwu::new(PROFILE_SEED, scenario.clone())?;
+    let mut simulation = Canwu::new(PROFILE_SEED, scenario)?;
     simulation.register_plugin(&ProfilePlugin)?;
     for index in 0..scale {
         let accepted_id = checked_u64(

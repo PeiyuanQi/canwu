@@ -26,7 +26,7 @@ assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 
 Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
 
-0.7 uses the Format 7 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, `authority_root_seed`, and exact decision-request commitments. The kernel does not silently migrate format 2-6 data.
+0.8 uses the Format 8 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, `authority_root_seed`, exact decision-request commitments, and explicit plugin descriptor versions. The kernel does not silently migrate pre-8 data.
 
 ## Checkpoint journals and exact replay
 
@@ -50,7 +50,7 @@ seal, the caller owns the returned `EvidenceJournalSegment` and can use
 emissions remain paired with host delivery and acknowledgement state; sealing
 does not imply that an external effect was delivered or acknowledged.
 
-Format 7 lets a domain-record schema declare sorted, unique identity-only
+Format 8 lets a domain-record schema declare sorted, unique identity-only
 evidence dependencies. Sealing keeps only their Merkle receipts, without old
 payload bytes in the hot path. Receipts for plugin-generated ingress also bind
 the provider plugin, packet type, and producing boundary. A domain runtime may
@@ -59,6 +59,111 @@ independently reconstructs and verifies both the set and counts. Direct sealing
 and prepare/store/commit sealing are atomic: a late validation failure such as
 a missing receipt leaves the live checkpoint unchanged. Only an explicit
 payload-required continuation reloads an old segment through `ArchiveProvider`.
+
+Format 8 also exposes `StatePageBlob`, `StatePageProvider`,
+`prepare_state_delta`, and `verify_state_delta` for idempotent content-addressed
+checkpoint pages. Domain records use canonical primary, reverse-reference,
+successor, and predecessor Patricia roots. A subtree already held by the
+provider is a traversal boundary, so one record change emits only missing paths
+and manifests.
+
+Query decision history with a typed `DecisionHistoryKey`;
+`DecisionHistoryLocation` reports `Hot`, `Archived { locator }`,
+`Unresolved { bucket, segment }`, or `Absent`. `Unresolved` means that the committed
+cold locator segment needs a provider before exact membership can be determined.
+Terminal payloads can leave hot state through canonical maintenance ingress;
+compact checkpoints retain the hot page, archive root, and a two-level locator:
+4,096 stable hash-prefix buckets, each split into 16 deterministic segments.
+Each segment is capped at 64 entries and 1 MiB. The locator page table is
+chunked again at 1,024 page IDs per authenticated directory page, keeping the
+root manifest below the 4 MiB state-page limit at one million keys. Exact
+lookup loads one locator segment. A restart-verifiable count/XOR/modular-sum accumulator maintains the
+hot-history root incrementally. Exact lookup and pagination return owned values. A missing segment or
+archive blob returns an explicit history-unavailable error rather than an absent
+key or empty success. Verification produces a complete authenticated replacement
+for every touched segment, bound to the previous page ID. Boundary commit needs
+no provider read, so a root-only restart can append to an existing segment while
+remaining replay-idempotent.
+Decision restore also validates the canonical bucket/segment directory and
+rejects any archived locator or terminal payload duplicated in hot metadata.
+Before validating hot state, restore derives every archived ticket or trace
+still referenced by a hot trace, resolved ticket, or accepted attempt and
+authenticates only those exact locator pages. A partially archived dependency
+graph can therefore restart without loading unrelated history.
+Repeat checkpoint preparation opens only the locator directory pages whose
+segments changed; an unchanged million-key directory is not reread page by
+page.
+
+Paged-checkpoint envelope format 4 stores a compact `SimulationCheckpoint` and
+content-addressed page roots. Its builder creates the body without paged domain
+or decision payloads directly; it does not clone the full payloads and clear
+them afterward. A non-empty journal cut can be restored only with
+the exact contiguous evidence prefix through that cut; only a zero cut accepts
+the empty-journal shorthand. Offline GC uses one `ArchiveReachabilityManifest`.
+It automatically invokes every frozen plugin archive participant and covers
+state pages, evidence segments, decision locator/blob IDs, and the law plugin's
+namespaced content, blob, and authenticated index pages; callers do not append
+law marks manually. The retention ledger derives and verifies the provider's
+exact transitive closure, protects committed roots and shared pages across
+restart, and represents pending work as a new-object delta plus the proposed
+current-page closure while the previous committed root protects older data. Legal archive
+handoff records `Prepared`, `Verified`, `DurableIngress`, `Committed`,
+`RejectedStale`, or `Abandoned` in the persisted ledger. Each transition is
+interlocked with the active GC epoch, and restart resumes from the durable
+state instead of guessing whether ownership transferred. Commit moves the
+prior object closure into the new root, retires the superseded root, and clears
+the terminal handle payload; it does not retain one full closure per batch.
+Internal maintenance ingress may additionally carry authenticated archive
+retention roots. A pending legal archive commit carries one directory root;
+the law reachability participant authenticates and expands that root into blob,
+membership, and temporal pages before mark/sweep, so ingress size is independent
+of accumulated history. Snapshot/restart preserves the root. Applying it
+transfers ownership to committed roots; terminal stale rejection releases the
+pending root. Plugin descriptors persist internal-ingress names so the same
+authority boundary survives restore. Admission and boundary validation bind
+the commit to the exact directory root, object count, shard, token, source root,
+and expected record versions; a forged or summary-only commit cannot install a
+different archive.
+The synchronous helper verifies the retention handle plus the complete
+directory, index-page, and blob closure before applying on a clone, and swaps
+the live runtime only after store finalization. Canonical boundaries persist a
+terminal outcome for every retention handle. Finalization reads that outcome
+from the reloaded authoritative runtime and queues a private acknowledgement,
+so restart recovery retains every in-flight result while acknowledged metadata
+can leave hot state.
+
+After legal history becomes cold, hot state retains only exact archived
+dependency identities still referenced by current-law projections. That set is
+rebuilt from hot references after every release, so it scales with current law
+rather than total history. Succession follows the same rule: full institutional,
+liability, evidence, and archive payloads become cold while the bounded current
+reception projection required by no-provider applicability stays hot. Legal
+archive objects remain format 1; authenticated membership/bitemporal indexes
+use format 2, the full 16-bit bucket space, and reject pages above 64 entries or
+1 MiB before storage or root admission. Dense same-time cells use ordered
+multi-page segments, so a sixty-fifth version cannot overflow one page. Archive
+provider-backed bitemporal queries stream those segments and enforce candidate,
+intersection, provider-call, segment, and decoded-byte budgets during actual
+I/O. One query-wide meter is shared across directory, membership, temporal,
+and blob reads and across every shard, so crossing a shard boundary cannot
+reset the allowance. Provider-call and segment limits are checked before the next read; decoded
+bytes are charged immediately after each hard-capped page is decoded. Archive
+prepare reads a persisted per-shard candidate queue and incremental source
+authenticator, examining and materializing only the selected batch; full catalog
+reconciliation is restricted to explicit full cold restore or migration.
+
+Cross-plugin retirement uses owner-authorized maintenance. The target schema
+owner and every dependent plugin registered as a resolver in the frozen
+descriptors must each participate with one proposal. A proposal is bound to that
+plugin's semantic hash and may write only schemas owned by that plugin. The
+target owner's proposal must also include an exact mutation of the target
+record. The complete set is preflighted against one domain root and committed
+atomically through replay-visible maintenance ingress.
+Registrar-issued opaque internal-ingress permits protect plugin-owned
+maintenance packets, so an ordinary host cannot forge a verified legal archive
+commit. Maintenance that becomes stale after admission records a chained
+`RejectedStale` terminal receipt and completes as a no-effect boundary instead
+of retrying forever.
 
 ## Counterfactuals and tests
 
