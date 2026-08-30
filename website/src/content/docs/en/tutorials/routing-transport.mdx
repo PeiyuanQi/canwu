@@ -7,7 +7,7 @@ sidebar:
   label: Routing and transport
 ---
 
-> **Published extension.** The 0.5 routing and transport types have public APIs and focused tests, but hosts must provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
+> **Current contract.** The routing and transport types were introduced in 0.5 and remain part of the current 0.9 public API. Hosts must still provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
 
 For a runnable end-to-end composition with addressed information delivery, see
 [Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/).
@@ -95,6 +95,6 @@ After the final leg arrives, execution enters `ArrivalPending`. `completion_requ
 
 Trains, aircraft, relay horses, and telegraph lines can use `CapacityBooking`. A booking is a persistent windowed record with requested, confirmed, consumed, released, expired, cancelled, and failed states; a route-cache hit must never hide a capacity mutation. The current correspondence contract exposes only `CorrespondenceCapacityAdmission::Unconstrained` and cannot start a constrained leg. A future admission variant must carry exact booking or simulation-reservation evidence supplied by an application or infrastructure adapter.
 
-`RoutingCache` is derived from the planning-snapshot digest, request, and policy. It is rebuildable, excluded from authoritative snapshots, and unnecessary for exact replay. Expansion, transfer, risk, and arrival-horizon limits are also policy inputs, so “no route” and “budget exceeded” are deterministic replayable outcomes.
+`RoutingCache` is derived from the planning-snapshot digest, request, and policy. It is rebuildable, excluded from snapshots, and unnecessary for exact replay. Expansion, transfer, risk, and arrival-horizon limits are also policy inputs, so “no route” and “budget exceeded” are deterministic replayable outcomes.
 
 See the [architecture page](/en/architecture/) and the [repository routing/transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md) for the complete ownership boundary and M1–M3 checklist.

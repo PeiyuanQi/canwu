@@ -7,18 +7,31 @@ sidebar:
   label: Production and resource boundary
 ---
 
-Canwu provides the deterministic infrastructure needed by a production economy, but it does not put grain, factories, prices, historical resource deposits, or armies into the engine core.
+Canwu provides the deterministic infrastructure needed by a production economy, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
 
 ## Recommended boundary
 
-- Canwu core owns command admission, deterministic time, phase ordering, reservation allocation, atomic commit, rollback, visibility, persistence, and replay.
+- The simulation core owns command admission, deterministic time, phase ordering, reservation allocation, atomic commit, rollback, visibility, persistence, and replay.
 - The host domain owns `ResourceAccount`, `ResourceDemand`, `ResourceReservation`, `ResourceTransfer`, and consumption settlement.
 - A host transport adapter owns cargo balance, in-transit custody, loss, arrival acceptance, and destination credit. `canwu-transport` supplies movement execution, capacity booking, itinerary legs, handoffs, and the delivery-completion bridge.
 - Population, production, and military plugins form demands and consequences separately; they do not directly rewrite one another's stock.
 
-This keeps one authority: the host registers typed records and plugin boundary systems through the public `canwu-api`, and every write is checked against its declared owner/system before atomic commit.
+This keeps a single source of authority: the host registers typed records and boundary systems through the public `canwu-api`, and every write is checked against its declared owner/system before atomic commit.
+
+## Three terms to understand first
+
+| Term | Meaning |
+| --- | --- |
+| Protected floor | The minimum amount an account must retain instead of offering it to the current allocation |
+| Attempt-local reservation | A `ReservationRequest` valid only for the current transaction attempt; failure or rollback does not leave a hidden long-term hold |
+| Custody predecessor | The exact prior record that authorizes the next cargo-state transition and prevents duplicate credit or material creation |
 
 ## Minimal lifecycle
+
+```text
+Demand -> attempt-local reservation -> source debit -> in-transit custody
+       -> arrival acceptance -> destination credit -> next-boundary consumption
+```
 
 1. Demands enter through admission; admission does not directly write stock.
 2. The resource owner publishes a protected-floor-aware `ReservationOffer`; consumers submit attempt-local `ReservationRequest` values.
@@ -32,4 +45,4 @@ The account amount is the only writable quantity. Reserved, available, and prote
 
 Hosts pin the `canwu-api` version and plugin semantic hashes. Loading restores the same Canwu snapshot and revalidates host typed records; it must not rebuild an old campaign from its current timestamp or treat an unpublished local engine version as a compatible API.
 
-See the [production, resource, and facility mechanism proposal](/en/proposals/production-economy-mechanism/) for candidate extensions and the boundary of what should not enter the core.
+See the [production, resource, and facility mechanism proposal](/en/proposals/production-economy-mechanism/) for candidate extensions and the boundary of what should not enter the simulation core.

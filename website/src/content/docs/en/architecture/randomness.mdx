@@ -26,7 +26,7 @@ changing an existing stream.
 
 ## Declare before drawing
 
-A phased system may use only streams declared and owned in `BoundarySystemContract.random_streams`. When a random session starts, the kernel copies the allowed stream states; undeclared streams are rejected.
+A boundary system may use only streams declared and owned in `BoundarySystemContract.random_streams`. When a random session starts, the kernel copies the allowed stream states; undeclared streams are rejected.
 
 Every range draw requires:
 
@@ -72,7 +72,7 @@ Draw records and stream state enter snapshots, boundary evidence, and hashes. On
 
 Deterministic replay is not the same as save-scumming. The same authoritative state, command or decision input, plugin semantic environment, and simulation time must produce the same draw result; reloading a snapshot from before an event does not automatically roll the same event again with a different outcome.
 
-If a caller issues a different command from the same snapshot, `fork()` or an equivalent branch entry can produce a valid counterfactual run. That is a new causal branch, not an exact replay of the original run. Whether to expose manual saves, single-writer saves, or research branches to players belongs to the application's save policy, not to a changed random seed.
+If a caller issues a different command from the same snapshot, `fork()` or an equivalent branch entry can produce a valid alternative reality. That is a new alternative reality, not an exact replay of the original run. Whether to expose manual saves, single-writer saves, or research branches to players belongs to the application's save policy, not to a changed random seed.
 
 ## Guidance for plugin authors
 

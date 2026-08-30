@@ -8,11 +8,12 @@ sidebar:
 
 import { Steps } from "@astrojs/starlight/components";
 
-Canwu is a headless simulation core. The host owns windows, maps, networking, input, AI scheduling, and the frame loop. Canwu owns generic authoritative state, validation, deterministic time, events, and evidence. Concrete world models and commands belong to the domain integration selected by the application.
+Canwu is a headless historical simulation engine. The host owns windows, maps, networking, input, AI scheduling, and the frame loop.
+Canwu owns generic authoritative state, validation, deterministic time, events, and evidence; concrete world models and commands belong to the domain integration selected by the application.
 
 ## Add dependencies
 
-The current main branch requires Rust 1.88 or newer. Depend on the public API and explicitly select a domain integration:
+The current `main` branch requires Rust 1.88 or newer. The following dependencies are appropriate for evaluating the current development version:
 
 ```toml
 [dependencies]
@@ -22,52 +23,75 @@ canwu-reference-world = { git = "https://github.com/PeiyuanQi/canwu", branch = "
 
 `canwu-reference-world` is a replaceable starter integration, not an engine foundation crate. The old `canwu-world` crate is retired. Do not depend on `canwu-sim` or another runtime implementation crate.
 
-Applications that persist snapshots should pin a published engine release and pair every upgrade with an explicit save migration.
+Before production, pin an exact published release or Git revision and pair every engine upgrade with an explicit save migration.
 
 ## Minimal host flow
 
 ```rust
 use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
-use canwu_reference_world::{MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement};
+use canwu_reference_world::{
+    MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement,
+    snapshot as reference_snapshot,
+};
 
-let (scenario, ids) = demo_scenario()?;
-let plugin = ReferenceWorldPlugin;
-let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
-let command = order_movement(
-    Issuer::Actor(ids.commander),
-    &MovementCommand {
-        subject: EntityRef::Army(ids.army),
-        destination: ids.eastern_territory,
-        cargo: Vec::new(),
-    },
-)?.at_time(canwu.time());
-canwu.enqueue_command(
-    canwu.time(),
-    0,
-    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), command),
-)?;
-canwu.advance_canonical(SimDuration::hours(19))?;
-# Ok::<(), canwu_api::CanwuError>(())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (scenario, ids) = demo_scenario()?;
+    let plugin = ReferenceWorldPlugin;
+    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+
+    let command = order_movement(
+        Issuer::Actor(ids.commander),
+        &MovementCommand {
+            subject: EntityRef::Army(ids.army),
+            destination: ids.eastern_territory,
+            cargo: Vec::new(),
+        },
+    )?
+    .at_time(canwu.time());
+    canwu.enqueue_command(
+        canwu.time(),
+        0,
+        CommandRequest::new(CommandRequestId::new(1), canwu.revision(), command),
+    )?;
+    canwu.advance_canonical(SimDuration::hours(19))?;
+
+    println!(
+        "army_location={}",
+        reference_snapshot(&canwu)?
+            .army(ids.army)
+            .expect("demo army exists")
+            .location
+    );
+    Ok(())
+}
 ```
 
+Run the complete example from the repository root:
+
+```shell
+cargo run -p canwu-reference-world --example starter
+```
+
+The value `35` is a deterministic demo seed, `0` is the command priority, and the 19-hour advance crosses the reference movement system's settlement time.
+The program prints the army's final location; the complete `starter` example also verifies saving, forking, and exact replay.
 Production applications normally construct their own `Scenario` and plugins. The reference integration's `demo_scenario()` is only a runnable template.
 
 ## Choose an ingress path
 
 | Entry point | Use it when |
 | --- | --- |
-| `submit(CommandEnvelope)` | The host already owns a typed plugin command and issuer identity |
+| `submit(CommandEnvelope)` | The host already owns a typed domain command and issuer identity |
 | `process_command(CommandRequest)` | An external service needs request identity, revision validation, and recorded outcomes |
 | `enqueue_command(...)` | A command must enter at an explicit simulation time and priority |
 
-The domain integration translates UI or agent intent into a typed plugin command. Every ingress path preserves the same rule: the host never receives a mutable world reference.
+The domain integration translates UI or agent intent into a typed domain command. Every ingress path preserves the same rule: the host never receives a mutable world reference.
 
 ## Drive time
 
 <Steps>
 1. The host reads wall time, turn input, or research workflow progress.
 2. The host converts that input into `SimDuration` according to its own speed policy.
-3. Event-driven hosts call `advance()`; hosts with daily, turn, or other phased systems call `advance_canonical()` or explicit `settle_boundary()`.
+3. Event-driven hosts call `advance()`; hosts with daily, turn, or other boundary systems call `advance_canonical()` or explicit `settle_boundary()`.
 4. The host refreshes presentation from events, boundary receipts, or a read-only projection produced by its domain integration.
 </Steps>
 

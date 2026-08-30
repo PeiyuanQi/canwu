@@ -8,11 +8,12 @@ sidebar:
 
 import { Steps } from "@astrojs/starlight/components";
 
-参伍是无界面历史模拟引擎。窗口、地图、网络、输入、AI 调度和帧循环由上层应用负责；参伍负责通用权威状态、验证、确定性时间、事件和证据。具体世界模型与命令属于应用选择的领域整合。
+参伍是无界面历史模拟引擎。窗口、地图、网络、输入、AI 调度和帧循环由上层应用负责。
+参伍负责通用权威状态、验证、确定性时间、事件和证据；具体世界模型与命令属于应用选择的领域整合。
 
 ## 添加依赖
 
-当前 main 分支需要 Rust 1.88 或更新版本。应用依赖对外 API，并显式选择领域整合：
+当前 `main` 分支需要 Rust 1.88 或更新版本。下面的配置适合试用当前开发版本：应用依赖对外 API，并显式选择领域整合。
 
 ```toml
 [dependencies]
@@ -22,52 +23,75 @@ canwu-reference-world = { git = "https://github.com/PeiyuanQi/canwu", branch = "
 
 `canwu-reference-world` 是可替换的起步整合，不是引擎基础层。旧 `canwu-world` crate 已退役；不要依赖 `canwu-sim` 或其他运行时实现 crate。
 
-长期保存快照的应用应固定已发布引擎版本，并把版本升级与存档迁移一起处理。
+进入生产环境前，应固定已发布的精确版本或 Git 修订，并把每次引擎升级与显式存档迁移一起处理。
 
 ## 最小接入流程
 
 ```rust
 use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
-use canwu_reference_world::{MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement};
+use canwu_reference_world::{
+    MovementCommand, ReferenceWorldPlugin, demo_scenario, order_movement,
+    snapshot as reference_snapshot,
+};
 
-let (scenario, ids) = demo_scenario()?;
-let plugin = ReferenceWorldPlugin;
-let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
-let command = order_movement(
-    Issuer::Actor(ids.commander),
-    &MovementCommand {
-        subject: EntityRef::Army(ids.army),
-        destination: ids.eastern_territory,
-        cargo: Vec::new(),
-    },
-)?.at_time(canwu.time());
-canwu.enqueue_command(
-    canwu.time(),
-    0,
-    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), command),
-)?;
-canwu.advance_canonical(SimDuration::hours(19))?;
-# Ok::<(), canwu_api::CanwuError>(())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let (scenario, ids) = demo_scenario()?;
+    let plugin = ReferenceWorldPlugin;
+    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+
+    let command = order_movement(
+        Issuer::Actor(ids.commander),
+        &MovementCommand {
+            subject: EntityRef::Army(ids.army),
+            destination: ids.eastern_territory,
+            cargo: Vec::new(),
+        },
+    )?
+    .at_time(canwu.time());
+    canwu.enqueue_command(
+        canwu.time(),
+        0,
+        CommandRequest::new(CommandRequestId::new(1), canwu.revision(), command),
+    )?;
+    canwu.advance_canonical(SimDuration::hours(19))?;
+
+    println!(
+        "army_location={}",
+        reference_snapshot(&canwu)?
+            .army(ids.army)
+            .expect("demo army exists")
+            .location
+    );
+    Ok(())
+}
 ```
 
-真实应用通常构建自己的 `Scenario` 与插件。参考整合的 `demo_scenario()` 只是可运行模板。
+在仓库根目录运行完整示例：
+
+```shell
+cargo run -p canwu-reference-world --example starter
+```
+
+示例中的 `35` 是确定性的演示种子，`0` 是命令优先级，19 小时会跨过参考移动系统的结算时间点。
+程序会打印军队的最终位置；完整 `starter` 示例还会验证存档、派生分支和精确重放。
+真实应用通常构建自己的 `Scenario` 与插件，`demo_scenario()` 只是可运行模板。
 
 ## 选择写入入口
 
 | 入口 | 适用场景 |
 | --- | --- |
-| `submit(CommandEnvelope)` | 调用方已持有类型化插件命令与发令者身份 |
+| `submit(CommandEnvelope)` | 调用方已持有类型化领域命令与发令者身份 |
 | `process_command(CommandRequest)` | 外部服务需要请求标识、修订校验和结果记录 |
 | `enqueue_command(...)` | 命令必须在指定模拟时间按优先级进入 |
 
-领域整合负责把 UI 或智能体意图转成类型化 plugin command。无论选择哪个入口，调用方都不会取得可变世界引用。
+领域整合负责把 UI 或智能体意图转成类型化领域命令。无论选择哪个入口，调用方都不会取得可变世界引用。
 
 ## 驱动时间
 
 <Steps>
 1. 上层应用读取现实时间、回合输入或研究任务进度。
 2. 上层应用按自己的速度策略把它转换为 `SimDuration`。
-3. 普通事件驱动场景调用 `advance()`；含日结、回合结算等阶段系统时调用 `advance_canonical()` 或显式 `settle_boundary()`。
+3. 普通事件驱动场景调用 `advance()`；含日结、回合结算等边界系统时调用 `advance_canonical()` 或显式 `settle_boundary()`。
 4. 从事件、边界回执或领域整合生成的只读投影刷新表现层。
 </Steps>
 

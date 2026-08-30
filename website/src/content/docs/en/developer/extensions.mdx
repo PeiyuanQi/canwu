@@ -1,121 +1,97 @@
 ---
 title: Extend with plugins
-description: Add commands, domain state, and phased settlement systems without bypassing Canwu's public safety boundaries.
+description: Add commands, domain state, and boundary systems without bypassing Canwu's public safety boundaries.
 sidebar:
   order: 5
   label: Plugin extensions
 ---
 
-Canwu keeps the simulation core domain-neutral. Applications add military, economic, political, or social rules through
-`SimulationPlugin`, public schemas, command handlers, and boundary systems rather than mutating the live world.
+Canwu keeps the simulation core domain-neutral. Host applications add military, economic, political, or social rules through
+simulation plugins, domain schemas, command handlers, and boundary systems rather than mutating the live world.
 
 ## Choose an extension path
 
 | Need | Use |
 | --- | --- |
-| A user action or service request produces a local change | Plugin command through `register_command()` |
-| Several systems coordinate at the same day, turn, or time point | Boundary system through `register_boundary_system()` |
-| The plugin owns typed domain data | Domain schemas and record APIs |
-| Results require stable randomness | Declared plugin random streams so draws enter evidence |
+| A user action or service request produces a local change | Register a domain command with `register_command()` |
+| Several systems coordinate at the same day, turn, or time point | Register a boundary system with `register_boundary_system()` |
+| The plugin owns typed domain data | Register domain schemas and use the domain-record APIs |
+| Results require stable randomness | Declare plugin random streams so each draw enters evidence |
 
-## Command plugins
+## Minimal simulation-plugin structure (excerpt)
 
-A command plugin should:
+This excerpt shows the registration shape only. The runnable example contains the payload schema, handler, and complete imports.
 
-1. Provide a stable name, version, and semantic hash.
-2. Declare its payload schema and read/write `StateKey` values with `PluginActionDescriptor`.
-3. Query through read-only `SimulationView` and check authority from `CommandContext`.
-4. Return `SystemDirective` values describing intended changes instead of mutating the world.
-5. Enter with `Command::Plugin` through public `submit()`, `process_command()`, or `enqueue_command()` ingress.
+```rust
+struct StancePlugin;
 
-See the runnable [command plugin tutorial](/en/tutorials/command-plugin/).
+impl SimulationPlugin for StancePlugin {
+    fn name(&self) -> &'static str { "example-stance" }
+    fn version(&self) -> &'static str { "1.0.0" }
+    fn semantic_hash(&self) -> &'static str { "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26" }
 
-## Boundary systems
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_command(stance_descriptor(), set_stance)
+    }
+}
+```
 
-Use a boundary system when supply, demand, allocation, and state changes must coordinate in one settlement. Its contract
-declares:
+`stance_descriptor()` declares the payload shape and read/write `StateKey` values. `set_stance()` queries through the read-only
+`SimulationView`, checks the issuer with `CommandContext`, and returns `SystemDirective` values describing the change.
+It never receives a mutable world reference.
 
-- execution phase and cadence;
+Run the complete example:
+
+```shell
+cargo run -p canwu-api --example plugin
+```
+
+When the army commander submits `set_stance`, Canwu validates the payload and authority before committing the stance component.
+An unauthorized issuer receives `InvalidAuthority`, and no partial state change is committed.
+
+## When to use a boundary system
+
+Use a boundary system when supply, demand, resource allocation, and consequences must coordinate in one transaction.
+Its contract should declare:
+
+- settlement phase and cadence;
 - reads, writes, and same-boundary visibility;
 - resource offers, reservation requests, and allocation dependencies;
-- domain events it may emit;
-- required random streams and schemas.
+- domain events it may emit; and
+- required random streams and domain schemas.
 
-Canwu runs these systems in fixed phase order, validates declared access, performs deterministic allocation, and commits
-the boundary atomically. See [phased boundary and allocation](/en/tutorials/phased-boundary/) for a complete example.
+Canwu runs systems in fixed phase order, validates declared access, performs deterministic allocation, and commits the result atomically.
+See [phased boundary and allocation](/en/tutorials/phased-boundary/) for a complete example.
 
-## Culture system SDK
+## From a requirement to a replayable extension
 
-The published `canwu-culture` SDK is a developer-facing authoring layer above
-`canwu-society`. A content pack declares targets, cohorts, channels,
-transitions, institutions, and downstream effects; the SDK validates budgets
-and compiles those definitions into an externally immutable, content-hash-bound execution plan.
-The runtime completely restores the dirty set, hot-target index, dormant
-schedule, and effect-cadence cursors. After explicit society synchronization, retired targets
-no longer participate in target-scoped hot work; incremental aggregation remains
-follow-up work.
+1. Choose a stable plugin name, version, and semantic hash.
+2. Register the domain schemas, commands, and boundary systems owned by the plugin.
+3. Let handlers read only through `SimulationView` and return declared changes.
+4. Submit domain commands or canonical ingress through public entry points; do not retain a live runtime reference.
+5. Verify save/load, exact replay, authority failure, and atomic rollback.
 
-Use `settle_culture_society_boundary` for ordinary host settlement. It prepares
-a runtime delta over active, due-dormant, and explicitly observed targets, and
-touches society bindings only for targets whose lifecycle changes. The full
-`synchronize_society_lifecycle` scan is reserved for load repair and explicit
-maintenance checkpoints.
+## Available domain extensions
 
-Culture targets have `Active`, `Dormant`, and `Retired` states. A dormant target
-leaves the culture hot index while retaining a reactivation descriptor; a retired
-target releases dynamic society state during synchronization but keeps a tombstone
-and historical evidence. Reactivation is explicit and generation-bound; the
-canonical-ingress adapter remains follow-up work. See the [culture and legal institutional systems](/en/architecture/culture-law/).
+These packages are optional capabilities built on the public API, not hard-coded simulation-core subsystems.
 
-## Legal institutionalization SDK
+| Package | Status and use | Continue with |
+| --- | --- | --- |
+| `canwu-society` | Published social-diffusion simulation module | [Local community diffusion](/en/tutorials/cases/local-community-diffusion/) |
+| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension | [Culture and legal institutions](/en/architecture/culture-law/) |
+| `canwu-law` | Experimental legal-institutionalization extension | [Culture and legal institutions](/en/architecture/culture-law/) |
+| `canwu-technology` | Published technology-evidence, local-capability, and diffusion extension | [Technology diffusion](/en/tutorials/technology-diffusion/) |
+| `canwu-fiscal` | Generic fiscal-procedure extension; it does not own resource balances or transport | [Ming fiscal case](/en/tutorials/cases/ming-fiscal/) |
 
-The experimental `canwu-law` crate compiles legal authoring definitions into a
-deterministic plan and provides jurisdiction relations, institutional seats,
-frozen procedures, per-seat participation, a decision outbox, pending legal
-intents, immutable legal sources and law versions, stable rules, cases and
-rulings, applicability, and succession. Authors must declare clause modality and distinguish legal
-competence, defects, validity, and exact origin. Kernel command authorization
-does not imply in-world validity. Rights and eligibility clauses also declare
-holders, duty bearers, subject matter, standing, and remedy relations. Canonical `LegalMutation` and pending-
-intent ingress are revalidated by the event-driven plugin and update the
-declared legal shard working set atomically in one `DomainDeltaProposal` using
-exact record versions. The three-stage outbox adapter persists the expected revision, settles
-decision ingress, then proves accepted controller and ticket-open outcomes plus
-the exact ticket binding from the persistent decision journal. The proof does
-not depend on retaining ingress payloads. Actor contexts come from bounded
-holder `KnowledgeQuery` results.
-
-Persisted indexes cover open procedures, deadlines, latest participation,
-dispatched outbox identities, due versions, decision outcomes, and dirty rules. Applicability queries require
-an order partition and exact compiled profile; succession uses bounded reception
-scope and rule-prefix matching rather than inheriting a whole predecessor order by default. Retirement names an exact culture
-generation: adoption evidence can retire without deleting enacted law, while
-an operative live-level dependency blocks retirement. Only the law's own
-review, expiry, repeal, or succession operation changes its legal effect.
-Retirement is bounded owner-authorized maintenance: target-keyed dependency
-records let the kernel preflight the culture owner and every registered
-resolver against one persistent root, then commit all owner-scoped changes or
-none without scanning total legal history.
-See the [culture and legal institutional systems](/en/architecture/culture-law/).
-
-## Fiscal simulation extension
-
-`canwu-fiscal` owns generic fiscal procedure: rules, regional adoption,
-assessments, remissions, execution authorizations, audits, and holder-relative
-knowledge reports. It does not own silver or grain balances, prices, or transport.
-Historical content compiles into an immutable catalog; dates produce periods
-and reform candidates rather than applying reforms automatically. After a real
-resource operation, a host adapter publishes a typed result and submits a fiscal
-execution receipt citing that exact version. See the complete design and three
-runnable starts in the [Ming fiscal case](/en/tutorials/cases/ming-fiscal/).
+Before selecting an extension, confirm its public version, dependency graph, and persistence contract.
+Historical content, scenario parameters, and host rules remain owned by content packs or the host application.
 
 ## Lifecycle rules
 
 - Register plugins before commands, scenario validation, or loads that depend on them.
-- Provide the same plugin set when restoring a save or replaying a journal.
-- Do not retain live runtime references or bypass ingress to mutate state.
-- Treat a semantic-hash change as executable semantic change that requires migration or a new version.
-- Consume every extension contract through `canwu-api` from application code.
+- Provide the same plugin set and semantic hashes when restoring a save or replaying a journal.
+- Do not retain live runtime references or bypass canonical ingress to mutate state.
+- Treat a semantic-hash change as an executable-behavior change that requires migration or a new version.
+- Consume extension contracts through `canwu-api` from application code.
 
-Before implementation, review the [five architectural boundaries](/en/architecture/#five-architectural-boundaries), then
-start from the public example closest to your use case.
+Before implementation, review the [five architectural boundaries](/en/architecture/#five-architectural-boundaries), then start from the public example closest to your use case.

@@ -1,14 +1,34 @@
 ---
 title: 存档、重放与分支
-description: 保存和恢复参伍状态，验证插件环境，并构建精确重放与平行现实。
+description: 保存和恢复参伍状态，验证插件语义环境，并构建精确重放与平行现实。
 sidebar:
   order: 4
   label: 存档与重放
 ---
 
-存档不是序列化一个世界结构体。参伍的可恢复状态包含实体注册表、领域记录、命令、事件、边界、随机证据、插件语义和校验承诺。
+参伍存档不只是一个序列化的世界对象。可恢复状态还包括命令、事件、结算边界、随机证据、
+插件语义环境和状态承诺。先确定恢复目标，再选择相应接口。
 
-## 带插件的存档
+## 先选择恢复目标
+
+| 目标 | 使用 | 上层应用责任 |
+| --- | --- | --- |
+| 普通存档或服务重启 | `snapshot_json()` 与 `from_snapshot_json_with_plugins()` | 保存完整快照，并在加载时提供相同插件集合 |
+| 长期运行的紧凑存储 | `checkpoint_journal_json()` | 保存经验证的检查点及其后连续日志 |
+| 审计或精确重建 | `replay_journal()` 与 `replay_from_journal()` | 保存完整日志和匹配的插件语义环境 |
+| 向外部系统发送副作用 | `outbox_entries()` | 至少投递一次，并按 `delivery_id` 去重和记录确认状态 |
+| 从同一起点尝试另一组输入 | `fork()` | 把结果当作新的平行现实，不与精确重放混淆 |
+
+## 版本与格式合同
+
+截至 2026 年 8 月 30 日，工作区版本为 `0.9.0`，快照格式为 8。精确的
+`engine_version` 仍属于存档合同，因此 0.8 与 0.9 快照不能互换。
+模拟内核不会静默迁移旧快照，也不能只修改格式号来伪装兼容。
+
+需要长期保存状态的应用应固定已发布的精确版本或 Git 修订。跨版本保留历史时，
+由上层应用运行显式导出/导入流程，或保留能够读取旧数据的旧引擎。
+
+## 快照保存与恢复（节选）
 
 ```rust
 use canwu_api::Canwu;
@@ -17,96 +37,70 @@ use canwu_reference_world::{ReferenceWorldPlugin, demo_scenario};
 let (scenario, _) = demo_scenario()?;
 let plugin = ReferenceWorldPlugin;
 let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+
 let json = canwu.snapshot_json()?;
 let restored = Canwu::from_snapshot_json_with_plugins(&json, &[&plugin])?;
-
 assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
-# Ok::<(), canwu_api::CanwuError>(())
 ```
 
-一旦状态包含插件领域记录，加载时必须提供与保存时相同的插件集合。插件名称、版本和语义哈希是环境承诺的一部分。
+这段代码是接入节选。可以运行完整示例验证快照、派生分支和精确重放：
 
-0.8 使用 Format 8 不兼容升级。快照必须带有声明式 `RunManifest`、运行配置、规范化 `initial_scenario`、完整承诺根、`authority_root_seed`、精确决策请求承诺和显式插件描述符版本；Format 8 以前的数据不会在内核中自动迁移。
+```shell
+cargo run -p canwu-reference-world --example starter
+```
+
+插件名称、版本和语义哈希都是插件语义环境的一部分。只要存档包含插件领域记录，
+加载和重放就必须提供兼容的插件集合。
 
 ## 检查点日志与精确重放
 
-`checkpoint_journal_json()` 把经验证的检查点与后续日志组合起来。恢复时使用对应的 `from_checkpoint_journal_json_with_plugins()`。
+检查点日志把一个经验证的检查点与之后的连续证据组合起来，适合长期运行。
+精确重放则从日志内的初始场景、输入和证据重建同一模拟运行：
 
 ```rust
+let checkpoint_journal = canwu.checkpoint_journal_json()?;
 let journal = canwu.replay_journal();
 let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
+
+assert!(!checkpoint_journal.is_empty());
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
-# Ok::<(), canwu_api::CanwuError>(())
 ```
 
-精确重放使用日志内的初始场景，不接受调用方另传的场景；引擎版本、运行身份和插件语义环境必须匹配。`Canwu::outbox_entries()` 返回边界产生的持久化外发项，上层应用应按 `delivery_id` 做至少一次投递和幂等去重；精确重放不会重新发送外部副作用。
+`replay_from_journal()` 不接受调用方另传的场景。运行身份、引擎版本、插件语义环境和
+已记录证据必须匹配；重放使用已记录结果，不重新询问外部服务或重新发送副作用。
 
-调用 `Canwu::replay_from_journal_json()` 从 JSON 载入日志；它会在精确重放开始前递归拒绝未知字段。
+## 外发项的四条规则
 
-`CompactedCanwu::outbox_entries()` 只返回当前保留证据尾部的外发项。证据封存后，调用方拥有返回的 `EvidenceJournalSegment`，可使用 `outbox_entries_for_segment` 重新生成相同的标识。边界外发记录仍应与上层应用的投递及确认状态一同保存；封存本身不表示外部副作用已投递或已确认。
+1. 把 `delivery_id`、投递状态和确认状态保存在上层应用自己的持久化存储中。
+2. 按至少一次语义投递；超时或重启后可以安全重试。
+3. 接收方按 `delivery_id` 去重，不能依赖网络调用只发生一次。
+4. 精确重放会生成相同外发项身份，但不会代表上层应用再次投递。
 
-Format 8 允许领域记录 schema 声明有序、唯一的仅身份型证据依赖。封存只保留对应的 Merkle 收据，不需要把旧载荷留在热路径；插件生成的规范化输入收据还绑定提供者插件、数据包类型和产出边界。领域运行时可用引用计数增量维护该声明，冷加载会独立完整重算并验证集合与计数。直接封存与准备、存储、提交式封存都是原子的：缺少收据等后期校验失败不会改变实时检查点。只有显式要求载荷的延续任务才需要通过 `ArchiveProvider` 重新加载旧分段。
+封存证据后，调用方还必须保存返回的 `EvidenceJournalSegment` 及其外发确认状态。
+压缩或封存不等于已经投递或确认。
 
-Format 8 还公开 `StatePageBlob`、`StatePageProvider`、`prepare_state_delta`
-与 `verify_state_delta`，用于幂等的内容寻址检查点页面。领域记录使用
-主索引、反向引用、后继与前驱四棵规范 Patricia 树；提供者已经持有的子树会成为
-遍历边界，所以单条记录变化只输出缺失路径与清单。
+## 高级存储与归档
 
-使用带类型的 `DecisionHistoryKey` 查询决策历史；`DecisionHistoryLocation` 返回
-`Hot`、`Archived { locator }`、`Unresolved { bucket, segment }` 或 `Absent`。`Unresolved`
-表示根已承诺该冷 locator 分段，但必须通过 provider 才能判断精确成员关系。终态载荷可经规范化维护输入移出热状态；
-检查点仅保存热页面、归档根和两级 locator：4,096 个稳定哈希前缀桶，每桶再分成 16 个确定性分段。
-每个分段最多 64 条、1 MiB；locator 页表再按每页最多 1,024 个 page ID 分页，因此百万键时根清单仍低于 4 MiB。
-精确查询只加载一个 locator 分段；热历史根由可在恢复时重建验证的
-计数、XOR 与模加和增量维护。精确查询与分页返回自有值；缺失分段
-或归档对象会返回明确的历史不可用错误，不会误报成空结果。验证阶段会为每个受影响分段生成
-绑定旧 page ID 的完整认证 replacement；边界提交不再读取 provider，因此 root-only 重启后仍可
-向已有分段追加历史，同时保持重放幂等。
-决策恢复还会校验规范的 bucket/segment 目录，并拒绝同时出现在热元数据中的归档 locator 或终态载荷。
-在校验热状态前，恢复流程会找出热 trace、已解决热 ticket 与已接受热 attempt 仍引用的归档 ticket/trace，
-并只按已提交目录认证这些精确 locator 页面。因此部分归档的依赖图可以正确重启，而不必加载无关历史。
-重复检查点准备只打开实际发生分段变化的 locator 目录页；未变化的百万键目录不会逐页重读。
+只有在快照大小或热历史成为实际问题后，才需要分页检查点、`StatePageProvider`、
+决策历史归档或插件归档参与者。此时上层应用必须：
 
-分页检查点 envelope format 4 保存的是紧凑 `SimulationCheckpoint` 与内容寻址页面根。
-构造分页检查点时会直接生成不含领域记录和决策历史载荷的紧凑主体，不会先复制全量载荷再清空。
-如果检查点日志 cut 非空，恢复必须同时提供截至该 cut 的精确连续日志前缀；只有零 cut
-才能使用空日志简写。离线 GC 使用统一 `ArchiveReachabilityManifest`，自动调用冻结插件的归档
-参与者，合并状态页、证据分段、决策 locator/blob，以及法律插件命名空间下的内容、blob 与
-三类认证索引页面；调用方不再手工附加法律标记。保留账本从 provider 推导并验证精确传递闭包。
-待处理工作只保存本批新增对象 delta 与拟提交根的当前页面闭包，旧数据继续由上一已提交根保护。法律归档交接会把
-`Prepared`、`Verified`、`DurableIngress`、`Committed`、`RejectedStale` 或 `Abandoned`
-写入持久化账本；每次转换都与当前 GC epoch 互锁，重启后从持久状态继续，而不会猜测保留责任是否已经转交。
-提交时会把旧对象闭包移动到新根、退休被取代的根，并清空终态句柄的可达性载荷，而不会为每个批次重复保留完整历史闭包。
-插件内部维护 ingress 还能携带认证归档保留根。待处理的法律归档提交只携带一个 directory root，
-法律插件的 reachability participant 会在 mark/sweep 前认证并展开其 blob、membership 与 temporal 页面；
-因此 ingress 大小不随累计历史增长。snapshot/restart 会继续保护该根；应用时保留责任转交给
-已提交根，陈旧终态拒绝则释放该根。插件描述符持久化内部 ingress 名称，从而在恢复后
-保留相同的授权边界。接纳与边界校验会绑定精确 directory root、对象数、分片、token、source root
-和预期记录版本；伪造或仅带摘要的提交不能安装另一份归档。
-同步提交会先认证 retention handle 以及完整 directory、索引页和 blob 闭包，再在克隆 runtime 上应用；
-只有 store finalization 成功后才替换实时 runtime。规范边界会按 retention handle 分别持久化终态结果。
-finalization 从重新加载的权威 runtime 推导结果，并排入一个私有确认 ingress；因此重启能恢复每个未完成交接，
-而已确认的恢复元数据可在下一边界退出热状态。
+- 按内容标识保存并返回精确页面字节；缺页必须明确失败，不能伪装成空数据；
+- 保存检查点要求的连续日志前缀和归档保留根；
+- 让每个插件恢复相同的归档合同与语义哈希；
+- 在删除冷数据前，根据已提交根完成可达性验证。
 
-法律历史进入冷归档后，热状态只保留仍被当前法律投影引用的精确依赖身份；该集合在每次释放后
-从热引用重建，因此随当前法律规模而不是总历史增长。法律秩序承继记录同样把完整机构、责任、证据
-与档案载荷移冷，只保留当前无 provider 适用性查询所需的有界继受投影。法律归档对象格式为 1，
-认证 membership/双时态索引格式为 2；索引使用完整 16-bit 桶空间，并在存储或接纳根之前拒绝超过
-64 条或 1 MiB 的页面。密集的同时间单元使用有序的多页面分段，因此第 65 条记录不会让单页溢出。
-provider-backed 双时态查询会流式读取这些分段，并在实际 I/O 过程中同时执行候选、交集、provider call、
-segment 与 decoded-byte 预算；同一个查询级 meter 覆盖所有分片以及 directory、membership、temporal
-和 blob 读取，跨分片不会重置配额。call/segment 上限在发起下一次读取前检查，decoded bytes 则在每个有硬上限的页面解码后立即累计并失败。
-归档准备从持久化的分片候选队列和增量 source authenticator 中读取，只检查和物化选中批次；完整
-目录重建仅允许出现在显式完整冷加载或迁移中。
+完整的格式号、分页合同与归档不变量见仓库中的
+[版本与持久化合同](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)。
 
-跨插件退休使用所有者授权维护。目标领域 schema 的所有者，以及冻结描述符中注册为
-依赖解析器的每个依赖插件，都必须各提交一个提案；每个提案绑定插件语义哈希，并且
-只能改写该插件自己拥有的领域 schema。
-目标所有者的提案还必须包含对目标记录的精确修改。完整提案集合针对同一个领域根
-预检，并通过可重放的规范化维护输入原子提交。
-插件自己的维护 ingress 由注册阶段签发的不透明内部许可保护，普通上层应用不能伪造法律归档提交。
-提交后才变陈旧的维护会写入链式 `RejectedStale` 终态收据并作为无副作用成功边界结束，避免无限重试。
+## 平行现实
 
-## 反事实与测试
+`fork()` 从当前点创建独立模拟。它适合比较另一组命令、策略或研究假设；
+每个分支仍通过正常命令与时间入口推进。它不是精确重放，因为后续输入可以不同。
 
-`fork()` 创建相同起点的独立模拟。使用领域投影或 checkpoint hash 比较分支；每个分支仍通过正常命令与时间入口推进。
+## 上线前检查
+
+- 固定引擎版本和插件语义环境。
+- 完成一次保存、进程重启、加载和哈希比较。
+- 完成一次精确重放，并比较最终检查点哈希。
+- 模拟外发投递超时，确认按 `delivery_id` 重试不会重复产生外部效果。
+- 为版本升级写明显式导出、迁移或放弃旧存档的政策。

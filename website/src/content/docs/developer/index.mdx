@@ -6,13 +6,13 @@ sidebar:
   order: 1
   label: 开发者指南
 hero:
-  tagline: 按接入、读取、存档和扩展等常见任务了解参伍的公开 API。
+  tagline: 按接入、读取、存档和扩展等常见任务了解参伍的对外 API。
   actions:
+    - text: 运行第一个示例
+      link: /tutorials/move-army/
+      icon: right-arrow
     - text: 接入参伍
       link: /developer/integration/
-      icon: right-arrow
-    - text: 查看教程
-      link: /tutorials/
       variant: secondary
       icon: open-book
     - text: English guide
@@ -29,6 +29,12 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 这组文档写给**使用参伍构建产品的开发者**。它不记录项目路线、维护流程、
 品牌规范或内部设计提案，而是解释上层应用如何正确使用 `canwu-api`。
 
+## 第一次接入
+
+1. 先运行[移动军队示例](/tutorials/move-army/)，确认本地工具链和对外 API 可以工作。
+2. 再阅读[接入并驱动模拟运行](/developer/integration/)，把同一流程放进自己的上层应用。
+3. 接入完成后，按需求继续阅读安全读取、存档或插件扩展页面。
+
 ## 你会在这里找到什么
 
 <CardGrid>
@@ -40,17 +46,17 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
   <LinkCard
     title="安全读取与呈现状态"
     href="/developer/reading-state/"
-    description="区分权威快照与角色视角，避免向玩家、智能体或远程客户端泄露真实世界状态。"
+    description="区分只读快照与角色相对视图，避免向玩家、智能体或远程客户端泄露真值。"
   />
   <LinkCard
     title="存档、重放与分支"
     href="/developer/persistence/"
-    description="选择快照或 checkpoint journal，恢复插件环境，并构建精确重放与平行现实。"
+    description="选择快照或检查点日志，恢复插件语义环境，并构建精确重放与平行现实。"
   />
   <LinkCard
     title="通过插件扩展"
     href="/developer/extensions/"
-    description="用命令插件和阶段系统添加领域规则，同时保留权限、确定性和审计边界。"
+    description="用领域命令和边界系统添加领域规则，同时保留权限、确定性和审计边界。"
   />
   <LinkCard
     title="生产与资源边界"
@@ -68,8 +74,8 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 
 ## 开发者的核心约束
 
-1. 应用代码通过 `canwu-api` 接入；具体领域规则选择公开整合包，不依赖内部 crate 作为兼容接口。
-2. 外部修改通过命令、语义动作或规范化输入进入，不直接改写世界状态。
-3. 玩家和智能体默认读取角色视角；权威快照只用于受信任的上层应用逻辑和调试工具。
+1. 应用代码通过 `canwu-api` 接入；具体领域规则选择参考整合包，不依赖内部 crate 作为兼容接口。
+2. 外部修改通过命令、领域命令或其他规范化输入进入，不直接改写世界状态。
+3. 玩家和智能体默认读取角色相对视图；只读快照只用于受信任的上层应用逻辑和调试工具。
 4. 现实时间、渲染和输入由上层应用负责；参伍只接收能准确表示的模拟时间。
 5. 需要存档时固定引擎版本，并在加载和重放时恢复相同的插件语义环境。

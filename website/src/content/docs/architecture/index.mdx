@@ -25,11 +25,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
-参伍是一个不负责渲染和用户界面的历史模拟内核（headless core）。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
+参伍是一个无界面历史模拟引擎。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
 
 ## Format 8 与三种模拟粒度
 
-0.8 在 1.0 之前采用 Format 8 不兼容升级：快照和 `ReplayJournal` 携带声明式运行身份、初始场景、承诺根、权威根和完整证据；Format 8 另行提供内容寻址状态页面，用于分页检查点。内核不自动加载 Format 8 以前的存档。`SimulationGranularity` 只定义领域无关的 `aggregate`、`group`、`actor` 三层。Celestial Mandate 可在自己的参考整合包中将它们映射为 Population、Special Group、Character；Southern Ming 与 WWII 是 CM 内容与规则整合，不是参伍内核模块。
+截至 2026 年 8 月 30 日，当前工作区版本为 `0.9.0`，快照格式仍为 8。快照和 `ReplayJournal` 携带声明式运行身份、初始场景、承诺根、权威根和完整证据；Format 8 另行提供内容寻址状态页面，用于分页检查点。精确的 `engine_version` 属于存档合同，因此 0.8 与 0.9 快照不能互换；模拟内核也不会隐式加载 Format 8 以前的存档。`SimulationGranularity` 只定义领域无关的 `aggregate`、`group`、`actor` 三层。Celestial Mandate 可在自己的参考整合包中将它们映射为 Population、Special Group、Character；Southern Ming 与 WWII 是 CM 内容与规则整合，不是模拟内核模块。
 
 ## 从客户端到内核
 
@@ -42,7 +42,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 五条架构边界
 
-1. **命令边界**：外部改变必须进入验证过的引擎命令、领域插件命令或规范化输入；客户端不能直接改写状态。
+1. **命令边界**：外部改变必须进入验证过的引擎命令、领域命令或规范化输入；客户端不能直接改写状态。
 2. **读取边界**：对外 API 返回通用实体、领域记录和证据；领域整合生成脱离运行时的投影，`CanwuViewer` 限定角色知识。
 3. **确定性边界**：时间、队列、插件执行顺序、资源分配和随机流都有明确的规范排序。
 4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。

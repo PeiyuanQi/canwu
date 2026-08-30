@@ -90,7 +90,7 @@ Fiscal procedure settles separately from resource truth:
 2. `GrantRemission` records authorized relief and cannot exceed the assessment.
 3. `AuthorizeExecution` permits collection, remittance, disbursement, reserve, or return without changing a resource.
 4. A host resource or logistics adapter performs the real operation and publishes a typed result.
-5. `enqueue_execution_receipt` submits the exact typed result versions. At the runtime settlement boundary, admission decodes every result and matches its request, execution kind, payment form, resource, source, target, and unit. The persisted quantity and disposition are derived from those results, not declared by the caller.
+5. `enqueue_execution_receipt` submits the exact typed result versions. During the runtime transaction, admission decodes every result and matches its request, execution kind, payment form, resource, source, target, and unit. The persisted quantity and disposition are derived from those results, not declared by the caller.
 6. The result is fulfilled, partial, rejected, or excused. Within one fiscal runtime state, neither one exact evidence version nor one `(evidence kind, external_operation_id)` pair can settle two receipts.
 7. Aggregates partition by institution, mechanism, scope, accounting cycle, unit, and payment form. They separate assessment and remission from collected, remitted, disbursed, reserved, and returned quantities; only remission and collection reduce outstanding assessment.
 8. Reports are holder-relative knowledge with non-invertible quantized ranges, confidence, and evidence, not exact truth stored in `FiscalState`.

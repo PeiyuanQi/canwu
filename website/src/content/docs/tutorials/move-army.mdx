@@ -17,9 +17,13 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 这是理解迁移后边界的最短路径：引擎提供通用运行时，世界模型和移动命令属于可选的 `canwu-reference-world` 整合。
 
-## 运行
+## 从新环境运行
+
+先安装 Git 和 Rust 1.88 或更新版本，再运行：
 
 ```shell
+git clone https://github.com/PeiyuanQi/canwu.git
+cd canwu
 cargo run -p canwu-reference-world --example starter
 ```
 
@@ -28,7 +32,7 @@ cargo run -p canwu-reference-world --example starter
 <Steps>
 1. 用 `demo_scenario()` 创建场景、通用实体注册表与参考领域记录。
 2. 通过 `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])` 注册领域逻辑。
-3. 把 `MovementCommand` 包装成 plugin command，再经 `enqueue_command()` 进入规范队列。
+3. 把 `MovementCommand` 包装成领域命令，再经 `enqueue_command()` 进入规范队列。
 4. 用 `advance_canonical()` 推进时间，再通过参考整合的 `snapshot()` 读取军队位置。
 5. 保存快照、加载、分支并从 journal 重放，然后比较四个检查点。
 </Steps>
@@ -37,8 +41,8 @@ cargo run -p canwu-reference-world --example starter
 
 - 军队在时间推进后到达目标领地。
 - 世界具体类型不是 `canwu-api` 的基础依赖；应用可替换整个领域整合。
-- 加载、分支和精确重演都与原运行产生相同检查点。
-- Format 8 快照自带规范实体注册与初始场景；Format 8 以前的存档由内核拒绝，不在运行时隐式迁移。
+- 加载、分支和精确重放都与原运行产生相同检查点。
+- Format 8 快照自带规范实体注册与初始场景；Format 8 以前的存档由模拟内核拒绝，不在运行时隐式迁移。
 
 ## 下一步
 

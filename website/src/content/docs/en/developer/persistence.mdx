@@ -1,14 +1,35 @@
 ---
 title: Save, replay, and fork
-description: Save and restore Canwu state, validate plugin environments, and build exact replay or alternative realities.
+description: Save and restore Canwu state, validate the plugin semantic environment, and build exact replay or alternative realities.
 sidebar:
   order: 4
   label: Persistence and replay
 ---
 
-A save is not one serialized world struct. Recoverable Canwu state includes the entity registry, domain records, commands, events, boundaries, random evidence, plugin semantics, and validation commitments.
+A Canwu save is more than one serialized world object. Recoverable state also includes commands, events,
+transactions, random evidence, the plugin semantic environment, and state commitments.
+Choose the recovery goal first, then use the matching interface.
 
-## Saves with plugins
+## Choose the recovery goal
+
+| Goal | Use | Host responsibility |
+| --- | --- | --- |
+| Normal save or service restart | `snapshot_json()` and `from_snapshot_json_with_plugins()` | Store the complete snapshot and provide the same plugin set when loading |
+| Compact storage for a long-running simulation | `checkpoint_journal_json()` | Store the validated checkpoint and its contiguous later journal |
+| Audit or exact reconstruction | `replay_journal()` and `replay_from_journal()` | Store the complete journal and matching plugin semantic environment |
+| Deliver external side effects | `outbox_entries()` | Deliver at least once, deduplicate by `delivery_id`, and persist acknowledgement state |
+| Try different inputs from the same point | `fork()` | Treat the result as a new alternative reality, not exact replay |
+
+## Version and format contract
+
+As of August 30, 2026, the workspace version is `0.9.0` and the snapshot format is 8.
+The exact `engine_version` remains part of the persistence contract, so 0.8 and 0.9 snapshots are not interchangeable.
+The simulation core does not silently migrate an old snapshot, and changing only its format number does not make it compatible.
+
+Applications that retain state should pin an exact published release or Git revision. To carry history across an engine boundary,
+run an explicit host-owned export/import process or retain the older engine that can read the data.
+
+## Save and restore a snapshot (excerpt)
 
 ```rust
 use canwu_api::Canwu;
@@ -17,154 +38,71 @@ use canwu_reference_world::{ReferenceWorldPlugin, demo_scenario};
 let (scenario, _) = demo_scenario()?;
 let plugin = ReferenceWorldPlugin;
 let canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+
 let json = canwu.snapshot_json()?;
 let restored = Canwu::from_snapshot_json_with_plugins(&json, &[&plugin])?;
-
 assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
-# Ok::<(), canwu_api::CanwuError>(())
 ```
 
-Once state contains plugin domain records, loading must provide the same plugin set used to save it. Plugin names, versions, and semantic hashes are part of the environment commitment.
+This is an integration excerpt. Run the complete example to verify snapshot loading, forking, and exact replay:
 
-0.8 uses the Format 8 clean break. A snapshot must carry a declared `RunManifest`, run configuration, canonical `initial_scenario`, complete commitment roots, `authority_root_seed`, exact decision-request commitments, and explicit plugin descriptor versions. The kernel does not silently migrate pre-8 data.
+```shell
+cargo run -p canwu-reference-world --example starter
+```
+
+Plugin names, versions, and semantic hashes belong to the plugin semantic environment.
+Once a save contains plugin domain records, loading and replay must provide a compatible plugin set.
 
 ## Checkpoint journals and exact replay
 
-`checkpoint_journal_json()` combines a validated checkpoint with later journal evidence. Restore it with the matching `from_checkpoint_journal_json_with_plugins()` function.
+A checkpoint journal combines a validated checkpoint with the contiguous evidence that follows it, which is useful for long-running simulations.
+Exact replay reconstructs the same simulation run from the journal's initial scenario, inputs, and evidence:
 
 ```rust
+let checkpoint_journal = canwu.checkpoint_journal_json()?;
 let journal = canwu.replay_journal();
 let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
+
+assert!(!checkpoint_journal.is_empty());
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
-# Ok::<(), canwu_api::CanwuError>(())
 ```
 
-Exact replay uses the journal's initial scenario and does not accept a second caller-supplied scenario. Engine version, run identity, and plugin semantic environment must match. `Canwu::outbox_entries()` exposes durable boundary emissions; the host delivers them at least once and deduplicates by `delivery_id`. Exact replay regenerates the same identity without re-sending external effects.
+`replay_from_journal()` does not accept a second caller-supplied scenario. Run identity, engine version,
+plugin semantic environment, and recorded evidence must match. Replay consumes recorded outcomes; it does not
+ask external services again or re-deliver side effects.
 
-Use `Canwu::replay_from_journal_json()` when the journal is stored as JSON; it
-rejects unknown fields recursively before exact replay begins.
+## Four outbox rules
 
-`CompactedCanwu::outbox_entries()` covers the retained evidence tail. After a
-seal, the caller owns the returned `EvidenceJournalSegment` and can use
-`outbox_entries_for_segment` to regenerate the same identities. Boundary
-emissions remain paired with host delivery and acknowledgement state; sealing
-does not imply that an external effect was delivered or acknowledged.
+1. Persist each `delivery_id` together with delivery and acknowledgement state in host-owned storage.
+2. Deliver with at-least-once semantics so a timeout or restart can be retried safely.
+3. Deduplicate by `delivery_id`; never assume the network call occurs only once.
+4. Exact replay regenerates the same outbox identity but does not deliver it again for the host.
 
-Format 8 lets a domain-record schema declare sorted, unique identity-only
-evidence dependencies. Sealing keeps only their Merkle receipts, without old
-payload bytes in the hot path. Receipts for plugin-generated ingress also bind
-the provider plugin, packet type, and producing boundary. A domain runtime may
-maintain the declaration incrementally with reference counts; cold load
-independently reconstructs and verifies both the set and counts. Direct sealing
-and prepare/store/commit sealing are atomic: a late validation failure such as
-a missing receipt leaves the live checkpoint unchanged. Only an explicit
-payload-required continuation reloads an old segment through `ArchiveProvider`.
+After evidence is sealed, the caller must also retain the returned `EvidenceJournalSegment` with its outbox acknowledgement state.
+Compaction or sealing does not mean an external effect was delivered or acknowledged.
 
-Format 8 also exposes `StatePageBlob`, `StatePageProvider`,
-`prepare_state_delta`, and `verify_state_delta` for idempotent content-addressed
-checkpoint pages. Domain records use canonical primary, reverse-reference,
-successor, and predecessor Patricia roots. A subtree already held by the
-provider is a traversal boundary, so one record change emits only missing paths
-and manifests.
+## Advanced storage and archives
 
-Query decision history with a typed `DecisionHistoryKey`;
-`DecisionHistoryLocation` reports `Hot`, `Archived { locator }`,
-`Unresolved { bucket, segment }`, or `Absent`. `Unresolved` means that the committed
-cold locator segment needs a provider before exact membership can be determined.
-Terminal payloads can leave hot state through canonical maintenance ingress;
-compact checkpoints retain the hot page, archive root, and a two-level locator:
-4,096 stable hash-prefix buckets, each split into 16 deterministic segments.
-Each segment is capped at 64 entries and 1 MiB. The locator page table is
-chunked again at 1,024 page IDs per authenticated directory page, keeping the
-root manifest below the 4 MiB state-page limit at one million keys. Exact
-lookup loads one locator segment. A restart-verifiable count/XOR/modular-sum accumulator maintains the
-hot-history root incrementally. Exact lookup and pagination return owned values. A missing segment or
-archive blob returns an explicit history-unavailable error rather than an absent
-key or empty success. Verification produces a complete authenticated replacement
-for every touched segment, bound to the previous page ID. Boundary commit needs
-no provider read, so a root-only restart can append to an existing segment while
-remaining replay-idempotent.
-Decision restore also validates the canonical bucket/segment directory and
-rejects any archived locator or terminal payload duplicated in hot metadata.
-Before validating hot state, restore derives every archived ticket or trace
-still referenced by a hot trace, resolved ticket, or accepted attempt and
-authenticates only those exact locator pages. A partially archived dependency
-graph can therefore restart without loading unrelated history.
-Repeat checkpoint preparation opens only the locator directory pages whose
-segments changed; an unchanged million-key directory is not reread page by
-page.
+Paged checkpoints, `StatePageProvider`, decision-history archives, and plugin archive participants are needed only after
+snapshot size or hot-history growth becomes a real constraint. At that point the host must:
 
-Paged-checkpoint envelope format 4 stores a compact `SimulationCheckpoint` and
-content-addressed page roots. Its builder creates the body without paged domain
-or decision payloads directly; it does not clone the full payloads and clear
-them afterward. A non-empty journal cut can be restored only with
-the exact contiguous evidence prefix through that cut; only a zero cut accepts
-the empty-journal shorthand. Offline GC uses one `ArchiveReachabilityManifest`.
-It automatically invokes every frozen plugin archive participant and covers
-state pages, evidence segments, decision locator/blob IDs, and the law plugin's
-namespaced content, blob, and authenticated index pages; callers do not append
-law marks manually. The retention ledger derives and verifies the provider's
-exact transitive closure, protects committed roots and shared pages across
-restart, and represents pending work as a new-object delta plus the proposed
-current-page closure while the previous committed root protects older data. Legal archive
-handoff records `Prepared`, `Verified`, `DurableIngress`, `Committed`,
-`RejectedStale`, or `Abandoned` in the persisted ledger. Each transition is
-interlocked with the active GC epoch, and restart resumes from the durable
-state instead of guessing whether ownership transferred. Commit moves the
-prior object closure into the new root, retires the superseded root, and clears
-the terminal handle payload; it does not retain one full closure per batch.
-Internal maintenance ingress may additionally carry authenticated archive
-retention roots. A pending legal archive commit carries one directory root;
-the law reachability participant authenticates and expands that root into blob,
-membership, and temporal pages before mark/sweep, so ingress size is independent
-of accumulated history. Snapshot/restart preserves the root. Applying it
-transfers ownership to committed roots; terminal stale rejection releases the
-pending root. Plugin descriptors persist internal-ingress names so the same
-authority boundary survives restore. Admission and boundary validation bind
-the commit to the exact directory root, object count, shard, token, source root,
-and expected record versions; a forged or summary-only commit cannot install a
-different archive.
-The synchronous helper verifies the retention handle plus the complete
-directory, index-page, and blob closure before applying on a clone, and swaps
-the live runtime only after store finalization. Canonical boundaries persist a
-terminal outcome for every retention handle. Finalization reads that outcome
-from the reloaded authoritative runtime and queues a private acknowledgement,
-so restart recovery retains every in-flight result while acknowledged metadata
-can leave hot state.
+- store and return the exact page bytes addressed by each content identifier; a missing page must fail explicitly rather than appear empty;
+- retain the contiguous journal prefix and archive-retention roots required by the checkpoint;
+- restore the same archive contracts and semantic hashes for every plugin; and
+- verify reachability from committed roots before deleting cold data.
 
-After legal history becomes cold, hot state retains only exact archived
-dependency identities still referenced by current-law projections. That set is
-rebuilt from hot references after every release, so it scales with current law
-rather than total history. Succession follows the same rule: full institutional,
-liability, evidence, and archive payloads become cold while the bounded current
-reception projection required by no-provider applicability stays hot. Legal
-archive objects remain format 1; authenticated membership/bitemporal indexes
-use format 2, the full 16-bit bucket space, and reject pages above 64 entries or
-1 MiB before storage or root admission. Dense same-time cells use ordered
-multi-page segments, so a sixty-fifth version cannot overflow one page. Archive
-provider-backed bitemporal queries stream those segments and enforce candidate,
-intersection, provider-call, segment, and decoded-byte budgets during actual
-I/O. One query-wide meter is shared across directory, membership, temporal,
-and blob reads and across every shard, so crossing a shard boundary cannot
-reset the allowance. Provider-call and segment limits are checked before the next read; decoded
-bytes are charged immediately after each hard-capped page is decoded. Archive
-prepare reads a persisted per-shard candidate queue and incremental source
-authenticator, examining and materializing only the selected batch; full catalog
-reconciliation is restricted to explicit full cold restore or migration.
+See the repository's [versioning and persistence contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)
+for format numbers, paged-storage contracts, and archive invariants.
 
-Cross-plugin retirement uses owner-authorized maintenance. The target schema
-owner and every dependent plugin registered as a resolver in the frozen
-descriptors must each participate with one proposal. A proposal is bound to that
-plugin's semantic hash and may write only schemas owned by that plugin. The
-target owner's proposal must also include an exact mutation of the target
-record. The complete set is preflighted against one domain root and committed
-atomically through replay-visible maintenance ingress.
-Registrar-issued opaque internal-ingress permits protect plugin-owned
-maintenance packets, so an ordinary host cannot forge a verified legal archive
-commit. Maintenance that becomes stale after admission records a chained
-`RejectedStale` terminal receipt and completes as a no-effect boundary instead
-of retrying forever.
+## Alternative realities
 
-## Counterfactuals and tests
+`fork()` creates an independent simulation from the current point. Use it to compare another command sequence, policy,
+or research assumption. Each branch still advances through normal command and time ingress. It is not exact replay because later inputs may differ.
 
-`fork()` creates an independent simulation from the same point. Compare branches with domain projections or checkpoint hashes; every branch still advances through normal command and time ingress.
+## Production checklist
+
+- Pin the engine version and plugin semantic environment.
+- Complete one save, process restart, load, and checkpoint-hash comparison.
+- Complete one exact replay and compare the final checkpoint hash.
+- Simulate an outbox timeout and verify that retrying by `delivery_id` does not duplicate an external effect.
+- Document whether an upgrade exports, migrates, or deliberately abandons old saves.

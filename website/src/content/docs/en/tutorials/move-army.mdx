@@ -17,9 +17,13 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 This is the shortest path through the migrated boundary: the engine supplies the generic runtime, while the world model and movement command belong to the optional `canwu-reference-world` integration.
 
-## Run it
+## Run from a fresh machine
+
+Install Git and Rust 1.88 or newer, then run:
 
 ```shell
+git clone https://github.com/PeiyuanQi/canwu.git
+cd canwu
 cargo run -p canwu-reference-world --example starter
 ```
 
@@ -28,7 +32,7 @@ cargo run -p canwu-reference-world --example starter
 <Steps>
 1. Call `demo_scenario()` to create a scenario, generic entity registry, and reference-domain records.
 2. Register domain logic with `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])`.
-3. Wrap a `MovementCommand` as a plugin command and pass it through canonical `enqueue_command()` ingress.
+3. Wrap a `MovementCommand` as a domain command and pass it through canonical `enqueue_command()` ingress.
 4. Advance time with `advance_canonical()`, then read the army location through the integration's `snapshot()` projection.
 5. Save, load, fork, and replay from the journal, then compare all four checkpoints.
 </Steps>
@@ -38,7 +42,7 @@ cargo run -p canwu-reference-world --example starter
 - The army reaches the destination after time advances.
 - Concrete world types are not a foundation dependency of `canwu-api`; an application can replace the entire domain integration.
 - Load, fork, and exact replay all produce the same checkpoint as the original run.
-- Format 8 snapshots carry their canonical entity registry and initial scenario; the kernel rejects pre-8 saves instead of migrating them implicitly.
+- Format 8 snapshots carry their canonical entity registry and initial scenario; the simulation core rejects pre-8 saves instead of migrating them implicitly.
 
 ## Next
 

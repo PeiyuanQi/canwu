@@ -17,7 +17,9 @@ sidebar:
 | 玩家或角色智能体 | `viewer_for_actor()` + `query_knowledge()` | 只读取指定角色的知识，不泄露真值 |
 | 解释界面 | `explain()` | 从已记录事件或失败生成因果说明 |
 
-## 领域投影不是玩家视图
+## 两条读取路径（节选）
+
+下面的代码只展示受信任投影与角色知识的分离，不是独立可运行程序。
 
 ```rust
 use canwu_api::{Canwu, KnowledgeQuery};
@@ -31,12 +33,26 @@ let server_world = snapshot(&canwu)?;
 let commander_knowledge = canwu
     .viewer_for_actor(ids.commander)?
     .query_knowledge(&KnowledgeQuery::default())?;
-# Ok::<(), canwu_api::CanwuError>(())
 ```
 
 `snapshot()` 是 `canwu-reference-world` 的受信任投影，包含完整世界真值。不要原样发送给玩家、角色智能体或不受信任客户端。
 
 参考世界只是一个整合。自定义领域应用 `typed_domain_record()` 组装自己的投影，同时使用 `CanwuViewer` 查询角色知识。
+
+## 生成客户端安全载荷
+
+上层应用应从 `commander_knowledge` 复制界面真正需要的字段，生成自己的 DTO，再序列化该 DTO。例如：
+
+```json
+{
+  "actor": "指挥官",
+  "knowledge_items": [
+    { "summary": "东侧道路可以通行", "confidence": "转述" }
+  ]
+}
+```
+
+这个结构由上层应用定义。它只能包含角色知识查询已经返回的内容；不要把 `server_world`、隐藏实体或调试字段混入响应。
 
 ## 表现层只复制，不回写
 

@@ -1,6 +1,6 @@
 ---
 title: Production, resource, and facility mechanism proposal
-description: When production-economy capability belongs in a host, an optional extension, or Canwu core.
+description: When production-economy capability belongs in a host, an optional extension, or the simulation core.
 template: doc
 sidebar:
   order: 8
@@ -9,15 +9,15 @@ sidebar:
 
 ## Decision
 
-Production, consumption, construction, and military supply should begin as host plugins above the public `canwu-api`. Grain, factories, prices, armies, and historical resource maps do not belong in Canwu core.
+Production, consumption, construction, and military supply should begin as host plugins above the public `canwu-api`. Grain, factories, prices, armies, and historical resource maps do not belong in the simulation core.
 
-Celestial Mandate has now validated this boundary with a fixed synthetic fixture. Host plugins on the Canwu 0.6 public API can perform deterministic partial allocation, same-place consumption, cargo custody, loss, arrival acceptance, next-boundary military consumption, whole-boundary rollback, exact save restoration, fork/replay, and holder-relative reporting without a Canwu core change. The fixture uses a fixed host-owned typed itinerary; composing Canwu transport execution types remains a later playable-integration gate.
+A historical Celestial Mandate fixture validated this boundary against the Canwu 0.6 public API. Host plugins performed deterministic partial allocation, same-place consumption, cargo custody, loss, arrival acceptance, next-boundary military consumption, whole-boundary rollback, exact save restoration, fork/replay, and holder-relative reporting without a simulation-core change. The fixture remains architectural evidence, not a statement of the current API version; see [save, replay, and fork](/en/developer/persistence/) for the current contract. It uses a fixed host-owned typed itinerary; composing Canwu transport execution types remains a later playable-integration gate.
 
 That proof supports the host-extension approach. It does not yet justify creating `canwu-resource` or `canwu-production`.
 
 ## Ownership
 
-- Canwu core owns admission, time and phase ordering, reservation allocation, declared reads and writes, atomic commit, rollback, evidence, visibility, persistence, and replay.
+- The simulation core owns admission, time and phase ordering, reservation allocation, declared reads and writes, atomic commit, rollback, evidence, visibility, persistence, and replay.
 - A host resource layer owns resource definitions, accounts, demands, persistent reservations, transfers, and consumption settlements.
 - A host transport adapter owns cargo balance, in-transit custody, loss, acceptance, return, and destination credit. `canwu-transport` supplies movement execution, itinerary legs, capacity, and the delivery-completion bridge.
 - Host population, production, and military domains form demands and consume accepted fulfillment results. They do not rewrite another domain's stock.
@@ -27,9 +27,9 @@ That proof supports the host-extension approach. It does not yet justify creatin
 
 Consider an experimental resource extension only after two independent lifecycle owners or two independent hosts reproduce the same account, reservation, transfer, transport-projection, and fulfillment semantics. A production extension must sit above that conserved layer and own versioned processes, work orders, work in progress, quality, loss, maintenance, and facility lifecycles.
 
-Large dynamic allocation, local proposal rejection, or a new core query API each requires a failing public-API fixture first. A diagram alone is not evidence for expanding the core.
+Large dynamic allocation, local proposal rejection, or a new simulation-core query API each requires a failing public-API fixture first. A diagram alone is not evidence for expanding the simulation core.
 
-## Content that stays out of core
+## Content that stays out of the simulation core
 
 - Historical goods, deposits, agricultural calendars, and era parameters.
 - A national price used as physical stock truth.

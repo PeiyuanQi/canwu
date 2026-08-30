@@ -25,18 +25,21 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
   <a href="/architecture/">中文架构</a>
 </nav>
 
-Canwu is a headless historical simulation core. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
+Canwu is a headless historical simulation engine. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
 
 ## Format 8 and three simulation granularities
 
-Before 1.0, 0.8 uses a clean persistence break. Snapshots and `ReplayJournal`
-carry declared run identity, initial scenario, commitments, authority root, and
-complete evidence. Format 8 separately adds content-addressed state pages for
-paged checkpoints. The kernel does not silently load pre-8 saves.
+As of August 30, 2026, the current workspace version is `0.9.0`, while the
+snapshot format remains 8. Snapshots and `ReplayJournal` carry declared run
+identity, initial scenario, commitments, authority root, and complete evidence.
+Format 8 separately adds content-addressed state pages for paged checkpoints.
+The exact `engine_version` belongs to the persistence contract, so 0.8 and 0.9
+snapshots are intentionally non-interchangeable; the simulation core also does
+not silently load pre-8 saves.
 `SimulationGranularity` defines only the domain-neutral levels `aggregate`,
 `group`, and `actor`. Celestial Mandate may map them to Population, Special
 Group, and Character in its own reference integration; Southern Ming and WWII
-are CM content and ruleset integrations, not Canwu kernel modules.
+are CM content and ruleset integrations, not simulation-core modules.
 
 ## From client to kernel
 
@@ -49,7 +52,7 @@ are CM content and ruleset integrations, not Canwu kernel modules.
 
 ## Five architectural boundaries
 
-1. **Command boundary:** external changes enter through validated engine commands, domain plugin commands, or canonical ingress; clients never rewrite state directly.
+1. **Command boundary:** external changes enter through validated engine commands, domain commands, or canonical ingress; clients never rewrite state directly.
 2. **Read boundary:** the public API returns generic entities, domain records, and evidence; integrations build detached projections, while `CanwuViewer` scopes actor knowledge.
 3. **Determinism boundary:** time, queues, plugin order, allocation, and random streams all have explicit canonical ordering.
 4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.

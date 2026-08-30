@@ -8,11 +8,11 @@ sidebar:
 hero:
   tagline: Integrate, drive, read, persist, and extend Canwu through the supported public API.
   actions:
+    - text: Run the first example
+      link: /en/tutorials/move-army/
+      icon: right-arrow
     - text: Integrate Canwu
       link: /en/developer/integration/
-      icon: right-arrow
-    - text: Browse tutorials
-      link: /en/tutorials/
       variant: secondary
       icon: open-book
     - text: 中文指南
@@ -30,6 +30,12 @@ This section is for **developers building products with Canwu**. It does not pub
 maintainer procedures, branding rules, or internal design proposals. It explains how a host application
 should use `canwu-api`.
 
+## First-time path
+
+1. Run the [move-army example](/en/tutorials/move-army/) to verify your local toolchain and the public API.
+2. Continue with [integration and driving](/en/developer/integration/) to place the same flow inside your host application.
+3. After integration works, choose the reading, persistence, or extension guide that matches your next task.
+
 ## What is covered
 
 <CardGrid>
@@ -41,17 +47,17 @@ should use `canwu-api`.
   <LinkCard
     title="Read and present state safely"
     href="/en/developer/reading-state/"
-    description="Separate authoritative snapshots from actor-relative views so players, agents, and remote clients do not receive ground truth."
+    description="Separate read-only snapshots from actor-relative views so players, agents, and remote clients do not receive ground truth."
   />
   <LinkCard
     title="Save, replay, and fork"
     href="/en/developer/persistence/"
-    description="Choose snapshots or checkpoint journals, restore plugin environments, and build exact replay or alternative realities."
+    description="Choose snapshots or checkpoint journals, restore plugin semantic environments, and build exact replay or alternative realities."
   />
   <LinkCard
     title="Extend with plugins"
     href="/en/developer/extensions/"
-    description="Add domain rules with command plugins and boundary systems while preserving authority, determinism, and auditability."
+    description="Add domain rules with domain commands and boundary systems while preserving authority, determinism, and auditability."
   />
   <LinkCard
     title="Production and resource boundary"
@@ -70,7 +76,7 @@ should use `canwu-api`.
 ## Core developer constraints
 
 1. Application code enters through `canwu-api`; choose a public domain integration for concrete rules, and do not use internal crates as compatibility surfaces.
-2. External mutations enter through engine commands, domain plugin commands, or canonical ingress rather than direct state edits.
-3. Players and agents read actor-relative views by default; authoritative snapshots stay inside trusted host logic and debugging tools.
+2. External mutations enter through engine commands, domain commands, or canonical ingress rather than direct state edits.
+3. Players and agents read actor-relative views by default; read-only snapshots stay inside trusted host logic and debugging tools.
 4. Wall time, rendering, and input belong to the host; Canwu receives representable simulation durations.
 5. Persisted applications pin the engine version and restore the same plugin semantics during load and replay.
