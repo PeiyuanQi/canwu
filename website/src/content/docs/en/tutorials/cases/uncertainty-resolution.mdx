@@ -1,0 +1,108 @@
+---
+title: Random decisions, LLM selection, and deterministic replay
+description: Choose the right uncertainty model for law, people, belief, and crowd mechanics.
+sidebar:
+  order: 2
+---
+
+Canwu permits genuine randomness while requiring an authoritative run to replay
+exactly. The key is not to roll for everything uncertain, but to classify the
+uncertainty first.
+
+| Question | Mechanism |
+| --- | --- |
+| A fact is missing, conflicting, or unknown to the actor | Preserve `Unknown`, `Indeterminate`, or contested evidence |
+| A person or institution selects among existing legal options | Use a `DecisionTicket` with Utility, Rule, Random, Human, External, or LLM selection |
+| A discrete world incident genuinely has a probability | Use an operation-keyed draw in the boundary system that owns the mechanic |
+| A large population changes by an expected rate | Use deterministic integer transfers with persisted remainder |
+
+## Configure one ticket contract for Random or LLM
+
+A law's “pass / fail” outcome can first be modeled as an ordinary ticket. With a
+Random controller, a boundary system declares a stream, draws for the exact
+ticket version, and supplies weights:
+
+```rust
+let weights = vec![
+    DecisionOptionWeight::new("fail", 25),
+    DecisionOptionWeight::new("pass", 75),
+];
+let sample = view.random_sample_for_operation(
+    &stream,
+    cause,
+    "decision_selection",
+    "law-proposal-42",
+    RandomOperationTarget::DecisionTicket {
+        ticket_id: ticket.id,
+        ticket_version: ticket.version,
+    },
+    0,
+    100,
+    "select whether the law passes from configured weights",
+)?;
+```
+
+Place `sample` and `weights` in
+`BoundaryDirective::ResolveDecisionRandomly`. The kernel validates stream
+ownership, operation target, weight sum, and current controller, then generates
+ordinary decision ingress for the next eligible boundary. The draw record and
+`DecisionTrace.random` cross-reference each other; a source-boundary failure
+rolls back the draw and generated decision ingress together.
+Each source boundary may generate at most one Random resolution, due
+immediately for the next eligible boundary. Put independent random decisions
+on separate source boundaries so the global revision guard remains unambiguous.
+
+An LLM-based run may reuse the same ticket contract and options, but the host
+must register its LLM controller before opening the ticket; a registered
+controller's policy cannot be replaced at runtime. The host sends
+`ExternalDecisionRequest` to its model and requires a structured response for
+one existing option ID, for example:
+
+```json
+{
+  "ticket_version": 1,
+  "option_id": "pass",
+  "provider": "host-model-gateway",
+  "request_id": "law-proposal-42-response-1"
+}
+```
+
+The model cannot see authoritative command payloads or add options. The adapter
+validates the answer as `ExternalDecisionResponse`; ordinary decision ingress
+and evidence enter the simulation, and exact replay never calls the model
+again. `QueuedLlmPolicy` already preserves this interface without connecting
+the engine to a particular provider.
+
+## Applying it across four domains
+
+- **Law:** keep quorum, authority, vote counting, and thresholds deterministic.
+  Weight `pass` / `fail` only when authored rules explicitly represent unresolved
+  bargaining or ratification probabilistically. `canwu-law` preserves a
+  compatible Random, External, or LLM controller pre-registered under its stable
+  seat controller ID.
+- **Person:** put personality, knowledge, doctrine, obligations, and current
+  options in ticket context. Utility/Rule represent deterministic preference,
+  Random bounded behavioral variation, and Human/External/LLM the same choices.
+- **Belief:** use integer rates and remainders for population diffusion. Use a
+  boundary draw or ticket only for a discrete schism, revival, suppression, or
+  leader choice, according to whether it is an incident or actor decision.
+- **Crowd:** use deterministic settlement for routine movement and diffusion.
+  Panic, riot, or stampede can be a discrete incident; an organizer's response
+  is a decision ticket.
+
+See the complete runnable
+[`uncertainty_resolution.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/uncertainty_resolution.rs)
+and the repository's `docs/uncertainty-resolution.md` for the full design and
+checklist.
+
+## Verification checklist
+
+1. The stream and boundary system are declared; operation ID, target, and purpose are stable.
+2. Weights use canonical option-ID order, cover every currently available option, and sum to the draw bound.
+3. LLM output can select only one option from the exact current ticket version.
+4. Every mutation still enters through ordinary decision or command ingress.
+5. Test snapshot restore, exact replay, rollback, stale tickets, and draw-evidence tampering.
+
+Continue with [Random generation](/en/architecture/randomness/) ·
+[Decision example](/en/tutorials/cases/warlord-aid-decision/) ·
+[Save, replay, and fork](/en/developer/persistence/)

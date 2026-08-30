@@ -1,6 +1,6 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.8 runtime
+Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.9 runtime
 writes and reads only its current contracts. There is no implicit loader or
 runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.8.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.9.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,15 @@ The workspace version is `0.8.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.9 adds the public Random decision policy, random option-weight and
+draw-evidence fields, a decision-ticket random-operation target, and a
+boundary-generated random resolution directive. These additions change public
+Rust exhaustive matches and struct literals, so they require a pre-1.0 minor
+version bump. The snapshot format number remains 8, while the exact
+`engine_version` continues to make 0.8 and 0.9 snapshots intentionally
+non-interchangeable; applications must use an explicit export if they need to
+carry state across that engine boundary.
 
 Format 8 keeps the exact decision-ingress commitment and adds explicit plugin
 descriptor versioning, typed decision-history locations, canonical domain-record
@@ -164,6 +173,11 @@ fields recursively before replay begins.
 
 Executable policy implementations are not replay inputs. Decisions, outcomes,
 and evidence already admitted to the journal are replayed as records.
+`DecisionPolicyKind::Random` therefore does not execute an RNG during replay.
+Its format-8 evidence consists of an operation-keyed draw targeting the exact
+ticket version, a `DecisionSelection` outcome, canonical option weights in the
+decision trace, and boundary-generated decision ingress. New optional random
+evidence fields remain absent on historical non-random decision traces.
 
 ## Durable outbox
 

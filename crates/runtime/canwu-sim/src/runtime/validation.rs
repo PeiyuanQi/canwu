@@ -11,22 +11,24 @@ use super::{
     CommandAttemptId, CommandAttemptOutcome, CommandAttemptRecord, CommandEnvelope, CommandId,
     CommandIngress, CommandRecord, DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction,
     DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority,
-    DecisionMutation, DecisionState, DecisionTraceId, DeterministicRng, DomainHistoryCut,
-    DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitStage,
-    DomainRecordHistory, DomainRecordMutation, DomainRecordRef, DomainRecordVersionRef,
-    DomainRecordVersionSource, EntityRef, ErrorCode, EventId, EvidenceRef, GENESIS_BOUNDARY_HASH,
-    IngressClass, IngressId, IngressPayload, IngressQueueKey, IngressRecord, InteractionPolicy,
-    Issuer, KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
-    LetterStatus, PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
+    DecisionMutation, DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DecisionState,
+    DecisionTraceId, DeterministicRng, DomainHistoryCut, DomainRecord, DomainRecordChange,
+    DomainRecordClass, DomainRecordCommitStage, DomainRecordHistory, DomainRecordMutation,
+    DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, ErrorCode,
+    EventId, EvidenceRef, GENESIS_BOUNDARY_HASH, IngressClass, IngressId, IngressPayload,
+    IngressQueueKey, IngressRecord, InteractionPolicy, Issuer, KnowledgeHolderPolicy,
+    KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, LetterStatus,
+    PersistedAdmissionCursors, PersonId, PluginComponentKey, PluginComponentRecord,
     PluginIngressTarget, PluginRegistry, RandomAlgorithm, RandomDrawAddress, RandomDrawId,
-    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, ReservationAllocation,
-    ReservationDisposition, ReservationPoolKey, ReservationRequestRecord, RunConfigurationSnapshot,
-    RunManifest, RuntimeCurrentState, RuntimeState, STATE_REVISION_FORMAT_VERSION, ScheduleKey,
-    ScheduledAction, SimDuration, SimEvent, SimulationSnapshot, StateVisibility, SystemCadence,
-    SystemDirective, WorldSnapshot, authoritative_revision_count, base_schema,
-    boundaries_before_attempts, boundary_has_event_ingress, boundary_state_hash_format,
-    boundary_system_due, boundary_write_stage, canonical_hash, canonical_text,
-    canonicalize_scenario, commitment_roots_are_canonical, component_key, compute_boundary_hash,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomOperationTarget,
+    ReservationAllocation, ReservationDisposition, ReservationPoolKey, ReservationRequestRecord,
+    RunConfigurationSnapshot, RunManifest, RuntimeCurrentState, RuntimeState,
+    STATE_REVISION_FORMAT_VERSION, ScheduleKey, ScheduledAction, SimDuration, SimEvent,
+    SimulationSnapshot, StateVisibility, SystemCadence, SystemDirective, WorldSnapshot,
+    authoritative_revision_count, base_schema, boundaries_before_attempts,
+    boundary_has_event_ingress, boundary_state_hash_format, boundary_system_due,
+    boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
+    commitment_roots_are_canonical, component_key, compute_boundary_hash,
     domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
     is_domain_record_state, is_expected_command_rejection, manifest, plugins, random,
     record_change_affected_entities, records, snapshot_boundary_head_state_hash,
@@ -1289,11 +1291,52 @@ fn validate_random_evidence(
                 let Some(contract) = snapshot_boundary_contract(plugins, plugin, system) else {
                     return invalid_snapshot("random draw references an unknown boundary system");
                 };
+                let outcome_is_valid = match &draw.outcome {
+                    Some(RandomDrawOutcome::BoundarySystemDecision) => true,
+                    Some(RandomDrawOutcome::DecisionSelection {
+                        ticket_id,
+                        ticket_version,
+                        option_id,
+                    }) => record.generated_ingress.iter().any(|generation| {
+                        if generation.plugin != *plugin || generation.system != *system {
+                            return false;
+                        }
+                        let index = usize::try_from(generation.ingress.get().saturating_sub(1))
+                            .unwrap_or(usize::MAX);
+                        let Some(IngressPayload::Decision { request }) =
+                            snapshot.ingress.get(index).map(|ingress| &ingress.payload)
+                        else {
+                            return false;
+                        };
+                        matches!(
+                            &request.mutation,
+                            DecisionMutation::Resolve {
+                                ticket_id: request_ticket,
+                                expected_version,
+                                decision,
+                                ..
+                            } if request_ticket == ticket_id
+                                && expected_version == ticket_version
+                                && matches!(
+                                    &decision.outcome,
+                                    DecisionOutcome::Selected {
+                                        option_id: request_option,
+                                    } if request_option == option_id
+                                )
+                                && decision.random.as_ref().is_some_and(|evidence| {
+                                    evidence.draw_id == draw.id
+                                        && evidence.value == draw.value
+                                        && evidence.upper_exclusive == draw.upper_exclusive
+                                })
+                        )
+                    }),
+                    Some(RandomDrawOutcome::KnowledgeReportDelivery { .. }) | None => false,
+                };
                 if boundary_draws.get(&draw.id) != Some(boundary)
                     || draw.at != record.at
                     || draw.correlation_id != record.correlation_id
                     || draw.cause != CauseRef::Boundary(*boundary)
-                    || draw.outcome != Some(RandomDrawOutcome::BoundarySystemDecision)
+                    || !outcome_is_valid
                     || !contract.random_streams.contains(&draw.stream)
                     || !boundary_system_due(
                         contract,
@@ -1604,6 +1647,12 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
         reconstructed.advance_time(boundary.at).map_err(|error| {
             invalid_snapshot_error(format!("decision deadline state is invalid: {error}"))
         })?;
+        validate_generated_random_decisions_at_boundary(
+            boundary,
+            snapshot,
+            &reconstructed,
+            current_revision,
+        )?;
         current_revision = current_revision
             .checked_add(1)
             .ok_or_else(|| invalid_snapshot_error("authoritative revision range is exhausted"))?;
@@ -1646,6 +1695,109 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             reconstructed_archive_commits,
             rejected_archive_commits,
         ));
+    }
+    Ok(())
+}
+
+fn validate_generated_random_decisions_at_boundary(
+    boundary: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    decisions: &DecisionState,
+    revision_before_boundary: u64,
+) -> Result<(), CanwuError> {
+    let expected_revision = revision_before_boundary
+        .checked_add(1)
+        .ok_or_else(|| invalid_snapshot_error("authoritative revision range is exhausted"))?;
+    for generation in &boundary.generated_ingress {
+        let index = usize::try_from(generation.ingress.get().saturating_sub(1)).map_err(|_| {
+            invalid_snapshot_error("generated decision ingress ID exceeds platform range")
+        })?;
+        let Some(IngressRecord {
+            payload: IngressPayload::Decision { request },
+            ..
+        }) = snapshot.ingress.get(index)
+        else {
+            continue;
+        };
+        let DecisionMutation::Resolve {
+            ticket_id,
+            expected_version,
+            controller_id,
+            policy,
+            decision,
+            command_request_id,
+        } = &request.mutation
+        else {
+            return invalid_snapshot(
+                "boundary-generated decision ingress must resolve an existing ticket",
+            );
+        };
+        let ticket = decisions.ticket(*ticket_id).ok_or_else(|| {
+            invalid_snapshot_error(
+                "boundary-generated random decision references an unknown ticket at its source boundary",
+            )
+        })?;
+        let controller = decisions.controller(controller_id).ok_or_else(|| {
+            invalid_snapshot_error(
+                "boundary-generated random decision references an unknown controller at its source boundary",
+            )
+        })?;
+        let Some(random) = &decision.random else {
+            return invalid_snapshot("boundary-generated decision ingress lacks random evidence");
+        };
+        let DecisionOutcome::Selected { option_id } = &decision.outcome else {
+            return invalid_snapshot(
+                "boundary-generated random decision must select an available option",
+            );
+        };
+        let selected =
+            DecisionRandomEvidence::selected_option(ticket, &random.option_weights, random.value)
+                .map_err(|error| {
+                invalid_snapshot_error(format!(
+                    "boundary-generated random decision weights are invalid: {error}"
+                ))
+            })?;
+        let option = ticket.option(option_id).ok_or_else(|| {
+            invalid_snapshot_error(
+                "boundary-generated random decision selected an unknown ticket option",
+            )
+        })?;
+        let command_matches = match (&option.action, &request.command) {
+            (DecisionAction::None, None) => command_request_id.is_none(),
+            (DecisionAction::Command { command }, Some(command_request)) => {
+                let expected_command = serde_json::from_value::<Command>(command.clone())
+                    .map_err(|error| {
+                        invalid_snapshot_error(format!(
+                            "boundary-generated random decision option contains an invalid command: {error}"
+                        ))
+                    })?;
+                *command_request_id == Some(command_request.request_id)
+                    && command_request.expected_revision == expected_revision
+                    && command_request.envelope.command == expected_command
+                    && command_request.envelope.issuer
+                        == super::decision::controller_issuer(controller)
+                    && command_request.envelope.authority.as_ref()
+                        == Some(&super::decision::controller_authority(controller))
+                    && command_request.envelope.expected_time == Some(boundary.at)
+            }
+            (DecisionAction::None, Some(_)) | (DecisionAction::Command { .. }, None) => false,
+        };
+        if !ticket.is_open()
+            || ticket.version != *expected_version
+            || ticket.assigned_controller != *controller_id
+            || controller.policy != *policy
+            || policy.kind != DecisionPolicyKind::Random
+            || request.expected_revision != expected_revision
+            || selected != *option_id
+            || decision.summary != format!("random policy selected {option_id}")
+            || !decision.evaluations.is_empty()
+            || decision.external.is_some()
+            || !command_matches
+        {
+            return invalid_snapshot(
+                "boundary-generated random decision disagrees with its source-boundary ticket or controller",
+            );
+        }
     }
     Ok(())
 }
@@ -1881,7 +2033,10 @@ fn validate_ingress_records(
                 || record.issued_at != boundary.at
                 || record.eligible_boundary_count != boundary.id.get()
                 || record.cause != Some(CauseRef::Boundary(boundary.id))
-                || !matches!(&record.payload, IngressPayload::Plugin { .. })
+                || !matches!(
+                    &record.payload,
+                    IngressPayload::Plugin { .. } | IngressPayload::Decision { .. }
+                )
             {
                 return invalid_snapshot(
                     "boundary-generated ingress evidence disagrees with its record",
@@ -2068,9 +2223,18 @@ fn validate_ingress_records(
                 if record.class != IngressClass::Decision
                     || request.request_id.get() == 0
                     || !decision_request_ids.insert(request.request_id)
-                    || record.cause.is_some()
                 {
                     return invalid_snapshot("queued decision ingress is not canonical");
+                }
+                match &record.cause {
+                    Some(CauseRef::Boundary(boundary))
+                        if generated_by_boundary.get(&record.id) == Some(boundary) => {}
+                    None if !generated_by_boundary.contains_key(&record.id) => {}
+                    _ => {
+                        return invalid_snapshot(
+                            "decision ingress cause disagrees with boundary-generation evidence",
+                        );
+                    }
                 }
                 if snapshot
                     .run_configuration
@@ -2079,6 +2243,7 @@ fn validate_ingress_records(
                     .is_some_and(|configuration| {
                         configuration.interaction == InteractionPolicy::ReadOnly
                     })
+                    && !matches!(&record.cause, Some(CauseRef::Boundary(_)))
                 {
                     return invalid_snapshot(
                         "declared read-only runs cannot contain newly authored decision ingress",
@@ -2999,25 +3164,117 @@ fn validate_boundary_ingress_generation(
         let Some(ingress) = snapshot.ingress.get(index) else {
             return invalid_snapshot("generated ingress references an unknown ingress record");
         };
-        let IngressPayload::Plugin {
-            plugin,
-            packet_type,
-            affected_entities,
-            ..
-        } = &ingress.payload
-        else {
-            return invalid_snapshot("boundary systems may generate only plugin ingress");
-        };
         let generated_delay = ingress.due_at.checked_sub(ingress.issued_at);
+        let payload_is_valid = match &ingress.payload {
+            IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                affected_entities,
+                ..
+            } => {
+                (plugin == &generation.plugin
+                    || contract
+                        .plugin_ingress_targets
+                        .contains(&PluginIngressTarget {
+                            target_plugin: plugin.clone(),
+                            packet_type: packet_type.clone(),
+                        }))
+                    && affected_entities.iter().all(|entity| match entity {
+                        EntityRef::Domain(reference) => cuts.identity_exists_for_proposal(
+                            final_records,
+                            reference,
+                            contract.phase,
+                            commit_stage,
+                            &generation.plugin,
+                            &generation.system,
+                        ),
+                        _ => core_world_entity_exists(&snapshot.world, entity),
+                    })
+            }
+            IngressPayload::Decision { request } => {
+                let DecisionMutation::Resolve {
+                    ticket_id,
+                    expected_version,
+                    policy,
+                    decision,
+                    command_request_id,
+                    ..
+                } = &request.mutation
+                else {
+                    return invalid_snapshot(
+                        "boundary-generated decision ingress must resolve an existing ticket",
+                    );
+                };
+                let Some(random) = &decision.random else {
+                    return invalid_snapshot(
+                        "boundary-generated decision ingress lacks random evidence",
+                    );
+                };
+                let Some(draw) = snapshot.random_draws.get(
+                    usize::try_from(random.draw_id.get().saturating_sub(1)).unwrap_or(usize::MAX),
+                ) else {
+                    return invalid_snapshot(
+                        "boundary-generated decision references an unknown random draw",
+                    );
+                };
+                let DecisionOutcome::Selected { option_id } = &decision.outcome else {
+                    return invalid_snapshot(
+                        "boundary-generated random decision must select an option",
+                    );
+                };
+                let producer_matches = matches!(
+                    &draw.producer,
+                    RandomDrawProducer::BoundarySystem {
+                        boundary,
+                        plugin,
+                        system,
+                    } if *boundary == record.id
+                        && plugin == &generation.plugin
+                        && system == &generation.system
+                );
+                let outcome_matches = matches!(
+                    &draw.outcome,
+                    Some(RandomDrawOutcome::DecisionSelection {
+                        ticket_id: outcome_ticket,
+                        ticket_version,
+                        option_id: outcome_option,
+                    }) if outcome_ticket == ticket_id
+                        && ticket_version == expected_version
+                        && outcome_option == option_id
+                );
+                let target_matches = matches!(
+                    &draw.address,
+                    RandomDrawAddress::OperationV1(address)
+                        if address.target
+                            == (RandomOperationTarget::DecisionTicket {
+                                ticket_id: *ticket_id,
+                                ticket_version: *expected_version,
+                            })
+                );
+                let weights_match = DecisionRandomEvidence::selected_option_from_weights(
+                    &random.option_weights,
+                    random.value,
+                    random.upper_exclusive,
+                )
+                .is_ok_and(|selected| selected == *option_id);
+                policy.kind == DecisionPolicyKind::Random
+                    && producer_matches
+                    && outcome_matches
+                    && target_matches
+                    && weights_match
+                    && random.value == draw.value
+                    && random.upper_exclusive == draw.upper_exclusive
+                    && decision.external.is_none()
+                    && *command_request_id
+                        == request.command.as_ref().map(|command| command.request_id)
+            }
+            IngressPayload::Command { .. }
+            | IngressPayload::Calendar { .. }
+            | IngressPayload::Maintenance { .. } => false,
+        };
         if generation.phase != contract.phase
             || generation.visibility != contract.visibility
-            || (plugin != &generation.plugin
-                && !contract
-                    .plugin_ingress_targets
-                    .contains(&PluginIngressTarget {
-                        target_plugin: plugin.clone(),
-                        packet_type: packet_type.clone(),
-                    }))
+            || !payload_is_valid
             || ingress.id != generation.ingress
             || ingress.issued_at != record.at
             || ingress.eligible_boundary_count != record.id.get()
@@ -3030,17 +3287,6 @@ fn validate_boundary_ingress_generation(
                 &record.cadences,
                 boundary_has_event_ingress(record),
             )
-            || affected_entities.iter().any(|entity| match entity {
-                EntityRef::Domain(reference) => !cuts.identity_exists_for_proposal(
-                    final_records,
-                    reference,
-                    contract.phase,
-                    commit_stage,
-                    &generation.plugin,
-                    &generation.system,
-                ),
-                _ => !core_world_entity_exists(&snapshot.world, entity),
-            })
         {
             return invalid_snapshot(
                 "generated ingress producer, commit stage, or entity provenance is inconsistent",

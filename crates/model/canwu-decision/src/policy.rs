@@ -145,6 +145,7 @@ impl DecisionPolicy for WeightedUtilityPolicy {
                 summary: "utility policy deferred because every option was blocked".to_owned(),
                 evaluations,
                 external: None,
+                random: None,
             });
         };
         Ok(PolicyDecision {
@@ -154,6 +155,7 @@ impl DecisionPolicy for WeightedUtilityPolicy {
             summary: format!("utility policy selected {option_id}"),
             evaluations,
             external: None,
+            random: None,
         })
     }
 }
@@ -221,6 +223,7 @@ impl DecisionPolicy for OrderedRulePolicy {
                         summary: format!("rule {} deferred: {reason}", rule.id()),
                         evaluations: Vec::new(),
                         external: None,
+                        random: None,
                     });
                 }
                 RuleChoice::NoMatch => {}
@@ -233,6 +236,7 @@ impl DecisionPolicy for OrderedRulePolicy {
             summary: "ordered rule policy exhausted its rules".to_owned(),
             evaluations: Vec::new(),
             external: None,
+            random: None,
         })
     }
 }
@@ -323,6 +327,7 @@ impl DecisionPolicy for QueuedHumanPolicy {
                 request_id: Some(response.operator_id),
                 metadata: BTreeMap::new(),
             }),
+            random: None,
         })
     }
 }
@@ -461,6 +466,7 @@ impl DecisionPolicy for QueuedExternalPolicy {
                 request_id: Some(response.request_id),
                 metadata: response.metadata,
             }),
+            random: None,
         })
     }
 }
@@ -570,6 +576,7 @@ impl DecisionPolicy for QueuedLlmPolicy {
                 request_id: Some(response.request_id),
                 metadata: response.metadata,
             }),
+            random: None,
         })
     }
 }

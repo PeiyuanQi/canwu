@@ -89,7 +89,7 @@ impl SimulationPlugin for LawPlugin {
         PLUGIN_NAME
     }
     fn version(&self) -> &'static str {
-        "0.8.0"
+        env!("CARGO_PKG_VERSION")
     }
     fn semantic_hash(&self) -> &'static str {
         LAW_SEMANTIC_HASH
@@ -1460,12 +1460,9 @@ fn verify_outbox_can_reprepare(
     }
     if view
         .decision_controller(&item.decision_controller_id)?
-        .is_some_and(
-            |controller| match crate::runtime::expected_decision_controller(item) {
-                Ok(expected) => controller != &expected,
-                Err(_) => true,
-            },
-        )
+        .is_some_and(|controller| {
+            !crate::runtime::decision_controller_matches_outbox(item, controller)
+        })
     {
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,

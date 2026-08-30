@@ -2463,6 +2463,14 @@ impl DecisionState {
                 "decision resolution policy does not match the persisted controller binding",
             ));
         }
+        if (controller.policy.kind == crate::DecisionPolicyKind::Random)
+            != decision.random.is_some()
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::PolicyMismatch,
+                "random decision controllers require random draw evidence, and other controllers reject it",
+            ));
+        }
         let previous_ticket = self
             .tickets
             .get(&ticket_id)
@@ -2510,6 +2518,7 @@ impl DecisionState {
             summary: decision.summary,
             evaluations: decision.evaluations,
             external: decision.external,
+            random: decision.random,
             command_request_id,
         };
         ticket.updated_at = at;
@@ -2959,6 +2968,7 @@ pub fn format8_trace_locator_scale_probe(
             summary: "trace-scale".to_owned(),
             evaluations: Vec::new(),
             external: None,
+            random: None,
             command_request_id: None,
         };
         state.insert_hot_history_record(&DecisionArchiveRecord::Trace {
@@ -3084,6 +3094,7 @@ mod archive_restart_tests {
             summary: "Restart dependency trace".to_owned(),
             evaluations: Vec::new(),
             external: None,
+            random: None,
             command_request_id: None,
         };
         state

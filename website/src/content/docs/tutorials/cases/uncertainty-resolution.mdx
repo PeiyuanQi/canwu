@@ -1,0 +1,93 @@
+---
+title: 随机决策、LLM 选择与确定性重放
+description: 为法律、人物、信仰和人群机制选择正确的不确定性模型。
+sidebar:
+  order: 2
+---
+
+参伍允许模拟包含真正的随机性，同时要求同一份权威记录可以精确重放。关键不是
+“所有不确定的地方都掷骰子”，而是先判断不确定性属于哪一种。
+
+| 问题 | 应用的机制 |
+| --- | --- |
+| 事实缺失、冲突或角色不知道 | 保留 `Unknown`、`Indeterminate` 或冲突证据 |
+| 人物或机构在已有合法选项中选择 | 使用 `DecisionTicket`，selector 可为 Utility、Rule、Random、Human、External 或 LLM |
+| 离散世界事件确实有概率 | 在拥有该机制的边界系统中使用操作定址随机抽样 |
+| 大规模人群按比例变化 | 使用确定性整数转移和持久化余数 |
+
+## 同一票据契约支持 Random 与 LLM 配置
+
+法律“通过 / 不通过”可以先建成普通票据。使用 Random controller 时，边界系统
+声明随机流，对精确票据版本抽样，并提交权重：
+
+```rust
+let weights = vec![
+    DecisionOptionWeight::new("fail", 25),
+    DecisionOptionWeight::new("pass", 75),
+];
+let sample = view.random_sample_for_operation(
+    &stream,
+    cause,
+    "decision_selection",
+    "law-proposal-42",
+    RandomOperationTarget::DecisionTicket {
+        ticket_id: ticket.id,
+        ticket_version: ticket.version,
+    },
+    0,
+    100,
+    "select whether the law passes from configured weights",
+)?;
+```
+
+随后把 `sample` 和 `weights` 放入
+`BoundaryDirective::ResolveDecisionRandomly`。内核校验随机流所有权、操作目标、
+权重总和和当前 controller，并为下一可用边界生成标准决策准入。抽样记录与
+`DecisionTrace.random` 会互相绑定；来源边界失败时，抽样与生成的决策准入一起回滚。
+每个来源边界最多生成一个 Random 决策结算，并立即交给下一可用边界；多个独立
+随机决策应拆到不同来源边界，以保持全局 revision guard 明确。
+
+如果另一种运行配置改用 LLM，可以复用相同票据契约和选项，但必须在开票前注册
+相应 controller；运行中不能替换一个已注册 controller 的 policy。上层应用把
+`ExternalDecisionRequest` 发送给模型，并要求结构化返回一个已有 option ID，例如：
+
+```json
+{
+  "ticket_version": 1,
+  "option_id": "pass",
+  "provider": "host-model-gateway",
+  "request_id": "law-proposal-42-response-1"
+}
+```
+
+模型看不到权威命令载荷，也不能增加选项。适配器把答案校验并转换成
+`ExternalDecisionResponse`；正式进入模拟的是标准决策准入和证据，精确重放不会
+再次调用模型。目前 `QueuedLlmPolicy` 已保留这条接口，不要求引擎接入具体模型。
+
+## 四类领域怎样用
+
+- **法律：**法定人数、权限、计票和门槛保持确定；只有规则明确表示未建模协商或
+  批准存在概率时，才给 `pass` / `fail` 配权重。`canwu-law` 会保留上层应用用
+  稳定席位 controller ID 预注册的兼容 Random、External 或 LLM controller。
+- **人物：**性格、知识、信条、义务和当前选项进入票据 context。Utility/Rule
+  表示确定偏好，Random 表示有边界的行为波动，Human/External/LLM 使用相同选项。
+- **信仰：**大规模传播使用整数比例和余数；一次分裂、复兴、压制或领袖选择若是
+  离散事件或角色决定，再分别使用边界抽样或票据。
+- **人群：**日常流动和扩散使用确定性结算；恐慌、骚乱、踩踏等离散事故可抽样，
+  组织者如何应对则是决策票据。
+
+完整可运行代码见
+[`uncertainty_resolution.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/uncertainty_resolution.rs)，
+更完整的设计与检查表见仓库中的 `docs/uncertainty-resolution.md`。
+
+## 验证清单
+
+1. 随机流和边界系统已经声明，operation ID、目标和 purpose 稳定。
+2. 权重按 option ID 规范排序，完整覆盖当前可用票据选项，且总和等于抽样上界。
+3. LLM 只能返回当前票据版本中的一个 option ID。
+4. 所有变更仍经过标准决策或命令准入。
+5. 测试快照恢复、精确重放、回滚、陈旧票据和抽样证据篡改。
+
+继续阅读：[随机生成方法](/architecture/randomness/) ·
+[决策案例](/tutorials/cases/warlord-aid-decision/) ·
+[存档、重放与分支](/developer/persistence/)

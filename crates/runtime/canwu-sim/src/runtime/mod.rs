@@ -30,9 +30,9 @@ pub use boundary::{
     BoundaryChange, BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
     BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryProposal, BoundaryReceipt,
     BoundaryRecord, BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
-    KnowledgeWriteGrant, OutboxEntry, PluginIngressTarget, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord,
+    KnowledgeWriteGrant, OutboxEntry, PluginIngressTarget, RandomDecisionResolution,
+    ReservationAllocation, ReservationDisposition, ReservationOffer, ReservationOfferRecord,
+    ReservationPoolKey, ReservationRef, ReservationRequest, ReservationRequestRecord,
 };
 pub use canwu_core::{
     DomainRecordVersionRef, DomainRecordVersionSource, EvidenceRef, HolderKnowledgeRecordId,
@@ -49,17 +49,17 @@ pub use canwu_decision::{
     DecisionControllerBinding, DecisionError, DecisionErrorCode, DecisionExternalEvidence,
     DecisionFactorContribution, DecisionHistoryCursor, DecisionHistoryKey, DecisionHistoryLocation,
     DecisionHistoryPage, DecisionHistoryQueryBudget, DecisionHotState, DecisionLocatorScaleMetrics,
-    DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOutcome, DecisionPolicy,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRule, DecisionState, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketState, DecisionTrace, ExternalDecisionOption,
-    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse,
-    HumanPolicy, LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
-    MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE, OrderedRulePolicy,
-    PersistentDecisionLog, PolicyDecision, PreparedDecisionArchive, QueuedExternalPolicy,
-    QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice, RulePolicy, TraceLocatorScaleMetrics,
-    UtilityEvaluator, UtilityPolicy, UtilityProfile, VerifiedDecisionArchiveCommit,
-    WeightedUtilityEvaluator, WeightedUtilityPolicy, format8_decision_locator_scale_probe,
-    format8_trace_locator_scale_probe,
+    DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight,
+    DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind,
+    DecisionRandomEvidence, DecisionRule, DecisionState, DecisionTicket, DecisionTicketDraft,
+    DecisionTicketState, DecisionTrace, ExternalDecisionOption, ExternalDecisionRequest,
+    ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse, HumanPolicy, LlmModelIdentity,
+    LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
+    MAX_DECISION_HISTORY_PAGE_SIZE, OrderedRulePolicy, PersistentDecisionLog, PolicyDecision,
+    PreparedDecisionArchive, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice,
+    RulePolicy, TraceLocatorScaleMetrics, UtilityEvaluator, UtilityPolicy, UtilityProfile,
+    VerifiedDecisionArchiveCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
+    format8_decision_locator_scale_probe, format8_trace_locator_scale_probe,
 };
 pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
@@ -115,7 +115,7 @@ pub use policy::{
 pub use random::{
     KeyedDrawReservation, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
     RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
-    RandomStreamKey, RandomStreamState,
+    RandomSample, RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,

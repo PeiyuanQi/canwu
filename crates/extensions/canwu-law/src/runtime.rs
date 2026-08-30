@@ -8618,10 +8618,7 @@ impl LegalRuntime {
             }
             if canwu
                 .decision_controller(&item.decision_controller_id)
-                .is_some_and(|controller| match expected_decision_controller(item) {
-                    Ok(expected) => controller != &expected,
-                    Err(_) => true,
-                })
+                .is_some_and(|controller| !decision_controller_matches_outbox(item, controller))
             {
                 return Err(invalid(
                     "legal outbox controller binding conflicts with the persisted draft",
@@ -8702,7 +8699,10 @@ impl LegalRuntime {
         let mut receipts = Vec::with_capacity(prepared.len());
         let mut queued_controllers = BTreeSet::new();
         for (_sequence, item, expected_revision) in prepared {
-            let controller = expected_decision_controller(item)?;
+            let controller = canwu
+                .decision_controller(&item.decision_controller_id)
+                .cloned()
+                .unwrap_or(expected_decision_controller(item)?);
             if item
                 .command_subject
                 .as_ref()
@@ -8714,7 +8714,7 @@ impl LegalRuntime {
                 .refresh_request_id
                 .ok_or_else(|| invalid("legal outbox controller request ID is missing"))?;
             match canwu.decision_controller(&item.decision_controller_id) {
-                Some(existing) if existing != &controller => {
+                Some(existing) if !decision_controller_matches_outbox(item, existing) => {
                     return Err(invalid(
                         "legal decision controller conflicts with the persisted draft",
                     ));
@@ -9532,6 +9532,20 @@ pub(crate) fn expected_decision_controller(
     Ok(controller)
 }
 
+pub(crate) fn decision_controller_matches_outbox(
+    item: &LegalDecisionOutboxItem,
+    controller: &DecisionControllerBinding,
+) -> bool {
+    let Ok(expected) = expected_decision_controller(item) else {
+        return false;
+    };
+    controller.id == expected.id
+        && controller.authority == expected.authority
+        && controller.seat_id == expected.seat_id
+        && controller.permission_profile_id == expected.permission_profile_id
+        && controller.command_subject == expected.command_subject
+}
+
 pub(crate) fn verify_accepted_outbox_state(
     item: &LegalDecisionOutboxItem,
     expected_revision: u64,
@@ -9543,12 +9557,16 @@ pub(crate) fn verify_accepted_outbox_state(
     let controller_request_id = item
         .refresh_request_id
         .ok_or_else(|| invalid("legal outbox controller request ID is missing"))?;
-    let expected_controller = expected_decision_controller(item)?;
+    if !decision_controller_matches_outbox(item, controller) {
+        return Err(invalid(
+            "legal outbox settled controller authority does not match its persisted seat binding",
+        ));
+    }
     let expected_controller_request = DecisionIngressRequest::new(
         DecisionRequestId::new(controller_request_id),
         expected_revision,
         DecisionMutation::RegisterController {
-            controller: expected_controller.clone(),
+            controller: controller.clone(),
         },
     );
     let expected_controller_commitment = canonical_hash(
@@ -9581,11 +9599,6 @@ pub(crate) fn verify_accepted_outbox_state(
     {
         return Err(invalid(
             "legal outbox ticket-open attempt does not match its persisted request",
-        ));
-    }
-    if controller != &expected_controller {
-        return Err(invalid(
-            "legal outbox settled controller does not match its persisted binding",
         ));
     }
     let ticket_mismatch = if ticket.id.get() != item.ticket_id {

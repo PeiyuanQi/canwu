@@ -34,9 +34,9 @@ pub use model::{
     DecisionAction, DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord,
     DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionError,
     DecisionErrorCode, DecisionExternalEvidence, DecisionFactorContribution, DecisionMutation,
-    DecisionOption, DecisionOptionEvaluation, DecisionOutcome, DecisionPolicyIdentity,
-    DecisionPolicyKind, DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace,
-    PolicyDecision,
+    DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight, DecisionOutcome,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence, DecisionTicket,
+    DecisionTicketDraft, DecisionTicketState, DecisionTrace, PolicyDecision,
 };
 pub use policy::{
     DecisionPolicy, DecisionRule, ExternalDecisionOption, ExternalDecisionRequest,

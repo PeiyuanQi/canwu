@@ -210,6 +210,14 @@ The legal bridge processes only dirty or due jurisdictions and proposals:
    then atomically commits the owner-scoped legal shard bundle. Downstream adapters
    consume the result at their own declared boundary.
 
+If the seat controller does not exist, `canwu-law` creates the default Human
+controller. A host may instead pre-register the same stable controller ID with
+Utility, Rule, Random, External, or LLM policy. The law adapter preserves that
+policy when authority, seat, permission profile, and command subject exactly match
+the compiled plan. Random produces decision ingress through an operation-keyed
+boundary draw; External/LLM returns one existing option ID through the strict
+selector DTO. Neither can change legal options or authority.
+
 ```text
 CulturalSignalBatch
   -> LegalProposal / DecisionTicket

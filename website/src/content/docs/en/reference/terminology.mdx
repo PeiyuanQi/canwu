@@ -104,6 +104,9 @@ renamed by this policy.
 | [correlation ID](/en/architecture/events/) | 相关标识 | `correlation_id` | A stable identifier that groups records belonging to one authoritative causal root. |
 | [random stream](/en/architecture/randomness/) | 随机流 | `RandomStreamKey` | A named, versioned deterministic source owned by a declared mechanic. |
 | [draw evidence](/en/architecture/randomness/) | 抽样证据 | `RandomDrawRecord` | The recorded stream, range, operation, and result of one deterministic draw. |
+| [random decision policy](/en/tutorials/cases/uncertainty-resolution/) | 随机决策策略 | `DecisionPolicyKind::Random` | A bounded ticket selector resolved by a declared boundary system with replayable draw evidence, not a general world-event generator. |
+| [decision option weight](/en/tutorials/cases/uncertainty-resolution/) | 决策选项权重 | `DecisionOptionWeight` | A canonical option ID and nonnegative integer weight mapping one bounded draw to an existing ticket option. |
+| [operation-keyed random draw](/en/architecture/randomness/) | 操作定址随机抽样 | `random_sample_for_operation` | A draw addressed by stable cause, operation ID, target, occurrence, purpose, and stream identity so retries and replay cannot consume another result. |
 | [reservation](/en/tutorials/phased-boundary/) | 资源预留 | `ReservationRequest` | A declared request against a conserved resource pool before allocation. |
 | [allocation](/en/architecture/settlement/) | 资源分配 | `ReservationAllocation` | The deterministic result of settling competing reservations against supply. |
 | [visibility](/en/architecture/settlement/) | 可见性 | `StateVisibility` | The policy controlling which state and evidence can reach which readers. |

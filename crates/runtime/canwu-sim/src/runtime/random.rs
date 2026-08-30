@@ -1,7 +1,7 @@
 use super::{CanwuError, ErrorCode};
 use canwu_core::{
-    ArmyId, BoundaryId, DeterministicRng, DomainRecordRef, EntityRef, EventId, EvidenceRef,
-    KnowledgeHolderRef, PersonId, RandomDrawId,
+    ArmyId, BoundaryId, DecisionTicketId, DeterministicRng, DomainRecordRef, EntityRef, EventId,
+    EvidenceRef, KnowledgeHolderRef, PersonId, RandomDrawId,
 };
 use canwu_event::CauseRef;
 use canwu_time::SimTime;
@@ -87,6 +87,11 @@ pub enum RandomDrawProducer {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RandomDrawOutcome {
     BoundarySystemDecision,
+    DecisionSelection {
+        ticket_id: DecisionTicketId,
+        ticket_version: u64,
+        option_id: String,
+    },
     KnowledgeReportDelivery {
         recipient: PersonId,
         army: ArmyId,
@@ -102,6 +107,10 @@ pub enum RandomDrawOutcome {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum RandomOperationTarget {
     Entity(EntityRef),
+    DecisionTicket {
+        ticket_id: DecisionTicketId,
+        ticket_version: u64,
+    },
     DomainRecord {
         record: DomainRecordRef,
         version: u64,
@@ -126,6 +135,14 @@ pub struct RandomOperationAddressV1 {
 pub enum RandomDrawAddress {
     Sequential { position: u64 },
     OperationV1(RandomOperationAddressV1),
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RandomSample {
+    pub stream: RandomStreamKey,
+    pub address: RandomDrawAddress,
+    pub upper_exclusive: u64,
+    pub value: u64,
 }
 
 impl RandomDrawAddress {
@@ -277,6 +294,7 @@ impl RandomSession {
         Ok(value)
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn range_for_operation(
         &mut self,
@@ -289,6 +307,31 @@ impl RandomSession {
         upper_exclusive: u64,
         purpose: &str,
     ) -> Result<u64, CanwuError> {
+        self.sample_for_operation(
+            key,
+            evidence,
+            operation_kind,
+            application_operation_id,
+            target,
+            draw_slot,
+            upper_exclusive,
+            purpose,
+        )
+        .map(|sample| sample.value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sample_for_operation(
+        &mut self,
+        key: &RandomStreamKey,
+        evidence: EvidenceRef,
+        operation_kind: &str,
+        application_operation_id: &str,
+        target: RandomOperationTarget,
+        draw_slot: u32,
+        upper_exclusive: u64,
+        purpose: &str,
+    ) -> Result<RandomSample, CanwuError> {
         if !self.states.contains_key(key) {
             return Err(CanwuError::new(
                 ErrorCode::UndeclaredRandomStream,
@@ -313,7 +356,12 @@ impl RandomSession {
                 && existing.upper_exclusive == upper_exclusive
                 && existing.purpose_hash == purpose_hash
             {
-                return Ok(existing.value);
+                return Ok(RandomSample {
+                    stream: key.clone(),
+                    address: RandomDrawAddress::OperationV1(address),
+                    upper_exclusive,
+                    value: existing.value,
+                });
             }
             return Err(CanwuError::new(
                 ErrorCode::RandomOperationConflict,
@@ -330,13 +378,18 @@ impl RandomSession {
         self.keyed.insert(index_key, memo);
         self.draws.push(PendingRandomDraw {
             stream: key.clone(),
-            address: RandomDrawAddress::OperationV1(address),
+            address: RandomDrawAddress::OperationV1(address.clone()),
             operation_evidence: Some(evidence),
             upper_exclusive,
             value,
             purpose: purpose.to_owned(),
         });
-        Ok(value)
+        Ok(RandomSample {
+            stream: key.clone(),
+            address: RandomDrawAddress::OperationV1(address),
+            upper_exclusive,
+            value,
+        })
     }
 
     pub(crate) fn finish(self) -> RandomExecution {
@@ -568,6 +621,17 @@ fn validate_target(target: &RandomOperationTarget) -> Result<(), CanwuError> {
             validate_operation_text(&record.kind.name)?;
             validate_operation_text(&record.id)?;
         }
+        RandomOperationTarget::DecisionTicket {
+            ticket_id,
+            ticket_version,
+        } => {
+            if ticket_id.get() == 0 || *ticket_version == 0 {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomDraw,
+                    "operation-keyed decision target requires positive ticket identity and version",
+                ));
+            }
+        }
         RandomOperationTarget::CanonicalKey(value) => validate_operation_text(value)?,
         RandomOperationTarget::Entity(_) | RandomOperationTarget::KnowledgeHolder(_) => {}
     }
@@ -686,6 +750,20 @@ fn encode_target(bytes: &mut Vec<u8>, target: &RandomOperationTarget) -> Result<
         RandomOperationTarget::CanonicalKey(value) => {
             bytes.push(4);
             put_text(bytes, value)?;
+        }
+        RandomOperationTarget::DecisionTicket {
+            ticket_id,
+            ticket_version,
+        } => {
+            if ticket_id.get() == 0 || *ticket_version == 0 {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomDraw,
+                    "operation-keyed decision target requires positive ticket identity and version",
+                ));
+            }
+            bytes.push(5);
+            bytes.extend_from_slice(&ticket_id.get().to_le_bytes());
+            bytes.extend_from_slice(&ticket_version.to_le_bytes());
         }
     }
     Ok(())

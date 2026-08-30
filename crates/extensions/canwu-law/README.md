@@ -35,6 +35,16 @@ the compiled binding exactly. The registered boundary system verifies command-ca
 and updates the authoritative runtime record, so accepted ticket commands
 become boundary-visible intents without an append-only side component.
 
+The law extension creates a Human controller when the compiled seat controller
+does not exist. A host may instead pre-register the same stable controller ID
+with Utility, Rule, Random, External, or LLM policy identity. The existing
+controller must keep the exact compiled authority, seat, permission profile, and
+command subject; `canwu-law` preserves that compatible binding rather than
+silently replacing the host's selector. Random controllers are resolved through
+an operation-keyed boundary draw, while External and LLM controllers use the
+ordinary strict decision request/response DTOs. Neither path grants the selector
+new legal options or command authority.
+
 All authored collections are canonically sorted, stable IDs are preserved,
 dense plan-local keys are deterministic, and hashes use Canwu's canonical hash
 contract. Law-local `LegalRecordRef` values name records inside the aggregate;

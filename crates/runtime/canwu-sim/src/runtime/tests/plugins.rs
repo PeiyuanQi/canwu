@@ -1060,7 +1060,14 @@ fn scoped_random_streams_are_isolated_recorded_hashed_and_replayable() {
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 
     let mut corrupted_hash = primary_only.snapshot();
-    corrupted_hash.boundaries[0].hash.replace_range(..1, "f");
+    let replacement = if corrupted_hash.boundaries[0].hash.starts_with('f') {
+        "e"
+    } else {
+        "f"
+    };
+    corrupted_hash.boundaries[0]
+        .hash
+        .replace_range(..1, replacement);
     let Err(error) =
         Simulation::from_snapshot_with_plugins(corrupted_hash, &[&PrimaryRandomPlugin])
     else {

@@ -1,10 +1,10 @@
 use super::{
-    CanwuError, DomainRecordChange, DomainRecordMutation, RandomStreamKey, SimulationView,
-    StateKey, StateVisibility, SystemCadence,
+    CanwuError, DecisionOptionWeight, DomainRecordChange, DomainRecordMutation, RandomSample,
+    RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
 };
 use canwu_core::{
-    BoundaryId, CommandAttemptId, CommandId, EntityRef, EventId, IngressId, KnowledgeHolderRef,
-    KnowledgeSchemaId, RandomDrawId,
+    BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId, DecisionTicketId,
+    EntityRef, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId, RandomDrawId,
 };
 use canwu_knowledge::{KnowledgeRecord, KnowledgeRecordDraft};
 use canwu_time::{SimDuration, SimTime};
@@ -131,6 +131,9 @@ pub enum BoundaryDirective {
         payload: Value,
         affected: Vec<EntityRef>,
     },
+    ResolveDecisionRandomly {
+        resolution: RandomDecisionResolution,
+    },
     PublishKnowledge {
         holder: KnowledgeHolderRef,
         visibility: StateVisibility,
@@ -138,6 +141,19 @@ pub enum BoundaryDirective {
         records: Vec<KnowledgeRecordDraft>,
         summary: String,
     },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RandomDecisionResolution {
+    pub priority: i32,
+    pub decision_request_id: DecisionRequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_request_id: Option<CommandRequestId>,
+    pub ticket_id: DecisionTicketId,
+    pub expected_version: u64,
+    pub controller_id: String,
+    pub sample: RandomSample,
+    pub option_weights: Vec<DecisionOptionWeight>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]

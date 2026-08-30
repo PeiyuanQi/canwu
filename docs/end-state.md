@@ -109,8 +109,8 @@ period-specific AI subsystem. The long-term ownership boundary is:
 | Layer | Responsibility |
 | --- | --- |
 | `canwu-core` | Stable decision request, ticket, and trace IDs only. It does not own policy or domain semantics. |
-| `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, accepted/rejected attempt records, traces, deterministic utility evaluation, and Utility/Rule/Human/External/LLM policy interfaces. |
-| `canwu-sim` | Authoritative decision state, canonical ingress, non-poisoning rejection admission, deadlines, authority derivation, transactional command admission, commitments, persistence validation, and exact replay. |
+| `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, accepted/rejected attempt records, traces, deterministic utility evaluation, and Utility/Rule/Random/Human/External/LLM policy interfaces. |
+| `canwu-sim` | Authoritative decision state, canonical ingress, operation-keyed random resolution, non-poisoning rejection admission, deadlines, authority derivation, transactional command admission, commitments, persistence validation, and exact replay. |
 | `canwu-api` | The supported public API for creating, refreshing, evaluating, inspecting, saving, and replaying decisions. |
 | Domain packages | Decision triggers, actor-relative fact projection, option and blocker generation, utility factors and weights, rules, personality or doctrine, and the command represented by each option. |
 
@@ -137,7 +137,18 @@ factor-by-factor score breakdown. Factor names, weights, normalization,
 personality, doctrine, uncertainty, and historical interpretation remain
 domain or policy data. Rule policies, human control, external services, and LLM
 adapters converge on the same constrained option-selection contract instead of
-creating parallel mutation paths.
+creating parallel mutation paths. Random policy uses that same bounded option
+set, but its operation-keyed draw occurs in a declared boundary system and
+produces canonical decision ingress plus cross-linked draw evidence. It does
+not execute a hidden RNG inside an out-of-transaction policy object.
+
+This decision selector is distinct from stochastic world incidents. A disease
+exposure, equipment failure, or weather event remains a boundary-system
+mechanic owned by its domain. Missing or contested knowledge remains explicit
+unknown state. Large-population belief or affiliation movement is normally
+settled with integer rates and persisted remainders; randomness is reserved for
+authored discrete incidents or bounded choices where probability is part of the
+model.
 
 Decision attempts are authoritative admission evidence. Every admitted request
 is recorded as accepted or as an expected rejection; stale revisions, stale
@@ -145,7 +156,8 @@ ticket versions, closed tickets, and conflicting mutations cannot leave a
 permanently failing item at the head of canonical ingress. Decision traces then
 explain successful resolution outcomes. Exact replay consumes recorded decision
 ingress, attempts, policy identity, selected option, score/evidence trace, and
-resulting command attempt; it does not rerun a human, service, or model.
+resulting command attempt; it does not rerun a human, service, or model. Random
+policy replays the recorded draw and generated ingress rather than drawing again.
 Counterfactual branches may deliberately rerun or replace a policy, but must
 then produce new decision ingress and lineage rather than claiming exact replay.
 

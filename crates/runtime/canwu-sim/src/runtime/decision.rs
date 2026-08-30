@@ -1,10 +1,10 @@
 use super::{
-    CanwuError, Command, CommandAuthority, CommandEnvelope, CommandIngress, CommandOutcome,
-    CommandRequest, CommandRequestId, ControllerDecision, DecisionAction, DecisionAttemptErrorCode,
-    DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority, DecisionController,
-    DecisionError, DecisionMutation, DecisionPolicy, DecisionPolicyKind, DecisionRequestId,
-    DecisionTicket, DecisionTicketId, DecisionTrace, DecisionTraceId, EntityRef, ErrorCode,
-    IngressClass, IngressPayload, IngressReceipt, Issuer, MaintenanceChangeRecord,
+    BoundaryId, CanwuError, CauseRef, Command, CommandAuthority, CommandEnvelope, CommandIngress,
+    CommandOutcome, CommandRequest, CommandRequestId, ControllerDecision, DecisionAction,
+    DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAttemptRecord, DecisionAuthority,
+    DecisionController, DecisionError, DecisionMutation, DecisionPolicy, DecisionPolicyKind,
+    DecisionRequestId, DecisionTicket, DecisionTicketId, DecisionTrace, DecisionTraceId, EntityRef,
+    ErrorCode, IngressClass, IngressPayload, IngressReceipt, Issuer, MaintenanceChangeRecord,
     MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt, SimTime,
     Simulation, VerifiedDecisionArchiveCommit, canonical_hash, claim_counter,
     invalid_snapshot_error, runtime_entity_identity_exists,
@@ -333,6 +333,71 @@ impl Simulation {
             },
             None,
             false,
+        )
+    }
+
+    pub(super) fn append_boundary_decision_ingress(
+        &mut self,
+        boundary_id: BoundaryId,
+        due_at: SimTime,
+        priority: i32,
+        request: DecisionIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_canonical_ingress_can_start()?;
+        let expected_revision = self.revision().checked_add(1).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "boundary-generated decision revision is exhausted",
+            )
+        })?;
+        if request.request_id.get() == 0 || request.expected_revision != expected_revision {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "boundary-generated decision requires a nonzero ID and the post-boundary revision",
+            ));
+        }
+        if self.decision_attempt(request.request_id).is_some()
+            || self
+                .state
+                .evidence
+                .archived_decision_requests
+                .contains_key(&request.request_id)
+            || self.state.evidence.ingress.iter().any(|record| {
+                matches!(
+                    &record.payload,
+                    IngressPayload::Decision { request: existing }
+                        if existing.request_id == request.request_id
+                )
+            })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::IdempotencyConflict,
+                format!(
+                    "boundary-generated decision request {} is already reserved or processed",
+                    request.request_id
+                ),
+            ));
+        }
+        if let Some(command) = &request.command
+            && (command.request_id.get() == 0
+                || command.expected_revision != request.expected_revision
+                || command.envelope.expected_time != Some(due_at)
+                || self.command_request_id_is_in_use(command.request_id))
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "boundary-generated decision command identity or guards are invalid",
+            ));
+        }
+        self.append_ingress(
+            due_at,
+            IngressClass::Decision,
+            priority,
+            IngressPayload::Decision {
+                request: Box::new(request),
+            },
+            Some(CauseRef::Boundary(boundary_id)),
+            true,
         )
     }
 
@@ -829,6 +894,7 @@ pub(super) fn controller_issuer(controller: &super::DecisionControllerBinding) -
         DecisionPolicyKind::Human => Issuer::Human(controller.id.clone()),
         DecisionPolicyKind::Utility
         | DecisionPolicyKind::Rule
+        | DecisionPolicyKind::Random
         | DecisionPolicyKind::External
         | DecisionPolicyKind::Llm => Issuer::Ai(controller.id.clone()),
     }

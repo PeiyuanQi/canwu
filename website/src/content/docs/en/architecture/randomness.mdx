@@ -18,7 +18,11 @@ canwu.core / knowledge-report-delay / 1
 
 The kernel derives an independent seed from the run root seed and stream identity. Separate domains use separate streams, so adding a report-delay draw cannot shift an unrelated system's sequence. Stream state stores the algorithm, initial seed, position, and generator state.
 
-The current algorithm is tagged `SplitMix64V1`. Algorithm name and version are part of the persistence contract; a future algorithm change should use a new version instead of silently changing an old stream's meaning.
+New streams use `SplitMix64V2` with unbiased rejection sampling. Historical
+`SplitMix64V1` streams retain their modulo semantics so old journals replay with
+their original meaning. Algorithm name and version are part of the persistence
+contract; changing an algorithm requires a new version rather than silently
+changing an existing stream.
 
 ## Declare before drawing
 
@@ -32,13 +36,30 @@ Every range draw requires:
 
 A plugin receives a bounded integer, not the global generator state.
 
+## Operation-keyed random draws
+
+Mechanics that may retry, roll back, or continue across phases should use
+`random_sample_for_operation`. In addition to stream and range, it binds the
+draw to stable cause, operation ID, target, occurrence, and purpose. The same
+authoritative operation therefore cannot consume a different sample merely
+because retry order changed.
+
+Random decision policy uses this path too:
+`RandomOperationTarget::DecisionTicket` binds an exact ticket version,
+`DecisionOptionWeight` maps the draw interval to existing ticket options, and
+`ResolveDecisionRandomly` lets the kernel generate ordinary decision ingress
+for the next boundary. Another run configuration selected before ticket opening
+may use LLM, Human, or External selection, but a registered controller policy
+cannot be replaced at runtime. These selectors also do not replace stochastic
+world events such as weather, failure, or epidemic incidents.
+
 ## Draw evidence
 
 Every draw records:
 
 | Field | Meaning |
 | --- | --- |
-| Stream and position | Which versioned stream and which draw number |
+| Stream and address | Which versioned stream, plus a sequential position or operation-keyed address |
 | Bound and value | Requested range and returned value |
 | `purpose` | Semantic reason for the draw |
 | `producer` | Boundary system or core system |
@@ -59,10 +80,11 @@ If a caller issues a different command from the same snapshot, `fork()` or an eq
 2. Put the semantic reason in `purpose` so debug and replay output can explain the result.
 3. Review stream declarations with the plugin version and semantic hash.
 4. Never use wall-clock time, thread order, or container iteration order as a seed or tie-break.
+5. Do not randomize missing facts; model unknown knowledge, actor choices, discrete incidents, and aggregate-rate settlement separately.
 
 ## Replay contract
 
-Exact replay requires stream identity, algorithm version, root seed, positions, every draw, and final outcomes to match. When loading a snapshot, the kernel verifies that stream state equals the initial seed advanced by the recorded number of draws; boundary replay also compares producer, purpose, cause, and correlation for each draw.
+Exact replay requires stream identity, algorithm version, root seed, sequential positions, operation addresses, every draw, and final outcomes to match. When loading a snapshot, the kernel verifies sequential stream state against the initial seed advanced by the recorded draw count and recomputes operation-keyed samples; boundary replay also compares producer, purpose, cause, and correlation for each draw.
 
 ## Continue reading
 
@@ -71,3 +93,4 @@ Exact replay requires stream identity, algorithm version, root seed, positions, 
 - [Event system](/en/architecture/events/)
 - [Save, replay, and fork](/en/developer/persistence/)
 - [Phased boundary tutorial](/en/tutorials/phased-boundary/)
+- [Random decisions, LLM interfaces, and domain examples](/en/tutorials/cases/uncertainty-resolution/)

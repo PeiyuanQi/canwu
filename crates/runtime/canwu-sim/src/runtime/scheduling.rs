@@ -3,6 +3,7 @@ use super::event_payloads::{
     ArmyArrived, KnowledgeUpdated, LetterDelivered, PersonArrived, ReportDispatched,
     RuntimeEventPayload,
 };
+use super::settlement::CommittedBoundaryRandomDraw;
 use super::{
     ActorKnowledge, ArmyId, ArmyKnowledge, AssertUnwindSafe, BTreeMap, BoundaryId, CanwuError,
     CauseRef, ClockTransactionCheckpoint, CommitmentDomains, DeterministicRng, EntityRef,
@@ -849,18 +850,24 @@ impl Simulation {
         boundary: BoundaryId,
         correlation_id: u64,
         draws: Vec<PendingBoundaryRandomDraw>,
-    ) -> Result<Vec<RandomDrawId>, CanwuError> {
+        mut outcomes: BTreeMap<(RandomStreamKey, RandomDrawAddress), RandomDrawOutcome>,
+    ) -> Result<Vec<CommittedBoundaryRandomDraw>, CanwuError> {
         let mut ids = Vec::with_capacity(draws.len());
         for pending in draws {
             let (draw_id, next_random_draw_id) =
                 claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
             let id = RandomDrawId::new(draw_id);
             self.state.counters.next_random_draw_id = next_random_draw_id;
+            let stream = pending.draw.stream;
+            let address = pending.draw.address;
+            let outcome = outcomes
+                .remove(&(stream.clone(), address.clone()))
+                .unwrap_or(RandomDrawOutcome::BoundarySystemDecision);
             self.state.evidence.random_draws.push(RandomDrawRecord {
                 id,
                 at: self.state.scheduler.now,
-                stream: pending.draw.stream,
-                address: pending.draw.address,
+                stream: stream.clone(),
+                address: address.clone(),
                 operation_evidence: pending.draw.operation_evidence,
                 upper_exclusive: pending.draw.upper_exclusive,
                 value: pending.draw.value,
@@ -870,11 +877,21 @@ impl Simulation {
                     plugin: pending.plugin,
                     system: pending.system,
                 },
-                outcome: Some(RandomDrawOutcome::BoundarySystemDecision),
+                outcome: Some(outcome),
                 cause: CauseRef::Boundary(boundary),
                 correlation_id,
             });
-            ids.push(id);
+            ids.push(CommittedBoundaryRandomDraw {
+                id,
+                stream,
+                address,
+            });
+        }
+        if !outcomes.is_empty() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomDraw,
+                "random decision references a draw that was not committed by its boundary",
+            ));
         }
         Ok(ids)
     }

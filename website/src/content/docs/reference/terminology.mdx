@@ -100,6 +100,9 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [相关标识](/architecture/events/) | correlation ID | `correlation_id` | 将同一权威因果根产生的记录归为一组的稳定标识。 |
 | [随机流](/architecture/randomness/) | random stream | `RandomStreamKey` | 由已声明机制拥有的具名、版本化确定性随机来源。 |
 | [抽样证据](/architecture/randomness/) | draw evidence | `RandomDrawRecord` | 一次确定性随机抽样所记录的流、范围、操作和结果。 |
+| [随机决策策略](/tutorials/cases/uncertainty-resolution/) | random decision policy | `DecisionPolicyKind::Random` | 由声明过的边界系统使用可重放抽样证据结算的有界票据选择器，不是通用世界事件生成器。 |
+| [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
+| [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
 | [资源分配](/architecture/settlement/) | allocation | `ReservationAllocation` | 在供给约束下确定性结算竞争申请的结果。 |
 | [可见性](/architecture/settlement/) | visibility | `StateVisibility` | 控制状态和证据可以到达哪些读取者的策略。 |

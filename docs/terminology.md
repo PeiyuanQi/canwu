@@ -100,6 +100,9 @@ renamed by this policy.
 | [相关标识](../website/src/content/docs/architecture/events.mdx) | correlation ID | `correlation_id` | A stable identifier that groups records belonging to one authoritative causal root. |
 | [随机流](../website/src/content/docs/architecture/randomness.mdx) | random stream | `RandomStreamKey` | A named, versioned deterministic source owned by a declared mechanic. |
 | [抽样证据](../website/src/content/docs/architecture/randomness.mdx) | draw evidence | `RandomDrawRecord` | The recorded stream, range, operation, and result of one deterministic random draw. |
+| [随机决策策略](../website/src/content/docs/tutorials/cases/uncertainty-resolution.mdx) | random decision policy | `DecisionPolicyKind::Random` | A bounded ticket selector resolved by a declared boundary system using replayable random evidence; it is not a general world-event generator. |
+| [决策选项权重](../website/src/content/docs/tutorials/cases/uncertainty-resolution.mdx) | decision option weight | `DecisionOptionWeight` | A canonical option-ID and nonnegative integer weight used to map one bounded draw to an existing ticket option. |
+| [操作定址随机抽样](../website/src/content/docs/architecture/randomness.mdx) | operation-keyed random draw | `random_sample_for_operation` | A draw addressed by stable cause, operation ID, target, occurrence, purpose, and stream identity so retries and replay cannot consume a different sample. |
 | [资源预留](../website/src/content/docs/tutorials/phased-boundary.mdx) | reservation | `ReservationRequest` | A declared request against a conserved resource pool before allocation is settled. |
 | [资源分配](../website/src/content/docs/architecture/settlement.mdx) | allocation | `ReservationAllocation` | The deterministic result of settling competing reservations against supply. |
 | [可见性](../website/src/content/docs/architecture/settlement.mdx) | visibility | `StateVisibility` | The policy controlling which state and evidence can reach which readers. |

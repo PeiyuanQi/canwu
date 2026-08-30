@@ -362,7 +362,7 @@ are rejected rather than migrated. / 事件迁出会破坏 Rust 源 API：调用
 `canwu-decision` is the official headless decision SDK. It defines persisted
 decision tickets, versioned dynamic options, controller bindings, persisted
 decision attempts and traces, a reusable weighted utility evaluator, and Utility, Rule, Human,
-External, and LLM policy contracts. Domain packages still define when a
+Random, External, and LLM policy contracts. Domain packages still define when a
 decision exists, what its context means, which options are legal, and which
 domain command an option represents.
 
@@ -387,6 +387,21 @@ handler can also require `CommandContext::decision_controller_id`; the engine
 sets it only for the nested command of validated decision ingress, so callers
 cannot manufacture DecisionTicket provenance with `CommandEnvelope::with_authority`.
 
+Random selection stays inside the boundary transaction. A declared boundary
+system uses `random_sample_for_operation` with
+`RandomOperationTarget::DecisionTicket`, supplies canonical
+`DecisionOptionWeight` values through `ResolveDecisionRandomly`, and lets the
+kernel generate the canonical resolution ingress for the next eligible
+boundary. `DecisionTrace.random` and `RandomDrawRecord` cross-reference the
+ticket version, selected option, draw value, bound, producer, and purpose. A
+failed boundary rolls back both the generated ingress and the random stream.
+Each source boundary may generate at most one such resolution, due immediately
+for the next eligible boundary, so its global revision guard remains
+unambiguous.
+This is a selector for a bounded ticket, not a replacement for a stochastic
+world-event mechanic; discrete incidents still belong to their owning boundary
+system, and unknown facts remain unknown rather than being randomized.
+
 Registration, opening, option replacement, resolution, and cancellation enter
 the runtime through `DecisionIngressRequest`. They use request IDs, revision
 guards, deterministic queue order, transactional settlement, and exact-retry
@@ -404,7 +419,8 @@ poison the canonical ingress queue. Decision and nested command request IDs are
 nonzero and globally collision-checked before persistence. Decision state has
 its own optional commitment root. Exact replay replays recorded decision ingress
 and verifies the resulting attempts, state, and traces; it deliberately does not
-rerun a possibly external, human, or nondeterministic policy.
+rerun a possibly external, human, or nondeterministic policy. The recorded draw
+and generated decision ingress are the replay inputs for Random policy.
 
 ### Deterministic outcomes, reloads, and forks
 

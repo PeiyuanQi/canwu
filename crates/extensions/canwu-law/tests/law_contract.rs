@@ -1980,6 +1980,36 @@ fn host_adapter_enqueues_typed_ticket_before_marking_outbox() {
         .values()
         .map(|item| item.draft.clone())
         .collect::<Vec<_>>();
+    let llm_item = boundary.emitted_outbox[0].clone();
+    let mut llm_controller = DecisionControllerBinding::new(
+        llm_item.decision_controller_id.clone(),
+        DecisionPolicyIdentity::new(DecisionPolicyKind::Llm, "host-law-selector", "1"),
+        DecisionAuthority::Actor {
+            actor: PersonId::new(1),
+        },
+    )
+    .with_seat(&llm_item.seat, &llm_item.permission_profile_id);
+    if let Some(subject) = &llm_item.command_subject {
+        llm_controller = llm_controller.with_command_subject(subject.clone());
+    }
+    let llm_registration_revision = canwu.revision();
+    canwu
+        .enqueue_decision(
+            canwu.time(),
+            0,
+            DecisionIngressRequest::new(
+                DecisionRequestId::new(900_000),
+                llm_registration_revision,
+                DecisionMutation::RegisterController {
+                    controller: llm_controller,
+                },
+            ),
+        )
+        .expect("host-selected law controller should queue");
+    canwu
+        .step_canonical()
+        .expect("settle host-selected law controller")
+        .expect("controller boundary");
     let preparation_receipts = runtime
         .prepare_pending_decision_enqueues(&mut canwu)
         .expect("queue durable enqueue preparation");
@@ -2063,6 +2093,15 @@ fn host_adapter_enqueues_typed_ticket_before_marking_outbox() {
             item.sequence
         );
     }
+    assert_eq!(
+        canwu
+            .decision_controller(&llm_item.decision_controller_id)
+            .expect("host-selected law controller")
+            .policy
+            .kind,
+        DecisionPolicyKind::Llm,
+        "law must preserve a compatible host-selected controller policy",
+    );
     let awaiting_ack = load_legal_runtime(&canwu, &plan)
         .expect("load persisted legal runtime")
         .expect("runtime record");

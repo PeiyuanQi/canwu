@@ -758,6 +758,31 @@ impl SimulationView<'_> {
         upper_exclusive: u64,
         purpose: &str,
     ) -> Result<u64, CanwuError> {
+        self.random_sample_for_operation(
+            stream,
+            evidence,
+            operation_kind,
+            application_operation_id,
+            target,
+            draw_slot,
+            upper_exclusive,
+            purpose,
+        )
+        .map(|sample| sample.value)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn random_sample_for_operation(
+        &self,
+        stream: &RandomStreamKey,
+        evidence: EvidenceRef,
+        operation_kind: &str,
+        application_operation_id: &str,
+        target: RandomOperationTarget,
+        draw_slot: u32,
+        upper_exclusive: u64,
+        purpose: &str,
+    ) -> Result<super::RandomSample, CanwuError> {
         let available = self
             .proposal_evidence
             .is_some_and(|values| values.contains(&evidence))
@@ -780,7 +805,7 @@ impl SimulationView<'_> {
                 ),
             ));
         };
-        session.borrow_mut().range_for_operation(
+        session.borrow_mut().sample_for_operation(
             stream,
             evidence,
             operation_kind,

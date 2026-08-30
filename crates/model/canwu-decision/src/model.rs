@@ -1,5 +1,6 @@
 use canwu_core::{
     CommandRequestId, DecisionRequestId, DecisionTicketId, DecisionTraceId, EntityRef, PersonId,
+    RandomDrawId,
 };
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
@@ -93,6 +94,7 @@ impl Error for DecisionError {}
 pub enum DecisionPolicyKind {
     Utility,
     Rule,
+    Random,
     Human,
     External,
     Llm,
@@ -452,6 +454,105 @@ pub struct DecisionExternalEvidence {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct DecisionOptionWeight {
+    pub option_id: String,
+    pub weight: u64,
+}
+
+impl DecisionOptionWeight {
+    #[must_use]
+    pub fn new(option_id: impl Into<String>, weight: u64) -> Self {
+        Self {
+            option_id: option_id.into(),
+            weight,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DecisionRandomEvidence {
+    pub draw_id: RandomDrawId,
+    pub value: u64,
+    pub upper_exclusive: u64,
+    pub option_weights: Vec<DecisionOptionWeight>,
+}
+
+impl DecisionRandomEvidence {
+    pub fn selected_option(
+        ticket: &DecisionTicket,
+        option_weights: &[DecisionOptionWeight],
+        value: u64,
+    ) -> Result<String, DecisionError> {
+        validate_option_weights(ticket, option_weights)?;
+        let upper_exclusive = checked_option_weight_total(option_weights)?;
+        Self::selected_option_from_weights(option_weights, value, upper_exclusive)
+    }
+
+    pub fn selected_option_from_weights(
+        option_weights: &[DecisionOptionWeight],
+        value: u64,
+        upper_exclusive: u64,
+    ) -> Result<String, DecisionError> {
+        let observed_total = checked_option_weight_total(option_weights)?;
+        if observed_total != upper_exclusive {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision option weights disagree with the draw bound",
+            ));
+        }
+        if value >= upper_exclusive {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision value is outside its positive total weight",
+            ));
+        }
+        let mut cursor = 0_u64;
+        for option in option_weights {
+            cursor = cursor.checked_add(option.weight).ok_or_else(|| {
+                DecisionError::new(
+                    DecisionErrorCode::InvalidDecision,
+                    "random decision option weights overflow the supported range",
+                )
+            })?;
+            if value < cursor {
+                return Ok(option.option_id.clone());
+            }
+        }
+        Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random decision weights did not select an option",
+        ))
+    }
+
+    fn validate(
+        &self,
+        ticket: &DecisionTicket,
+        selected_option: &str,
+    ) -> Result<(), DecisionError> {
+        if self.draw_id.get() == 0 {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision evidence requires a nonzero draw ID",
+            ));
+        }
+        let observed = Self::selected_option(ticket, &self.option_weights, self.value)?;
+        if checked_option_weight_total(&self.option_weights)? != self.upper_exclusive {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision total weight disagrees with its draw bound",
+            ));
+        }
+        if observed != selected_option {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision evidence does not select the recorded option",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DecisionOutcome {
@@ -468,6 +569,8 @@ pub struct PolicyDecision {
     pub evaluations: Vec<DecisionOptionEvaluation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<DecisionExternalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub random: Option<DecisionRandomEvidence>,
 }
 
 impl PolicyDecision {
@@ -480,6 +583,7 @@ impl PolicyDecision {
             summary: summary.into(),
             evaluations: Vec::new(),
             external: None,
+            random: None,
         }
     }
 
@@ -493,6 +597,7 @@ impl PolicyDecision {
             summary: reason,
             evaluations: Vec::new(),
             external: None,
+            random: None,
         }
     }
 
@@ -525,6 +630,21 @@ impl PolicyDecision {
                 ));
             }
         }
+        if self.external.is_some() && self.random.is_some() {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "a decision cannot carry both external and random evidence",
+            ));
+        }
+        if let Some(random) = &self.random {
+            let DecisionOutcome::Selected { option_id } = &self.outcome else {
+                return Err(DecisionError::new(
+                    DecisionErrorCode::InvalidDecision,
+                    "random decision evidence requires a selected outcome",
+                ));
+            };
+            random.validate(ticket, option_id)?;
+        }
         Ok(())
     }
 }
@@ -543,6 +663,8 @@ pub struct DecisionTrace {
     pub evaluations: Vec<DecisionOptionEvaluation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external: Option<DecisionExternalEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub random: Option<DecisionRandomEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_request_id: Option<CommandRequestId>,
 }
@@ -620,6 +742,64 @@ pub(crate) fn canonicalize_options(options: &mut Vec<DecisionOption>) -> Result<
         ));
     }
     Ok(())
+}
+
+fn validate_option_weights(
+    ticket: &DecisionTicket,
+    option_weights: &[DecisionOptionWeight],
+) -> Result<(), DecisionError> {
+    checked_option_weight_total(option_weights)?;
+    let available = ticket
+        .options
+        .iter()
+        .filter(|option| option.is_available())
+        .map(|option| option.id.as_str())
+        .collect::<Vec<_>>();
+    if available.len() != option_weights.len()
+        || available
+            .iter()
+            .zip(option_weights)
+            .any(|(option_id, weight)| *option_id != weight.option_id)
+    {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random decision weights must cover every available option exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn checked_option_weight_total(
+    option_weights: &[DecisionOptionWeight],
+) -> Result<u64, DecisionError> {
+    if option_weights
+        .windows(2)
+        .any(|pair| pair[0].option_id >= pair[1].option_id)
+    {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random decision option weights must be in canonical option-ID order",
+        ));
+    }
+    for option in option_weights {
+        require_identifier(&option.option_id, "random decision option ID")?;
+    }
+    let total = option_weights
+        .iter()
+        .try_fold(0_u64, |sum, option| sum.checked_add(option.weight))
+        .ok_or_else(|| {
+            DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "random decision option weights overflow the supported range",
+            )
+        })?;
+    if total == 0 {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random decision option weights require a positive total",
+        ));
+    }
+    Ok(total)
 }
 
 pub(crate) fn require_identifier(value: &str, label: &str) -> Result<(), DecisionError> {

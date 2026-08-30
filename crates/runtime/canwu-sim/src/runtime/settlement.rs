@@ -7,11 +7,13 @@ use super::{
     BoundaryEmission, BoundaryEmissionKind, BoundaryId, BoundaryIngressGeneration,
     BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
     BoundaryRequest, BoundaryStateHashFormat, BoundarySystemContract,
-    BoundaryTransactionCheckpoint, CanwuError, CauseRef, CommandIngress, CommandRequest,
-    CommitmentDomains, DomainRecord, DomainRecordChange, DomainRecordRef,
-    DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH,
-    HashSet, IngressPayload, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId,
-    PluginComponentKey, PluginComponentRecord, PluginRegistry, RefCell, ReservationAllocation,
+    BoundaryTransactionCheckpoint, CanwuError, CauseRef, Command, CommandEnvelope, CommandIngress,
+    CommandRequest, CommitmentDomains, DecisionAction, DecisionIngressRequest, DecisionMutation,
+    DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DomainRecord, DomainRecordChange,
+    DomainRecordRef, DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef,
+    GENESIS_BOUNDARY_HASH, HashSet, IngressPayload, KnowledgeHolderRef, KnowledgeRecord,
+    KnowledgeRecordId, PluginComponentKey, PluginComponentRecord, PluginRegistry, PolicyDecision,
+    RandomDrawAddress, RandomDrawOutcome, RandomOperationTarget, RefCell, ReservationAllocation,
     ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
     ReservationRef, ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot,
     RuntimeCurrentState, RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation,
@@ -378,6 +380,9 @@ impl Simulation {
                                 ),
                             )
                         })??;
+                let random_execution = view
+                    .finish_random_session()
+                    .expect("boundary views always have a random session");
                 validate_boundary_proposal(
                     &registered.plugin,
                     &registered.contract,
@@ -390,10 +395,8 @@ impl Simulation {
                     &visible_record_overlay,
                     &visible_knowledge_overlay,
                     &proposal,
+                    &random_execution.draws,
                 )?;
-                let random_execution = view
-                    .finish_random_session()
-                    .expect("boundary views always have a random session");
                 random::extend_keyed_draws(&mut keyed_random_draws, &random_execution.draws)?;
                 random_overlay.extend(random_execution.states);
                 pending_random_draws.extend(random_execution.draws.into_iter().map(|draw| {
@@ -570,12 +573,64 @@ impl Simulation {
             changes,
             record_changes,
             emissions,
-            generated_ingress,
+            mut generated_ingress,
+            random_decisions,
         } = evidence;
         self.invalidate_commitments(CommitmentDomains::RANDOM_STREAMS);
         self.state.current.random_streams = random_overlay;
-        let random_draws =
-            self.append_boundary_random_draws(boundary_id, correlation_id, pending_random_draws)?;
+        let mut random_outcomes = BTreeMap::new();
+        for pending in &random_decisions {
+            let ticket = self
+                .state
+                .current
+                .decisions
+                .ticket(pending.resolution.ticket_id)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDecision,
+                        "random decision ticket disappeared before boundary commit",
+                    )
+                })?;
+            let option_id = DecisionRandomEvidence::selected_option(
+                ticket,
+                &pending.resolution.option_weights,
+                pending.resolution.sample.value,
+            )
+            .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+            let previous = random_outcomes.insert(
+                (
+                    pending.resolution.sample.stream.clone(),
+                    pending.resolution.sample.address.clone(),
+                ),
+                RandomDrawOutcome::DecisionSelection {
+                    ticket_id: ticket.id,
+                    ticket_version: ticket.version,
+                    option_id,
+                },
+            );
+            if previous.is_some() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomDraw,
+                    "one random draw cannot resolve multiple decisions",
+                ));
+            }
+        }
+        let committed_random_draws = self.append_boundary_random_draws(
+            boundary_id,
+            correlation_id,
+            pending_random_draws,
+            random_outcomes,
+        )?;
+        self.materialize_boundary_random_decisions(
+            boundary_id,
+            &random_decisions,
+            &committed_random_draws,
+            &mut generated_ingress,
+        )?;
+        let random_draws = committed_random_draws
+            .iter()
+            .map(|draw| draw.id)
+            .collect::<Vec<_>>();
         self.state.metadata.plugin_registration_closed = true;
         let state_hash = self.compute_boundary_state_hash_for(state_hash_format)?;
         let previous_hash = self
@@ -664,6 +719,26 @@ impl Simulation {
         directives: Vec<StagedBoundaryDirective>,
         evidence: &mut PendingBoundaryEvidence,
     ) -> Result<(), CanwuError> {
+        let random_decision_count = directives
+            .iter()
+            .filter(|staged| {
+                matches!(
+                    &staged.directive,
+                    BoundaryDirective::ResolveDecisionRandomly { .. }
+                )
+            })
+            .count();
+        if evidence
+            .random_decisions
+            .len()
+            .checked_add(random_decision_count)
+            .is_none_or(|count| count > 1)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "one boundary may generate at most one random decision resolution",
+            ));
+        }
         let changes = &mut evidence.changes;
         let record_changes = &mut evidence.record_changes;
         let emissions = &mut evidence.emissions;
@@ -684,6 +759,7 @@ impl Simulation {
                 | BoundaryDirective::Emit { .. }
                 | BoundaryDirective::ScheduleIngress { .. }
                 | BoundaryDirective::SchedulePluginIngress { .. }
+                | BoundaryDirective::ResolveDecisionRandomly { .. }
                 | BoundaryDirective::PublishKnowledge { .. } => None,
             })
             .collect();
@@ -733,6 +809,7 @@ impl Simulation {
                     .iter()
                     .find(|entity| !runtime_entity_identity_exists(&self.state, entity)),
                 BoundaryDirective::MutateRecord { .. }
+                | BoundaryDirective::ResolveDecisionRandomly { .. }
                 | BoundaryDirective::PublishKnowledge { .. } => None,
             };
             if let Some(entity) = unavailable {
@@ -961,9 +1038,163 @@ impl Simulation {
                         visibility: staged.visibility,
                     });
                 }
+                BoundaryDirective::ResolveDecisionRandomly { resolution } => {
+                    evidence
+                        .random_decisions
+                        .push(PendingRandomDecisionResolution {
+                            plugin: staged.plugin,
+                            system: staged.system,
+                            phase: staged.phase,
+                            visibility: staged.visibility,
+                            resolution,
+                        });
+                }
             }
         }
         validate_runtime_domain_dependents(&self.state)?;
+        Ok(())
+    }
+
+    fn materialize_boundary_random_decisions(
+        &mut self,
+        boundary_id: BoundaryId,
+        pending: &[PendingRandomDecisionResolution],
+        committed_draws: &[CommittedBoundaryRandomDraw],
+        generated_ingress: &mut Vec<BoundaryIngressGeneration>,
+    ) -> Result<(), CanwuError> {
+        let expected_revision = self.revision().checked_add(1).ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::IdentifierExhausted,
+                "random decision target revision is exhausted",
+            )
+        })?;
+        let draws = committed_draws
+            .iter()
+            .map(|draw| ((draw.stream.clone(), draw.address.clone()), draw.id))
+            .collect::<BTreeMap<_, _>>();
+        for pending in pending {
+            let resolution = &pending.resolution;
+            let draw_id = draws
+                .get(&(
+                    resolution.sample.stream.clone(),
+                    resolution.sample.address.clone(),
+                ))
+                .copied()
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidRandomDraw,
+                        "random decision draw was not committed by its source boundary",
+                    )
+                })?;
+            let ticket = self
+                .state
+                .current
+                .decisions
+                .ticket(resolution.ticket_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDecision,
+                        "random decision ticket disappeared before ingress generation",
+                    )
+                })?;
+            let controller = self
+                .state
+                .current
+                .decisions
+                .controller(&resolution.controller_id)
+                .cloned()
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDecision,
+                        "random decision controller disappeared before ingress generation",
+                    )
+                })?;
+            let option_id = DecisionRandomEvidence::selected_option(
+                &ticket,
+                &resolution.option_weights,
+                resolution.sample.value,
+            )
+            .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+            let option = ticket.option(&option_id).ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::InvalidDecision,
+                    "random decision selected an unavailable option",
+                )
+            })?;
+            let due_at = self.state.scheduler.now;
+            let command = match &option.action {
+                DecisionAction::Command { command } => {
+                    let request_id = resolution.command_request_id.ok_or_else(|| {
+                        CanwuError::new(
+                            ErrorCode::InvalidDecision,
+                            "random decision command option lacks a command request ID",
+                        )
+                    })?;
+                    let command: Command =
+                        serde_json::from_value(command.clone()).map_err(|error| {
+                            CanwuError::new(
+                                ErrorCode::InvalidDecision,
+                                format!("decision option contains an invalid command: {error}"),
+                            )
+                        })?;
+                    Some(CommandRequest::new(
+                        request_id,
+                        expected_revision,
+                        CommandEnvelope::new(
+                            super::decision::controller_issuer(&controller),
+                            command,
+                        )
+                        .with_authority(super::decision::controller_authority(&controller))
+                        .at_time(due_at),
+                    ))
+                }
+                DecisionAction::None => None,
+            };
+            let decision = PolicyDecision {
+                outcome: DecisionOutcome::Selected {
+                    option_id: option_id.clone(),
+                },
+                summary: format!("random policy selected {option_id}"),
+                evaluations: Vec::new(),
+                external: None,
+                random: Some(DecisionRandomEvidence {
+                    draw_id,
+                    value: resolution.sample.value,
+                    upper_exclusive: resolution.sample.upper_exclusive,
+                    option_weights: resolution.option_weights.clone(),
+                }),
+            };
+            let mutation = DecisionMutation::Resolve {
+                ticket_id: ticket.id,
+                expected_version: ticket.version,
+                controller_id: controller.id.clone(),
+                policy: controller.policy.clone(),
+                decision,
+                command_request_id: resolution.command_request_id,
+            };
+            let mut request = DecisionIngressRequest::new(
+                resolution.decision_request_id,
+                expected_revision,
+                mutation,
+            );
+            if let Some(command) = command {
+                request = request.with_command(command);
+            }
+            let receipt = self.append_boundary_decision_ingress(
+                boundary_id,
+                due_at,
+                resolution.priority,
+                request,
+            )?;
+            generated_ingress.push(BoundaryIngressGeneration {
+                ingress: receipt.ingress_id,
+                plugin: pending.plugin.clone(),
+                system: pending.system.clone(),
+                phase: pending.phase,
+                visibility: pending.visibility,
+            });
+        }
         Ok(())
     }
 
@@ -1293,6 +1524,15 @@ struct PendingBoundaryEvidence {
     record_changes: Vec<DomainRecordChange>,
     emissions: Vec<BoundaryEmission>,
     generated_ingress: Vec<BoundaryIngressGeneration>,
+    random_decisions: Vec<PendingRandomDecisionResolution>,
+}
+
+struct PendingRandomDecisionResolution {
+    plugin: String,
+    system: String,
+    phase: BoundaryPhase,
+    visibility: StateVisibility,
+    resolution: super::RandomDecisionResolution,
 }
 
 fn proposal_evidence_refs(
@@ -1329,6 +1569,12 @@ pub(super) struct PendingBoundaryRandomDraw {
     pub(super) draw: random::PendingRandomDraw,
 }
 
+pub(super) struct CommittedBoundaryRandomDraw {
+    pub(super) id: super::RandomDrawId,
+    pub(super) stream: super::RandomStreamKey,
+    pub(super) address: RandomDrawAddress,
+}
+
 pub(super) fn boundary_system_due(
     contract: &BoundarySystemContract,
     cadences: &[SystemCadence],
@@ -1357,6 +1603,7 @@ fn validate_boundary_proposal(
     record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
     knowledge_overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
     proposal: &BoundaryProposal,
+    pending_random_draws: &[random::PendingRandomDraw],
 ) -> Result<(), CanwuError> {
     if contract.phase != BoundaryPhase::ReservationAndAllocation
         && (!proposal.offers.is_empty() || !proposal.requests.is_empty())
@@ -1443,6 +1690,7 @@ fn validate_boundary_proposal(
     let mut record_targets = BTreeSet::new();
     let mut producer_correlations = BTreeSet::new();
     let mut canonical_drafts = BTreeSet::new();
+    let mut random_decision_samples = BTreeSet::new();
     for directive in &proposal.directives {
         match directive {
             BoundaryDirective::SetComponent {
@@ -1779,7 +2027,152 @@ fn validate_boundary_proposal(
                     ));
                 }
             }
+            BoundaryDirective::ResolveDecisionRandomly { resolution } => {
+                validate_random_decision_resolution(
+                    plugin,
+                    contract,
+                    current,
+                    pending_random_draws,
+                    &mut random_decision_samples,
+                    resolution,
+                )?;
+            }
         }
+    }
+    Ok(())
+}
+
+fn validate_random_decision_resolution(
+    plugin: &str,
+    contract: &BoundarySystemContract,
+    current: &RuntimeCurrentState,
+    pending_random_draws: &[random::PendingRandomDraw],
+    used_samples: &mut BTreeSet<(super::RandomStreamKey, RandomDrawAddress)>,
+    resolution: &super::RandomDecisionResolution,
+) -> Result<(), CanwuError> {
+    if resolution.decision_request_id.get() == 0
+        || resolution
+            .command_request_id
+            .is_some_and(|request_id| request_id.get() == 0)
+        || resolution.expected_version == 0
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random decision resolution requires nonzero request IDs and ticket version",
+        ));
+    }
+    let ticket = current
+        .decisions
+        .ticket(resolution.ticket_id)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "random decision resolution references an unknown ticket",
+            )
+        })?;
+    if !ticket.is_open()
+        || ticket.version != resolution.expected_version
+        || ticket.assigned_controller != resolution.controller_id
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random decision resolution references a closed, stale, or differently controlled ticket",
+        ));
+    }
+    let controller = current
+        .decisions
+        .controller(&resolution.controller_id)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "random decision resolution references an unknown controller",
+            )
+        })?;
+    if controller.policy.kind != DecisionPolicyKind::Random {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random decision resolution requires a controller with random policy identity",
+        ));
+    }
+    if !contract.random_streams.contains(&resolution.sample.stream) {
+        return Err(CanwuError::new(
+            ErrorCode::UndeclaredRandomStream,
+            format!(
+                "boundary system {plugin}.{} did not declare the random decision stream",
+                contract.name
+            ),
+        ));
+    }
+    let RandomDrawAddress::OperationV1(address) = &resolution.sample.address else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRandomDraw,
+            "random decisions require an operation-keyed draw",
+        ));
+    };
+    if address.producer_plugin != plugin
+        || address.target
+            != (RandomOperationTarget::DecisionTicket {
+                ticket_id: ticket.id,
+                ticket_version: ticket.version,
+            })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRandomDraw,
+            "random decision draw address does not bind the current ticket version",
+        ));
+    }
+    let sample_key = (
+        resolution.sample.stream.clone(),
+        resolution.sample.address.clone(),
+    );
+    if !used_samples.insert(sample_key.clone()) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRandomDraw,
+            "one random draw cannot resolve more than one decision",
+        ));
+    }
+    if !pending_random_draws.iter().any(|draw| {
+        draw.stream == sample_key.0
+            && draw.address == sample_key.1
+            && draw.upper_exclusive == resolution.sample.upper_exclusive
+            && draw.value == resolution.sample.value
+    }) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidRandomDraw,
+            "random decision resolution does not reference a draw produced by this proposal",
+        ));
+    }
+    let total_weight = resolution
+        .option_weights
+        .iter()
+        .try_fold(0_u64, |total, option| total.checked_add(option.weight))
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "random decision option weights overflow the supported range",
+            )
+        })?;
+    if total_weight != resolution.sample.upper_exclusive {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random decision option weights disagree with the draw bound",
+        ));
+    }
+    let selected = DecisionRandomEvidence::selected_option(
+        ticket,
+        &resolution.option_weights,
+        resolution.sample.value,
+    )
+    .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+    let action = &ticket
+        .option(&selected)
+        .expect("validated random decision selected an existing option")
+        .action;
+    if matches!(action, DecisionAction::Command { .. }) != resolution.command_request_id.is_some() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random decision command options require exactly one command request ID",
+        ));
     }
     Ok(())
 }
@@ -1983,6 +2376,7 @@ fn extend_boundary_domain_record_overlay(
             | BoundaryDirective::Emit { .. }
             | BoundaryDirective::ScheduleIngress { .. }
             | BoundaryDirective::SchedulePluginIngress { .. }
+            | BoundaryDirective::ResolveDecisionRandomly { .. }
             | BoundaryDirective::PublishKnowledge { .. } => None,
         })
         .collect();

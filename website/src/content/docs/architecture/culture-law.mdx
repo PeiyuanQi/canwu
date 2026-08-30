@@ -163,6 +163,13 @@ persistence class、cadence 和 evidence；它是法律输入，不是权限授�
 4. 授权控制者从既有选项中选择；被接受的命令只能安排有界的 pending legal intent，不能直接写法律；
 5. 后续法律插件边界重新校验权限、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子提交 owner-scoped 法律分片 mutation bundle；下游适配器在各自声明的边界消费结果。
 
+如果席位 controller 尚不存在，`canwu-law` 会创建默认 Human controller。上层
+应用也可以提前使用相同的稳定 controller ID 注册 Utility、Rule、Random、External
+或 LLM 策略；只要 authority、seat、permission profile 和 command subject 与编译计划
+完全一致，法律适配器会保留该策略而不是覆盖它。Random 通过操作定址边界抽样
+生成决策准入，External/LLM 通过严格的选项选择 DTO 返回已有 option ID；两者都
+不能改变法律选项或权限。
+
 权威路径是：
 
 ```text
