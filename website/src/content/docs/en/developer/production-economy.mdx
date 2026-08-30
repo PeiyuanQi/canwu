@@ -1,0 +1,39 @@
+---
+title: Production, resource, and transport boundary
+description: Ownership and settlement boundaries for production, consumption, construction, and military supply on Canwu.
+template: doc
+sidebar:
+  order: 6
+  label: Production and resource boundary
+---
+
+Canwu provides the deterministic infrastructure needed by a production economy, but it does not put grain, factories, prices, historical resource deposits, or armies into the engine core.
+
+## Recommended boundary
+
+- Canwu core owns command admission, deterministic time, phase ordering, reservation allocation, atomic commit, rollback, visibility, persistence, and replay.
+- The host domain owns `ResourceAccount`, `ResourceDemand`, `ResourceReservation`, `ResourceTransfer`, and consumption settlement.
+- A host transport adapter owns cargo balance, in-transit custody, loss, arrival acceptance, and destination credit. `canwu-transport` supplies movement execution, capacity booking, itinerary legs, handoffs, and the delivery-completion bridge.
+- Population, production, and military plugins form demands and consequences separately; they do not directly rewrite one another's stock.
+
+This keeps one authority: the host registers typed records and plugin boundary systems through the public `canwu-api`, and every write is checked against its declared owner/system before atomic commit.
+
+## Minimal lifecycle
+
+1. Demands enter through admission; admission does not directly write stock.
+2. The resource owner publishes a protected-floor-aware `ReservationOffer`; consumers submit attempt-local `ReservationRequest` values.
+3. Boundary systems read deterministic allocation evidence and propose only their own ledger, transport, or consequence records.
+4. Conservation, version, custody-predecessor, or authority failure rolls back the whole proposal group.
+5. A destination is credited only after the cargo disposition is accepted; military consumption becomes eligible at the next appropriate boundary.
+
+The account amount is the only writable quantity. Reserved, available, and protected views are derived; reach is not delivery and arrival is not consumption.
+
+## Relation to Victoria 3
+
+Production methods, inputs/outputs, and visible bottlenecks are useful presentation comparisons. A building level, national price, or instantaneous method switch is not a universal physical truth. Premodern production also needs separate constraints for season, geography, tools, skills, labor obligations, transport security, credit, and political authorization.
+
+## Versioning and saves
+
+Hosts pin the `canwu-api` version and plugin semantic hashes. Loading restores the same Canwu snapshot and revalidates host typed records; it must not rebuild an old campaign from its current timestamp or treat an unpublished local engine version as a compatible API.
+
+See the [production, resource, and facility mechanism proposal](/en/proposals/production-economy-mechanism/) for candidate extensions and the boundary of what should not enter the core.
