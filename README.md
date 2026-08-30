@@ -88,6 +88,19 @@ For routed local and Wuxi-to-Beijing correspondence:
 cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
+For the trusted desktop debug client:
+
+```text
+cargo run --locked -p canwu-debug
+```
+
+`canwu-debug` starts the Hongwu Ming fiscal reference fixture through the
+public API. `Run` advances six simulation hours at a time, `Step` settles the
+next canonical boundary, and `Run fiscal sample` executes the complete fiscal
+cycle. The center view shows the reference-world map and an interactive
+settlement timeline; click a frame to inspect its fiscal counts. `Open trace
+viewer` opens the browser trace viewer against the same live trace dump.
+
 ## How the repository fits together
 
 - `canwu-core`: stable IDs, repeatable random numbers, and schema metadata

@@ -7,19 +7,22 @@ use canwu_api::{
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, MingFiscalTraceFrame, MingFiscalTracePhase, MingFiscalTraceWriter,
-    capture_ming_fiscal_trace_frame, ming_fiscal_reference_scenario, new_ming_fiscal_reference,
-    restore_ming_fiscal_reference, trace_error,
+    TraceViewerHandle, capture_ming_fiscal_trace_frame, default_trace_directory,
+    ming_fiscal_reference_scenario, new_ming_fiscal_reference, restore_ming_fiscal_reference,
+    start_trace_viewer, trace_error,
 };
 use canwu_reference_world::{
     MapPoint, ReferenceWorldIds, WorldSnapshot, snapshot as reference_snapshot,
 };
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, TextureHandle, Vec2};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const ENGLISH_LOGO_PNG: &[u8] = include_bytes!("../../../../assets/branding/canwu-logo-en.png");
 const CHINESE_LOGO_PNG: &[u8] = include_bytes!("../../../../assets/branding/canwu-logo-zh-cn.png");
 const DEBUG_FIXTURE: &str = "hongwu-1391";
+const MAX_DEBUG_TRACE_FRAMES: usize = 512;
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -51,8 +54,10 @@ struct DebugApp {
     search: String,
     saved_snapshot: Option<String>,
     trace_writer: Option<MingFiscalTraceWriter>,
+    trace_viewer: Option<TraceViewerHandle>,
     trace_frames: Vec<MingFiscalTraceFrame>,
     trace_sequence: usize,
+    selected_trace_frame: Option<usize>,
     map_pan: Vec2,
     map_zoom: f32,
     status: String,
@@ -79,8 +84,10 @@ impl DebugApp {
             search: String::new(),
             saved_snapshot: None,
             trace_writer,
+            trace_viewer: None,
             trace_frames: Vec::new(),
             trace_sequence: 0,
+            selected_trace_frame: None,
             map_pan: Vec2::ZERO,
             map_zoom: 1.0,
             status,
@@ -96,6 +103,7 @@ impl DebugApp {
         self.selected = Some(EntityRef::Army(self.ids.army));
         self.trace_frames.clear();
         self.trace_sequence = 0;
+        self.selected_trace_frame = None;
         self.trace_writer = self.new_trace_writer();
         "Scenario reset through the lifecycle API; trace restarted".clone_into(&mut self.status);
     }
@@ -145,6 +153,8 @@ impl DebugApp {
                     self.status = format!("Trace dump stopped: {error}");
                 }
                 self.trace_frames.push(frame);
+                self.retain_recent_trace_frames();
+                self.selected_trace_frame = Some(self.trace_frames.len().saturating_sub(1));
             }
             Err(error) => self.status = format!("Trace capture failed: {error}"),
         }
@@ -174,6 +184,10 @@ impl DebugApp {
         self.trace_writer = writer;
         self.trace_sequence = sequence;
         self.trace_frames.extend(frames);
+        self.retain_recent_trace_frames();
+        if !self.trace_frames.is_empty() {
+            self.selected_trace_frame = Some(self.trace_frames.len().saturating_sub(1));
+        }
         match result {
             Ok(()) => "Ming fiscal sample cycle completed".clone_into(&mut self.status),
             Err(error) => self.status = error.to_string(),
@@ -200,6 +214,9 @@ impl DebugApp {
             }
             if ui.button("Run fiscal sample").clicked() {
                 self.run_fiscal_sample();
+            }
+            if ui.button("Open trace viewer").clicked() {
+                self.open_trace_viewer();
             }
             if ui.button("Reset").clicked() {
                 self.reset();
@@ -228,6 +245,7 @@ impl DebugApp {
                         self.running = false;
                         self.trace_frames.clear();
                         self.trace_sequence = 0;
+                        self.selected_trace_frame = None;
                         self.trace_writer = self.new_trace_writer();
                         "Snapshot restored".clone_into(&mut self.status);
                     }
@@ -241,6 +259,16 @@ impl DebugApp {
             ui.separator();
             ui.label(&self.status);
         });
+    }
+
+    fn retain_recent_trace_frames(&mut self) {
+        let excess = self
+            .trace_frames
+            .len()
+            .saturating_sub(MAX_DEBUG_TRACE_FRAMES);
+        if excess > 0 {
+            self.trace_frames.drain(..excess);
+        }
     }
 
     fn world_browser(&mut self, ui: &mut egui::Ui) {
@@ -403,7 +431,10 @@ impl DebugApp {
     fn event_log(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("Fiscal Trace");
-            ui.label(format!("{} boundary frame(s)", self.trace_frames.len()));
+            ui.label(format!(
+                "{} recent boundary frame(s) · full trace on disk",
+                self.trace_frames.len()
+            ));
         });
         if let Some(writer) = &self.trace_writer {
             ui.weak(format!("dump: {}", writer.paths().steps.display()));
@@ -563,6 +594,176 @@ impl DebugApp {
         }
     }
 
+    // Frame indexes are converted to screen coordinates; sub-pixel precision
+    // beyond f32 is not meaningful for an egui viewport.
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+    fn trace_timeline(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("Settlement Timeline");
+            ui.weak(format!("{} frame(s)", self.trace_frames.len()));
+            if let Some(index) = self.selected_trace_frame
+                && let Some(frame) = self.trace_frames.get(index)
+            {
+                ui.label(format!(
+                    "selected #{} · {} · {}",
+                    frame.sequence, frame.receipt.settled_at, frame.phase
+                ));
+            }
+        });
+        if self.trace_frames.is_empty() {
+            ui.weak("Run or step the simulation to populate the timeline.");
+            return;
+        }
+
+        let mut selected_index = self
+            .selected_trace_frame
+            .unwrap_or_else(|| self.trace_frames.len().saturating_sub(1));
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(selected_index > 0, egui::Button::new("Previous frame"))
+                .clicked()
+            {
+                selected_index = selected_index.saturating_sub(1);
+            }
+            ui.add(
+                egui::Slider::new(&mut selected_index, 0..=self.trace_frames.len() - 1)
+                    .show_value(false)
+                    .text("precise frame selection"),
+            );
+            if ui
+                .add_enabled(
+                    selected_index + 1 < self.trace_frames.len(),
+                    egui::Button::new("Next frame"),
+                )
+                .clicked()
+            {
+                selected_index = (selected_index + 1).min(self.trace_frames.len() - 1);
+            }
+            let first_sequence = self.trace_frames.first().map_or(0, |frame| frame.sequence);
+            let last_sequence = self.trace_frames.last().map_or(0, |frame| frame.sequence);
+            ui.weak(format!(
+                "on-screen sequence range #{first_sequence}–#{last_sequence}"
+            ));
+        });
+        self.selected_trace_frame = Some(selected_index);
+
+        let height = ui.available_height().clamp(120.0, 190.0);
+        let (response, painter) =
+            ui.allocate_painter(Vec2::new(ui.available_width(), height), Sense::click());
+        let rect = response.rect;
+        let left = rect.left() + 28.0;
+        let right = rect.right() - 28.0;
+        let y = rect.top() + 54.0;
+        let span = (right - left).max(1.0);
+        let last = self.trace_frames.len().saturating_sub(1) as f32;
+        painter.line_segment(
+            [Pos2::new(left, y), Pos2::new(right, y)],
+            Stroke::new(2.0_f32, Color32::from_rgb(90, 98, 104)),
+        );
+
+        for (index, frame) in self.trace_frames.iter().enumerate() {
+            let x = timeline_x(left, span, last, index);
+            let selected = self.selected_trace_frame == Some(index);
+            let color = phase_color(frame.phase);
+            painter.line_segment(
+                [Pos2::new(x, y - 22.0), Pos2::new(x, y + 22.0)],
+                Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, color),
+            );
+            painter.circle_filled(Pos2::new(x, y), if selected { 8.0 } else { 5.0 }, color);
+            if selected {
+                painter.text(
+                    Pos2::new(x, y - 36.0),
+                    Align2::CENTER_BOTTOM,
+                    format!("#{} {}", frame.sequence, frame.phase),
+                    FontId::proportional(12.0),
+                    Color32::WHITE,
+                );
+            }
+            if index == 0 || index == self.trace_frames.len() - 1 || selected {
+                painter.text(
+                    Pos2::new(x, y + 30.0),
+                    Align2::CENTER_TOP,
+                    frame.receipt.settled_at.to_string(),
+                    FontId::proportional(11.0),
+                    Color32::LIGHT_GRAY,
+                );
+            }
+        }
+
+        if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+            && pointer.y >= y - 32.0
+            && pointer.y <= y + 32.0
+        {
+            self.selected_trace_frame = self
+                .trace_frames
+                .iter()
+                .enumerate()
+                .min_by(|(left_index, _), (right_index, _)| {
+                    let left_distance =
+                        (timeline_x(left, span, last, *left_index) - pointer.x).abs();
+                    let right_distance =
+                        (timeline_x(left, span, last, *right_index) - pointer.x).abs();
+                    left_distance.total_cmp(&right_distance)
+                })
+                .map(|(index, _)| index);
+        }
+
+        if let Some(index) = self.selected_trace_frame
+            && let Some(frame) = self.trace_frames.get(index)
+        {
+            let counts = &frame.fiscal.counts;
+            ui.horizontal_wrapped(|ui| {
+                ui.monospace(format!(
+                    "#{} · {} · year {} · revision {}",
+                    frame.sequence, frame.phase, frame.fiscal.historical_year, frame.revision
+                ));
+                ui.label(format!(
+                    "assessments={} requests={} receipts={} audits={} aggregates={}",
+                    counts.assessments,
+                    counts.execution_requests,
+                    counts.execution_receipts,
+                    counts.audits,
+                    counts.aggregates
+                ));
+            });
+        }
+    }
+
+    fn open_trace_viewer(&mut self) {
+        if let Some(viewer) = &self.trace_viewer {
+            match viewer.open_browser() {
+                Ok(()) => self.status = format!("Trace viewer reopened · {}", viewer.url()),
+                Err(error) => self.status = error.to_string(),
+            }
+            return;
+        }
+
+        let trace_directory = self.trace_writer.as_ref().map_or_else(
+            || {
+                default_trace_directory()
+                    .join("ming-fiscal-reference")
+                    .join(DEBUG_FIXTURE)
+            },
+            |writer| writer.paths().directory.clone(),
+        );
+        let Some(workspace_root) = find_workspace_root() else {
+            "Could not locate the Canwu workspace root".clone_into(&mut self.status);
+            return;
+        };
+        match start_trace_viewer(workspace_root, trace_directory, 0) {
+            Ok(viewer) => {
+                let url = viewer.url().to_owned();
+                match viewer.open_browser() {
+                    Ok(()) => self.status = format!("Trace viewer opened · {url}"),
+                    Err(error) => self.status = error.to_string(),
+                }
+                self.trace_viewer = Some(viewer);
+            }
+            Err(error) => self.status = error.to_string(),
+        }
+    }
+
     fn map_position(&self, rect: Rect, point: MapPoint) -> Pos2 {
         let origin = rect.left_top() + Vec2::new(30.0, 25.0) + self.map_pan;
         origin + Vec2::new(point.x, point.y) * self.map_zoom
@@ -616,7 +817,25 @@ impl eframe::App for DebugApp {
             .resizable(true)
             .default_width(300.0)
             .show(context, |ui| self.inspector(ui));
-        egui::CentralPanel::default().show(context, |ui| self.map_view(ui));
+        egui::CentralPanel::default().show(context, |ui| {
+            let timeline_height = ui.available_height().clamp(150.0, 210.0);
+            let map_height = (ui.available_height() - timeline_height - 12.0).max(230.0);
+            ui.allocate_ui(Vec2::new(ui.available_width(), map_height), |ui| {
+                self.map_view(ui);
+            });
+            ui.separator();
+            ui.allocate_ui(Vec2::new(ui.available_width(), timeline_height), |ui| {
+                self.trace_timeline(ui);
+            });
+        });
+    }
+}
+
+impl Drop for DebugApp {
+    fn drop(&mut self) {
+        if let Some(mut writer) = self.trace_writer.take() {
+            let _ = writer.finish(&self.canwu);
+        }
     }
 }
 
@@ -668,5 +887,60 @@ fn compact_value(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
         _ => value.to_string(),
+    }
+}
+
+fn find_workspace_root() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("CANWU_WORKSPACE_ROOT") {
+        let root = PathBuf::from(root);
+        if is_viewer_workspace(&root) {
+            return Some(root);
+        }
+    }
+    if let Ok(current) = std::env::current_dir()
+        && let Some(root) = find_workspace_from(&current)
+    {
+        return Some(root);
+    }
+    let compiled_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    find_workspace_from(&compiled_manifest)
+}
+
+fn find_workspace_from(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if is_viewer_workspace(&current) {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn is_viewer_workspace(path: &Path) -> bool {
+    path.join("Cargo.toml").is_file()
+        && path.join("crates").is_dir()
+        && path.join("tools").join("trace-viewer").is_dir()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn timeline_x(left: f32, span: f32, last: f32, index: usize) -> f32 {
+    if last == 0.0 {
+        left + span * 0.5
+    } else {
+        left + span * (index as f32 / last)
+    }
+}
+
+fn phase_color(phase: MingFiscalTracePhase) -> Color32 {
+    match phase {
+        MingFiscalTracePhase::InitialState => Color32::from_rgb(150, 150, 150),
+        MingFiscalTracePhase::OpenAssessment => Color32::from_rgb(88, 166, 255),
+        MingFiscalTracePhase::AuthorizeExecution => Color32::from_rgb(177, 125, 255),
+        MingFiscalTracePhase::AdapterEvidence => Color32::from_rgb(255, 184, 77),
+        MingFiscalTracePhase::FiscalExecutionReceipt => Color32::from_rgb(84, 205, 126),
+        MingFiscalTracePhase::ReportMaterialization => Color32::from_rgb(108, 199, 214),
+        MingFiscalTracePhase::CanonicalBoundary => Color32::from_rgb(232, 116, 116),
     }
 }

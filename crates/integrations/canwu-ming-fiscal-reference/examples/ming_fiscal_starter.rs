@@ -1,8 +1,8 @@
 use canwu_api::{BoundaryRequest, SimDuration, SystemCadence};
 use canwu_ming_fiscal_reference::{
-    DEFAULT_SEED, MingFiscalTracePaths, MingFiscalTraceWriter, capture_ming_fiscal_trace_frame,
-    new_ming_fiscal_reference, run_ming_fiscal_sample_cycle_with_trace, start_trace_viewer,
-    trace_error,
+    DEFAULT_SEED, MingFiscalTracePaths, MingFiscalTraceWriter, TraceViewerHandle,
+    capture_ming_fiscal_trace_frame, new_ming_fiscal_reference,
+    run_ming_fiscal_sample_cycle_with_trace, start_trace_viewer, trace_error,
 };
 use std::path::PathBuf;
 
@@ -153,7 +153,7 @@ options:\n\
   --days <N>               continue for N total simulation days after the sample cycle\n\
   --cadence <kind>         daily, monthly, or annual (default: daily)\n\
   --step-days <N>          fixed simulation-day quantum; overrides cadence default\n\
-  --open-viewer             start localhost viewer and open the generated trace\n\
+  --open-viewer             open a live localhost viewer before simulation starts\n\
   --viewer-port <N>        viewer TCP port; 0 selects an available port (default)\n\
   --help                   show this help"
 }
@@ -174,6 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => MingFiscalTraceWriter::create(&options.fixture_id, DEFAULT_SEED, canwu.time())?,
     };
+    let viewer = start_viewer_if_requested(&options, writer.paths());
     let mut sequence = 0;
     run_ming_fiscal_sample_cycle_with_trace(
         &mut canwu,
@@ -249,13 +250,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         paths.manifest.display(),
         paths.steps.display(),
     );
-    open_viewer_if_requested(&options, &paths);
+    if let Some(viewer) = viewer {
+        viewer.wait();
+    }
     Ok(())
 }
 
-fn open_viewer_if_requested(options: &Options, paths: &MingFiscalTracePaths) {
+fn start_viewer_if_requested(
+    options: &Options,
+    paths: &MingFiscalTracePaths,
+) -> Option<TraceViewerHandle> {
     if !options.open_viewer {
-        return;
+        return None;
     }
     match workspace_root().and_then(|root| {
         start_trace_viewer(&root, &paths.directory, options.viewer_port)
@@ -266,10 +272,11 @@ fn open_viewer_if_requested(options: &Options, paths: &MingFiscalTracePaths) {
                 eprintln!("trace_viewer_browser_warning={error}");
             }
             println!("trace_viewer_url={}", viewer.url());
-            viewer.wait();
+            Some(viewer)
         }
         Err(error) => {
             eprintln!("trace_viewer_warning={error}");
+            None
         }
     }
 }

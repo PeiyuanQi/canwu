@@ -47,8 +47,11 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu
 ```
 
 该选项会启动仅监听 `127.0.0.1` 的临时静态服务器，打开浏览器并通过 URL
-参数自动载入本次运行生成的 trace。终端会保持运行以提供静态文件，按
-`Ctrl+C` 停止；使用 `--viewer-port 0`（默认）自动选择可用端口。
+参数自动载入本次运行生成的 trace。服务器和浏览器会在模拟循环开始前启动，查看器默认
+每 3 秒刷新一次，适合边运行边观察；
+也可以点击“刷新 trace”或关闭“自动刷新”。如果在第一帧写入前打开查看器，会先显示
+“trace 已连接，等待新的结算 frame”，而不是把空文件当成错误。终端会保持运行以提供
+静态文件，按 `Ctrl+C` 停止；使用 `--viewer-port 0`（默认）自动选择可用端口。
 
 默认样例路径为：
 
@@ -60,10 +63,27 @@ artifacts/traces/ming-fiscal-reference/<fixture>/steps.jsonl
 当前查看器提供：
 
 - 结算边界时间线和阶段过滤；
+- 主视口横向时间线：边界按时间从左到右排列，轨道占满详情区宽度并在内部横向滚动，支持轨道箭头与键盘方向键，阶段报告置于其下；
+- 可手动收起来源栏，把桌面调试空间让给时间线和阶段报告；
+- 自动刷新、手动刷新，以及最新/分页导航（每页最多 60 个 frame）；
+- URL trace 首次按流读取 JSONL；内置 Rust viewer server 支持 HTTP byte range，后续刷新只读取新增尾部；不支持 range 的普通静态服务器会自动回退为完整刷新；
+- 浏览器默认最多保留最近 512 个完整 frame，trace 总数仍单独显示，避免长期运行耗尽页面内存；需要调查旧历史时，可明确点击“载入全部（内存）”重新按流读取完整 trace；
+- 明确的数据来源与连接方式：实时 URL、已完成 URL 或本地静态副本；
+- 结构化查找，例如 `boundary=4`、`frame=6`、`phase=财政`、`hash=<片段>`；
+- 当前 frame 与 JSONL 中真实上一帧的结构化差异，覆盖所有检测到的领域，不会把筛选后的上一条误当作因果基线；
 - 引擎变化、领域变化、knowledge 和 allocation 摘要；
+- 阶段总览：按本 frame 的证据和当前领域快照，列出参与实体、实体类型、当前状态、持有人和边界证据数量；
 - 财政扩展的 procedure revision、计数和 holder-relative projections；
-- boundary evidence 展开查看；
+- boundary evidence 的跨类别搜索、分页查看，以及每条证据的完整 JSON 展开；
 - 当前 frame 的复制和下载；
 - 任意未知领域的通用 JSON 摘要。
+
+“数据检查”会检查必填结构、frame 序号、manifest 数量/版本、boundary 前后链接、
+receipt/boundary hash 引用和最终 checkpoint 引用。Canwu 的承诺使用 BLAKE3；由 starter
+启动的内置 Rust viewer server 会在运行完成后重算每个 boundary 的内容 hash，并校验
+previous-hash 链。纯静态服务器、本地文件和运行中的 trace 仍只做结构检查，因此界面会
+明确显示“结构通过 · 未验 BLAKE3 内容”或“等待运行完成”，而不是容易误解的笼统“通过”。
+这里的 BLAKE3 状态只证明 trace 中 boundary 内容与 boundary 链的一致性，不等同于外部签名
+或完整 checkpoint 防篡改证明。
 
 这是开发者/研究者的 trusted-host 调试工具，不是玩家视图。玩家界面仍应读取角色相对视图，而不是直接展示完整 authoritative trace。

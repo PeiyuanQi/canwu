@@ -78,6 +78,17 @@ cargo run -p canwu-technology --example technology_diffusion
 cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
+如需运行受信任的桌面调试客户端：
+
+```text
+cargo run --locked -p canwu-debug
+```
+
+`canwu-debug` 会通过公开 API 启动洪武时期的明代财政参考场景。`Run` 每次推进
+六个模拟小时，`Step` 结算下一个规范边界，`Run fiscal sample` 执行完整财政
+流程。中央区域同时显示参考世界地图和可交互的结算时间线；点击时间线节点即可
+查看该帧的财政计数。`Open trace viewer` 会在浏览器中打开同一份实时 trace 转储。
+
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据

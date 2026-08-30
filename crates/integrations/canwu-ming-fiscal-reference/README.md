@@ -38,7 +38,9 @@ days because `SimTime` is minute-based and does not claim a Gregorian calendar.
 If the horizon ends partway through a period, the starter records a final
 cadence-free boundary instead of triggering monthly or annual systems early.
 For interactive inspection, add `--open-viewer`; this starts a localhost-only
-server, opens the default browser, and loads the generated trace automatically.
+server before the simulation loop, opens the default browser, and loads the
+growing trace automatically. The built-in server supports byte-range tail reads,
+so later refreshes transfer only newly appended JSONL bytes.
 Use `--viewer-port <N>` to request a port (`0` selects an available port).
 The same behavior can be enabled with `CANWU_OPEN_TRACE_VIEWER=1`. The viewer
 requires the command to run from the Canwu workspace, or
@@ -54,5 +56,5 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu
 Each JSONL row contains the canonical boundary receipt, the persisted boundary
 evidence, the complete fiscal state snapshot, and any holder-relative fiscal
 projections that are available at that boundary. This layout is intentionally
-stable so the HTML viewer can scan the manifest and stream `steps.jsonl`
+stable so the HTML viewer can scan the manifest and incrementally tail `steps.jsonl`
 without understanding the Rust runtime.

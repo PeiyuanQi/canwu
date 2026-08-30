@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark light" />
     <title>Canwu Trace Viewer</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20" />
   </head>
   <body>
     <div class="app-shell">
@@ -19,6 +19,16 @@
           <button id="loadDefaultButton" class="button button-primary" type="button">
             读取默认样例
           </button>
+          <button id="refreshButton" class="button button-secondary" type="button" disabled>
+            刷新 trace
+          </button>
+          <button id="toggleSourceButton" class="button button-secondary" type="button" aria-expanded="true">
+            隐藏来源栏
+          </button>
+          <label class="refresh-toggle">
+            <input id="autoRefreshInput" type="checkbox" checked />
+            自动刷新
+          </label>
           <span id="loadStatus" class="status-text" aria-live="polite">等待载入 trace</span>
         </div>
       </header>
@@ -55,11 +65,15 @@
             <div class="section-kicker">RUN</div>
             <h2>运行信息</h2>
             <dl class="meta-list">
-              <div><dt>fixture</dt><dd id="metaFixture">—</dd></div>
-              <div><dt>engine</dt><dd id="metaEngine">—</dd></div>
-              <div><dt>status</dt><dd id="metaStatus">—</dd></div>
-              <div><dt>steps file</dt><dd id="metaStepsFile">—</dd></div>
+              <div><dt>场景 ID</dt><dd id="metaFixture">—</dd></div>
+              <div><dt>引擎版本</dt><dd id="metaEngine">—</dd></div>
+              <div><dt>运行状态</dt><dd id="metaStatus">—</dd></div>
+              <div><dt>数据来源</dt><dd id="metaSource">—</dd></div>
+              <div><dt>连接方式</dt><dd id="metaConnection">—</dd></div>
+              <div><dt>数据检查</dt><dd id="metaIntegrity">—</dd></div>
+              <div><dt>steps 文件</dt><dd id="metaStepsFile">—</dd></div>
             </dl>
+            <div id="validationBox" class="validation-box" hidden></div>
           </section>
 
           <section class="source-card filter-card">
@@ -85,7 +99,7 @@
               <article class="stat-card">
                 <span class="stat-label">结算边界</span>
                 <strong id="statSteps" class="stat-value">—</strong>
-                <span class="stat-context">JSONL frames</span>
+                <span class="stat-context">JSONL frame 数量</span>
               </article>
               <article class="stat-card">
                 <span class="stat-label">当前模拟时间</span>
@@ -95,12 +109,12 @@
               <article class="stat-card">
                 <span class="stat-label">领域版本</span>
                 <strong id="statDomainRevision" class="stat-value">—</strong>
-                <span class="stat-context">domain adapter revision</span>
+                <span class="stat-context">领域适配器 revision</span>
               </article>
               <article class="stat-card stat-card-wide">
                 <span class="stat-label">当前 checkpoint</span>
                 <strong id="statCheckpoint" class="stat-value hash-value">—</strong>
-                <span class="stat-context">state commitment</span>
+                <span class="stat-context">状态承诺 hash</span>
               </article>
             </div>
 
@@ -111,9 +125,27 @@
                     <div class="section-kicker">TIMELINE</div>
                     <h2>结算边界时间线</h2>
                   </div>
-                  <span id="timelineCount" class="count-label">0 / 0</span>
+                  <div class="timeline-heading-actions">
+                    <span id="timelineCount" class="count-label">0 / 0</span>
+                    <button id="loadAllFramesButton" class="text-button" type="button" hidden>载入全部（内存）</button>
+                    <button id="timelineLatestButton" class="text-button" type="button" disabled>最新</button>
+                    <div class="timeline-navigation" aria-label="时间线分页">
+                      <button id="timelinePreviousButton" class="text-button" type="button" disabled>上一页</button>
+                      <span id="timelineRange" class="count-label">0–0 / 0</span>
+                      <button id="timelineNextButton" class="text-button" type="button" disabled>下一页</button>
+                    </div>
+                    <label class="timeline-search">
+                      <span>查找 frame</span>
+                      <input id="frameSearch" class="search-control" type="search" placeholder="例如 boundary=4、frame=6、phase=财政" />
+                    </label>
+                  </div>
                 </div>
-                <div id="timeline" class="timeline-list"></div>
+                <p class="timeline-hint">从左到右是时间顺序；横向滚动查看更早或更晚的结算边界。</p>
+                <div class="timeline-rail">
+                  <button id="timelineScrollPreviousButton" class="timeline-scroll-button timeline-scroll-previous" type="button" aria-label="向左滚动时间线" disabled>‹</button>
+                  <div id="timeline" class="timeline-list" role="listbox" aria-label="结算边界，从左到右按时间排列" tabindex="0"></div>
+                  <button id="timelineScrollNextButton" class="timeline-scroll-button timeline-scroll-next" type="button" aria-label="向右滚动时间线" disabled>›</button>
+                </div>
               </section>
 
               <section class="detail-panel" aria-live="polite" aria-label="Selected boundary detail">
@@ -124,6 +156,6 @@
         </main>
       </div>
     </div>
-    <script src="app.js" defer></script>
+    <script src="app.js?v=20" defer></script>
   </body>
 </html>
