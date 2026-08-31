@@ -42,9 +42,14 @@ import { Icon } from "@astrojs/starlight/components";
   let mermaidModule: Promise<typeof import("mermaid")> | undefined;
   let renderQueue = Promise.resolve();
 
-  const minimumZoom = 0.5;
-  const maximumZoom = 2.5;
-  const zoomStep = 0.25;
+  const defaultMinimumZoom = 0.5;
+  const defaultMaximumZoom = 4;
+  const defaultZoomStep = 0.25;
+
+  function zoomValue(value: string | undefined, fallback: number) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
 
   function setupZoomableMermaid(figure: HTMLElement, diagram: HTMLElement) {
     if (figure.dataset.zoomable !== "true") return;
@@ -56,7 +61,17 @@ import { Icon } from "@astrojs/starlight/components";
     const svg = diagram.querySelector<SVGSVGElement>("svg");
     if (!zoomOut || !zoomReset || !zoomIn || !zoomLevel || !svg) return;
 
-    const getScale = () => Number(diagram.dataset.zoomScale ?? "1");
+    const minimumZoom = zoomValue(figure.dataset.minimumZoom, defaultMinimumZoom);
+    const maximumZoom = Math.max(
+      minimumZoom,
+      zoomValue(figure.dataset.maximumZoom, defaultMaximumZoom),
+    );
+    const initialZoom = Math.min(
+      maximumZoom,
+      Math.max(minimumZoom, zoomValue(figure.dataset.initialZoom, 1)),
+    );
+    const zoomStep = Math.max(0.05, zoomValue(figure.dataset.zoomStep, defaultZoomStep));
+    const getScale = () => zoomValue(diagram.dataset.zoomScale, initialZoom);
     const updateControls = (scale: number) => {
       const percentage = Math.round(scale * 100);
       zoomLevel.textContent = `${percentage}%`;
@@ -68,13 +83,31 @@ import { Icon } from "@astrojs/starlight/components";
       const currentSvg = diagram.querySelector<SVGSVGElement>("svg");
       if (!currentSvg) return;
 
+      let surface = currentSvg.parentElement;
+      if (!surface?.classList.contains("mermaid-zoom-surface")) {
+        surface = document.createElement("div");
+        surface.className = "mermaid-zoom-surface";
+        currentSvg.replaceWith(surface);
+        surface.append(currentSvg);
+      }
+
       const styles = getComputedStyle(diagram);
       const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
       const availableWidth = Math.max(diagram.clientWidth - horizontalPadding, 1);
       const baseWidth = window.matchMedia("(max-width: 50rem)").matches
         ? Math.max(availableWidth, 768)
         : availableWidth;
-      currentSvg.style.width = `${baseWidth * scale}px`;
+      const viewBox = currentSvg.viewBox.baseVal;
+      const viewBoxWidth = viewBox.width || baseWidth;
+      const viewBoxHeight = viewBox.height || baseWidth;
+      const aspectRatio = viewBoxWidth / Math.max(viewBoxHeight, 1);
+      const scaledWidth = Math.max(1, Math.round(baseWidth * scale));
+      const scaledHeight = Math.max(1, Math.round(scaledWidth / aspectRatio));
+
+      surface.style.width = `${scaledWidth}px`;
+      surface.style.height = `${scaledHeight}px`;
+      currentSvg.style.width = "100%";
+      currentSvg.style.height = "100%";
       currentSvg.style.maxWidth = "none";
       diagram.dataset.zoomScale = String(scale);
       updateControls(scale);
@@ -105,7 +138,21 @@ import { Icon } from "@astrojs/starlight/components";
 
     zoomOut.addEventListener("click", () => setScale(getScale() - zoomStep));
     zoomIn.addEventListener("click", () => setScale(getScale() + zoomStep));
-    zoomReset.addEventListener("click", () => setScale(1));
+    zoomReset.addEventListener("click", () => setScale(initialZoom));
+
+    diagram.addEventListener("wheel", (event) => {
+      if (event.deltaY === 0) return;
+
+      const currentScale = getScale();
+      const direction = event.deltaY < 0 ? 1 : -1;
+      const requestedScale = Math.round((currentScale + direction * zoomStep) * 100) / 100;
+      const nextScale = Math.min(maximumZoom, Math.max(minimumZoom, requestedScale));
+      if (nextScale === currentScale) return;
+
+      const bounds = diagram.getBoundingClientRect();
+      setScale(nextScale, event.clientX - bounds.left, event.clientY - bounds.top);
+      event.preventDefault();
+    }, { passive: false });
 
     let activePointer: number | undefined;
     let pointerX = 0;
@@ -138,7 +185,15 @@ import { Icon } from "@astrojs/starlight/components";
     diagram.addEventListener("pointercancel", stopPanning);
     diagram.addEventListener("lostpointercapture", stopPanning);
 
-    new ResizeObserver(() => applyScale(getScale())).observe(diagram);
+    let observedWidth = diagram.clientWidth;
+    let resizeFrame = 0;
+    new ResizeObserver(([entry]) => {
+      const nextWidth = entry?.contentRect.width ?? diagram.clientWidth;
+      if (Math.abs(nextWidth - observedWidth) < 0.5) return;
+      observedWidth = nextWidth;
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => applyScale(getScale()));
+    }).observe(diagram);
   }
 
   function renderMermaidDiagrams() {

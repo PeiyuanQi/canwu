@@ -9,7 +9,6 @@ hero:
   tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重放的边界内协作。"
 ---
 
-import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="架构总览导航">
@@ -27,109 +26,17 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 参伍是一个无界面历史模拟引擎。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
 
-## Format 8 与三种模拟粒度
-
-截至 2026 年 8 月 30 日，当前工作区版本为 `0.9.0`，快照格式仍为 8。快照和 `ReplayJournal` 携带声明式运行身份、初始场景、承诺根、权威根和完整证据；Format 8 另行提供内容寻址状态页面，用于分页检查点。精确的 `engine_version` 属于存档合同，因此 0.8 与 0.9 快照不能互换；模拟内核也不会隐式加载 Format 8 以前的存档。`SimulationGranularity` 只定义领域无关的 `aggregate`、`group`、`actor` 三层。Celestial Mandate 可在自己的参考整合包中将它们映射为 Population、Special Group、Character；Southern Ming 与 WWII 是 CM 内容与规则整合，不是模拟内核模块。
-
-## 从客户端到内核
-
-| 层 | 责任 | 公开承诺 |
-| --- | --- | --- |
-| 客户端 | 地图、渲染、输入、研究工作流与智能体循环 | 自由选择界面，不拥有权威状态 |
-| `canwu-api` | 程序对外 API、命令、领域记录、事件、快照与重放 | 通过验证后的公开入口工作 |
-| `canwu-sim` | 调度、插件、结算、持久化与重放 | 唯一持有实时可变模拟状态 |
-| 基础与模型 crate | ID、时间、事件、决策与角色知识 | 提供可序列化、跨平台的引擎契约 |
-
-## 五条架构边界
-
-1. **命令边界**：外部改变必须进入验证过的引擎命令、领域命令或规范化输入；客户端不能直接改写状态。
-2. **读取边界**：对外 API 返回通用实体、领域记录和证据；领域整合生成脱离运行时的投影，`CanwuViewer` 限定角色知识。
-3. **确定性边界**：时间、队列、插件执行顺序、资源分配和随机流都有明确的规范排序。
-4. **插件边界**：插件先声明读取、写入、阶段、资源和随机流，再由内核校验并执行。
-5. **证据边界**：命令、事件、结算、随机抽样、状态变化和哈希共同组成可检查、可重放的记录。
-
-## 深入页面
-
-<CardGrid>
-  <LinkCard
-    title="结算系统"
-    href="/architecture/settlement/"
-    description="了解十四个结算阶段、资源分配、可见性、原子提交与失败回滚。"
-  />
-  <LinkCard
-    title="事件系统"
-    href="/architecture/events/"
-    description="了解事件类型、因果引用、调度队列、角色知识和边界事件的生命周期。"
-  />
-  <LinkCard
-    title="随机生成方法"
-    href="/architecture/randomness/"
-    description="了解带命名版本的随机流、SplitMix64、抽样证据和精确重放。"
-  />
-  <LinkCard
-    title="世界与事件模型归属"
-    href="/architecture/model-ownership/"
-    description="查看每个公开世界与事件类型应保留、迁移还是在满足条件后退役。"
-  />
-  <LinkCard
-    title="文化和法律制度系统"
-    href="/architecture/culture-law/"
-    description="从文化内容编写、生命周期和社会信号，到授权程序、法律版本与可重放制度。"
-  />
-</CardGrid>
-
-## 一次行动如何穿过系统
-
-<Steps>
-1. 客户端或领域整合通过 `canwu-api` 提交类型化命令；内核验证权限、前置条件、修订版本和请求身份。
-2. 接受的命令产生带因果引用的事件，并按可表示的模拟时间安排后续工作。
-3. 到达结算边界后，内核切出准入集合和不可变边界快照，按固定阶段运行插件系统。
-4. 系统提出资源申请、状态变化、领域记录和事件；内核验证声明范围并原子提交。
-5. 结算记录保存事件、随机抽样、分配、变化、生产者和哈希，客户端再读取快照或角色视角的观察结果。
-</Steps>
-
-## 工作区 crate
-
-| crate | 核心职责 |
-| --- | --- |
-| `canwu-core` | 类型化 ID、确定性随机工具和模式元数据 |
-| `canwu-time` | 历史时间戳与经过检查的时长运算 |
-| `canwu-decision` | 决策票据、确定性求值、控制者与决策策略 SDK |
-| `canwu-event` | 通用事件信封、因果来源、受众和结构化事件记录 |
-| `canwu-reference-world` | 可替换的示例实体、移动插件、脱离式投影、路由适配器与入门示例 |
-| `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
-| `canwu-routing` | 确定性时变路由原语 |
-| `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
-| `canwu-sim` | 私有运行时、调度、插件和结算 |
-| `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重放 |
-| `canwu-information` | 已正式发布的权威信息生命周期扩展 |
-| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件 |
-| `canwu-society` | 已正式发布的社会传播模拟模块 |
-| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展 |
-| `canwu-law` | 已实现的实验性法律编写、制度程序、版本化法律与适用扩展 |
-| `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
-| `canwu-history-research` | 可选的下游历史研究评估插件 |
-| `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
-| `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
-| `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
-| `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
-
-已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
-它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
-和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
-上层应用显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
-边界系统注册、规范化信号准入和增量聚合仍是后续工作。
-详见独立的[文化和法律制度系统](/architecture/culture-law/)，其中合并说明文化编写、生命周期和法律制度化设计。
-
 ## crate 直接依赖 DAG
 
 下图只展示第一方 workspace crate 在 Cargo manifest 中声明的普通直接依赖。
-`A → B` 表示 **A 依赖 B**；外部依赖和开发依赖未列入。
+`A → B` 表示 **A 依赖 B**；外部依赖和开发依赖未列入。依赖图默认放大到 200%；可以使用按钮、在图内滚动鼠标滚轮或拖动画布查看细节，最高放大到 400%。
 
 <div class="crate-dependency-dag">
 <MermaidDiagram
   label="参伍 workspace crate 直接依赖有向无环图；箭头从使用者指向它依赖的 crate"
   zoomable
+  initialZoom={2}
+  maximumZoom={4}
   zoomControlsLabel="依赖图缩放"
   zoomInLabel="放大依赖图"
   zoomOutLabel="缩小依赖图"
@@ -227,6 +134,39 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 </div>
+
+## 工作区 crate
+
+| crate | 核心职责 |
+| --- | --- |
+| `canwu-core` | 类型化 ID、确定性随机工具和模式元数据 |
+| `canwu-time` | 历史时间戳与经过检查的时长运算 |
+| `canwu-decision` | 决策票据、确定性求值、控制者与决策策略 SDK |
+| `canwu-event` | 通用事件信封、因果来源、受众和结构化事件记录 |
+| `canwu-reference-world` | 可替换的示例实体、移动插件、脱离式投影、路由适配器与入门示例 |
+| `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
+| `canwu-routing` | 确定性时变路由原语 |
+| `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
+| `canwu-sim` | 私有运行时、调度、插件和结算 |
+| `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重放 |
+| `canwu-information` | 已正式发布的权威信息生命周期扩展 |
+| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件 |
+| `canwu-society` | 已正式发布的社会传播模拟模块 |
+| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展 |
+| `canwu-law` | 已实现的实验性法律编写、制度程序、版本化法律与适用扩展 |
+| `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
+| `canwu-history-research` | 可选的下游历史研究评估插件 |
+| `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
+| `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
+| `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
+| `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
+
+已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
+它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
+和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
+上层应用显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
+边界系统注册、规范化信号准入和增量聚合仍是后续工作。
+详见独立的[文化和法律制度系统](/architecture/culture-law/)，其中合并说明文化编写、生命周期和法律制度化设计。
 
 ## 从领域扩展到可运行套件
 

@@ -291,9 +291,19 @@
   user-select: none;
 }
 
-.mermaid-figure[data-zoomable="true"] > .mermaid svg {
+.mermaid-figure[data-zoomable="true"] > .mermaid .mermaid-zoom-surface {
   flex: 0 0 auto;
   margin-inline: auto;
+  overflow: hidden;
+  isolation: isolate;
+}
+
+.mermaid-figure[data-zoomable="true"] > .mermaid .mermaid-zoom-surface > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  margin: 0;
 }
 
 @media (max-width: 50rem) {

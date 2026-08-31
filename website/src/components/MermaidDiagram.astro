@@ -11,6 +11,10 @@ interface Props {
   zoomInLabel?: string;
   zoomOutLabel?: string;
   resetZoomLabel?: string;
+  initialZoom?: number;
+  minimumZoom?: number;
+  maximumZoom?: number;
+  zoomStep?: number;
 }
 
 const {
@@ -25,21 +29,33 @@ const {
   zoomInLabel = "Zoom in",
   zoomOutLabel = "Zoom out",
   resetZoomLabel = "Reset zoom",
+  initialZoom = 1,
+  minimumZoom = 0.5,
+  maximumZoom = 4,
+  zoomStep = 0.25,
 } = Astro.props;
+const initialZoomPercentage = Math.round(initialZoom * 100);
 const encodedDefinition = JSON.stringify(definition)
   .replaceAll("&", "\\u0026")
   .replaceAll("<", "\\u003c")
   .replaceAll(">", "\\u003e");
 ---
 
-<figure class="mermaid-figure" data-zoomable={zoomable ? "true" : undefined}>
+<figure
+  class="mermaid-figure"
+  data-zoomable={zoomable ? "true" : undefined}
+  data-initial-zoom={zoomable ? initialZoom : undefined}
+  data-minimum-zoom={zoomable ? minimumZoom : undefined}
+  data-maximum-zoom={zoomable ? maximumZoom : undefined}
+  data-zoom-step={zoomable ? zoomStep : undefined}
+>
   <figcaption class="sr-only">{label}. {sourceSummary}.</figcaption>
   {zoomable && (
     <div class="mermaid-toolbar">
       <div class="mermaid-zoom-controls" role="group" aria-label={zoomControlsLabel}>
         <button type="button" data-mermaid-zoom-out aria-label={zoomOutLabel} title={zoomOutLabel}>-</button>
-        <button type="button" data-mermaid-zoom-reset aria-label={`${resetZoomLabel}: 100%`} title={resetZoomLabel}>
-          <span data-mermaid-zoom-level aria-live="polite">100%</span>
+        <button type="button" data-mermaid-zoom-reset aria-label={`${resetZoomLabel}: ${initialZoomPercentage}%`} title={resetZoomLabel}>
+          <span data-mermaid-zoom-level aria-live="polite">{initialZoomPercentage}%</span>
         </button>
         <button type="button" data-mermaid-zoom-in aria-label={zoomInLabel} title={zoomInLabel}>+</button>
       </div>

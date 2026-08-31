@@ -9,7 +9,6 @@ hero:
   tagline: "The complete path from client to authoritative runtime: a narrow public API, deterministic settlement, causal events, and replayable randomness."
 ---
 
-import { CardGrid, LinkCard, Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="Architecture overview navigation">
@@ -27,125 +26,18 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 Canwu is a headless historical simulation engine. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
 
-## Format 8 and three simulation granularities
-
-As of August 30, 2026, the current workspace version is `0.9.0`, while the
-snapshot format remains 8. Snapshots and `ReplayJournal` carry declared run
-identity, initial scenario, commitments, authority root, and complete evidence.
-Format 8 separately adds content-addressed state pages for paged checkpoints.
-The exact `engine_version` belongs to the persistence contract, so 0.8 and 0.9
-snapshots are intentionally non-interchangeable; the simulation core also does
-not silently load pre-8 saves.
-`SimulationGranularity` defines only the domain-neutral levels `aggregate`,
-`group`, and `actor`. Celestial Mandate may map them to Population, Special
-Group, and Character in its own reference integration; Southern Ming and WWII
-are CM content and ruleset integrations, not simulation-core modules.
-
-## From client to kernel
-
-| Layer | Responsibility | Public contract |
-| --- | --- | --- |
-| Client | Maps, rendering, input, research workflows, and agent loops | Choose the interface freely; do not own authoritative state |
-| `canwu-api` | Programmatic API, commands, domain records, events, snapshots, and replay | Work through validated public ingress |
-| `canwu-sim` | Scheduling, plugins, settlement, persistence, and replay | The only owner of live mutable simulation state |
-| Foundation and model crates | IDs, time, events, decisions, and actor knowledge | Serializable, portable engine contracts |
-
-## Five architectural boundaries
-
-1. **Command boundary:** external changes enter through validated engine commands, domain commands, or canonical ingress; clients never rewrite state directly.
-2. **Read boundary:** the public API returns generic entities, domain records, and evidence; integrations build detached projections, while `CanwuViewer` scopes actor knowledge.
-3. **Determinism boundary:** time, queues, plugin order, allocation, and random streams all have explicit canonical ordering.
-4. **Plugin boundary:** systems declare reads, writes, phases, resources, and random streams before the kernel validates and runs them.
-5. **Evidence boundary:** commands, events, settlement, random draws, state changes, and hashes form an inspectable replay record.
-
-## Deep dives
-
-<CardGrid>
-  <LinkCard
-    title="Settlement system"
-    href="/en/architecture/settlement/"
-    description="Fourteen phases, resource allocation, visibility, atomic commit, and rollback."
-  />
-  <LinkCard
-    title="Event system"
-    href="/en/architecture/events/"
-    description="Event kinds, causal references, scheduling, actor knowledge, and boundary admission."
-  />
-  <LinkCard
-    title="Random generation"
-    href="/en/architecture/randomness/"
-    description="Versioned streams, SplitMix64, draw evidence, ownership, and exact replay."
-  />
-  <LinkCard
-    title="World and event model ownership"
-    href="/en/architecture/model-ownership/"
-    description="See which public world and event types stay, move, or retire after explicit compatibility gates."
-  />
-  <LinkCard
-    title="Culture and legal institutional systems"
-    href="/en/architecture/culture-law/"
-    description="From culture authoring, lifecycle, and social signals to authorized procedure, law versions, and replayable institutions."
-  />
-</CardGrid>
-
-## How one action moves through the system
-
-<Steps>
-1. A client or domain integration submits a typed command through `canwu-api`; the kernel validates authority, preconditions, revision, and request identity.
-2. An accepted command emits a causally linked event and schedules follow-up work using representable simulation time.
-3. In a transaction, the simulation core cuts the admission set and immutable snapshot, then runs systems in fixed phase order.
-4. Systems propose reservations, state changes, domain records, and events; the kernel validates declared access and commits atomically.
-5. The boundary stores events, random draws, allocations, changes, producer provenance, and hashes before clients read snapshots or actor-scoped observations.
-</Steps>
-
-## Workspace crates
-
-| Crate | Core responsibility |
-| --- | --- |
-| `canwu-core` | Typed IDs, deterministic random utilities, and schema metadata |
-| `canwu-time` | Historical timestamps and checked duration arithmetic |
-| `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
-| `canwu-event` | Generic event envelopes, provenance, audiences, and structured event records |
-| `canwu-reference-world` | Replaceable example entities, movement plugin, detached projection, routing adapter, and starter |
-| `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
-| `canwu-routing` | Deterministic time-dependent routing primitives |
-| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
-| `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
-| `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
-| `canwu-information` | Published authoritative information lifecycle extension |
-| `canwu-correspondence` | Published correspondence domain extension and simulation plugin |
-| `canwu-society` | Published social diffusion simulation module |
-| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
-| `canwu-law` | Implemented experimental legal authoring, institutional procedure, versioned law, and applicability extension |
-| `canwu-technology` | Published evidence-based generic technology simulation extension |
-| `canwu-history-research` | Optional downstream historical research assessment plugins |
-| `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
-| `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
-| `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
-| `canwu-debug` | Reference client using the public API and reference-world integration |
-
-The published `canwu-culture` culture system SDK sits above
-`canwu-society`, not in the simulation core. It compiles versioned content into
-an externally immutable, content-hash-bound execution plan, enforces cardinality and
-expanded fan-out budgets, and provides dirty-set and hot-target indexes. Its
-complete state restores lifecycle schedules, hot/dirty indexes, and effect
-cadence. Dormant targets leave the culture hot index and stop compiled culture transition rules
-after explicit society synchronization; retired targets additionally release
-target-scoped dynamic society state while historical evidence remains available.
-Boundary-system registration, canonical signal admission, and incremental
-aggregation remain follow-up work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
-which combines culture authoring, lifecycle, and legal institutionalization design.
-
 ## Direct crate dependency DAG
 
 This graph shows normal, direct dependencies declared between first-party
 workspace crates in their Cargo manifests. `A → B` means **A depends on B**;
-external and development dependencies are omitted.
+external and development dependencies are omitted. The graph opens at 200%; use the buttons, mouse wheel inside the graph, or drag-to-pan to inspect details, up to 400%.
 
 <div class="crate-dependency-dag">
 <MermaidDiagram
   label="Directed acyclic graph of direct Canwu workspace crate dependencies; arrows point from dependents to their dependencies"
   zoomable
+  initialZoom={2}
+  maximumZoom={4}
   zoomControlsLabel="Dependency graph zoom"
   zoomInLabel="Zoom in on dependency graph"
   zoomOutLabel="Zoom out of dependency graph"
@@ -243,6 +135,44 @@ external and development dependencies are omitted.
 `}
 />
 </div>
+
+## Workspace crates
+
+| Crate | Core responsibility |
+| --- | --- |
+| `canwu-core` | Typed IDs, deterministic random utilities, and schema metadata |
+| `canwu-time` | Historical timestamps and checked duration arithmetic |
+| `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
+| `canwu-event` | Generic event envelopes, provenance, audiences, and structured event records |
+| `canwu-reference-world` | Replaceable example entities, movement plugin, detached projection, routing adapter, and starter |
+| `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
+| `canwu-routing` | Deterministic time-dependent routing primitives |
+| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
+| `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
+| `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
+| `canwu-information` | Published authoritative information lifecycle extension |
+| `canwu-correspondence` | Published correspondence domain extension and simulation plugin |
+| `canwu-society` | Published social diffusion simulation module |
+| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
+| `canwu-law` | Implemented experimental legal authoring, institutional procedure, versioned law, and applicability extension |
+| `canwu-technology` | Published evidence-based generic technology simulation extension |
+| `canwu-history-research` | Optional downstream historical research assessment plugins |
+| `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
+| `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
+| `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
+| `canwu-debug` | Reference client using the public API and reference-world integration |
+
+The published `canwu-culture` culture system SDK sits above
+`canwu-society`, not in the simulation core. It compiles versioned content into
+an externally immutable, content-hash-bound execution plan, enforces cardinality and
+expanded fan-out budgets, and provides dirty-set and hot-target indexes. Its
+complete state restores lifecycle schedules, hot/dirty indexes, and effect
+cadence. Dormant targets leave the culture hot index and stop compiled culture transition rules
+after explicit society synchronization; retired targets additionally release
+target-scoped dynamic society state while historical evidence remains available.
+Boundary-system registration, canonical signal admission, and incremental
+aggregation remain follow-up work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
+which combines culture authoring, lifecycle, and legal institutionalization design.
 
 ## From domain extensions to runnable kits
 
