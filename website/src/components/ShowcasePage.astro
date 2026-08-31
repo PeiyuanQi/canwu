@@ -35,7 +35,7 @@ let why = canwu.explain(&explanation_request);`,
     proof: `entities()       → stable identities
 domain snapshot → timeline or map state
 events()         → causal history
-fork()           → repeatable branch`,
+fork()           → repeatable fork`,
   },
 ];
 
@@ -49,7 +49,7 @@ const localized = isEnglish
       index: "Integration types", available: "Available in the core", client: "Your client provides", notIncluded: "Ecosystem opportunities", relevant: "Public API", evidence: "Integration shape",
       cases: [
         { kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu in the game process or behind a server boundary while keeping concrete world rules in an integration plugin.", available: ["Deterministic time and frame-independent scheduling", "Canonical command ingress and causal events", "Generic entity and domain-record registries", "Plugin-owned typed state and boundary settlement"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"] },
-        { kind: "Research", status: "Branching APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep runs independent of notebooks and visualization layers, then compare committed branch outcomes.", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay interfaces", "Causal events and random-draw journals", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Historical model-validation frameworks"] },
+        { kind: "Research", status: "Fork APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep runs independent of notebooks and visualization layers, then compare committed fork outcomes.", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay interfaces", "Causal events and random-draw journals", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Historical model-validation frameworks"] },
         { kind: "Agents", status: "Canonical loop available", title: "Multi-agent historical environments", purpose: "Give each model an actor-scoped knowledge view and route its typed decisions through the same validated command boundary.", available: ["Viewer identities scoped to represented actors", "Knowledge queries without ground-truth leakage", "Issuer and revision validation", "Causal explanations for stored events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
         { kind: "Education", status: "Core APIs available", title: "Classroom and public-history tools", purpose: "Use replayable domain projections beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and generic entity identity", "Domain projections supplied by integrations", "Repeatable interventions through snapshots and forks", "Causal records that support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"] },
       ],
@@ -59,13 +59,13 @@ const localized = isEnglish
       title: "参伍集成模式",
       description: "游戏、历史研究、智能体环境与公共史客户端接入参伍的具体技术边界。",
       label: "集成模式", heading: "让不同客户端共享同一个确定性模拟内核",
-      intro: "参伍统一维护时间、实体注册表、命令入口、事件、持久化与重演。领域整合拥有具体模型和类型化命令；客户端负责表现、认证、编排与内容。",
-      index: "集成类型", available: "内核已经提供", client: "客户端需要提供", notIncluded: "生态扩展方向", relevant: "公开 API", evidence: "接入方式",
+      intro: "参伍统一维护时间、实体注册表、命令入口、事件、持久化与重放。领域整合拥有具体模型和类型化命令；客户端负责表现、认证、编排与内容。",
+      index: "集成类型", available: "内核已经提供", client: "客户端需要提供", notIncluded: "生态扩展方向", relevant: "对外 API", evidence: "接入方式",
       cases: [
         { kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；具体世界规则由整合插件拥有。", available: ["确定性时间与画面帧率解耦调度", "规范命令入口与因果事件", "通用实体与领域记录注册表", "插件拥有的类型化状态与边界结算"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["渲染器适配器", "生产级多人服务", "完整可玩战役"] },
-        { kind: "研究", status: "分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再比较已承诺的分支结果。", available: ["经验证快照与检查点哈希", "分支与精确重演接口", "因果事件与随机抽取日志", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "历史模型验证框架"] },
+        { kind: "研究", status: "派生分支接口已可用", title: "可复现实验与反事实分析", purpose: "让模拟运行独立于笔记本或可视化层，再比较已承诺的派生分支结果。", available: ["经验证快照与检查点哈希", "派生分支与精确重放接口", "因果事件与随机抽取日志", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "历史模型验证框架"] },
         { kind: "智能体", status: "规范循环已可用", title: "多智能体历史环境", purpose: "为每个模型提供限定到角色的知识视图，并把类型化决策送入同一个经验证命令边界。", available: ["限定到所代表角色的观察者身份", "不泄露世界真值的知识查询", "发令者与修订版本验证", "存储事件的因果解释"], client: ["模型选择与编排", "指定发令主体之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "应用授权政策"] },
-        { kind: "教育", status: "核心 API 已可用", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重演的领域投影。", available: ["历史时间与通用实体身份", "由领域整合提供的投影", "通过快照与分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"] },
+        { kind: "教育", status: "核心 API 已可用", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重放的领域投影。", available: ["历史时间与通用实体身份", "由领域整合提供的投影", "通过快照与派生分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"] },
       ],
       next: "先运行证据，再阅读架构", nextCopy: "先运行仓库中的参考整合示例，再通过架构文档确定领域插件与客户端的边界。", run: "查看 starter 示例", architecture: "阅读集成架构", source: "打开 API 源码",
     };

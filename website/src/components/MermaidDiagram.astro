@@ -4,8 +4,8 @@ interface Props {
   label: string;
   diagramLoading?: string;
   sourceSummary?: string;
-  sourceLoading?: string;
   noScriptMessage?: string;
+  renderFailureMessage?: string;
   zoomable?: boolean;
   zoomControlsLabel?: string;
   zoomInLabel?: string;
@@ -22,8 +22,8 @@ const {
   label,
   diagramLoading = "Rendering diagram…",
   sourceSummary = "View diagram source",
-  sourceLoading = "Diagram source loads with the preview.",
   noScriptMessage = "JavaScript is required for the diagram preview; the text-source fallback remains available above.",
+  renderFailureMessage = "Diagram preview unavailable — source shown below.",
   zoomable = false,
   zoomControlsLabel = "Diagram zoom",
   zoomInLabel = "Zoom in",
@@ -66,11 +66,12 @@ const encodedDefinition = JSON.stringify(definition)
     role="img"
     aria-label={label}
     aria-busy="true"
+    data-render-failure-message={renderFailureMessage}
     tabindex={zoomable ? "0" : undefined}
   >{diagramLoading}</div>
   <details class="mermaid-source">
     <summary>{sourceSummary}</summary>
-    <pre><code class="mermaid-source-code">{sourceLoading}</code></pre>
+    <pre><code class="mermaid-source-code">{definition}</code></pre>
   </details>
   <script is:inline type="application/json" class="mermaid-definition" set:html={encodedDefinition}></script>
   <noscript>

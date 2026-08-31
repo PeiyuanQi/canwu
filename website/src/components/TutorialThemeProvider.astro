@@ -106,8 +106,10 @@ import { Icon } from "@astrojs/starlight/components";
 
       surface.style.width = `${scaledWidth}px`;
       surface.style.height = `${scaledHeight}px`;
-      currentSvg.style.width = "100%";
-      currentSvg.style.height = "100%";
+      currentSvg.setAttribute("width", String(scaledWidth));
+      currentSvg.setAttribute("height", String(scaledHeight));
+      currentSvg.style.width = `${scaledWidth}px`;
+      currentSvg.style.height = `${scaledHeight}px`;
       currentSvg.style.maxWidth = "none";
       diagram.dataset.zoomScale = String(scale);
       updateControls(scale);
@@ -197,25 +199,15 @@ import { Icon } from "@astrojs/starlight/components";
   }
 
   function renderMermaidDiagrams() {
-    renderQueue = renderQueue.then(async () => {
+    renderQueue = renderQueue.catch(() => undefined).then(async () => {
       const figures = Array.from(document.querySelectorAll<HTMLElement>(".mermaid-figure"));
       if (figures.length === 0) return;
 
-      mermaidModule ??= import("mermaid");
-      const { default: mermaid } = await mermaidModule;
-      mermaid.initialize({
-        startOnLoad: false,
-        securityLevel: "strict",
-        suppressErrorRendering: true,
-        theme: document.documentElement.dataset.theme === "light" ? "neutral" : "dark",
-        fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
-      });
-
-      for (const figure of figures) {
+      const preparedFigures = figures.flatMap((figure) => {
         const diagram = figure.querySelector<HTMLElement>(".mermaid");
         const definition = figure.querySelector<HTMLScriptElement>(".mermaid-definition");
         const sourceCode = figure.querySelector<HTMLElement>(".mermaid-source-code");
-        if (!diagram || !definition || !sourceCode) continue;
+        if (!diagram || !definition || !sourceCode) return [];
 
         const source = JSON.parse(definition.textContent ?? '""') as string;
         sourceCode.textContent = source;
@@ -223,8 +215,38 @@ import { Icon } from "@astrojs/starlight/components";
         diagram.removeAttribute("data-processed");
         diagram.setAttribute("aria-busy", "true");
         figure.classList.remove("render-failed");
+        figure.classList.remove("zoom-ready");
 
+        return [{ figure, diagram, source }];
+      });
+
+      let mermaid: typeof import("mermaid")["default"];
+      try {
+        mermaidModule ??= import("mermaid");
+        ({ default: mermaid } = await mermaidModule);
+      } catch {
+        mermaidModule = undefined;
+        for (const { figure, diagram, source } of preparedFigures) {
+          diagram.textContent = source;
+          diagram.removeAttribute("data-processed");
+          diagram.setAttribute("aria-busy", "false");
+          figure.classList.add("render-failed");
+        }
+        return;
+      }
+
+      for (const { figure, diagram, source } of preparedFigures) {
         try {
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: "strict",
+            suppressErrorRendering: true,
+            theme: document.documentElement.dataset.theme === "light" ? "neutral" : "dark",
+            fontFamily: "Inter, ui-sans-serif, system-ui, sans-serif",
+            // Native SVG text avoids Chromium's stale compositing tiles when a
+            // scrollable diagram containing foreignObject labels is resized.
+            htmlLabels: figure.dataset.zoomable !== "true",
+          });
           await mermaid.run({ nodes: [diagram] });
         } catch {
           diagram.textContent = source;

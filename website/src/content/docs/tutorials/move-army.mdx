@@ -34,14 +34,14 @@ cargo run -p canwu-reference-world --example starter
 2. 通过 `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])` 注册领域逻辑。
 3. 把 `MovementCommand` 包装成领域命令，再经 `enqueue_command()` 进入规范队列。
 4. 用 `advance_canonical()` 推进时间，再通过参考整合的 `snapshot()` 读取军队位置。
-5. 保存快照、加载、分支并从 journal 重放，然后比较四个检查点。
+5. 保存快照、加载、创建派生分支并从 journal 重放，然后比较四个检查点。
 </Steps>
 
 ## 应该观察什么
 
 - 军队在时间推进后到达目标领地。
 - 世界具体类型不是 `canwu-api` 的基础依赖；应用可替换整个领域整合。
-- 加载、分支和精确重放都与原运行产生相同检查点。
+- 加载、派生分支和精确重放都与原运行产生相同检查点。
 - Format 8 快照自带规范实体注册与初始场景；Format 8 以前的存档由模拟内核拒绝，不在运行时隐式迁移。
 
 ## 下一步

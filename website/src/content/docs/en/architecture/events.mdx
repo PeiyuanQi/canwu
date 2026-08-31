@@ -57,7 +57,7 @@ Late input is rejected instead of being inserted behind a committed boundary. A 
 
 Large event systems should not scan every entity and roll a temporary die every frame. A domain plugin can create persistent event opportunities when state changes, admitted events, or declared time cadences make them eligible, then schedule each opportunity at a deterministic due time. At expiry, the plugin settles only due candidates and writes the random stream, causal source, deduplication key, cooldown, and outcome into boundary evidence.
 
-Opportunity generation, event-result settlement, and actor-scoped report publication are three separate steps. The same candidate keeps the same result after reload; different commands or decisions can create a new legal branch from the same checkpoint.
+Opportunity generation, event-result settlement, and actor-scoped report publication are three separate steps. The same candidate keeps the same result after reload; different commands or decisions can create a new valid alternative reality from the same checkpoint.
 
 ## Events and actor knowledge
 
