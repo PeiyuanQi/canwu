@@ -945,6 +945,7 @@ impl Simulation {
             allocations: None,
             allowed_reservations: None,
             random_session: None,
+            plugin_archive_provider: self.plugin_archive_provider.as_ref(),
         }
     }
 }

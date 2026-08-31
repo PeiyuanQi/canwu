@@ -462,6 +462,11 @@ pub(super) struct RuntimeCounters {
 pub(super) struct RuntimeMetadata {
     pub(super) initial_scenario: Option<Scenario>,
     pub(super) initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
+    /// Exact provenance for each current domain-record version. This is
+    /// maintained incrementally at boundary commit time and rebuilt from the
+    /// retained journal during restore, keeping hot-path lookups O(log n).
+    pub(super) current_domain_record_versions:
+        BTreeMap<DomainRecordRef, super::DomainRecordVersionRef>,
     pub(super) run_manifest: RunManifest,
     pub(super) run_manifest_hash: String,
     pub(super) run_configuration: RunConfigurationSnapshot,

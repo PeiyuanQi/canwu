@@ -453,7 +453,7 @@ impl Simulation {
     pub(super) fn apply_maintenance_request(
         &mut self,
         request: MaintenanceIngressRequest,
-    ) -> Result<MaintenanceChangeRecord, CanwuError> {
+    ) -> Result<(MaintenanceChangeRecord, Vec<super::DomainRecordChange>), CanwuError> {
         match request {
             MaintenanceIngressRequest::DecisionArchive { commit } => {
                 let observed_source_root = self
@@ -463,20 +463,24 @@ impl Simulation {
                     .hot_history_commitment()
                     .map_err(decision_error)?;
                 if observed_source_root != commit.source_root() {
-                    return Ok(MaintenanceChangeRecord {
-                        kind: "decision_archive".to_owned(),
-                        token: commit.token().to_owned(),
-                        disposition: MaintenanceDisposition::RejectedStale,
-                        source_root: observed_source_root.clone(),
-                        target_root: observed_source_root.clone(),
-                        rejection: Some(MaintenanceRejectionReceipt {
+                    return Ok((
+                        MaintenanceChangeRecord {
+                            kind: "decision_archive".to_owned(),
                             token: commit.token().to_owned(),
-                            expected_source_root: commit.source_root().to_owned(),
-                            observed_source_root,
-                            reason: "decision archive source root changed after durable admission"
-                                .to_owned(),
-                        }),
-                    });
+                            disposition: MaintenanceDisposition::RejectedStale,
+                            source_root: observed_source_root.clone(),
+                            target_root: observed_source_root.clone(),
+                            rejection: Some(MaintenanceRejectionReceipt {
+                                token: commit.token().to_owned(),
+                                expected_source_root: commit.source_root().to_owned(),
+                                observed_source_root,
+                                reason:
+                                    "decision archive source root changed after durable admission"
+                                        .to_owned(),
+                            }),
+                        },
+                        Vec::new(),
+                    ));
                 }
                 self.state.current.decisions = self
                     .state
@@ -491,49 +495,63 @@ impl Simulation {
                     .decisions
                     .hot_history_commitment()
                     .map_err(decision_error)?;
-                Ok(MaintenanceChangeRecord {
-                    kind: "decision_archive".to_owned(),
-                    token: commit.token().to_owned(),
-                    disposition: MaintenanceDisposition::Applied,
-                    source_root: observed_source_root,
-                    target_root,
-                    rejection: None,
-                })
+                Ok((
+                    MaintenanceChangeRecord {
+                        kind: "decision_archive".to_owned(),
+                        token: commit.token().to_owned(),
+                        disposition: MaintenanceDisposition::Applied,
+                        source_root: observed_source_root,
+                        target_root,
+                        rejection: None,
+                    },
+                    Vec::new(),
+                ))
             }
             MaintenanceIngressRequest::OwnerAuthorized { commit } => {
+                super::maintenance::validate_verified_commit_authorization_structure(
+                    &commit,
+                    &self.plugins,
+                )?;
                 let observed_source_root = canonical_hash(
                     "canwu.owner-authorized.source-domain-root.v1",
                     self.state.current.domain_records.roots(),
                 )?;
                 if observed_source_root != commit.source_root() {
-                    return Ok(MaintenanceChangeRecord {
-                        kind: "owner_authorized".to_owned(),
-                        token: commit.token().to_owned(),
-                        disposition: MaintenanceDisposition::RejectedStale,
-                        source_root: observed_source_root.clone(),
-                        target_root: observed_source_root.clone(),
-                        rejection: Some(MaintenanceRejectionReceipt {
+                    return Ok((
+                        MaintenanceChangeRecord {
+                            kind: "owner_authorized".to_owned(),
                             token: commit.token().to_owned(),
-                            expected_source_root: commit.source_root().to_owned(),
-                            observed_source_root,
-                            reason: "owner-authorized source root changed after durable admission"
-                                .to_owned(),
-                        }),
-                    });
+                            disposition: MaintenanceDisposition::RejectedStale,
+                            source_root: observed_source_root.clone(),
+                            target_root: observed_source_root.clone(),
+                            rejection: Some(MaintenanceRejectionReceipt {
+                                token: commit.token().to_owned(),
+                                expected_source_root: commit.source_root().to_owned(),
+                                observed_source_root,
+                                reason:
+                                    "owner-authorized source root changed after durable admission"
+                                        .to_owned(),
+                            }),
+                        },
+                        Vec::new(),
+                    ));
                 }
-                self.apply_owner_authorized_maintenance(&commit)?;
+                let record_changes = self.apply_owner_authorized_maintenance(&commit)?;
                 let target_root = canonical_hash(
                     "canwu.owner-authorized.source-domain-root.v1",
                     self.state.current.domain_records.roots(),
                 )?;
-                Ok(MaintenanceChangeRecord {
-                    kind: "owner_authorized".to_owned(),
-                    token: commit.token().to_owned(),
-                    disposition: MaintenanceDisposition::Applied,
-                    source_root: observed_source_root,
-                    target_root,
-                    rejection: None,
-                })
+                Ok((
+                    MaintenanceChangeRecord {
+                        kind: "owner_authorized".to_owned(),
+                        token: commit.token().to_owned(),
+                        disposition: MaintenanceDisposition::Applied,
+                        source_root: observed_source_root,
+                        target_root,
+                        rejection: None,
+                    },
+                    record_changes,
+                ))
             }
         }
     }

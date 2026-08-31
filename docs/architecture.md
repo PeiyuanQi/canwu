@@ -149,8 +149,13 @@ flowchart TB
         Technology["canwu-technology"]
         History["canwu-history-research"]
         Fiscal["canwu-fiscal"]
+        Resource["canwu-resource"]
+        Production["canwu-production"]
         MingFiscal["canwu-ming-fiscal"]
+        EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]
+        ForceSupply["canwu-force-supply-reference"]
+        EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -187,12 +192,32 @@ flowchart TB
     History --> Api
     History --> Technology
     Fiscal --> Api
+    Resource --> Api
+    Production --> Api
+    Production --> Resource
+    Production --> Technology
     MingFiscal --> Api
     MingFiscal --> Fiscal
+    EconomyContent --> Api
+    EconomyContent --> Production
+    EconomyContent --> Resource
+    EconomyContent --> Technology
     MingReference --> Api
     MingReference --> Fiscal
     MingReference --> MingFiscal
     MingReference --> ReferenceWorld
+    ForceSupply --> Api
+    ForceSupply --> EconomyContent
+    ForceSupply --> Resource
+    EconomyReference --> Api
+    EconomyReference --> EconomyContent
+    EconomyReference --> ForceSupply
+    EconomyReference --> Production
+    EconomyReference --> ReferenceWorld
+    EconomyReference --> Resource
+    EconomyReference --> Routing
+    EconomyReference --> Technology
+    EconomyReference --> Transport
 
     Api --> Core
     Api --> Decision
@@ -571,6 +596,42 @@ date, uncertainty, citations, contradictions, and supersession. They never
 replace authoritative attempts, assets, production runs, capability, or
 adoption. Omitting them leaves base technology outcomes unchanged and avoids
 their record and handler cost.
+
+### Resources, production, and force supply / 资源、生产与军事补给
+
+`canwu-resource` is the shared conserved-quantity boundary. It owns revisioned
+resource and unit definitions, accounts, demands, reservations, exact
+allocation legs, transfers, consumption, losses, fulfillment, and operation
+receipts. Protected floors, custody, acceptance, explicit conversions, and
+holder-relative reports are part of that boundary. Transport reach alone never
+counts as delivery, and no consumer may debit an account directly.
+
+`canwu-production` is a downstream production-asset extension. It owns
+processes, sites, facilities, capacity allocation, work orders, work in
+progress, production execution, facility projects, and output settlement. It
+consumes exact resource outcomes and process-specific technology evidence. A
+site form such as household work, distributed workshop, government workshop,
+or concentrated plant is revisioned data rather than a universal building
+level. Roads, canals, fortifications, institutions, money, trade, and combat
+remain outside this extension unless a replaceable integration explicitly
+composes them.
+
+`canwu-force-supply-reference` proves that a second independent domain can
+consume the same resource API. It owns force-local recurring demand,
+consumption intent, readiness and shortage consequences, and the requisition
+saga. It cannot write civilian population, cooperation, harvest, property, or
+occupation state; the receiving integration applies or rejects those typed
+externality intents at an exact expected revision.
+
+`canwu-economy-reference` composes these packages with routing and transport in
+a runnable synthetic grain loop. It also provides detached, holder-bound local
+scarcity and evidence-qualified price-pressure projections. Those projections
+are read-only decision inputs: they neither move resources nor form a market,
+and price pressure remains explicitly unknown without a qualifying executed,
+quoted, administered, or contracted price observation. Source-cited Ming and
+China-industrialization model cards live in
+`canwu-economy-reference-content`; they are replaceable content, not engine
+truth or scenario branches.
 
 `DomainRecordPage` is a trusted-host query bound to one authoritative revision,
 kind, exclusive record cursor, and limit. Subsequent pages reject a stale

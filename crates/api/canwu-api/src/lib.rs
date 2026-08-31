@@ -125,6 +125,16 @@ pub struct CompactedCanwu {
     simulation: CompactedSimulation,
 }
 
+impl PluginArchiveObjectProvider for Canwu {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.plugin_archive_object(namespace, object_id)
+    }
+}
+
 impl Canwu {
     #[must_use]
     pub const fn version() -> &'static str {
@@ -358,6 +368,15 @@ impl Canwu {
         self.simulation.domain_record_version(reference)
     }
 
+    /// Returns the retained or archive-resolvable exact identity for the
+    /// authoritative current record version. Missing provenance fails closed.
+    pub fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        self.simulation.current_domain_record_version(reference)
+    }
+
     #[must_use]
     pub fn typed_domain_record<T: DomainRecordType>(
         &self,
@@ -494,6 +513,26 @@ impl Canwu {
         plugin: &P,
     ) -> Result<(), CanwuError> {
         self.simulation.register_plugin(plugin)
+    }
+
+    /// Attaches caller-owned package archive storage for authenticated cold
+    /// history resolution during normal admissions, settlement, and queries.
+    pub fn set_plugin_archive_object_provider(
+        &mut self,
+        provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+    ) {
+        self.simulation.set_plugin_archive_object_provider(provider);
+    }
+
+    /// Loads one opaque package archive object from the attached provider.
+    /// Package integrations authenticate the bytes against their committed
+    /// archive roots before use.
+    pub fn plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.simulation.plugin_archive_object(namespace, object_id)
     }
 
     pub fn submit(&mut self, command: CommandEnvelope) -> Result<CommandReceipt, CanwuError> {
@@ -693,6 +732,22 @@ impl Canwu {
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
         let simulation = Simulation::replay_from_journal(plugins, journal)?;
+        Ok(Self { simulation })
+    }
+
+    /// Replays with package archive storage attached before the first
+    /// recorded boundary, so package-owned cold history participates in
+    /// ordinary admission and settlement throughout replay.
+    pub fn replay_from_journal_with_archive_provider(
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+        archive_provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+    ) -> Result<Self, CanwuError> {
+        let simulation = Simulation::replay_from_journal_with_archive_provider(
+            plugins,
+            journal,
+            archive_provider,
+        )?;
         Ok(Self { simulation })
     }
 

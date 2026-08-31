@@ -1,8 +1,9 @@
 use super::{
-    Army, ArmyId, CommitmentRoots, DecisionState, IngressQueueKey, KnowledgeSnapshot, LetterCargo,
-    LetterId, PersistentDomainRecordStore, Person, PersonId, PluginComponentKey,
-    PluginComponentRecord, RandomStreamKey, RandomStreamState, RuntimeCommitmentCache,
-    RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey, ScheduledAction, SimTime,
+    Army, ArmyId, CommitmentRoots, DecisionState, DomainRecordRef, IngressQueueKey,
+    KnowledgeSnapshot, LetterCargo, LetterId, PersistentDomainRecordStore, Person, PersonId,
+    PluginComponentKey, PluginComponentRecord, RandomStreamKey, RandomStreamState,
+    RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey,
+    ScheduledAction, SimTime,
 };
 use std::collections::BTreeMap;
 
@@ -151,6 +152,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     boundary_count: usize,
     random_draw_count: usize,
     plugin_registration_closed: bool,
+    current_domain_record_versions: BTreeMap<DomainRecordRef, super::DomainRecordVersionRef>,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
     commitment_cache: Option<RuntimeCommitmentCache>,
@@ -176,6 +178,7 @@ impl BoundaryTransactionCheckpoint {
             boundary_count: state.evidence.boundaries.len(),
             random_draw_count: state.evidence.random_draws.len(),
             plugin_registration_closed: state.metadata.plugin_registration_closed,
+            current_domain_record_versions: state.metadata.current_domain_record_versions.clone(),
             checkpoint_hash: state.metadata.checkpoint_hash.clone(),
             commitment_roots: state.metadata.commitment_roots.clone(),
             commitment_cache: state.metadata.commitment_cache.clone(),
@@ -203,6 +206,7 @@ impl BoundaryTransactionCheckpoint {
         state.evidence.boundaries.truncate(self.boundary_count);
         state.evidence.random_draws.truncate(self.random_draw_count);
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.current_domain_record_versions = self.current_domain_record_versions;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
         state.metadata.commitment_cache = self.commitment_cache;

@@ -7,35 +7,36 @@ sidebar:
   label: Production and resource boundary
 ---
 
-Canwu provides the deterministic infrastructure needed by a production economy, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
+Canwu 0.10.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
 
 ## Recommended boundary
 
-- The simulation core owns command admission, deterministic time, phase ordering, reservation allocation, atomic commit, rollback, visibility, persistence, and replay.
-- The host domain owns `ResourceAccount`, `ResourceDemand`, `ResourceReservation`, `ResourceTransfer`, and consumption settlement.
-- A host transport adapter owns cargo balance, in-transit custody, loss, arrival acceptance, and destination credit. `canwu-transport` supplies movement execution, capacity booking, itinerary legs, handoffs, and the delivery-completion bridge.
-- Population, production, and military plugins form demands and consequences separately; they do not directly rewrite one another's stock.
+- The simulation core owns command admission, deterministic time, phase ordering, atomic commit, rollback, visibility, persistence, and replay.
+- `canwu-resource` owns resource/unit revisions, `ResourceAccount`, protected floors, `ResourceDemand`, `ResourceReservation`, exact allocation legs, transfer, consumption, loss, and fulfillment. It is the sole physical-balance writer.
+- `canwu-production` owns processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement. It consumes exact resource outcomes and technology evidence without keeping a second inventory.
+- `canwu-transport` owns itinerary, capacity, legs, execution, custody handoffs, and delivery completion. The resource extension owns cargo escrow balance, loss, acceptance, return, and destination credit.
+- Population and military domains form demand and consequences separately. They cannot directly rewrite resource balances or production state.
 
-This keeps a single source of authority: the host registers typed records and boundary systems through the public `canwu-api`, and every write is checked against its declared owner/system before atomic commit.
+These optional extensions sit above the public `canwu-api`; they do not become reverse dependencies of the simulation core. Host games still own money, markets, wages, building UI, combat formulas, and historical content.
 
 ## Three terms to understand first
 
 | Term | Meaning |
 | --- | --- |
 | Protected floor | The minimum amount an account must retain instead of offering it to the current allocation |
-| Attempt-local reservation | A `ReservationRequest` valid only for the current transaction attempt; failure or rollback does not leave a hidden long-term hold |
+| Resource reservation | A `ResourceReservation` bound to an exact demand, account, resource/unit revision, and lifecycle; failure or rollback cannot leave a hidden hold |
 | Custody predecessor | The exact prior record that authorizes the next cargo-state transition and prevents duplicate credit or material creation |
 
 ## Minimal lifecycle
 
 ```text
-Demand -> attempt-local reservation -> source debit -> in-transit custody
+Demand -> resource reservation/allocation -> source debit -> in-transit custody
        -> arrival acceptance -> destination credit -> next-boundary consumption
 ```
 
-1. Demands enter through admission; admission does not directly write stock.
-2. The resource owner publishes a protected-floor-aware `ReservationOffer`; consumers submit attempt-local `ReservationRequest` values.
-3. Boundary systems read deterministic allocation evidence and propose only their own ledger, transport, or consequence records.
+1. Demands enter through a resource command or typed adapter ingress; consumers never write stock directly.
+2. `canwu-resource` deterministically allocates against protected floors, minimum useful amounts, partial-fulfillment policies, due times, and stable tie-break keys.
+3. Production, force, and other consumers cite exact allocation and fulfillment evidence and write only their own work-order or consequence records.
 4. Conservation, version, custody-predecessor, or authority failure rolls back the whole proposal group.
 5. A destination is credited only after the cargo disposition is accepted; military consumption becomes eligible at the next appropriate boundary.
 
@@ -43,6 +44,6 @@ The account amount is the only writable quantity. Reserved, available, and prote
 
 ## Versioning and saves
 
-Hosts pin the `canwu-api` version and plugin semantic hashes. Loading restores the same Canwu snapshot and revalidates host typed records; it must not rebuild an old campaign from its current timestamp or treat an unpublished local engine version as a compatible API.
+Hosts pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and plugin semantic hashes from the same release line. Loading restores the same Canwu snapshot and revalidates extension records; it must not rebuild an old campaign from its current timestamp or treat an unpublished local engine version as a compatible API.
 
-See the [production, resource, and facility mechanism proposal](/en/proposals/production-economy-mechanism/) for candidate extensions and the boundary of what should not enter the simulation core.
+Continue with the [production, resources, and military supply case](/en/tutorials/cases/production-economy/) and the [delivered mechanism decision](/en/proposals/production-economy-mechanism/).

@@ -9,25 +9,26 @@ sidebar:
 
 ## Decision
 
-Production, consumption, construction, and military supply should begin as host plugins above the public `canwu-api`. Grain, factories, prices, armies, and historical resource maps do not belong in the simulation core.
+**Status: delivered in 0.10.0.** Production, consumption, and military supply remain optional extensions above the public `canwu-api`. Grain, factories, prices, armies, and historical resource maps do not enter the simulation core.
 
-A historical Celestial Mandate fixture validated this boundary against the Canwu 0.6 public API. Host plugins performed deterministic partial allocation, same-place consumption, cargo custody, loss, arrival acceptance, next-boundary military consumption, whole-boundary rollback, exact save restoration, fork/replay, and holder-relative reporting without a simulation-core change. The fixture remains architectural evidence, not a statement of the current API version; see [save, replay, and fork](/en/developer/persistence/) for the current contract. It uses a fixed host-owned typed itinerary; composing Canwu transport execution types remains a later playable-integration gate.
+A historical Celestial Mandate fixture first validated the boundary against the Canwu 0.6 public API. The 0.10.0 G1b slice now runs a fourteen-month grain loop with real `canwu-routing` and `canwu-transport` types. The G3 production extension and G4 independent force-supply consumer prove that two different downstream lifecycle owners reuse the same resource boundary.
 
-That proof supports the host-extension approach. It does not yet justify creating `canwu-resource` or `canwu-production`.
+The extraction gate is therefore satisfied: `canwu-resource` and `canwu-production` are publishable optional extensions, while `canwu-force-supply-reference` and `canwu-economy-reference` remain replaceable integrations. G5 supplies evidence-qualified local scarcity and price-pressure reads, not a full market simulation.
 
 ## Ownership
 
 - The simulation core owns admission, time and phase ordering, reservation allocation, declared reads and writes, atomic commit, rollback, evidence, visibility, persistence, and replay.
-- A host resource layer owns resource definitions, accounts, demands, persistent reservations, transfers, and consumption settlements.
-- A host transport adapter owns cargo balance, in-transit custody, loss, acceptance, return, and destination credit. `canwu-transport` supplies movement execution, itinerary legs, capacity, and the delivery-completion bridge.
-- Host population, production, and military domains form demands and consume accepted fulfillment results. They do not rewrite another domain's stock.
+- `canwu-resource` owns resource definitions, units, accounts, protected floors, demands, reservations, allocation, transfers, consumption, loss, and fulfillment.
+- `canwu-production` owns processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement.
+- `canwu-transport` supplies movement execution, itinerary legs, capacity, custody handoff, and the delivery-completion bridge. The resource extension remains the authority for in-transit cargo balance, loss, acceptance, return, and destination credit.
+- Population, production, and military domains form demands and consume exact fulfillment outcomes. They do not rewrite another domain's state.
 - Historical content owns places, deposits, processes, facilities, institutions, parameters, and provenance. It receives no privileged mutation path.
 
-## Extraction gate
+## Satisfied extraction gate
 
-Consider an experimental resource extension only after two independent lifecycle owners or two independent hosts reproduce the same account, reservation, transfer, transport-projection, and fulfillment semantics. A production extension must sit above that conserved layer and own versioned processes, work orders, work in progress, quality, loss, maintenance, and facility lifecycles.
+G3 production and G4 force supply are independent lifecycle owners that consume the same account, reservation, allocation, transfer, and fulfillment semantics. Production sits above the conserved layer, owns versioned processes, work orders, work in progress, maintenance, and facilities, and returns output to the resource extension for credit.
 
-Large dynamic allocation, local proposal rejection, or a new simulation-core query API each requires a failing public-API fixture first. A diagram alone is not evidence for expanding the simulation core.
+This delivery adds no simulation-core query API and moves no domain semantics into the core. A future full market, money, property, universal construction, or combat system still needs independent-consumer evidence and a failing public-API fixture; a diagram alone cannot grant it a core position.
 
 ## Content that stays out of the simulation core
 
@@ -37,4 +38,4 @@ Large dynamic allocation, local proposal rejection, or a new simulation-core que
 - Treating route reach as booking, departure, arrival, or consumable delivery.
 - Treating transport execution records as the authority for host cargo balance and loss.
 
-See the [production, resource, and transport boundary](/en/developer/production-economy/) for the host implementation pattern.
+See the [production, resource, and transport boundary](/en/developer/production-economy/) and the [production, resources, and military supply case](/en/tutorials/cases/production-economy/).

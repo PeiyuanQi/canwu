@@ -1,0 +1,25 @@
+[package]
+name = "canwu-economy-reference-content"
+description = "Fail-closed source and model-card reference content for Canwu economy examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+
+[dependencies]
+canwu-api.workspace = true
+canwu-production.workspace = true
+canwu-resource.workspace = true
+canwu-technology.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

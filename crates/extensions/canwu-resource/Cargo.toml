@@ -1,0 +1,22 @@
+[package]
+name = "canwu-resource"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish = ["crates-io"]
+description = "Conserved resource accounts, allocation, transfer, and fulfillment extension for Canwu"
+
+[dependencies]
+blake3.workspace = true
+canwu-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -69,9 +69,22 @@ pub struct SimulationView<'a> {
     pub(super) allocations: Option<&'a BTreeMap<ReservationRef, ReservationAllocation>>,
     pub(super) allowed_reservations: Option<&'a [ReservationRef]>,
     pub(super) random_session: Option<RefCell<random::RandomSession>>,
+    pub(super) plugin_archive_provider: &'a dyn super::PluginArchiveObjectProvider,
 }
 
 impl SimulationView<'_> {
+    /// Loads a package-owned cold object through the host provider attached to
+    /// this runtime. Package code remains responsible for authenticating the
+    /// bytes against its committed archive root before using them.
+    pub fn plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.plugin_archive_provider
+            .load_plugin_archive_object(namespace, object_id)
+    }
+
     #[must_use]
     pub const fn time(&self) -> SimTime {
         self.state.now()
@@ -494,6 +507,47 @@ impl SimulationView<'_> {
         }))
     }
 
+    /// Returns the exact evidence reference for the currently visible version
+    /// of a domain record.  Strategic aggregation runs after atomic commit,
+    /// therefore it cannot use [`Self::proposed_domain_record_version`].
+    ///
+    /// The current boundary overlay/proposal is preferred, followed by the
+    /// runtime's verified current-record provenance index. The index is
+    /// maintained at commit time and rebuilt from canonical evidence on
+    /// restore, so lookup does not scan retained or archived history.
+    pub fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        self.require_read(&records::record_state_key(&reference.kind))?;
+        let Some(record) = self.domain_record(reference)? else {
+            return Ok(None);
+        };
+        if let Some(proposed) = self.proposal_evidence.and_then(|evidence| {
+            evidence.iter().find_map(|item| match item {
+                EvidenceRef::DomainRecordVersion(version)
+                    if version.record == *reference && version.version == record.version =>
+                {
+                    Some(version.clone())
+                }
+                _ => None,
+            })
+        }) {
+            return Ok(Some(proposed));
+        }
+        let current = super::current_domain_record_version(self.state.runtime(), reference)?;
+        if current
+            .as_ref()
+            .is_some_and(|current| current.version != record.version)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "visible domain-record version disagrees with the runtime provenance index",
+            ));
+        }
+        Ok(current)
+    }
+
     /// Returns whether an exact domain-record version reference is valid at
     /// this proposal-visible cut.
     ///
@@ -904,5 +958,15 @@ impl SimulationView<'_> {
         self.random_session
             .map(RefCell::into_inner)
             .map(random::RandomSession::finish)
+    }
+}
+
+impl super::PluginArchiveObjectProvider for SimulationView<'_> {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.plugin_archive_object(namespace, object_id)
     }
 }

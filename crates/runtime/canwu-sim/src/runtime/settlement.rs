@@ -87,6 +87,7 @@ impl Simulation {
         let admitted_ingress = self.take_due_ingress(request.at);
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
         let mut maintenance_changes = Vec::new();
+        let mut maintenance_record_changes = Vec::new();
         for ingress_id in &admitted_ingress {
             let record = self
                 .state
@@ -121,7 +122,9 @@ impl Simulation {
                     self.apply_decision_request(*request)?;
                 }
                 IngressPayload::Maintenance { request } => {
-                    maintenance_changes.push(self.apply_maintenance_request(*request)?);
+                    let (change, record_changes) = self.apply_maintenance_request(*request)?;
+                    maintenance_changes.push(change);
+                    maintenance_record_changes.extend(record_changes);
                 }
             }
         }
@@ -273,6 +276,34 @@ impl Simulation {
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
         let mut evidence = PendingBoundaryEvidence::default();
+        for change in maintenance_record_changes {
+            let change_index = u64::try_from(evidence.record_changes.len()).map_err(|_| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "boundary record-change index exceeds the persistent identifier space",
+                )
+            })?;
+            index_current_domain_record_version(
+                &mut self.state,
+                boundary_id,
+                change_index,
+                &change,
+            );
+            let event = self.append_event(
+                EventKind::plugin(change.plugin.clone(), change.operation.event_type()),
+                record_change_affected_entities(&change),
+                change.summary.clone(),
+                Some(CauseRef::Boundary(boundary_id)),
+                correlation_id,
+            )?;
+            evidence.emissions.push(BoundaryEmission {
+                plugin: change.plugin.clone(),
+                system: change.system.clone(),
+                event: event.id,
+                kind: BoundaryEmissionKind::RecordChange { change_index },
+            });
+            evidence.record_changes.push(change);
+        }
         for phase in BoundaryPhase::ALL {
             match phase {
                 BoundaryPhase::AtomicDomainCommit => {
@@ -352,6 +383,7 @@ impl Simulation {
                     allocations: Some(&allocations),
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
+                    plugin_archive_provider: self.plugin_archive_provider.as_ref(),
                 };
                 let context = BoundaryContext {
                     boundary_id,
@@ -786,6 +818,7 @@ impl Simulation {
                         "boundary record-change index exceeds the persistent identifier space",
                     )
                 })?;
+                index_current_domain_record_version(&mut self.state, boundary_id, index, change);
                 stage_record_changes
                     .insert(change.current.reference.clone(), (index, change.clone()));
             }
@@ -1490,6 +1523,25 @@ impl Simulation {
         }
         Ok(())
     }
+}
+
+fn index_current_domain_record_version(
+    state: &mut RuntimeState,
+    boundary: BoundaryId,
+    change_index: u64,
+    change: &DomainRecordChange,
+) {
+    state.metadata.current_domain_record_versions.insert(
+        change.current.reference.clone(),
+        super::DomainRecordVersionRef {
+            record: change.current.reference.clone(),
+            version: change.current.version,
+            established_by: super::DomainRecordVersionSource::BoundaryChange {
+                boundary,
+                change_index,
+            },
+        },
+    );
 }
 
 struct PendingReservationOffer {

@@ -34,8 +34,13 @@ flowchart BT
     technology["canwu-technology"]
     history["canwu-history-research"]
     fiscal["canwu-fiscal"]
+    resource["canwu-resource"]
+    production["canwu-production"]
     ming_fiscal["canwu-ming-fiscal"]
+    economy_content["canwu-economy-reference-content"]
     ming_reference["canwu-ming-fiscal-reference"]
+    force_supply["canwu-force-supply-reference"]
+    economy_reference["canwu-economy-reference"]
     debug["canwu-debug"]
 
     subgraph tools["Tools"]
@@ -44,9 +49,12 @@ flowchart BT
     subgraph integrations["Reference integrations"]
         reference_world
         ming_reference
+        force_supply
+        economy_reference
     end
     subgraph reference_content["Reference content"]
         ming_fiscal
+        economy_content
     end
     subgraph extensions["Published extensions"]
         information
@@ -57,6 +65,8 @@ flowchart BT
         technology
         history
         fiscal
+        resource
+        production
     end
     subgraph PublicApi["Public API"]
         api
@@ -117,11 +127,31 @@ flowchart BT
     api --> history
     technology --> history
     api --> fiscal
+    api --> resource
+    api --> production
+    resource --> production
+    technology --> production
     fiscal --> ming_fiscal
+    api --> economy_content
+    resource --> economy_content
+    production --> economy_content
+    technology --> economy_content
     api --> ming_reference
     fiscal --> ming_reference
     ming_fiscal --> ming_reference
     reference_world --> ming_reference
+    api --> force_supply
+    resource --> force_supply
+    economy_content --> force_supply
+    api --> economy_reference
+    resource --> economy_reference
+    production --> economy_reference
+    economy_content --> economy_reference
+    force_supply --> economy_reference
+    routing --> economy_reference
+    transport --> economy_reference
+    technology --> economy_reference
+    reference_world --> economy_reference
     api --> debug
     api --> reference_world
     reference_world --> debug
@@ -136,9 +166,9 @@ flowchart BT
 | `mechanisms/` | `canwu-routing`, `canwu-transport` | Reusable planning and transport execution | Published |
 | `runtime/` | `canwu-sim` | Authoritative state, commands, settlement, persistence, replay, and plugins | Published as an implementation dependency |
 | `api/` | `canwu-api` | Supported application-facing Rust API | Published and recommended for applications |
-| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-law`, `canwu-technology`, `canwu-history-research`, `canwu-fiscal` | Domain implementations built on the public API; culture remains downstream from society, law consumes admitted social evidence through controller-mediated procedure, historical research remains downstream from technology, and fiscal procedure remains independent from resource balances and physical transfers | Published except for milestone-stage crates awaiting their release tag |
-| `reference-content/` | `canwu-ming-fiscal` | Versioned, source-cited historical definitions compiled by generic extensions | Published |
-| `integrations/` | `canwu-reference-world`, `canwu-ming-fiscal-reference` | Replaceable example worlds, adapters, scenario composition, and runnable starters | Not published |
+| `extensions/` | `canwu-information`, `canwu-correspondence`, `canwu-society`, `canwu-culture`, `canwu-law`, `canwu-technology`, `canwu-history-research`, `canwu-fiscal`, `canwu-resource`, `canwu-production` | Domain implementations built on the public API; resource owns conserved quantities and fulfillment, production consumes resource and technology evidence, and fiscal procedure remains independent from resource balances and physical transfers | Published except for milestone-stage crates awaiting their release tag |
+| `reference-content/` | `canwu-ming-fiscal`, `canwu-economy-reference-content` | Versioned, source-cited historical definitions and explicit synthetic fixtures compiled by generic extensions | Published |
+| `integrations/` | `canwu-reference-world`, `canwu-ming-fiscal-reference`, `canwu-force-supply-reference`, `canwu-economy-reference` | Replaceable example worlds, adapters, scenario composition, force-supply consumers, and runnable starters | Not published |
 | `tools/` | `canwu-debug` | Reference clients and maintainer tools | Not published |
 
 ## Registry order
@@ -151,8 +181,9 @@ each completed group to become resolvable before continuing:
 3. `canwu-routing`, `canwu-sim`
 4. `canwu-transport`
 5. `canwu-api`
-6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`
-7. `canwu-culture`, `canwu-law`, `canwu-correspondence`, `canwu-history-research`, `canwu-ming-fiscal`
+6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`, `canwu-resource`
+7. `canwu-culture`, `canwu-law`, `canwu-correspondence`, `canwu-history-research`, `canwu-production`, `canwu-ming-fiscal`
+8. `canwu-economy-reference-content`
 
 See [the architecture](../docs/architecture.md), [versioning](../docs/versioning.md),
 and [the release procedure](../docs/releasing.md) for the behavioral and
