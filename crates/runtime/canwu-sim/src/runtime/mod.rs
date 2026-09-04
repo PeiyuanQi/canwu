@@ -149,6 +149,7 @@ use serde_json::Value;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::rc::Rc;
 
 use event_payloads::{
     DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
@@ -459,6 +460,90 @@ fn retained_domain_record_version(
     Some(record.clone())
 }
 
+fn current_domain_record_version(
+    state: &RuntimeState,
+    reference: &DomainRecordRef,
+) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+    let Some(record) = state.current.domain_records.get(reference) else {
+        return Ok(None);
+    };
+    let Some(version) = state.metadata.current_domain_record_versions.get(reference) else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            "current domain-record provenance index is missing a live record",
+        ));
+    };
+    if version.version != record.version {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidSnapshot,
+            "current domain-record provenance index disagrees with live state",
+        ));
+    }
+    Ok(Some(version.clone()))
+}
+
+fn build_current_domain_record_versions(
+    initial_scenario: Option<&Scenario>,
+    boundaries: &[BoundaryRecord],
+    current_records: &[DomainRecord],
+) -> Result<BTreeMap<DomainRecordRef, DomainRecordVersionRef>, CanwuError> {
+    let mut versions = initial_scenario
+        .into_iter()
+        .flat_map(|scenario| scenario.domain_records.iter())
+        .map(|record| {
+            (
+                record.reference.clone(),
+                DomainRecordVersionRef {
+                    record: record.reference.clone(),
+                    version: record.version,
+                    established_by: DomainRecordVersionSource::InitialScenario,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for boundary in boundaries {
+        for (change_index, change) in boundary.record_changes.iter().enumerate() {
+            let change_index = u64::try_from(change_index).map_err(|_| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "domain-record change index exceeds the persistent identifier space",
+                )
+            })?;
+            versions.insert(
+                change.current.reference.clone(),
+                DomainRecordVersionRef {
+                    record: change.current.reference.clone(),
+                    version: change.current.version,
+                    established_by: DomainRecordVersionSource::BoundaryChange {
+                        boundary: boundary.id,
+                        change_index,
+                    },
+                },
+            );
+        }
+    }
+    let current_references = current_records
+        .iter()
+        .map(|record| record.reference.clone())
+        .collect::<BTreeSet<_>>();
+    for record in current_records {
+        let Some(version) = versions.get(&record.reference) else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "current domain-record state has no exact provenance index entry",
+            ));
+        };
+        if version.version != record.version {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "current domain-record provenance index disagrees with snapshot state",
+            ));
+        }
+    }
+    versions.retain(|reference, _| current_references.contains(reference));
+    Ok(versions)
+}
+
 fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Option<SimTime> {
     match reference {
         EvidenceRef::Command(id) => state
@@ -698,6 +783,7 @@ enum BoundaryWriteStage {
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum DomainRecordCommitStage {
+    Maintenance,
     Ordinary,
     Transition,
     Aggregation,
@@ -706,7 +792,8 @@ enum DomainRecordCommitStage {
 }
 
 impl DomainRecordCommitStage {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
+        Self::Maintenance,
         Self::Ordinary,
         Self::Transition,
         Self::Aggregation,
@@ -716,11 +803,12 @@ impl DomainRecordCommitStage {
 
     const fn ordinal(self) -> u8 {
         match self {
-            Self::Ordinary => 1,
-            Self::Transition => 2,
-            Self::Aggregation => 3,
-            Self::Perspective => 4,
-            Self::Deferred => 5,
+            Self::Maintenance => 1,
+            Self::Ordinary => 2,
+            Self::Transition => 3,
+            Self::Aggregation => 4,
+            Self::Perspective => 5,
+            Self::Deferred => 6,
         }
     }
 }
@@ -738,7 +826,7 @@ impl DomainHistoryCut {
     };
 
     const fn after_boundaries(boundary: usize) -> Self {
-        Self { boundary, stage: 5 }
+        Self { boundary, stage: 6 }
     }
 
     const fn after_stage(boundary: usize, stage: DomainRecordCommitStage) -> Self {
@@ -1133,6 +1221,7 @@ pub struct Simulation {
     state: RuntimeState,
     schema: SchemaRegistry,
     plugins: PluginRegistry,
+    plugin_archive_provider: Rc<dyn PluginArchiveObjectProvider>,
     sync_reaction_depth: usize,
 }
 
@@ -1303,6 +1392,11 @@ impl Simulation {
                     .collect()
             })
             .unwrap_or_default();
+        let current_domain_record_versions = build_current_domain_record_versions(
+            initial_scenario.as_ref(),
+            &[],
+            &scenario.domain_records,
+        )?;
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
@@ -1382,6 +1476,7 @@ impl Simulation {
                 metadata: RuntimeMetadata {
                     initial_scenario,
                     initial_domain_record_indexes,
+                    current_domain_record_versions,
                     run_manifest,
                     run_manifest_hash,
                     run_configuration,
@@ -1415,6 +1510,7 @@ impl Simulation {
             },
             schema,
             plugins,
+            plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
         };
         simulation.refresh_checkpoint_hash()?;
@@ -1652,6 +1748,16 @@ impl Simulation {
         reference: &DomainRecordVersionRef,
     ) -> Option<DomainRecord> {
         retained_domain_record_version(&self.state, reference)
+    }
+
+    /// Returns the exact evidence identity for the authoritative current
+    /// version without manufacturing an initial-scenario source after
+    /// compaction.
+    pub fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        current_domain_record_version(&self.state, reference)
     }
 
     #[must_use]
@@ -2228,6 +2334,11 @@ impl Simulation {
                     .collect()
             })
             .unwrap_or_default();
+        let current_domain_record_versions = build_current_domain_record_versions(
+            initial_scenario.as_ref(),
+            &snapshot.boundaries,
+            &snapshot.domain_records,
+        )?;
         let mut simulation = Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
@@ -2329,6 +2440,7 @@ impl Simulation {
                 metadata: RuntimeMetadata {
                     initial_scenario,
                     initial_domain_record_indexes,
+                    current_domain_record_versions,
                     run_manifest: snapshot.run_manifest.clone().ok_or_else(|| {
                         invalid_snapshot_error("snapshot is missing its run manifest")
                     })?,
@@ -2366,6 +2478,7 @@ impl Simulation {
             },
             schema: snapshot.schema,
             plugins,
+            plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
         };
         simulation.refresh_checkpoint_hash()?;
@@ -2403,8 +2516,32 @@ impl Simulation {
             state: self.state.clone(),
             schema: self.schema.clone(),
             plugins: self.plugins.clone(),
+            plugin_archive_provider: Rc::clone(&self.plugin_archive_provider),
             sync_reaction_depth: 0,
         }
+    }
+
+    /// Attaches the caller-owned provider used to resolve package cold
+    /// archives during normal command admission, boundary settlement, and
+    /// detached queries. The provider is executable host context and is never
+    /// serialized into a snapshot.
+    pub fn set_plugin_archive_object_provider(
+        &mut self,
+        provider: Rc<dyn PluginArchiveObjectProvider>,
+    ) {
+        self.plugin_archive_provider = provider;
+    }
+
+    /// Loads one package-owned archive object from the currently attached host
+    /// provider. Callers must authenticate returned bytes against a committed
+    /// package archive root before treating them as authoritative.
+    pub fn plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.plugin_archive_provider
+            .load_plugin_archive_object(namespace, object_id)
     }
 
     fn prepare_command(

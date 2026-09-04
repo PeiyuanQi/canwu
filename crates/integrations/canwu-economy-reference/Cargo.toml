@@ -1,0 +1,28 @@
+[package]
+name = "canwu-economy-reference"
+description = "Runnable resource, production, force-supply, scarcity, and price-evidence reference composition for Canwu"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+blake3.workspace = true
+canwu-api.workspace = true
+canwu-economy-reference-content.workspace = true
+canwu-force-supply-reference.workspace = true
+canwu-production.workspace = true
+canwu-reference-world.workspace = true
+canwu-resource.workspace = true
+canwu-routing.workspace = true
+canwu-technology.workspace = true
+canwu-transport.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

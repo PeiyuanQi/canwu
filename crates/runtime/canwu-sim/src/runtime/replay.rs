@@ -1,14 +1,15 @@
 use super::{
     BoundaryRecord, BoundaryRequest, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef,
     CommandAttemptOutcome, CommandAttemptRecord, CommandIngress, CommandOutcome, CommandRecord,
-    ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord, PluginIngressRequest, PluginRegistry,
-    ReplayJournal, SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, SimDuration, SimTime,
-    Simulation, SimulationPlugin, authoritative_revision_count, authoritative_run_identity,
-    boundary_state_hash_format, is_canonical_hash, manifest,
+    ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord, PluginArchiveObjectProvider,
+    PluginIngressRequest, PluginRegistry, ReplayJournal, SNAPSHOT_FORMAT_VERSION,
+    STATE_REVISION_FORMAT_VERSION, SimDuration, SimTime, Simulation, SimulationPlugin,
+    authoritative_revision_count, authoritative_run_identity, boundary_state_hash_format,
+    is_canonical_hash, manifest,
 };
 #[cfg(test)]
 use super::{RunConfiguration, RunManifest, Scenario};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, rc::Rc};
 
 impl Simulation {
     /// Reconstructs caller-supplied core commands without proving a recorded
@@ -124,6 +125,18 @@ impl Simulation {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
     ) -> Result<Self, CanwuError> {
+        Self::replay_from_journal_with_archive_provider(plugins, journal, Rc::new(()))
+    }
+
+    /// Replays with caller-owned package archive storage attached before any
+    /// recorded boundary is evaluated. Cold idempotency and continuation
+    /// checks therefore use the same authenticated provider during replay as
+    /// they do during a live run.
+    pub fn replay_from_journal_with_archive_provider(
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+    ) -> Result<Self, CanwuError> {
         if journal.commitment_format_version != COMMITMENT_FORMAT_VERSION {
             return Err(CanwuError::new(
                 ErrorCode::ReplayEnvironmentMismatch,
@@ -212,6 +225,7 @@ impl Simulation {
             normalized.run_manifest.clone(),
             normalized.run_configuration.clone(),
         )?;
+        simulation.set_plugin_archive_object_provider(archive_provider);
         simulation.state.current.authority_root_seed = normalized.authority_root_seed;
         let simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();

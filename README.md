@@ -34,12 +34,12 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "=0.8.0"
+canwu-api = "=0.10.0"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
 release exactly and upgrade only alongside an explicit save migration. The
-example above selects the immutable `0.8.0` release rather than the moving
+example above selects the immutable `0.10.0` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
@@ -131,6 +131,16 @@ viewer` opens the browser trace viewer against the same live trace dump.
   kept downstream from base technology truth
 - `canwu-fiscal`: published generic fiscal-procedure extension for regional
   law adoption, assessment, remission, authorization, receipts, and reports
+- `canwu-resource`: optional conserved resource accounts, demand, allocation,
+  transfer escrow, consumption, loss, fulfillment, and holder-relative reports
+- `canwu-production`: optional process, site, facility, work-order, WIP,
+  maintenance, repair, and output-settlement extension
+- `canwu-economy-reference-content`: source/model-card-bound economy profiles
+  with fail-closed place, period, resource, process, and coverage keys
+- `canwu-force-supply-reference`: replaceable military-supply consumer proving
+  that resource fulfillment and force consequences remain separate domains
+- `canwu-economy-reference`: runnable G1b grain loop and detached G5 local
+  scarcity/price-pressure reference composition
 - `canwu-ming-fiscal`: source-cited Ming reference content from 1368-1662,
   plus an optional Zheng continuation through 1683
 - `canwu-ming-fiscal-reference`: runnable Hongwu, Wanli, and Hongguang scenario

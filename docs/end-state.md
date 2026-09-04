@@ -232,6 +232,45 @@ allocation remains separate from pure route search. The current correspondence
 request is explicitly `Unconstrained`; constrained execution needs a future
 admission contract carrying exact booking or reservation evidence.
 
+## Resources, production, and local economy
+
+Conserved physical quantities are implemented by the optional
+`canwu-resource` extension, not by the simulation core. It owns exact resource
+and unit revisions, accounts, protected floors, demands, reservations,
+allocation legs, custody-aware transfer, accepted delivery, consumption,
+losses, fulfillment, and deterministic receipts. Geography influences supply
+through effective-dated content capabilities and route access rather than a
+single timeless deposit flag.
+
+`canwu-production` consumes that public resource boundary and exact
+`canwu-technology` evidence. It owns process, site, facility, capacity, work
+order, work-in-progress, execution, project, and output-settlement lifecycles.
+Household supplementary work, distributed workshops, government workshops,
+concentrated plants, and multi-site enterprises are data profiles. Knowledge of
+a technique, the calendar year, or a generic building level never grants
+productive capacity by itself.
+
+Military logistics remains an independent consumer. The replaceable
+`canwu-force-supply-reference` integration submits recurring demands and typed
+consumption intents, then owns readiness and shortage consequences after exact
+resource outcomes exist. Requisition externalities cross to the civilian
+economy through an idempotent typed saga; force code cannot directly mutate
+population welfare, cooperation, harvest inputs, or property.
+
+The runnable `canwu-economy-reference` vertical slice connects seasonal
+harvest, protected seed stock, civilian relief, force supply, route closure,
+transport custody, consumption, requisition, and next-season effects. Its first
+balance profile is explicitly synthetic. Historical Ming production and the
+Hanyang-Daye-Pingxiang industrial chain are source-cited model cards in
+`canwu-economy-reference-content`, so games can replace assumptions without
+changing engine code.
+
+Local scarcity is a detached, holder-relative projection over bounded evidence.
+Price pressure is produced only when the same scope and interval has qualifying
+executed, quoted, administered, or contracted price evidence. Neither
+projection creates money, transfers ownership, settles trade, or claims a full
+market simulation.
+
 ## Systems and plugins
 
 Population, agriculture, trade, taxation, bureaucracy, military logistics,

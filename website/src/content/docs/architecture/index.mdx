@@ -6,7 +6,7 @@ sidebar:
   order: 1
   label: 架构总览
 hero:
-  tagline: "从客户端到权威运行时的完整路径：对外 API 保持窄而稳定，结算、事件和随机性在可重放的边界内协作。"
+  tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重放的边界内协作。"
 ---
 
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
@@ -43,8 +43,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   resetZoomLabel="重置依赖图缩放"
   diagramLoading="正在渲染 crate 依赖图……"
   sourceSummary="查看依赖图源码"
+  sourceLoading="依赖图源码将在预览加载时显示。"
   noScriptMessage="依赖图预览需要 JavaScript；上方仍提供文字说明。"
-  renderFailureMessage="依赖图预览不可用——下方仍可查看源码。"
   definition={`flowchart TB
     subgraph ToolsExtensions["工具与扩展"]
         Debug["canwu-debug"]
@@ -56,8 +56,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         Technology["canwu-technology"]
         History["canwu-history-research"]
         Fiscal["canwu-fiscal"]
+        Resource["canwu-resource"]
+        Production["canwu-production"]
         MingFiscal["canwu-ming-fiscal"]
+        EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]
+        ForceSupply["canwu-force-supply-reference"]
+        EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -94,12 +99,32 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     History --> Api
     History --> Technology
     Fiscal --> Api
+    Resource --> Api
+    Production --> Api
+    Production --> Resource
+    Production --> Technology
     MingFiscal --> Api
     MingFiscal --> Fiscal
+    EconomyContent --> Api
+    EconomyContent --> Production
+    EconomyContent --> Resource
+    EconomyContent --> Technology
     MingReference --> Api
     MingReference --> Fiscal
     MingReference --> MingFiscal
     MingReference --> ReferenceWorld
+    ForceSupply --> Api
+    ForceSupply --> EconomyContent
+    ForceSupply --> Resource
+    EconomyReference --> Api
+    EconomyReference --> EconomyContent
+    EconomyReference --> ForceSupply
+    EconomyReference --> Production
+    EconomyReference --> ReferenceWorld
+    EconomyReference --> Resource
+    EconomyReference --> Routing
+    EconomyReference --> Technology
+    EconomyReference --> Transport
     ReferenceWorld --> Api
     Debug --> ReferenceWorld
 
@@ -157,9 +182,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
 | `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
+| `canwu-resource` | 守恒资源账户、受保护底线、需求、预留、分配、转移、消费、损耗与履约扩展 |
+| `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、生产执行、项目与产出结算扩展 |
 | `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
+| `canwu-economy-reference-content` | 带模型卡、出处、覆盖声明和明确未知/不适用状态的经济参考内容包 |
 | `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
-| `canwu-debug` | 使用对外 API 与参考世界整合包的参考客户端 |
+| `canwu-force-supply-reference` | 使用公共资源 API 的可替换军事补给消费者与征发 saga 参考整合 |
+| `canwu-economy-reference` | 组合资源、生产、运输、军事补给、粮食循环、稀缺度和价格证据的可运行参考整合 |
+| `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
 
 已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
 它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
@@ -180,12 +210,18 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `SimulationPlugin`，通过权威命令、规范化输入（canonical ingress）和边界系统接入运行时。
 它依赖 `canwu-api` 与 `canwu-information`，反向依赖不存在，因此不会形成依赖环。
 
+资源与生产沿用同一边界：`canwu-resource` 只拥有守恒数量和履约；
+`canwu-production` 消费资源结果与精确技术证据，拥有生产资产和工单生命周期；
+`canwu-force-supply-reference` 是另一个独立资源消费者；`canwu-economy-reference`
+把它们与路线、运输和季节性粮食循环组合起来。稀缺度和价格压力只是脱离式、
+持有人绑定的读取投影；没有成交、报价、官价或合同价证据时，不会虚构价格。
+
 <MermaidDiagram
   label="从参伍内核到参考内容、参考整合和上层游戏的架构分层"
   diagramLoading="正在渲染图表……"
   sourceSummary="查看图表源码"
+  sourceLoading="图表源码将在预览加载时显示。"
   noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
-  renderFailureMessage="图表预览不可用——下方仍可查看源码。"
   definition={`flowchart TB
     Core["模拟内核"] --> Api["canwu-api"]
     Api --> Domain["通用模拟领域扩展"]
@@ -199,14 +235,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 
-参考内容包是数据，不是新的求解器；参考整合包必须使用对外 API，并且
+参考内容包是数据，不是新的求解器；参考整合包必须使用公开 API，并且
 可以被另一种世界或经济模型替换；入门套件必须展示场景创建、命令、结算、
-角色相对读取、保存、派生分支和精确重放。内容包和整合包会持续增加，不能被
+角色相对读取、保存、分支和精确重放。内容包和整合包会持续增加，不能被
 设计成只有一个固定 Demo 的特殊路径。
 
 ## 延伸阅读
 
 - [开发者指南](/developer/)
 - [通过插件扩展](/developer/extensions/)
-- [存档、重放与派生分支](/developer/persistence/)
+- [存档、重放与分支](/developer/persistence/)
 - [使用教程](/tutorials/)

@@ -118,6 +118,53 @@ fn same_boundary_proposal_does_not_hide_valid_prior_version_evidence() {
 }
 
 #[test]
+fn current_record_version_is_rebuilt_and_fails_closed_on_cache_corruption() {
+    let (mut scenario, _) = demo_scenario();
+    scenario.domain_records.push(DomainRecord {
+        reference: same_boundary_record_ref(),
+        owner: SAME_BOUNDARY_VERSION_PLUGIN.to_owned(),
+        class: DomainRecordClass::Record,
+        version: 1,
+        lifecycle: DomainRecordLifecycle::Active,
+        payload: serde_json::json!({"value": 1}),
+        references: Vec::new(),
+    });
+    let mut simulation = Simulation::new_with_plugins(812, scenario, &[&SameBoundaryVersionPlugin])
+        .expect("exact-version fixture should initialize");
+    simulation
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+        .expect("the fixture should establish version two");
+    let exact = simulation
+        .current_domain_record_version(&same_boundary_record_ref())
+        .expect("exact-version query")
+        .expect("retained boundary provenance");
+    assert_eq!(exact.version, 2);
+    let restored = Simulation::from_snapshot_with_plugins(
+        simulation.snapshot(),
+        &[&SameBoundaryVersionPlugin],
+    )
+    .expect("snapshot restore should rebuild the exact provenance index");
+    assert_eq!(
+        restored
+            .current_domain_record_version(&same_boundary_record_ref())
+            .expect("rebuilt provenance query"),
+        Some(exact.clone())
+    );
+
+    simulation
+        .state
+        .metadata
+        .current_domain_record_versions
+        .get_mut(&same_boundary_record_ref())
+        .expect("cached provenance")
+        .version = 1;
+    let error = simulation
+        .current_domain_record_version(&same_boundary_record_ref())
+        .expect_err("a corrupted provenance index must fail closed");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+}
+
+#[test]
 fn deterministic_seed_and_event_order_survive_equal_runs() {
     let (scenario, ids) = demo_scenario();
     let mut first = Simulation::new(35, scenario.clone()).expect("demo should load");

@@ -1,0 +1,180 @@
+---
+title: Production, resources, and military supply
+description: Understand Canwu's production-economy boundary through a fourteen-month grain loop, a Ming Songjiang cotton archetype, and the Hanyeping industrial chain.
+sidebar:
+  order: 3
+  label: Production, resources, and supply
+---
+
+import { LinkButton, Aside } from "@astrojs/starlight/components";
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/examples/grain_loop.rs" icon="external">
+  View the runnable grain loop
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/reference-content/canwu-economy-reference-content" variant="secondary" icon="external">
+  View model cards and sources
+</LinkButton>
+
+This case does not transplant Victoria 3's market model into Canwu. Its useful
+design vocabulary is inputs, outputs, production methods, resource conditions,
+and logistics constraints. Canwu supplies lower-level replaceable deterministic
+contracts; CM remains responsible for markets, money, wages, building UI, and
+combat formulas.
+
+## Five delivery gates
+
+| Gate | Runnable result | Engine boundary |
+| --- | --- | --- |
+| G1b | Fourteen-month synthetic grain loop | Seasonal harvest, seed floor, civilian food, relief, force supply, route closure, requisition, and next-season feedback |
+| G2 | `canwu-resource` | Conserved accounts, demand, reservation, exact allocation legs, transport handoff, acceptance, consumption, loss, and fulfillment |
+| G3 | `canwu-production` | Processes, sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement |
+| G4 | `canwu-force-supply-reference` | Independent military-supply consumer, readiness/shortage consequences, and a cross-domain requisition saga |
+| G5 | Scarcity and price-pressure reads | Bounded, holder-relative, and explainable; price remains explicitly unknown without price evidence |
+
+## How production happens
+
+Production is not “the technology is unlocked, therefore a building emits goods
+each week.” A run must satisfy an evidence chain:
+
+```text
+revisioned process
+  + available production site and facility
+  + materials, labor/capability, tools/machines, and energy
+  + local qualification or installed technology implementation
+  + authorization, season/environment, security, and access
+  -> authorized work order and reserved capacity
+  -> inputs become work in progress
+  -> production execution
+  -> outputs settle through the resource extension
+```
+
+Supplementary household work, distributed workshops, government workshops,
+concentrated plants, and multi-site enterprises are revisioned data forms, not
+levels on one universal building ladder. A game may present them as buildings;
+the engine requires exact, replayable bindings for inputs, capability,
+facilities, time, and output.
+
+When a scenario needs slow diffusion or adoption, Canwu does not merely apply
+an “era speed” penalty. It separates knowing a technique, qualifying to perform
+it at a site, installing tools or facilities, adopting it for a particular use,
+and maintaining access to inputs and routes. Any missing link becomes a
+structured work-order blocker; a calendar year never grants capability.
+
+## How geography affects production
+
+Canwu does not use a timeless `has_coal = true` flag. Reference content uses
+effective-dated, source-cited capability stages:
+
+```text
+potential -> observed/surveyed -> proven -> technically extractable
+          -> operating site -> route accessible -> delivered and accepted
+```
+
+Geological presence is not usable production. Extraction process,
+authorization, labor, equipment, energy, security, road/water/rail access, and
+destination acceptance all constrain supply. Routing proposes a plan;
+transport records itinerary, capacity, execution, custody, and handoffs. A
+resource becomes local stock or a production input only after acceptance.
+
+## Runnable fourteen-month grain loop
+
+The first profile is explicitly **synthetic**. Every quantity is gameplay
+calibration, not an estimate of Ming population, yields, military rations, or
+prices. Each month selects relief first, force first, balanced allocation, or
+military requisition. Winter closes a route, autumn harvest requires a protected
+seed floor, and requisition reduces cooperation and the next harvest.
+
+```bash
+cargo run -p canwu-economy-reference --example grain_loop
+cargo test -p canwu-economy-reference
+```
+
+The resource extension remains the sole balance writer. A force submits demand
+and a consumption intent instead of debiting grain directly. Transport arrival
+is not delivery until custody handoff and acceptance complete. The fixture can
+therefore check monthly conservation, retries, restore, and exact replay.
+
+## Ming case: a Songjiang cotton archetype
+
+The historical content is scoped to household cotton-textile production in
+Songjiang and the Lower Yangzi, 1450–1644. It supports an organizational
+archetype of household spinning and weaving, including households specializing
+in particular preparation or production stages, with merchants and brokers
+mediating distribution. Some workshops produced higher-grade and fancy cloth.
+Separately, large urban workshops handled the final dyeing and calendaring
+operations. The sources do not establish a universal Ming workshop size, wage,
+productivity level, modern factory coefficient, or empire-wide organization.
+
+The main model card uses Harriet T. Zurndorfer's research on late-imperial
+cotton textile manufacture and marketing, with page locators stored in the
+content. The source connects Songjiang cotton production with peasant-family
+production, commercialization, and distribution networks. The Canwu profile
+therefore preserves household and specialist-household organization instead of
+rewriting it as an anachronistic concentrated factory.
+
+## China industrialization case: Hanyang–Daye–Pingxiang
+
+The second historical archetype is explicitly a **Middle Yangzi Hubei–Jiangxi
+industrial chain**, not a “North China industrial corridor”:
+
+- Hanyang Iron Works was in Hubei;
+- the Daye iron mine was in Hubei;
+- Pingxiang coal was in Jiangxi; the 1896 evidence supports the mining bureau's
+  acquisition of mining and railway land, not an already operating route;
+- 1896–1907 is modeled as linked but unconsolidated Hanyang, Daye, and Pingxiang
+  precursor enterprises; capability evidence is represented as dated nodes—an
+  1896 survey/land observation, mechanized adits operating by 1904, and a route
+  that reached Liling in 1903 and extended to Zhuzhou during 1905. Because the
+  fixture uses whole years, 1906 is the first full-year proxy for rail movement
+  to Zhuzhou and onward riverboat movement toward Hubei; intervening capability
+  is not inferred;
+- only 1908–1911 uses the consolidated Hanyeping organizational class, while
+  actual route accessibility remains an independently evidenced condition.
+
+Its model cards cite Yun Liu's study of the Hanyeping company's formation,
+Jeff Hornibrook's research on mechanized mining, local elites, and mining land
+in Pingxiang, Jiangxi, Elizabeth Perry's chronology of the modern mine and the
+rail-to-river supply chain, and Shellen Xiao Wu's evidence for water transport
+before the railway and for an operating mine in 1905.
+The case tests how mineral capability, extraction
+processes, interregional routes, energy, facilities, and enterprise organization
+jointly constrain production. It cannot be generalized into national
+representativeness, inevitable industrialization, automatic technology
+diffusion, or a universal productivity coefficient.
+
+<Aside type="caution" title="Historical facts are not balance values">
+  Both historical profiles are source-cited archetypes, not complete
+  calibrations. Every numeric value and causal rule must bind to a model card.
+  Unsupported coverage must be explicit unknown or not applicable; default
+  values may not silently fill the gap.
+</Aside>
+
+## Military and civilian-economy interaction
+
+Food, fodder, physical currency, ammunition, spares, and fuel remain distinct
+resources rather than one universal “supply score.” Shortage produces
+force-local readiness, fatigue, cohesion, disease, or desertion consequences.
+Civilian welfare, cooperation, and future-production effects cross into the
+economy integration as typed requisition intents. The economy applies or
+rejects them at an expected revision, then the force acknowledges the outcome,
+so neither package writes the other's state.
+
+## Scarcity and price
+
+`LocalScarcityProjection` explains the stock, demand, buffers, route access,
+security, and policy actually observable to one holder. It does not claim a
+price. `PricePressureProjection` is materialized only when the same scope and
+interval has executed, quoted, administered, or contracted price evidence plus
+a revisioned interpretation rule. Neither projection creates money, moves
+goods, transfers ownership, or settles trade.
+
+## Historical sources
+
+- [Zurndorfer, Cotton Textile Manufacture and Marketing in Late Imperial China and the “Great Divergence”](https://doi.org/10.1163/156852011X614028)
+- [Zurndorfer, The Resistant Fibre (open PDF)](https://www.lse.ac.uk/Economic-History/Assets/Documents/Research/GEHN/Padua/PADUAZurndorfer.pdf)
+- [Yun Liu, Revisiting Hanyeping Company (1889–1908)](https://doi.org/10.1080/00076790903469612)
+- [Jeff Hornibrook, Local Elites and Mechanized Mining in China](https://doi.org/10.1177/009770040102700202)
+- [Jeff Hornibrook, Don’t Tread on Me (1896 Pingxiang mining-land evidence)](https://ihss.hku.hk/wp-content/uploads/2020/09/cbh-15-1.pdf)
+- [Elizabeth J. Perry, Anyuan: Mining China’s Revolutionary Tradition](https://doi.org/10.1525/9780520954038)
+- [Zhu Li, Why Is Zhuzhou a City Brought by Trains? (1903 Liling terminus, 1905 Zhuzhou extension, and rail-to-river transfer)](https://m.voc.com.cn/xhn/news/202007/14436245.html)
+- [Shellen Xiao Wu, Empires of Coal](https://doi.org/10.1515/9780804794732)

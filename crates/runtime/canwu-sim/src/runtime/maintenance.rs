@@ -1,7 +1,8 @@
 use super::{
-    CanwuError, CauseRef, DomainRecordMutation, DomainRecordRef, ErrorCode, IngressClass,
-    IngressPayload, IngressReceipt, SimTime, Simulation, StateVisibility, canonical_hash,
-    canonical_text, is_canonical_hash, records, runtime_entity_exists,
+    CanwuError, CauseRef, DomainRecordChange, DomainRecordMutation, DomainRecordRef, EntityRef,
+    ErrorCode, IngressClass, IngressPayload, IngressReceipt, PersistentDomainRecordStore,
+    PluginRegistry, SimTime, Simulation, StateVisibility, canonical_hash, canonical_text,
+    is_canonical_hash, records, runtime_entity_exists,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,6 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 pub const OWNER_AUTHORIZED_MAINTENANCE_FORMAT_VERSION: u32 = 1;
 pub const MAX_OWNER_AUTHORIZED_PARTICIPANTS: usize = 32;
 pub const MAX_OWNER_AUTHORIZED_MUTATIONS: usize = 256;
+pub(super) const OWNER_AUTHORIZED_MAINTENANCE_SYSTEM: &str = "owner-authorized-maintenance";
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -405,76 +407,233 @@ impl Simulation {
     pub(super) fn apply_owner_authorized_maintenance(
         &mut self,
         commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
-    ) -> Result<(), CanwuError> {
-        let next = self.apply_owner_authorized_commit_to_root(commit)?;
+    ) -> Result<Vec<super::DomainRecordChange>, CanwuError> {
+        let (next, changes) = self.apply_owner_authorized_commit_to_root(commit)?;
         self.state.current.domain_records = next;
         self.invalidate_commitments(super::CommitmentDomains::DOMAIN_RECORDS);
-        Ok(())
+        Ok(changes)
     }
 
     fn apply_owner_authorized_commit_to_root(
         &self,
         commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
-    ) -> Result<super::PersistentDomainRecordStore, CanwuError> {
-        validate_verified_commit_shape(commit)?;
-        let source_domain_root = canonical_hash(
-            "canwu.owner-authorized.source-domain-root.v1",
-            self.state.current.domain_records.roots(),
-        )?;
-        if source_domain_root != commit.source_domain_root {
-            return Err(invalid_maintenance(
-                "owner-authorized maintenance source root is stale",
-            ));
-        }
-        let mut mutations = Vec::new();
-        for proposal in &commit.participants {
-            let descriptor = self
-                .plugins
-                .descriptors
-                .get(&proposal.plugin)
-                .ok_or_else(|| {
-                    invalid_maintenance("maintenance participant descriptor is unavailable")
-                })?;
-            if descriptor.semantic_hash != proposal.semantic_hash
-                || participant_commitment_from_verified(proposal, &commit.target)?
-                    != proposal.proposal_commitment
-            {
-                return Err(invalid_maintenance(
-                    "maintenance participant identity or commitment changed",
-                ));
-            }
-            for expected in &proposal.expected_records {
-                if self
-                    .state
-                    .current
-                    .domain_records
-                    .get(&expected.record)
-                    .is_none_or(|record| record.version != expected.version)
-                {
-                    return Err(invalid_maintenance(
-                        "owner-authorized maintenance expectation is stale",
-                    ));
-                }
-            }
-            mutations.extend(proposal.mutations.iter().map(|change| {
-                records::DomainMutationRequest {
+    ) -> Result<(PersistentDomainRecordStore, Vec<DomainRecordChange>), CanwuError> {
+        apply_verified_owner_authorized_commit(
+            commit,
+            &self.state.current.domain_records,
+            &self.plugins,
+            self.state.scheduler.now,
+            &|entity| runtime_entity_exists(&self.state, entity),
+        )
+    }
+}
+
+pub(super) fn apply_verified_owner_authorized_commit(
+    commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
+    current: &PersistentDomainRecordStore,
+    plugins: &PluginRegistry,
+    now: SimTime,
+    core_exists: &dyn Fn(&EntityRef) -> bool,
+) -> Result<(PersistentDomainRecordStore, Vec<DomainRecordChange>), CanwuError> {
+    validate_verified_commit_authorization(commit, current, plugins)?;
+    let source_domain_root = canonical_hash(
+        "canwu.owner-authorized.source-domain-root.v1",
+        current.roots(),
+    )?;
+    if source_domain_root != commit.source_domain_root {
+        return Err(invalid_maintenance(
+            "owner-authorized maintenance source root is stale",
+        ));
+    }
+    let mut mutations = Vec::new();
+    for proposal in &commit.participants {
+        mutations.extend(
+            proposal
+                .mutations
+                .iter()
+                .map(|change| records::DomainMutationRequest {
                     plugin: proposal.plugin.as_str(),
-                    system: "owner-authorized-maintenance",
+                    system: OWNER_AUTHORIZED_MAINTENANCE_SYSTEM,
                     visibility: change.visibility,
                     mutation: &change.mutation,
                     summary: &change.summary,
-                }
-            }));
-        }
-        let (next, _) = records::apply_mutation_bundle_cow(
-            &self.state.current.domain_records,
-            &self.plugins.record_schemas,
-            self.state.scheduler.now,
-            &|entity| runtime_entity_exists(&self.state, entity),
-            mutations,
-        )?;
-        Ok(next)
+                }),
+        );
     }
+    records::apply_mutation_bundle_cow(
+        current,
+        &plugins.record_schemas,
+        now,
+        core_exists,
+        mutations,
+    )
+}
+
+fn validate_verified_commit_authorization(
+    commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
+    current: &PersistentDomainRecordStore,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    validate_verified_commit_authorization_structure(commit, plugins)?;
+    validate_verified_commit_freshness(commit, current)
+}
+
+pub(super) fn validate_verified_commit_authorization_structure(
+    commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    validate_verified_commit_shape(commit)?;
+    if commit.target.version == 0 {
+        return Err(invalid_maintenance(
+            "maintenance target expectation must use a nonzero version",
+        ));
+    }
+    let (target_owner, _) = plugins
+        .record_schemas
+        .get(&commit.target.record.kind)
+        .ok_or_else(|| invalid_maintenance("maintenance target schema has no owner"))?;
+    let mut required = plugins
+        .maintenance_dependency_resolvers
+        .get(&commit.target.record.kind.namespace)
+        .cloned()
+        .unwrap_or_default();
+    required.insert(target_owner.clone());
+    if required.is_empty()
+        || required.len() > MAX_OWNER_AUTHORIZED_PARTICIPANTS
+        || commit.participants.len() != required.len()
+        || !commit
+            .participants
+            .iter()
+            .map(|proposal| &proposal.plugin)
+            .eq(required.iter())
+    {
+        return Err(invalid_maintenance(
+            "owner-authorized maintenance participant set is incomplete or noncanonical",
+        ));
+    }
+    let mutation_count = commit
+        .participants
+        .iter()
+        .try_fold(0_usize, |total, proposal| {
+            total.checked_add(proposal.mutations.len()).ok_or_else(|| {
+                invalid_maintenance("owner-authorized maintenance mutation budget is invalid")
+            })
+        })?;
+    if mutation_count > MAX_OWNER_AUTHORIZED_MUTATIONS {
+        return Err(invalid_maintenance(
+            "owner-authorized maintenance mutation budget is invalid",
+        ));
+    }
+    for proposal in &commit.participants {
+        let descriptor = plugins.descriptors.get(&proposal.plugin).ok_or_else(|| {
+            invalid_maintenance("maintenance participant descriptor is unavailable")
+        })?;
+        let expected_role = if proposal.plugin == *target_owner {
+            OwnerAuthorizedParticipantRole::TargetOwner
+        } else {
+            OwnerAuthorizedParticipantRole::DependentOwner
+        };
+        if !descriptor.owner_authorized_maintenance_participant
+            || descriptor.semantic_hash != proposal.semantic_hash
+            || proposal.role != expected_role
+            || !proposal.accepted
+            || proposal.rejection_reason.is_some()
+            || participant_commitment_from_verified(proposal, &commit.target)?
+                != proposal.proposal_commitment
+        {
+            return Err(invalid_maintenance(
+                "maintenance participant identity, role, or commitment changed",
+            ));
+        }
+        if proposal.expected_records.is_empty()
+            || proposal
+                .expected_records
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || proposal
+                .expected_records
+                .iter()
+                .any(|expected| expected.version == 0)
+        {
+            return Err(invalid_maintenance(
+                "maintenance participant expectations are empty or noncanonical",
+            ));
+        }
+        for change in &proposal.mutations {
+            if !canonical_text(&change.summary) {
+                return Err(invalid_maintenance(
+                    "maintenance mutation summary is not canonical",
+                ));
+            }
+            let owner = plugins
+                .record_schemas
+                .get(&change.mutation.target().kind)
+                .map(|(owner, _)| owner)
+                .ok_or_else(|| {
+                    invalid_maintenance("maintenance mutation target has no schema owner")
+                })?;
+            if owner != &proposal.plugin {
+                return Err(CanwuError::new(
+                    ErrorCode::UndeclaredStateWrite,
+                    "owner-authorized proposal targets another plugin's schema",
+                ));
+            }
+        }
+        if proposal.role == OwnerAuthorizedParticipantRole::TargetOwner
+            && !proposal.mutations.iter().any(|change| {
+                matches!(
+                    &change.mutation,
+                    DomainRecordMutation::Update {
+                        record,
+                        expected_version,
+                    } if record.reference == commit.target.record
+                        && *expected_version == commit.target.version
+                ) || matches!(
+                    &change.mutation,
+                    DomainRecordMutation::Retire { record, expected_version, .. }
+                        if record == &commit.target.record
+                            && *expected_version == commit.target.version
+                ) || matches!(
+                    &change.mutation,
+                    DomainRecordMutation::Delete { record, expected_version }
+                        if record == &commit.target.record
+                            && *expected_version == commit.target.version
+                )
+            })
+        {
+            return Err(invalid_maintenance(
+                "target owner did not supply an exact owner-defined target mutation",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_verified_commit_freshness(
+    commit: &VerifiedOwnerAuthorizedMaintenanceCommit,
+    current: &PersistentDomainRecordStore,
+) -> Result<(), CanwuError> {
+    let target_record = current
+        .get(&commit.target.record)
+        .ok_or_else(|| invalid_maintenance("maintenance target record is unavailable"))?;
+    if target_record.version != commit.target.version || !target_record.is_active() {
+        return Err(invalid_maintenance(
+            "maintenance target expectation is stale or not active",
+        ));
+    }
+    for proposal in &commit.participants {
+        for expected in &proposal.expected_records {
+            if current
+                .get(&expected.record)
+                .is_none_or(|record| record.version != expected.version)
+            {
+                return Err(invalid_maintenance(
+                    "owner-authorized maintenance expectation is stale",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn participant_commitment(

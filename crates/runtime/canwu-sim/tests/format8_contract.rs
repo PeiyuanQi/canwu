@@ -1,17 +1,20 @@
 use canwu_core::{
     DecisionRequestId, DecisionTicketId, DecisionTraceId, DomainRecordKind, DomainRecordRef,
+    DomainRecordVersionRef, DomainRecordVersionSource,
 };
 use canwu_sim::{
-    ArchiveStoreOutcome, DecisionArchiveBlob, DecisionArchiveProvider, DecisionArchiveStore,
-    DecisionArchiveStoreOutcome, DecisionHistoryKey, DecisionHistoryLocation,
+    ArchiveStoreOutcome, BoundaryRequest, DecisionArchiveBlob, DecisionArchiveProvider,
+    DecisionArchiveStore, DecisionArchiveStoreOutcome, DecisionHistoryKey, DecisionHistoryLocation,
     DecisionIngressRequest, DecisionMutation, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordSchema, ErrorCode,
-    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
+    MaintenanceDisposition, OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation,
+    OwnerAuthorizedParticipantDraft, OwnerAuthorizedParticipantProposal,
     OwnerAuthorizedParticipantRole, OwnerAuthorizedRecordExpectation,
     PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadSchema, PersistentDomainRecordStore,
     PreparedStateDelta, Scenario, Simulation, SimulationPlugin, SimulationView, StatePageBlob,
     StatePageProvider, StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore,
-    StateVisibility, prepare_state_delta, state_page_id, verify_state_delta,
+    StateVisibility, SystemCadence, canonical_hash, prepare_state_delta, state_page_id,
+    verify_state_delta,
 };
 use canwu_time::SimTime;
 use std::cell::RefCell;
@@ -881,6 +884,104 @@ fn stale_decision_archive_is_terminally_rejected_without_boundary_rollback() {
     assert!(boundary.maintenance_terminal_root.is_some());
 }
 
+fn assert_owner_authorized_versions(
+    simulation: &Simulation,
+    culture_ref: &DomainRecordRef,
+    culture_version: &DomainRecordVersionRef,
+    law_ref: &DomainRecordRef,
+    law_version: &DomainRecordVersionRef,
+) {
+    assert_eq!(
+        simulation
+            .current_domain_record_version(culture_ref)
+            .expect("current culture version query"),
+        Some(culture_version.clone())
+    );
+    assert_eq!(
+        simulation
+            .current_domain_record_version(law_ref)
+            .expect("current law version query"),
+        Some(law_version.clone())
+    );
+}
+
+fn maintenance_version_from_last_boundary(
+    simulation: &Simulation,
+    reference: &DomainRecordRef,
+) -> DomainRecordVersionRef {
+    let boundary = simulation
+        .boundaries()
+        .last()
+        .expect("retirement boundary evidence");
+    let (change_index, change) = boundary
+        .record_changes
+        .iter()
+        .enumerate()
+        .find(|(_, change)| &change.current.reference == reference)
+        .expect("maintenance record change");
+    DomainRecordVersionRef {
+        record: reference.clone(),
+        version: change.current.version,
+        established_by: DomainRecordVersionSource::BoundaryChange {
+            boundary: boundary.id,
+            change_index: u64::try_from(change_index).expect("bounded change index"),
+        },
+    }
+}
+
+fn owner_authorized_commit_mut<'a>(
+    value: &'a mut serde_json::Value,
+    request_id: &str,
+) -> &'a mut serde_json::Value {
+    value["ingress"]
+        .as_array_mut()
+        .expect("ingress array")
+        .iter_mut()
+        .find_map(|record| {
+            (record["payload"]["type"] == "maintenance"
+                && record["payload"]["request"]["maintenance"] == "owner_authorized"
+                && record["payload"]["request"]["commit"]["request_id"] == request_id)
+                .then_some(&mut record["payload"]["request"]["commit"])
+        })
+        .expect("owner-authorized commit")
+}
+
+fn omit_required_participant_and_rehash(commit: &mut serde_json::Value) -> String {
+    commit["participants"]
+        .as_array_mut()
+        .expect("participant array")
+        .retain(|proposal| proposal["plugin"] == "culture-owner");
+    let format_version =
+        serde_json::from_value::<u32>(commit["format_version"].clone()).expect("format version");
+    let request_id =
+        serde_json::from_value::<String>(commit["request_id"].clone()).expect("request id");
+    let target =
+        serde_json::from_value::<OwnerAuthorizedRecordExpectation>(commit["target"].clone())
+            .expect("target expectation");
+    let requested_at =
+        serde_json::from_value::<SimTime>(commit["requested_at"].clone()).expect("requested time");
+    let source_root = serde_json::from_value::<String>(commit["source_domain_root"].clone())
+        .expect("source root");
+    let participants = serde_json::from_value::<Vec<OwnerAuthorizedParticipantProposal>>(
+        commit["participants"].clone(),
+    )
+    .expect("remaining participants");
+    let forged_token = canonical_hash(
+        "canwu.owner-authorized.maintenance-token.v1",
+        &(
+            format_version,
+            &request_id,
+            &target,
+            requested_at,
+            &source_root,
+            &participants,
+        ),
+    )
+    .expect("rehashed forged token");
+    commit["token"] = serde_json::json!(&forged_token);
+    forged_token
+}
+
 #[test]
 fn owner_authorized_retirement_is_atomic_and_schema_scoped() {
     let (mut simulation, culture, law, culture_ref, law_ref) = owner_authorized_fixture();
@@ -903,8 +1004,48 @@ fn owner_authorized_retirement_is_atomic_and_schema_scoped() {
     assert_eq!(dependency.version, 2);
     assert_eq!(dependency.payload["acknowledged"], serde_json::json!(true));
 
+    let boundary = simulation
+        .boundaries()
+        .last()
+        .expect("retirement boundary evidence");
+    assert_eq!(boundary.record_changes.len(), 2);
+    let culture_version = maintenance_version_from_last_boundary(&simulation, &culture_ref);
+    let law_version = maintenance_version_from_last_boundary(&simulation, &law_ref);
+    assert_owner_authorized_versions(
+        &simulation,
+        &culture_ref,
+        &culture_version,
+        &law_ref,
+        &law_version,
+    );
+
+    let restored = Simulation::from_snapshot_with_plugins(simulation.snapshot(), &[&culture, &law])
+        .expect("maintenance snapshot restores exact version provenance");
+    assert_owner_authorized_versions(
+        &restored,
+        &culture_ref,
+        &culture_version,
+        &law_ref,
+        &law_version,
+    );
+
+    let checkpoint_restored = Simulation::from_checkpoint_journal_with_plugins(
+        simulation
+            .checkpoint_journal()
+            .expect("maintenance checkpoint journal"),
+        &[&culture, &law],
+    )
+    .expect("maintenance checkpoint restores exact version provenance");
+    assert_owner_authorized_versions(
+        &checkpoint_restored,
+        &culture_ref,
+        &culture_version,
+        &law_ref,
+        &law_version,
+    );
+
     let journal = simulation.replay_journal();
-    let replayed = Simulation::replay_from_journal(&[&culture, &law], &journal)
+    let mut replayed = Simulation::replay_from_journal(&[&culture, &law], &journal)
         .expect("owner-authorized maintenance replays exactly");
     assert_eq!(
         replayed
@@ -919,5 +1060,147 @@ fn owner_authorized_retirement_is_atomic_and_schema_scoped() {
     assert_eq!(
         replayed.domain_record(&law_ref),
         simulation.domain_record(&law_ref)
+    );
+    assert_owner_authorized_versions(
+        &replayed,
+        &culture_ref,
+        &culture_version,
+        &law_ref,
+        &law_version,
+    );
+    replayed
+        .settle_boundary(BoundaryRequest::at(replayed.time()).with_cadence(SystemCadence::Daily))
+        .expect("replayed runtime continues after owner-authorized maintenance");
+    assert_owner_authorized_versions(
+        &replayed,
+        &culture_ref,
+        &culture_version,
+        &law_ref,
+        &law_version,
+    );
+}
+
+#[test]
+fn rehashed_owner_maintenance_cannot_omit_a_required_participant() {
+    let (mut simulation, culture, law, culture_ref, law_ref) = owner_authorized_fixture();
+    simulation
+        .schedule_owner_authorized_maintenance(
+            simulation.time(),
+            0,
+            owner_authorized_retirement_draft(&simulation, &culture_ref, &law_ref),
+        )
+        .expect("enqueue owner-authorized retirement");
+    simulation
+        .step_canonical()
+        .expect("settle retirement")
+        .expect("retirement boundary");
+
+    let mut value = serde_json::to_value(simulation.snapshot()).expect("snapshot value");
+    let forged_token = omit_required_participant_and_rehash(owner_authorized_commit_mut(
+        &mut value,
+        "retire-rights-generation-1",
+    ));
+    value["boundaries"][0]["maintenance_changes"][0]["token"] = serde_json::json!(forged_token);
+
+    let tampered = serde_json::from_value(value).expect("tampered snapshot shape");
+    let Err(error) = Simulation::from_snapshot_with_plugins(tampered, &[&culture, &law]) else {
+        panic!("rehashed participant omission must fail closed");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(
+        error.message.contains("participant set is incomplete"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn rehashed_pending_owner_maintenance_cannot_poison_restored_queue() {
+    let (mut simulation, culture, law, culture_ref, law_ref) = owner_authorized_fixture();
+    simulation
+        .schedule_owner_authorized_maintenance(
+            simulation.time(),
+            0,
+            owner_authorized_retirement_draft(&simulation, &culture_ref, &law_ref),
+        )
+        .expect("enqueue pending owner-authorized retirement");
+
+    let mut value = serde_json::to_value(simulation.snapshot()).expect("snapshot value");
+    omit_required_participant_and_rehash(owner_authorized_commit_mut(
+        &mut value,
+        "retire-rights-generation-1",
+    ));
+
+    let tampered = serde_json::from_value(value).expect("tampered pending snapshot shape");
+    let Err(error) = Simulation::from_snapshot_with_plugins(tampered, &[&culture, &law]) else {
+        panic!("rehashed pending participant omission must fail closed");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(
+        error.message.contains("participant set is incomplete"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn rejected_stale_owner_maintenance_is_authorized_and_restores_without_poisoning() {
+    let (mut simulation, culture, law, culture_ref, law_ref) = owner_authorized_fixture();
+    let first = owner_authorized_retirement_draft(&simulation, &culture_ref, &law_ref);
+    let mut stale = owner_authorized_retirement_draft(&simulation, &culture_ref, &law_ref);
+    stale.request_id = "retire-rights-generation-1-stale".to_owned();
+    simulation
+        .schedule_owner_authorized_maintenance(simulation.time(), 1, first)
+        .expect("enqueue first owner-authorized retirement");
+    simulation
+        .schedule_owner_authorized_maintenance(simulation.time(), 0, stale)
+        .expect("enqueue later stale owner-authorized retirement");
+    simulation
+        .step_canonical()
+        .expect("settle competing maintenance")
+        .expect("maintenance boundary");
+    let boundary = simulation
+        .boundaries()
+        .last()
+        .expect("maintenance boundary");
+    assert_eq!(boundary.maintenance_changes.len(), 2);
+    assert_eq!(
+        boundary.maintenance_changes[0].disposition,
+        MaintenanceDisposition::Applied
+    );
+    assert_eq!(
+        boundary.maintenance_changes[1].disposition,
+        MaintenanceDisposition::RejectedStale
+    );
+
+    let snapshot = simulation.snapshot();
+    let mut restored = Simulation::from_snapshot_with_plugins(snapshot.clone(), &[&culture, &law])
+        .expect("legitimate stale maintenance restores");
+    restored
+        .settle_boundary(BoundaryRequest::at(restored.time()).with_cadence(SystemCadence::Daily))
+        .expect("restored runtime continues after legitimate stale maintenance");
+
+    let mut value = serde_json::to_value(snapshot).expect("snapshot value");
+    let forged_token = omit_required_participant_and_rehash(owner_authorized_commit_mut(
+        &mut value,
+        "retire-rights-generation-1-stale",
+    ));
+    let stale_terminal = value["boundaries"][0]["maintenance_changes"]
+        .as_array_mut()
+        .expect("maintenance changes")
+        .iter_mut()
+        .find(|change| change["disposition"] == "rejected_stale")
+        .expect("stale terminal evidence");
+    stale_terminal["token"] = serde_json::json!(forged_token);
+
+    let tampered = serde_json::from_value(value).expect("tampered stale snapshot shape");
+    let Err(error) = Simulation::from_snapshot_with_plugins(tampered, &[&culture, &law]) else {
+        panic!("rehashed stale participant omission must fail closed");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(
+        error.message.contains("participant set is incomplete"),
+        "{}",
+        error.message
     );
 }

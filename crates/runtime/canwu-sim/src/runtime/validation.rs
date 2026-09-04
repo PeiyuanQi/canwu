@@ -30,7 +30,7 @@ use super::{
     boundary_write_stage, canonical_hash, canonical_text, canonicalize_scenario,
     commitment_roots_are_canonical, component_key, compute_boundary_hash,
     domain_record_commit_stage, invalid_snapshot, invalid_snapshot_error, is_canonical_hash,
-    is_domain_record_state, is_expected_command_rejection, manifest, plugins, random,
+    is_domain_record_state, is_expected_command_rejection, maintenance, manifest, plugins, random,
     record_change_affected_entities, records, snapshot_boundary_head_state_hash,
     snapshot_checkpoint_hash, snapshot_command_attempt_preflight_error, snapshot_commitment_roots,
     snapshot_is_at_boundary_head, validate_command_authority, validate_directives,
@@ -2285,7 +2285,14 @@ fn validate_ingress_records(
                                 "owner-authorized maintenance ingress cause is invalid",
                             );
                         }
-                        super::maintenance::validate_verified_commit_shape(commit)?;
+                        super::maintenance::validate_verified_commit_authorization_structure(
+                            commit, plugins,
+                        )
+                        .map_err(|error| {
+                            invalid_snapshot_error(format!(
+                                "owner-authorized maintenance ingress is invalid: {error}"
+                            ))
+                        })?;
                     }
                 }
             }
@@ -3357,22 +3364,68 @@ fn validate_boundary_record_changes(
     plugins: &PluginRegistry,
     values: &mut BTreeMap<DomainRecordRef, DomainRecord>,
 ) -> Result<BoundaryDomainEntityCuts, CanwuError> {
+    let expected_maintenance_changes =
+        expected_owner_authorized_record_changes(record, snapshot, plugins, values)?;
+    if record
+        .record_changes
+        .get(..expected_maintenance_changes.len())
+        != Some(expected_maintenance_changes.as_slice())
+    {
+        return invalid_snapshot(
+            "owner-authorized maintenance record changes disagree with admitted commitments",
+        );
+    }
+
     let mut by_stage = BTreeMap::<DomainRecordCommitStage, Vec<&DomainRecordChange>>::new();
     let mut previous_order = None;
-    for change in &record.record_changes {
-        let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
-        else {
-            return invalid_snapshot("domain-record change references an unknown boundary system");
-        };
-        let Some(write_stage) = boundary_write_stage(contract.phase) else {
-            return invalid_snapshot("domain-record change references a non-writing phase");
-        };
-        let Some(commit_stage) = domain_record_commit_stage(contract.phase, change.visibility)
-        else {
-            return invalid_snapshot("domain-record change has no deterministic commit stage");
+    for (index, change) in record.record_changes.iter().enumerate() {
+        let maintenance_change = change.system == maintenance::OWNER_AUTHORIZED_MAINTENANCE_SYSTEM;
+        let commit_stage = if maintenance_change {
+            if index >= expected_maintenance_changes.len() {
+                return invalid_snapshot(
+                    "boundary contains an owner-authorized record change without an admitted commitment",
+                );
+            }
+            DomainRecordCommitStage::Maintenance
+        } else {
+            let Some(contract) =
+                snapshot_boundary_contract(plugins, &change.plugin, &change.system)
+            else {
+                return invalid_snapshot(
+                    "domain-record change references an unknown boundary system",
+                );
+            };
+            let Some(write_stage) = boundary_write_stage(contract.phase) else {
+                return invalid_snapshot("domain-record change references a non-writing phase");
+            };
+            let Some(commit_stage) = domain_record_commit_stage(contract.phase, change.visibility)
+            else {
+                return invalid_snapshot("domain-record change has no deterministic commit stage");
+            };
+            let reference = &change.current.reference;
+            let state = records::record_state_key(&reference.kind);
+            if !contract.writes.contains(&state)
+                || !boundary_system_due(
+                    contract,
+                    &record.cadences,
+                    boundary_has_event_ingress(record),
+                )
+                || contract.visibility != change.visibility
+                || plugins.state_owners.get(&state) != Some(&change.plugin)
+                || plugins.boundary_writers.get(&(write_stage, state.clone()))
+                    != Some(&(change.plugin.clone(), change.system.clone()))
+                || plugins
+                    .record_schemas
+                    .get(&reference.kind)
+                    .is_none_or(|(owner, _)| owner != &change.plugin)
+            {
+                return invalid_snapshot(
+                    "boundary domain-record change is unauthorized, duplicated, or noncanonical",
+                );
+            }
+            commit_stage
         };
         let reference = &change.current.reference;
-        let state = records::record_state_key(&reference.kind);
         let order = (commit_stage, reference.clone());
         if !canonical_text(&change.summary)
             || previous_order
@@ -3382,20 +3435,6 @@ fn validate_boundary_record_changes(
                 .previous
                 .as_ref()
                 .is_some_and(|previous| previous.reference != *reference)
-            || !contract.writes.contains(&state)
-            || !boundary_system_due(
-                contract,
-                &record.cadences,
-                boundary_has_event_ingress(record),
-            )
-            || contract.visibility != change.visibility
-            || plugins.state_owners.get(&state) != Some(&change.plugin)
-            || plugins.boundary_writers.get(&(write_stage, state.clone()))
-                != Some(&(change.plugin.clone(), change.system.clone()))
-            || plugins
-                .record_schemas
-                .get(&reference.kind)
-                .is_none_or(|(owner, _)| owner != &change.plugin)
         {
             return invalid_snapshot(
                 "boundary domain-record change is unauthorized, duplicated, or noncanonical",
@@ -3448,6 +3487,91 @@ fn validate_boundary_record_changes(
         }
     }
     Ok(cuts)
+}
+
+fn expected_owner_authorized_record_changes(
+    record: &BoundaryRecord,
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    values: &BTreeMap<DomainRecordRef, DomainRecord>,
+) -> Result<Vec<DomainRecordChange>, CanwuError> {
+    let mut current = super::PersistentDomainRecordStore::from_records(values.clone())?;
+    let mut expected_changes = Vec::new();
+    let mut maintenance_change_index = 0_usize;
+    for ingress_id in &record.admitted_ingress {
+        let Some(ingress) = snapshot_ingress_by_id(snapshot, *ingress_id) else {
+            return invalid_snapshot("boundary admits an unknown maintenance ingress record");
+        };
+        let IngressPayload::Maintenance { request } = &ingress.payload else {
+            continue;
+        };
+        let Some(terminal) = record.maintenance_changes.get(maintenance_change_index) else {
+            return invalid_snapshot("maintenance ingress lacks its terminal change record");
+        };
+        maintenance_change_index += 1;
+        let super::MaintenanceIngressRequest::OwnerAuthorized { commit } = request.as_ref() else {
+            continue;
+        };
+        if terminal.kind != "owner_authorized" || terminal.token != commit.token() {
+            return invalid_snapshot(
+                "owner-authorized ingress and terminal change evidence disagree",
+            );
+        }
+        let observed_root = canonical_hash(
+            "canwu.owner-authorized.source-domain-root.v1",
+            current.roots(),
+        )?;
+        if terminal.source_root != observed_root {
+            return invalid_snapshot(
+                "owner-authorized terminal source root disagrees with domain-record history",
+            );
+        }
+        maintenance::validate_verified_commit_authorization_structure(commit, plugins).map_err(
+            |error| {
+                invalid_snapshot_error(format!(
+                    "owner-authorized maintenance commitment is invalid: {error}"
+                ))
+            },
+        )?;
+        match terminal.disposition {
+            super::MaintenanceDisposition::Applied => {
+                let (next, changes) = maintenance::apply_verified_owner_authorized_commit(
+                    commit,
+                    &current,
+                    plugins,
+                    record.at,
+                    &|entity| core_world_entity_exists(&snapshot.world, entity),
+                )
+                .map_err(|error| {
+                    invalid_snapshot_error(format!(
+                        "owner-authorized maintenance commitment is invalid: {error}"
+                    ))
+                })?;
+                let target_root =
+                    canonical_hash("canwu.owner-authorized.source-domain-root.v1", next.roots())?;
+                if terminal.target_root != target_root {
+                    return invalid_snapshot(
+                        "owner-authorized terminal target root disagrees with deterministic replay",
+                    );
+                }
+                current = next;
+                expected_changes.extend(changes);
+            }
+            super::MaintenanceDisposition::RejectedStale => {
+                if commit.source_root() == observed_root || terminal.target_root != observed_root {
+                    return invalid_snapshot(
+                        "owner-authorized stale rejection disagrees with its source root",
+                    );
+                }
+            }
+        }
+    }
+    if maintenance_change_index != record.maintenance_changes.len() {
+        return invalid_snapshot(
+            "boundary contains a terminal maintenance record without admitted ingress",
+        );
+    }
+    Ok(expected_changes)
 }
 
 fn validate_boundary_knowledge_changes(
@@ -3629,20 +3753,37 @@ fn validate_boundary_emissions(
         {
             return invalid_snapshot("boundary emitted event evidence is inconsistent");
         }
-        let Some(contract) =
-            snapshot_boundary_contract(plugins, &emission.plugin, &emission.system)
-        else {
-            return invalid_snapshot("boundary emission references an unknown system");
-        };
-        if !boundary_system_due(
-            contract,
-            &record.cadences,
-            boundary_has_event_ingress(record),
-        ) {
-            return invalid_snapshot("boundary emission source system was not due");
+        let owner_authorized_maintenance =
+            emission.system == maintenance::OWNER_AUTHORIZED_MAINTENANCE_SYSTEM;
+        if owner_authorized_maintenance
+            && !matches!(emission.kind, BoundaryEmissionKind::RecordChange { .. })
+        {
+            return invalid_snapshot(
+                "owner-authorized maintenance may emit only domain-record change evidence",
+            );
         }
+        let contract = if owner_authorized_maintenance {
+            None
+        } else {
+            let Some(contract) =
+                snapshot_boundary_contract(plugins, &emission.plugin, &emission.system)
+            else {
+                return invalid_snapshot("boundary emission references an unknown system");
+            };
+            if !boundary_system_due(
+                contract,
+                &record.cadences,
+                boundary_has_event_ingress(record),
+            ) {
+                return invalid_snapshot("boundary emission source system was not due");
+            }
+            Some(contract)
+        };
         match emission.kind {
             BoundaryEmissionKind::Change { change_index } => {
+                let contract = contract.ok_or_else(|| {
+                    invalid_snapshot_error("boundary change emission lacks a system contract")
+                })?;
                 let Some((plugin, event_type)) = event.kind.plugin_identity() else {
                     return invalid_snapshot("boundary change emitted a non-plugin event");
                 };
@@ -3739,6 +3880,9 @@ fn validate_boundary_emissions(
                 }
             }
             BoundaryEmissionKind::Explicit => {
+                let contract = contract.ok_or_else(|| {
+                    invalid_snapshot_error("explicit boundary emission lacks a system contract")
+                })?;
                 let Some((plugin, event_type)) = event.kind.plugin_identity() else {
                     return invalid_snapshot("explicit boundary emission is not a plugin event");
                 };

@@ -90,6 +90,14 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [历史财政语境](/tutorials/cases/ming-fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/tutorials/cases/ming-fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `（证据种类，外部操作 ID）` 组合最多结算一张凭证；凭证不拥有资源真值。 |
+| [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
+| [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
+| [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStageV1` | 带生效期和出处的勘探、矿藏刻画、准入、开采准备、在产、枯竭或明确未知/不适用状态；不是永恒的矿藏布尔值。 |
+| [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevisionV1` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。 |
+| [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgressVersionV1` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
+| [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
+| [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
+| [价格压力投影](/tutorials/cases/production-economy/) | price-pressure projection | `PricePressureProjection` | 只有存在合格的价格证据和版本化解释规则时才生成的脱离式读取模型；既不形成市场，也不结算交易。 |
 
 ## 证据、随机性与持久化
 

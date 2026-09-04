@@ -1,0 +1,23 @@
+[package]
+name = "canwu-force-supply-reference"
+description = "Replaceable force-supply reference consumer for Canwu resources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+canwu-api.workspace = true
+canwu-economy-reference-content.workspace = true
+canwu-resource.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

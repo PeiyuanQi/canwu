@@ -2340,69 +2340,39 @@ impl Simulation {
                 })?;
             add_identity_evidence_dependencies(&mut dependencies, record, schema)?;
             add_payload_required_continuation_dependencies(&mut dependencies, record, schema)?;
-            let retained = self
+            let version = self
                 .state
-                .evidence
-                .boundaries
-                .iter()
-                .rev()
-                .find_map(|boundary| {
-                    boundary
-                        .record_changes
-                        .iter()
-                        .enumerate()
-                        .find(|(_, change)| {
-                            change.current.reference == record.reference
-                                && change.current.version == record.version
-                        })
-                        .map(|(change_index, _)| {
-                            EvidenceRef::DomainRecordVersion(DomainRecordVersionRef {
-                                record: record.reference.clone(),
-                                version: record.version,
-                                established_by: DomainRecordVersionSource::BoundaryChange {
-                                    boundary: boundary.id,
-                                    change_index: change_index as u64,
-                                },
-                            })
-                        })
-                });
-            let archived = self
-                .state
-                .evidence
-                .archived_evidence_receipts
-                .keys()
-                .filter(|reference| {
-                    matches!(
-                        reference,
-                        EvidenceRef::DomainRecordVersion(version)
-                            if version.record == record.reference && version.version == record.version
+                .metadata
+                .current_domain_record_versions
+                .get(&record.reference)
+                .filter(|version| version.version == record.version)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::ArchiveNotReady,
+                        format!(
+                            "current domain record {} has no exact version provenance",
+                            record.reference
+                        ),
                     )
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            if archived.len() > 1 {
-                return Err(CanwuError::new(
-                    ErrorCode::ArchiveNotReady,
-                    format!(
-                        "current domain record {} has ambiguous archived version provenance",
-                        record.reference
-                    ),
-                ));
-            }
-            if let Some(reference) = retained.or_else(|| archived.into_iter().next()) {
-                promote_dependency(&mut dependencies, reference, identity);
-                continue;
-            }
-            let initial = self.bound_initial_scenario().is_some_and(|scenario| {
+                })?;
+            if !matches!(
+                version.established_by,
+                DomainRecordVersionSource::InitialScenario
+            ) {
+                promote_dependency(
+                    &mut dependencies,
+                    EvidenceRef::DomainRecordVersion(version.clone()),
+                    identity,
+                );
+            } else if !self.bound_initial_scenario().is_some_and(|scenario| {
                 scenario.domain_records.iter().any(|initial| {
                     initial.reference == record.reference && initial.version == record.version
                 })
-            });
-            if !initial {
+            }) {
                 return Err(CanwuError::new(
                     ErrorCode::ArchiveNotReady,
                     format!(
-                        "current domain record {} has no retained, archived, or scenario version provenance",
+                        "current domain record {} has invalid initial-scenario provenance",
                         record.reference
                     ),
                 ));

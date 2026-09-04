@@ -1,6 +1,6 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.9 runtime
+Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.10 runtime
 writes and reads only its current contracts. There is no implicit loader or
 runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.9.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.10.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -25,7 +25,15 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.9 adds the public Random decision policy, random option-weight and
+Version 0.10 adds optional resource, production, reference economy-content,
+force-supply, and runnable economy-reference packages. They are built above
+`canwu-api`; the simulation core gains no production, market, resource, or
+military-doctrine semantics. The release retains format 8. Exact plugin
+descriptors and semantic hashes make a 0.9 save intentionally incompatible
+with a 0.10 run that enables the new packages, and no implicit migration is
+provided.
+
+Version 0.9 added the public Random decision policy, random option-weight and
 draw-evidence fields, a decision-ticket random-operation target, and a
 boundary-generated random resolution directive. These additions change public
 Rust exhaustive matches and struct literals, so they require a pre-1.0 minor

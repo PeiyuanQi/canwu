@@ -56,8 +56,13 @@ external and development dependencies are omitted. The graph opens at 200%; use 
         Technology["canwu-technology"]
         History["canwu-history-research"]
         Fiscal["canwu-fiscal"]
+        Resource["canwu-resource"]
+        Production["canwu-production"]
         MingFiscal["canwu-ming-fiscal"]
+        EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]
+        ForceSupply["canwu-force-supply-reference"]
+        EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
     end
 
@@ -94,12 +99,32 @@ external and development dependencies are omitted. The graph opens at 200%; use 
     History --> Api
     History --> Technology
     Fiscal --> Api
+    Resource --> Api
+    Production --> Api
+    Production --> Resource
+    Production --> Technology
     MingFiscal --> Api
     MingFiscal --> Fiscal
+    EconomyContent --> Api
+    EconomyContent --> Production
+    EconomyContent --> Resource
+    EconomyContent --> Technology
     MingReference --> Api
     MingReference --> Fiscal
     MingReference --> MingFiscal
     MingReference --> ReferenceWorld
+    ForceSupply --> Api
+    ForceSupply --> EconomyContent
+    ForceSupply --> Resource
+    EconomyReference --> Api
+    EconomyReference --> EconomyContent
+    EconomyReference --> ForceSupply
+    EconomyReference --> Production
+    EconomyReference --> ReferenceWorld
+    EconomyReference --> Resource
+    EconomyReference --> Routing
+    EconomyReference --> Technology
+    EconomyReference --> Transport
     ReferenceWorld --> Api
     Debug --> ReferenceWorld
 
@@ -157,8 +182,13 @@ external and development dependencies are omitted. The graph opens at 200%; use 
 | `canwu-technology` | Published evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
+| `canwu-resource` | Conserved resource accounts, protected floors, demand, reservation, allocation, transfer, consumption, loss, and fulfillment extension |
+| `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, production execution, projects, and output settlement extension |
 | `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
+| `canwu-economy-reference-content` | Economy reference content with model cards, citations, coverage declarations, and explicit unknown/not-applicable states |
 | `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
+| `canwu-force-supply-reference` | Replaceable military-supply consumer and requisition-saga reference integration using the public resource API |
+| `canwu-economy-reference` | Runnable integration composing resources, production, transport, force supply, a grain loop, scarcity, and price evidence |
 | `canwu-debug` | Reference client using the public API and reference-world integration |
 
 The published `canwu-culture` culture system SDK sits above
@@ -188,6 +218,16 @@ interception policy, and cross-mechanism evidence. It is also a
 `SimulationPlugin` by execution form, registering authoritative commands,
 canonical ingress, and boundary systems. It depends on `canwu-api` and
 `canwu-information`, with no reverse dependency, so the crate DAG stays acyclic.
+
+Resources and production follow the same ownership boundary:
+`canwu-resource` owns conserved quantities and fulfillment only;
+`canwu-production` consumes resource outcomes and exact technology evidence
+while owning production assets and work-order lifecycles;
+`canwu-force-supply-reference` is a second independent resource consumer; and
+`canwu-economy-reference` composes them with routing, transport, and a seasonal
+grain loop. Scarcity and price pressure remain detached, holder-bound read
+projections. Without executed, quoted, administered, or contracted price
+evidence, the integration does not invent a price.
 
 <MermaidDiagram
   label="Architecture layers from the Canwu kernel to reference content, integrations, and host games"
