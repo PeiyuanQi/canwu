@@ -1,20 +1,125 @@
 use canwu_api::{
-    Canwu, Command, CommandAuthority, CommandEnvelope, CommandRequestId, DecisionAuthority,
-    DecisionControllerBinding, DecisionEvaluation, DecisionIngressRequest, DecisionMutation,
-    DecisionOrigin, DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId,
-    DecisionTicketId, EntityRef, ErrorCode, Issuer, KnowledgeSnapshot, Scenario, SimDuration,
-    SimTime, UtilityProfile, WeightedUtilityPolicy,
+    Canwu, Command, CommandAuthority, CommandEnvelope, CommandRequest, CommandRequestId,
+    DecisionAuthority, DecisionControllerBinding, DecisionEvaluation, DecisionIngressRequest,
+    DecisionMutation, DecisionOrigin, DecisionPolicyIdentity, DecisionPolicyKind,
+    DecisionRequestId, DecisionTicketId, EntityRef, ErrorCode, Issuer, KnowledgeSnapshot, Scenario,
+    SimDuration, SimTime, UtilityProfile, WeightedUtilityPolicy,
 };
 use canwu_society::{
-    AffiliationTarget, AssentBand, AwarenessBand, DispositionBucket, DispositionDistribution,
-    DispositionProfile, InfluenceSource, InstitutionalAlignment, MobilizationBand, ObserverProfile,
-    OrganizationNode, OrganizationRelation, OrganizationalTieBand, PolicyChoice, PolicyDecision,
-    PolicyPressure, PracticeBand, PublicAlignmentBand, SocialInfluenceEdge, SocietyCohort,
+    AffiliationTarget, AssentBand, AwarenessBand, CohortTransferIntent, DispositionBucket,
+    DispositionDistribution, DispositionProfile, InfluenceSource, InstitutionalAlignment,
+    MobilizationBand, ObserverProfile, OrganizationNode, OrganizationRelation,
+    OrganizationalTieBand, PolicyChoice, PolicyDecision, PolicyPressure, PracticeBand,
+    PublicAlignmentBand, SocialInfluenceEdge, SocietyCohort, SocietyCohortExchangeLedgerRecord,
     SocietyPlugin, SocietyState, TransitionRule, TransitionWeights, VisibilityBand,
     distribution_id, from_society_snapshot_json, institutional_policy_ticket, load_society_state,
-    projection_for_viewer, settle_transitions,
+    projection_for_viewer, settle_transitions, society_cohort_exchange_ledger_reference,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
+#[test]
+#[ignore = "cohort-transfer canonical scheduling needs a dedicated daily-boundary harness"]
+fn owner_side_cohort_transfer_is_conservative_idempotent_stale_checked_and_replayable() {
+    let (mut canwu, _) = tutorial_simulation();
+    let ids = Canwu::demo_ids();
+    let intent = CohortTransferIntent {
+        operation_id: "enlistment-1".to_owned(),
+        authority_alignment_id: "council-alignment".to_owned(),
+        source_cohort_id: "market".to_owned(),
+        destination_cohort_id: "village".to_owned(),
+        quantity: 101,
+        expected_source_version: 1,
+        due_time: SimTime::EPOCH,
+    };
+    let envelope = || {
+        CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::Plugin {
+                plugin: "canwu-society".to_owned(),
+                command: "transfer_cohort_population".to_owned(),
+                payload: serde_json::to_value(&intent).expect("transfer intent"),
+            },
+        )
+        .with_authority(CommandAuthority {
+            decision_origin: DecisionOrigin::Actor {
+                actor: ids.commander,
+            },
+            seat_id: None,
+            permission_profile_id: None,
+            command_subject: Some(EntityRef::Government(ids.government)),
+        })
+    };
+    canwu
+        .enqueue_command(
+            SimTime::EPOCH,
+            0,
+            CommandRequest::new(CommandRequestId::new(1), canwu.revision(), envelope()),
+        )
+        .expect("first transfer intent");
+    canwu
+        .enqueue_command(
+            SimTime::EPOCH,
+            1,
+            CommandRequest::new(CommandRequestId::new(2), canwu.revision(), envelope()),
+        )
+        .expect("duplicate transfer intent");
+    canwu
+        .advance_canonical(SimDuration::days(2))
+        .expect("settle admitted transfer");
+    let state = load_society_state(&canwu).expect("transferred society state");
+    assert_eq!(state.cohorts["market"].headcount, 899);
+    assert_eq!(state.cohorts["village"].headcount, 2_101);
+    assert_distribution_conservation(&state);
+    let ledger = canwu
+        .typed_domain_record(&society_cohort_exchange_ledger_reference())
+        .expect("ledger exists")
+        .decode_payload::<SocietyCohortExchangeLedgerRecord>()
+        .expect("ledger payload");
+    assert_eq!(ledger.outcomes["enlistment-1"].quantity, 101);
+    assert_eq!(ledger.outcomes["enlistment-1"].source_record_version, 1);
+    let stale_intent = CohortTransferIntent {
+        operation_id: "stale-1".to_owned(),
+        expected_source_version: 1,
+        ..intent
+    };
+    let stale_envelope = CommandEnvelope::new(
+        Issuer::Actor(ids.commander),
+        Command::Plugin {
+            plugin: "canwu-society".to_owned(),
+            command: "transfer_cohort_population".to_owned(),
+            payload: serde_json::to_value(stale_intent).expect("stale intent"),
+        },
+    )
+    .with_authority(CommandAuthority {
+        decision_origin: DecisionOrigin::Actor {
+            actor: ids.commander,
+        },
+        seat_id: None,
+        permission_profile_id: None,
+        command_subject: Some(EntityRef::Government(ids.government)),
+    });
+    canwu
+        .enqueue_command(
+            canwu.time(),
+            2,
+            CommandRequest::new(CommandRequestId::new(3), canwu.revision(), stale_envelope),
+        )
+        .expect("queue stale transfer");
+    let stale_error = canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect_err("stale transfer must reject");
+    assert!(matches!(
+        stale_error.code,
+        ErrorCode::DomainRecordVersionConflict | ErrorCode::InvalidDecision
+    ));
+    let snapshot = canwu.snapshot();
+    let restored = from_society_snapshot_json(&serde_json::to_string(&snapshot).expect("snapshot"))
+        .expect("restore transfer snapshot");
+    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin], &canwu.replay_journal())
+        .expect("replay transfer history");
+    assert_eq!(restored.snapshot(), snapshot);
+    assert_eq!(replayed.snapshot(), snapshot);
+}
 
 #[test]
 #[allow(clippy::too_many_lines)]

@@ -435,6 +435,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "canwu-military"
+version = "0.10.0"
+dependencies = [
+ "blake3",
+ "canwu-api",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-military-reference"
+version = "0.10.0"
+dependencies = [
+ "canwu-api",
+ "canwu-military",
+ "canwu-military-reference-content",
+ "canwu-reference-world",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "canwu-military-reference-content"
+version = "0.10.0"
+dependencies = [
+ "blake3",
+ "canwu-api",
+ "canwu-military",
+ "serde",
+]
+
+[[package]]
 name = "canwu-ming-fiscal"
 version = "0.10.0"
 dependencies = [

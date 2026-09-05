@@ -1,0 +1,52 @@
+---
+title: Military simulation extension
+description: Connect forces, operations, combat, supply, occupation, and military administration through a replayable, actor-relative domain extension.
+template: doc
+sidebar:
+  label: Military simulation extension
+---
+
+Canwu's military capability is an optional **domain extension**, not a new simulation-core subsystem. `canwu-military` provides military domain records, domain commands, boundary systems, draw evidence, and actor-relative projections through `canwu-api`; `canwu-military-reference-content` provides versioned rules and content; and `canwu-military-reference` provides a replaceable reference integration.
+
+## 13 capabilities
+
+The extension supports one persisted, exactly replayable causal chain:
+
+1. Establish army: create formations, subunits, and lifecycle state.
+2. Assign generals: maintain the command chain, authority, and command delay.
+3. Recruit: connect society candidates with enlistment, training, and equipment.
+4. March: use actor-relative route planning and delegate execution to transport.
+5. Encounter: record contact, visibility, and deterministic arbitration.
+6. Ambush: record concealment, preparation, trigger, and counter-observation.
+7. Tactics and strategy: bind operational plans and choices to `DecisionTicket`.
+8. Battle settlement: settle rounds, casualties, prisoners, retreat, and pursuit in stages.
+9. Behind-enemy operations: support reconnaissance, raids, sabotage, infiltration, extraction, and return.
+10. Supply: submit typed demand and receive reservation, transport, and shortage results.
+11. Occupation control: manage object control, garrison, security, resistance, and governance prerequisites.
+12. Assimilation: advance staged legal, social, and cultural integration signals.
+13. Military administration: record military-government offices, policy, and fiscal/legal procedure.
+
+## Ownership boundaries
+
+The military extension is the sole writer for military force, operation, combat, occupation, and military-knowledge records. The simulation core owns time, canonical ingress, authority, scheduling, atomic commit, persistence, exact replay, and random evidence. Route planning and reachability belong to `canwu-routing`; movement, custody, capacity, and handoff belong to `canwu-transport`; resource accounts, reservations, consumption, and fulfillment belong to `canwu-resource`; population, law, fiscal procedure, information, and knowledge remain owned by their respective extensions. Military submits typed requests and binds exact receipts; it does not mutate another domain's state.
+
+External effects first become provider-owned pending intent, reservation, or saga state. The provider settles them in its own canonical boundary and returns a source-bound acknowledgement through ingress. Queries, command errors, events, and reports must not disclose another actor's military ground truth.
+
+## Synthetic-content disclaimer
+
+The reference content pack's `riverine-preindustrial` and `industrial-front` profiles are explicitly **synthetic**. They exercise different organization, transport, communication, and replenishment assumptions; they are not historical facts, historical force estimates, or source-calibrated data.
+
+## Example command
+
+The host application submits a typed domain command through the public API, such as `OrderMarch`, instead of mutating a force record directly:
+
+```text
+military.submit(OrderMarch {
+  force_id: force_17,
+  destination: node_42,
+  expected_revision: 8,
+  operation_key: "march-17-42"
+})
+```
+
+The command passes authority, revision, idempotency, route-snapshot, and boundary validation. Transport returns a provider receipt, and military state produces projections only from the committed boundary view.

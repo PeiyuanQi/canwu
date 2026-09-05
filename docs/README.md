@@ -39,6 +39,7 @@ current published **social diffusion simulation module**
 - [Legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 - [Legal storage sharding, COW, delta persistence, and cold archive](proposals/legal-storage-sharding-compaction.md)
 - [Legal institutionalization consensus review](proposals/legal-institutionalization-review.md)
+- [Military domain extension design](proposals/military-domain-design.md)
 
 ## Runnable cases, reference content, and starter kits
 

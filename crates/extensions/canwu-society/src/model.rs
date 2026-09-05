@@ -13,6 +13,16 @@ const ROOT_ID: &str = "root";
 
 pub struct SocietyStateRecord;
 
+pub struct SocietyCohortExchangeLedgerRecord;
+
+impl DomainRecordType for SocietyCohortExchangeLedgerRecord {
+    type Payload = SocietyCohortExchangeLedger;
+    type Class = DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "canwu.society";
+    const NAME: &'static str = "cohort-exchange-ledger";
+}
+
 impl DomainRecordType for SocietyStateRecord {
     type Payload = SocietyState;
     type Class = DomainValueKindClass;
@@ -24,6 +34,66 @@ impl DomainRecordType for SocietyStateRecord {
 #[must_use]
 pub fn society_state_reference() -> TypedDomainRecordRef<SocietyStateRecord> {
     TypedDomainRecordRef::new(ROOT_ID)
+}
+
+#[must_use]
+pub fn society_cohort_exchange_ledger_reference()
+-> TypedDomainRecordRef<SocietyCohortExchangeLedgerRecord> {
+    TypedDomainRecordRef::new(ROOT_ID)
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CohortTransferIntent {
+    pub operation_id: String,
+    pub authority_alignment_id: String,
+    pub source_cohort_id: String,
+    pub destination_cohort_id: String,
+    pub quantity: u64,
+    pub expected_source_version: u64,
+    pub due_time: SimTime,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CohortTransferOutcome {
+    pub operation_id: String,
+    pub source_record_version: u64,
+    pub source_cohort_id: String,
+    pub destination_cohort_id: String,
+    pub quantity: u64,
+    pub actor: PersonId,
+    pub authority_alignment_id: String,
+    pub due_time: SimTime,
+    pub completed_at: SimTime,
+    pub result: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SocietyCohortExchangeLedger {
+    pub schema_version: u32,
+    pub outcomes: BTreeMap<String, CohortTransferOutcome>,
+}
+
+impl SocietyCohortExchangeLedger {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// # Errors
+    ///
+    /// Returns an error when the ledger schema or outcome identity is invalid.
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(invalid(
+                "unsupported society cohort exchange ledger version",
+            ));
+        }
+        for (key, outcome) in &self.outcomes {
+            if key != &outcome.operation_id || key.is_empty() || outcome.quantity == 0 {
+                return Err(invalid(
+                    "society cohort exchange ledger contains an invalid outcome",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[must_use]

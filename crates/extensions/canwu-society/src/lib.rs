@@ -14,13 +14,15 @@ mod solver;
 
 pub use decision::{PolicyChoice, institutional_policy_ticket};
 pub use model::{
-    AffiliationTarget, AssentBand, AwarenessBand, DispositionBucket, DispositionDistribution,
-    DispositionProfile, InfluenceSource, InstitutionalAlignment, MobilizationBand,
-    MobilizationCandidate, ObserverProfile, OrganizationNode, OrganizationRelation,
-    OrganizationalTieBand, PolicyDecision, PolicyPressure, PracticeBand, ProjectionEntry,
-    PublicAlignmentBand, SocialInfluenceEdge, SocietyAggregate, SocietyCohort, SocietyProjection,
-    SocietyState, SocietyStateRecord, TransitionRemainder, TransitionRule, TransitionWeights,
-    VisibilityBand, distribution_id, society_state_reference,
+    AffiliationTarget, AssentBand, AwarenessBand, CohortTransferIntent, CohortTransferOutcome,
+    DispositionBucket, DispositionDistribution, DispositionProfile, InfluenceSource,
+    InstitutionalAlignment, MobilizationBand, MobilizationCandidate, ObserverProfile,
+    OrganizationNode, OrganizationRelation, OrganizationalTieBand, PolicyDecision, PolicyPressure,
+    PracticeBand, ProjectionEntry, PublicAlignmentBand, SocialInfluenceEdge, SocietyAggregate,
+    SocietyCohort, SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord,
+    SocietyProjection, SocietyState, SocietyStateRecord, TransitionRemainder, TransitionRule,
+    TransitionWeights, VisibilityBand, distribution_id, society_cohort_exchange_ledger_reference,
+    society_state_reference,
 };
 pub use plugin::{PLUGIN_NAME, SocietyPlugin};
 pub use projection::{from_society_snapshot_json, load_society_state, projection_for_viewer};

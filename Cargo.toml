@@ -21,7 +21,10 @@ members = [
     "crates/reference-content/canwu-ming-fiscal",
     "crates/reference-content/canwu-economy-reference-content",
     "crates/extensions/canwu-law",
+    "crates/extensions/canwu-military",
+    "crates/reference-content/canwu-military-reference-content",
     "crates/integrations/canwu-reference-world",
+    "crates/integrations/canwu-military-reference",
     "crates/integrations/canwu-ming-fiscal-reference",
     "crates/integrations/canwu-force-supply-reference",
     "crates/integrations/canwu-economy-reference",
@@ -61,6 +64,9 @@ canwu-fiscal = { path = "crates/extensions/canwu-fiscal", version = "=0.10.0" }
 canwu-resource = { path = "crates/extensions/canwu-resource", version = "=0.10.0" }
 canwu-production = { path = "crates/extensions/canwu-production", version = "=0.10.0" }
 canwu-law = { path = "crates/extensions/canwu-law", version = "=0.10.0" }
+canwu-military = { path = "crates/extensions/canwu-military", version = "=0.10.0" }
+canwu-military-reference-content = { path = "crates/reference-content/canwu-military-reference-content", version = "=0.10.0" }
+canwu-military-reference = { path = "crates/integrations/canwu-military-reference", version = "=0.10.0" }
 canwu-ming-fiscal = { path = "crates/reference-content/canwu-ming-fiscal", version = "=0.10.0" }
 canwu-economy-reference-content = { path = "crates/reference-content/canwu-economy-reference-content", version = "=0.10.0" }
 canwu-ming-fiscal-reference = { path = "crates/integrations/canwu-ming-fiscal-reference", version = "=0.10.0" }

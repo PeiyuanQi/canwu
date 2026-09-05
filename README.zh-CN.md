@@ -123,6 +123,7 @@ cargo run --locked -p canwu-debug
   产出结算扩展
 - `canwu-economy-reference-content`：以出处、model card 和精确地点/时期/资源/
   工艺覆盖键约束的经济参考内容
+- `canwu-military`：可选的军事模拟扩展，负责军队、行动、战斗、占领、军事知识和军政管理
 - `canwu-force-supply-reference`：可替换的军需资源消费者，用于证明物资履约和
   军事后果属于不同领域
 - `canwu-economy-reference`：可运行的 G1b 粮食纵向切片，以及脱离式 G5 地方

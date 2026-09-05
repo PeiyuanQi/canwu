@@ -137,6 +137,7 @@ viewer` opens the browser trace viewer against the same live trace dump.
   maintenance, repair, and output-settlement extension
 - `canwu-economy-reference-content`: source/model-card-bound economy profiles
   with fail-closed place, period, resource, process, and coverage keys
+- `canwu-military`: optional military domain extension for forces, operations, combat, occupation, military knowledge, and military administration
 - `canwu-force-supply-reference`: replaceable military-supply consumer proving
   that resource fulfillment and force consequences remain separate domains
 - `canwu-economy-reference`: runnable G1b grain loop and detached G5 local
