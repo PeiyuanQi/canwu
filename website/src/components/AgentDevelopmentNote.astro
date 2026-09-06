@@ -8,7 +8,7 @@ const isEnglish = locale === "en";
 
 const copy = isEnglish
   ? {
-      summary: "Recommended: use a coding agent for implementation",
+      summary: "Optional: use a coding agent for implementation",
       intro: "Ask your coding agent to read and use the two official skills before it writes code, then consult this page, the developer guide, and the relevant runnable example.",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",
@@ -18,7 +18,7 @@ const copy = isEnglish
       prompt: "Read canwu-engine-docs and canwu-engine-usage first. Then read the relevant Canwu tutorial, developer guide section, and public example. Implement through canwu-api, explain the invariant before editing, and run the example or focused check when done.",
     }
   : {
-      summary: "推荐：使用 Coding Agent 开发",
+      summary: "可选：使用 Coding Agent 开发",
       intro: "开始写代码前，先让你的 coding agent 读取并使用这两个官方 skill，再查阅本页、开发者指南和相关可运行示例。",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",

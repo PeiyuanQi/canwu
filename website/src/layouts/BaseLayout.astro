@@ -34,14 +34,14 @@ const ui = {
     architecture: "Architecture",
     integrations: "Integrations",
     contribute: "Contribute",
-    download: "Download",
+    download: "Install",
     credits: "Credits",
     issues: "Issues",
     examples: "Examples",
     license: "License",
     menu: "Menu",
     language: "中文",
-    footerLine: "A deterministic historical simulation core written in Rust, embeddable in any client.",
+    footerLine: "A deterministic historical simulation core written in Rust for host applications.",
     footerSub: "Open source · Rust · Windows / macOS / Linux",
   },
   zh: {
@@ -54,14 +54,14 @@ const ui = {
     architecture: "架构",
     integrations: "集成",
     contribute: "参与贡献",
-    download: "下载",
+    download: "安装",
     credits: "鸣谢",
     issues: "议题",
     examples: "示例",
     license: "许可证",
     menu: "菜单",
     language: "EN",
-    footerLine: "用 Rust 构建的确定性历史模拟内核，可嵌入任意客户端。",
+    footerLine: "用 Rust 构建的确定性历史模拟内核，供上层应用接入。",
     footerSub: "开源 · Rust · Windows / macOS / Linux",
   },
 };
@@ -136,7 +136,7 @@ const isCurrent = (href: string) =>
       {variants.map((variant) => (
         <nav data-locale-content={isAuto ? variant.locale : undefined} aria-label={variant.ui.navLabel}>
           <details class="nav-docs">
-            <summary aria-current={documentationItems(variant).some((item) => isCurrent(item.href)) ? "page" : undefined}>
+            <summary>
               {variant.ui.docs}
             </summary>
             <div class="nav-docs-popover">
@@ -158,7 +158,7 @@ const isCurrent = (href: string) =>
           <summary>{variant.ui.menu}</summary>
           <div>
             <details class="mobile-docs-menu">
-              <summary aria-current={documentationItems(variant).some((item) => isCurrent(item.href)) ? "page" : undefined}>
+              <summary>
                 {variant.ui.docs}
               </summary>
               <div>

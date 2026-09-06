@@ -1,6 +1,6 @@
 :root {
   --sl-color-accent-low: #35211b;
-  --sl-color-accent: #d86c4a;
+  --sl-color-accent: #ef8a67;
   --sl-color-accent-high: #ffd5c7;
   --sl-color-white: #f3efe7;
   --sl-color-gray-1: #dfd9ce;
@@ -31,11 +31,12 @@
 
 .site-title {
   font-weight: 760;
-  letter-spacing: -0.025em;
+  letter-spacing: 0;
 }
 
 .hero h1 {
-  letter-spacing: -0.045em;
+  letter-spacing: 0;
+  text-wrap: balance;
 }
 
 .sl-markdown-content a:not(.sl-link-button) {
@@ -145,6 +146,10 @@
   min-width: 0;
 }
 
+.terminology-reference {
+  overflow-x: auto;
+}
+
 .terminology-reference thead,
 .terminology-reference tbody {
   display: table;
@@ -153,7 +158,7 @@
 }
 
 .terminology-reference th {
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .terminology-reference th:nth-child(1),

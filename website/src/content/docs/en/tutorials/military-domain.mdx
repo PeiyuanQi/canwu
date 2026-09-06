@@ -6,7 +6,7 @@ sidebar:
   label: Military simulation extension
 ---
 
-Canwu's military capability is an optional **domain extension**, not a new simulation-core subsystem. `canwu-military` provides military domain records, domain commands, boundary systems, draw evidence, and actor-relative projections through `canwu-api`; `canwu-military-reference-content` provides versioned rules and content; and `canwu-military-reference` provides a replaceable reference integration.
+Canwu's military capability is an optional **domain extension**, not a new simulation-core subsystem. `canwu-military` provides military domain records, domain commands, boundary systems, draw evidence, and actor-relative projections through `canwu-api`; `canwu-military-reference-content` provides versioned rules and content; and `canwu-military-reference` provides a replaceable reference integration. The current starter is a bounded reference implementation; it does not yet provide a complete production movement, routing, or campaign stack.
 
 ## 13 capabilities
 
@@ -15,7 +15,7 @@ The extension supports one persisted, exactly replayable causal chain:
 1. Establish army: create formations, subunits, and lifecycle state.
 2. Assign generals: maintain the command chain, authority, and command delay.
 3. Recruit: connect society candidates with enlistment, training, and equipment.
-4. March: use actor-relative route planning and delegate execution to transport.
+4. March: admit a typed march order and record its deterministic military operation; a host may later compose routing and transport adapters around this boundary.
 5. Encounter: record contact, visibility, and deterministic arbitration.
 6. Ambush: record concealment, preparation, trigger, and counter-observation.
 7. Tactics and strategy: bind operational plans and choices to `DecisionTicket`.
@@ -49,4 +49,12 @@ military.submit(OrderMarch {
 })
 ```
 
-The command passes authority, revision, idempotency, route-snapshot, and boundary validation. Transport returns a provider receipt, and military state produces projections only from the committed boundary view.
+The command passes authority, revision, idempotency, and boundary validation. The current reference plugin records a deterministic route digest and operation outcome; a host that adds routing or transport must provide those provider receipts through its own integration boundary.
+
+Run the current reference starter from the repository root:
+
+```shell
+cargo run -p canwu-military-reference --example military_starter
+```
+
+The command flow above is schematic. See the [runnable starter source](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs) for the complete `CommandEnvelope`, revision guard, and canonical advancement path.

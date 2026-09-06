@@ -6,7 +6,7 @@ sidebar:
   label: 军事模拟扩展
 ---
 
-Canwu 的军事能力属于可选的**模拟领域扩展**（`domain extension`），不是模拟内核的新子系统。`canwu-military` 通过 `canwu-api` 提供军事领域记录、领域命令、边界系统、抽样证据和角色相对投影；`canwu-military-reference-content` 提供版本化规则与内容；`canwu-military-reference` 提供可替换的参考整合包。
+Canwu 的军事能力属于可选的**模拟领域扩展**（`domain extension`），不是模拟内核的新子系统。`canwu-military` 通过 `canwu-api` 提供军事领域记录、领域命令、边界系统、抽样证据和角色相对投影；`canwu-military-reference-content` 提供版本化规则与内容；`canwu-military-reference` 提供可替换的参考整合包。当前 starter 是有边界的参考实现，还不是完整的生产级行军、路由或战役系统。
 
 ## 13 项能力
 
@@ -15,7 +15,7 @@ Canwu 的军事能力属于可选的**模拟领域扩展**（`domain extension`�
 1. 建立军队：创建编制、编组、子单位和生命周期。
 2. 任命将领：维护指挥链、权限和命令延迟。
 3. 招募：连接社会候选人、入伍、训练和装备。
-4. 行军：使用角色相对路线规划，并交给运输扩展执行。
+4. 行军：接纳类型化行军命令，记录确定性的军事行动；上层应用可以在此边界上继续组合路由和运输适配器。
 5. 遭遇：记录接触、可见性和确定性仲裁。
 6. 伏击：记录隐蔽、准备、触发和反侦察。
 7. 战术与战略：通过 `DecisionTicket` 绑定行动计划和选择。
@@ -49,4 +49,12 @@ military.submit(OrderMarch {
 })
 ```
 
-命令会经过权限、版本、幂等性、路线快照和边界验证；运输结果以提供方凭证返回，军事状态只在提交后的边界视图中生成投影。
+命令会经过权限、版本、幂等性和边界验证。当前参考插件记录确定性的路线摘要和行动结果；如果上层应用加入路由或运输，还必须在自己的整合边界中提供提供方凭证。
+
+在仓库根目录运行当前参考 starter：
+
+```shell
+cargo run -p canwu-military-reference --example military_starter
+```
+
+上面的命令流程是示意代码。完整的 `CommandEnvelope`、版本保护和规范化推进流程见[可运行 starter 源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs)。
