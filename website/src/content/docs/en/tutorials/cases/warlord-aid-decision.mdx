@@ -27,7 +27,7 @@ that can safely enter the live simulation:
 - record attempts, scores, and outcomes so restoration and exact replay never
   have to ask the decision maker again.
 
-The scenario does not represent specific historical people. Personality,
+This is a synthetic Beiyang-era-style fixture, not a reconstruction of named people, institutions, or documented events. Personality,
 intelligence sources, and the historical meaning of “worth aiding” remain
 domain concerns. Canwu provides the boundaries among decisions, authority,
 commands, and durable evidence.
@@ -126,8 +126,7 @@ policy.
 
 ### Step three: change the options when new intelligence arrives
 
-Route confirmation is a new authoritative fact, so the application submits an
-option replacement guarded by `expected_version`:
+The host supplies route confirmation as an authored scenario observation in this fixture; it is not linked to historical source evidence. A research application should attach an evidence record before treating it as authoritative. The application submits an option replacement guarded by `expected_version`:
 
 ```rust
 DecisionMutation::ReplaceOptions {

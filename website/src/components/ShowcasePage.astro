@@ -20,13 +20,13 @@ let events = canwu.events();`,
     proof: `let saved = canwu.snapshot_json()?;
 let branch = canwu.fork();
 let journal = canwu.replay_journal();
-let replayed = Canwu::replay_from_journal(scenario, plugins, &journal)?;
+let replayed = Canwu::replay_from_journal(plugins, &journal)?;
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());`,
   },
   {
     id: "agents", number: "03", api: ["viewer_for_actor", "query_knowledge", "enqueue_command", "events", "explain"],
     proof: `let viewer = canwu.viewer_for_actor(actor)?;
-let view = canwu.query_knowledge(&viewer, query)?;
+let view = viewer.query_knowledge(&query)?;
 canwu.enqueue_command(time, priority, request)?;
 let why = canwu.explain(&explanation_request);`,
   },
@@ -50,7 +50,7 @@ const localized = isEnglish
       cases: [
         { kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu in the game process or behind a server boundary while keeping concrete world rules in an integration plugin.", available: ["Deterministic time and frame-independent scheduling", "Canonical command ingress and causal events", "Generic entity and domain-record registries", "Plugin-owned typed state and boundary settlement"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"] },
         { kind: "Research", status: "Fork APIs available", title: "Reproducible scenarios and counterfactual analysis", purpose: "Keep runs independent of notebooks and visualization layers, then compare committed fork outcomes.", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay interfaces", "Causal events and random-draw journals", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Historical model-validation frameworks"] },
-        { kind: "Agents", status: "Canonical loop available", title: "Multi-agent historical environments", purpose: "Give each model an actor-scoped knowledge view and route its typed decisions through the same validated command boundary.", available: ["Viewer identities scoped to represented actors", "Knowledge queries without ground-truth leakage", "Issuer and revision validation", "Causal explanations for stored events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
+        { kind: "Agents", status: "Actor-scoped loop available", title: "Multi-agent historical environments", purpose: "Give each model an actor-scoped knowledge view and route its typed decisions through the same validated command boundary.", available: ["Viewer identities scoped to represented actors", "Knowledge queries without ground-truth leakage", "Issuer and revision validation", "Causal explanations for stored events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
         { kind: "Education", status: "Core APIs available", title: "Classroom and public-history tools", purpose: "Use replayable domain projections beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and generic entity identity", "Domain projections supplied by integrations", "Repeatable interventions through snapshots and forks", "Causal records that support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"] },
       ],
       next: "Start with runnable evidence", nextCopy: "Run the checked-in reference integration first. Then use the architecture document to decide where your domain plugin and client boundaries belong.", run: "View starter source", architecture: "Read integration architecture", source: "Open API source",

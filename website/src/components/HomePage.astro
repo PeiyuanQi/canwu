@@ -5,7 +5,8 @@ interface Props { locale: "zh-CN" | "en"; }
 const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const prefix = isEnglish ? "/en" : "";
-const installCommand = "cargo add --git https://github.com/PeiyuanQi/canwu --branch main canwu-api canwu-reference-world";
+const installCommand = `[dependencies]
+canwu-api = "=0.10.0"`;
 const releaseUrl = "https://github.com/PeiyuanQi/canwu/releases";
 
 const rustExample = `use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
@@ -40,24 +41,25 @@ const cliExample = `git clone https://github.com/PeiyuanQi/canwu
 cd canwu
 cargo run -p canwu-reference-world --example starter`;
 
-const outputExample = `army_location=3 checkpoint=a65aafbbf99a6c66f79f35f0c0af14686ca50ba5931406f74a16d72960b07a90`;
+const outputExample = `army_location=3 checkpoint=7364865368761c398cf4934a0e9c0ab98f312380fc869e39be40d61b195a1794`;
 
-const agentFlow = `viewer_for_actor(actor)
-  → query_knowledge(query)
-  → enqueue_command(request)
-  → events() → explain(event)`;
+const agentFlow = `let viewer = canwu.viewer_for_actor(actor)?;
+let knowledge = viewer.query_knowledge(&query)?;
+canwu.enqueue_command(time, priority, request)?;
+canwu.advance_canonical(duration)?;
+canwu.events() → canwu.explain(&request);`;
 
 const c = isEnglish
   ? {
-      title: "Canwu Engine — Deterministic historical simulation core",
-      description: "An agent-ready, deterministic Rust core for historical, social, and strategic simulations across regions and eras.",
-      status: "open source · agent-ready · actively developed",
+      title: "Canwu Engine — Replayable historical simulations in Rust",
+      description: "A deterministic Rust core for replayable historical, social, and strategic simulations with validated commands and actor-scoped knowledge.",
+      status: "open source · 0.10.0 · pre-1.0",
       name: "Canwu Engine", nativeName: "参伍引擎",
-      summary: "An agent-native, deterministic Rust core for historical simulation.",
-      intro: "Advance historical, social, and strategic worlds through commands, causal events, actor knowledge, and snapshots. Agents are first-class clients; choose your own renderer, interface, and content stack across regions and eras.",
+      summary: "Build replayable historical simulations without giving every client the whole world.",
+      intro: "Canwu advances historical, social, and strategic worlds through validated commands, causal events, actor-scoped knowledge, and verifiable snapshots. Your game, research tool, or agent system owns the renderer, interface, and period-specific content.",
       getStarted: "Run the example", repository: "View source", docs: "Read the architecture",
-      installLabel: "Install", installTitle: "Add Canwu to your Rust project", installIntro: "Use canwu-api's public API and choose a domain integration such as canwu-reference-world from the main branch. Rust 1.88 or newer is required.", installCommandLabel: "One-line install", release: "View releases",
-      facts: [["Replay", "Exact continuation from a recorded environment"], ["Knowledge", "Scoped to each actor"], ["Rendering", "Bring your own client"], ["Agents", "Typed command API"]],
+      installLabel: "Add the API", installTitle: "Use the supported 0.10.0 release", installIntro: "Rust 1.88 or newer is required. Add the published canwu-api crate to a host application; the reference-world package remains a runnable source integration in this repository.", installCommandLabel: "Cargo dependency", release: "View releases",
+      facts: [["Replay", "Exact reconstruction from a recorded environment"], ["Knowledge", "Scoped to an authorized holder"], ["Rendering", "Bring your own client"], ["Agents", "Typed command API"]],
       example: "Excerpt from the real example", source: "Open the complete starter.rs",
       featuresLabel: "Why Canwu", featuresTitle: "One runtime, replaceable domain models", featuresIntro: "Canwu owns generic simulation truth and exposes a narrow public boundary. Integrations own concrete models, while games, research tools, and agents choose their renderer and interface.",
       features: [
@@ -65,38 +67,38 @@ const c = isEnglish
         ["knowledge", "Knowledge belongs to actors", "Ground truth and actor knowledge stay separate. Observations retain source, confidence, and information age while authoritative state remains inside the runtime."],
         ["boundary", "Renderer-independent public API", "External clients change the world through validated commands and read detached snapshots, events, or actor-scoped observations."],
       ],
-      scopeLabel: "Scope", scopeTitle: "Across dynasties, regions, and renderers", scopeCopy: "The engine core stays generic. Scenario data and plugins define institutions, geography, population, trade, conflict, and other period-specific systems. The roadmap spans multiple regions and eras, from antiquity through the late twentieth century.",
+      scopeLabel: "Scope", scopeTitle: "Across periods, regions, and renderers", scopeCopy: "The engine core stays generic. Scenario data and plugins define institutions, geography, population, trade, conflict, and other period-specific systems. The repository includes reference slices for fiscal history, technology, routing, information, and social diffusion; hosts supply the content and presentation.",
       quickLabel: "Five-minute proof", quickTitle: "Run the checked-in reference integration", quickIntro: "The example registers the reference-world plugin, submits a typed movement command, then proves save, load, fork, and exact replay produce the same checkpoint.",
-      clone: "Clone and run", output: "Full example output", quickTutorial: "Open the step-by-step tutorial",
-      statusTitle: "Current capabilities", statusCopy: "The core simulation workflow, canonical ingress, atomic settlement, validated persistence, exact replay, and committed performance evidence are available today. Public APIs mature through real integrations, with migration guidance accompanying contract changes.",
+      clone: "Clone and run", output: "Current starter output", quickTutorial: "Open the step-by-step tutorial",
+      statusTitle: "Current capabilities", statusCopy: "The 0.10.0 pre-1.0 line has implemented and tested slices for canonical ingress, atomic settlement, validated persistence, exact replay, actor-relative reads, and reproducible performance evidence. Read the conformance notes before treating partial areas as production-complete.",
       availableTitle: "Available now", availableItems: ["Change domain state through validated engine or plugin commands", "Advance time, run scheduled work, and record causal events in a fixed order", "Give each actor a different knowledge view, including delayed information", "Save snapshots, create incremental checkpoint journals, seal completed live evidence into caller-owned segments, and replay records exactly", "Inspect committed elapsed-time, allocation, snapshot-size, and growth benchmarks"],
-      evolvingTitle: "Roadmap", evolvingItems: ["Stable public API and compatibility guidance", "C, Python, TypeScript, and network interfaces", "Content-addressed archive adapters and indexed historical lookup", "Official renderer adapters and complete runnable scenarios"],
+      evolvingTitle: "Still evolving", evolvingItems: ["Broader language and network interfaces", "Content-addressed archive adapters and indexed historical lookup", "More complete cross-domain runnable scenarios", "Production-ready client and renderer integrations"],
       platforms: "CI covers Windows, macOS, and Linux.",
       architectureLabel: "Architecture", architectureTitle: "A narrow boundary around mutable state", architectureIntro: "Applications work through validated commands and canonical ingress. Reads return detached snapshots or observations scoped to an actor, keeping live mutation inside the authoritative runtime.",
       apps: "Clients", appItems: ["Rust game client", "Research tool", "Autonomous agent", "Debug client", "Planned bindings"],
       publicApi: "canwu-api", publicDetails: "commands · entity registry · events · snapshots · replay",
       sim: "canwu-sim", simDetails: "private mutable runtime · scheduling · plugins · settlement",
-      foundation: "Foundation crates", foundationDetails: "core · time · event · knowledge · decision", architectureLink: "Read the architecture →",
+      foundation: "Foundation and model crates", foundationDetails: "core · time · event · knowledge · decision", architectureLink: "Read the architecture →",
       archNotes: ["Command / query / event boundary", "Transactional mutation", "Ordered deterministic collections", "Actor-relative semantic reads", "Explicit plugin identities and contracts"],
-      cratesLabel: "Workspace crates", cratesTitle: "Each crate owns one core responsibility",
+      cratesLabel: "Starter foundations", cratesTitle: "The core crates used by the reference starter",
       crates: [["canwu-core", "Typed IDs, deterministic random utilities, schema metadata"], ["canwu-time", "Historical timestamps and checked durations"], ["canwu-event", "Stored events and causal relationships"], ["canwu-knowledge", "Actor knowledge, confidence, source, and age"], ["canwu-sim", "Private simulation state, scheduling, and plugins"], ["canwu-api", "Public engine API"], ["canwu-reference-world", "Optional world model, plugin, projection, and starter"], ["canwu-debug", "Reference client using the public API and reference integration"]],
       agentLabel: "Agent-ready engine", agentTitle: "Agents participate through the same canonical boundary", agentCopy: "Canwu scopes knowledge to a viewer, accepts validated command requests, records causal events, and explains outcomes. Each domain integration defines its own typed commands and projections.", agentFlowLabel: "Canonical agent loop",
-      agentMethods: ["viewer_for_actor", "query_knowledge", "enqueue_command", "advance_canonical", "events", "explain", "snapshot_json", "replay_from_journal"],
+      agentMethods: ["viewer_for_actor(actor)", "viewer.query_knowledge(query)", "enqueue_command(...) ", "advance_canonical(...)", "events()", "explain(request)", "snapshot_json()", "replay_from_journal(...)"],
       usesLabel: "Integration patterns", usesTitle: "Choose a domain and client; keep one runtime contract", uses: [["Grand strategy games", "Embed authoritative simulation beneath any map or renderer."], ["Historical research", "Run repeatable scenarios, alternative realities, and inspectable comparisons."], ["Agent environments", "Give multiple actors distinct knowledge, authority, and typed domain commands."], ["Education and public history", "Build timelines, maps, exhibits, and classroom tools on replayable state."]], allUses: "Compare integration patterns →",
       projectLabel: "Participate", projectTitle: "Help build the deterministic simulation stack", projectCopy: "Start with the architecture and contribution guide, then propose a focused improvement to the public API, documentation, tests, or reference scenarios.",
       licenseTitle: "Open-source license", licenseCopy: "Canwu is licensed under Apache License 2.0. Commercial and proprietary use, modification, and redistribution are royalty-free; distributed copies preserve applicable license and notice material.",
       projectLinks: [["Architecture", "/en/architecture/"], ["API examples", "https://github.com/PeiyuanQi/canwu/tree/main/crates/api/canwu-api/examples"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "/LICENSE"]],
     }
   : {
-      title: "参伍引擎 — 确定性历史模拟内核",
+      title: "参伍引擎 — 用 Rust 构建可重放的历史模拟",
       description: "面向智能体接入，用于跨地区、跨时代历史、社会与策略模拟的确定性 Rust 内核。",
-      status: "开源 · 智能体可接入 · 持续演进",
+      status: "开源 · 0.10.0 · 1.0 前",
       name: "参伍引擎", nativeName: "Canwu Engine",
-      summary: "支持智能体与可替换领域整合的确定性 Rust 历史模拟内核。",
-      intro: "参伍通过命令、因果事件、角色知识与快照推进历史、社会和策略模拟。渲染器、交互界面与内容系统由客户端自行选择；核心面向跨地区、跨时代场景。",
+      summary: "构建可重放的历史模拟，同时避免让每个客户端看到整个世界。",
+      intro: "参伍通过经验证命令、因果事件、角色相对知识和可验证快照推进历史、社会与策略世界。游戏、研究工具或智能体系统自行负责渲染器、界面与特定时代内容。",
       getStarted: "运行示例", repository: "查看源码", docs: "阅读架构",
-      installLabel: "下载安装", installTitle: "一行命令接入 Canwu", installIntro: "从 main 分支接入 canwu-api 对外 API，并按场景选择 canwu-reference-world 等领域整合包；需要 Rust 1.88 或更高版本。", installCommandLabel: "一行安装", release: "查看发布版本",
-      facts: [["重放", "同一记录环境可精确继续"], ["知识", "限定到具体角色"], ["渲染", "由客户端选择"], ["智能体", "类型化命令 API"]],
+      installLabel: "接入对外 API", installTitle: "使用 0.10.0 正式版本", installIntro: "需要 Rust 1.88 或更新版本。上层应用添加已发布的 canwu-api；reference-world 是仓库中的可运行参考整合，而不是必须安装的引擎基础层。", installCommandLabel: "Cargo 依赖", release: "查看发布版本",
+      facts: [["重放", "从记录环境精确重建"], ["知识", "限定到获授权持有人"], ["渲染", "由客户端选择"], ["智能体", "类型化命令 API"]],
       example: "真实示例代码摘录", source: "打开完整 starter.rs",
       featuresLabel: "为什么选择参伍", featuresTitle: "一套运行时，可替换的领域模型", featuresIntro: "参伍维护通用模拟真值，并通过窄而明确的对外边界提供能力。整合包拥有具体模型，游戏、研究工具与智能体自由选择渲染器与界面。",
       features: [
@@ -104,23 +106,23 @@ const c = isEnglish
         ["knowledge", "知识属于具体角色", "世界真值与角色所知分开保存。观察结果记录来源、可信度与信息时效，权威状态保留在运行时内部。"],
         ["boundary", "跨渲染器对外 API", "外部客户端通过经验证命令改变世界，并通过快照、事件或角色相对视图读取状态。"],
       ],
-      scopeLabel: "时空范围", scopeTitle: "跨朝代、跨地区、跨渲染器", scopeCopy: "引擎核心保持通用；制度、地理、人口、贸易、冲突等特定时代规则由场景数据与插件定义。路线图覆盖多个地区与时代，从古代世界延伸到二十世纪末。",
+      scopeLabel: "时空范围", scopeTitle: "跨时代、跨地区、跨渲染器", scopeCopy: "引擎核心保持通用；制度、地理、人口、贸易、冲突等特定时代规则由场景数据与插件定义。仓库已经提供财政史、技术、路由、信息与社会传播等参考切片；历史内容与表现层由上层应用提供。",
       quickLabel: "五分钟验证", quickTitle: "运行仓库中的参考整合示例", quickIntro: "该示例注册 reference-world 插件，提交类型化移动命令，并验证保存、加载、派生分支与精确重放产生相同检查点。",
-      clone: "克隆并运行", output: "完整示例输出", quickTutorial: "查看分步教程",
-      statusTitle: "当前能力", statusCopy: "核心模拟流程、规范化输入、原子结算、持久化验证、精确重放与可复现性能证据均已具备。对外 API 通过真实集成持续成熟，契约调整同时提供迁移说明。",
+      clone: "克隆并运行", output: "当前 starter 输出", quickTutorial: "查看分步教程",
+      statusTitle: "当前能力", statusCopy: "0.10.0 的 1.0 前版本已经实现并测试规范化输入、原子结算、持久化验证、精确重放、角色相对读取与可复现性能证据的部分切片。把尚未完成的领域当作生产就绪能力前，请先阅读契约符合性说明。",
       availableTitle: "现有功能", availableItems: ["通过经验证的引擎或插件命令修改领域状态", "按固定顺序推进时间、运行计划任务并记录事件因果", "让不同角色获得不同知识视图，并保留信息延迟", "保存快照、创建增量检查点日志、把已完成的实时证据封存为调用方持有的分段，并精确重放记录", "查看已提交的耗时、分配、快照大小与增长基准"],
-      evolvingTitle: "路线图", evolvingItems: ["稳定的对外 API 与兼容指引", "C、Python、TypeScript 和网络接口", "内容寻址归档适配器与索引化历史查询", "官方渲染适配器与完整可运行场景"],
+      evolvingTitle: "仍在演进", evolvingItems: ["更广泛的语言与网络接口", "内容寻址归档适配器与索引化历史查询", "更完整的跨领域可运行场景", "面向生产的客户端与渲染器整合"],
       platforms: "持续集成覆盖 Windows、macOS 与 Linux。",
       architectureLabel: "架构", architectureTitle: "用窄边界保护可变状态", architectureIntro: "应用通过经验证命令与规范化输入工作。读取返回独立快照或限定到具体角色的观察结果，实时变更集中在权威运行时内部。",
       apps: "客户端", appItems: ["Rust 游戏客户端", "研究工具", "自主智能体", "调试客户端", "规划中的语言绑定"],
       publicApi: "canwu-api", publicDetails: "命令 · 实体注册表 · 事件 · 快照 · 重放",
       sim: "canwu-sim", simDetails: "私有可变运行时 · 调度 · 插件 · 结算",
-      foundation: "基础 crate", foundationDetails: "core · time · event · knowledge · decision", architectureLink: "阅读架构文档 →",
+      foundation: "基础与模型 crate", foundationDetails: "core · time · event · knowledge · decision", architectureLink: "阅读架构文档 →",
       archNotes: ["命令 / 查询 / 事件边界", "事务式状态变更", "有序且确定的数据集合", "角色视角语义读取", "明确的插件身份与契约"],
-      cratesLabel: "工作区 crate", cratesTitle: "每个 crate 只承担一类核心职责",
+      cratesLabel: "Starter 基础", cratesTitle: "参考 starter 使用的核心 crate",
       crates: [["canwu-core", "类型化 ID、确定性随机工具与模式元数据"], ["canwu-time", "历史时间戳与经过检查的时长"], ["canwu-event", "存储事件与因果关系"], ["canwu-knowledge", "角色知识、可信度、来源与时效"], ["canwu-sim", "私有模拟状态、调度与插件"], ["canwu-api", "对外 API"], ["canwu-reference-world", "可选世界模型、插件、投影与起步示例"], ["canwu-debug", "同时使用对外 API 与参考整合的客户端"]],
       agentLabel: "智能体可接入引擎", agentTitle: "智能体通过同一规范边界参与模拟", agentCopy: "参伍把知识限定到观察者，接收经验证命令，记录因果事件并解释结果。每个领域整合自行定义类型化命令与投影。", agentFlowLabel: "规范智能体循环",
-      agentMethods: ["viewer_for_actor", "query_knowledge", "enqueue_command", "advance_canonical", "events", "explain", "snapshot_json", "replay_from_journal"],
+      agentMethods: ["viewer_for_actor(actor)", "viewer.query_knowledge(query)", "enqueue_command(...) ", "advance_canonical(...)", "events()", "explain(request)", "snapshot_json()", "replay_from_journal(...)"],
       usesLabel: "集成模式", usesTitle: "选择领域与客户端，共用运行时契约", uses: [["大战略游戏", "在任意地图或渲染器之下嵌入权威模拟。"], ["历史研究", "运行可重复场景、平行现实与可检查比较。"], ["智能体环境", "为多个行动者提供不同知识、权限与类型化领域命令。"], ["教育与公共史", "在可重放状态之上构建时间线、地图、展览与课堂工具。"]], allUses: "比较集成模式 →",
       projectLabel: "参与项目", projectTitle: "一起完善确定性模拟基础设施", projectCopy: "从架构说明与贡献指南开始，再针对对外 API、文档、测试与参考场景提出范围明确的改进。",
       licenseTitle: "开源许可证", licenseCopy: "Canwu 按照 Apache License 2.0 发布。商业或专有使用、修改和再分发均为免版税；分发副本保留适用的许可证与声明材料。",
@@ -153,7 +155,7 @@ const c = isEnglish
 
   <section class="tech-section page-width"><header class="section-heading"><p>{c.cratesLabel}</p><h2>{c.cratesTitle}</h2></header><div class="crate-grid">{c.crates.map(([name, copy]) => <article><code>{name}</code><p>{copy}</p></article>)}</div></section>
 
-  <section class="tech-section page-width agent-api"><div><header class="section-heading"><p>{c.agentLabel}</p><h2>{c.agentTitle}</h2><span>{c.agentCopy}</span></header><div class="method-list">{c.agentMethods.map((method) => <code>{method}()</code>)}</div></div><div class="code-panel"><div class="code-title"><span>{c.agentFlowLabel}</span><code>actor-scoped</code></div><pre><code>{agentFlow}</code></pre></div></section>
+  <section class="tech-section page-width agent-api"><div><header class="section-heading"><p>{c.agentLabel}</p><h2>{c.agentTitle}</h2><span>{c.agentCopy}</span></header><div class="method-list">{c.agentMethods.map((method) => <code>{method}</code>)}</div></div><div class="code-panel"><div class="code-title"><span>{c.agentFlowLabel}</span><code>actor-scoped</code></div><pre><code>{agentFlow}</code></pre></div></section>
 
   <section class="tech-section page-width"><header class="section-heading inline"><div><p>{c.usesLabel}</p><h2>{c.usesTitle}</h2></div><a href={`${prefix}/showcase/`}>{c.allUses}</a></header><div class="use-grid">{c.uses.map(([title, copy]) => <article><h3>{title}</h3><p>{copy}</p></article>)}</div></section>
 

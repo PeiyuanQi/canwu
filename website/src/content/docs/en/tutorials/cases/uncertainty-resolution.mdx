@@ -18,7 +18,7 @@ uncertainty first.
 
 ## Configure one ticket contract for Random or LLM
 
-A law's “pass / fail” outcome can first be modeled as an ordinary ticket. With a
+A law's “pass / fail” outcome can first be modeled as an ordinary ticket. The 25/75 values below are illustrative authored weights, not historical probability estimates. With a
 Random controller, a boundary system declares a stream, draws for the exact
 ticket version, and supplies weights:
 
@@ -43,7 +43,7 @@ let sample = view.random_sample_for_operation(
 ```
 
 Place `sample` and `weights` in
-`BoundaryDirective::ResolveDecisionRandomly`. The kernel validates stream
+`BoundaryDirective::ResolveDecisionRandomly`. The simulation core validates stream
 ownership, operation target, weight sum, and current controller, then generates
 ordinary decision ingress for the next eligible boundary. The draw record and
 `DecisionTrace.random` cross-reference each other; a source-boundary failure
