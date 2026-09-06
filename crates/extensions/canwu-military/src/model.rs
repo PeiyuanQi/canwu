@@ -267,7 +267,18 @@ pub struct ForceState {
     pub transport_capacity: u32,
     pub active_operation: Option<OperationId>,
     pub active_order: Option<MilitaryOperationKey>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepared_ambush: Option<AmbushPreparation>,
     pub status: ForceStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AmbushPreparation {
+    pub node: MilitaryNodeId,
+    pub tactic: String,
+    pub concealment_per_mille: u16,
+    pub prepared_at: SimTime,
+    pub expires_at: Option<SimTime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -312,6 +323,8 @@ pub struct OperationState {
     pub owner: EntityRef,
     pub objective: String,
     pub forces: Vec<ForceId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opposing_force: Option<ForceId>,
     pub phase: OperationPhase,
     pub from: MilitaryNodeId,
     pub destination: MilitaryNodeId,
@@ -494,6 +507,8 @@ pub struct MilitaryLedger {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MilitaryOutcome {
     pub operation: MilitaryOperationKey,
+    #[serde(default)]
+    pub input_digest: String,
     pub disposition: OutcomeDisposition,
     pub record: String,
     pub message: String,
@@ -622,6 +637,16 @@ impl ForceState {
         {
             return Err(invalid("force strength accounting is inconsistent"));
         }
+        let subunit_strength = self
+            .subunits
+            .values()
+            .map(|unit| u64::from(unit.strength))
+            .sum::<u64>();
+        if subunit_strength != u64::from(self.actual_strength) {
+            return Err(invalid(
+                "subunit strength does not reconcile with force strength",
+            ));
+        }
         Ok(())
     }
 }
@@ -659,6 +684,8 @@ pub enum MilitaryCommand {
         owner: EntityRef,
         location: MilitaryNodeId,
         authorized_strength: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initial_strength: Option<u32>,
         branch: String,
         commander: Option<PersonId>,
     },
@@ -691,6 +718,8 @@ pub enum MilitaryCommand {
         destination: MilitaryNodeId,
         objective: String,
         tactic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opposing_force: Option<ForceId>,
         expected_force_revision: u64,
     },
     PlanOperation {
@@ -702,6 +731,13 @@ pub enum MilitaryCommand {
         from: MilitaryNodeId,
         destination: MilitaryNodeId,
         tactic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        opposing_force: Option<ForceId>,
+    },
+    AdvanceTick {
+        operation: Option<OperationId>,
+        occupation: Option<OccupationId>,
+        operation_key: MilitaryOperationKey,
     },
     Recon {
         operation: MilitaryOperationKey,

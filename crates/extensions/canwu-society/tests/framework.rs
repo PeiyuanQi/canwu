@@ -18,7 +18,7 @@ use canwu_society::{
 use std::collections::{BTreeMap, BTreeSet};
 
 #[test]
-#[ignore = "cohort-transfer canonical scheduling needs a dedicated daily-boundary harness"]
+#[allow(clippy::too_many_lines)]
 fn owner_side_cohort_transfer_is_conservative_idempotent_stale_checked_and_replayable() {
     let (mut canwu, _) = tutorial_simulation();
     let ids = Canwu::demo_ids();
@@ -66,6 +66,12 @@ fn owner_side_cohort_transfer_is_conservative_idempotent_stale_checked_and_repla
     canwu
         .advance_canonical(SimDuration::days(2))
         .expect("settle admitted transfer");
+    canwu
+        .settle_boundary(
+            canwu_api::BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(2))
+                .with_cadence(canwu_api::SystemCadence::Daily),
+        )
+        .expect("settle daily transfer consumer");
     let state = load_society_state(&canwu).expect("transferred society state");
     assert_eq!(state.cohorts["market"].headcount, 899);
     assert_eq!(state.cohorts["village"].headcount, 2_101);

@@ -17,5 +17,8 @@ canwu-api.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+[dev-dependencies]
+canwu-reference-world.workspace = true
+
 [lints]
 workspace = true

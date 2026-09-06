@@ -17,11 +17,13 @@ pub use model::{
     AffiliationTarget, AssentBand, AwarenessBand, CohortTransferIntent, CohortTransferOutcome,
     DispositionBucket, DispositionDistribution, DispositionProfile, InfluenceSource,
     InstitutionalAlignment, MobilizationBand, MobilizationCandidate, ObserverProfile,
-    OrganizationNode, OrganizationRelation, OrganizationalTieBand, PolicyDecision, PolicyPressure,
-    PracticeBand, ProjectionEntry, PublicAlignmentBand, SocialInfluenceEdge, SocietyAggregate,
-    SocietyCohort, SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord,
-    SocietyProjection, SocietyState, SocietyStateRecord, TransitionRemainder, TransitionRule,
-    TransitionWeights, VisibilityBand, distribution_id, society_cohort_exchange_ledger_reference,
+    OrganizationNode, OrganizationRelation, OrganizationalTieBand, PendingCohortTransfer,
+    PolicyDecision, PolicyPressure, PracticeBand, ProjectionEntry, PublicAlignmentBand,
+    SocialInfluenceEdge, SocietyAggregate, SocietyCohort, SocietyCohortExchangeLedger,
+    SocietyCohortExchangeLedgerRecord, SocietyCohortTransferPending,
+    SocietyCohortTransferPendingRecord, SocietyProjection, SocietyState, SocietyStateRecord,
+    TransitionRemainder, TransitionRule, TransitionWeights, VisibilityBand, distribution_id,
+    society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
     society_state_reference,
 };
 pub use plugin::{PLUGIN_NAME, SocietyPlugin};

@@ -1,18 +1,20 @@
 use crate::model::{
     CohortTransferIntent, CohortTransferOutcome, DispositionBucket, InstitutionalAlignment,
-    PolicyDecision, SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord, SocietyState,
-    SocietyStateRecord, core_reference_schemas, invalid, society_cohort_exchange_ledger_reference,
+    PendingCohortTransfer, PolicyDecision, SocietyCohortExchangeLedger,
+    SocietyCohortExchangeLedgerRecord, SocietyCohortTransferPending,
+    SocietyCohortTransferPendingRecord, SocietyState, SocietyStateRecord, core_reference_schemas,
+    invalid, society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
     society_state_reference,
 };
 use crate::settle_transitions;
 use crate::solver::{compute_aggregates, compute_mobilization_candidates, compute_projections};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    CanwuError, DecisionOrigin, DomainRecord, DomainRecordDraft, DomainRecordMutation,
-    DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass, IngressPayload, Issuer,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
-    PluginIngressDescriptor, PluginRegistrar, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective,
+    CanwuError, Command, CommandId, DecisionOrigin, DomainRecord, DomainRecordDraft,
+    DomainRecordMutation, DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass,
+    IngressPayload, Issuer, PayloadProperty, PayloadSchema, PayloadValueType,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimulationPlugin,
+    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -45,6 +47,9 @@ impl SimulationPlugin for SocietyPlugin {
             DomainRecordSchema::for_record::<SocietyCohortExchangeLedgerRecord>();
         ledger_schema.payload_schema = exchange_ledger_payload_schema();
         registrar.register_record_schema(ledger_schema)?;
+        registrar.register_record_schema(DomainRecordSchema::for_record::<
+            SocietyCohortTransferPendingRecord,
+        >())?;
 
         registrar.register_command(
             PluginActionDescriptor {
@@ -57,6 +62,21 @@ impl SimulationPlugin for SocietyPlugin {
             },
             transfer_cohort_population,
         )?;
+
+        let mut transfer_intake = BoundarySystemContract::new(
+            "intake-cohort-transfers",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        transfer_intake.reads = vec![
+            society_state_key(),
+            pending_transfer_key(),
+            StateKey::core_ingress(),
+            StateKey::core_commands(),
+        ];
+        transfer_intake.writes = vec![pending_transfer_key()];
+        transfer_intake.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(transfer_intake, intake_cohort_transfer)?;
 
         registrar.register_ingress(PluginIngressDescriptor {
             name: COHORT_TRANSFER_INGRESS.to_owned(),
@@ -84,6 +104,7 @@ impl SimulationPlugin for SocietyPlugin {
             society_state_key(),
             policy_decision_key(),
             cohort_exchange_ledger_key(),
+            pending_transfer_key(),
             StateKey::core_ingress(),
         ];
         transition.writes = vec![society_state_key(), cohort_exchange_ledger_key()];
@@ -202,27 +223,36 @@ fn transfer_cohort_population(
         after: canwu_api::SimDuration::days(1),
         packet_type: COHORT_TRANSFER_INGRESS.to_owned(),
         priority: 0,
-        payload: serde_json::json!({"intent": intent, "actor": actor.get(), "source_record_version": record.version}),
+        payload: serde_json::json!({"intent": intent, "actor": actor.get(), "source_record_version": record.version, "command_id": context.command_id.get()}),
         affected: vec![alignment.institution.clone()],
     }])
 }
 
-#[allow(dead_code, clippy::too_many_lines)]
-fn apply_cohort_transfer_ingress(
+const COHORT_TRANSFER_INGRESS: &str = "cohort-transfer";
+
+fn pending_transfer_key() -> StateKey {
+    StateKey::new(
+        SocietyCohortTransferPendingRecord::NAMESPACE,
+        SocietyCohortTransferPendingRecord::NAME,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn intake_cohort_transfer(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some((record, mut state)) = load_state(view)? else {
+    let Some((_, state)) = load_state(view)? else {
         return Ok(BoundaryProposal::default());
     };
-    let (mut ledger, ledger_record) = load_ledger(view)?;
+    let pending_ref = society_cohort_transfer_pending_reference();
+    let (mut pending, pending_record) = load_pending(view)?;
     let mut changed = false;
-    let mut directives = Vec::new();
     for ingress_id in &context.admitted_ingress {
         let Some(ingress) = view.ingress(*ingress_id)? else {
             continue;
         };
-        let canwu_api::IngressPayload::Plugin {
+        let IngressPayload::Plugin {
             plugin,
             packet_type,
             payload,
@@ -234,22 +264,60 @@ fn apply_cohort_transfer_ingress(
         if plugin != PLUGIN_NAME || packet_type != COHORT_TRANSFER_INGRESS {
             continue;
         }
-        let admitted: Value = payload.clone();
-        let intent: CohortTransferIntent = serde_json::from_value(admitted["intent"].clone())
+        let intent: CohortTransferIntent = serde_json::from_value(payload["intent"].clone())
             .map_err(|e| invalid(format!("admitted cohort transfer malformed: {e}")))?;
+        validate_transfer_intent(&intent)?;
         let actor = canwu_api::PersonId::new(
-            admitted["actor"]
+            payload["actor"]
                 .as_u64()
                 .ok_or_else(|| invalid("admitted transfer actor missing"))?,
         );
-        let source_version = admitted["source_record_version"]
-            .as_u64()
-            .ok_or_else(|| invalid("admitted source version missing"))?;
-        if let Some(existing) = ledger.outcomes.get(&intent.operation_id) {
-            if existing.source_record_version == source_version
-                && existing.quantity == intent.quantity
-                && existing.source_cohort_id == intent.source_cohort_id
-                && existing.destination_cohort_id == intent.destination_cohort_id
+        let command_id = CommandId::new(
+            payload["command_id"]
+                .as_u64()
+                .ok_or_else(|| invalid("admitted transfer command evidence missing"))?,
+        );
+        let command = view.command(command_id)?.ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "cohort transfer command evidence is unavailable",
+            )
+        })?;
+        let Command::Plugin {
+            plugin: command_plugin,
+            command: command_name,
+            payload: command_payload,
+        } = &command.envelope.command
+        else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "cohort transfer evidence is not a society command",
+            ));
+        };
+        if command_plugin != PLUGIN_NAME
+            || command_name != "transfer_cohort_population"
+            || command_payload["operation_id"] != serde_json::json!(intent.operation_id)
+            || command
+                .envelope
+                .authority
+                .as_ref()
+                .and_then(|a| a.command_subject.as_ref())
+                != state
+                    .institutional_alignments
+                    .get(&intent.authority_alignment_id)
+                    .map(|a| &a.institution)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "cohort transfer ingress is not backed by the original authorized command",
+            ));
+        }
+        let source_digest = cohort_transfer_digest(&state, &intent)?;
+        if let Some(existing) = pending.transfers.get(&intent.operation_id) {
+            if existing.intent == intent
+                && existing.actor == actor
+                && existing.command_id == command_id.get()
+                && existing.source_digest == source_digest
             {
                 continue;
             }
@@ -258,26 +326,13 @@ fn apply_cohort_transfer_ingress(
                 "operation id was reused with different transfer data",
             ));
         }
-        if record.version < source_version {
-            return Err(CanwuError::new(
-                ErrorCode::DomainRecordVersionConflict,
-                "admitted cohort transfer source version is stale",
-            ));
-        }
-        apply_cohort_transfer(&mut state, &intent)?;
-        ledger.outcomes.insert(
+        pending.transfers.insert(
             intent.operation_id.clone(),
-            CohortTransferOutcome {
-                operation_id: intent.operation_id.clone(),
-                source_record_version: source_version,
-                source_cohort_id: intent.source_cohort_id.clone(),
-                destination_cohort_id: intent.destination_cohort_id.clone(),
-                quantity: intent.quantity,
+            PendingCohortTransfer {
+                intent,
                 actor,
-                authority_alignment_id: intent.authority_alignment_id.clone(),
-                due_time: intent.due_time,
-                completed_at: context.at,
-                result: "completed".to_owned(),
+                command_id: command_id.get(),
+                source_digest,
             },
         );
         changed = true;
@@ -285,42 +340,61 @@ fn apply_cohort_transfer_ingress(
     if !changed {
         return Ok(BoundaryProposal::default());
     }
-    state.canonicalize()?;
-    state.validate()?;
-    ledger.validate()?;
-    directives.push(BoundaryDirective::MutateRecord {
-        mutation: DomainRecordMutation::Update {
-            record: state.record_draft()?,
+    let mutation = match pending_record {
+        Some(record) => DomainRecordMutation::Update {
+            record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
             expected_version: record.version,
         },
-        summary: "Applied society cohort transfer".to_owned(),
-    });
-    let mutation = match ledger_record {
-        Some(r) => DomainRecordMutation::Update {
-            record: DomainRecordDraft::from_typed(
-                society_cohort_exchange_ledger_reference(),
-                &ledger,
-            )?,
-            expected_version: r.version,
-        },
         None => DomainRecordMutation::Create {
-            record: DomainRecordDraft::from_typed(
-                society_cohort_exchange_ledger_reference(),
-                &ledger,
-            )?,
+            record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
         },
     };
-    directives.push(BoundaryDirective::MutateRecord {
-        mutation,
-        summary: "Recorded society cohort transfer outcome".to_owned(),
-    });
     Ok(BoundaryProposal {
-        directives,
+        directives: vec![BoundaryDirective::MutateRecord {
+            mutation,
+            summary: "Persist admitted society cohort transfer".to_owned(),
+        }],
         ..BoundaryProposal::default()
     })
 }
 
-const COHORT_TRANSFER_INGRESS: &str = "cohort-transfer";
+fn load_pending(
+    view: &SimulationView<'_>,
+) -> Result<(SocietyCohortTransferPending, Option<DomainRecord>), CanwuError> {
+    let Some(record) = view.typed_domain_record(&society_cohort_transfer_pending_reference())?
+    else {
+        return Ok((
+            SocietyCohortTransferPending {
+                schema_version: 1,
+                transfers: BTreeMap::new(),
+            },
+            None,
+        ));
+    };
+    let pending = record.decode_payload::<SocietyCohortTransferPendingRecord>()?;
+    if pending.schema_version != 1 {
+        return Err(invalid("unsupported pending cohort transfer schema"));
+    }
+    Ok((pending, Some(record.clone())))
+}
+
+fn cohort_transfer_digest(
+    state: &SocietyState,
+    intent: &CohortTransferIntent,
+) -> Result<String, CanwuError> {
+    let source = state
+        .cohorts
+        .get(&intent.source_cohort_id)
+        .ok_or_else(|| invalid("unknown source cohort"))?;
+    let destination = state
+        .cohorts
+        .get(&intent.destination_cohort_id)
+        .ok_or_else(|| invalid("unknown destination cohort"))?;
+    canwu_api::canonical_hash(
+        "canwu.society.cohort-transfer-source.v1",
+        &(source, destination, &state.distributions),
+    )
+}
 
 fn validate_transfer_intent(intent: &CohortTransferIntent) -> Result<(), CanwuError> {
     if intent.operation_id.is_empty()
@@ -601,6 +675,7 @@ fn validate_policy_authority(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn settle_social_transitions(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -610,73 +685,62 @@ fn settle_social_transitions(
     };
     let before = state.clone();
     let (mut ledger, ledger_record) = load_ledger(view)?;
+    let (mut pending, pending_record) = load_pending(view)?;
     let mut transfer_changed = false;
-    for ingress_id in &context.admitted_ingress {
-        let Some(ingress) = view.ingress(*ingress_id)? else {
-            continue;
-        };
-        let IngressPayload::Plugin {
-            plugin,
-            packet_type,
-            payload,
-            ..
-        } = &ingress.payload
-        else {
-            continue;
-        };
-        if plugin != PLUGIN_NAME || packet_type != COHORT_TRANSFER_INGRESS {
+    let operation_ids: Vec<_> = pending.transfers.keys().cloned().collect();
+    for operation_id in operation_ids {
+        let transfer = pending
+            .transfers
+            .get(&operation_id)
+            .cloned()
+            .ok_or_else(|| invalid("pending cohort transfer disappeared"))?;
+        if transfer.intent.due_time > context.at {
             continue;
         }
-        let intent: CohortTransferIntent = serde_json::from_value(payload["intent"].clone())
-            .map_err(|error| invalid(format!("admitted cohort transfer malformed: {error}")))?;
-        let source_version = payload["source_record_version"]
-            .as_u64()
-            .ok_or_else(|| invalid("admitted source version missing"))?;
-        if let Some(existing) = ledger.outcomes.get(&intent.operation_id) {
-            if existing.source_record_version == source_version
-                && existing.quantity == intent.quantity
-            {
-                continue;
-            }
-            return Err(CanwuError::new(
-                ErrorCode::IdempotencyConflict,
-                "operation id was reused with different transfer data",
-            ));
-        }
-        if record.version < source_version {
+        let digest = cohort_transfer_digest(&state, &transfer.intent)?;
+        if digest != transfer.source_digest {
             return Err(CanwuError::new(
                 ErrorCode::DomainRecordVersionConflict,
-                "admitted cohort transfer source version is stale",
+                "pending cohort transfer source digest is stale",
             ));
         }
-        apply_cohort_transfer(&mut state, &intent)?;
+        if ledger.outcomes.contains_key(&operation_id) {
+            pending.transfers.remove(&operation_id);
+            continue;
+        }
+        apply_cohort_transfer(&mut state, &transfer.intent)?;
         ledger.outcomes.insert(
-            intent.operation_id.clone(),
+            operation_id.clone(),
             CohortTransferOutcome {
-                operation_id: intent.operation_id.clone(),
-                source_record_version: source_version,
-                source_cohort_id: intent.source_cohort_id.clone(),
-                destination_cohort_id: intent.destination_cohort_id.clone(),
-                quantity: intent.quantity,
-                actor: canwu_api::PersonId::new(
-                    payload["actor"]
-                        .as_u64()
-                        .ok_or_else(|| invalid("admitted transfer actor missing"))?,
-                ),
-                authority_alignment_id: intent.authority_alignment_id.clone(),
-                due_time: intent.due_time,
+                operation_id: operation_id.clone(),
+                source_record_version: transfer.intent.expected_source_version,
+                source_cohort_id: transfer.intent.source_cohort_id.clone(),
+                destination_cohort_id: transfer.intent.destination_cohort_id.clone(),
+                quantity: transfer.intent.quantity,
+                actor: transfer.actor,
+                authority_alignment_id: transfer.intent.authority_alignment_id.clone(),
+                due_time: transfer.intent.due_time,
                 completed_at: context.at,
                 result: "completed".to_owned(),
             },
         );
+        pending.transfers.remove(&operation_id);
         transfer_changed = true;
     }
     apply_pending_policies(view, &mut state)?;
     settle_transitions(&mut state, context.at)?;
-    if state == before && !transfer_changed {
+    if state == before
+        && !transfer_changed
+        && pending_record.is_some()
+        && pending.transfers == load_pending(view)?.0.transfers
+    {
         return Ok(BoundaryProposal::default());
     }
-    let mut proposal = update_state(&record, state, "Settled aggregate social transitions")?;
+    let mut proposal = if state == before {
+        BoundaryProposal::default()
+    } else {
+        update_state(&record, state, "Settled aggregate social transitions")?
+    };
     if transfer_changed {
         ledger.validate()?;
         let mutation = match ledger_record {
@@ -699,6 +763,7 @@ fn settle_social_transitions(
             summary: "Recorded society cohort transfer outcome".to_owned(),
         });
     }
+
     Ok(proposal)
 }
 

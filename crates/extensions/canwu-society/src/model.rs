@@ -14,6 +14,7 @@ const ROOT_ID: &str = "root";
 pub struct SocietyStateRecord;
 
 pub struct SocietyCohortExchangeLedgerRecord;
+pub struct SocietyCohortTransferPendingRecord;
 
 impl DomainRecordType for SocietyCohortExchangeLedgerRecord {
     type Payload = SocietyCohortExchangeLedger;
@@ -23,12 +24,39 @@ impl DomainRecordType for SocietyCohortExchangeLedgerRecord {
     const NAME: &'static str = "cohort-exchange-ledger";
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PendingCohortTransfer {
+    pub intent: CohortTransferIntent,
+    pub actor: PersonId,
+    pub command_id: u64,
+    pub source_digest: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SocietyCohortTransferPending {
+    pub schema_version: u32,
+    pub transfers: BTreeMap<String, PendingCohortTransfer>,
+}
+
+impl DomainRecordType for SocietyCohortTransferPendingRecord {
+    type Payload = SocietyCohortTransferPending;
+    type Class = DomainValueKindClass;
+    const NAMESPACE: &'static str = "canwu.society";
+    const NAME: &'static str = "cohort-transfer-pending";
+}
+
 impl DomainRecordType for SocietyStateRecord {
     type Payload = SocietyState;
     type Class = DomainValueKindClass;
 
     const NAMESPACE: &'static str = "canwu.society";
     const NAME: &'static str = "state";
+}
+
+#[must_use]
+pub fn society_cohort_transfer_pending_reference()
+-> TypedDomainRecordRef<SocietyCohortTransferPendingRecord> {
+    TypedDomainRecordRef::new(ROOT_ID)
 }
 
 #[must_use]
