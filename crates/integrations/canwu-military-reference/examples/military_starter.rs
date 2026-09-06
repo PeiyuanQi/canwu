@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             location: node.clone(),
             authorized_strength: 2_500,
             initial_strength: Some(2_000),
-            branch: "infantry".to_owned(),
+            branch: "levy_infantry".to_owned(),
             commander: Some(ids.commander),
         },
     )?;
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?,
             force: force.clone(),
             subunit: canwu_military::SubunitId::new("canwu.military:subunit:reserve")?,
-            branch: "infantry".to_owned(),
+            branch: "levy_infantry".to_owned(),
             quantity: 400,
             expected_force_revision: 1,
             society_operation: Some("canwu.society:transfer:field-1".to_owned()),
@@ -81,7 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "canwu.military:node:{}",
                 ids.eastern_territory
             ))?,
-            tactic: "screen-and-advance".to_owned(),
+            tactic: "crossing_assault".to_owned(),
             opposing_force: None,
         },
     )?;
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ))?,
             authorized_strength: 100,
             initial_strength: None,
-            branch: "infantry".to_owned(),
+            branch: "levy_infantry".to_owned(),
             commander: Some(ids.observer),
         },
     )?;
@@ -118,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ids.eastern_territory
             ))?,
             objective: "secure the eastern route".to_owned(),
-            tactic: "screen-and-advance".to_owned(),
+            tactic: "crossing_assault".to_owned(),
             opposing_force: Some(ForceId::new("canwu.military:force:defender")?),
             expected_force_revision: 2,
         },

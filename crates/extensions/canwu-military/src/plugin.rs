@@ -263,6 +263,36 @@ fn validate_command(
         validate_per_mille(*collaboration_per_mille, "collaboration")?;
         validate_per_mille(*extraction_burden_per_mille, "extraction burden")?;
     }
+    if let Some(catalog_record) = view.typed_domain_record(&catalog_reference())? {
+        let catalog = catalog_record.decode_payload::<MilitaryCatalogRecord>()?;
+        let branch = match command {
+            MilitaryCommand::CreateForce { branch, .. }
+            | MilitaryCommand::Recruit { branch, .. } => Some(branch),
+            _ => None,
+        };
+        if let Some(branch) = branch {
+            if !catalog.ruleset.branch_profiles.contains_key(branch) {
+                return Err(err(
+                    ErrorCode::InvalidPayload,
+                    "military branch is not present in the active ruleset",
+                ));
+            }
+        }
+        let tactic = match command {
+            MilitaryCommand::OrderMarch { tactic, .. }
+            | MilitaryCommand::PlanOperation { tactic, .. }
+            | MilitaryCommand::PrepareAmbush { tactic, .. } => Some(tactic),
+            _ => None,
+        };
+        if let Some(tactic) = tactic {
+            if !catalog.ruleset.tactics.contains_key(tactic) {
+                return Err(err(
+                    ErrorCode::InvalidPayload,
+                    "military tactic is not present in the active ruleset",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -469,6 +499,7 @@ fn apply_command(
                 key: command_operation(command).clone(),
                 owner: force_owner(view, force)?,
                 objective: objective.clone(),
+                kind: "march".to_owned(),
                 forces: vec![force.clone()],
                 opposing_force: opposing_force.clone(),
                 phase: OperationPhase::Moving,
@@ -515,6 +546,7 @@ fn apply_command(
                 key: command_operation(command).clone(),
                 owner: owner.clone(),
                 objective: objective.clone(),
+                kind: "strategic".to_owned(),
                 forces: vec![force.clone()],
                 opposing_force: opposing_force.clone(),
                 phase: OperationPhase::Planned,
@@ -625,6 +657,7 @@ fn apply_command(
                     provider_plugin: provider_plugin.clone(),
                     kind: "administration".to_owned(),
                     expected_source_version: *expected_provider_version,
+                    occupation: Some(occupation.clone()),
                     state: PendingEffectState::Pending,
                 },
             );
@@ -662,7 +695,56 @@ fn apply_command(
                 Ok(())
             })?;
         }
-        MilitaryCommand::Recon { .. } | MilitaryCommand::ExecuteSpecialOperation { .. } => {
+        MilitaryCommand::ExecuteSpecialOperation {
+            force,
+            operation_id,
+            objective,
+            target,
+            ..
+        } => {
+            update_force(view, out, force, at, |state| {
+                state.active_operation = Some(operation_id.clone());
+                state.status = ForceStatus::Moving;
+                Ok(())
+            })?;
+            let operation = OperationState {
+                meta: MilitaryRecordMeta::new(1, at, &())?,
+                id: operation_id.clone(),
+                key: command_operation(command).clone(),
+                owner: force_owner(view, force)?,
+                objective: objective.clone(),
+                kind: "special".to_owned(),
+                forces: vec![force.clone()],
+                opposing_force: None,
+                phase: OperationPhase::Moving,
+                from: force_location(view, force)?,
+                destination: target.clone(),
+                route_digest: digest(&(force, target))?,
+                terrain: String::new(),
+                weather: String::new(),
+                started_at: at,
+                due_at: at
+                    .checked_add(SimDuration::days(1))
+                    .ok_or_else(|| err(ErrorCode::InvalidDuration, "special operation overflow"))?,
+                command_delay_minutes: 0,
+                supply_line: None,
+                exit_condition: "extract".to_owned(),
+            };
+            create(
+                out,
+                operation_reference(operation_id),
+                &operation,
+                "Start special operation",
+            )?;
+            schedule_tick(
+                out,
+                SimDuration::days(1),
+                Some(operation_id.clone()),
+                None,
+                command_operation(command).clone(),
+            )?;
+        }
+        MilitaryCommand::Recon { .. } => {
             let _ = view.random_range_for_operation(
                 &military_random_stream(),
                 EvidenceRef::Boundary(context.boundary_id),
@@ -963,6 +1045,13 @@ fn apply_ack(
             "provider outcome identity does not match pending effect",
         ));
     }
+    if outcome.digest.is_empty() || outcome.provider_record.is_empty() {
+        return Err(err(
+            ErrorCode::InvalidPayload,
+            "provider outcome lacks an authenticated digest or record",
+        ));
+    }
+    let pending_occupation = pending.occupation.clone();
     state.pending.remove(&outcome.operation);
     state.outcomes.insert(
         outcome.operation.clone(),
@@ -987,7 +1076,56 @@ fn apply_ack(
         reference,
         &state,
         "Acknowledge military provider outcome",
-    )
+    )?;
+    if view
+        .typed_domain_record(&provider_outcome_reference(&outcome.id))?
+        .is_none()
+    {
+        create(
+            out,
+            provider_outcome_reference(&outcome.id),
+            outcome,
+            "Retain exact provider outcome",
+        )?;
+    }
+    if let Some(occupation_id) = pending_occupation {
+        let occupation_ref = occupation_reference(&occupation_id);
+        if let Some(occupation_record) = view.typed_domain_record(&occupation_ref)? {
+            let mut occupation = occupation_record.decode_payload::<OccupationStateRecord>()?;
+            match outcome.disposition {
+                ProviderDisposition::Rejected | ProviderDisposition::Compensating => {
+                    occupation.integration = IntegrationStage::MilitaryControl;
+                    occupation.legitimacy_per_mille =
+                        occupation.legitimacy_per_mille.saturating_sub(50);
+                }
+                ProviderDisposition::Accepted | ProviderDisposition::Committed => {
+                    occupation.integration = match occupation.integration {
+                        IntegrationStage::MilitaryControl => {
+                            IntegrationStage::AdministrativeTakeover
+                        }
+                        IntegrationStage::AdministrativeTakeover => {
+                            IntegrationStage::LegalRecognition
+                        }
+                        current_stage => current_stage,
+                    };
+                    occupation
+                        .pending_provider_outcomes
+                        .insert(outcome.id.clone());
+                }
+            }
+            occupation.meta.revision = occupation_record.version + 1;
+            occupation.meta.established_at = context.at;
+            occupation.meta.semantic_digest = digest(&occupation)?;
+            upsert(
+                view,
+                out,
+                occupation_ref,
+                &occupation,
+                "Apply provider result to occupation",
+            )?;
+        }
+    }
+    Ok(())
 }
 fn schedule_tick(
     out: &mut Vec<BoundaryDirective>,
@@ -1075,7 +1213,39 @@ fn advance_operation(
             force.fatigue_per_mille = force.fatigue_per_mille.saturating_add(20).min(1_000);
             force.morale_per_mille = force.morale_per_mille.saturating_sub(10);
         }
-        if operation.phase != OperationPhase::Failed {
+        if operation.phase != OperationPhase::Failed && operation.kind == "special" {
+            let success = view.random_range_for_operation(
+                &military_random_stream(),
+                context
+                    .admitted_ingress
+                    .first()
+                    .copied()
+                    .map(EvidenceRef::Ingress)
+                    .unwrap_or(EvidenceRef::Boundary(context.boundary_id)),
+                "special-operation",
+                operation.key.as_str(),
+                RandomOperationTarget::CanonicalKey(operation.id.to_string()),
+                0,
+                1_000,
+                "special-operation-success",
+            )? >= 650;
+            force.location = if success {
+                operation.from.clone()
+            } else {
+                operation.destination.clone()
+            };
+            force.status = if success {
+                ForceStatus::Ready
+            } else {
+                ForceStatus::Routing
+            };
+            force.active_operation = None;
+            operation.phase = if success {
+                OperationPhase::Completed
+            } else {
+                OperationPhase::Failed
+            };
+        } else if operation.phase != OperationPhase::Failed {
             force.location = operation.destination.clone();
             force.status = if operation.opposing_force.is_some() {
                 ForceStatus::Engaged
@@ -1083,12 +1253,33 @@ fn advance_operation(
                 ForceStatus::Ready
             };
         }
-        if operation.phase != OperationPhase::Failed && operation.opposing_force.is_none() {
+        if operation.phase != OperationPhase::Failed
+            && operation.kind != "special"
+            && operation.opposing_force.is_none()
+        {
             force.active_operation = None;
             operation.phase = OperationPhase::Completed;
         } else if operation.phase != OperationPhase::Failed {
             operation.phase = OperationPhase::Engaged;
             let defender = operation.opposing_force.clone().expect("checked above");
+            let defender_record = view
+                .typed_domain_record(&force_reference(&defender))?
+                .ok_or_else(|| {
+                    err(
+                        ErrorCode::DomainRecordNotFound,
+                        "opposing force is unavailable",
+                    )
+                })?;
+            let mut defender_state = defender_record.decode_payload::<ForceStateRecord>()?;
+            let ambush_ready = defender_state
+                .prepared_ambush
+                .as_ref()
+                .is_some_and(|ambush| {
+                    ambush.node == operation.destination
+                        && ambush
+                            .expires_at
+                            .is_none_or(|expires| expires >= context.at)
+                });
             let combat_id = CombatId::new(format!("canwu.military:combat:{}", operation.id))?;
             if view
                 .typed_domain_record(&combat_reference(&combat_id))?
@@ -1100,15 +1291,15 @@ fn advance_operation(
                     operation: operation.id.clone(),
                     location: operation.destination.clone(),
                     attacker: force_id.clone(),
-                    defender,
+                    defender: defender.clone(),
                     stage: CombatStage::Contact,
                     round: 0,
                     attacker_tactic: "screen-and-advance".to_owned(),
                     defender_tactic: "hold".to_owned(),
                     attacker_preparation_per_mille: 500,
-                    defender_preparation_per_mille: 500,
+                    defender_preparation_per_mille: if ambush_ready { 850 } else { 500 },
                     attacker_visible_strength: force.actual_strength,
-                    defender_visible_strength: 0,
+                    defender_visible_strength: defender_state.actual_strength,
                     attacker_casualties: 0,
                     defender_casualties: 0,
                     attacker_prisoners: 0,
@@ -1123,6 +1314,19 @@ fn advance_operation(
                     &combat,
                     "Create military contact",
                 )?;
+                if ambush_ready {
+                    defender_state.prepared_ambush = None;
+                    defender_state.meta.revision = defender_record.version + 1;
+                    defender_state.meta.established_at = context.at;
+                    defender_state.meta.semantic_digest = digest(&defender_state)?;
+                    upsert(
+                        view,
+                        out,
+                        force_reference(&defender),
+                        &defender_state,
+                        "Consume prepared ambush",
+                    )?;
+                }
             }
             schedule_tick(
                 out,

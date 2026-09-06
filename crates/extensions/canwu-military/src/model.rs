@@ -322,6 +322,8 @@ pub struct OperationState {
     pub key: MilitaryOperationKey,
     pub owner: EntityRef,
     pub objective: String,
+    #[serde(default)]
+    pub kind: String,
     pub forces: Vec<ForceId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opposing_force: Option<ForceId>,
@@ -527,6 +529,8 @@ pub struct PendingMilitaryEffect {
     pub provider_plugin: String,
     pub kind: String,
     pub expected_source_version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occupation: Option<OccupationId>,
     pub state: PendingEffectState,
 }
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
