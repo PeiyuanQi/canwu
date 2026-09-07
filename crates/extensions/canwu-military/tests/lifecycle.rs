@@ -1,12 +1,40 @@
 use canwu_api::{
-    Canwu, CommandEnvelope, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration,
+    Canwu, CommandEnvelope, CommandRequest, CommandRequestId, EntityRef, GovernmentId, Issuer,
+    PersonId, Scenario, SimDuration, SimTime,
 };
 use canwu_military::{
     CombatId, CombatStateRecord, ForceId, MilitaryCommand, MilitaryNodeId, OccupationId,
     OccupationStateRecord, OperationId, combat_reference, military_command, military_plugin,
     occupation_reference,
 };
-use canwu_reference_world::{ReferenceWorldPlugin, demo_scenario};
+
+#[derive(Clone, Copy)]
+struct DemoIds {
+    commander: PersonId,
+    observer: PersonId,
+    government: GovernmentId,
+    western_territory: u64,
+    eastern_territory: u64,
+}
+
+fn demo_scenario() -> Result<(Scenario, DemoIds), Box<dyn std::error::Error>> {
+    let ids = DemoIds {
+        commander: PersonId::new(1),
+        observer: PersonId::new(2),
+        government: GovernmentId::new(1),
+        western_territory: 1,
+        eastern_territory: 3,
+    };
+    let entities = vec![
+        EntityRef::Person(ids.commander),
+        EntityRef::Person(ids.observer),
+        EntityRef::Government(ids.government),
+        EntityRef::Territory(canwu_api::TerritoryId::new(ids.western_territory)),
+        EntityRef::Territory(canwu_api::TerritoryId::new(2)),
+        EntityRef::Territory(canwu_api::TerritoryId::new(ids.eastern_territory)),
+    ];
+    Ok((Scenario::new(SimTime::EPOCH, entities), ids))
+}
 
 fn submit(
     canwu: &mut Canwu,
@@ -30,9 +58,8 @@ fn submit(
 #[test]
 fn altered_operation_key_input_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let (scenario, ids) = demo_scenario()?;
-    let world = ReferenceWorldPlugin;
     let military = military_plugin();
-    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&world, &military])?;
+    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&military])?;
     let force = ForceId::new("canwu.military:test:idempotency")?;
     let node = MilitaryNodeId::new(format!("canwu.military:node:{}", ids.western_territory))?;
     submit(
@@ -84,9 +111,8 @@ fn altered_operation_key_input_is_rejected() -> Result<(), Box<dyn std::error::E
 fn complete_military_lifecycle_is_persisted_and_replayed() -> Result<(), Box<dyn std::error::Error>>
 {
     let (scenario, ids) = demo_scenario()?;
-    let world = ReferenceWorldPlugin;
     let military = military_plugin();
-    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&world, &military])?;
+    let mut canwu = Canwu::new_with_plugins(35, scenario, &[&military])?;
     let attacker = ForceId::new("canwu.military:test:attacker")?;
     let defender = ForceId::new("canwu.military:test:defender")?;
     let west = MilitaryNodeId::new(format!("canwu.military:node:{}", ids.western_territory))?;
@@ -169,8 +195,8 @@ fn complete_military_lifecycle_is_persisted_and_replayed() -> Result<(), Box<dyn
     assert!(occupation.military_control_per_mille > 0);
 
     let snapshot = canwu.snapshot_json()?;
-    let restored = Canwu::from_snapshot_json_with_plugins(&snapshot, &[&world, &military])?;
-    let replayed = Canwu::replay_from_journal(&[&world, &military], &canwu.replay_journal())?;
+    let restored = Canwu::from_snapshot_json_with_plugins(&snapshot, &[&military])?;
+    let replayed = Canwu::replay_from_journal(&[&military], &canwu.replay_journal())?;
     assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
     assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
     Ok(())
