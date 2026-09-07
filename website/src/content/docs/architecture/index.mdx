@@ -46,8 +46,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   sourceLoading="依赖图源码将在预览加载时显示。"
   noScriptMessage="依赖图预览需要 JavaScript；上方仍提供文字说明。"
   definition={`flowchart TB
-    subgraph ToolsExtensions["工具与扩展"]
+    subgraph Tools["工具"]
         Debug["canwu-debug"]
+    end
+
+    subgraph Extensions["扩展"]
         Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
@@ -58,6 +61,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+    end
+
+    subgraph Examples["示例"]
         MingFiscal["canwu-ming-fiscal"]
         EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]

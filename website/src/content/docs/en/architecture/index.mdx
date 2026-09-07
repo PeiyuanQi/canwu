@@ -46,8 +46,11 @@ external and development dependencies are omitted. The graph opens at 200%; use 
   sourceSummary="View dependency graph source"
   noScriptMessage="JavaScript is required for the dependency graph preview; the text explanation remains available above."
   definition={`flowchart TB
-    subgraph ToolsExtensions["Tools and extensions"]
+    subgraph Tools["Tools"]
         Debug["canwu-debug"]
+    end
+
+    subgraph Extensions["Extensions"]
         Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
@@ -58,6 +61,9 @@ external and development dependencies are omitted. The graph opens at 200%; use 
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+    end
+
+    subgraph Examples["Examples"]
         MingFiscal["canwu-ming-fiscal"]
         EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]

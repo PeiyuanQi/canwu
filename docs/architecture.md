@@ -139,8 +139,11 @@ A 指向 B 表示 **A 依赖 B**；外部依赖和开发依赖未列入。
 
 ```mermaid
 flowchart TB
-    subgraph ToolsExtensions["Tools and extensions / 工具与扩展"]
+    subgraph Tools["Tools / 工具"]
         Debug["canwu-debug"]
+    end
+
+    subgraph Extensions["Extensions / 扩展"]
         Correspondence["canwu-correspondence"]
         Information["canwu-information"]
         Society["canwu-society"]
@@ -151,6 +154,9 @@ flowchart TB
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+    end
+
+    subgraph Examples["Examples / 示例"]
         MingFiscal["canwu-ming-fiscal"]
         EconomyContent["canwu-economy-reference-content"]
         MingReference["canwu-ming-fiscal-reference"]
