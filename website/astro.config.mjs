@@ -63,6 +63,7 @@ export default defineConfig({
             { slug: "tutorials/phased-boundary" },
             { slug: "tutorials/routing-transport" },
             { slug: "tutorials/technology-diffusion" },
+            { slug: "tutorials/military-domain" },
             {
               label: "案例",
               translations: { en: "Examples" },
