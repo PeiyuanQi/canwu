@@ -343,9 +343,7 @@ dependencies = [
  "canwu-production",
  "canwu-reference-world",
  "canwu-resource",
- "canwu-routing",
  "canwu-technology",
- "canwu-transport",
  "serde",
  "serde_json",
 ]

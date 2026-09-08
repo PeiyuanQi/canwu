@@ -19,13 +19,18 @@ use crate::{
     economy_reference_state, economy_route_provider_reference,
 };
 use canwu_api::{
-    BoundaryRequest, Canwu, CanwuError, Command, CommandAuthority, CommandEnvelope, CommandRequest,
-    CommandRequestId, DecisionAction, DecisionAuthority, DecisionContext,
-    DecisionControllerBinding, DecisionIngressRequest, DecisionMutation, DecisionOption,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId, DecisionTicketDraft,
-    DecisionTicketId, DomainRecordRef, DomainRecordVersionRef, EntityRef, EvidenceRef, Issuer,
-    KnowledgeHolderRef, PersonId, PluginIngressRequest, PolicyDecision, Scenario, SimDuration,
-    SimTime, SimulationPlugin, SystemCadence, canonical_hash,
+    BoundaryRequest, Canwu, CanwuError, CapacityBooking, CapacityBookingId, CapacityBookingStatus,
+    Command, CommandAuthority, CommandEnvelope, CommandRequest, CommandRequestId, DecisionAction,
+    DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionIngressRequest,
+    DecisionMutation, DecisionOption, DecisionPolicyIdentity, DecisionPolicyKind,
+    DecisionRequestId, DecisionTicketDraft, DecisionTicketId, DomainRecordRef,
+    DomainRecordVersionRef, EntityRef, EvidenceRef, Handoff, HandoffId, Issuer, ItineraryRevision,
+    ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef, PersonId, PlanningSnapshot,
+    PluginIngressRequest, PolicyDecision, ReconciliationOutcome, RoutePlan, RoutingConnection,
+    RoutingConnectionRef, RoutingEndpoint, RoutingEndpointKind, RoutingNetwork, RoutingNodeRef,
+    RoutingPolicy, RoutingRequest, Scenario, SimDuration, SimTime, SimulationPlugin, SystemCadence,
+    TransferMode, TransportError, TransportExecution, TransportExecutionId, TraversalModel,
+    canonical_hash, plan_route,
 };
 use canwu_economy_reference_content::{compile_content_pack, synthetic_grain_fixture};
 use canwu_force_supply_reference::{
@@ -65,16 +70,6 @@ use canwu_resource::{
     enqueue_resource_archive, enqueue_resource_completion_operation,
     finalize_resource_archive_retention, resource_command, resource_operation_outcome,
     resource_state,
-};
-use canwu_routing::{
-    PlanningSnapshot, RoutingConnection, RoutingConnectionRef, RoutingEndpoint,
-    RoutingEndpointKind, RoutingNetwork, RoutingNodeRef, RoutingPolicy, RoutingRequest,
-    TransferMode, TraversalModel, plan_route,
-};
-use canwu_transport::{
-    CapacityBooking, CapacityBookingId, CapacityBookingStatus, Handoff, HandoffId,
-    ItineraryRevision, ItineraryRevisionId, ItineraryRevisionReason, ReconciliationOutcome,
-    TransportExecution, TransportExecutionId,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -3740,11 +3735,7 @@ fn completion_budget(
     .seal()
 }
 
-fn route_plan(
-    at: SimTime,
-    month: u16,
-    alternate: bool,
-) -> Result<canwu_routing::RoutePlan, GrainLoopError> {
+fn route_plan(at: SimTime, month: u16, alternate: bool) -> Result<RoutePlan, GrainLoopError> {
     let origin = RoutingNodeRef::new("river-granary");
     let relay = RoutingNodeRef::new(if alternate {
         "ridge-post"
@@ -3897,6 +3888,6 @@ fn digest_label(label: &str) -> String {
 }
 
 #[allow(clippy::needless_pass_by_value)]
-fn transport_error(error: canwu_transport::TransportError) -> GrainLoopError {
+fn transport_error(error: TransportError) -> GrainLoopError {
     GrainLoopError::Transport(format!("{error:?}"))
 }

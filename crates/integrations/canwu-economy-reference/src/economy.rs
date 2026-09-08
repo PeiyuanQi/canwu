@@ -2,7 +2,7 @@ use crate::{MAX_OBSERVATION_FACTS, MAX_PRICE_FACTORS, PLUGIN_NAME, PLUGIN_NAMESP
 use canwu_api::{
     CanwuError, DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle,
     DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, ErrorCode, KnowledgeHolderRef,
-    SimTime, TypedDomainRecordRef, canonical_hash,
+    SimTime, TransportExecution, TypedDomainRecordRef, canonical_hash,
 };
 use canwu_economy_reference_content::CompiledEconomyReferenceContentV1;
 use canwu_force_supply_reference::{
@@ -19,7 +19,6 @@ use canwu_resource::{
     ResourceOperationOutcomeVersionV1, ResourceQualityId, ResourceRevision, ResourceScopeId,
     ResourceTransferId, ResourceUnitRevisionId, RunBudgetRevisionV1,
 };
-use canwu_transport::TransportExecution;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

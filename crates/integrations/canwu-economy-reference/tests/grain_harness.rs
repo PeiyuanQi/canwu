@@ -4,6 +4,7 @@ use canwu_api::{
     DecisionMutation, DecisionRequestId, DecisionTicketDraft, DecisionTicketId,
     DecisionTicketState, EntityRef, Issuer, KnowledgeHolderRef, PersonId, PolicyDecision,
 };
+use canwu_api::{ItineraryRevisionReason, LegExecutionStatus};
 use canwu_economy_reference::{
     ECONOMY_ARCHIVE_BLOB_NAMESPACE, GrainDecision, GrainHarness, economy_reference_state,
 };
@@ -11,7 +12,6 @@ use canwu_force_supply_reference::{ForceSupplyRuntimeRecord, force_supply_runtim
 use canwu_resource::{
     RESOURCE_ARCHIVE_BLOB_NAMESPACE, ResourceOperationStatus, ResourceReportDtoV1, resource_state,
 };
-use canwu_transport::{ItineraryRevisionReason, LegExecutionStatus};
 
 fn decisions() -> [GrainDecision; 14] {
     [
