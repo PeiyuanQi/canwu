@@ -61,6 +61,7 @@ external and development dependencies are omitted. The graph opens at 200%; use 
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+        Military["canwu-military"]
     end
 
     subgraph Examples["Examples"]
@@ -70,6 +71,8 @@ external and development dependencies are omitted. The graph opens at 200%; use 
         ForceSupply["canwu-force-supply-reference"]
         EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
+        MilitaryContent["canwu-military-reference-content"]
+        MilitaryReference["canwu-military-reference"]
     end
 
     subgraph PublicApi["Public API"]
@@ -94,6 +97,7 @@ external and development dependencies are omitted. The graph opens at 200%; use 
     end
 
     Debug --> Api
+    Debug --> MingReference
     Correspondence --> Api
     Correspondence --> Information
     Information --> Api
@@ -109,6 +113,7 @@ external and development dependencies are omitted. The graph opens at 200%; use 
     Production --> Api
     Production --> Resource
     Production --> Technology
+    Military --> Api
     MingFiscal --> Api
     MingFiscal --> Fiscal
     EconomyContent --> Api
@@ -132,6 +137,12 @@ external and development dependencies are omitted. The graph opens at 200%; use 
     EconomyReference --> Technology
     EconomyReference --> Transport
     ReferenceWorld --> Api
+    MilitaryContent --> Api
+    MilitaryContent --> Military
+    MilitaryReference --> Api
+    MilitaryReference --> Military
+    MilitaryReference --> MilitaryContent
+    MilitaryReference --> ReferenceWorld
     Debug --> ReferenceWorld
 
     Api --> Core

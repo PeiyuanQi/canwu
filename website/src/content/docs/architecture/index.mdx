@@ -61,6 +61,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+        Military["canwu-military"]
     end
 
     subgraph Examples["示例"]
@@ -70,6 +71,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         ForceSupply["canwu-force-supply-reference"]
         EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
+        MilitaryContent["canwu-military-reference-content"]
+        MilitaryReference["canwu-military-reference"]
     end
 
     subgraph PublicApi["对外 API"]
@@ -94,6 +97,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     end
 
     Debug --> Api
+    Debug --> MingReference
     Correspondence --> Api
     Correspondence --> Information
     Information --> Api
@@ -109,6 +113,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Production --> Api
     Production --> Resource
     Production --> Technology
+    Military --> Api
     MingFiscal --> Api
     MingFiscal --> Fiscal
     EconomyContent --> Api
@@ -132,6 +137,12 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     EconomyReference --> Technology
     EconomyReference --> Transport
     ReferenceWorld --> Api
+    MilitaryContent --> Api
+    MilitaryContent --> Military
+    MilitaryReference --> Api
+    MilitaryReference --> Military
+    MilitaryReference --> MilitaryContent
+    MilitaryReference --> ReferenceWorld
     Debug --> ReferenceWorld
 
     Api --> Core
