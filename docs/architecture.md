@@ -221,9 +221,7 @@ flowchart TB
     EconomyReference --> Production
     EconomyReference --> ReferenceWorld
     EconomyReference --> Resource
-    EconomyReference --> Routing
     EconomyReference --> Technology
-    EconomyReference --> Transport
 
     Api --> Core
     Api --> Decision
