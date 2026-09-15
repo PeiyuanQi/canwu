@@ -5,7 +5,7 @@ project remains subject to its own license.
 
 | Project | Version | Purpose | License |
 | --- | --- | --- | --- |
-| Astro | 7.2.2 | Static site framework | MIT |
+| Astro | 7.2.8 | Static site framework | MIT |
 | Astro Starlight | 0.41.7 | Markdown tutorial and documentation UI | MIT |
 | @astrojs/sitemap | 3.7.3 | Sitemap generation | MIT |
 | @astrojs/check | 0.9.10 | Astro and TypeScript validation | MIT |
