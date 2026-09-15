@@ -263,3 +263,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - [通过插件扩展](/developer/extensions/)
 - [存档、重放与分支](/developer/persistence/)
 - [使用教程](/tutorials/)
+
+## 自定义资源消费者
+
+在 0.10.1 中，自定义消费者使用提供方拥有的有效记录，其中包含有界的
+`resource_consumption_intents` 映射，值为已封存的 `ResourceConsumptionIntentV1`。
+规范适配器输入绑定精确当前来源、分配与完成租约；消费者不能写入资源余额。
+军事补给参考消费者保留其专用适配器。参见[开发合同](/developer/production-economy/)。

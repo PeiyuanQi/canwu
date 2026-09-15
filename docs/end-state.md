@@ -242,6 +242,15 @@ losses, fulfillment, and deterministic receipts. Geography influences supply
 through effective-dated content capabilities and route access rather than a
 single timeless deposit flag.
 
+Since 0.10.1, other consumers can use the existing sealed
+`ResourceConsumptionIntentV1` map contract through canonical adapter ingress.
+Authorization is bound to an active exact current provider record, the full
+allocation leg and its completion lease; the map is bounded by
+`max_operation_outcomes`. Provider intent lifecycle remains outside the resource
+balance owner. The force-supply reference retains its specialized adapter.
+See `docs/architecture.md` and the production/resource developer guide for the
+source, registration and version requirements.
+
 `canwu-production` consumes that public resource boundary and exact
 `canwu-technology` evidence. It owns process, site, facility, capacity, work
 order, work-in-progress, execution, project, and output-settlement lifecycles.

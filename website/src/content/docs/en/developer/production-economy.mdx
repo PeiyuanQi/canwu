@@ -7,7 +7,7 @@ sidebar:
   label: Production and resource boundary
 ---
 
-Canwu 0.10.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
+Canwu 0.10.1 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
 
 ## Recommended boundary
 
@@ -41,6 +41,35 @@ Demand -> resource reservation/allocation -> source debit -> in-transit custody
 5. A destination is credited only after the cargo disposition is accepted; military consumption becomes eligible at the next appropriate boundary.
 
 The account amount is the only writable quantity. Reserved, available, and protected views are derived; reach is not delivery and arrival is not consumption.
+
+## Authorize a custom consumer
+
+Version 0.10.1 supports custom consumption providers using the existing
+`ResourceConsumptionIntentV1` contract. Keep a top-level
+`resource_consumption_intents` map in your plugin's owned, active domain record;
+each key is the sealed intent's `id`. No callback or reference-provider name is
+needed. Register that record kind in `ResourcePlugin::new` so the adapter may
+read the exact source.
+
+Before submission, complete the existing allocation and completion-lease
+lifecycle. Submit `ResourceOperationRequestV1::Consume` through canonical adapter
+ingress. Its `consumer_evidence` must equal the exact **current** provider source;
+the completion certificate must bind that source and the same operation key.
+The holder, participant, time, revision and lease checks still apply.
+
+Exactly one `Authorized` intent must match the complete allocation leg, demand
+and account revisions, consumption identity and operation key. Partial-leg
+consumption is outside this contract. The map may contain at most the resource
+state's `max_operation_outcomes` entries; excessive maps fail before decoding.
+Missing or malformed maps and identity/digest mismatches are rejected, as are
+retired, ambiguous or mismatched authorizations. A sealed digest proves content
+consistency, not permission by itself. Rejection does not authorize a debit.
+
+Your provider owns authorization and retirement of the intent and any local
+consequences after the resource receipt. `canwu-resource` owns the conserved
+balance and duplicate-operation behavior. The force-supply reference retains
+its specialized adapter, including its different retained-source policy; custom
+consumers must use the current-source contract above.
 
 ## Versioning and saves
 

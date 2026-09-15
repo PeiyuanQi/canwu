@@ -417,6 +417,11 @@ pub enum ResourceConsumptionIntentStatusV1 {
 /// Provider-owned authorization for one exact resource consumption. This
 /// value lives inside the provider's exact domain payload; the resource
 /// adapter accepts no inferred policy, string prefix, or equal-size demand.
+/// Non-force providers expose these values in a top-level
+/// `resource_consumption_intents` map keyed by intent ID. The active exact
+/// current provider source, full allocation leg and completion lease must
+/// match the request. The map is bounded by `ResourceLimitsV1::max_operation_outcomes`.
+/// The provider owns authorization/retirement; this digest alone grants no authority.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceConsumptionIntentV1 {
     pub id: ResourceConsumptionIntentId,

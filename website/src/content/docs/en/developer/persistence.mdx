@@ -22,8 +22,9 @@ Choose the recovery goal first, then use the matching interface.
 
 ## Version and format contract
 
-As of August 30, 2026, the workspace version is `0.10.0` and the snapshot format is 8.
-The exact `engine_version` remains part of the persistence contract, so 0.8 and 0.9 snapshots are not interchangeable with a 0.10.0 run.
+As of September 15, 2026, the workspace version is `0.10.1` and the snapshot format is 8.
+The exact `engine_version` remains part of the persistence contract, so snapshots from 0.10.0 or earlier cannot be loaded into a 0.10.1 run.
+Version 0.10.1 extends the existing typed resource-consumption intent contract to custom providers and changes the resource plugin semantic identity. It adds no public DTO fields or enum variants. A local engine checkout does not update a downstream application's pinned registry dependency.
 The simulation core does not silently migrate an old snapshot, and changing only its format number does not make it compatible.
 
 Applications that retain state should pin an exact published release or Git revision. To carry history across an engine boundary,

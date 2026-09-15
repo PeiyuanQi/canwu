@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.10.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.10.1`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,15 @@ The workspace version is `0.10.0`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.10.1 extends the existing typed resource-consumption intent contract
+to provider-owned domain records beyond the economy reference integration.
+It adds no public DTO fields or enum variants and retains snapshot format 8.
+The resource plugin semantic identity changes with this authorization behavior.
+Exact engine-version and plugin-descriptor checks still apply: a 0.10.0 snapshot
+must not be relabeled or loaded into 0.10.1. Retain the previous engine or use an
+explicit application-owned export when crossing that boundary. A downstream
+application's pinned registry version does not change with this local checkout.
 
 Version 0.10 adds optional resource, production, reference economy-content,
 force-supply, and runnable economy-reference packages. They are built above

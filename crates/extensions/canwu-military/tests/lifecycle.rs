@@ -17,7 +17,7 @@ struct DemoIds {
     eastern_territory: u64,
 }
 
-fn demo_scenario() -> Result<(Scenario, DemoIds), Box<dyn std::error::Error>> {
+fn demo_scenario() -> (Scenario, DemoIds) {
     let ids = DemoIds {
         commander: PersonId::new(1),
         observer: PersonId::new(2),
@@ -33,7 +33,7 @@ fn demo_scenario() -> Result<(Scenario, DemoIds), Box<dyn std::error::Error>> {
         EntityRef::Territory(canwu_api::TerritoryId::new(2)),
         EntityRef::Territory(canwu_api::TerritoryId::new(ids.eastern_territory)),
     ];
-    Ok((Scenario::new(SimTime::EPOCH, entities), ids))
+    (Scenario::new(SimTime::EPOCH, entities), ids)
 }
 
 fn submit(
@@ -57,7 +57,7 @@ fn submit(
 
 #[test]
 fn altered_operation_key_input_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
-    let (scenario, ids) = demo_scenario()?;
+    let (scenario, ids) = demo_scenario();
     let military = military_plugin();
     let mut canwu = Canwu::new_with_plugins(35, scenario, &[&military])?;
     let force = ForceId::new("canwu.military:test:idempotency")?;
@@ -110,7 +110,7 @@ fn altered_operation_key_input_is_rejected() -> Result<(), Box<dyn std::error::E
 #[test]
 fn complete_military_lifecycle_is_persisted_and_replayed() -> Result<(), Box<dyn std::error::Error>>
 {
-    let (scenario, ids) = demo_scenario()?;
+    let (scenario, ids) = demo_scenario();
     let military = military_plugin();
     let mut canwu = Canwu::new_with_plugins(35, scenario, &[&military])?;
     let attacker = ForceId::new("canwu.military:test:attacker")?;

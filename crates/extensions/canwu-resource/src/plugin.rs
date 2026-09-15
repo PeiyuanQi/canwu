@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "62931530fdc87cb8c56ab78f617e3d2d20468b3fdcfbbfc2c74abe37c385fc44";
+    "5b95a5463bf84b414ce5aa466c8543d671a8c3f4d82407f5b27cdd9be8f43346";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "c4aed3aebb1f4cb54f889c644647d15671be3c5338731330d6fc693c3933493b";
@@ -1347,6 +1347,22 @@ fn validate_adapter_packet(
     } else {
         require_exact_current_body(view, &packet.provider_source)?;
     }
+    if let ResourceOperationRequestV1::Consume(request) = &packet.request
+        && packet.provider_plugin != "canwu-force-supply-reference"
+        && (source.lifecycle != canwu_api::DomainRecordLifecycle::Active
+            || request.operation_key != request.completion_certificate.operation_key
+            || !request
+                .completion_certificate
+                .locked_target_versions
+                .contains(&crate::CompletionLockedTargetV1::ExternalRecord {
+                    version: packet.provider_source.clone(),
+                }))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "typed consumption requires an active source and exact operation/source lease binding",
+        ));
+    }
     validate_request_certificate_evidence(view, &packet.request)?;
     validate_local_provider_participant(resource_state, packet)?;
     authoritative_provider_operation(&source.payload, packet, resource_state)
@@ -1659,19 +1675,10 @@ fn authoritative_provider_operation(
             authoritative_force_consumption(payload, request)?;
             Ok(None)
         }
-        ResourceOperationRequestV1::Consume(request)
-            if packet.provider_plugin == "canwu-economy-reference" =>
-        {
-            authoritative_economy_consumption(payload, packet, request, resource_state)?;
+        ResourceOperationRequestV1::Consume(request) => {
+            authoritative_typed_consumption(payload, packet, request, resource_state)?;
             Ok(None)
         }
-        ResourceOperationRequestV1::Consume(_) => Err(CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            format!(
-                "resource consumption provider {} has no typed authoritative adapter",
-                packet.provider_plugin
-            ),
-        )),
         _ => Ok(None),
     }
 }
@@ -1788,7 +1795,7 @@ fn authoritative_force_consumption(
     Ok(())
 }
 
-fn authoritative_economy_consumption(
+fn authoritative_typed_consumption(
     payload: &Value,
     packet: &ResourceAdapterOperationV1,
     request: &crate::ResourceConsumptionRequestV1,
@@ -1815,13 +1822,19 @@ fn authoritative_economy_consumption(
         .ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidDomainRecord,
-                "economy provider has no typed resource consumption intents",
+                "provider has no typed resource consumption intents",
             )
         })?;
     if request.consumer_evidence != packet.provider_source {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
-            "economy consumption evidence is not the exact provider payload version",
+            "consumption evidence is not the exact provider payload version",
+        ));
+    }
+    if intents.len() > state.limits.max_operation_outcomes {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "resource consumption intent map exceeds max_operation_outcomes",
         ));
     }
     let mut matching = 0_usize;
@@ -1830,14 +1843,14 @@ fn authoritative_economy_consumption(
             .map_err(|error| {
                 CanwuError::new(
                     ErrorCode::InvalidDomainRecord,
-                    format!("economy resource consumption intent cannot be decoded: {error}"),
+                    format!("resource consumption intent cannot be decoded: {error}"),
                 )
             })?;
         intent.validate().map_err(resource_canwu_error)?;
         if map_id != intent.id.as_str() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidDomainRecord,
-                "economy resource consumption intent map key differs from its identity",
+                "resource consumption intent map key differs from its identity",
             ));
         }
         if intent.status == crate::ResourceConsumptionIntentStatusV1::Authorized
@@ -1855,7 +1868,7 @@ fn authoritative_economy_consumption(
             matching = matching.checked_add(1).ok_or_else(|| {
                 CanwuError::new(
                     ErrorCode::ValueOutOfRange,
-                    "economy resource consumption intent match count overflowed",
+                    "resource consumption intent match count overflowed",
                 )
             })?;
         }
@@ -1864,7 +1877,7 @@ fn authoritative_economy_consumption(
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             format!(
-                "economy provider payload does not uniquely authorize the exact typed consumption intent (matches={matching})"
+                "provider payload does not uniquely authorize the exact typed consumption intent (matches={matching})"
             ),
         ));
     }

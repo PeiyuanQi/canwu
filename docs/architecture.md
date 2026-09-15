@@ -612,6 +612,21 @@ receipts. Protected floors, custody, acceptance, explicit conversions, and
 holder-relative reports are part of that boundary. Transport reach alone never
 counts as delivery, and no consumer may debit an account directly.
 
+Non-force consumption providers publish a top-level `resource_consumption_intents`
+map in their owned, active domain record. Map keys equal the IDs of sealed
+`ResourceConsumptionIntentV1` entries. The resource adapter requires exactly one
+Authorized entry matching the complete allocation leg, demand/account revisions,
+consumption identity and operation key; it rejects maps larger than
+`ResourceLimitsV1::max_operation_outcomes` before decoding entries. Register the
+source kind with `ResourcePlugin::new`, and submit through canonical adapter
+ingress with the exact current source as `consumer_evidence`. The completion
+certificate must bind that source and operation key, with the existing holder,
+participant, time and lease checks. A digest verifies content consistency; it
+does not grant authority. The provider owns intent authorization and retirement;
+resource settlement owns the debit and receipt. The force-supply reference keeps
+its specialized retained-source adapter. This 0.10.1 behavior changes the resource
+plugin semantic identity but introduces no callback registry or core schema.
+
 `canwu-production` is a downstream production-asset extension. It owns
 processes, sites, facilities, capacity allocation, work orders, work in
 progress, production execution, facility projects, and output settlement. It

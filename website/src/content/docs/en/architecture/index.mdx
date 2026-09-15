@@ -276,3 +276,11 @@ it is not a privileged path for one fixed demo.
 - [Extend with plugins](/en/developer/extensions/)
 - [Save, replay, and fork](/en/developer/persistence/)
 - [Tutorials](/en/tutorials/)
+
+## Custom resource consumers
+
+In 0.10.1, custom consumers use an active provider-owned record containing a bounded
+`resource_consumption_intents` map of sealed `ResourceConsumptionIntentV1` values.
+Canonical adapter ingress binds the exact current source, allocation and completion
+lease; consumers never write resource balances. The force-supply reference retains
+its specialized adapter. See [the developer contract](/en/developer/production-economy/).
