@@ -3,6 +3,21 @@
 This file contains upstream notices that are not included automatically in
 `third-party-notices.html`.
 
+## Persistent collection sources
+
+The unmodified upstream crates `im` 15.1.0, `bitmaps` 2.1.0 and
+`sized-chunks` 0.6.5 carry MPL-2.0+ metadata. Their selected MPL-2.0 license
+text is included in `third-party-notices.html`. Exact source archives are
+available from crates.io:
+
+- https://crates.io/api/v1/crates/im/15.1.0/download
+- https://crates.io/api/v1/crates/bitmaps/2.1.0/download
+- https://crates.io/api/v1/crates/sized-chunks/0.6.5/download
+
+These third-party sources retain their upstream licenses; Canwu does not
+relicense them as Apache-2.0. Preserve this source-availability information
+with the notice bundle when distributing binaries that include them.
+
 ## `cfg_aliases` 0.2.2
 
 The upstream `cfg_aliases` package includes the following notice:

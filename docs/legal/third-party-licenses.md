@@ -15,14 +15,15 @@ notices that the generator does not collect.
 
 ## Current dependency set
 
-The inventory was reviewed against the locked dependency graph on August 28,
-2026. `cargo metadata --locked --format-version 1` reports 316 external
+The inventory was reviewed against the locked dependency graph on September 15,
+2026. `cargo metadata --locked --format-version 1` reports 322 external
 packages, and every package in that graph declares license metadata.
 
 The complete versioned package list is recorded in `Cargo.lock`. The external
 packages and bundled assets use one or more of these license families:
 
 - MIT
+- Mozilla Public License 2.0 (MPL-2.0)
 - Apache License 2.0, sometimes with the LLVM exception
 - BSD Zero Clause, BSD 2-Clause, and BSD 3-Clause
 - Boost Software License 1.0
@@ -43,6 +44,7 @@ licenses. An `AND` means all listed terms apply to the relevant code or assets.
 
 | Package | Locked version | Declared license |
 | --- | ---: | --- |
+| `im` | 15.1.0 | MPL-2.0+ |
 | `blake3` | 1.8.6 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception |
 | `eframe` | 0.32.3 | MIT OR Apache-2.0 |
 | `image` | 0.25.10 | MIT OR Apache-2.0 |
