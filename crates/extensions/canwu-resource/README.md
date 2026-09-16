@@ -43,7 +43,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "0.10.0", optional = true }
+canwu-resource = { version = "0.11.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -168,3 +168,18 @@ lease constants bound recipes, pending acquisitions, reserved slots, tokens,
 same-time roots, TTL, and activation guard. Capacity pressure is reported as a
 stable error or terminal rejection; it must not partially mutate physical
 truth.
+
+## Demand source policy
+
+Since 0.11.0, every `ResourceDemand` persists a `source_policy`:
+
+- `ResourceDemandSourcePolicyV1::Pooled` preserves allocation across all open accounts with matching resource and unit revisions, in deterministic account-ID order.
+- `ExactAccounts(Vec<ResourceAccountId>)` lists 1–256 accounts in strictly increasing ID order, with no duplicates. Each must exist, be open, match both exact revisions, and have the demand requester as its custodian. Invalid lists reject the command before resources change; allocation validates them again.
+
+The allocator computes available supply, minimum useful quantity and partial fulfillment from the selected accounts only. An insufficient exact list never falls back to the pool. Existing protected floors and later transfer/consumption authority checks still apply. The exact path visits only the listed accounts, bounded by `MAX_DEMAND_SOURCE_ACCOUNTS`; pooled selection retains its existing account scan.
+
+A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended.
+
+`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. Cross-custodian appointments, delegation, purpose and spending limits remain application/domain responsibilities; an account-ID list proves none of them. Transfer custody and completion-lease checks remain separate requirements.
+
+The policy is included in request digests, runtime snapshots, exact replay and terminal demand archive payloads. Restore validates live source references and retained reservation membership; archive validation preserves the policy and its digest. Holder-relative reports retain their existing visibility contract and do not expose the authoritative source list automatically. Missing `source_policy` fields deserialize as `Pooled` in a standalone DTO, but this does not migrate old snapshots: exact engine-version and plugin-identity checks still apply. Rust struct literals must add the field; this is a 0.11.0 source break.

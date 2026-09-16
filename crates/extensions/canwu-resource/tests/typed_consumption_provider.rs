@@ -277,6 +277,7 @@ fn prepared(fault: &str) -> (Canwu, ResourceAdapterOperationV1, DomainRecordVers
             id: ResourceDemandId::new("fixture:demand").expect("id"),
             revision: ResourceRevision::INITIAL,
             requester: holder(1),
+            source_policy: ResourceDemandSourcePolicyV1::default(),
             resource_revision: initial.resource.clone(),
             unit_revision: initial.unit.clone(),
             requested: 10,

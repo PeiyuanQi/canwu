@@ -7,11 +7,12 @@ use crate::{
     ResourceAccount, ResourceAccountId, ResourceAllocationLeg, ResourceAllocationLegId,
     ResourceAllocationLegVersionV1, ResourceConsumption, ResourceConsumptionId,
     ResourceConsumptionVersionV1, ResourceDefinitionRevision, ResourceDefinitionRevisionId,
-    ResourceDemand, ResourceDemandId, ResourceError, ResourceFulfillment, ResourceFulfillmentId,
-    ResourceLimitsV1, ResourceLoss, ResourceLossId, ResourceOperationKey, ResourceOperationKind,
-    ResourceOperationOutcome, ResourceOperationOutcomeId, ResourceOperationStatus,
-    ResourceRecordRefV1, ResourceReportGrantV1, ResourceReservation, ResourceReservationId,
-    ResourceRevision, ResourceState, ResourceTransfer, ResourceTransferId, ResourceTransferState,
+    ResourceDemand, ResourceDemandId, ResourceDemandSourcePolicyV1, ResourceError,
+    ResourceFulfillment, ResourceFulfillmentId, ResourceLimitsV1, ResourceLoss, ResourceLossId,
+    ResourceOperationKey, ResourceOperationKind, ResourceOperationOutcome,
+    ResourceOperationOutcomeId, ResourceOperationStatus, ResourceRecordRefV1,
+    ResourceReportGrantV1, ResourceReservation, ResourceReservationId, ResourceRevision,
+    ResourceState, ResourceTransfer, ResourceTransferId, ResourceTransferState,
     ResourceUnitRevision, ResourceUnitRevisionId, TransportExecutionLink, canonical_digest,
 };
 use canwu_api::{DomainRecordVersionRef, EvidenceRef, SimTime};
@@ -1658,6 +1659,20 @@ impl ResourceState {
             ));
         }
         self.validate_demand_contract(&request.replacement)?;
+        // Reservations remain indexed, including consumed legs, until the demand is
+        // terminal and its closure is archived. Terminal demands cannot be amended.
+        if request.replacement.source_policy != current.source_policy
+            && (current.fulfilled > 0
+                || self
+                    .reservation_by_demand
+                    .get(&current.id)
+                    .is_some_and(|ids| !ids.is_empty()))
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "resource demand source policy cannot change after reservation or fulfillment"
+                    .to_owned(),
+            ));
+        }
         let mut replacement = request.replacement.clone();
         replacement.revision = current.revision.next()?;
         replacement.admitted_sequence = current.admitted_sequence;
@@ -1766,21 +1781,25 @@ impl ResourceState {
             let demand = self.demands.get(&demand_id).cloned().ok_or_else(|| {
                 ResourceError::NotFound("allocation demand disappeared".to_owned())
             })?;
+            self.validate_demand_sources(&demand)?;
             let reserved = self.active_reserved_for_demand(&demand.id)?;
             let needed = demand.remainder().saturating_sub(reserved);
             if needed == 0 {
                 continue;
             }
-            let mut accounts: Vec<_> = self
-                .accounts
-                .values()
-                .filter(|account| {
-                    !account.closed
-                        && account.resource_revision == demand.resource_revision
-                        && account.unit_revision == demand.unit_revision
-                })
-                .map(|account| account.id.clone())
-                .collect();
+            let mut accounts: Vec<_> = match &demand.source_policy {
+                ResourceDemandSourcePolicyV1::Pooled => self
+                    .accounts
+                    .values()
+                    .filter(|account| {
+                        !account.closed
+                            && account.resource_revision == demand.resource_revision
+                            && account.unit_revision == demand.unit_revision
+                    })
+                    .map(|account| account.id.clone())
+                    .collect(),
+                ResourceDemandSourcePolicyV1::ExactAccounts(accounts) => accounts.clone(),
+            };
             accounts.sort();
             let total_available = accounts.iter().try_fold(0_u64, |total, account| {
                 total
@@ -3383,7 +3402,39 @@ impl ResourceState {
         Ok(())
     }
 
+    pub(crate) fn validate_demand_sources(
+        &self,
+        demand: &ResourceDemand,
+    ) -> Result<(), ResourceError> {
+        demand.source_policy.validate_shape()?;
+        if let ResourceDemandSourcePolicyV1::ExactAccounts(accounts) = &demand.source_policy {
+            for id in accounts {
+                let account = self.accounts.get(id).ok_or_else(|| {
+                    ResourceError::NotFound(
+                        "resource demand source account is unavailable".to_owned(),
+                    )
+                })?;
+                if account.custodian != demand.requester {
+                    return Err(ResourceError::Authority(
+                        "resource demand source account is not custodied by its requester"
+                            .to_owned(),
+                    ));
+                }
+                if account.closed
+                    || account.resource_revision != demand.resource_revision
+                    || account.unit_revision != demand.unit_revision
+                {
+                    return Err(ResourceError::InvalidDefinition(
+                        "resource demand source account resource or unit differs".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_demand_contract(&self, demand: &ResourceDemand) -> Result<(), ResourceError> {
+        self.validate_demand_sources(demand)?;
         if demand.requested == 0
             || demand.minimum_useful == 0
             || demand.minimum_useful > demand.requested
@@ -3552,6 +3603,15 @@ impl ResourceState {
             {
                 return Err(ResourceError::InvalidDefinition(
                     "resource reservation/allocation closure is invalid".to_owned(),
+                ));
+            }
+            let demand = self.demands.get(&reservation.demand);
+            if (reservation.status == ReservationStatus::Active && demand.is_none())
+                || demand.is_some_and(|demand| !demand.source_policy.permits(&reservation.account))
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource reservation violates demand source policy or lost its active demand"
+                        .to_owned(),
                 ));
             }
             if reservation.status == ReservationStatus::Active

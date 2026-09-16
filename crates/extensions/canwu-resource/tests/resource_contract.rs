@@ -262,6 +262,7 @@ fn demand(
         id: ResourceDemandId::new(id).expect("demand"),
         revision: ResourceRevision::INITIAL,
         requester: holder(1),
+        source_policy: ResourceDemandSourcePolicyV1::default(),
         resource_revision: fixture.resource.clone(),
         unit_revision: fixture.unit.clone(),
         requested,

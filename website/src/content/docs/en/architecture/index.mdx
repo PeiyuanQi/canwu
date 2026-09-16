@@ -277,8 +277,12 @@ it is not a privileged path for one fixed demo.
 
 ## Custom resource consumers
 
-In 0.10.1, custom consumers use an active provider-owned record containing a bounded
+Since 0.10.1, custom consumers use an active provider-owned record containing a bounded
 `resource_consumption_intents` map of sealed `ResourceConsumptionIntentV1` values.
 Canonical adapter ingress binds the exact current source, allocation and completion
 lease; consumers never write resource balances. The force-supply reference retains
 its specialized adapter. See [the developer contract](/en/developer/production-economy/).
+
+## Demand source policy
+
+Since 0.11.0, `ResourceDemand::source_policy` records either `Pooled` or `ExactAccounts`. The latter lists 1–256 sorted unique requester-custodied accounts with exact matching resource/unit revisions. Source checks precede scarcity arbitration, with no fallback to pooled accounts. The policy is fixed after any reservation or fulfillment, including consumed reservations supporting in-flight escrow. Snapshots, replay and terminal archives preserve it. Pooled selection does not grant transfer authority; the host application controls pooled demand use and cross-custodian delegation. See the [full contract](/en/developer/production-economy/#demand-source-policy).

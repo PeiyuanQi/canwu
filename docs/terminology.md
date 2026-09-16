@@ -113,6 +113,7 @@ renamed by this policy.
 | [决策选项权重](../website/src/content/docs/tutorials/cases/uncertainty-resolution.mdx) | decision option weight | `DecisionOptionWeight` | A canonical option-ID and nonnegative integer weight used to map one bounded draw to an existing ticket option. |
 | [操作定址随机抽样](../website/src/content/docs/architecture/randomness.mdx) | operation-keyed random draw | `random_sample_for_operation` | A draw addressed by stable cause, operation ID, target, occurrence, purpose, and stream identity so retries and replay cannot consume a different sample. |
 | [资源预留](../website/src/content/docs/tutorials/phased-boundary.mdx) | reservation | `ReservationRequest` | A declared request against a conserved resource pool before allocation is settled. |
+| 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | Selects the eligible supply accounts before scarcity arbitration: pooled matching accounts or a bounded exact requester-custodied list; it grants no cross-custodian authority. |
 | [资源分配](../website/src/content/docs/architecture/settlement.mdx) | allocation | `ReservationAllocation` | The deterministic result of settling competing reservations against supply. |
 | [可见性](../website/src/content/docs/architecture/settlement.mdx) | visibility | `StateVisibility` | The policy controlling which state and evidence can reach which readers. |
 | [快照](../website/src/content/docs/developer/persistence.mdx) | snapshot | `SimulationSnapshot` | A complete persisted state image validated on restore. |

@@ -610,6 +610,31 @@ receipts. Protected floors, custody, acceptance, explicit conversions, and
 holder-relative reports are part of that boundary. Transport reach alone never
 counts as delivery, and no consumer may debit an account directly.
 
+`ResourceDemand::source_policy` is persisted before allocation. `Pooled` preserves
+all open accounts matching the exact resource/unit revisions. `ExactAccounts`
+accepts 1–256 sorted, unique account IDs owned in custody by the requester, all
+open and matching those revisions. Admission and allocation validate the list;
+only eligible accounts contribute to scarcity, minimum useful quantity and
+partial fulfillment, with no fallback to the pool. Protected floors and transfer
+authority remain separate checks. Exact selection iterates the bounded list;
+the pooled path retains its existing account scan.
+
+The policy can be amended with an expected revision only before any allocation
+or fulfillment. The reservation-by-demand index retains consumed reservations
+while transfers are in flight, even when fulfillment is zero. Reservations become
+archive candidates only with terminal demand closure; terminal demands cannot be
+amended. The policy participates in request digests, snapshot identity, replay
+and terminal demand archives. Retained reservations must match the policy while
+their demand is retained; active reservations require that demand. Archive
+payloads retain canonical policy shape and authenticated demand digests.
+
+A source policy selects accounts; it does not prove cross-custodian delegation.
+The host application controls use of pooled demands and requester identity.
+Holder-relative reports keep their existing visibility contract and do not
+automatically disclose the source list. Standalone DTOs default a missing field
+to `Pooled`; strict snapshots still require the exact engine and plugin identity.
+Adding the public Rust struct field requires the 0.11.0 minor release.
+
 Non-force consumption providers publish a top-level `resource_consumption_intents`
 map in their owned, active domain record. Map keys equal the IDs of sealed
 `ResourceConsumptionIntentV1` entries. The resource adapter requires exactly one

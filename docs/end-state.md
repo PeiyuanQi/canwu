@@ -242,6 +242,16 @@ losses, fulfillment, and deterministic receipts. Geography influences supply
 through effective-dated content capabilities and route access rather than a
 single timeless deposit flag.
 
+Since 0.11.0, demand source policy is explicit: `Pooled` preserves the shared
+account pool, while `ExactAccounts` bounds supply to 1–256 sorted unique accounts
+custodied by the requester with matching resource/unit revisions. Source checks
+precede scarcity arbitration and never fall back to pooled accounts. Policy
+amendments stop at the first reservation or fulfillment, including consumed
+reservations backing in-flight escrow. Cancellation and a new demand are needed
+for a different policy. Persistence, replay and terminal archives retain the
+policy; strict old-snapshot loading remains unsupported. Cross-custodian
+delegation and permission to submit pooled demands stay with the host/domain.
+
 Since 0.10.1, other consumers can use the existing sealed
 `ResourceConsumptionIntentV1` map contract through canonical adapter ingress.
 Authorization is bound to an active exact current provider record, the full

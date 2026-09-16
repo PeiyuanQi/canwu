@@ -113,6 +113,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
 | [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
+| 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户，或由申请者保管的有界精确账户列表；该策略不授予跨保管人的权限。 |
 | [资源分配](/architecture/settlement/) | allocation | `ReservationAllocation` | 在供给约束下确定性结算竞争申请的结果。 |
 | [可见性](/architecture/settlement/) | visibility | `StateVisibility` | 控制状态和证据可以到达哪些读取者的策略。 |
 | [快照](/developer/persistence/) | snapshot | `SimulationSnapshot` | 恢复时必须完整校验的持久化状态映像。 |

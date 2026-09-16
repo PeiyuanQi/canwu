@@ -296,11 +296,58 @@ pub enum DemandStatus {
     RejectedMinimum,
 }
 
+/// Selects which accounts may satisfy a demand during allocation.
+///
+/// `Pooled` preserves the historical deterministic account pool. `ExactAccounts`
+/// restricts allocation to the listed, requester-custodied accounts.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceDemandSourcePolicyV1 {
+    /// All open accounts with matching resource and unit may supply the demand.
+    /// This does not grant the requester authority to transfer or consume them.
+    #[default]
+    Pooled,
+    /// A nonempty, sorted, unique list of at most [`MAX_DEMAND_SOURCE_ACCOUNTS`]
+    /// open accounts, each custodied by the requester with matching resource/unit.
+    ExactAccounts(Vec<ResourceAccountId>),
+}
+
+impl ResourceDemandSourcePolicyV1 {
+    /// Validates list ordering, uniqueness, and the configured source-count bound.
+    pub(crate) fn validate_shape(&self) -> Result<(), ResourceError> {
+        if let Self::ExactAccounts(accounts) = self
+            && (accounts.is_empty()
+                || accounts.len() > MAX_DEMAND_SOURCE_ACCOUNTS
+                || accounts.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource demand source accounts must be nonempty, bounded, sorted and unique"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Returns whether an account ID is admitted by this policy.
+    #[must_use]
+    pub(crate) fn permits(&self, account: &ResourceAccountId) -> bool {
+        match self {
+            Self::Pooled => true,
+            Self::ExactAccounts(accounts) => accounts.binary_search(account).is_ok(),
+        }
+    }
+}
+
+/// Maximum number of explicitly listed source accounts in one demand.
+pub const MAX_DEMAND_SOURCE_ACCOUNTS: usize = 256;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceDemand {
     pub id: ResourceDemandId,
     pub revision: ResourceRevision,
     pub requester: KnowledgeHolderRef,
+    #[serde(default)]
+    pub source_policy: ResourceDemandSourcePolicyV1,
     pub resource_revision: ResourceDefinitionRevisionId,
     pub unit_revision: ResourceUnitRevisionId,
     pub requested: u64,

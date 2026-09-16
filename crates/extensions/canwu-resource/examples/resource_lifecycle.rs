@@ -2,9 +2,9 @@ use canwu_api::{KnowledgeHolderRef, PersonId, SimDuration, SimTime};
 use canwu_resource::{
     DemandStatus, PartialFulfillmentPolicy, ResourceAccount, ResourceAccountId,
     ResourceAllocationRequestV1, ResourceDefinitionId, ResourceDefinitionRevision,
-    ResourceDefinitionRevisionId, ResourceDemand, ResourceDemandId, ResourceLimitsV1,
-    ResourceOperationKey, ResourceOperationRequestV1, ResourceQualityId, ResourceRevision,
-    ResourceScopeId, ResourceState, ResourceTieBreakKey, ResourceUnitRevision,
+    ResourceDefinitionRevisionId, ResourceDemand, ResourceDemandId, ResourceDemandSourcePolicyV1,
+    ResourceLimitsV1, ResourceOperationKey, ResourceOperationRequestV1, ResourceQualityId,
+    ResourceRevision, ResourceScopeId, ResourceState, ResourceTieBreakKey, ResourceUnitRevision,
     ResourceUnitRevisionId,
 };
 use std::collections::BTreeSet;
@@ -60,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         id: ResourceDemandId::new("example:demand:workshop")?,
         revision: ResourceRevision::INITIAL,
         requester: consumer,
+        source_policy: ResourceDemandSourcePolicyV1::default(),
         resource_revision: resource,
         unit_revision: unit,
         requested: 40,

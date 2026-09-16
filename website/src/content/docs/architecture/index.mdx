@@ -264,7 +264,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 自定义资源消费者
 
-在 0.10.1 中，自定义消费者使用提供方拥有的有效记录，其中包含有界的
+自 0.10.1 起，自定义消费者使用提供方拥有的有效记录，其中包含有界的
 `resource_consumption_intents` 映射，值为已封存的 `ResourceConsumptionIntentV1`。
 规范适配器输入绑定精确当前来源、分配与完成租约；消费者不能写入资源余额。
 军事补给参考消费者保留其专用适配器。参见[开发合同](/developer/production-economy/)。
+
+## 需求来源策略
+
+自 0.11.0 起，`ResourceDemand::source_policy` 明确记录 `Pooled` 或 `ExactAccounts`。后者列出 1–256 个严格排序、不重复、由需求申请者保管的账户，资源和单位版本必须精确匹配。来源检查先于稀缺资源分配，不会回退到资源池。一旦有资源预留或履约，策略便固定，包括已消费、但仍对应在途托管余额的预留。快照、重放和终止归档均保留策略。资源池选择不授予转移权限；资源池需求的使用权限及跨保管人的委托由上层应用负责。参见[完整合同](/developer/production-economy/#需求来源策略)。

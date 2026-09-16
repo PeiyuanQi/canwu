@@ -1214,6 +1214,7 @@ fn validate_resource_terminal_archive_record(
             ResourceTerminalRecordKeyV1::Demand(id),
             ResourceTerminalArchivePayloadV1::Demand(value),
         ) => {
+            value.source_policy.validate_shape()?;
             let digest = canonical_digest("canwu.resource.demand.v1", value)?;
             if id != &value.id
                 || record.operation_key

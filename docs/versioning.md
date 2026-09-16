@@ -1,6 +1,6 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.10 runtime
+Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.11 runtime
 writes and reads only its current contracts. There is no implicit loader or
 runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.10.1`. A live `SimulationSnapshot` has:
+The workspace version is `0.11.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -25,13 +25,15 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.10.1 extends the existing typed resource-consumption intent contract
-to provider-owned domain records beyond the economy reference integration.
-It adds no public DTO fields or enum variants and retains snapshot format 8.
-The resource plugin semantic identity changes with this authorization behavior.
-Exact engine-version and plugin-descriptor checks still apply: a 0.10.0 snapshot
-must not be relabeled or loaded into 0.10.1. Retain the previous engine or use an
-explicit application-owned export when crossing that boundary. A downstream
+Version 0.11.0 adds a persisted source policy to resource demands: `Pooled`
+retains shared-pool behavior, while bounded `ExactAccounts` names lawful
+requester-custodied sources. Admission, amendment, allocation, restore and
+replay validate that policy before reservation; there is no silent fallback to an
+unlisted account. This public Rust field is an additive semantic capability but
+struct literals are source-incompatible before 1.0, so the release is a minor
+version and retains snapshot format 8. The resource plugin semantic identity
+changes. A 0.10.1 snapshot must not be relabeled or loaded into 0.11.0; retain
+the previous engine or use an explicit application-owned export. A downstream
 application's pinned registry version does not change with this local checkout.
 
 Version 0.10 adds optional resource, production, reference economy-content,

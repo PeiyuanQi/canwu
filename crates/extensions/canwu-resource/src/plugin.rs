@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "5b95a5463bf84b414ce5aa466c8543d671a8c3f4d82407f5b27cdd9be8f43346";
+    "f57c8bc26d7f4e2b34d6b4e1c9f94ddf31ef8e4e5a63cf1b8a2a8f7394f3ac27";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "c4aed3aebb1f4cb54f889c644647d15671be3c5338731330d6fc693c3933493b";
@@ -2505,7 +2505,10 @@ fn validate_resource_authority(
         ResourceOperationRequestV1::CreateAccount(request) => {
             Some(request.account.custodian.clone())
         }
-        ResourceOperationRequestV1::SubmitDemand(request) => Some(request.demand.requester.clone()),
+        ResourceOperationRequestV1::SubmitDemand(request) => {
+            state.validate_demand_sources(&request.demand).map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
+            Some(request.demand.requester.clone())
+        }
         ResourceOperationRequestV1::AmendDemand(request) => {
             let current = state.demands.get(&request.replacement.id).ok_or_else(|| {
                 CanwuError::new(
@@ -2519,6 +2522,7 @@ fn validate_resource_authority(
                     "resource demand amendment changes its authority holder",
                 ));
             }
+            state.validate_demand_sources(&request.replacement).map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
             Some(current.requester.clone())
         }
         ResourceOperationRequestV1::BeginTransfer(request) => state

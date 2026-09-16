@@ -265,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-api"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-core",
  "canwu-decision",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-core"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -289,7 +289,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-correspondence"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-information",
@@ -299,7 +299,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-culture"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-society",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-debug"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-ming-fiscal-reference",
@@ -322,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-decision"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-economy-reference"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-api",
@@ -350,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-economy-reference-content"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-production",
@@ -363,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-event"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-core",
  "canwu-time",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-fiscal"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "semver",
@@ -383,7 +383,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-force-supply-reference"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-economy-reference-content",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-history-research"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-technology",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-information"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -413,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-knowledge"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-law"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-api",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-military"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-api",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-military-reference"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-military",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-military-reference-content"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-api",
@@ -466,7 +466,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-ming-fiscal"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-fiscal",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-ming-fiscal-reference"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-fiscal",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-production"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "canwu-resource",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-reference-world"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-resource"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-api",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-routing"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-sim"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "blake3",
  "canwu-core",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-society"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -553,7 +553,7 @@ dependencies = [
 
 [[package]]
 name = "canwu-technology"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-api",
  "serde",
@@ -562,14 +562,14 @@ dependencies = [
 
 [[package]]
 name = "canwu-time"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "canwu-transport"
-version = "0.10.1"
+version = "0.11.0"
 dependencies = [
  "canwu-core",
  "canwu-routing",
