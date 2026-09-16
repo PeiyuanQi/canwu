@@ -9,7 +9,21 @@ sidebar:
 import { Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-`settle_boundary(BoundaryRequest)` is the authoritative extension path for new domain mechanics. It turns a simulation boundary into a verifiable transaction: admit the work, run systems in fixed phases, then commit everything once or roll it back completely.
+A **boundary** is one authoritative pass through the simulation. It may represent a clock tick, a batch of scheduled work, or a settlement point requested by the host application. The boundary gathers work, runs it in a fixed order, and either commits the result or rolls the whole pass back.
+
+`settle_boundary(BoundaryRequest)` is the authoritative extension path for new domain mechanics. The fourteen phases below define its execution order; they are not fourteen separate simulation engines.
+
+## Boundary at a glance
+
+<MermaidDiagram
+  label="Fourteen ordered phases in one Canwu boundary"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the phase table below remains available."
+  definition={`flowchart LR
+    Input["Admit work"] --> Read["Fix read baseline"] --> Think["Derive, perceive, decide"] --> Supply["Allocate scarce resources"] --> Propose["Stage domain changes"] --> Check["Validate"] --> Commit["Commit"] --> History["Apply historical transitions"] --> Reports["Build actor-relative views"] --> Evidence["Save evidence and hashes"]
+`}
+/>
 
 ## Four settlement foundations
 
@@ -59,7 +73,7 @@ The practical classification is: **1 and 3 write state, 2 computes an allocation
 6. If a fatal error occurs, restore time, queues, state, journals, random streams, counters, and boundary records.
 </Steps>
 
-## Fourteen phases
+## Fourteen ordered phases
 
 | # | Phase | Purpose |
 | ---: | --- | --- |

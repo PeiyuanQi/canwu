@@ -9,7 +9,22 @@ sidebar:
 import { Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-`settle_boundary(BoundaryRequest)` 是扩展领域机制的权威入口。它把一次模拟边界变成一个可验证的事务：先确定应该被纳入的工作，再按固定阶段运行系统，最后一次性提交或完整回滚。
+**边界**是一次权威模拟运行。它可以代表一个时钟节拍、一批已调度工作，或上层应用请求的结算点。边界先收集工作，再按固定顺序运行；成功时提交结果，失败时回滚整个过程。
+
+`settle_boundary(BoundaryRequest)` 是扩展领域机制的权威入口。下面的十四个阶段定义执行顺序，并不是十四个彼此独立的模拟引擎。
+
+## 一次边界的全貌
+
+<MermaidDiagram
+  label="一次参伍边界中的十四个有序阶段"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方阶段表格仍然可用。"
+  renderFailureMessage="图表预览不可用；下方阶段表格仍然可用。"
+  definition={`flowchart LR
+    Input["接纳工作"] --> Read["固定读取基线"] --> Think["计算、感知、决策"] --> Supply["分配稀缺资源"] --> Propose["暂存领域变化"] --> Check["校验"] --> Commit["提交"] --> History["应用历史转移"] --> Reports["生成角色相对视图"] --> Evidence["保存证据与哈希"]
+`}
+/>
 
 ## 结算系统的四个底层构成
 
@@ -60,7 +75,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 6. 若发生任何致命错误，则恢复时间、队列、状态、日志、随机流、计数器和边界记录。
 </Steps>
 
-## 十四个阶段
+## 十四个有序阶段
 
 | 顺序 | 阶段 | 作用 |
 | ---: | --- | --- |
