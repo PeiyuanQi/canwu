@@ -1677,6 +1677,77 @@ fn prepare_revalidates_exact_local_targets_and_persists_stable_rejection() {
     assert_eq!(restarted.completion_leases.reserved_units, 0);
 }
 
+#[test]
+fn aborting_held_grant_cleans_expiry_index_before_validation() {
+    let mut value = fixture(10, 0);
+    let request = RequestCompletionLeaseV1 {
+        recipe: CompletionCapacityRecipeV1 {
+            receipts: MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+            mutations: 1,
+            reports_per_holder: 0,
+            holders: 0,
+            bytes: 1_024,
+        },
+        ..lease_request(
+            1,
+            "test:lease:abort-expiry-index",
+            SimTime::EPOCH,
+            CompletionPolicyClassV1::Guaranteed,
+        )
+    };
+    let acquisition = request.id.clone();
+    value
+        .state
+        .apply_operation(&ResourceOperationRequestV1::Completion(
+            ResourceCompletionOperationV1::Acquire(request),
+        ))
+        .expect("acquire");
+    let grant_id = CompletionCapacityGrantId::new("test:grant:abort-expiry-index").expect("grant");
+    value
+        .state
+        .apply_operation(&ResourceOperationRequestV1::Completion(
+            ResourceCompletionOperationV1::Grant(GrantCompletionCapacityV1 {
+                grant_id: grant_id.clone(),
+                acquisition: acquisition.clone(),
+                expected_acquisition_revision: value.state.completion_leases.acquisitions
+                    [&acquisition]
+                    .revision,
+                owner_plugin: PLUGIN_NAME.to_owned(),
+                target_versions: vec![CompletionLockedTargetV1::Account {
+                    id: value.account.clone(),
+                    revision: ResourceRevision::INITIAL,
+                }],
+                current_boundary: 1,
+            }),
+        ))
+        .expect("grant");
+    let revision = value.state.completion_leases.acquisitions[&acquisition].revision;
+    value
+        .state
+        .apply_operation(&ResourceOperationRequestV1::Completion(
+            ResourceCompletionOperationV1::Abort(AbortCompletionLeaseV1 {
+                acquisition: acquisition.clone(),
+                expected_revision: revision,
+                holder: holder(1),
+            }),
+        ))
+        .expect("abort");
+    value
+        .state
+        .completion_leases
+        .cleanup_aborting(16)
+        .expect("cleanup");
+    value.state.validate().expect("released grant validates");
+    assert!(
+        !value
+            .state
+            .completion_leases
+            .expiry_due
+            .values()
+            .any(|grants| grants.contains(&grant_id))
+    );
+}
+
 fn lease_request(
     authority: u64,
     id: &str,

@@ -2235,46 +2235,58 @@ impl CompletionLeaseBookV1 {
     }
 
     fn release_grant(&mut self, grant_id: &CompletionCapacityGrantId) -> Result<(), ResourceError> {
-        let grant = self.grants.get_mut(grant_id).ok_or_else(|| {
-            ResourceError::NotFound("completion capacity grant is unavailable".to_owned())
-        })?;
-        if matches!(
-            grant.state,
-            CompletionGrantStateV1::Released
-                | CompletionGrantStateV1::Expired
-                | CompletionGrantStateV1::Completed
-        ) {
-            return Ok(());
-        }
-        if grant.state == CompletionGrantStateV1::Rejected {
+        let (state, acquisition_id, reserved_units, targets) = {
+            let grant = self.grants.get_mut(grant_id).ok_or_else(|| {
+                ResourceError::NotFound("completion capacity grant is unavailable".to_owned())
+            })?;
+            if matches!(
+                grant.state,
+                CompletionGrantStateV1::Released
+                    | CompletionGrantStateV1::Expired
+                    | CompletionGrantStateV1::Completed
+            ) {
+                return Ok(());
+            }
+            if grant.state == CompletionGrantStateV1::Consumed {
+                return Err(ResourceError::InvalidLifecycle(
+                    "an activated consumed grant cannot be released".to_owned(),
+                ));
+            }
+            let state = grant.state;
             grant.state = CompletionGrantStateV1::Released;
             grant.revision = grant.revision.next()?;
-            return Ok(());
+            (
+                state,
+                grant.acquisition.clone(),
+                grant.reserved_units,
+                grant.target_versions.clone(),
+            )
+        };
+        if state != CompletionGrantStateV1::Rejected {
+            self.reserved_units =
+                self.reserved_units
+                    .checked_sub(reserved_units)
+                    .ok_or_else(|| {
+                        ResourceError::Conservation(
+                            "completion reserved units underflowed".to_owned(),
+                        )
+                    })?;
+            for target in &targets {
+                self.target_locks.remove(target);
+            }
+            let acquisition = self
+                .acquisitions
+                .get_mut(&acquisition_id)
+                .ok_or_else(|| ResourceError::InvalidDefinition("grant is orphaned".to_owned()))?;
+            acquisition.refunded_units = acquisition
+                .refunded_units
+                .checked_add(reserved_units)
+                .ok_or(ResourceError::Overflow)?;
         }
-        if grant.state == CompletionGrantStateV1::Consumed {
-            return Err(ResourceError::InvalidLifecycle(
-                "an activated consumed grant cannot be released".to_owned(),
-            ));
+        for grants in self.expiry_due.values_mut() {
+            grants.remove(grant_id);
         }
-        grant.state = CompletionGrantStateV1::Released;
-        grant.revision = grant.revision.next()?;
-        self.reserved_units = self
-            .reserved_units
-            .checked_sub(grant.reserved_units)
-            .ok_or_else(|| {
-                ResourceError::Conservation("completion reserved units underflowed".to_owned())
-            })?;
-        for target in &grant.target_versions {
-            self.target_locks.remove(target);
-        }
-        let acquisition = self
-            .acquisitions
-            .get_mut(&grant.acquisition)
-            .ok_or_else(|| ResourceError::InvalidDefinition("grant is orphaned".to_owned()))?;
-        acquisition.refunded_units = acquisition
-            .refunded_units
-            .checked_add(grant.reserved_units)
-            .ok_or(ResourceError::Overflow)?;
+        self.expiry_due.retain(|_, grants| !grants.is_empty());
         Ok(())
     }
 

@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.11.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.11.1`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -25,7 +25,7 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.11.0 adds a persisted source policy to resource demands: `Pooled`
+Version 0.11.0 added a persisted source policy to resource demands: `Pooled`
 retains shared-pool behavior, while bounded `ExactAccounts` names lawful
 requester-custodied sources. Admission, amendment, allocation, restore and
 replay validate that policy before reservation; there is no silent fallback to an
@@ -245,3 +245,6 @@ Use the constructor APIs for new runs, `snapshot`/`checkpoint` for persistence,
 `replay_from_journal` for exact replay, and `outbox_entries` for host delivery.
 Downstream crates must update their code to these contracts; no deprecated
 alias is retained before 1.0.
+
+
+Version 0.11.1 is a patch release. It fixes completion-lease abort and release cleanup so every released held or prepared grant is removed from the bounded expiry index before validation; snapshot format and public type shapes remain unchanged.
