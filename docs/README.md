@@ -40,6 +40,7 @@ current published **social diffusion simulation module**
 - [Legal storage sharding, COW, delta persistence, and cold archive](proposals/legal-storage-sharding-compaction.md)
 - [Legal institutionalization consensus review](proposals/legal-institutionalization-review.md)
 - [Military domain extension design](proposals/military-domain-design.md)
+- [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits
 
