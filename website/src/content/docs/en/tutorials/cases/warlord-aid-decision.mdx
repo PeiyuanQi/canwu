@@ -237,7 +237,9 @@ You can substitute several decision styles:
 
 Since 0.12.0, the trace records the decision stage (`Guard`, `Utility`, or
 `Random`) and the guards that fired. A ticket can also name a `parent_ticket`:
-a terminal ticket of exactly the same decision maker that it follows up.
+a terminal ticket that it follows up, either of exactly the same decision
+maker or, since 0.13.0, one whose controller held the same seat as the new
+ticket's controller.
 
 If Warlord B dies or is captured, Canwu cancels the open tickets where Warlord B
 is the decision maker at the end of that boundary, and refuses new tickets for
@@ -246,6 +248,15 @@ person, the person the controller acts for, becomes unavailable, Canwu cancels
 that controller's open tickets and refuses new ones for it. To continue such a
 decision, open a new ticket for an available controller and set
 `parent_ticket` to the cancelled ticket; the link is copied onto the new trace.
+
+Since 0.13.0, the decision can also pass to Warlord B's successor through seat
+succession. Suppose Warlord B's controller is bound to the seat
+`faction-b.leader`. When Warlord B dies, bind the successor's controller to that
+same seat, open a new ticket with the successor as decision maker, and set
+`parent_ticket` to the cancelled ticket. Canwu accepts the parent because both
+controllers are bound to the same non-empty seat, and the new trace keeps the
+lineage. A parent with a different decision maker whose controller sits in
+another seat is still rejected.
 
 ## 3. Where is the code?
 

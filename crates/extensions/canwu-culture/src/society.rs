@@ -1,12 +1,12 @@
 use crate::model::{CompiledCulturePlan, CultureDefinition};
 use canwu_api::{CanwuError, ErrorCode, SimTime};
 use canwu_society::{
-    AffiliationTarget, InstitutionalAlignment, SocietyCohort, SocietyState, TransitionRule,
-    distribution_id,
+    AffiliationTarget, InstitutionalAlignment, SocietyCohort, SocietyLifecycleDeltaV1,
+    SocietyState, SocietyTargetBindings, TransitionRule, distribution_id,
 };
 use std::collections::BTreeSet;
 
-fn culture_binding_id(plan: &CompiledCulturePlan, source_id: &str) -> String {
+pub(crate) fn culture_binding_id(plan: &CompiledCulturePlan, source_id: &str) -> String {
     format!(
         "culture:v1:{}:{}:{}:{}",
         plan.definition_id.len(),
@@ -421,12 +421,86 @@ fn install_target_bindings_draft(
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
-fn apply_society_lifecycle_delta_draft(
+/// Returns the compiled society rules and alignments of one culture target.
+///
+/// Alignments carry zero values and no authorized actor, exactly as
+/// [`install_into_society`] creates them.
+pub(crate) fn compiled_target_bindings(
+    plan: &CompiledCulturePlan,
+    target_id: &str,
+) -> Result<SocietyTargetBindings, CanwuError> {
+    let target = plan
+        .target_by_id
+        .get(target_id)
+        .ok_or_else(|| invalid(format!("unknown compiled culture target {target_id}")))?;
+    let mut rules = Vec::new();
+    for transition_key in plan.transitions_by_target.get(target).into_iter().flatten() {
+        let transition = plan
+            .transitions
+            .get(transition_key.get() as usize)
+            .ok_or_else(|| invalid("compiled culture transition key is invalid"))?;
+        rules.push(TransitionRule {
+            id: culture_binding_id(plan, &transition.source_id),
+            target_id: target_id.to_owned(),
+            affected_cohorts: transition
+                .affected_cohorts
+                .iter()
+                .filter_map(|cohort| plan.cohorts.get(cohort.get() as usize))
+                .map(|cohort| cohort.source_id.clone())
+                .collect(),
+            from: transition.from,
+            to: transition.to,
+            base_rate_per_million: transition.base_rate_per_million,
+            weights: transition.weights,
+        });
+    }
+    let mut alignments = Vec::new();
+    for institution_key in plan
+        .institutions_by_target
+        .get(target)
+        .into_iter()
+        .flatten()
+    {
+        let institution = plan
+            .institutions
+            .get(institution_key.get() as usize)
+            .ok_or_else(|| invalid("compiled culture institution key is invalid"))?;
+        alignments.push(InstitutionalAlignment {
+            id: culture_binding_id(plan, &institution.source_id),
+            institution: institution.institution.clone(),
+            target_id: target_id.to_owned(),
+            affected_cohorts: institution
+                .affected_cohorts
+                .iter()
+                .filter_map(|cohort| plan.cohorts.get(cohort.get() as usize))
+                .map(|cohort| cohort.source_id.clone())
+                .collect(),
+            support_per_mille: 0,
+            enforcement_per_mille: 0,
+            access_grant_per_mille: 0,
+            authorized_actor: None,
+            last_decision_version: 0,
+        });
+    }
+    Ok(SocietyTargetBindings {
+        target_id: target_id.to_owned(),
+        rules,
+        alignments,
+    })
+}
+
+/// Translates culture lifecycle transitions into the society-owned
+/// [`SocietyLifecycleDeltaV1`].
+///
+/// A reactivated target reinstalls its compiled bindings; a dormant or
+/// retired target deactivates its compiled rules; a retired target also
+/// releases its compiled alignments and target-scoped dynamic society state.
+/// [`settle_culture_society_boundary`] applies this delta to caller-owned
+/// state, and `CultureBoundaryPlugin` delivers it to the society plugin.
+pub fn society_lifecycle_delta(
     plan: &CompiledCulturePlan,
     transitions: &[crate::LifecycleTransition],
-    draft: &mut SocietyState,
-) -> Result<(), CanwuError> {
+) -> Result<SocietyLifecycleDeltaV1, CanwuError> {
     let mut inactive_targets = BTreeSet::new();
     let mut retired_targets = BTreeSet::new();
     let mut reactivated_targets = BTreeSet::new();
@@ -444,96 +518,30 @@ fn apply_society_lifecycle_delta_draft(
             }
         }
     }
-    for target_id in reactivated_targets {
-        install_target_bindings_draft(plan, target_id, draft)?;
-    }
-
-    let inactive_bindings =
-        compiled_binding_ids_for_targets(plan, inactive_targets.iter().copied())?;
-    let retired_bindings = compiled_binding_ids_for_targets(plan, retired_targets.iter().copied())?;
-    if !retired_targets.is_empty() {
-        let external_rule = draft.transition_rules.iter().any(|(id, rule)| {
-            retired_targets.contains(rule.target_id.as_str())
-                && !retired_bindings.rules.contains(id)
-        });
-        let external_alignment = draft
-            .institutional_alignments
-            .iter()
-            .any(|(id, alignment)| {
-                retired_targets.contains(alignment.target_id.as_str())
-                    && !retired_bindings.alignments.contains(id)
-            });
-        let live_culture_alignment =
-            draft
-                .institutional_alignments
-                .iter()
-                .any(|(id, alignment)| {
-                    retired_targets.contains(alignment.target_id.as_str())
-                        && retired_bindings.alignments.contains(id)
-                        && (alignment.support_per_mille > 0
-                            || alignment.enforcement_per_mille > 0
-                            || alignment.access_grant_per_mille > 0
-                            || alignment.authorized_actor.is_some())
-                });
-        let live_influence = draft
-            .influence_edges
-            .values()
-            .any(|edge| retired_targets.contains(edge.target_id.as_str()) && edge.active);
-        let live_organization = draft.organizations.values().any(|organization| {
-            retired_targets.contains(organization.target_id.as_str()) && organization.active
-        });
-        let live_policy = draft
-            .policies
-            .values()
-            .any(|policy| retired_targets.contains(policy.target_id.as_str()));
-        if external_rule
-            || external_alignment
-            || live_culture_alignment
-            || live_influence
-            || live_organization
-            || live_policy
-        {
-            return Err(invalid(
-                "live society dependency blocks culture target retirement",
-            ));
-        }
-    }
-
-    draft
-        .transition_rules
-        .retain(|rule_id, _| !inactive_bindings.rules.contains(rule_id));
-    draft
-        .remainders
-        .retain(|_, remainder| draft.transition_rules.contains_key(&remainder.rule_id));
-    if !retired_targets.is_empty() {
-        draft
-            .institutional_alignments
-            .retain(|id, _| !retired_bindings.alignments.contains(id));
-        draft
-            .distributions
-            .retain(|_, value| !retired_targets.contains(value.target_id.as_str()));
-        draft
-            .aggregates
-            .retain(|_, value| !retired_targets.contains(value.target_id.as_str()));
-        draft
-            .mobilization_candidates
-            .retain(|_, value| !retired_targets.contains(value.target_id.as_str()));
-        for projection in draft.projections.values_mut() {
-            projection
-                .entries
-                .retain(|_, value| !retired_targets.contains(value.target_id.as_str()));
-        }
-    }
-    draft.canonicalize()?;
-    draft.validate()
+    Ok(SocietyLifecycleDeltaV1 {
+        installs: reactivated_targets
+            .into_iter()
+            .map(|target_id| compiled_target_bindings(plan, target_id))
+            .collect::<Result<_, _>>()?,
+        deactivations: inactive_targets
+            .into_iter()
+            .map(|target_id| compiled_target_bindings(plan, target_id))
+            .collect::<Result<_, _>>()?,
+        releases: retired_targets.into_iter().map(str::to_owned).collect(),
+    })
 }
 
 /// Atomically settles culture lifecycle state and synchronizes society state.
 ///
-/// This is the preferred host boundary helper. If lifecycle settlement or a
+/// This is the host-driven boundary helper. If lifecycle settlement or a
 /// live society dependency rejects retirement, neither caller-owned state is
 /// changed. The returned transitions and resulting culture record still need
 /// to be persisted by the host's authoritative boundary transaction.
+///
+/// A host that registers `CultureBoundaryPlugin` must not also call this
+/// function for the same run: the plugin already settles culture lifecycle
+/// and delivers the same [`society_lifecycle_delta`] to the society plugin,
+/// so doing both would apply every lifecycle change twice.
 pub fn settle_culture_society_boundary(
     plan: &CompiledCulturePlan,
     runtime: &mut crate::CultureRuntime,
@@ -552,8 +560,9 @@ pub fn settle_culture_society_boundary(
         runtime.apply_boundary_delta(delta);
         return Ok(transitions);
     }
+    let society_delta = society_lifecycle_delta(plan, delta.transitions())?;
     let mut society_draft = society.clone();
-    apply_society_lifecycle_delta_draft(plan, delta.transitions(), &mut society_draft)?;
+    society_draft.apply_lifecycle_delta(&society_delta)?;
     runtime.apply_boundary_delta(delta);
     *society = society_draft;
     Ok(transitions)

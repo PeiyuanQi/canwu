@@ -226,6 +226,12 @@ pub struct LegalInstitutionDefinition {
     pub competences: Vec<LegalCompetenceDefinition>,
 }
 
+/// Role of one stage in a procedure.
+///
+/// Every kind except [`Self::Consultation`] is a deciding stage: its ballots
+/// are tallied by [`ProcedureStageDefinition`]'s quorum, threshold, and block
+/// rules, and the stage completes as soon as that tally passes. A `Veto` stage
+/// additionally treats any `Against` ballot as a veto.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcedureStageKind {
@@ -234,24 +240,126 @@ pub enum ProcedureStageKind {
     Signature,
     Review,
     Ratification,
+    /// Advisory stage. Seats receive tickets whose context carries
+    /// `"advisory": true`, and their ballots persist as immutable participation
+    /// evidence, but ballots never count toward completion, veto, or adoption.
+    /// The stage completes at the first legal boundary after its deadline (the
+    /// procedure deadline wake) and opens the next stage; zero ballots is a
+    /// valid outcome. Seat work of the stage that is still pending or enqueued
+    /// at completion expires, as whenever a stage stops accepting ballots. A
+    /// procedure that lacks its capacity reservation cannot complete a
+    /// consultation: it expires at that deadline like any other stage. A
+    /// consultation needs a positive `deadline_minutes`, no quorum, threshold,
+    /// weights, or blocks, and cannot be a procedure's final stage.
+    Consultation,
 }
 
+/// Tie-break token for a procedure whose stages count unit blocks: a tie adds
+/// no block, so a tied stage passes only if `block_threshold` is already met;
+/// otherwise it waits for more ballots or its deadline.
+pub const PROCEDURE_TIE_BREAK_STATUS_QUO: &str = "status-quo";
+/// Prefix of the casting-seat tie-break token, followed by a seat ID (for
+/// example `casting-seat:chair`). The seat must belong to every blocked stage
+/// of the procedure, and each such stage's `block_threshold` must exceed half
+/// its block count, so no tie passes on its own and the casting seat decides.
+pub const PROCEDURE_TIE_BREAK_CASTING_SEAT_PREFIX: &str = "casting-seat:";
+
+/// Parsed [`ProcedureProfileDefinition::deterministic_tie_break`] for block counting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BlockTieBreak<'a> {
+    StatusQuo,
+    CastingSeat(&'a str),
+}
+
+impl<'a> BlockTieBreak<'a> {
+    pub(crate) fn parse(value: &'a str) -> Option<Self> {
+        if value == PROCEDURE_TIE_BREAK_STATUS_QUO {
+            return Some(Self::StatusQuo);
+        }
+        value
+            .strip_prefix(PROCEDURE_TIE_BREAK_CASTING_SEAT_PREFIX)
+            .filter(|seat| canonical_id(seat))
+            .map(Self::CastingSeat)
+    }
+}
+
+/// One frozen stage of a procedure profile.
+///
+/// Ballots are tallied in integer *vote weight*. A seat's weight is its entry in
+/// [`Self::seat_weights`], or 1 when the seat is absent (so an empty map is the
+/// equal-seat count). A deciding stage passes when all of the following hold:
+///
+/// - no seat cast `Veto`, and in a `Veto` stage no seat cast `Against`
+///   (vetoes are seat powers and are never weighted);
+/// - `quorum`: the summed weight of seats that cast any ballot, abstentions
+///   included, is at least `quorum`;
+/// - `threshold`: the summed weight of `For` and `Against` ballots is positive
+///   and `For` weight × 1,000 is at least that sum × `threshold` (per mille);
+/// - when [`Self::block_of_seat`] is non-empty, at least `block_threshold`
+///   blocks take the `For` position.
+///
+/// A block's position is the weighted majority of its seats' `For` and
+/// `Against` ballots. A block whose `For` and `Against` weights are equal is
+/// divided and takes no position, like a block whose seats cast no ballot or
+/// only abstained; neither counts for either side. When as many blocks are
+/// `For` as `Against` (at least one each), the stage is tied and the
+/// procedure's `deterministic_tie_break` applies. [`PROCEDURE_TIE_BREAK_STATUS_QUO`]
+/// adds no block: the tied stage passes only if `block_threshold` is already
+/// met, and otherwise waits for more ballots or its deadline.
+/// [`PROCEDURE_TIE_BREAK_CASTING_SEAT_PREFIX`] names a casting seat whose own
+/// `For` ballot in this stage adds one `For` block before `block_threshold` is
+/// checked; a casting seat that voted `Against`, abstained, or has not voted
+/// adds nothing, so the tie does not pass.
+///
+/// Stages are evaluated at every boundary that touches the procedure, over the
+/// ballots admitted so far, exactly as for equal seats, so later ballots can
+/// break or create a tie before the deadline. Seat work of a stage that stops
+/// accepting ballots (it passed, completed, or its procedure closed) expires,
+/// and a seat response that arrives afterwards is recorded as a rejected
+/// intent outcome. Weight, block, and block-threshold fields are omitted from
+/// JSON when unused, so existing definitions keep their canonical encoding and
+/// plan hash.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProcedureStageDefinition {
     pub id: String,
     pub kind: ProcedureStageKind,
     pub seats: Vec<String>,
     pub allowed_ballots: Vec<Ballot>,
+    /// Minimum summed weight of seats that cast any ballot. Without weights
+    /// other than 1 or blocks it is a seat count capped at 1,000; with them it
+    /// may not exceed the stage's total seat weight.
     pub quorum: u16,
+    /// Per-mille share of counted (`For` plus `Against`) weight that must be
+    /// `For`, at most 1,000.
     pub threshold: u16,
+    /// Minutes between the boundary that opens this stage and its deadline.
+    /// The first stage's deadline is the proposal deadline.
     pub deadline_minutes: i64,
     pub allow_replacement: bool,
+    /// Integer vote weight per seat of this stage; every weight is at least 1
+    /// and every key is a seat of this stage. Seats not listed weigh 1, and an
+    /// explicit weight of 1 is removed when the plan compiles so equal seats
+    /// have one canonical encoding.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub seat_weights: BTreeMap<String, u16>,
+    /// Unit block of each seat. When non-empty, every seat of this stage
+    /// belongs to exactly one block and `block_threshold` is required.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub block_of_seat: BTreeMap<String, String>,
+    /// Number of blocks that must take the `For` position, from 1 to the
+    /// number of distinct blocks. Present exactly when blocks are used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_threshold: Option<u16>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProcedureProfileDefinition {
     pub id: String,
     pub stages: Vec<ProcedureStageDefinition>,
+    /// Non-empty deterministic tie-break rule. It is interpreted only by
+    /// stages that count unit blocks; a procedure with such a stage must use
+    /// [`PROCEDURE_TIE_BREAK_STATUS_QUO`] or
+    /// `casting-seat:<seat>` ([`PROCEDURE_TIE_BREAK_CASTING_SEAT_PREFIX`]).
     pub deterministic_tie_break: String,
     pub reservation_pool: Option<String>,
     pub reservation_quantity: u64,

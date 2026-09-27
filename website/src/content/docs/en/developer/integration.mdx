@@ -110,6 +110,12 @@ A person who is not alive, or who is detained or captive, is unavailable:
 
 Hostage, hiding, and exile stay admissible by default; add stricter rules in your own systems. A cancelled ticket is not reassigned. When only the controller's authority person became unavailable, continue the decision by opening a new ticket for an available controller with `parent_ticket` set to the cancelled one. No new ticket can be opened for a decision maker who is still unavailable.
 
+Since 0.13.0, a successor can also continue the decision of a decision maker who died or was captured. Open the new ticket with the successor as decision maker, assigned to a controller bound to the same non-empty `seat_id` as the cancelled ticket's controller, and set `parent_ticket` to the cancelled ticket. This seat succession keeps the lineage on the new ticket's trace; a parent of a different decision maker in a different seat is still rejected.
+
+## Limit rule explanations
+
+Boundary systems may record [evaluation traces](/en/architecture/settlement/#evaluation-traces) to explain rule results. The run configuration bounds them for all systems together: by default 4,096 traces per boundary and 32 terms per trace, at most 65,536 and 256. Declare other bounds before the run starts with `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })`; a trace limit of zero forbids traces. A boundary whose systems exceed a bound fails with `EvaluationTraceLimitExceeded` and commits nothing, so size the limits for all systems and seats in one boundary together, not per seat. Traces also count toward journal size.
+
 ## Drive time
 
 <Steps>

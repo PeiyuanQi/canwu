@@ -252,6 +252,7 @@ fn fixture_information_delegated_interpretation() -> Result<(), String> {
             status: InterpretationStatus::Succeeded,
             capability: "decode_fixture".to_owned(),
             confidence_per_mille: 950,
+            authenticity: None,
         },
         authority: InterpretationAuthority::InstitutionalRole {
             assignment: DomainRecordVersionRef {

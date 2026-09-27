@@ -285,6 +285,12 @@ impl Simulation {
         let mut deferred = Vec::new();
         let mut evidence = PendingBoundaryEvidence::default();
         let mut person_writes = super::persons::BoundaryPersonWrites::default();
+        let evaluation_limits = self.state.metadata.run_configuration.evaluation_limits();
+        let mut evaluation_traces = Vec::new();
+        let mut transition_ledger = super::transitions::BoundaryTransitionLedger::new(
+            boundary_id,
+            &self.state.scheduler.transition_manifests,
+        );
         for change in maintenance_record_changes {
             let change_index = u64::try_from(evidence.record_changes.len()).map_err(|_| {
                 CanwuError::new(
@@ -331,6 +337,9 @@ impl Simulation {
                     candidate_record_overlay.clear();
                 }
                 BoundaryPhase::ConditionalTransitionCommit => {
+                    // Audit ready transition manifests against the committed
+                    // state phase 10 read, before the bundle commits.
+                    transition_ledger.settle_ready(&self.state)?;
                     let (same_boundary, next_boundary) =
                         partition_boundary_visibility(std::mem::take(&mut transitions));
                     self.apply_boundary_stage(
@@ -340,6 +349,13 @@ impl Simulation {
                         &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
+                    if transition_ledger.requires_post_check() {
+                        self.check_transition_post_versions(
+                            &mut transition_ledger,
+                            &record_schemas,
+                            &deferred,
+                        )?;
+                    }
                     visible_overlay.clear();
                     visible_record_overlay.clear();
                 }
@@ -393,6 +409,7 @@ impl Simulation {
                     allowed_reservations: Some(&registered.contract.reservation_reads),
                     random_session: Some(RefCell::new(random_session)),
                     plugin_archive_provider: self.plugin_archive_provider.as_ref(),
+                    transitions: Some(&transition_ledger),
                 };
                 let context = BoundaryContext {
                     boundary_id,
@@ -424,6 +441,19 @@ impl Simulation {
                 let random_execution = view
                     .finish_random_session()
                     .expect("boundary views always have a random session");
+                // Registrations leave the proposal and staged transition
+                // writes become ordinary directives of this system.
+                let proposal = transition_ledger.admit(
+                    &registered.plugin,
+                    &registered.contract,
+                    &self.plugins,
+                    proposal,
+                )?;
+                super::evaluation::check_trace_budget(
+                    evaluation_traces.len(),
+                    &proposal.directives,
+                    evaluation_limits,
+                )?;
                 validate_boundary_proposal(
                     &registered.plugin,
                     &registered.contract,
@@ -473,7 +503,23 @@ impl Simulation {
                         request,
                     }
                 }));
-                phase_directives.extend(proposal.directives.into_iter().map(|directive| {
+                // Traces are evidence, not state: they leave the directive
+                // stream here and are recorded on the boundary record.
+                let mut state_directives = Vec::with_capacity(proposal.directives.len());
+                let mut traces = Vec::new();
+                for directive in proposal.directives {
+                    match directive {
+                        BoundaryDirective::RecordEvaluationTrace { trace } => traces.push(trace),
+                        directive => state_directives.push(directive),
+                    }
+                }
+                super::evaluation::stage_traces(
+                    &mut evaluation_traces,
+                    &registered.plugin,
+                    &registered.contract,
+                    traces,
+                );
+                phase_directives.extend(state_directives.into_iter().map(|directive| {
                     // Created persons commit at the end of the boundary and
                     // become visible to systems at the next boundary.
                     let visibility = if matches!(directive, BoundaryDirective::CreatePerson { .. })
@@ -491,6 +537,7 @@ impl Simulation {
                     }
                 }));
             }
+            transition_ledger.close_phase();
 
             let (knowledge_directives, phase_directives) =
                 partition_knowledge_directives(phase_directives);
@@ -680,6 +727,11 @@ impl Simulation {
             &mut generated_ingress,
         )?;
         self.cancel_unavailable_person_tickets(&mut person_availability_changes)?;
+        let transition_evidence = transition_ledger.finish();
+        if !transition_evidence.registered.is_empty() || !transition_evidence.audits.is_empty() {
+            self.invalidate_commitments(CommitmentDomains::SCHEDULER);
+            self.state.scheduler.transition_manifests = transition_evidence.pending;
+        }
         let random_draws = committed_random_draws
             .iter()
             .map(|draw| draw.id)
@@ -730,6 +782,9 @@ impl Simulation {
             maintenance_terminal_root,
             person_availability_changes,
             created_persons: created_persons.clone(),
+            evaluation_traces,
+            transition_manifests: transition_evidence.registered,
+            transition_audits: transition_evidence.audits.clone(),
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -768,6 +823,39 @@ impl Simulation {
                 .iter()
                 .map(super::CreatedPerson::from)
                 .collect(),
+            transition_audits: transition_evidence.audits,
+        })
+    }
+
+    /// Checks the `expected_post` versions of the transition manifests
+    /// committed in this boundary. Same-boundary phase-10 writes are already
+    /// committed; the deferred next-boundary record writes of phases 7 and 10
+    /// are applied to a candidate overlay in the order the end-of-boundary
+    /// stage applies them. Phase-12 and phase-13 writes are not yet proposed,
+    /// so they may still change a checked record afterwards.
+    fn check_transition_post_versions(
+        &self,
+        ledger: &mut super::transitions::BoundaryTransitionLedger,
+        record_schemas: &records::DomainRecordSchemas,
+        deferred: &[StagedBoundaryDirective],
+    ) -> Result<(), CanwuError> {
+        let mut candidate = BTreeMap::new();
+        extend_boundary_record_candidate_overlay(
+            &BoundaryRecordOverlayContext {
+                current: &self.state.current,
+                now: self.state.scheduler.now,
+                scheduled_actions: &self.state.scheduler.actions,
+                run_configuration: &self.state.metadata.run_configuration,
+                schemas: record_schemas,
+            },
+            &mut candidate,
+            deferred,
+        )?;
+        ledger.check_expected_post(&|record| {
+            candidate
+                .get(record)
+                .or_else(|| self.state.current.domain_records.get(record))
+                .map(|record| record.version)
         })
     }
 
@@ -822,7 +910,10 @@ impl Simulation {
                 | BoundaryDirective::PublishKnowledge { .. }
                 | BoundaryDirective::SetPersonAvailability { .. }
                 | BoundaryDirective::CreatePerson { .. }
-                | BoundaryDirective::CancelPluginIngress { .. } => None,
+                | BoundaryDirective::CancelPluginIngress { .. }
+                | BoundaryDirective::RecordEvaluationTrace { .. }
+                | BoundaryDirective::RegisterTransitionManifest { .. }
+                | BoundaryDirective::StageTransitionWrite { .. } => None,
             })
             .collect();
         let mut stage_record_changes = BTreeMap::new();
@@ -876,7 +967,10 @@ impl Simulation {
                 | BoundaryDirective::PublishKnowledge { .. }
                 | BoundaryDirective::SetPersonAvailability { .. }
                 | BoundaryDirective::CreatePerson { .. }
-                | BoundaryDirective::CancelPluginIngress { .. } => None,
+                | BoundaryDirective::CancelPluginIngress { .. }
+                | BoundaryDirective::RecordEvaluationTrace { .. }
+                | BoundaryDirective::RegisterTransitionManifest { .. }
+                | BoundaryDirective::StageTransitionWrite { .. } => None,
             };
             if let Some(entity) = unavailable {
                 return Err(CanwuError::new(
@@ -1195,6 +1289,19 @@ impl Simulation {
                         summary,
                     )?;
                     evidence.created_persons.push(creation);
+                }
+                BoundaryDirective::RecordEvaluationTrace { .. } => {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        "evaluation traces are boundary evidence and never reach a commit stage",
+                    ));
+                }
+                BoundaryDirective::RegisterTransitionManifest { .. }
+                | BoundaryDirective::StageTransitionWrite { .. } => {
+                    return Err(transition_directive_not_admitted(
+                        &staged.plugin,
+                        &staged.system,
+                    ));
                 }
             }
         }
@@ -2246,6 +2353,37 @@ fn validate_boundary_proposal(
                     &entity_exists,
                 )?;
             }
+            BoundaryDirective::RecordEvaluationTrace { trace } => {
+                super::evaluation::validate_trace_shape(
+                    contract.phase,
+                    trace,
+                    boundary_id,
+                    runtime.metadata.run_configuration.evaluation_limits(),
+                )?;
+                if !proposal_entity_identity_exists(
+                    current,
+                    &plugins.record_schemas,
+                    proposal,
+                    &trace.subject,
+                ) {
+                    return Err(CanwuError::new(
+                        ErrorCode::EntityNotFound,
+                        format!(
+                            "boundary system {plugin}.{} traced an evaluation of unknown subject {}",
+                            contract.name, trace.subject
+                        ),
+                    )
+                    .with_entity(trace.subject.clone()));
+                }
+                for reference in trace.terms.iter().flat_map(|term| &term.evidence) {
+                    validate_proposal_evidence_reference(
+                        runtime,
+                        boundary_id,
+                        pending_evidence,
+                        reference,
+                    )?;
+                }
+            }
             BoundaryDirective::CreatePerson {
                 draft,
                 correlation,
@@ -2271,9 +2409,24 @@ fn validate_boundary_proposal(
                     &draft.provenance,
                 )?;
             }
+            BoundaryDirective::RegisterTransitionManifest { .. }
+            | BoundaryDirective::StageTransitionWrite { .. } => {
+                return Err(transition_directive_not_admitted(plugin, &contract.name));
+            }
         }
     }
     Ok(())
+}
+
+/// Transition directives are resolved by the boundary transition ledger
+/// before proposal validation, so reaching one later is a kernel fault.
+fn transition_directive_not_admitted(plugin: &str, system: &str) -> CanwuError {
+    CanwuError::new(
+        ErrorCode::InvalidBoundary,
+        format!(
+            "boundary system {plugin}.{system} produced a transition directive outside the transition ledger"
+        ),
+    )
 }
 
 /// Validates one `ResolveDecisionRandomly` directive before its draw is
@@ -2695,7 +2848,10 @@ fn extend_boundary_domain_record_overlay(
             | BoundaryDirective::PublishKnowledge { .. }
             | BoundaryDirective::SetPersonAvailability { .. }
             | BoundaryDirective::CreatePerson { .. }
-            | BoundaryDirective::CancelPluginIngress { .. } => None,
+            | BoundaryDirective::CancelPluginIngress { .. }
+            | BoundaryDirective::RecordEvaluationTrace { .. }
+            | BoundaryDirective::RegisterTransitionManifest { .. }
+            | BoundaryDirective::StageTransitionWrite { .. } => None,
         })
         .collect();
     if requests.is_empty() {

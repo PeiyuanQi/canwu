@@ -371,11 +371,31 @@ pub enum TransmissionMode {
     IndependentInvestigation,
 }
 
+/// An off-map transmission source: a teacher, workshop, or institution that
+/// has no live capability record in the simulation.
+///
+/// For the practice modes (`Demonstration`, `Apprenticeship`,
+/// `PersonnelTransfer`) a transmission cites exactly one of a live
+/// `source_capability` and an external source. An external source has no
+/// simulated holder or site, so the destination opens the opportunity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalTransmissionSourceV1 {
+    /// A manifest-bound content record describing the source: a
+    /// domain-record version established by the initial scenario and owned
+    /// outside `canwu.technology`.
+    pub evidence: EvidenceRef,
+    /// Reliability the content declares for the source, 0 to 1,000 per mille.
+    pub declared_reliability_per_mille: u16,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransmissionOpportunityPayload {
     pub source: Option<KnowledgeHolderRef>,
     pub source_site: Option<EntityRef>,
     pub source_capability: Option<DomainRecordVersionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_source: Option<ExternalTransmissionSourceV1>,
     pub destination: KnowledgeHolderRef,
     pub destination_site: EntityRef,
     pub revision: Option<DomainRecordVersionRef>,
@@ -845,7 +865,17 @@ impl TechnologyRecordPayload {
                 .collect(),
             Self::AssetBinding(value) => vec![value.provider_asset.clone()],
             Self::Adoption(value) => vec![value.decision_evidence.clone()],
-            Self::Transmission(value) => value.evidence.clone(),
+            Self::Transmission(value) => value
+                .evidence
+                .iter()
+                .chain(
+                    value
+                        .external_source
+                        .as_ref()
+                        .map(|external| &external.evidence),
+                )
+                .cloned()
+                .collect(),
             Self::ExperimentAttempt(_)
             | Self::AttemptObservation(_)
             | Self::Capability(_)

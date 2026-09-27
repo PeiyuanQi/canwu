@@ -70,8 +70,9 @@ recorded on the boundary evidence. A ticket cannot be reassigned. When only the
 controller's authority person became unavailable, the decision continues as a
 new ticket for an available controller whose `parent_ticket` names the
 cancelled one. When the decision maker is unavailable, no ticket can be opened
-for that decision maker, and because lineage requires the same decision maker,
-a successor's decision is a new ticket without a parent link.
+for that decision maker; a successor's decision is a new ticket of the
+successor, which may name the cancelled one as its parent when the successor's
+controller is bound to the same seat.
 
 Persons can also enter the world at runtime. A phase-7 `CreatePerson`
 directive supplies an application draft and provenance; the kernel allocates
@@ -85,6 +86,22 @@ is due, its issuer (the host, the owning plugin's registration permit, or a
 boundary system of the plugin that scheduled it) can withdraw it. The
 withdrawal is a terminal journal record rather than a rollback, and the
 withdrawn item is never admitted.
+
+## Multi-owner transitions
+
+A historical transition often needs several owners to write together: a
+central order that a treasury and a county must both execute, or a succession
+that several institutions must record. Each owner still writes only its own
+state. Since 0.13.0 the kernel lets a coordinating plugin declare such a
+transition as a transition manifest: the participant plugins, the exact record
+versions each expects before and after, and the single ready boundary in which
+all of them stage their writes in phase 10. Before phase 11 commits, the kernel
+audits every ready manifest. A manifest that only some participants staged, or
+whose expected versions do not hold, fails the whole boundary closed; a
+manifest that no participant staged expires. The committed or expired audit is
+read-only boundary evidence for phase-12 systems, and pending manifests persist
+and replay with the run. Which transitions need a manifest, who participates,
+and what the transition means remain application content.
 
 ## Information flow
 
@@ -129,14 +146,24 @@ resolution, accepted route evidence, incident policy, and cross-extension
 orchestration. Application and channel adapters still prepare content and
 dispatch records, supply period-specific network/address knowledge, and admit
 scarce capacity. The information ledger does not acquire route search, and the
-router does not acquire dispatch or retry lifecycle state. The implemented
-slice requires the carrier holder to be the sender and reads only that
-sender-owned ledger; delegated-carrier disclosure and authority remain future
-contracts. Since 0.12.0 the same holder-relative planning rule is public:
+router does not acquire dispatch or retry lifecycle state. Planning reads the
+carrier holder's ledger; since 0.13.0 a carrier other than the sender must
+accept the carrying through its own delegation command, whose claim covers
+each dispatch, and the engine publishes none of the carrier's knowledge to the
+sender. A seized carrier ends the delivery attempt and only the carrier holder
+is told. Since 0.12.0 the same
+holder-relative planning rule is public:
 `planning_snapshot_from_holder_knowledge` builds a routing snapshot only from
 the endpoints and connections one holder's ledger asserts at the read cut and
 returns a read-set digest as evidence, so other domains can plan from what a
 holder knows without reading route truth.
+
+Interpretation can also judge provenance. Since 0.13.0 an interpreting holder
+may attach an authenticity finding to an interpretation: whether the claimed
+source of one exact interpreted representation is accepted, with a basis and a
+confidence. The finding is bound to that representation's exact version.
+Whether a forgery is detected, and with what probability, stays an application
+draw.
 
 ## Causality and explanation
 
@@ -146,6 +173,16 @@ and committed component-change evidence. Future field provenance should add
 compact `(entity, component, field) -> event` indexes rather than replacing the
 event model. Explanation can then grow from event chains to domain-specific
 causal narratives.
+
+Since 0.13.0, explaining a rule result has a generic contract. A phase-7 or
+phase-12 boundary system may record a rule-evaluation trace: the rule ID and
+version, the subject, the named integer terms with the evidence each read, and
+the result. Traces are bounded per boundary by the run configuration, fail the
+boundary deterministically when they exceed the bound rather than being
+sampled, and are boundary evidence that no system reads back. A player or agent
+sees a trace only through the actor-relative viewer: traces about its own
+entity, and traces about another subject evaluated after its ledger learned of
+that subject. Rule IDs, terms, and their meaning remain application content.
 
 ## Decisions and controllers
 
@@ -200,9 +237,11 @@ rejected. Only a boundary resolution may carry draw evidence; host-authored
 decision ingress cannot.
 
 A ticket may name a `parent_ticket`: a terminal ticket in hot decision history
-with the exact same decision maker. The link is copied onto the trace, so a
-follow-up decision, such as one reopened after its controller's authority
-person became unavailable, keeps its lineage without a second mechanism.
+with the exact same decision maker, or, since 0.13.0, one whose controller is
+bound to the same seat as the new ticket's controller (a seat succession). The
+link is copied onto the trace, so a follow-up decision, such as one reopened
+after its controller's authority person became unavailable or continued by a
+successor in the same seat, keeps its lineage without a second mechanism.
 
 This decision selector is distinct from stochastic world incidents. A disease
 exposure, equipment failure, or weather event remains a boundary-system
@@ -233,7 +272,8 @@ kernel.
 
 Snapshots contain deterministic state, clock, RNG state, scheduler sequence,
 pending serializable work, knowledge, person availability and the
-created-person registry, decision tickets/controllers/attempts/traces,
+created-person registry, pending transition manifests, decision
+tickets/controllers/attempts/traces,
 event history, and command records. A
 snapshot also retains plugin descriptors and blocks continuation until matching
 stateless executable handlers are rehydrated. It can be forked into independent
@@ -271,9 +311,23 @@ subject (`PersonsGroup`, counted by head count), custody taken by someone
 outside the itinerary (a seizure handoff that names the seizing identity), and
 a reroute caused by an application-owned condition record cited at an exact
 version (`ExternalCondition`). Incidents, hostility, hazards, and their
-authority remain application systems. `canwu-transport` is still a record
-library: a movement lifecycle plugin with capacity pools is a proposed later
-extension, not part of the current contract.
+authority remain application systems. `canwu-transport` remains a record
+library; the `canwu-movement` extension owns the lifecycle of its records,
+including capacity pools and holder-relative movement reports.
+
+Since 0.13.0, `canwu-movement` admits movement orders through one tracked
+command, keeps every order and execution in one runtime record, settles each
+leg at its due time, and publishes reports to the owner, the operator, and
+delayed remote observers. Moving anyone but the owner requires a current
+authority-basis record that names the owner and every subject. Seizures,
+failures caused by hazards, and delivery reconciliation arrive only as
+application incidents that cite exact evidence; the plugin never draws
+randomness. Capacity pools offer windowed transport capacity, and one
+deterministic, all-or-nothing allocation pass per pool orders requests by
+priority, window start, tie-break key, admission sequence, and booking identity
+without preempting confirmed capacity. After a terminal seizure a
+transport execution can only be closed by its owner. Closed executions retire from hot state once their final
+reports are out, and within a bounded time.
 
 Movement commands follow the same boundary. The canonical intent is
 `OrderMovement`, with subject-specific transit and custody state. A voluntary
@@ -299,10 +353,12 @@ only a true retry creates a successor attempt. A failed attempt leaves the
 dispatch active until explicit sender-authorized retry or finalization. Replan
 of the same attempt applies only before terminal failure, while it is waiting
 for a route and transport is `ReplanPending`.
-Interception records access and does not imply delivery termination. Capacity
-allocation remains separate from pure route search. The current correspondence
-request is explicitly `Unconstrained`; constrained execution needs a future
-admission contract carrying exact booking or reservation evidence.
+Interception records access and does not imply delivery termination; a carrier
+seizure does end the attempt. Capacity allocation remains separate from pure
+route search. Movement executions can draw on `canwu-movement` capacity pools,
+but the current correspondence request is still explicitly `Unconstrained`;
+constrained correspondence needs a future admission contract carrying exact
+booking or reservation evidence.
 
 ## Resources, production, and local economy
 
@@ -321,8 +377,10 @@ precede scarcity arbitration and never fall back to pooled accounts. Policy
 amendments stop at the first reservation or fulfillment, including consumed
 reservations backing in-flight escrow. Cancellation and a new demand are needed
 for a different policy. Persistence, replay and terminal archives retain the
-policy; strict old-snapshot loading remains unsupported. Cross-custodian
-delegation and permission to submit pooled demands stay with the host/domain.
+policy; strict old-snapshot loading remains unsupported. Permission to submit
+pooled demands stays with the host/domain; cross-custodian delegation is
+expressed only by an explicit access grant and a `Granted` source policy, while
+who may grant whom stays application authority.
 
 Since 0.12.0, three more movements of stock are explicit. An account-level loss
 debits one account in place, cites its cause, and is conserved as admitted loss
@@ -333,7 +391,20 @@ the whole exchange, and the two transfers then settle independently. Local
 acceptance settles an undispatched transfer without a transport execution when
 both accounts carry the same host-declared place scope, which the scenario sets
 at installation and the engine never infers. None of these grants delegated
-access to another custodian's stock; that remains a separate future contract.
+access to another custodian's stock; since 0.13.0 only an explicit access
+grant does.
+
+An access grant is a grantor custodian's recorded consent, citing exact
+authority evidence, that a grantee may draw on its stock of one exact resource
+and unit revision up to a cap within a window. The grantee's demand names the
+grant and the grantor's accounts; allocation checks the grant before scarcity
+arbitration and never falls back to other accounts; each unit is charged once;
+and the grantee's own completion lease authorizes each debit, which settles
+only at its certified time inside the grant window. Revocation stops at the first
+reservation. Who may grant whom, and the record that justifies it, stay
+application authority. Version 0.13.0 also makes live production completions
+settle their output, which the completion lease's early version lock had
+prevented in 0.11 and 0.12.
 
 Since 0.10.1, other consumers can use the existing sealed
 `ResourceConsumptionIntentV1` map contract through canonical adapter ingress.
@@ -392,7 +463,10 @@ for particular operations at particular sites, installed, evaluated for a
 specific use, and adopted by an authorized holder. Claims, observations,
 capability, implementation, adoption, and transmission remain orthogonal.
 Papermaking, woodblock printing, movable type, gunpowder, and steam engines are
-cross-validation data profiles, never solver branches.
+cross-validation data profiles, never solver branches. Since 0.13.0, a
+practice transmission may cite an external source, an initial-scenario content
+record with a declared reliability, for a teacher who exists outside the
+simulated world; the destination then opens the opportunity.
 
 Detailed historical interpretation remains optional. The three
 `canwu-history-research` plugins record bounded assessments of sources,
@@ -417,7 +491,12 @@ edges, organization topology, institutional alignment, policy pressure,
 transition remainders, mobilization candidates, and actor estimates outside the
 kernel. Historical labels and meanings remain downstream data. It is evidence
 for the plugin/domain-record/decision/knowledge contracts, not a declaration
-that its current types are stable public Canwu primitives.
+that its current types are stable public Canwu primitives. Since 0.13.0 a
+policy pressure can record its issuer and decision version, and a cohort can be
+rebased to a cited external stock record, such as a population owned by
+another domain, with deterministic integer re-proportioning. Rebase and
+lifecycle-delta packets are queued at admission and applied at the next Daily
+society settlement, so the society plugin stays the only writer of its state.
 
 Promotion from this domain extension into core requires an independently
 implemented second domain system needing the same primitive, evidence that the
@@ -432,8 +511,10 @@ channels, transitions, institutions, and cross-extension effects without
 hand-building runtime indexes. The current crate provides the compiler,
 society adapter, dirty-set API, lifecycle index, tombstones, explicit
 reactivation, complete state hydration, compiled effect cadence, and atomic
-combined runtime/society lifecycle synchronization. Boundary-system admission and incremental
-society aggregation/projection settlement remain follow-up work. The plan is
+combined runtime/society lifecycle synchronization. `CultureBoundaryPlugin`
+adds in-engine Monthly settlement with exposure ingress, next-boundary signal
+batches, and society lifecycle deltas applied by the society plugin; incremental
+society aggregation/projection settlement remains follow-up work. The plan is
 externally immutable for a run revision and carries its content hash and
 cardinality budgets.
 
@@ -444,8 +525,9 @@ also stops its compiled culture transition rules. Continued dormancy may produce
 tombstone. Society synchronization then removes target-scoped dynamic
 distributions, derived state, and signal inputs while preserving historical
 references. Only an explicit reactivation may create a new target generation.
-The complete runtime state is snapshot-compatible, while authoritative
-boundary/replay integration remains a host responsibility in this first slice.
+The complete runtime state is snapshot-compatible; with `CulturePlugin` the
+host drives boundary/replay integration, and with `CultureBoundaryPlugin` the
+engine does.
 This is a hot-state optimization, not historical deletion.
 
 The complete authoring, incremental settlement, lifecycle, and benchmark
@@ -471,7 +553,10 @@ dispatch through the public decision API, indexed wake/expiry work, and actor
 contexts derived through bounded holder knowledge queries. The plugin owns
 atomic sharded persistence and authenticated archive placement; the application owns orchestration and all
 concrete election, administration, justice, and
-enforcement systems.
+enforcement systems. Since 0.13.0, procedure stages can weigh seats, require a
+number of unit blocks with a deterministic status-quo or casting-seat
+tie-break, and run advisory consultation stages whose ballots are recorded but
+never counted; seat weights, blocks, and the tie-break choice are content.
 
 ### Reference content and starter kits
 

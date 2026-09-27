@@ -84,6 +84,7 @@ fn run(long_distance: bool) -> CorrespondenceOperation {
         capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
         execution_id: canwu_api::TransportExecutionId(if long_distance { 2 } else { 1 }),
         automatic_opportunity: Some(opportunity_ref(operation_key)),
+        carrier_delegation: None,
     };
     canwu
         .enqueue_command(

@@ -14,9 +14,9 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 
 This case connects communication demand to physical delivery. The information
 ledger remains transport-neutral: the `canwu-correspondence` domain extension
-resolves an address, plans from the sender's own holder ledger, persists
-transport execution, and advances the addressed delivery through canonical
-ingress.
+resolves an address, plans from the carrier's holder ledger (normally the
+sender's own), persists transport execution, and advances the addressed
+delivery through canonical ingress.
 
 ## Run it
 
@@ -40,7 +40,7 @@ address and network knowledge determine the accepted route.
 <Steps>
 1. An application or channel adapter prepares one single-recipient addressed `Dispatch` and chooses a logical `due_at` deadline.
 2. A decision-backed command or a deterministically selected automatic `CommunicationOpportunity` admits the correspondence intent.
-3. The current plugin requires the carrier holder to equal the sender, reads only that sender-owned address, endpoint, and connection knowledge, then persists the accepted `RoutePlan` and exact knowledge cut.
+3. The plugin reads the carrier holder's address, endpoint, and connection knowledge, then persists the accepted `RoutePlan` and exact knowledge cut. The carrier is normally the sender; a different carrier needs its own delegation (see below).
 4. One atomic information operation activates the dispatch and creates its first `DeliveryAttempt`.
 5. `TransportExecution` advances each leg and records an explicit custody `Handoff` at a carrier or mode boundary.
 6. On-time final arrival completes the attempt and dispatch through idempotent information operations, preserving exact record-version evidence. A failed or late attempt leaves the dispatch `Active` for explicit recovery.
@@ -79,6 +79,44 @@ whether an opportunity occurs; another selects one recipient. The opportunity
 is consumed when correspondence starts, so snapshot restore cannot choose a
 different recipient.
 
+## Delegated carriers and carrier seizure
+
+Since 0.13.0, a sender can hand its correspondence to another holder, such as
+an envoy, a merchant, or a courier service. The carrier must accept first:
+under its own command authority it issues `delegate_carrier_v1` with a
+delegation claim (`DelegationClaimV1`) that names itself as `performed_by`, the
+sender as `performed_for`, and the `carry_correspondence` capability. The
+sender's request then cites that admitted command in
+`InitiateCorrespondenceRequest::carrier_delegation`.
+
+- The claim's validity interval must cover every dispatch. It is checked when
+  the correspondence is admitted and again when the first dispatch or a retry
+  settles; replanning the same attempt does not check it again. A newer
+  delegation from the same carrier for the same sender replaces the older one,
+  which is how a carrier withdraws it; otherwise give the claim an `expires_at`
+  when the carrying should end.
+- Planning and address resolution read the carrier's ledger, because the
+  carrier is the one who travels. The engine publishes none of the carrier's
+  knowledge to the sender, who observes only consequences such as whether the
+  delivery arrives.
+- The plugin records each accepted delegation as the carrier's current
+  delegation for that sender, citable from the next boundary. Admission reads
+  that record rather than the command, so a run whose evidence was sealed
+  decides exactly as its replay. A replaced delegation can no longer be cited,
+  including by retries of a correspondence already under way.
+
+A `CarrierSeized { seized_by, custody_handoff }` incident means the carrier and
+the packet were taken. Unlike interception, it ends the delivery attempt: the
+current leg fails, a terminal seizure handoff is recorded under
+`custody_handoff`, and the plugin, which owns the execution record, closes the
+transport execution and the attempt as failed. The dispatch stays active for
+the sender's explicit retry or finalization. A
+carrier waiting for a route can also be seized. Only the carrier holder
+receives an `attempt_report`, which says that the attempt ended by seizure
+without naming the seizer. A sender that delegated the carrying is not told by
+the engine; the application relays the news when it would reach the sender.
+Whether a seizure happens is an application draw.
+
 ## Historical and modern channels
 
 Ancient post roads, 1900/1940 rail, modern rail, air, telegraph, and other signal
@@ -92,8 +130,9 @@ Route search does not reserve scarce capacity. The current request contract has
 only `CorrespondenceCapacityAdmission::Unconstrained`; the plugin neither
 checks nor persists a booking. Rail, air, courier, or signal capacity needs a
 future admission variant carrying exact `CapacityBooking` or simulation
-reservation evidence. This example therefore demonstrates only unconstrained
-delivery.
+reservation evidence. Movement executions managed by `canwu-movement` can book
+capacity pools, but correspondence does not use them yet. This example
+therefore demonstrates only unconstrained delivery.
 
 The tests restore snapshots and replay the full operation exactly. They also
 cover disaster rerouting after a handoff that keeps prior legs and handoff evidence, route recovery after a

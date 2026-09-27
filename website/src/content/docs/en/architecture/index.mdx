@@ -62,6 +62,7 @@ external and development dependencies are omitted. The graph opens at 200%; use 
         Resource["canwu-resource"]
         Production["canwu-production"]
         Military["canwu-military"]
+        Movement["canwu-movement"]
     end
 
     subgraph Examples["Examples"]
@@ -114,6 +115,7 @@ external and development dependencies are omitted. The graph opens at 200%; use 
     Production --> Resource
     Production --> Technology
     Military --> Api
+    Movement --> Api
     MingFiscal --> Api
     MingFiscal --> Fiscal
     EconomyContent --> Api
@@ -186,24 +188,28 @@ external and development dependencies are omitted. The graph opens at 200%; use 
 | `canwu-reference-world` | Replaceable example entities, movement plugin, detached projection, routing adapter, and starter |
 | `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
 | `canwu-routing` | Deterministic time-dependent routing primitives |
-| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, and saga primitives |
-| `canwu-sim` | Private runtime, scheduling, plugins, and settlement |
+| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, capacity-pool allocation, and saga record primitives |
+| `canwu-sim` | Private runtime, scheduling, plugins, settlement, transition manifests, and evaluation-trace evidence |
 | `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
-| `canwu-information` | Published authoritative information lifecycle extension |
-| `canwu-correspondence` | Published correspondence domain extension and simulation plugin |
+| `canwu-information` | Published authoritative information lifecycle extension, including authenticity findings on interpretation |
+| `canwu-correspondence` | Published correspondence domain extension and simulation plugin, with delegated carriers and carrier seizure |
 | `canwu-society` | Published social diffusion simulation module |
-| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension |
-| `canwu-law` | Implemented experimental legal authoring, institutional procedure, versioned law, and applicability extension |
+| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension, with host-driven and in-engine settlement plugins |
+| `canwu-law` | Implemented experimental legal authoring, institutional procedure (including weighted, unit-block, and consultation stages), versioned law, and applicability extension |
 | `canwu-technology` | Published evidence-based generic technology simulation extension |
 | `canwu-history-research` | Optional downstream historical research assessment plugins |
 | `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
-| `canwu-resource` | Conserved resource accounts, protected floors, demand, reservation, allocation, transfer, consumption, loss, and fulfillment extension |
+| `canwu-resource` | Conserved resource accounts, protected floors, demand, reservation, allocation, transfer, consumption, loss, delegated access grants, and fulfillment extension |
 | `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, production execution, projects, and output settlement extension |
+| `canwu-military` | Optional military domain extension for forces, operations, combat, occupation, military knowledge, and cross-domain receipts; not a universal combat model |
+| `canwu-movement` | Movement lifecycle extension: movement orders, leg settlement, capacity-pool allocation, and holder-relative movement reports over `canwu-transport` records |
 | `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
 | `canwu-economy-reference-content` | Economy reference content with model cards, citations, coverage declarations, and explicit unknown/not-applicable states |
+| `canwu-military-reference-content` | Versioned, explicitly synthetic military rulesets for the military extension; not a historical dataset |
 | `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
 | `canwu-force-supply-reference` | Replaceable military-supply consumer and requisition-saga reference integration using the public resource API |
 | `canwu-economy-reference` | Runnable integration composing resources, production, transport, force supply, a grain loop, scarcity, and price evidence |
+| `canwu-military-reference` | Runnable public-API military integration composing the military extension, its synthetic content, and the reference world |
 | `canwu-debug` | Reference client using the public API and reference-world integration |
 
 The published `canwu-culture` culture system SDK sits above
@@ -214,8 +220,10 @@ complete state restores lifecycle schedules, hot/dirty indexes, and effect
 cadence. Dormant targets leave the culture hot index and stop compiled culture transition rules
 after explicit society synchronization; retired targets additionally release
 target-scoped dynamic society state while historical evidence remains available.
-Boundary-system registration, canonical signal admission, and incremental
-aggregation remain follow-up work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
+Since 0.13.0, the culture boundary plugin (`CultureBoundaryPlugin`) runs that
+lifecycle as a Monthly boundary system and admits exposure signal batches
+through canonical ingress; incremental society aggregation remains follow-up
+work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
 which combines culture authoring, lifecycle, and legal institutionalization design.
 
 ## From domain extensions to runnable kits
@@ -233,6 +241,17 @@ interception policy, and cross-mechanism evidence. It is also a
 `SimulationPlugin` by execution form, registering authoritative commands,
 canonical ingress, and boundary systems. It depends on `canwu-api` and
 `canwu-information`, with no reverse dependency, so the crate DAG stays acyclic.
+
+`canwu-movement` follows the same pattern for movement. `canwu-transport` stays
+a record library of orders, executions, itinerary revisions, handoffs,
+bookings, and capacity pools. It cannot host a plugin: plugins are built on
+`canwu-api`, which depends on `canwu-transport`, so a plugin there would create
+a dependency cycle.
+`canwu-movement` depends only on `canwu-api` and owns the
+lifecycle of those records: it keeps every admitted order and execution in one
+domain record, settles legs at their due times, allocates capacity pools, and
+publishes holder-relative movement reports. Incidents, hazards, hostility, and
+every random draw about them stay in application systems.
 
 Resources and production follow the same ownership boundary:
 `canwu-resource` owns conserved quantities and fulfillment only;
@@ -285,7 +304,7 @@ its specialized adapter. See [the developer contract](/en/developer/production-e
 
 ## Demand source policy
 
-Since 0.11.0, `ResourceDemand::source_policy` records either `Pooled` or `ExactAccounts`. The latter lists 1–256 sorted unique requester-custodied accounts with exact matching resource/unit revisions. Source checks precede scarcity arbitration, with no fallback to pooled accounts. The policy is fixed after any reservation or fulfillment, including consumed reservations supporting in-flight escrow. Snapshots, replay and terminal archives preserve it. Pooled selection does not grant transfer authority; the host application controls pooled demand use and cross-custodian delegation. See the [full contract](/en/developer/production-economy/#demand-source-policy).
+Since 0.11.0, `ResourceDemand::source_policy` records either `Pooled` or `ExactAccounts`. The latter lists 1–256 sorted unique requester-custodied accounts with exact matching resource/unit revisions. Source checks precede scarcity arbitration, with no fallback to pooled accounts. The policy is fixed after any reservation or fulfillment, including consumed reservations supporting in-flight escrow. Snapshots, replay and terminal archives preserve it. Pooled selection does not grant transfer authority; the host application controls pooled demand use. Since 0.13.0, cross-custodian delegation is expressed only by an access grant and a third policy, `Granted` (see [delegated access grants](/en/developer/production-economy/#delegated-access-grants)). See the [full contract](/en/developer/production-economy/#demand-source-policy).
 
 ## Person availability and queued input
 
@@ -294,3 +313,23 @@ Since 0.12.0, the kernel keeps each person's life and custody state as `PersonAv
 ## Loss, exchange, and local acceptance
 
 Since 0.12.0, `canwu-resource` records account-level loss without a transfer, starts two transfers as one atomic exchange whose per-leg leases bind the agreed terms, and settles a same-place transfer without transport when both accounts share a host-declared place scope. None of these grants cross-custodian authority. See the [full contract](/en/developer/production-economy/#account-level-loss).
+
+## What the 0.13.0 contracts own
+
+Version 0.13.0 completes the downstream grand-strategy gap set except for its deferred series items. Every contract is additive and keeps snapshot format 8; each has one owner, and the application keeps the decisions the engine should not make.
+
+| Contract | Owner | What the owner does | What stays with the application |
+| --- | --- | --- | --- |
+| Transition manifest and audit | `canwu-sim` | Records who must write in one multi-owner transition, stages their writes in phase 10, and audits them in phase 11 before the transition commits | The participants, expected versions, and meaning of the transition |
+| Evaluation trace | `canwu-core` record, `canwu-sim` evidence, `canwu-api` viewer read | Keeps a bounded, term-by-term explanation of a rule's result as boundary evidence and shows it only to holders that may see the subject | Rule IDs, terms, and what they mean |
+| Seat succession | `canwu-decision` | Lets a new ticket name a terminal ticket whose controller held the same seat | Who holds the seat |
+| Access grant | `canwu-resource` | Records a grantor's capped, windowed consent and charges each unit once under the grantee's own lease | Who may grant whom, and the authority evidence |
+| Movement lifecycle and capacity pools | `canwu-movement` over `canwu-transport` records | Admits orders, settles legs, allocates pools, and publishes movement reports | Incidents, hazards, hostility, their random draws, and authority-basis records |
+| Delegated carrier and carrier seizure | `canwu-correspondence` | Admits a carrier only on its own delegation, plans from its ledger, and ends an attempt on seizure | Relaying the news of a seizure to the sender |
+| Authenticity finding | `canwu-information` | Binds a holder's judgment of a claimed source to the exact interpreted representation | How likely a forgery is to be detected |
+| Weighted, unit-block, and consultation stages | `canwu-law` | Tallies integer vote weights and unit blocks, and runs advisory consultation stages | Seat weights, blocks, and the tie-break choice |
+| Culture boundary settlement | `canwu-culture` (`CultureBoundaryPlugin`); `canwu-society` stays the only society writer | Settles the culture lifecycle inside the engine and hands society deltas to the society plugin | The exposure signals and the culture definition |
+| Policy-pressure provenance and cohort headcount rebase | `canwu-society` | Records who issued a policy pressure and rebases a cohort to a cited external stock | The external stock record |
+| External transmission source | `canwu-technology` | Admits a cited off-map source instead of a live capability for practice transmission | The content record and its declared reliability |
+
+The [settlement system](/en/architecture/settlement/#transition-manifests) describes when each contract runs, and [model ownership](/en/architecture/model-ownership/#domain-ownership-after-0130) lists the boundaries together with the 0.12.0 contracts.

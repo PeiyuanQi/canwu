@@ -442,6 +442,10 @@ pub(super) struct RuntimeScheduler {
     /// cancellation record. Rebuilt from the ingress journal on restore and
     /// cleared when the retained journal is sealed.
     pub(super) cancelled_ingress: BTreeSet<super::IngressId>,
+    /// Registered transition manifests awaiting their ready boundary,
+    /// committed under the scheduler root.
+    pub(super) transition_manifests:
+        BTreeMap<super::TransitionManifestId, super::PendingTransitionManifest>,
 }
 
 #[derive(Clone)]

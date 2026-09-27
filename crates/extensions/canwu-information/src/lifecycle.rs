@@ -1,10 +1,11 @@
 use crate::model::{
     AccessContext, AccessPayload, AudienceAccessEvidence, AudienceMembership, AudiencePayload,
-    ChannelCapability, ChannelPayload, ContentPayload, ContentRelation, DelegationAuthorityGrant,
-    DelegationClaimV1, DelegationEvidenceSelector, DeliveryAttemptPayload, DeliveryAttemptStatus,
-    DispatchPayload, DispatchStatus, DispatchTarget, InformationBody, InformationLimitsV1,
-    InstancePayload, InstanceStatus, InterpretationAuthority, InterpretationPayload,
-    InterpretationStatus, ReleasePayload, ReleaseScope, ReleaseStatus, RepresentationPayload,
+    AuthenticityFinding, ChannelCapability, ChannelPayload, ContentPayload, ContentRelation,
+    DelegationAuthorityGrant, DelegationClaimV1, DelegationEvidenceSelector,
+    DeliveryAttemptPayload, DeliveryAttemptStatus, DispatchPayload, DispatchStatus, DispatchTarget,
+    InformationBody, InformationLimitsV1, InstancePayload, InstanceStatus, InterpretationAuthority,
+    InterpretationPayload, InterpretationStatus, MAX_AUTHENTICITY_BASIS_BYTES, ReleasePayload,
+    ReleaseScope, ReleaseStatus, RepresentationPayload,
 };
 use crate::query::InformationRecordSet;
 use crate::schema::{
@@ -972,6 +973,9 @@ pub fn validate_interpretation(
     {
         return Err("every interpreted representation must be named by an input access".to_owned());
     }
+    if let Some(finding) = &payload.authenticity {
+        validate_authenticity_finding(records, finding, &representations)?;
+    }
     let result_content = optional_typed_role::<Content>(&binding.references, "result_content")?;
     match payload.status {
         InterpretationStatus::Failed if result_content.is_some() => {
@@ -1009,6 +1013,50 @@ pub fn validate_interpretation(
         InterpretationAuthority::Delegated {
             authority_grant, ..
         } => validate_canonical_text(authority_grant, "authority grant")?,
+    }
+    Ok(())
+}
+
+/// Checks the record-set part of an authenticity finding's binding: it judges
+/// one of the interpreted representations, at that record's current version,
+/// and that representation carries a claimed source. The runtime additionally
+/// requires the cited version reference, including its establishing evidence,
+/// to be the exact current version.
+fn validate_authenticity_finding(
+    records: &InformationRecordSet,
+    finding: &AuthenticityFinding,
+    interpreted: &[TypedDomainRecordRef<Representation>],
+) -> Result<(), String> {
+    validate_canonical_text(&finding.basis, "authenticity basis")?;
+    if finding.basis.len() > MAX_AUTHENTICITY_BASIS_BYTES {
+        return Err(format!(
+            "authenticity basis exceeds {MAX_AUTHENTICITY_BASIS_BYTES} bytes"
+        ));
+    }
+    validate_per_mille(finding.confidence_per_mille, "authenticity confidence")?;
+    let representation =
+        TypedDomainRecordRef::<Representation>::from_untyped(finding.representation.record.clone())
+            .map_err(|_| "authenticity finding must cite a representation record".to_owned())?;
+    if !interpreted.contains(&representation) {
+        return Err(
+            "authenticity finding must cite a representation the interpretation reads".to_owned(),
+        );
+    }
+    let record = records.required(&representation)?;
+    if record.version != finding.representation.version {
+        return Err(
+            "authenticity finding must cite the interpreted representation version".to_owned(),
+        );
+    }
+    if record
+        .decode_payload::<Representation>()
+        .map_err(stringify)?
+        .claimed_source
+        .is_none()
+    {
+        return Err(
+            "authenticity finding requires a representation that claims a source".to_owned(),
+        );
     }
     Ok(())
 }
@@ -1051,12 +1099,19 @@ pub fn validate_delegation_grant(grant: &DelegationAuthorityGrant) -> Result<(),
     Ok(())
 }
 
+/// Checks that a delegation claim binds exactly this performer, principal,
+/// and capability, and that `at` lies in its half-open validity interval
+/// `[not_before, expires_at)`.
+///
+/// Interpretation authority checks the interpretation time; other domains
+/// reuse the same rule, for example correspondence checks a delegated
+/// carrier's claim at dispatch.
 pub fn validate_delegation_claim(
     claim: &DelegationClaimV1,
     performed_by: &EntityRef,
     performed_for: &KnowledgeHolderRef,
     capability: &str,
-    interpreted_at: canwu_api::SimTime,
+    at: canwu_api::SimTime,
 ) -> Result<(), String> {
     if claim.format_version != 1
         || &claim.performed_by != performed_by
@@ -1068,7 +1123,9 @@ pub fn validate_delegation_claim(
             .binary_search_by(|candidate| candidate.as_str().cmp(capability))
             .is_err()
     {
-        return Err("delegation claim does not bind the interpretation request".to_owned());
+        return Err(
+            "delegation claim does not bind the performer, principal, and capability".to_owned(),
+        );
     }
     for claimed in &claim.capabilities {
         validate_canonical_text(claimed, "delegation capability")?;
@@ -1077,10 +1134,10 @@ pub fn validate_delegation_claim(
         .not_before
         .zip(claim.expires_at)
         .is_some_and(|(start, end)| end <= start)
-        || claim.not_before.is_some_and(|start| interpreted_at < start)
-        || claim.expires_at.is_some_and(|end| interpreted_at >= end)
+        || claim.not_before.is_some_and(|start| at < start)
+        || claim.expires_at.is_some_and(|end| at >= end)
     {
-        return Err("interpretation time is outside the delegation interval".to_owned());
+        return Err("the delegated act falls outside the delegation interval".to_owned());
     }
     Ok(())
 }

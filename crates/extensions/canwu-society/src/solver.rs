@@ -773,6 +773,8 @@ mod tests {
                     material_penalty_per_mille: 100,
                     disruption_per_mille: 100,
                     migration_pressure_per_mille: 0,
+                    issuer: None,
+                    decision_version: 0,
                 },
             );
         }

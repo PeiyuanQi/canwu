@@ -9,12 +9,14 @@ suggested release grouping is at the end. No section is accepted until its
 public-API fixture fails on 0.11.1 and passes on the implementation branch.
 
 Sections §1, §2, §3, §7, §8, §9, §10, §11, §12, §13, §14, §17, §18, §19, and
-§30 shipped in 0.12.0. Where the shipped contract differs from the sketch
-below, the [0.12.0 implementation notes](#0120-implementation-notes) and the
-canonical [architecture](../architecture.md) and
-[versioning](../versioning.md) documents are authoritative; the sketches are
-kept as the original design record. Open questions 1 and 2 are answered. All
-other sections remain proposals for 0.13.0 or later.
+§30 shipped in 0.12.0. Sections §4, §5, §6, §15, §16, and §20–§28 shipped in
+0.13.0, together with an amendment to §9 (seat succession). Only the §29 series
+items remain future work. Where the shipped contract differs from the sketch
+below, the [0.12.0 implementation notes](#0120-implementation-notes), the
+[0.13.0 implementation notes](#0130-implementation-notes), and the canonical
+[architecture](../architecture.md) and [versioning](../versioning.md)
+documents are authoritative; the sketches are kept as the original design
+record. All seven open questions are answered.
 
 ## Decision and invariant
 
@@ -237,6 +239,10 @@ in the manifest; phase 11 fails the boundary when a listed participant staged
 nothing or a pre-version differs from the snapshot; phase 12 receives the
 read-only audit record as evidence; ordinary phase-10 directives without a
 manifest keep today's behavior.
+
+*Shipped differently in 0.13.0:* a manifest that no participant staged expires
+instead of failing, and registration is a boundary directive; see the
+[0.13.0 implementation notes](#0130-implementation-notes).
 
 Versioning: new directive variant and evidence kind → minor; format 8
 retained.
@@ -492,7 +498,7 @@ Evidence: `fiscal_action_from_acting_holder_admitted_with_current_basis`.
 
 ## 15. `canwu-movement` domain extension
 
-Verified: `canwu-transport` is a record library with no plugin, ingress, phase-7 writer, root state, validator, or report; a plugin cannot live there because `canwu-sim` depends on `canwu-transport` (publish groups 3–5).
+Verified: `canwu-transport` is a record library with no plugin, ingress, phase-7 writer, root state, validator, or report; a plugin cannot live there because plugins build on `canwu-api`, which depends on `canwu-transport` (publish groups 4–5), so a plugin inside `canwu-transport` would form a dependency cycle. (The original sketch attributed this to `canwu-sim`, which does not depend on `canwu-transport`.)
 
 Add `crates/extensions/canwu-movement` (publish group 6, depends on
 `canwu-api` only):
@@ -733,8 +739,10 @@ workspace.
 - **0.12.0 (shipped):** §1, §2, §3, §7, §8, §9, §10, §11, §12, §13, §14,
   §17, §18, §19, §30, plus `versioning.md`, `end-state.md`, terminology, and
   website mirrors. All additive; format 8 retained.
-- **0.13.0:** §4, §5, §6, §15, §16, §20, §21, §22, §25, §26, §27, §28, and
-  §23–§24 if the downstream application confirms `canwu-law` adoption.
+- **0.13.0 (shipped):** §4, §5, §6, §15, §16, §20, §21, §22, §23, §24, §25,
+  §26, §27, and §28, plus seat succession for §9, the new `canwu-movement`
+  crate in publish group 6, `versioning.md`, `end-state.md`, terminology, and
+  website mirrors. All additive; format 8 retained.
 - **Later:** §29.
 
 ## 0.12.0 implementation notes
@@ -844,6 +852,170 @@ The shipped contracts follow the sketches except for the points below.
   previously accepted the administrative domain-record read but then required
   the exact kind read internally; it now resolves evidence under either read.
 
+## 0.13.0 implementation notes
+
+The shipped contracts follow the sketches except for the points below.
+
+- **§4 transition manifest.** Registration and staging are boundary
+  directives rather than internal ingress, so they are checked against the
+  system contract and recorded on the hash-chained boundary record:
+  `RegisterTransitionManifest { manifest }` from a phase-7, phase-10, or
+  phase-12 system and `StageTransitionWrite { manifest_id, writes }` from a
+  listed participant's phase-10 system, both declaring
+  `StateKey::core_transitions()`. The kernel records the coordinator, so the
+  identity is `TransitionManifestId { coordinator, lineage_id, attempt }`, and
+  `expected_post` uses `TransitionRecordVersion`, which has no establishing
+  change yet. A phase-7 registration may be ready in the same boundary; a
+  phase-10 or phase-12 registration must name a later boundary, at most 1,024
+  ahead. The audit outcome is `Committed` or `Expired`; a failed check leaves no
+  record and fails the boundary with `TransitionParticipantMissing` or
+  `TransitionVersionMismatch`. Unlike the sketch, a silent participant fails
+  the boundary only when another participant staged: when every participant is
+  silent the manifest expires, so a single-participant manifest cannot fail for
+  omission, and settling the ready boundary with no participant running is the
+  recovery path from a boundary that fails on every retry. `expected_post` is
+  checked at phase 11 against committed versions plus a dry run of the
+  boundary's pending next-boundary phase-7 and phase-10 writes. There is no
+  withdrawal directive. One pending manifest per coordinator and lineage and
+  fixed global, per-coordinator, participant, and version bounds apply, and
+  audits are unique by `(manifest_id, ready_at)`. Pending manifests persist in
+  scheduler state under an optional sub-root; format numbers and plugin
+  semantic hashes are unchanged.
+- **§5 access grant.** The identifier is `ResourceAccessGrantId`; grantor and
+  grantee are `KnowledgeHolderRef` values; accounting lives on
+  `ResourceAccessGrantRecordV1` (`cap = remaining + reserved + debited`) with an
+  `Active` or `Revoked` status, bounded by `MAX_RESOURCE_ACCESS_GRANTS` (4,096)
+  and never archived. Only the grantor custodian issues a grant, as a tracked
+  command citing available exact authority evidence, so the resource command
+  descriptor gained the administrative domain-record read. The grantor's
+  consent is the grant; the grantee's own completion lease authorizes each
+  debit, and a granted debit settles only in a boundary at its certified time,
+  inside the grant window. Tracked
+  transfer and exchange starts on a granted allocation come from the grantee,
+  who then controls cancellation, return, and loss. A granted demand's window
+  must lie inside the grant window, and `resource_access_grant_status` is the
+  grantor's or grantee's read. The same release fixes live production output
+  settlement (a live completion could never settle its credit on 0.11 or 0.12)
+  and stops `AmendDemand` from changing a demand's status or rejection reason.
+- **§6 evaluation trace.** Traces are proposed with a
+  `RecordEvaluationTrace { trace }` directive rather than a `BoundaryProposal`
+  field, accepted from phase 7 or phase 12 without a contract declaration, and
+  recorded as `BoundaryEvaluationTrace { plugin, system, phase, trace }` in
+  `BoundaryRecord::evaluation_traces`, hashed only when present.
+  `EvaluationLimitsV1` uses `u32` bounds on `RunConfiguration` (by default 4,096
+  traces per boundary and 32 terms per trace, at most 65,536 and 256) plus fixed
+  bounds of 16 evidence references per term and 256 text bytes. The viewer read
+  is `CanwuViewer::evaluation_traces(subject, after)`, which returns
+  evidence-free `EvaluationTraceView` values and derives visibility from the
+  holder ledger instead of a caller-supplied read cut.
+- **§9 amendment: seat succession.** A parent is also valid when both
+  tickets' assigned controllers are bound to the same non-empty `seat_id`.
+  Controller bindings are immutable, so no persisted field was added; the
+  rejection message names a different decision maker and controller seat.
+- **§15 movement extension.** The crate is `canwu-movement`, publish group 6.
+  `MovementPlugin::new(evidence_kinds)` declares its exact read set, and one
+  `MovementState` record holds the runtime. The tracked command carries
+  `Order`, `StartLeg`, `CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`,
+  `RequestBooking`, `Cancel`, and `OfferPool`; seizures and `Reconcile` arrive
+  only through the public `movement_incident_v1` ingress with exact evidence.
+  Moving anyone but the owner needs an `authority_basis` record that names the
+  owner (`movement_grantee`) and every other subject (`movement_subject`).
+  Observers are the operator, the owner, and delayed remote observers, and
+  reports go only to person holders. Closed executions retire automatically
+  once final reports are out and at most 365 days after closing, with
+  per-holder and per-owner quotas.
+- **§16 capacity pools.** Allocation runs in phase 7 with the pure
+  `allocate_capacity_bookings`, not through kernel phase-6 reservations:
+  reservation reads must name fixed identities at registration, the kernel
+  grants partial quantities, and it cannot order by window start or admission
+  sequence. Requests are `CapacityBookingRequestV1` (booking, tie-break key,
+  admission sequence); results are `BookingAllocationV1` with
+  `CapacityBookingAllocationEvidenceV1` (status, failure reason, remaining
+  capacity, allocation time, and digest). Bookings are all-or-nothing and
+  allocated in the boundary in which they are requested.
+  `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v5`: a booking may be
+  confirmed, failed, or cancelled before its window opens but consumed only
+  inside it, execution cancellation and delivery-free arrival are new
+  transitions, and after a terminal seizure the execution can only be closed.
+- **§20 delegated carrier.** The claim is not carried in the sender's request,
+  which would be self-vouching and would let any sender plan from any holder's
+  private ledger. The carrier issues `delegate_carrier_v1`
+  (`CarrierDelegationRequest { claim }`) under its own command authority, the
+  pattern `canwu-information` uses for delegated authority; the sender's
+  `InitiateCorrespondenceRequest::carrier_delegation` cites that command, and
+  the resolved `CorrespondenceIntent::carrier_authority` is
+  `CarrierAuthority { delegation, claim }`. The plugin records each accepted
+  delegation per (carrier, sender), citable from the next boundary and replaced
+  by a newer one (not keyed by command ID, because a scheduled retirement would
+  block evidence sealing), and admission reads that record, so a sealed run
+  decides exactly as its replay. The claim's interval is re-checked when each
+  dispatch or retry settles, not on replanning; replacement is the only
+  withdrawal. The engine
+  discloses none of the carrier's knowledge to the sender.
+- **§21 carrier seizure.** As sketched, plus: the seizure handoff is recorded
+  under the cited ID; an ID that already names another handoff keeps the
+  incident as suppressed evidence; a zero ID, malformed seizer, or
+  self-seizure is rejected; and a carrier waiting for a route can be seized.
+  Only the carrier holder receives an `attempt_report`, which does not name the
+  seizer, and a sender that delegated is not told. `canwu-transport` accepts a
+  terminal seizure that names its failed leg of the active revision as both
+  ends, at most once per execution, instead of requiring a next leg.
+- **§22 authenticity finding.** The finding carries its own
+  `representation: DomainRecordVersionRef`, which must be one of the
+  interpreted representations at its exact current version and must carry a
+  claimed source, or the operation is rejected as `invalid_lifecycle`. The
+  basis is at most `MAX_AUTHENTICITY_BASIS_BYTES` (256).
+- **§23 weighted and unit-block stages.** As sketched, plus a tie-break:
+  `deterministic_tie_break`, previously without runtime meaning, is read only
+  for procedures with a blocked stage, as `status-quo` or
+  `casting-seat:<seat>`. Quorum is the summed weight of seats that cast any
+  ballot, abstentions included; vetoes are never weighted; a block's position
+  is the weighted majority of its seats; and compile checks cover seat
+  membership, weights, block coverage, the block threshold range, and quorum.
+  The same release expires seat work when a stage stops accepting ballots,
+  records late seat responses as rejected outcomes, and counts ticket work at
+  the exact deadline minute in the budget check.
+- **§24 consultation stage.** Consultation needs a positive deadline and no
+  quorum, threshold, weights, or blocks, cannot be the last stage, marks its
+  tickets `"advisory": true`, completes at the first boundary after its
+  deadline, and expires unanswered seat work; without its capacity reservation
+  the procedure expires instead.
+- **§25 policy-pressure provenance.** A non-zero `decision_version` requires an
+  issuer, which must be a government, organization, or person and joins the
+  record's core references. Both fields are omitted when unused.
+- **§26 cohort headcount rebase.** The rebase is public ingress
+  (`CohortHeadcountRebaseV1`) queued by a new event-driven phase-12 intake in
+  `canwu.society:ingress-queue` and applied at the next Daily settlement,
+  because the society writer runs only on Daily boundaries and only one system
+  may write a state per phase. The stock version is checked at admission, not
+  when applied. Rejections are `stale_external_stock`,
+  `invalid_external_stock`, and `malformed_payload`. The same release fixes the
+  0.12.0 failure of the Daily boundary after an applied cohort transfer and
+  validates queued packets supplied by a scenario or snapshot like admitted
+  ones.
+- **§27 culture boundary system.** A new `CultureBoundaryPlugin` carries the
+  boundary system; `CulturePlugin` is unchanged. The exposure batch gains
+  `target_id`. The culture definition is a scenario record
+  (`culture_definition_record`) recompiled at each lifecycle boundary, because
+  handlers are plain function pointers. The society delta travels as internal
+  `society_lifecycle_delta_v1` ingress that the society plugin applies at its
+  next Daily settlement, so a culture step reaches society state up to two
+  boundaries later; a refused delta is recorded and reconciled. Signal batches
+  are self-addressed `cultural_signal_batch_v1` ingress admitted at the next
+  boundary. A host must not also call `settle_culture_society_boundary` when
+  the plugin is registered.
+- **§28 external transmission source.** An additive optional
+  `external_source: Option<ExternalTransmissionSourceV1 { evidence,
+  declared_reliability_per_mille }>` sits beside `source_capability` instead of
+  the sketched enum, and exactly one of the two is required for
+  demonstration, apprenticeship, and personnel transfer. A manifest-bound
+  record is an initial-scenario record version outside `canwu.technology`;
+  with no simulated holder or site, the destination opens the opportunity. The
+  apply system gained the administrative domain-record read.
+- **Engine fix.** Snapshot restore now accepts initial domain records that
+  reference entities listed only in `Scenario::entities`, as the live state
+  check already did.
+
 ## Verification evidence expected for every section
 
 - A public-API fixture that fails on 0.11.1 and passes on the branch, using
@@ -871,13 +1043,26 @@ The shipped contracts follow the sketches except for the points below.
    proposing plugin bind them at a later boundary.
 3. §4: should a manifest be allowed to span two boundaries (`ready_at` in the
    future) so participants can stage across a report boundary?
+   *Answered in 0.13.0:* a manifest may be registered ahead of its ready
+   boundary, up to 1,024 boundaries, but every participant stages and the
+   transition commits in that one `ready_at` boundary; staging never spans
+   boundaries.
 4. §6: evidence-journal growth — should traces be sampled by rule id under a
    run-configuration trace policy rather than always recorded?
+   *Answered in 0.13.0:* no sampling. Traces are bounded per boundary by
+   `EvaluationLimitsV1` and fail the boundary deterministically when a bound is
+   exceeded; a host that does not want traces does not emit them, and a zero
+   bound forbids them.
 5. §15: name — `canwu-movement` versus `canwu-transit`; the terminology table
    must add the paired Chinese term before publication.
+   *Answered in 0.13.0:* `canwu-movement`, paired in the terminology table as
+   the movement lifecycle extension (移动生命周期扩展).
 6. §28: replacing `source_capability` with an enum is a shape change; an
    alternative is an additional optional `external_source` field with a
    validation rule that exactly one is present.
+   *Answered in 0.13.0:* the additive optional `external_source` field, with
+   exactly one of it and `source_capability` present for the practice modes.
 7. §23: should block counting live in `canwu-law` or in a generic ballot
    helper under `canwu-decision` that both law and institutional society
    decisions reuse?
+   *Answered in 0.13.0:* block counting lives in `canwu-law`.

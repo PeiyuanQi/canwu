@@ -266,12 +266,40 @@ pub enum InterpretationStatus {
     Succeeded,
 }
 
+/// Longest [`AuthenticityFinding::basis`] the lifecycle admits, in bytes.
+pub const MAX_AUTHENTICITY_BASIS_BYTES: usize = 256;
+
+/// The interpreting holder's judgement of a representation's claimed source.
+///
+/// The finding binds to one exact version of an interpreted representation
+/// that carries a [`ClaimedSourceRef`]. It records whether the interpreter
+/// accepts that claim, on what basis, and with what confidence; it does not
+/// state who actually produced the representation, which stays protected
+/// audit origin. How likely a holder is to detect a false claim is an
+/// application draw.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthenticityFinding {
+    /// Exact version of the interpreted representation the finding judges.
+    pub representation: DomainRecordVersionRef,
+    pub claimed_source_accepted: bool,
+    /// Canonical application code or short explanation, at most
+    /// [`MAX_AUTHENTICITY_BASIS_BYTES`] bytes.
+    pub basis: String,
+    pub confidence_per_mille: u16,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InterpretationPayload {
     pub interpreted_at: SimTime,
     pub status: InterpretationStatus,
     pub capability: String,
     pub confidence_per_mille: u16,
+    /// Authenticity finding written by the interpreting holder's
+    /// interpretation. Omitted from JSON when absent, so interpretations
+    /// without a finding keep their exact encoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticity: Option<AuthenticityFinding>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

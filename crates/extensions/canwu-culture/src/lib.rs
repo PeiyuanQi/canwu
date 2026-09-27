@@ -6,12 +6,22 @@
 
 #![allow(clippy::missing_errors_doc, clippy::module_name_repetitions)]
 
+mod boundary;
 mod compiler;
 mod lifecycle;
 mod model;
 mod plugin;
 mod society;
 
+pub use boundary::{
+    BOUNDARY_SEMANTIC_HASH, CULTURAL_SIGNAL_INGRESS, CULTURE_EXPOSURE_INGRESS,
+    CULTURE_EXPOSURE_INTAKE_SYSTEM, CULTURE_EXPOSURE_REJECTED_EVENT,
+    CULTURE_LIFECYCLE_REJECTED_EVENT, CULTURE_LIFECYCLE_SYSTEM, CULTURE_LIFECYCLE_TRANSITION_EVENT,
+    CultureBoundaryPlugin, CultureDefinitionRecord, CultureExposureQueue,
+    CultureExposureQueueRecord, CultureExposureSignalBatch, MAX_CULTURE_EXPOSURE_QUEUE,
+    QueuedCultureExposure, culture_definition_record, culture_definition_reference,
+    culture_exposure_queue_reference,
+};
 pub use compiler::compile_culture;
 pub use lifecycle::{CultureRuntime, LifecycleObservation};
 pub use model::{
@@ -28,7 +38,7 @@ pub use model::{CultureStateRecord, culture_state_reference};
 pub use plugin::{CulturePlugin, SEMANTIC_HASH, load_culture_runtime, load_culture_state_for_plan};
 pub use society::{
     install_definition_into_society, install_into_society, settle_culture_society_boundary,
-    society_distribution_id, synchronize_society_lifecycle,
+    society_distribution_id, society_lifecycle_delta, synchronize_society_lifecycle,
 };
 
 pub const PLUGIN_NAME: &str = "canwu-culture";

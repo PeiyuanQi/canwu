@@ -1,6 +1,6 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.12 runtime
+Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.13 runtime
 writes and reads only its current contracts. There is no implicit loader or
 runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.12.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.13.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -25,7 +25,123 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.12.0 ships the first release of the
+Version 0.13.0 ships the second and final release group of the
+[downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md);
+only the §29 series items remain future work. Every contract is additive:
+
+- `canwu-core`, re-exported by `canwu-api`: `EvaluationTraceRecord` and
+  `EvaluationTerm`, the application-neutral explanation of how one rule
+  produced one integer result for one subject at one boundary.
+- `canwu-sim`, re-exported by `canwu-api`: rule-evaluation traces recorded by
+  the `RecordEvaluationTrace` boundary directive from phase 7 or phase 12 into
+  `BoundaryRecord::evaluation_traces` (`BoundaryEvaluationTrace`), bounded per
+  boundary by the run configuration's `EvaluationLimitsV1`
+  (`RunConfiguration::with_evaluation_limits`) and failing the boundary with
+  `EvaluationTraceLimitExceeded` when exceeded. Transition manifests add the
+  `RegisterTransitionManifest` and `StageTransitionWrite` directives, the
+  `canwu.core.transitions` state key, `TransitionManifest`,
+  `TransitionParticipant`, `TransitionRecordVersion`, `TransitionManifestId`,
+  `PendingTransitionManifest`, and a phase-11 audit recorded as
+  `TransitionAuditRecord` (`Committed` or `Expired`) on the boundary record and
+  receipt; a partially staged manifest fails the boundary with
+  `TransitionParticipantMissing` and a wrong expected version with
+  `TransitionVersionMismatch`. Pending manifests persist in
+  `SimulationSnapshot::pending_transition_manifests`.
+- `canwu-api`: `CanwuViewer::evaluation_traces` with the evidence-free
+  `EvaluationTraceView` and `EvaluationTermView`, and
+  `pending_transition_manifests` on `Canwu` and `CompactedCanwu`.
+- `canwu-decision`: a ticket's `parent_ticket` may also name a terminal ticket
+  whose assigned controller is bound to the same non-empty seat as the new
+  ticket's controller, so a successor continues a predecessor's decision.
+- `canwu-resource`: delegated access grants (`ResourceAccessGrantV1`, the
+  `IssueAccessGrant` and `RevokeAccessGrant` requests, the
+  `ResourceDemandSourcePolicyV1::Granted` source policy, grant-backed
+  transfers, and the holder-bound `resource_access_grant_status` read). A
+  granted debit settles only in a boundary whose time equals its certified
+  lease time, and the grant must be current then.
+- `canwu-transport`: capacity pools and deterministic booking allocation
+  (`TransportCapacityPoolV1`, `CapacityBookingRequestV1`,
+  `allocate_capacity_bookings`, `BookingAllocationV1`,
+  `CapacityBookingAllocationEvidenceV1`, `CapacityAllocationFailureV1`),
+  booking requests on an execution, booking confirmation or cancellation
+  before the booking window opens, execution cancellation, arrival settlement
+  for an execution without a delivery attempt, and a terminal seizure after
+  which an execution can only be closed. `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v5`.
+- `canwu-movement` (new crate): `MovementPlugin`, the movement lifecycle
+  extension that owns transport executions and capacity pools in one
+  `MovementState` record, settles legs at their due times, allocates pools in
+  phase 7, and publishes holder-relative movement reports. It never draws
+  randomness.
+- `canwu-correspondence`: delegated carriers (`delegate_carrier_v1`,
+  `CarrierDelegationRequest`, `InitiateCorrespondenceRequest::carrier_delegation`,
+  `CorrespondenceIntent::carrier_authority`), recorded by the plugin as the carrier's current delegation for each sender
+  (citable from the next boundary, replaced by a newer delegation); the terminal
+  `CorrespondenceIncidentKind::CarrierSeized` incident; and the carrier's
+  `attempt_report` knowledge schema.
+- `canwu-information`: `AuthenticityFinding` on `InterpretationPayload`.
+- `canwu-law`: weighted and unit-block procedure stages (`seat_weights`,
+  `block_of_seat`, `block_threshold`, and the `status-quo` and
+  `casting-seat:<seat>` tie-breaks) and the advisory
+  `ProcedureStageKind::Consultation`.
+- `canwu-society`: policy-pressure provenance (`PolicyPressure::issuer`,
+  `decision_version`), the `cohort_headcount_rebase_v1` ingress, the internal
+  `society_lifecycle_delta_v1` ingress, and the queued phase-12 society intake.
+- `canwu-culture`: the new `CultureBoundaryPlugin`, which settles the culture
+  lifecycle in a Monthly phase-7 system, admits `culture_exposure_v1` batches,
+  and hands society deltas to the society plugin. `CulturePlugin` and its
+  host-driven flow are unchanged.
+- `canwu-technology`: an optional `external_source` on practice transmission
+  opportunities (`ExternalTransmissionSourceV1`).
+
+New enum variants (including `ErrorCode`, `BoundaryDirective`,
+`ResourceOperationRequestV1`, `ResourceOperationKind`,
+`ResourceDemandSourcePolicyV1`, `CorrespondenceIncidentKind`,
+`ProcedureStageKind`, and `TransportError`) and new public struct fields (for
+example on `RunConfiguration`, `BoundaryRecord`, `BoundaryReceipt`,
+`SimulationSnapshot`, `ResourceState`, `ResourceTransfer`,
+`InitiateCorrespondenceRequest`, `CorrespondenceIntent`,
+`InterpretationPayload`, `ProcedureStageDefinition`, `PolicyPressure`, and
+`TransmissionOpportunityPayload`) are source-incompatible: exhaustive matches
+and struct literals must be updated, so the release is a pre-1.0 minor version.
+New serialized fields are omitted while empty or at their default, and runs
+that never register a manifest or record a trace hash exactly as before.
+Snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4
+are retained.
+
+The resource, correspondence, information, society, technology, and law plugin
+semantic identities change. `MovementPlugin` and `CultureBoundaryPlugin` are new
+plugin identities. The `CulturePlugin`, production, fiscal, military,
+history-research, and reference-world plugin semantic identities are unchanged. Existing law plans keep their canonical encoding and
+content hash.
+
+Version 0.13.0 also fixes these behaviors, which are visible to existing runs:
+
+- A live production completion now settles its output. The resource side of an
+  execution's completion lease locked the production runtime at the version
+  current when the lease was granted, so a live completion could not settle its
+  credit on 0.11 or 0.12; the credit now cites the version production pinned
+  as the execution's output source.
+- `AmendDemand` can no longer change a demand's lifecycle status, rejection
+  reason, or requester; such an amendment is a recorded rejection instead of a change that
+  jammed later boundaries.
+- A law procedure stage that stops accepting ballots expires its pending seat
+  work; a late seat response is recorded as a rejected outcome instead of
+  failing the plugin boundary; and the pre-settlement budget check counts
+  ticket work emitted at the exact deadline minute.
+- The society Daily boundary after an applied cohort transfer no longer fails:
+  applying a transfer invalidates the derived aggregates, mobilization
+  candidates, and projections it affects, and a transfer's digest binds only
+  the state the transfer depends on. Queued society ingress supplied by a
+  scenario or snapshot is validated like admitted packets.
+- Snapshot restore accepts initial domain records that reference entities
+  listed only in `Scenario::entities`, as the live state check already did.
+
+Exact engine-version and plugin-descriptor checks still apply: a 0.12.0
+snapshot must not be relabeled or loaded into 0.13.0; retain the previous
+engine or use an explicit application-owned export. `canwu-movement` joins
+publish group 6, so all 24 publishable library crates move to 0.13.0 together.
+
+Version 0.12.0 shipped the first release of the
 [downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md).
 Every contract is additive:
 
@@ -263,6 +379,13 @@ evidence fields remain absent on historical non-random decision traces. Since
 naming only the pending near-equivalent candidates and the trace recording the
 `Random` stage; the stage, fired-guard, and parent-ticket fields are absent on
 traces that do not use them.
+
+Since 0.13.0, rule-evaluation traces, transition-manifest registrations, and
+transition audits are hash-chained boundary evidence. Exact replay regenerates
+and compares them with the rest of the boundary, snapshot validation rebuilds
+the pending manifests from that evidence, and sealing archives traces with
+their boundary records. A trace is never read back as state, so replay needs no
+separate trace input.
 
 ## Durable outbox
 

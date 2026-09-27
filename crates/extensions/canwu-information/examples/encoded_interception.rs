@@ -221,6 +221,7 @@ fn main() -> Result<(), String> {
             status: InterpretationStatus::Failed,
             capability: "decode_k1".to_owned(),
             confidence_per_mille: 0,
+            authenticity: None,
         },
         authority: InterpretationAuthority::HolderSelf,
     })?;
@@ -297,6 +298,7 @@ fn main() -> Result<(), String> {
             status: InterpretationStatus::Succeeded,
             capability: "decode_k2".to_owned(),
             confidence_per_mille: 990,
+            authenticity: None,
         },
         authority: InterpretationAuthority::HolderSelf,
     };
@@ -330,6 +332,7 @@ fn main() -> Result<(), String> {
             status: InterpretationStatus::Succeeded,
             capability: "decode_k2".to_owned(),
             confidence_per_mille: 990,
+            authenticity: None,
         },
         authority: InterpretationAuthority::Delegated {
             evidence: EvidenceRef::Command(CommandId::new(1)),

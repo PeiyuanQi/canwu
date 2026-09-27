@@ -715,7 +715,15 @@ fn admit_legal_ingress(
                 })?;
             verify_intent_command(view, ingress.cause.as_ref(), &intent)?;
             reserve_collected_mutation(&mut collected_mutations, mutation_budget)?;
-            select_object_route(directory, &intent.procedure.id, &mut selected_shards)?;
+            // A procedure whose history was archived has no hot route; its late
+            // seat response settles in the coordinator as a rejected outcome.
+            if directory
+                .directory
+                .object_routes
+                .contains_key(&intent.procedure.id)
+            {
+                select_object_route(directory, &intent.procedure.id, &mut selected_shards)?;
+            }
             intents.push(intent);
         } else if packet_type == LAW_ACTOR_CONTEXT_INGRESS {
             let requirement = serde_json::from_value::<crate::LegalActorContextRequirement>(
@@ -1002,7 +1010,18 @@ fn admit_legal_ingress(
         let actor_context = crate::runtime::actor_context_from_query_result(&result)?;
         runtime.stage_actor_context(&requirement, actor_context)?;
     }
+    // Seat work that expired with its stage or procedure is terminal; a
+    // preparation or acknowledgement that arrives for it afterwards is a no-op.
+    let expired = |runtime: &LegalRuntime, sequence: u64| {
+        runtime
+            .outbox
+            .get(&sequence)
+            .is_some_and(|item| item.dispatch == crate::DispatchState::Expired)
+    };
     for (sequence, expected_revision) in preparations {
+        if expired(&runtime, sequence) {
+            continue;
+        }
         if runtime
             .outbox
             .get(&sequence)
@@ -1014,6 +1033,9 @@ fn admit_legal_ingress(
         runtime.stage_outbox_expected_revision(sequence, expected_revision)?;
     }
     for (sequence, acknowledgement) in acknowledgements {
+        if expired(&runtime, sequence) {
+            continue;
+        }
         verify_outbox_enqueue(
             view,
             &runtime,

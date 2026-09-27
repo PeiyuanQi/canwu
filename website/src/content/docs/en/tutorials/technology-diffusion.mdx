@@ -45,6 +45,7 @@ deterministic, validated technology state.
 5. Create `CapabilityQualification` only through a command whose evidence satisfies the configured rule; a successful trial grants nothing automatically.
 6. Represent a local installation with `ImplementationRecord`, then evaluate and authorize one use separately with `ApplicationSpec` and `AdoptionRecord`. A new installation must cite current active qualification and assets; trial, committed, or recommitted adoption must cite current active implementations. Older exact versions remain history, not fresh authority.
 7. Use `TransmissionOpportunity` for document access, demonstration, apprenticeship, artifact inspection, personnel transfer, or independent investigation. Qualifications and implementations record their validity/install start times, and new practice transmission cites the exact one that is both already valid and current in that boundary's replayed state. Later deactivation blocks new transmission without overturning old opportunities. An old opportunity may only close; resuming the relationship requires a new opportunity based on a source valid at that time. An opportunity may link a destination learning program but never copies knowledge or capability automatically.
+8. Since 0.13.0, a teacher who exists outside the simulated world can be cited as an external transmission source (`ExternalTransmissionSourceV1`) instead of a live capability: an initial-scenario content record owned outside `canwu.technology`, with a declared reliability. Demonstration, apprenticeship, and personnel-transfer opportunities cite exactly one of `source_capability` and `external_source`. An external source has no simulated holder or site, so the destination opens the opportunity, which closes like any other. Document and artifact modes keep their own rules.
 </Steps>
 
 Creating a new `TechniqueRevision` also does not publish it into any actor's
@@ -131,7 +132,7 @@ plugins, select one method, or enable all three through
 ## 5. Choose a home-hardware scale
 
 These figures were recorded on 2026-08-22 against engine 0.5.1 and have not been
-re-measured on 0.12.0. Format 8 has since removed the broad domain-state clone
+re-measured on 0.13.0. Format 8 has since removed the broad domain-state clone
 from each transaction, so treat them as historical reference, not current
 performance. The 20-year workload on a Ryzen 7 7800X3D, 32 GB RAM, Windows
 release build produced:

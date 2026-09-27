@@ -110,6 +110,12 @@ canwu.cancel_plugin_ingress(queued.ingress_id, "withdrawn by player")?;
 
 人质、藏匿和流亡状态默认仍可准入；更严格的规则由你自己的系统实现。已取消的票据不会被改派。若只是控制者的权限人物变为不可用，要继续这项决策，请为可用的控制者开启新票据，并把 `parent_ticket` 设为已取消的票据。决策者仍不可用时，不能为其开启新票据。
 
+自 0.13.0 起，决策者死亡或被俘后，继任者也可以接续其决策：以继任者为决策者开启新票据，并把新票据指定给一个控制者，该控制者与已取消票据的控制者绑定同一个非空 `seat_id`；再把 `parent_ticket` 设为已取消的票据。这种席位继任会把谱系保留在新票据的决策轨迹上；决策者不同、席位也不同的前序票据仍会被拒绝。
+
+## 限定规则说明的规模
+
+边界系统可以记录[评估轨迹](/architecture/settlement/#评估轨迹)来说明规则结果。运行配置对所有系统合计设定上限：默认每个边界 4,096 条轨迹、每条 32 项，最多 65,536 条与 256 项。运行开始前，可以用 `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })` 声明其他上限；轨迹上限为零时禁止记录轨迹。边界中的系统超出任一上限时，边界会以 `EvaluationTraceLimitExceeded` 失败且不提交任何内容，因此应按同一边界中所有系统合计（而不是按单个席位）设定上限。轨迹也计入日志大小。
+
 ## 驱动时间
 
 <Steps>

@@ -17,6 +17,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Cancellation reason recorded on an open ticket whose person decision maker
 /// became unavailable.
+///
+/// A successor holder continues the decision as a new ticket of its own. When
+/// the successor's controller is bound to the same seat as the cancelled
+/// ticket's controller, the new ticket may name the cancelled one as its
+/// `parent_ticket`.
 pub const DECISION_MAKER_UNAVAILABLE_REASON: &str = "decision_maker_unavailable";
 
 /// Cancellation reason recorded on an open ticket whose assigned controller's
@@ -190,15 +195,18 @@ pub(super) fn person_is_available(
 /// Returns the plugin-owned subset of a boundary contract's writes after
 /// checking the kernel-guarded core keys a boundary system may declare.
 ///
-/// `canwu.core.person_availability` is writable in phases 7 and 10 and
-/// `canwu.core.people` (person creation) in phase 7. Neither is owned by a
-/// plugin, so several systems may declare them; per-person conflicts fail the
-/// boundary at settlement.
+/// `canwu.core.person_availability` is writable in phases 7 and 10,
+/// `canwu.core.people` (person creation) in phase 7, and
+/// `canwu.core.transitions` (transition manifests) in phases 7, 10, and 12.
+/// None is owned by a plugin, so several systems may declare them. Per-person
+/// conflicts fail the boundary at settlement; a repeated pending lineage or an
+/// exceeded pending bound fails it when the registration is admitted.
 pub(super) fn plugin_owned_boundary_writes(
     contract: &BoundarySystemContract,
 ) -> Result<Vec<StateKey>, CanwuError> {
     let availability = StateKey::core_person_availability();
     let people = StateKey::core_people();
+    let transitions = StateKey::core_transitions();
     let mut owned = Vec::with_capacity(contract.writes.len());
     for key in &contract.writes {
         let allowed = if *key == availability {
@@ -208,6 +216,13 @@ pub(super) fn plugin_owned_boundary_writes(
             )
         } else if *key == people {
             contract.phase == BoundaryPhase::DomainDeltaProposal
+        } else if *key == transitions {
+            matches!(
+                contract.phase,
+                BoundaryPhase::DomainDeltaProposal
+                    | BoundaryPhase::HistoricalCandidateEvaluation
+                    | BoundaryPhase::StrategicAggregation
+            )
         } else {
             owned.push(key.clone());
             continue;

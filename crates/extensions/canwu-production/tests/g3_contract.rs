@@ -5144,7 +5144,7 @@ fn gap_g14_production_realized_output() {
 
     // Canonical command path: each invalid completion is a stable rejected
     // outcome that leaves the nominal output requests untouched.
-    let mut canwu = start(production.clone(), 214);
+    let mut canwu = start(production, 214);
     let unavailable = DomainRecordVersionRef {
         version: 2,
         ..realization.clone()
@@ -5262,31 +5262,8 @@ fn gap_g14_production_realized_output() {
         snapshot
     );
 
-    // Resource conservation: the resource-owned credits settle exactly the
-    // realized quantities. The completion is applied through the same reducer
-    // before start so the certificate's exact production source stays current.
-    let mut realized = production;
-    realized
-        .apply_operation(
-            &command(
-                &realized,
-                &holder,
-                "production:realized-output:complete",
-                complete(Some(875), Some(realization.clone())),
-            ),
-            SimTime::EPOCH,
-        )
-        .expect("apply realized completion");
-    assert_eq!(quantities(&realized), vec![7, 2]);
-    let mut canwu = start(realized, 215);
-    canwu
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            PLUGIN_NAME,
-            PRODUCTION_OBSERVATION_WAKE_INGRESS,
-            SimTime::EPOCH,
-            serde_json::json!({ "reason": "resume-realized-output" }),
-        ))
-        .expect("resume realized output settlement");
+    // Resource conservation: the live completion's output settles through the
+    // resource plugin, crediting exactly the realized quantities.
     for boundary in 0..10 {
         settle_at_epoch(&mut canwu, &format!("realized-output boundary {boundary}"));
         if production_state(&canwu)
@@ -5324,5 +5301,227 @@ fn gap_g14_production_realized_output() {
             .expect("replayed resource state")
             .1,
         resources
+    );
+}
+
+/// A running execution completed by a live `CompleteExecution` command
+/// settles its resource output. Every production record change after the
+/// completion lease locked the production runtime (here a live advance and the
+/// completion itself) advances that record's version; the output credit cites
+/// the production version that proves the completion, never the older locked
+/// version, and still settles, conserves, and replays exactly.
+#[test]
+fn live_completion_settles_output() {
+    let (mut production, holder, _site, facility) = base_state();
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process ID");
+    let order = work_order(
+        "production:order:live-completion",
+        &holder,
+        &process_id,
+        &production.facilities[&facility].site,
+    );
+    let order_id = order.id.clone();
+    for (id, operation) in [
+        (
+            "production:live-completion:create",
+            ProductionOperation::CreateWorkOrder { work_order: order },
+        ),
+        (
+            "production:live-completion:authorize",
+            ProductionOperation::AuthorizeWorkOrder {
+                work_order: order_id.clone(),
+            },
+        ),
+    ] {
+        production
+            .apply_operation(
+                &command(&production, &holder, id, operation),
+                SimTime::EPOCH,
+            )
+            .expect("prepare live-completion order");
+    }
+    let execution = start_execution(
+        &mut production,
+        &holder,
+        &facility,
+        &order_id,
+        "live-completion",
+        PRODUCTION_RUNTIME_ID,
+        vec![
+            evidence(
+                ProductionRequirementKind::LaborCapability,
+                "customary-hand-milling",
+                1,
+            ),
+            evidence(
+                ProductionRequirementKind::Authorization,
+                "household-authority",
+                1,
+            ),
+        ],
+        CapacityAllocationState::Reserved,
+    )
+    .expect("start live-completion execution");
+    let running = production.executions[&execution].clone();
+    let locked_production = running
+        .completion_certificate
+        .locked_target_versions
+        .iter()
+        .find_map(|target| match target {
+            CompletionLockedTargetV1::ExternalRecord { version }
+                if version
+                    .record
+                    .kind
+                    .matches_type::<ProductionRuntimeRecord>() =>
+            {
+                Some(version.clone())
+            }
+            _ => None,
+        })
+        .expect("the certificate locks the production runtime");
+    let resource = resource_state_for_execution(&production, &running);
+    // The harness builds the resource participant directly; mirror its exact
+    // consumed grant in the coordinator, as the live coordinator's consumed
+    // acknowledgement does, so the completion lease can close after output.
+    let acquisition = running.completion_certificate.acquisition.clone();
+    production
+        .completion_participant_grants
+        .get_mut(&acquisition)
+        .expect("coordinator participant mirror")
+        .insert(
+            canwu_resource::PLUGIN_NAME.to_owned(),
+            ProductionCompletionParticipantGrantV1 {
+                participant: canwu_resource::PLUGIN_NAME.to_owned(),
+                provider_source: version::<ResourceRuntimeRecord>("resource:runtime:v1"),
+                grant: resource.external_completion_participants.grants[&acquisition]
+                    .grant
+                    .clone(),
+            },
+        );
+    production.observation_dirty_index.clear();
+    production.observation_due_index.clear();
+    let mut scenario = scenario_with_production(production);
+    scenario
+        .domain_records
+        .push(resource.into_record().expect("resource output root"));
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let plugins: [&dyn canwu_api::SimulationPlugin; 2] = [&production_plugin, &resource_plugin];
+    let mut canwu =
+        Canwu::new_with_plugins(216, scenario, &plugins).expect("live-completion runtime");
+
+    // Both the progress and the completion arrive as live tracked commands,
+    // half an hour after the execution started.
+    let later = SimTime::from_minutes(30);
+    canwu
+        .settle_boundary(BoundaryRequest::at(later))
+        .expect("advance to the completion time");
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        &holder,
+        1,
+        "production:live-completion:advance",
+        ProductionOperation::AdvanceExecution {
+            execution: execution.clone(),
+            completed_units: 10,
+        },
+    );
+    for label in [
+        "live advance command boundary",
+        "live advance apply boundary",
+    ] {
+        canwu
+            .settle_boundary(BoundaryRequest::at(later))
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+    }
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        &holder,
+        2,
+        "production:live-completion:complete",
+        ProductionOperation::CompleteExecution {
+            execution: execution.clone(),
+            realized_output_per_mille: None,
+            realization_evidence: None,
+        },
+    );
+    // Settle the output, then let the resource participant and the
+    // production coordinator close the completion lease.
+    for boundary in 0..12 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(later))
+            .unwrap_or_else(|error| panic!("live completion boundary {boundary}: {error}"));
+        if production_state(&canwu).completion_acquisitions[&acquisition].state
+            == canwu_resource::CompletionLeaseAcquisitionStateV1::Released
+        {
+            break;
+        }
+    }
+    let settled = production_state(&canwu);
+    let settled_execution = &settled.executions[&execution];
+    assert_eq!(settled_execution.lifecycle, WorkOrderLifecycle::Settled);
+    let output_source = settled_execution
+        .output_source
+        .clone()
+        .expect("settled output pins its production source");
+    assert_eq!(output_source.record, locked_production.record);
+    assert!(
+        output_source.version > locked_production.version,
+        "the credit cites the completed production version, not the locked one"
+    );
+    assert!(settled.archive_due_index.contains(&execution));
+    let (_, resources) = canwu_resource::resource_state(&canwu)
+        .expect("resource state query")
+        .expect("resource state");
+    assert_eq!(
+        resources
+            .external_completion_participants
+            .participant(&acquisition)
+            .map(|participant| participant.grant.state),
+        Some(CompletionGrantStateV1::Completed)
+    );
+    assert_eq!(
+        settled_execution.output_outcomes.len(),
+        settled_execution.output_requests.len()
+    );
+    let mut credited = 0_u128;
+    for (request, outcome) in settled_execution
+        .output_requests
+        .iter()
+        .zip(&settled_execution.output_outcomes)
+    {
+        assert_eq!(outcome.status, ResourceOperationStatus::Applied);
+        assert_eq!(outcome.quantity, request.quantity);
+        assert_eq!(outcome.exact_evidence, vec![output_source.clone()]);
+        assert_eq!(
+            resources.accounts[&request.account].balance,
+            request.quantity
+        );
+        credited += u128::from(request.quantity);
+    }
+    assert_eq!(resources.conservation.admitted_production, credited);
+    resources.validate().expect("conserved resource state");
+
+    let snapshot = canwu.snapshot_json().expect("live-completion snapshot");
+    let restored =
+        Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins).expect("restored run");
+    assert_eq!(production_state(&restored), settled);
+    assert_eq!(
+        restored.snapshot_json().expect("restored snapshot"),
+        snapshot
+    );
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("live-completion replay");
+    assert_eq!(production_state(&replayed), settled);
+    assert_eq!(
+        canwu_resource::resource_state(&replayed)
+            .expect("replayed resource state query")
+            .expect("replayed resource state")
+            .1,
+        resources
+    );
+    assert_eq!(
+        replayed.snapshot_json().expect("replayed snapshot"),
+        snapshot
     );
 }

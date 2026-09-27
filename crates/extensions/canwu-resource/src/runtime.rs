@@ -262,6 +262,13 @@ pub enum ResourceCreditSourceV1 {
 
 /// Production-output settlement request. The source record body remains
 /// payload-required until the returned exact outcome is acknowledged.
+///
+/// When the certificate belongs to an external completion participant, the
+/// participant locked the coordinator's runtime record at the version current
+/// when the lease was granted. A `Production` source must be that record at
+/// the locked version or later (the version proving the completion); the
+/// production output batch ingress further requires it to equal the source
+/// the coordinator pinned on the execution.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceCreditRequestV1 {
     pub operation_key: ResourceOperationKey,
@@ -318,6 +325,25 @@ pub struct ResourceCancelDemandRequestV1 {
     pub operation_key: ResourceOperationKey,
     pub demand: ResourceDemandId,
     pub expected_demand_revision: ResourceRevision,
+}
+
+/// Issues one delegated access grant. A tracked command must come from the
+/// grant's `grantor_custodian`, and the grant's exact authority evidence must
+/// be an available record version.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceIssueAccessGrantRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub grant: crate::ResourceAccessGrantV1,
+}
+
+/// Revokes an access grant. A tracked command must come from the grantor
+/// custodian. Like a demand source-policy amendment, revocation is refused
+/// once any reservation has drawn on the grant.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceRevokeAccessGrantRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub grant_id: crate::ResourceAccessGrantId,
+    pub expected_grant_revision: ResourceRevision,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -441,6 +467,8 @@ pub enum ResourceOperationRequestV1 {
     Completion(ResourceCompletionOperationV1),
     RecordLoss(ResourceAccountLossRequestV1),
     BeginExchange(ResourceExchangeStartRequestV1),
+    IssueAccessGrant(ResourceIssueAccessGrantRequestV1),
+    RevokeAccessGrant(ResourceRevokeAccessGrantRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
@@ -449,6 +477,8 @@ impl ResourceOperationRequestV1 {
         match self {
             Self::RecordLoss(value) => value.operation_key.clone(),
             Self::BeginExchange(value) => value.operation_key.clone(),
+            Self::IssueAccessGrant(value) => value.operation_key.clone(),
+            Self::RevokeAccessGrant(value) => value.operation_key.clone(),
             Self::CreateAccount(value) => value.operation_key.clone(),
             Self::SubmitDemand(value) => value.operation_key.clone(),
             Self::AmendDemand(value) => value.operation_key.clone(),
@@ -487,6 +517,8 @@ impl ResourceOperationRequestV1 {
             Self::Completion(_) => ResourceOperationKind::CompletionLease,
             Self::RecordLoss(_) => ResourceOperationKind::Loss,
             Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
+            Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
+            Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
         }
     }
 
@@ -544,6 +576,7 @@ impl ResourceState {
             fulfillments: BTreeMap::new(),
             outcomes: BTreeMap::new(),
             report_grants: BTreeMap::new(),
+            access_grants: BTreeMap::new(),
             observation_heads: BTreeMap::new(),
             observation_head_by_grant: BTreeMap::new(),
             report_dirty_grants: BTreeSet::new(),
@@ -678,6 +711,7 @@ impl ResourceState {
             ));
         }
         self.validate_demand_contract(&demand)?;
+        self.validate_demand_admission(&demand, false)?;
         if demand.status != DemandStatus::Open || demand.fulfilled != 0 {
             return Err(ResourceError::InvalidLifecycle(
                 "installed resource demand must begin open and unfulfilled".to_owned(),
@@ -1135,7 +1169,19 @@ impl ResourceState {
         request: &ResourceOperationRequestV1,
     ) -> Result<ResourceOperationOutcome, ResourceError> {
         let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
-        self.apply_operation_with_context(request, request_digest, None, None)
+        self.apply_operation_with_context(request, request_digest, None, None, None)
+    }
+
+    /// Applies an operation that the plugin settles in a boundary at
+    /// `settled_at`. Detached callers of [`Self::apply_operation`] have no
+    /// separate settlement clock, so their request times stand in for it.
+    pub(crate) fn apply_operation_at(
+        &mut self,
+        request: &ResourceOperationRequestV1,
+        settled_at: SimTime,
+    ) -> Result<ResourceOperationOutcome, ResourceError> {
+        let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
+        self.apply_operation_with_context(request, request_digest, None, None, Some(settled_at))
     }
 
     /// Apply every credit in one production output batch atomically. A
@@ -1198,20 +1244,30 @@ impl ResourceState {
             request_digest,
             None,
             Some(external_targets_current),
+            None,
         )
     }
 
+    /// Applies one requester-scoped allocation that the plugin settles in a
+    /// boundary at `settled_at`.
     pub(crate) fn apply_authorized_allocation(
         &mut self,
         requester: &canwu_api::KnowledgeHolderRef,
         request: &ResourceAllocationRequestV1,
+        settled_at: SimTime,
     ) -> Result<ResourceOperationOutcome, ResourceError> {
         let operation = ResourceOperationRequestV1::Allocate(request.clone());
         let request_digest = canonical_digest(
             "canwu.resource.authorized-allocation-request.v1",
             &(requester, request),
         )?;
-        self.apply_operation_with_context(&operation, request_digest, Some(requester), None)
+        self.apply_operation_with_context(
+            &operation,
+            request_digest,
+            Some(requester),
+            None,
+            Some(settled_at),
+        )
     }
 
     fn apply_operation_with_context(
@@ -1220,6 +1276,7 @@ impl ResourceState {
         request_digest: String,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
         prepare_external_targets_current: Option<bool>,
+        settled_at: Option<SimTime>,
     ) -> Result<ResourceOperationOutcome, ResourceError> {
         let operation_key = request.operation_key();
         if let Some(existing) = self.outcomes.get(&operation_key) {
@@ -1309,6 +1366,7 @@ impl ResourceState {
             request,
             allocation_requester,
             prepare_external_targets_current,
+            settled_at,
         );
         let (
             status,
@@ -1384,16 +1442,19 @@ impl ResourceState {
         request: &ResourceOperationRequestV1,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
         prepare_external_targets_current: Option<bool>,
+        settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         match request {
             ResourceOperationRequestV1::CreateAccount(value) => self.create_account(value),
             ResourceOperationRequestV1::SubmitDemand(value) => self.submit_demand(value),
             ResourceOperationRequestV1::AmendDemand(value) => self.amend_demand(value),
             ResourceOperationRequestV1::Allocate(value) => {
-                self.allocate(value, allocation_requester)
+                self.allocate(value, allocation_requester, settled_at)
             }
-            ResourceOperationRequestV1::Consume(value) => self.consume(value),
-            ResourceOperationRequestV1::BeginTransfer(value) => self.begin_transfer(value),
+            ResourceOperationRequestV1::Consume(value) => self.consume(value, settled_at),
+            ResourceOperationRequestV1::BeginTransfer(value) => {
+                self.begin_transfer(value, settled_at)
+            }
             ResourceOperationRequestV1::AdvanceTransfer(value) => self.advance_transfer(value),
             ResourceOperationRequestV1::CancelTransfer(value) => self.cancel_transfer(value),
             ResourceOperationRequestV1::CompleteTransfer(value) => self.complete_transfer(value),
@@ -1414,7 +1475,11 @@ impl ResourceState {
                 self.apply_completion(value, prepare_external_targets_current)
             }
             ResourceOperationRequestV1::RecordLoss(value) => self.record_account_loss(value),
-            ResourceOperationRequestV1::BeginExchange(value) => self.begin_exchange(value),
+            ResourceOperationRequestV1::BeginExchange(value) => {
+                self.begin_exchange(value, settled_at)
+            }
+            ResourceOperationRequestV1::IssueAccessGrant(value) => self.issue_access_grant(value),
+            ResourceOperationRequestV1::RevokeAccessGrant(value) => self.revoke_access_grant(value),
         }
     }
 
@@ -1812,10 +1877,16 @@ impl ResourceState {
                 "resource demand amendment expected a stale revision".to_owned(),
             ));
         }
+        // Lifecycle status, its rejection reason, and the requester belong to
+        // the lifecycle writer and authority, not to the amendment; a changed
+        // value would desynchronize the due, expiry, and dirty indexes.
         if !matches!(
             current.status,
             DemandStatus::Open | DemandStatus::PartiallyFulfilled
-        ) || request.replacement.requested < current.fulfilled
+        ) || request.replacement.status != current.status
+            || request.replacement.rejection_reason != current.rejection_reason
+            || request.replacement.requester != current.requester
+            || request.replacement.requested < current.fulfilled
             || request.replacement.fulfilled != current.fulfilled
             || request.replacement.resource_revision != current.resource_revision
             || request.replacement.unit_revision != current.unit_revision
@@ -1827,13 +1898,13 @@ impl ResourceState {
         self.validate_demand_contract(&request.replacement)?;
         // Reservations remain indexed, including consumed legs, until the demand is
         // terminal and its closure is archived. Terminal demands cannot be amended.
-        if request.replacement.source_policy != current.source_policy
-            && (current.fulfilled > 0
-                || self
-                    .reservation_by_demand
-                    .get(&current.id)
-                    .is_some_and(|ids| !ids.is_empty()))
-        {
+        let drawn = current.fulfilled > 0
+            || self
+                .reservation_by_demand
+                .get(&current.id)
+                .is_some_and(|ids| !ids.is_empty());
+        self.validate_demand_admission(&request.replacement, drawn)?;
+        if request.replacement.source_policy != current.source_policy && drawn {
             return Err(ResourceError::InvalidLifecycle(
                 "resource demand source policy cannot change after reservation or fulfillment"
                     .to_owned(),
@@ -1872,6 +1943,7 @@ impl ResourceState {
         &mut self,
         request: &ResourceAllocationRequestV1,
         requester: Option<&canwu_api::KnowledgeHolderRef>,
+        settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         self.expect_state_revision(request.expected_state_revision)?;
         if request.candidate_limit == 0
@@ -1964,14 +2036,33 @@ impl ResourceState {
                     })
                     .map(|account| account.id.clone())
                     .collect(),
-                ResourceDemandSourcePolicyV1::ExactAccounts(accounts) => accounts.clone(),
+                ResourceDemandSourcePolicyV1::ExactAccounts(accounts)
+                | ResourceDemandSourcePolicyV1::Granted { accounts, .. } => accounts.clone(),
             };
             accounts.sort();
-            let total_available = accounts.iter().try_fold(0_u64, |total, account| {
+            let mut total_available = accounts.iter().try_fold(0_u64, |total, account| {
                 total
-                    .checked_add(self.available_for_demand(account, &demand)?)
+                    .checked_add(self.available_for_source(account, &demand)?)
                     .ok_or(ResourceError::Overflow)
             })?;
+            // A granted demand is bounded by its grant before scarcity
+            // arbitration: an inactive grant, or one not current at both the
+            // requested allocation time and the settling boundary, supplies
+            // nothing, and no allocation exceeds the remaining cap. There is
+            // no fallback.
+            let grant_limit = demand.source_policy.access_grant().map(|grant_id| {
+                self.access_grants
+                    .get(grant_id)
+                    .filter(|record| {
+                        record.status == crate::ResourceAccessGrantStatusV1::Active
+                            && record.grant.is_current_at(request.at)
+                            && settled_at.is_none_or(|at| record.grant.is_current_at(at))
+                    })
+                    .map_or(0, crate::ResourceAccessGrantRecordV1::remaining)
+            });
+            if let Some(limit) = grant_limit {
+                total_available = total_available.min(limit);
+            }
             let grantable = needed.min(total_available);
             let minimum_remaining = demand
                 .minimum_useful
@@ -1983,7 +2074,11 @@ impl ResourceState {
                 if reserved == 0 && demand.fulfilled == 0 && grantable < demand.minimum_useful {
                     let current = self.demands.get_mut(&demand.id).expect("candidate exists");
                     current.status = DemandStatus::RejectedMinimum;
-                    current.rejection_reason = Some("minimum_useful_not_met".to_owned());
+                    current.rejection_reason = Some(if grant_limit == Some(0) {
+                        "access_grant_unavailable".to_owned()
+                    } else {
+                        "minimum_useful_not_met".to_owned()
+                    });
                     current.revision = current.revision.next()?;
                     if let Some(ids) = self.demand_due_index.get_mut(&demand.due_at) {
                         ids.remove(&demand.id);
@@ -2001,7 +2096,7 @@ impl ResourceState {
                 if remaining == 0 {
                     break;
                 }
-                let available = self.available_for_demand(&account_id, &demand)?;
+                let available = self.available_for_source(&account_id, &demand)?;
                 let quantity = remaining.min(available);
                 if quantity == 0 {
                     continue;
@@ -2053,6 +2148,9 @@ impl ResourceState {
                     .insert(reservation_id.clone());
                 self.reservations.insert(reservation_id, reservation);
                 self.allocation_legs.insert(leg_id.clone(), leg);
+                if let Some(grant_id) = demand.source_policy.access_grant() {
+                    self.reserve_access_grant(grant_id, quantity)?;
+                }
                 active_allocation_count = active_allocation_count
                     .checked_add(1)
                     .ok_or(ResourceError::Overflow)?;
@@ -2090,6 +2188,7 @@ impl ResourceState {
     fn consume(
         &mut self,
         request: &ResourceConsumptionRequestV1,
+        settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         let leg = self.exact_allocation(&request.allocation)?.clone();
         if self.consumptions.contains_key(&request.consumption_id) {
@@ -2115,6 +2214,12 @@ impl ResourceState {
         local_targets.push(CompletionLockedTargetV1::ExternalRecord {
             version: request.consumer_evidence.clone(),
         });
+        self.granted_debit_authority(
+            &leg,
+            request.at,
+            settled_at,
+            &request.completion_certificate,
+        )?;
         let external_participant = self
             .external_completion_participants
             .grants
@@ -2123,6 +2228,7 @@ impl ResourceState {
             self.validate_consumed_external_completion_certificate(
                 &request.completion_certificate,
                 request.at,
+                false,
                 &request.operation_key,
                 &resource_targets,
             )?
@@ -2197,6 +2303,7 @@ impl ResourceState {
     fn begin_transfer(
         &mut self,
         request: &ResourceTransferStartRequestV1,
+        settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         if self.transfers.len() >= self.limits.max_transfers
             || self.transfers.contains_key(&request.transfer_id)
@@ -2206,13 +2313,19 @@ impl ResourceState {
             ));
         }
         let (leg, targets) = self.transfer_start_targets(request)?;
+        let access_grant = self.granted_debit_authority(
+            &leg,
+            request.at,
+            settled_at,
+            &request.completion_certificate,
+        )?;
         let (acquisition, _) = self.consume_completion_certificate(
             &request.completion_certificate,
             request.at,
             &request.operation_key,
             &targets,
         )?;
-        self.settle_transfer_start(request, leg.clone(), acquisition)?;
+        self.settle_transfer_start(request, leg.clone(), acquisition, access_grant)?;
         Ok(AppliedOperation {
             quantity: leg.quantity,
             remainder: 0,
@@ -2227,6 +2340,7 @@ impl ResourceState {
     fn begin_exchange(
         &mut self,
         request: &ResourceExchangeStartRequestV1,
+        settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         let legs = [&request.leg_a, &request.leg_b];
         let leg_keys = request.terms().leg_operation_keys()?;
@@ -2279,22 +2393,30 @@ impl ResourceState {
                 .acquisitions
                 .get(&leg.completion_certificate.acquisition)
                 .map(|acquisition| &acquisition.holder);
-            if lease_holder != Some(&source.custodian) {
+            // A granted leg is consented to by its grantee under the grant;
+            // any other leg by its source custodian.
+            let access_grant = self.granted_debit_authority(
+                &allocation,
+                leg.at,
+                settled_at,
+                &leg.completion_certificate,
+            )?;
+            if access_grant.is_none() && lease_holder != Some(&source.custodian) {
                 return Err(ResourceError::Authority(
                     "each exchange leg requires a completion lease held by its source custodian"
                         .to_owned(),
                 ));
             }
-            prepared.push((leg, allocation, targets));
+            prepared.push((leg, allocation, targets, access_grant));
         }
-        for (leg, allocation, targets) in prepared {
+        for (leg, allocation, targets, access_grant) in prepared {
             let (acquisition, _) = self.consume_completion_certificate(
                 &leg.completion_certificate,
                 leg.at,
                 &leg.operation_key,
                 &targets,
             )?;
-            self.settle_transfer_start(leg, allocation, acquisition)?;
+            self.settle_transfer_start(leg, allocation, acquisition, access_grant)?;
         }
         Ok(AppliedOperation {
             quantity: 0,
@@ -2347,6 +2469,7 @@ impl ResourceState {
         request: &ResourceTransferStartRequestV1,
         leg: ResourceAllocationLeg,
         acquisition: CompletionLeaseAcquisitionId,
+        access_grant: Option<crate::ResourceAccessGrantId>,
     ) -> Result<(), ResourceError> {
         self.consume_leg(&leg, request.expected_account_revision)?;
         let transfer = ResourceTransfer {
@@ -2369,6 +2492,7 @@ impl ResourceState {
             completion_acquisition: acquisition,
             operation_key: request.operation_key.clone(),
             terminal_sequence: 0,
+            access_grant,
         };
         self.active_transfers.insert(transfer.id.clone());
         self.transfers.insert(transfer.id.clone(), transfer);
@@ -2928,9 +3052,27 @@ impl ResourceState {
                 .grants
                 .contains_key(&request.completion_certificate.acquisition);
         let (acquisition, grant) = if external_participant {
+            // The coordinator's lease locked its runtime record before the
+            // execution existed. The credit cites a later exact version of the
+            // same record that proves the completion, so the lock is the lower
+            // bound of the cited source rather than the source itself.
+            if let ResourceCreditSourceV1::Production(source) = &request.source {
+                let locked = self.external_locked_production_source(
+                    &request.completion_certificate.acquisition,
+                    source,
+                )?;
+                targets.retain(|target| {
+                    !matches!(
+                        target,
+                        CompletionLockedTargetV1::ExternalRecord { version } if version == source
+                    )
+                });
+                targets.push(CompletionLockedTargetV1::ExternalRecord { version: locked });
+            }
             self.validate_consumed_external_completion_certificate(
                 &request.completion_certificate,
                 request.at,
+                true,
                 &request.operation_key,
                 &targets,
             )?
@@ -3095,6 +3237,8 @@ impl ResourceState {
         let remainder = demand.remainder();
         let due_at = demand.due_at;
         let expires_at = demand.expires_at;
+        let access_grant = demand.source_policy.access_grant().cloned();
+        let mut released = 0_u64;
         let reservation_ids = self
             .reservation_by_demand
             .get(&request.demand)
@@ -3111,12 +3255,20 @@ impl ResourceState {
             }
             reservation.status = ReservationStatus::Released;
             reservation.revision = reservation.revision.next()?;
+            released = released
+                .checked_add(reservation.quantity)
+                .ok_or(ResourceError::Overflow)?;
             if let Some(leg) = self.allocation_legs.get_mut(&reservation.allocation_leg) {
                 leg.status = AllocationLegStatus::Released;
                 leg.revision = leg.revision.next()?;
                 leg.semantic_digest.clear();
                 leg.semantic_digest = canonical_digest("canwu.resource.allocation-leg.v1", leg)?;
             }
+        }
+        if let Some(grant_id) = &access_grant
+            && released > 0
+        {
+            self.release_access_grant(grant_id, released)?;
         }
         if let Some(ids) = self.demand_due_index.get_mut(&due_at) {
             ids.remove(&request.demand);
@@ -3177,6 +3329,14 @@ impl ResourceState {
         current_leg.semantic_digest.clear();
         current_leg.semantic_digest =
             canonical_digest("canwu.resource.allocation-leg.v1", current_leg)?;
+        if let Some(grant_id) = self
+            .demands
+            .get(&leg.demand)
+            .and_then(|demand| demand.source_policy.access_grant())
+            .cloned()
+        {
+            self.debit_access_grant(&grant_id, leg.quantity)?;
+        }
         Ok(())
     }
 
@@ -3508,7 +3668,9 @@ impl ResourceState {
             | ResourceOperationRequestV1::Allocate(_)
             | ResourceOperationRequestV1::SetProtectedFloor(_)
             | ResourceOperationRequestV1::CancelDemand(_)
-            | ResourceOperationRequestV1::RecordObservation(_) => false,
+            | ResourceOperationRequestV1::RecordObservation(_)
+            | ResourceOperationRequestV1::IssueAccessGrant(_)
+            | ResourceOperationRequestV1::RevokeAccessGrant(_) => false,
         }
     }
 
@@ -3659,10 +3821,16 @@ impl ResourceState {
         Ok((certificate.acquisition.clone(), grant))
     }
 
+    /// Validates an operation authorized by an external participant grant
+    /// that its coordinator already consumed at the lease eligibility time.
+    /// An input consumption is part of that consumption and must happen at
+    /// exactly that time; a terminal output credit settles the consumed grant
+    /// later, at or after it (`settles_after_eligibility`).
     fn validate_consumed_external_completion_certificate(
         &self,
         certificate: &CompletionLeaseActivationCertificateV1,
         at: SimTime,
+        settles_after_eligibility: bool,
         operation_key: &ResourceOperationKey,
         required_targets: &[CompletionLockedTargetV1],
     ) -> Result<(CompletionLeaseAcquisitionId, CompletionCapacityGrantId), ResourceError> {
@@ -3677,7 +3845,11 @@ impl ResourceState {
             })?;
         if participant.certificate.as_ref() != Some(certificate)
             || participant.grant.operation_key != certificate.operation_key
-            || participant.eligibility_time != at
+            || (if settles_after_eligibility {
+                at < participant.eligibility_time
+            } else {
+                at != participant.eligibility_time
+            })
             || participant.grant.state != CompletionGrantStateV1::Consumed
             || required_targets.iter().any(|target| {
                 !participant.grant.target_versions.contains(target)
@@ -3701,6 +3873,322 @@ impl ResourceState {
         ))
     }
 
+    fn issue_access_grant(
+        &mut self,
+        request: &ResourceIssueAccessGrantRequestV1,
+    ) -> Result<AppliedOperation, ResourceError> {
+        let grant = &request.grant;
+        if self.access_grants.contains_key(&grant.grant_id) {
+            return Err(ResourceError::IdempotencyConflict(
+                "resource access grant identity already exists".to_owned(),
+            ));
+        }
+        if self.access_grants.len() >= crate::MAX_RESOURCE_ACCESS_GRANTS {
+            return Err(ResourceError::LimitExceeded(
+                "resource access grant capacity is exhausted".to_owned(),
+            ));
+        }
+        self.validate_access_grant_contract(grant)?;
+        self.access_grants.insert(
+            grant.grant_id.clone(),
+            crate::ResourceAccessGrantRecordV1 {
+                grant: grant.clone(),
+                revision: ResourceRevision::INITIAL,
+                status: crate::ResourceAccessGrantStatusV1::Active,
+                reserved_quantity: 0,
+                debited_quantity: 0,
+            },
+        );
+        Ok(AppliedOperation {
+            quantity: grant.cap_quantity,
+            remainder: grant.cap_quantity,
+            result_ref: None,
+            exact_evidence: vec![grant.authority_evidence.clone()],
+        })
+    }
+
+    fn revoke_access_grant(
+        &mut self,
+        request: &ResourceRevokeAccessGrantRequestV1,
+    ) -> Result<AppliedOperation, ResourceError> {
+        let record = self
+            .access_grants
+            .get_mut(&request.grant_id)
+            .ok_or_else(|| {
+                ResourceError::NotFound("resource access grant is unavailable".to_owned())
+            })?;
+        if record.revision != request.expected_grant_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource access grant revocation expected a stale revision".to_owned(),
+            ));
+        }
+        if record.status != crate::ResourceAccessGrantStatusV1::Active || record.is_drawn() {
+            return Err(ResourceError::InvalidLifecycle(
+                "resource access grant is revoked or fixed by a reservation".to_owned(),
+            ));
+        }
+        record.status = crate::ResourceAccessGrantStatusV1::Revoked;
+        record.revision = record.revision.next()?;
+        Ok(AppliedOperation {
+            quantity: 0,
+            remainder: record.remaining(),
+            result_ref: None,
+            exact_evidence: Vec::new(),
+        })
+    }
+
+    fn validate_access_grant_contract(
+        &self,
+        grant: &crate::ResourceAccessGrantV1,
+    ) -> Result<(), ResourceError> {
+        grant.validate_shape()?;
+        let definition = self
+            .definitions
+            .get(&grant.resource_revision)
+            .ok_or_else(|| {
+                ResourceError::NotFound(
+                    "resource access grant definition revision is unavailable".to_owned(),
+                )
+            })?;
+        if definition.canonical_unit != grant.unit_revision
+            || !self.units.contains_key(&grant.unit_revision)
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource access grant unit is not its resource's exact canonical unit".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn access_grant_mut(
+        &mut self,
+        grant_id: &crate::ResourceAccessGrantId,
+    ) -> Result<&mut crate::ResourceAccessGrantRecordV1, ResourceError> {
+        self.access_grants.get_mut(grant_id).ok_or_else(|| {
+            ResourceError::InvalidDefinition("resource demand lost its access grant".to_owned())
+        })
+    }
+
+    /// Charges a new reservation to its grant's cap.
+    fn reserve_access_grant(
+        &mut self,
+        grant_id: &crate::ResourceAccessGrantId,
+        quantity: u64,
+    ) -> Result<(), ResourceError> {
+        let record = self.access_grant_mut(grant_id)?;
+        if quantity > record.remaining() {
+            return Err(ResourceError::Conservation(
+                "resource allocation would exceed its access grant's cap".to_owned(),
+            ));
+        }
+        record.reserved_quantity = record
+            .reserved_quantity
+            .checked_add(quantity)
+            .ok_or(ResourceError::Overflow)?;
+        record.revision = record.revision.next()?;
+        Ok(())
+    }
+
+    /// Returns a released or expired reservation's quantity to its grant.
+    fn release_access_grant(
+        &mut self,
+        grant_id: &crate::ResourceAccessGrantId,
+        quantity: u64,
+    ) -> Result<(), ResourceError> {
+        let record = self.access_grant_mut(grant_id)?;
+        record.reserved_quantity =
+            record
+                .reserved_quantity
+                .checked_sub(quantity)
+                .ok_or_else(|| {
+                    ResourceError::Conservation(
+                        "resource access grant reservation accounting underflowed".to_owned(),
+                    )
+                })?;
+        record.revision = record.revision.next()?;
+        Ok(())
+    }
+
+    /// Moves a debited reservation's quantity from reserved to debited, so
+    /// the grant charges each unit exactly once.
+    fn debit_access_grant(
+        &mut self,
+        grant_id: &crate::ResourceAccessGrantId,
+        quantity: u64,
+    ) -> Result<(), ResourceError> {
+        let record = self.access_grant_mut(grant_id)?;
+        record.reserved_quantity =
+            record
+                .reserved_quantity
+                .checked_sub(quantity)
+                .ok_or_else(|| {
+                    ResourceError::Conservation(
+                        "resource access grant debit exceeds its reservations".to_owned(),
+                    )
+                })?;
+        record.debited_quantity = record
+            .debited_quantity
+            .checked_add(quantity)
+            .ok_or(ResourceError::Overflow)?;
+        record.revision = record.revision.next()?;
+        Ok(())
+    }
+
+    /// Authority for debiting an allocation that was reserved under an access
+    /// grant. The grantor's consent is the grant; the debit itself must run
+    /// under the grantee's own completion lease while the grant is current.
+    /// A lease held by anyone else, including the grantor custodian, cannot
+    /// debit a granted allocation. Returns the grant, or `None` for an
+    /// allocation that no grant backs.
+    ///
+    /// `at` is the debit's certified lease time and `settled_at` the boundary
+    /// time that settles it (`None` for a detached caller, whose request time
+    /// stands in). An activated lease does not expire and demand expiry is
+    /// lazy, so the grant must be current when the debit settles, and a
+    /// granted debit settles only at its certified time, as adapter ingress
+    /// already requires of every irreversible operation.
+    fn granted_debit_authority(
+        &self,
+        leg: &ResourceAllocationLeg,
+        at: SimTime,
+        settled_at: Option<SimTime>,
+        certificate: &CompletionLeaseActivationCertificateV1,
+    ) -> Result<Option<crate::ResourceAccessGrantId>, ResourceError> {
+        let Some(grant_id) = self
+            .demands
+            .get(&leg.demand)
+            .and_then(|demand| demand.source_policy.access_grant())
+        else {
+            return Ok(None);
+        };
+        let record = self.access_grants.get(grant_id).ok_or_else(|| {
+            ResourceError::InvalidDefinition("resource demand lost its access grant".to_owned())
+        })?;
+        let settled_at = settled_at.unwrap_or(at);
+        if record.status != crate::ResourceAccessGrantStatusV1::Active
+            || !record.grant.is_current_at(at)
+            || !record.grant.is_current_at(settled_at)
+        {
+            return Err(ResourceError::Authority(
+                "resource access grant is not current at the debit time".to_owned(),
+            ));
+        }
+        if settled_at != at {
+            return Err(ResourceError::Authority(
+                "a granted allocation is debited only at its certified lease time".to_owned(),
+            ));
+        }
+        let lease_holder = self
+            .completion_leases
+            .acquisitions
+            .get(&certificate.acquisition)
+            .map(|acquisition| &acquisition.holder)
+            .or_else(|| {
+                self.external_completion_participants
+                    .grants
+                    .get(&certificate.acquisition)
+                    .map(|participant| &participant.holder)
+            });
+        if lease_holder != Some(&record.grant.grantee) {
+            return Err(ResourceError::Authority(
+                "a granted allocation is debited only under the grantee's completion lease"
+                    .to_owned(),
+            ));
+        }
+        Ok(Some(grant_id.clone()))
+    }
+
+    /// Holder whose tracked command may debit an allocation leg: the grantee
+    /// for a leg reserved under an access grant, otherwise the source custodian.
+    pub(crate) fn allocation_debit_holder(
+        &self,
+        allocation: &ResourceAllocationLegVersionV1,
+    ) -> Option<canwu_api::KnowledgeHolderRef> {
+        let granted = self
+            .allocation_legs
+            .get(&allocation.id)
+            .and_then(|leg| self.demands.get(&leg.demand))
+            .and_then(|demand| {
+                demand
+                    .source_policy
+                    .access_grant()
+                    .map(|_| demand.requester.clone())
+            });
+        granted.or_else(|| {
+            self.accounts
+                .get(&allocation.account)
+                .map(|account| account.custodian.clone())
+        })
+    }
+
+    /// Holder controlling a transfer's cancellation, return, and loss: the
+    /// grantee of the access grant it was started under, otherwise the source
+    /// custodian.
+    pub(crate) fn transfer_controller(
+        &self,
+        transfer: &ResourceTransfer,
+    ) -> Option<canwu_api::KnowledgeHolderRef> {
+        match &transfer.access_grant {
+            Some(grant_id) => self
+                .access_grants
+                .get(grant_id)
+                .map(|record| record.grant.grantee.clone()),
+            None => self
+                .accounts
+                .get(&transfer.source)
+                .map(|account| account.custodian.clone()),
+        }
+    }
+
+    /// Returns the one coordinator record version that an external
+    /// participant grant locked for `source.record`, provided `source` is that
+    /// version or a later version of the same record.
+    ///
+    /// Invariant: a production output credit is authorized by the consumed
+    /// resource participant grant of the execution's completion lease. That
+    /// lease locks the coordinator runtime at the version current when it was
+    /// granted, which predates the execution. Every later coordinator
+    /// transition, including the completion itself, advances the record, so
+    /// the credit must cite a version that is no older than the locked one
+    /// (the coordinator plugin additionally proves that the cited body holds
+    /// the completed execution with the same certificate). Citing an older
+    /// version, another record, or an unlocked record is rejected.
+    fn external_locked_production_source(
+        &self,
+        acquisition: &CompletionLeaseAcquisitionId,
+        source: &DomainRecordVersionRef,
+    ) -> Result<DomainRecordVersionRef, ResourceError> {
+        let participant = self
+            .external_completion_participants
+            .grants
+            .get(acquisition)
+            .ok_or_else(|| {
+                ResourceError::NotFound(
+                    "external completion participant grant is unavailable".to_owned(),
+                )
+            })?;
+        let mut locked =
+            participant
+                .grant
+                .target_versions
+                .iter()
+                .filter_map(|target| match target {
+                    CompletionLockedTargetV1::ExternalRecord { version }
+                        if version.record == source.record =>
+                    {
+                        Some(version)
+                    }
+                    _ => None,
+                });
+        match (locked.next(), locked.next()) {
+            (Some(version), None) if version.version <= source.version => Ok(version.clone()),
+            _ => Err(ResourceError::VersionConflict(
+                "production credit source is not the locked coordinator record at or after its locked version"
+                    .to_owned(),
+            )),
+        }
+    }
+
     fn active_reserved_for_demand(
         &self,
         demand_id: &ResourceDemandId,
@@ -3715,6 +4203,25 @@ impl ResourceState {
                     .checked_add(reservation.quantity)
                     .ok_or(ResourceError::Overflow)
             })
+    }
+
+    /// Supply one source account offers a demand. For a granted demand the
+    /// account belongs to another custodian, so a protected-floor policy the
+    /// grantor changed after admission withholds that account's supply
+    /// instead of failing the grantee's whole allocation pass.
+    fn available_for_source(
+        &self,
+        account_id: &ResourceAccountId,
+        demand: &ResourceDemand,
+    ) -> Result<u64, ResourceError> {
+        if demand.source_policy.access_grant().is_some()
+            && self.accounts.get(account_id).is_some_and(|account| {
+                account.protected_floor_policy != demand.protected_floor_policy
+            })
+        {
+            return Ok(0);
+        }
+        self.available_for_demand(account_id, demand)
     }
 
     fn available_for_demand(
@@ -3786,6 +4293,7 @@ impl ResourceState {
             let demand = self.demands.get_mut(&demand_id).expect("selected above");
             demand.status = DemandStatus::Expired;
             demand.revision = demand.revision.next()?;
+            let mut released = 0_u64;
             let reservation_ids = self
                 .reservation_by_demand
                 .get(&demand_id)
@@ -3803,6 +4311,9 @@ impl ResourceState {
                 }
                 reservation.status = ReservationStatus::Expired;
                 reservation.revision = reservation.revision.next()?;
+                released = released
+                    .checked_add(reservation.quantity)
+                    .ok_or(ResourceError::Overflow)?;
                 if let Some(leg) = self.allocation_legs.get_mut(&reservation.allocation_leg) {
                     leg.status = AllocationLegStatus::Expired;
                     leg.revision = leg.revision.next()?;
@@ -3810,6 +4321,11 @@ impl ResourceState {
                     leg.semantic_digest =
                         canonical_digest("canwu.resource.allocation-leg.v1", leg)?;
                 }
+            }
+            if let Some(grant_id) = snapshot.source_policy.access_grant()
+                && released > 0
+            {
+                self.release_access_grant(grant_id, released)?;
             }
             if let Some(ids) = self.demand_due_index.get_mut(&snapshot.due_at) {
                 ids.remove(&demand_id);
@@ -3879,6 +4395,75 @@ impl ResourceState {
                     ));
                 }
             }
+        }
+        if let ResourceDemandSourcePolicyV1::Granted { grant_id, accounts } = &demand.source_policy
+        {
+            let record = self.access_grants.get(grant_id).ok_or_else(|| {
+                ResourceError::NotFound("resource demand access grant is unavailable".to_owned())
+            })?;
+            let grant = &record.grant;
+            if grant.grantee != demand.requester {
+                return Err(ResourceError::Authority(
+                    "resource demand access grant was not issued to its requester".to_owned(),
+                ));
+            }
+            if grant.resource_revision != demand.resource_revision
+                || grant.unit_revision != demand.unit_revision
+                || demand.due_at < grant.valid_from
+                || demand.expires_at > grant.valid_until
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource demand resource, unit, or window exceeds its access grant".to_owned(),
+                ));
+            }
+            for id in accounts {
+                let account = self.accounts.get(id).ok_or_else(|| {
+                    ResourceError::NotFound(
+                        "resource demand source account is unavailable".to_owned(),
+                    )
+                })?;
+                if account.custodian != grant.grantor_custodian {
+                    return Err(ResourceError::Authority(
+                        "resource demand granted account is not custodied by the grantor"
+                            .to_owned(),
+                    ));
+                }
+                if account.closed
+                    || account.resource_revision != grant.resource_revision
+                    || account.unit_revision != grant.unit_revision
+                {
+                    return Err(ResourceError::InvalidDefinition(
+                        "resource demand granted account resource or unit differs".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Admission rules for a new or amended demand beyond its static source
+    /// contract: a `Granted` demand needs an active grant, and a demand that
+    /// has not yet drawn on its grant may not request more than the grant's
+    /// remaining cap.
+    pub(crate) fn validate_demand_admission(
+        &self,
+        demand: &ResourceDemand,
+        drawn: bool,
+    ) -> Result<(), ResourceError> {
+        self.validate_demand_sources(demand)?;
+        let Some(grant_id) = demand.source_policy.access_grant() else {
+            return Ok(());
+        };
+        let record = &self.access_grants[grant_id];
+        if record.status != crate::ResourceAccessGrantStatusV1::Active {
+            return Err(ResourceError::InvalidLifecycle(
+                "resource demand access grant is revoked".to_owned(),
+            ));
+        }
+        if !drawn && demand.requested > record.remaining() {
+            return Err(ResourceError::Capacity(
+                "resource demand exceeds its access grant's remaining cap".to_owned(),
+            ));
         }
         Ok(())
     }
@@ -4091,6 +4676,7 @@ impl ResourceState {
                 "resource reservation-by-demand index differs from hot state".to_owned(),
             ));
         }
+        self.validate_access_grants()?;
         let expected_active_transfers: BTreeSet<_> = self
             .transfers
             .values()
@@ -4326,6 +4912,99 @@ impl ResourceState {
         self.validate_conservation()
     }
 
+    /// Access grant identity, shape, and cap accounting: every grant's
+    /// reserved quantity equals the active reservations of the demands drawn
+    /// under it, its debited quantity covers at least the hot transfers and
+    /// consumptions debited under it, and reserved plus debited never exceeds
+    /// its cap. While a transfer's allocation leg and demand are hot, the
+    /// transfer names exactly the grant that demand drew on.
+    fn validate_access_grants(&self) -> Result<(), ResourceError> {
+        if self.access_grants.len() > crate::MAX_RESOURCE_ACCESS_GRANTS {
+            return Err(ResourceError::LimitExceeded(
+                "resource access grants exceed their bound".to_owned(),
+            ));
+        }
+        let mut reserved = BTreeMap::<&crate::ResourceAccessGrantId, u64>::new();
+        for reservation in self
+            .reservations
+            .values()
+            .filter(|reservation| reservation.status == ReservationStatus::Active)
+        {
+            if let Some(grant_id) = self
+                .demands
+                .get(&reservation.demand)
+                .and_then(|demand| demand.source_policy.access_grant())
+            {
+                let total = reserved.entry(grant_id).or_default();
+                *total = total
+                    .checked_add(reservation.quantity)
+                    .ok_or(ResourceError::Overflow)?;
+            }
+        }
+        // Debits never return to a grant, so the hot debit records are a
+        // lower bound on its debited quantity; archived ones are not counted.
+        let mut debited = BTreeMap::<&crate::ResourceAccessGrantId, u64>::new();
+        for transfer in self.transfers.values() {
+            let demand_grant = self
+                .allocation_legs
+                .get(&transfer.allocation_leg)
+                .and_then(|leg| self.demands.get(&leg.demand))
+                .map(|demand| demand.source_policy.access_grant());
+            if demand_grant.is_some_and(|expected| expected != transfer.access_grant.as_ref()) {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource transfer access grant differs from the grant its demand drew on"
+                        .to_owned(),
+                ));
+            }
+            if let Some(grant_id) = &transfer.access_grant {
+                if !self.access_grants.contains_key(grant_id) {
+                    return Err(ResourceError::InvalidDefinition(
+                        "resource transfer names an unavailable access grant".to_owned(),
+                    ));
+                }
+                let total = debited.entry(grant_id).or_default();
+                *total = total
+                    .checked_add(transfer.quantity)
+                    .ok_or(ResourceError::Overflow)?;
+            }
+        }
+        for consumption in self.consumptions.values() {
+            if let Some(grant_id) = self
+                .demands
+                .get(&consumption.demand)
+                .and_then(|demand| demand.source_policy.access_grant())
+            {
+                let total = debited.entry(grant_id).or_default();
+                *total = total
+                    .checked_add(consumption.quantity)
+                    .ok_or(ResourceError::Overflow)?;
+            }
+        }
+        for (id, record) in &self.access_grants {
+            if id != &record.grant.grant_id {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource access grant map key differs from its identity".to_owned(),
+                ));
+            }
+            self.validate_access_grant_contract(&record.grant)?;
+            let charged = record
+                .reserved_quantity
+                .checked_add(record.debited_quantity)
+                .ok_or(ResourceError::Overflow)?;
+            if charged > record.grant.cap_quantity
+                || record.reserved_quantity != reserved.get(id).copied().unwrap_or(0)
+                || record.debited_quantity < debited.get(id).copied().unwrap_or(0)
+                || (record.status == crate::ResourceAccessGrantStatusV1::Revoked
+                    && record.is_drawn())
+            {
+                return Err(ResourceError::Conservation(
+                    "resource access grant cap accounting does not reconcile".to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_conservation(&self) -> Result<(), ResourceError> {
         let balances = self.accounts.values().try_fold(0_u128, |total, account| {
             total
@@ -4420,7 +5099,9 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         | ResourceOperationRequestV1::SetProtectedFloor(_)
         | ResourceOperationRequestV1::RecordObservation(_)
         | ResourceOperationRequestV1::Completion(_)
-        | ResourceOperationRequestV1::BeginExchange(_) => 0,
+        | ResourceOperationRequestV1::BeginExchange(_)
+        | ResourceOperationRequestV1::RevokeAccessGrant(_) => 0,
+        ResourceOperationRequestV1::IssueAccessGrant(value) => value.grant.cap_quantity,
     }
 }
 

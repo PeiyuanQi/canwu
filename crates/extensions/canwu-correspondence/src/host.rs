@@ -1,6 +1,7 @@
 use crate::{
-    CORRESPONDENCE_COMMAND, InitiateCorrespondenceRequest, PLUGIN_NAME,
-    RESOLVE_CORRESPONDENCE_COMMAND, ResolveCorrespondenceRequest,
+    CARRIER_DELEGATION_COMMAND, CORRESPONDENCE_COMMAND, CarrierDelegationRequest,
+    InitiateCorrespondenceRequest, PLUGIN_NAME, RESOLVE_CORRESPONDENCE_COMMAND,
+    ResolveCorrespondenceRequest,
 };
 use canwu_api::{
     Command, DecisionContext, DecisionOption, DecisionTicketDraft, DecisionTicketId, EntityRef,
@@ -13,6 +14,21 @@ pub fn correspondence_command(
     Ok(Command::Plugin {
         plugin: PLUGIN_NAME.to_owned(),
         command: CORRESPONDENCE_COMMAND.to_owned(),
+        payload: serde_json::to_value(request)?,
+    })
+}
+
+/// Builds the carrier delegation command. Issue it under the command authority
+/// of the carrier the claim names as `performed_by`; the resulting command ID
+/// is what [`InitiateCorrespondenceRequest::carrier_delegation`] cites, from
+/// the boundary after the command, while it is the carrier's newest
+/// delegation for that principal.
+pub fn carrier_delegation_command(
+    request: &CarrierDelegationRequest,
+) -> Result<Command, serde_json::Error> {
+    Ok(Command::Plugin {
+        plugin: PLUGIN_NAME.to_owned(),
+        command: CARRIER_DELEGATION_COMMAND.to_owned(),
         payload: serde_json::to_value(request)?,
     })
 }

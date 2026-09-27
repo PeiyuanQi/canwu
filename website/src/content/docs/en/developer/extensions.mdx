@@ -17,6 +17,8 @@ simulation plugins, domain schemas, command handlers, and boundary systems rathe
 | Several systems coordinate at the same day, turn, or time point | Register a boundary system with `register_boundary_system()` |
 | The plugin owns typed domain data | Register domain schemas and use the domain-record APIs |
 | Results require stable randomness | Declare plugin random streams so each draw enters evidence |
+| Several plugins must write one transition together, and a silent participant must be caught | Register a transition manifest and stage each participant's writes in phase 10; see [transition manifests](/en/architecture/settlement/#transition-manifests) |
+| Players or agents need to see why a rule produced a value | Record an evaluation trace from the phase-7 or phase-12 system that computed it; see [evaluation traces](/en/architecture/settlement/#evaluation-traces) |
 
 ## Minimal simulation-plugin structure (excerpt)
 
@@ -78,13 +80,16 @@ These packages are optional capabilities built on the public API, not hard-coded
 | Package | Status and use | Continue with |
 | --- | --- | --- |
 | `canwu-society` | Published social-diffusion simulation module | [Local community diffusion](/en/tutorials/cases/local-community-diffusion/) |
-| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension | [Culture and legal institutions](/en/architecture/culture-law/) |
-| `canwu-law` | Experimental legal-institutionalization extension | [Culture and legal institutions](/en/architecture/culture-law/) |
+| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension, with host-driven (`CulturePlugin`) and in-engine (`CultureBoundaryPlugin`) settlement | [Culture and legal institutions](/en/architecture/culture-law/) |
+| `canwu-law` | Experimental legal-institutionalization extension with weighted, unit-block, and consultation procedure stages | [Culture and legal institutions](/en/architecture/culture-law/) |
 | `canwu-technology` | Published technology-evidence, local-capability, and diffusion extension | [Technology diffusion](/en/tutorials/technology-diffusion/) |
 | `canwu-fiscal` | Generic fiscal-procedure extension; it does not own resource balances or transport | [Ming fiscal case](/en/tutorials/cases/ming-fiscal/) |
-| `canwu-resource` | Published conserved-resource accounts, demand, allocation, transfer, and fulfillment extension | [Production, resource, and transport boundary](/en/developer/production-economy/) |
+| `canwu-resource` | Published conserved-resource accounts, demand, allocation, transfer, delegated access grants, and fulfillment extension | [Production, resource, and transport boundary](/en/developer/production-economy/) |
 | `canwu-production` | Published production process, facility, work-order, and output-settlement extension | [Production, resource, and transport boundary](/en/developer/production-economy/) |
 | `canwu-military` | Optional military simulation extension; not a universal combat model | [Military simulation extension](/en/tutorials/military-domain/) |
+| `canwu-movement` | Published movement lifecycle extension: movement orders, leg settlement, capacity pools, and holder-relative movement reports | [Route planning and delivery execution](/en/tutorials/routing-transport/#movement-lifecycle-and-capacity-pools) |
+| `canwu-information` | Published information-lifecycle extension, including authenticity findings on interpretation | [Encoded interception](/en/tutorials/cases/encoded-interception/) |
+| `canwu-correspondence` | Published correspondence extension with holder-relative planning, delegated carriers, and carrier seizure | [Routed correspondence](/en/tutorials/cases/routed-correspondence/) |
 
 Before selecting an extension, confirm its public version, dependency graph, and persistence contract.
 Historical content, scenario parameters, and host rules remain owned by content packs or the host application.

@@ -375,6 +375,7 @@ fn sender_cannot_read_an_unrelated_carriers_private_route_knowledge() {
         capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
         execution_id: TransportExecutionId(31),
         automatic_opportunity: None,
+        carrier_delegation: None,
     };
     open_and_resolve_send_decision(&mut canwu, sender, &request);
     assert!(
@@ -450,6 +451,7 @@ fn automatic_opportunity_selects_and_consumes_one_recipient_deterministically() 
         capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
         execution_id: canwu_api::TransportExecutionId(10),
         automatic_opportunity: Some(opportunity_reference.clone()),
+        carrier_delegation: None,
     };
     canwu
         .enqueue_command(
@@ -650,6 +652,7 @@ fn start_delivery_case(
         capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
         execution_id: canwu_api::TransportExecutionId(if long_distance { 2 } else { 1 }),
         automatic_opportunity: None,
+        carrier_delegation: None,
     };
     open_and_resolve_send_decision(&mut canwu, sender, &request);
     (canwu, sender, request)

@@ -49,5 +49,8 @@ pub const PLUGIN_NAME: &str = "canwu-law";
 pub const PLUGIN_NAMESPACE: &str = "canwu.law";
 
 /// Stable semantic identity for the registered legal record and command contract.
+///
+/// It changes whenever procedure tallying or persisted legal semantics change,
+/// such as weighted and unit-block stages and the advisory consultation kind.
 pub const LAW_SEMANTIC_HASH: &str =
-    "c38a4b03ea9158ae246bf2b171f3f6fe30746b46ac6fadd29cb00a320d6a7438";
+    "ee7f4b5e9992ed3612c9c7e52e4f1470e4b843146edf8137bf63ad5d725712c0";

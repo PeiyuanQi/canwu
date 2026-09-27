@@ -315,6 +315,15 @@ randomness, save/load, exact replay, forking, rollback, tamper detection, and
 package-identity rejection. It proves those implemented architecture boundaries
 without adding application-specific types or rules to the kernel.
 
+Since 0.13.0, conditional transitions that span several owners can declare
+their participants in a transition manifest. The public
+`gap_g04_sim_transition_manifest` fixture proves that a partially staged
+manifest or a stale expected version rolls back the whole boundary, that a
+manifest no participant staged expires, that only listed plugins may stage,
+and that pending manifests survive fork, save/load, and exact replay while a
+dropped pending manifest is rejected on load. This strengthens E07 without
+adding domain semantics to the kernel.
+
 The published `canwu-society` social diffusion simulation module is a
 domain extension. It additionally composes E01,
 E02, E04, E05, E07, E09, E10, E12, E13, and E15 through public `canwu-api`
@@ -336,9 +345,11 @@ runtime dirty-set API follows active pairs, and retired targets are absent from
 the hot target index. The complete persisted state restores lifecycle schedules,
 dirty work, generations, and effect cadence. Explicit atomic society lifecycle
 synchronization removes retired target-scoped rules, distributions, signal
-inputs, and derived state. Host boundary registration, authoritative transition
-persistence, canonical signal admission, and incremental society aggregate /
-projection refreshes are not yet implemented. A dedicated benchmark must
+inputs, and derived state. Since 0.13.0, `CultureBoundaryPlugin` registers the
+lifecycle as a Monthly boundary system, persists culture state and lifecycle
+transitions inside the engine, and admits exposure and signal batches through
+canonical ingress while the society plugin remains the only society writer.
+Incremental society aggregate / projection refreshes are not yet implemented. A dedicated benchmark must
 measure active/dirty pairs, cross-extension signal batches, observers, retired
 catalog size, snapshot bytes, validation, replay, and peak resident memory
 before the SDK is described as scalable.

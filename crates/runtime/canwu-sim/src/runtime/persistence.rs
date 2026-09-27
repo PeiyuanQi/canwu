@@ -103,6 +103,10 @@ pub struct SimulationSnapshot {
     #[serde(default)]
     pub random_draws: Vec<RandomDrawRecord>,
     pub(super) scheduled: Vec<ScheduledRecord>,
+    /// Registered transition manifests awaiting their ready boundary, in
+    /// manifest-ID order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_transition_manifests: Vec<super::PendingTransitionManifest>,
     #[serde(default, rename = "rng", skip_serializing_if = "Option::is_none")]
     pub(super) legacy_rng: Option<DeterministicRng>,
     pub(super) next_event_id: u64,
@@ -2094,6 +2098,14 @@ impl CompactedSimulation {
         self.simulation.person_availabilities()
     }
 
+    /// Returns the registered transition manifests whose ready boundary has
+    /// not settled, in manifest-ID order.
+    pub fn pending_transition_manifests(
+        &self,
+    ) -> impl Iterator<Item = &super::PendingTransitionManifest> {
+        self.simulation.pending_transition_manifests()
+    }
+
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
@@ -3030,6 +3042,13 @@ impl Simulation {
                     key: key.clone(),
                     action: action.clone(),
                 })
+                .collect(),
+            pending_transition_manifests: self
+                .state
+                .scheduler
+                .transition_manifests
+                .values()
+                .cloned()
                 .collect(),
             legacy_rng: None,
             next_event_id: self.state.counters.next_event_id,

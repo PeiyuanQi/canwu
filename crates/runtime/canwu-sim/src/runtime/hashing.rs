@@ -68,6 +68,8 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) plugin_descriptors: &'a [PluginDescriptor],
     pub(super) schema: &'a SchemaRegistry,
     pub(super) scheduled: &'a [ScheduledRecord],
+    #[serde(skip_serializing_if = "transition_manifest_slice_is_empty")]
+    pub(super) transition_manifests: &'a [&'a super::PendingTransitionManifest],
     pub(super) root_seed: u64,
     pub(super) authority_root_seed: u64,
     pub(super) random_streams: &'a [RandomStreamState],
@@ -101,6 +103,10 @@ fn created_person_slice_is_empty(value: &&[super::CreatedPerson]) -> bool {
     value.is_empty()
 }
 
+fn transition_manifest_slice_is_empty(value: &&[&super::PendingTransitionManifest]) -> bool {
+    value.is_empty()
+}
+
 #[derive(Serialize)]
 struct WorldCommitmentMaterial<'a> {
     people: String,
@@ -120,6 +126,8 @@ struct WorldCommitmentMaterial<'a> {
 struct SchedulerCommitmentMaterial {
     now: SimTime,
     scheduled: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transition_manifests: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -333,9 +341,12 @@ pub(super) fn decision_commitment_root(decisions: &DecisionState) -> Result<Stri
         .map_err(super::decision::decision_error)
 }
 
+/// Pending transition manifests are committed in manifest-ID order under an
+/// optional sub-root, so runs without manifests keep their scheduler root.
 pub(super) fn scheduler_commitment_root(
     now: SimTime,
     scheduled: &[ScheduledRecord],
+    transition_manifests: &[&super::PendingTransitionManifest],
 ) -> Result<String, CanwuError> {
     canonical_hash(
         "canwu.commitment.scheduler.v1",
@@ -346,6 +357,14 @@ pub(super) fn scheduler_commitment_root(
                 scheduled,
                 |record| record.key.clone(),
             )?,
+            transition_manifests: (!transition_manifests.is_empty())
+                .then(|| {
+                    canonical_hash(
+                        "canwu.commitment.scheduler.transition-manifests.v1",
+                        transition_manifests,
+                    )
+                })
+                .transpose()?,
         },
     )
 }
@@ -405,7 +424,11 @@ fn commitment_roots(
     let plugin_components = plugin_component_commitment_root(material.plugin_components)?;
     let domain_records = domain_record_commitment_root(material.domain_records)?;
     let decisions = decision_commitment_root(material.decisions)?;
-    let scheduler = scheduler_commitment_root(material.now, material.scheduled)?;
+    let scheduler = scheduler_commitment_root(
+        material.now,
+        material.scheduled,
+        material.transition_manifests,
+    )?;
     let command_root = match journal_roots {
         Some(roots) => roots.commands.clone(),
         None => canonical_sorted_hash_by(
@@ -596,6 +619,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
     let (authoritative_manifest, authoritative_manifest_hash) =
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
     let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
+    let transition_manifests: Vec<_> = snapshot.pending_transition_manifests.iter().collect();
     state_hash(&StateHashMaterial {
         engine_version: &snapshot.engine_version,
         snapshot_format_version: snapshot.snapshot_format_version,
@@ -620,6 +644,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         plugin_descriptors: &snapshot.plugin_descriptors,
         schema: &snapshot.schema,
         scheduled: &snapshot.scheduled,
+        transition_manifests: &transition_manifests,
         root_seed: snapshot.root_seed,
         authority_root_seed: snapshot.authority_root_seed,
         random_streams: &snapshot.random_streams,
@@ -685,6 +710,7 @@ pub(super) fn snapshot_commitment_roots(
     let (authoritative_manifest, authoritative_manifest_hash) =
         authoritative_run_identity(run_manifest, &snapshot.run_manifest_hash, run_configuration)?;
     let initial_scenario = committed_initial_scenario(snapshot.initial_scenario.as_ref());
+    let transition_manifests: Vec<_> = snapshot.pending_transition_manifests.iter().collect();
     commitment_roots(
         &StateHashMaterial {
             engine_version: &snapshot.engine_version,
@@ -710,6 +736,7 @@ pub(super) fn snapshot_commitment_roots(
             plugin_descriptors: &snapshot.plugin_descriptors,
             schema: &snapshot.schema,
             scheduled: &snapshot.scheduled,
+            transition_manifests: &transition_manifests,
             root_seed: snapshot.root_seed,
             authority_root_seed: snapshot.authority_root_seed,
             random_streams: &snapshot.random_streams,
@@ -965,6 +992,12 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         person_availability_changes: Option<&'a [super::BoundaryPersonAvailabilityChange]>,
         #[serde(skip_serializing_if = "Option::is_none")]
         created_persons: Option<&'a [super::BoundaryPersonCreation]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        evaluation_traces: Option<&'a [super::BoundaryEvaluationTrace]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transition_manifests: Option<&'a [super::PendingTransitionManifest]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transition_audits: Option<&'a [super::TransitionAuditRecord]>,
         emissions: &'a [BoundaryEmission],
         state_hash: &'a Option<String>,
         previous_hash: &'a str,
@@ -996,6 +1029,12 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
                 .then_some(record.person_availability_changes.as_slice()),
             created_persons: (!record.created_persons.is_empty())
                 .then_some(record.created_persons.as_slice()),
+            evaluation_traces: (!record.evaluation_traces.is_empty())
+                .then_some(record.evaluation_traces.as_slice()),
+            transition_manifests: (!record.transition_manifests.is_empty())
+                .then_some(record.transition_manifests.as_slice()),
+            transition_audits: (!record.transition_audits.is_empty())
+                .then_some(record.transition_audits.as_slice()),
             emissions: &record.emissions,
             state_hash: &record.state_hash,
             previous_hash: &record.previous_hash,

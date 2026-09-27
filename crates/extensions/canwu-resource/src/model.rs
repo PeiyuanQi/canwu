@@ -191,6 +191,7 @@ typed_id!(
     ResourceObservationAdapterRevisionId,
     "resource observation adapter revision"
 );
+typed_id!(ResourceAccessGrantId, "resource access grant");
 
 /// Non-zero revision of a resource-owned dynamic record.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -308,7 +309,9 @@ pub enum DemandStatus {
 /// Selects which accounts may satisfy a demand during allocation.
 ///
 /// `Pooled` preserves the historical deterministic account pool. `ExactAccounts`
-/// restricts allocation to the listed, requester-custodied accounts.
+/// restricts allocation to the listed, requester-custodied accounts. `Granted`
+/// restricts allocation to listed accounts of another custodian that issued the
+/// named [`ResourceAccessGrantV1`] to the requester.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceDemandSourcePolicyV1 {
@@ -319,15 +322,27 @@ pub enum ResourceDemandSourcePolicyV1 {
     /// A nonempty, sorted, unique list of at most [`MAX_DEMAND_SOURCE_ACCOUNTS`]
     /// open accounts, each custodied by the requester with matching resource/unit.
     ExactAccounts(Vec<ResourceAccountId>),
+    /// A nonempty, sorted, unique list of at most [`MAX_DEMAND_SOURCE_ACCOUNTS`]
+    /// open accounts, each custodied by the grant's grantor, drawn under the
+    /// named access grant. The requester must be the grantee, the demand
+    /// window must lie inside the grant window, and allocation never reserves
+    /// beyond the grant's remaining cap or falls back to other accounts.
+    Granted {
+        grant_id: ResourceAccessGrantId,
+        accounts: Vec<ResourceAccountId>,
+    },
 }
 
 impl ResourceDemandSourcePolicyV1 {
     /// Validates list ordering, uniqueness, and the configured source-count bound.
     pub(crate) fn validate_shape(&self) -> Result<(), ResourceError> {
-        if let Self::ExactAccounts(accounts) = self
-            && (accounts.is_empty()
-                || accounts.len() > MAX_DEMAND_SOURCE_ACCOUNTS
-                || accounts.windows(2).any(|pair| pair[0] >= pair[1]))
+        let accounts = match self {
+            Self::Pooled => return Ok(()),
+            Self::ExactAccounts(accounts) | Self::Granted { accounts, .. } => accounts,
+        };
+        if accounts.is_empty()
+            || accounts.len() > MAX_DEMAND_SOURCE_ACCOUNTS
+            || accounts.windows(2).any(|pair| pair[0] >= pair[1])
         {
             return Err(ResourceError::InvalidDefinition(
                 "resource demand source accounts must be nonempty, bounded, sorted and unique"
@@ -342,13 +357,118 @@ impl ResourceDemandSourcePolicyV1 {
     pub(crate) fn permits(&self, account: &ResourceAccountId) -> bool {
         match self {
             Self::Pooled => true,
-            Self::ExactAccounts(accounts) => accounts.binary_search(account).is_ok(),
+            Self::ExactAccounts(accounts) | Self::Granted { accounts, .. } => {
+                accounts.binary_search(account).is_ok()
+            }
+        }
+    }
+
+    /// The access grant a `Granted` policy draws on.
+    #[must_use]
+    pub fn access_grant(&self) -> Option<&ResourceAccessGrantId> {
+        match self {
+            Self::Granted { grant_id, .. } => Some(grant_id),
+            Self::Pooled | Self::ExactAccounts(_) => None,
         }
     }
 }
 
 /// Maximum number of explicitly listed source accounts in one demand.
 pub const MAX_DEMAND_SOURCE_ACCOUNTS: usize = 256;
+
+/// Maximum number of access grants retained in one resource state. Grants,
+/// including revoked ones, stay in hot state; they are not archived.
+pub const MAX_RESOURCE_ACCESS_GRANTS: usize = 4_096;
+
+/// Delegated access a grantor custodian gives a grantee over its stock of one
+/// exact resource and unit revision.
+///
+/// The grant is the grantor's explicit consent: it is issued only by a
+/// tracked command whose subject is `grantor_custodian`, and it cites the exact
+/// application record that justifies it. It lets the grantee submit
+/// [`ResourceDemandSourcePolicyV1::Granted`] demands against listed accounts
+/// the grantor custodies, and lets the grantee's own completion lease debit the
+/// resulting allocations, for at most `cap_quantity` inside
+/// `valid_from..valid_until`. Who may grant whom, and why, stays application
+/// authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceAccessGrantV1 {
+    pub grant_id: ResourceAccessGrantId,
+    pub grantor_custodian: KnowledgeHolderRef,
+    pub grantee: KnowledgeHolderRef,
+    pub resource_revision: ResourceDefinitionRevisionId,
+    pub unit_revision: ResourceUnitRevisionId,
+    pub cap_quantity: u64,
+    pub valid_from: SimTime,
+    /// Exclusive end of the grant window.
+    pub valid_until: SimTime,
+    pub authority_evidence: DomainRecordVersionRef,
+}
+
+impl ResourceAccessGrantV1 {
+    /// Validates the self-contained shape of a grant.
+    pub fn validate_shape(&self) -> Result<(), ResourceError> {
+        if self.cap_quantity == 0
+            || self.valid_from >= self.valid_until
+            || self.grantor_custodian == self.grantee
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource access grant needs a positive cap, a nonempty window, and a grantee other than its grantor"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether `at` lies inside the grant window.
+    #[must_use]
+    pub fn is_current_at(&self, at: SimTime) -> bool {
+        self.valid_from <= at && at < self.valid_until
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceAccessGrantStatusV1 {
+    Active,
+    /// Revoked by its grantor before any reservation drew on it.
+    Revoked,
+}
+
+/// Persisted access grant with its cap accounting.
+///
+/// `cap_quantity = remaining + reserved_quantity + debited_quantity` always
+/// holds. Allocation under the grant moves quantity from remaining to
+/// reserved; a debit (consumption or transfer start) of that allocation moves
+/// it from reserved to debited, so each unit is charged exactly once. A
+/// reservation that is released or expires returns its quantity to remaining,
+/// because the stock never left the grantor's account; debited quantity stays
+/// charged even if a transfer later returns it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceAccessGrantRecordV1 {
+    pub grant: ResourceAccessGrantV1,
+    pub revision: ResourceRevision,
+    pub status: ResourceAccessGrantStatusV1,
+    pub reserved_quantity: u64,
+    pub debited_quantity: u64,
+}
+
+impl ResourceAccessGrantRecordV1 {
+    /// Quantity the grant can still back.
+    #[must_use]
+    pub fn remaining(&self) -> u64 {
+        self.grant
+            .cap_quantity
+            .saturating_sub(self.reserved_quantity)
+            .saturating_sub(self.debited_quantity)
+    }
+
+    /// Whether any reservation drew on the grant; such a grant is irrevocable.
+    #[must_use]
+    pub fn is_drawn(&self) -> bool {
+        self.reserved_quantity > 0 || self.debited_quantity > 0
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceDemand {
@@ -567,6 +687,11 @@ pub struct ResourceTransfer {
     pub completion_acquisition: CompletionLeaseAcquisitionId,
     pub operation_key: ResourceOperationKey,
     pub terminal_sequence: u64,
+    /// Access grant under which the grantee started this transfer out of the
+    /// grantor's account. The grantee, not the source custodian, then controls
+    /// its cancellation, return, and loss. `None` for ordinary transfers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_grant: Option<ResourceAccessGrantId>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -718,6 +843,10 @@ pub enum ResourceOperationKind {
     Loss,
     /// Atomic start of two transfer legs under one operation outcome.
     BeginExchange,
+    /// A grantor custodian issues a delegated access grant.
+    IssueAccessGrant,
+    /// A grantor custodian revokes an access grant nothing has drawn on.
+    RevokeAccessGrant,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -832,7 +961,10 @@ impl ResourceOperationOutcome {
                 }
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
                 ResourceOperationKind::Credit | ResourceOperationKind::Loss => evidence_count <= 1,
-                ResourceOperationKind::BeginExchange => evidence_count == 0,
+                ResourceOperationKind::BeginExchange | ResourceOperationKind::RevokeAccessGrant => {
+                    evidence_count == 0
+                }
+                ResourceOperationKind::IssueAccessGrant => evidence_count == 1,
                 ResourceOperationKind::CompletionLease => {
                     completion_evidence_shape(self.operation_key.as_str(), evidence_count)
                 }
@@ -923,7 +1055,9 @@ fn result_ref_matches_kind(
         | ResourceOperationKind::AmendDemand
         | ResourceOperationKind::SetProtectedFloor
         | ResourceOperationKind::CancelDemand
-        | ResourceOperationKind::Observation => result_ref.is_none(),
+        | ResourceOperationKind::Observation
+        | ResourceOperationKind::IssueAccessGrant
+        | ResourceOperationKind::RevokeAccessGrant => result_ref.is_none(),
         ResourceOperationKind::Credit | ResourceOperationKind::ExternalOutflow => {
             result_ref.is_none()
         }
@@ -1048,6 +1182,10 @@ pub struct ResourceState {
     pub fulfillments: BTreeMap<ResourceFulfillmentId, ResourceFulfillment>,
     pub outcomes: BTreeMap<ResourceOperationKey, ResourceOperationOutcome>,
     pub report_grants: BTreeMap<ResourceReportGrantId, ResourceReportGrantV1>,
+    /// Delegated access grants, bounded by [`MAX_RESOURCE_ACCESS_GRANTS`].
+    /// Omitted from the canonical encoding while empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub access_grants: BTreeMap<ResourceAccessGrantId, ResourceAccessGrantRecordV1>,
     pub observation_heads: BTreeMap<ResourceObservationHeadId, crate::ResourceObservationHeadV1>,
     pub observation_head_by_grant: BTreeMap<ResourceReportGrantId, ResourceObservationHeadId>,
     #[serde(default)]

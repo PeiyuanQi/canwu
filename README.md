@@ -34,12 +34,12 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "=0.12.0"
+canwu-api = "=0.13.0"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
 release exactly and upgrade only alongside an explicit save migration. The
-example above selects the immutable `0.12.0` release rather than the moving
+example above selects the immutable `0.13.0` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
@@ -110,21 +110,28 @@ viewer` opens the browser trace viewer against the same live trace dump.
 - `canwu-event`: stored events and links between causes and effects
 - `canwu-knowledge`: what each actor knows and when they learned it
 - `canwu-routing`: deterministic, observer-relative route planning
-- `canwu-transport`: itinerary, custody, booking, and delivery execution
-- `canwu-sim`: private simulation state, commands, scheduling, and plugins
-- `canwu-api`: public APIs for programs, agents, explanations, and debugging
+- `canwu-transport`: itinerary, custody, booking, capacity-pool, and delivery
+  execution records
+- `canwu-sim`: private simulation state, commands, scheduling, plugins, and
+  multi-owner transition audits
+- `canwu-api`: public APIs for programs, agents, explanations (including
+  rule-evaluation traces), and debugging
 - `canwu-reference-world`: replaceable example entities, detached projection,
   movement plugin, routing adapter, and runnable persistence/replay starter
 - `canwu-debug`: a small reference client built on the public API and reference integration
-- `canwu-information`: published information-lifecycle extension
+- `canwu-information`: published information-lifecycle extension, including
+  authenticity findings
 - `canwu-correspondence`: published correspondence domain
-  extension and simulation plugin built on routing, transport, and information
+  extension and simulation plugin built on routing, transport, and information,
+  with delegated carriers
 - `canwu-society`: published social diffusion simulation module;
   architecturally, a domain extension built on `canwu-api`
 - `canwu-culture`: published culture authoring, compilation, and
-  lifecycle extension built on `canwu-society`
+  lifecycle extension built on `canwu-society`, with host-driven and in-engine
+  settlement plugins
 - `canwu-law`: experimental deterministic legal authoring, institutional
-  procedure, versioned law, applicability, succession, and retirement extension
+  procedure (including weighted, unit-block, and consultation stages), versioned
+  law, applicability, succession, and retirement extension
 - `canwu-technology`: published generic technology extension for evidence,
   local capability, implementation, use-specific adoption, and diffusion
 - `canwu-history-research`: published optional historical assessment plugins
@@ -132,13 +139,16 @@ viewer` opens the browser trace viewer against the same live trace dump.
 - `canwu-fiscal`: published generic fiscal-procedure extension for regional
   law adoption, assessment, remission, authorization, receipts, and reports
 - `canwu-resource`: optional conserved resource accounts, demand, allocation,
-  transfer escrow, atomic exchange, consumption, loss, fulfillment, and
-  holder-relative reports
+  transfer escrow, atomic exchange, delegated access grants, consumption, loss,
+  fulfillment, and holder-relative reports
 - `canwu-production`: optional process, site, facility, work-order, WIP,
   maintenance, repair, and output-settlement extension
 - `canwu-economy-reference-content`: source/model-card-bound economy profiles
   with fail-closed place, period, resource, process, and coverage keys
 - `canwu-military`: optional military domain extension for forces, operations, combat, occupation, military knowledge, and military administration
+- `canwu-movement`: optional movement lifecycle extension for movement orders,
+  leg settlement, capacity-pool allocation, and holder-relative movement
+  reports over `canwu-transport` records
 - `canwu-force-supply-reference`: replaceable military-supply consumer proving
   that resource fulfillment and force consequences remain separate domains
 - `canwu-economy-reference`: runnable G1b grain loop and detached G5 local

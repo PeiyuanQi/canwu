@@ -3053,9 +3053,18 @@ impl LegalRuntime {
         intent: PendingLegalIntent,
     ) -> Result<(), CanwuError> {
         self.validate_against_plan(plan)?;
+        if !self.consumed_intent_ids.contains(&intent.id) {
+            self.validate_intent_binding(&intent)?;
+        }
         self.queue_authorized_pending_intent(intent)
     }
 
+    /// Queues an intent whose command evidence the plugin has already verified.
+    ///
+    /// The binding to the active stage is not checked here: a seat response
+    /// that arrives after its stage completed, advanced, or closed is settled
+    /// at this boundary as a recorded rejected intent outcome instead of
+    /// failing the boundary.
     pub(crate) fn queue_authorized_pending_intent(
         &mut self,
         intent: PendingLegalIntent,
@@ -3070,9 +3079,10 @@ impl LegalRuntime {
         if self.pending_intents.contains_key(&intent.id) {
             return Err(invalid("duplicate pending legal intent"));
         }
-        self.validate_intent_binding(&intent)?;
         self.reserve_state_growth(Self::encoded_growth(&intent, 8)?)?;
-        self.dirty_procedures.insert(intent.procedure.id.clone());
+        if self.open_procedures.contains(&intent.procedure.id) {
+            self.dirty_procedures.insert(intent.procedure.id.clone());
+        }
         self.pending_intents.insert(intent.id.clone(), intent);
         Ok(())
     }
@@ -3462,7 +3472,18 @@ impl LegalRuntime {
         for id in &procedure_ids {
             let deadline = self.procedures.get(id).map(|procedure| procedure.deadline);
             if deadline.is_some_and(|deadline| at > deadline) {
-                self.expire_procedure(id, at)?;
+                let consultation = self
+                    .procedures
+                    .get(id)
+                    .filter(|procedure| consultation_deadline_passed(procedure, at))
+                    .map(|procedure| self.procedure_has_capacity(plan, procedure))
+                    .transpose()?
+                    .unwrap_or(false);
+                if consultation {
+                    self.complete_consultation_stage(id, at)?;
+                } else {
+                    self.expire_procedure(id, at)?;
+                }
                 continue;
             }
             if self.advance_procedure(plan, id, at)? {
@@ -3671,26 +3692,13 @@ impl LegalRuntime {
                         .or_insert_with(|| ballot_for_option(&intent.selected_option));
                 }
             }
-            let vetoed = projected_ballots
-                .values()
-                .any(|ballot| *ballot == Ballot::Veto)
-                || (stage.kind == ProcedureStageKind::Veto
-                    && projected_ballots
-                        .values()
-                        .any(|ballot| *ballot == Ballot::Against));
-            let counted = projected_ballots
-                .values()
-                .filter(|ballot| **ballot != Ballot::Abstain)
-                .count();
-            let approved = projected_ballots
-                .values()
-                .filter(|ballot| **ballot == Ballot::For)
-                .count();
-            let passed = !vetoed
-                && projected_ballots.len() >= stage.quorum as usize
-                && counted > 0
-                && approved.saturating_mul(1_000)
-                    >= counted.saturating_mul(stage.threshold as usize);
+            let StageTally { vetoed, passed } = tally_stage(
+                stage,
+                &compiled_procedure(plan, &procedure.profile)?.deterministic_tie_break,
+                &projected_ballots,
+            );
+            // A consultation completes when its deadline passes, whatever its ballots.
+            let consultation_completes = consultation_deadline_passed(procedure, at);
             let (projected_stage, projected_round, closes) = if vetoed {
                 possible_procedure_mutations += 1;
                 reserved_growth = reserved_growth
@@ -3710,7 +3718,7 @@ impl LegalRuntime {
                     }
                 }
                 (procedure.active_stage, procedure.round, true)
-            } else if passed {
+            } else if passed || consultation_completes {
                 possible_procedure_mutations += 1;
                 reserved_growth = reserved_growth
                     .checked_add(Self::encoded_growth(procedure, 8)?)
@@ -3729,7 +3737,8 @@ impl LegalRuntime {
             } else {
                 (procedure.active_stage, procedure.round, false)
             };
-            if !closes && at < procedure.deadline {
+            // `materialize_outbox` emits through the deadline minute inclusive.
+            if !closes && at <= procedure.deadline {
                 let projected = &procedure.stages[projected_stage];
                 let missing = projected
                     .seats
@@ -4117,6 +4126,12 @@ impl LegalRuntime {
     }
 
     fn close_procedure(&mut self, id: &str) -> Result<(), CanwuError> {
+        let active = self
+            .procedures
+            .get(id)
+            .cloned()
+            .ok_or_else(|| invalid("legal procedure is missing"))?;
+        self.expire_active_stage_seat_work(&active);
         let procedure = self
             .procedures
             .get(id)
@@ -4190,6 +4205,72 @@ impl LegalRuntime {
         self.close_procedure(id)
     }
 
+    /// Expires the active stage's seat work that is still pending or enqueued.
+    ///
+    /// Called whenever a stage stops accepting ballots (it passed, completed,
+    /// or its procedure closed), so the host adapter no longer dispatches it and
+    /// culture retirement no longer treats it as live. Work is found through the
+    /// seat-keyed outbox index, so the cost is bounded by the stage's seats.
+    fn expire_active_stage_seat_work(&mut self, procedure: &ProcedureInstance) {
+        let Some(stage) = procedure.stages.get(procedure.active_stage) else {
+            return;
+        };
+        for seat in &stage.seats {
+            let key = outbox_key(&procedure.id, procedure.active_stage, procedure.round, seat);
+            let Some(sequence) = self.outbox_sequence_by_key.get(&key).copied() else {
+                continue;
+            };
+            if let Some(item) = self.outbox.get_mut(&sequence)
+                && matches!(
+                    item.dispatch,
+                    DispatchState::Pending | DispatchState::Enqueued
+                )
+            {
+                item.dispatch = DispatchState::Expired;
+                self.pending_outbox_sequences.remove(&sequence);
+            }
+        }
+    }
+
+    /// Expires the active stage's open seat work, then opens the next stage
+    /// with a fresh round and a deadline measured from `at`.
+    fn open_next_stage(
+        &mut self,
+        id: &str,
+        procedure: &ProcedureInstance,
+        at: SimTime,
+    ) -> Result<(), CanwuError> {
+        self.expire_active_stage_seat_work(procedure);
+        let next_stage = procedure
+            .stages
+            .get(procedure.active_stage + 1)
+            .ok_or_else(|| invalid("legal procedure has no next stage"))?;
+        let deadline = at
+            .checked_add(SimDuration::minutes(next_stage.deadline_minutes))
+            .ok_or_else(|| invalid("legal procedure deadline overflowed"))?;
+        if let Some(current) = self.procedures.get_mut(id) {
+            current.active_stage += 1;
+            current.round = current.round.saturating_add(1);
+            current.eligible_seats.clone_from(&next_stage.seats);
+            current.deadline = deadline;
+        }
+        self.move_procedure_deadline(id, procedure.deadline, deadline)
+    }
+
+    /// Completes an advisory consultation whose deadline has passed.
+    ///
+    /// Its admitted ballots stay as participation evidence and are never
+    /// tallied; opening the next stage expires the consultation's unanswered
+    /// seat work.
+    fn complete_consultation_stage(&mut self, id: &str, at: SimTime) -> Result<(), CanwuError> {
+        let procedure = self
+            .procedures
+            .get(id)
+            .cloned()
+            .ok_or_else(|| invalid("completing legal consultation is missing"))?;
+        self.open_next_stage(id, &procedure, at)
+    }
+
     fn advance_procedure(
         &mut self,
         plan: &CompiledLawPlan,
@@ -4209,7 +4290,7 @@ impl LegalRuntime {
             .stages
             .get(procedure.active_stage)
             .ok_or_else(|| invalid("procedure stage index is invalid"))?;
-        let votes = stage
+        let ballots = stage
             .seats
             .iter()
             .filter_map(|seat| {
@@ -4217,12 +4298,15 @@ impl LegalRuntime {
                 self.latest_participation_by_key
                     .get(&key)
                     .and_then(|index| self.participations.get(*index))
+                    .map(|participation| (seat.as_str(), participation.ballot))
             })
-            .collect::<Vec<_>>();
-        if votes.iter().any(|vote| vote.ballot == Ballot::Veto)
-            || (stage.kind == ProcedureStageKind::Veto
-                && votes.iter().any(|vote| vote.ballot == Ballot::Against))
-        {
+            .collect::<BTreeMap<_, _>>();
+        let tally = tally_stage(
+            stage,
+            &compiled_procedure(plan, &procedure.profile)?.deterministic_tie_break,
+            &ballots,
+        );
+        if tally.vetoed {
             let proposal_id = procedure.proposal.id.clone();
             if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
                 proposal.status = ProposalStatus::Rejected;
@@ -4230,34 +4314,11 @@ impl LegalRuntime {
             self.close_procedure(id)?;
             return Ok(false);
         }
-        if votes.len() < stage.quorum as usize {
-            return Ok(false);
-        }
-        let counted = votes
-            .iter()
-            .filter(|vote| vote.ballot != Ballot::Abstain)
-            .count();
-        let approved = votes
-            .iter()
-            .filter(|vote| vote.ballot == Ballot::For)
-            .count();
-        if counted == 0
-            || approved.saturating_mul(1_000) < counted.saturating_mul(stage.threshold as usize)
-        {
+        if !tally.passed {
             return Ok(false);
         }
         if procedure.active_stage + 1 < procedure.stages.len() {
-            let next_stage = &procedure.stages[procedure.active_stage + 1];
-            let deadline = at
-                .checked_add(SimDuration::minutes(next_stage.deadline_minutes))
-                .ok_or_else(|| invalid("legal procedure deadline overflowed"))?;
-            if let Some(current) = self.procedures.get_mut(id) {
-                current.active_stage += 1;
-                current.round = current.round.saturating_add(1);
-                current.eligible_seats.clone_from(&next_stage.seats);
-                current.deadline = deadline;
-            }
-            self.move_procedure_deadline(id, procedure.deadline, deadline)?;
+            self.open_next_stage(id, &procedure, at)?;
             return Ok(false);
         }
         let proposal = self
@@ -8926,27 +8987,30 @@ fn decision_ticket_draft(
         options.push(option);
     }
     options.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut context = serde_json::json!({
+        "holder": holder,
+        "knowledge_read_cut": actor_context.read_cut,
+        "knowledge_record_ids": actor_context.knowledge_record_ids,
+        "facts": actor_context.facts,
+        "context_hash": actor_context.context_hash,
+        "proposal": procedure.proposal,
+        "procedure": procedure_ref,
+        "stage": stage.id,
+        "round": procedure.round,
+        "seat": seat,
+    });
+    // Only consultation tickets carry the flag, so deciding-stage drafts keep
+    // their encoding: a controller can tell that this ballot is advisory.
+    if stage.kind == ProcedureStageKind::Consultation {
+        context["advisory"] = serde_json::Value::Bool(true);
+    }
     Ok(DecisionTicketDraft {
         id: DecisionTicketId::new(ticket_id),
         definition: "canwu.law.procedure-seat.v1".to_owned(),
         decision_maker,
         assigned_controller: assigned_controller.to_owned(),
         summary: format!("Decide {} at {}", proposal.id, stage.id),
-        context: DecisionContext::new(
-            "canwu.law.actor-relative-context.v1",
-            serde_json::json!({
-                "holder": holder,
-                "knowledge_read_cut": actor_context.read_cut,
-                "knowledge_record_ids": actor_context.knowledge_record_ids,
-                "facts": actor_context.facts,
-                "context_hash": actor_context.context_hash,
-                "proposal": procedure.proposal,
-                "procedure": procedure_ref,
-                "stage": stage.id,
-                "round": procedure.round,
-                "seat": seat,
-            }),
-        ),
+        context: DecisionContext::new("canwu.law.actor-relative-context.v1", context),
         options,
         deadline: Some(procedure.deadline),
         parent_ticket: None,
@@ -9446,6 +9510,106 @@ fn procedure_expiry_time(deadline: SimTime) -> Result<SimTime, CanwuError> {
     deadline
         .checked_add(SimDuration::minutes(1))
         .ok_or_else(|| invalid("legal procedure expiry time overflowed"))
+}
+
+/// Whether `procedure` is open, its active stage is an advisory consultation,
+/// and that stage's deadline has passed at `at`. Preflight and settlement share
+/// this predicate; settlement additionally requires the procedure's capacity.
+fn consultation_deadline_passed(procedure: &ProcedureInstance, at: SimTime) -> bool {
+    !procedure.closed
+        && at > procedure.deadline
+        && procedure
+            .stages
+            .get(procedure.active_stage)
+            .is_some_and(|stage| stage.kind == ProcedureStageKind::Consultation)
+}
+
+fn compiled_procedure<'p>(
+    plan: &'p CompiledLawPlan,
+    profile: &str,
+) -> Result<&'p CompiledProcedure, CanwuError> {
+    plan.procedure_by_id
+        .get(profile)
+        .and_then(|key| plan.procedures.get(key.get() as usize))
+        .ok_or_else(|| invalid("legal procedure profile is missing"))
+}
+
+/// Result of tallying one stage's current ballots.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct StageTally {
+    vetoed: bool,
+    passed: bool,
+}
+
+/// Tallies the latest ballot of each seat of `stage` in the current round.
+///
+/// See [`ProcedureStageDefinition`] for the weighted quorum, per-mille
+/// threshold, unit-block, and tie-break rules. A consultation never vetoes or
+/// passes: its ballots are evidence only.
+fn tally_stage(
+    stage: &ProcedureStageDefinition,
+    tie_break: &str,
+    ballots: &BTreeMap<&str, Ballot>,
+) -> StageTally {
+    if stage.kind == ProcedureStageKind::Consultation {
+        return StageTally::default();
+    }
+    let vetoed = ballots.values().any(|ballot| *ballot == Ballot::Veto)
+        || (stage.kind == ProcedureStageKind::Veto
+            && ballots.values().any(|ballot| *ballot == Ballot::Against));
+    if vetoed {
+        return StageTally {
+            vetoed,
+            passed: false,
+        };
+    }
+    let weight = |seat: &str| {
+        stage
+            .seat_weights
+            .get(seat)
+            .map_or(1_u64, |weight| u64::from(*weight))
+    };
+    let (mut participating, mut counted, mut approved) = (0_u64, 0_u64, 0_u64);
+    for (seat, ballot) in ballots {
+        let seat_weight = weight(seat);
+        participating = participating.saturating_add(seat_weight);
+        if *ballot != Ballot::Abstain {
+            counted = counted.saturating_add(seat_weight);
+        }
+        if *ballot == Ballot::For {
+            approved = approved.saturating_add(seat_weight);
+        }
+    }
+    let mut passed = participating >= u64::from(stage.quorum)
+        && counted > 0
+        && approved.saturating_mul(1_000) >= counted.saturating_mul(u64::from(stage.threshold));
+    if passed && !stage.block_of_seat.is_empty() {
+        let mut blocks = BTreeMap::<&str, (u64, u64)>::new();
+        for (seat, ballot) in ballots {
+            let Some(block) = stage.block_of_seat.get(*seat) else {
+                continue;
+            };
+            let entry = blocks.entry(block.as_str()).or_default();
+            match ballot {
+                Ballot::For => entry.0 = entry.0.saturating_add(weight(seat)),
+                Ballot::Against => entry.1 = entry.1.saturating_add(weight(seat)),
+                Ballot::Abstain | Ballot::Veto => {}
+            }
+        }
+        let blocks_for = blocks.values().filter(|(yes, no)| yes > no).count();
+        let blocks_against = blocks.values().filter(|(yes, no)| no > yes).count();
+        let casting = match BlockTieBreak::parse(tie_break) {
+            Some(BlockTieBreak::CastingSeat(seat))
+                if blocks_for == blocks_against && blocks_for > 0 =>
+            {
+                usize::from(ballots.get(seat) == Some(&Ballot::For))
+            }
+            _ => 0,
+        };
+        passed = blocks_for.saturating_add(casting)
+            >= stage.block_threshold.map_or(usize::MAX, usize::from);
+    }
+    StageTally { vetoed, passed }
 }
 
 fn ballot_for_option(option: &str) -> Ballot {

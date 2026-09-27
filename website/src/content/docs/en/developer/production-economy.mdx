@@ -7,14 +7,14 @@ sidebar:
   label: Production and resource boundary
 ---
 
-Canwu 0.12.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
+Canwu 0.13.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
 
 ## Recommended boundary
 
 - The simulation core owns command admission, deterministic time, phase ordering, atomic commit, rollback, visibility, persistence, and replay.
 - `canwu-resource` owns resource/unit revisions, `ResourceAccount`, protected floors, `ResourceDemand`, `ResourceReservation`, exact allocation legs, transfer, consumption, loss, and fulfillment. It is the sole physical-balance writer.
 - `canwu-production` owns processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement. It consumes exact resource outcomes and technology evidence without keeping a second inventory.
-- `canwu-transport` owns itinerary, capacity, legs, execution, custody handoffs, and delivery completion. The resource extension owns cargo escrow balance, loss, acceptance, return, and destination credit.
+- `canwu-transport` owns itinerary, capacity, legs, execution, custody handoffs, and delivery completion records, and since 0.13.0 `canwu-movement` owns the lifecycle of movement executions and their capacity pools. The resource extension owns cargo escrow balance, loss, acceptance, return, and destination credit.
 - Population and military domains form demand and consequences separately. They cannot directly rewrite resource balances or production state.
 
 These optional extensions sit above the public `canwu-api`; they do not become reverse dependencies of the simulation core. Host games still own money, markets, wages, building UI, combat formulas, and historical content.
@@ -44,7 +44,7 @@ The account amount is the only writable quantity. Reserved, available, and prote
 
 ## Authorize a custom consumer
 
-Version 0.12.0 supports custom consumption providers using the existing
+Since 0.10.1, Canwu supports custom consumption providers using the existing
 `ResourceConsumptionIntentV1` contract. Keep a top-level
 `resource_consumption_intents` map in your plugin's owned, active domain record;
 each key is the sealed intent's `id`. No callback or reference-provider name is
@@ -83,12 +83,13 @@ Since 0.11.0, every `ResourceDemand` persists a `source_policy`:
 
 - `ResourceDemandSourcePolicyV1::Pooled` preserves allocation across all open accounts with matching resource and unit revisions, in deterministic account-ID order.
 - `ExactAccounts(Vec<ResourceAccountId>)` lists 1–256 accounts in strictly increasing ID order, with no duplicates. Each must exist, be open, match both exact revisions, and have the demand requester as its custodian. Invalid lists reject the command before resources change; allocation validates them again.
+- Since 0.13.0, `Granted { grant_id, accounts }` lists 1–256 accounts the same way, but each must be custodied by the grantor of the named access grant, whose grantee must be the requester (see [delegated access grants](#delegated-access-grants)).
 
 The allocator computes available supply, minimum useful quantity and partial fulfillment from the selected accounts only. An insufficient exact list never falls back to the pool. Existing protected floors and later transfer/consumption authority checks still apply. The exact path visits only the listed accounts, bounded by `MAX_DEMAND_SOURCE_ACCOUNTS`; pooled selection retains its existing account scan.
 
-A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended.
+A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended. Since 0.13.0, an amendment also cannot change a demand's lifecycle status, rejection reason, or requester; such an amendment settles as a recorded rejection instead of a change that blocked later boundaries.
 
-`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. Cross-custodian appointments, delegation, purpose and spending limits remain application/domain responsibilities; an account-ID list proves none of them. Transfer custody and completion-lease checks remain separate requirements.
+`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses, and an `ExactAccounts` list proves no delegation either. Cross-custodian delegation with a cap and a window is expressed only by an access grant and a `Granted` policy; appointments, purposes, and who may grant whom remain application or domain responsibilities. Transfer custody and completion-lease checks remain separate requirements.
 
 The policy is included in request digests, runtime snapshots, exact replay and terminal demand archive payloads. Restore validates live source references and retained reservation membership; archive validation preserves the policy and its digest. Holder-relative reports retain their existing visibility contract and do not expose the authoritative source list automatically. Missing `source_policy` fields deserialize as `Pooled` in a standalone DTO, but this does not migrate old snapshots: exact engine-version and plugin-identity checks still apply. Rust struct literals must add the field; this is a 0.11.0 source break.
 
@@ -123,3 +124,22 @@ The scenario declares that scope when it installs an account. It is immutable, n
 - The ratio must be positive and must not scale any output leg to zero. Record a total loss by cancelling the work order.
 - The ratio may not exceed the process revision's `max_realized_per_mille`, which defaults to 1,000; a larger bound admits evidenced yields above nominal.
 - Holder, lifecycle, ratio, and kind rules run before the evidence record is resolved, so a rejection does not reveal whether another record exists.
+
+## Delegated access grants
+
+Since 0.13.0, one custodian can let another draw on its stock without transferring the stock first. An access grant (`ResourceAccessGrantV1`) records the grantor custodian, the grantee, the exact resource and unit revisions, a `cap_quantity`, the half-open window `valid_from..valid_until`, and the exact `authority_evidence` record version that justifies it, such as the application's accepted requisition record.
+
+1. The grantor custodian submits `ResourceOperationRequestV1::IssueAccessGrant` as a tracked command, and the authority evidence must be an available exact record version. Adapter ingress cannot issue or revoke grants.
+2. The grantee submits a demand whose source policy is `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. The grant must be active with the requester as grantee, the resource and unit must match, the demand's window must lie inside the grant window, every listed account must be open and custodied by the grantor, and the quantity must fit the remaining cap.
+3. Allocation checks the grant before scarcity arbitration. A revoked or out-of-window grant supplies nothing, no allocation exceeds the remaining cap, and nothing falls back to pooled or other accounts.
+4. The grantee debits the allocation, by consumption or by starting a transfer or exchange leg, under its own completion lease. A granted debit settles only in a boundary whose time equals the debit's certified time, and the grant window must contain that time, so a debit certified inside the window cannot settle after it. A lease held by anyone else, including the grantor, cannot debit a granted allocation.
+
+`ResourceAccessGrantRecordV1` keeps `cap_quantity = remaining + reserved + debited`: allocation moves quantity to reserved and the debit moves it to debited, so each unit is charged once, while released or expired reservations return to remaining. A transfer started from a granted allocation records its `access_grant`, and the grantee, not the source custodian, controls its cancellation, return, and loss; local acceptance still belongs to the destination custodian. `RevokeAccessGrant` also comes from the grantor with the expected grant revision, and it is refused once anything is reserved or debited, so size the cap and window to the delegation. Expired reservations of a granted demand are released by the next allocation pass for the grantee, which the host runs with `enqueue_resource_allocation`.
+
+Grants stay in hot state, bounded by `MAX_RESOURCE_ACCESS_GRANTS` (4,096), and are not archived, so control who may issue them as you control account creation. `resource_access_grant_status` is the holder-bound read of a grant and its accounting for the grantor or the grantee. Who may grant whom, and the record behind a grant, remain application authority.
+
+For example, an application's requisition saga first records the population owner's acceptance. The owner then issues a grant citing that acceptance record, the army submits a `Granted` demand, and the army's own lease debits the allocation.
+
+## Live production output settlement
+
+Before 0.13.0, an execution completed through a live command could not settle its output. The resource side of the execution's completion lease locked the production runtime record at the version current when the lease was granted, before the execution existed, and every later production transition advances that record. The output credit now cites the exact production version the coordinator pinned on the execution as its `output_source`. The resource runtime accepts that version as the locked record at or after its locked version, and the production output batch ingress requires it to equal the pinned source; the generic resource adapter ingress rejects production credits. Completing an execution through a live command, at its start time or later, now settles its output.

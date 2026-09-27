@@ -154,6 +154,8 @@ flowchart TB
         Fiscal["canwu-fiscal"]
         Resource["canwu-resource"]
         Production["canwu-production"]
+        Military["canwu-military"]
+        Movement["canwu-movement"]
     end
 
     subgraph Examples["Examples / 示例"]
@@ -163,6 +165,8 @@ flowchart TB
         ForceSupply["canwu-force-supply-reference"]
         EconomyReference["canwu-economy-reference"]
         ReferenceWorld["canwu-reference-world"]
+        MilitaryContent["canwu-military-reference-content"]
+        MilitaryReference["canwu-military-reference"]
     end
 
     subgraph PublicApi["Public API / 对外 API"]
@@ -187,6 +191,7 @@ flowchart TB
     end
 
     Debug --> Api
+    Debug --> MingReference
     Correspondence --> Api
     Correspondence --> Information
     Information --> Api
@@ -202,6 +207,8 @@ flowchart TB
     Production --> Api
     Production --> Resource
     Production --> Technology
+    Military --> Api
+    Movement --> Api
     MingFiscal --> Api
     MingFiscal --> Fiscal
     EconomyContent --> Api
@@ -222,6 +229,12 @@ flowchart TB
     EconomyReference --> ReferenceWorld
     EconomyReference --> Resource
     EconomyReference --> Technology
+    MilitaryContent --> Api
+    MilitaryContent --> Military
+    MilitaryReference --> Api
+    MilitaryReference --> Military
+    MilitaryReference --> MilitaryContent
+    MilitaryReference --> ReferenceWorld
 
     Api --> Core
     Api --> Decision
@@ -278,6 +291,7 @@ flowchart TB
         Society["Society<br/>population and social diffusion"]
         Fiscal["Fiscal procedure<br/>law, adoption, assessment, receipts"]
         Production["Production / economy<br/>assets, recipes, markets"]
+        Movement["Movement<br/>transport lifecycle, capacity pools, reports"]
     end
 
     subgraph Kits["Reference content and starter kits / 参考内容与入门套件"]
@@ -489,8 +503,10 @@ are unaffected. Host preparation through `prepare_decision` and
 
 `DecisionTicketDraft::parent_ticket` records decision lineage. At `Open` the
 parent must be a terminal ticket in hot decision history with exactly the same
-`decision_maker`; an archived or absent parent is rejected as `TicketNotFound`,
-and an open parent or another maker as `InvalidDecision`. The parent is copied
+`decision_maker`, or with an assigned controller bound to the same non-empty
+`DecisionControllerBinding::seat_id` as the new ticket's controller (a seat
+succession); an archived or absent parent is rejected as `TicketNotFound`,
+and an open parent or another maker and seat as `InvalidDecision`. The parent is copied
 onto `DecisionTicket` and `DecisionTrace`. A ticket cannot be reassigned to
 another controller, so a decision whose controller can no longer act continues
 as a new ticket for an available controller that names the cancelled ticket as
@@ -537,6 +553,18 @@ describes how its authoritative commands and boundary systems execute. It
 depends on `canwu-api` and `canwu-information`; neither dependency points back
 to it.
 
+`canwu-information` owns the neutral information lifecycle. Since 0.13.0 an
+interpretation's `InterpretationPayload` may carry an `AuthenticityFinding`:
+the interpreting holder's judgment of whether a
+representation's claimed source is accepted, with a basis of at most
+`MAX_AUTHENTICITY_BASIS_BYTES` and a per-mille confidence. The finding must cite
+one of the interpreted representations at its exact current version, and that
+representation must carry a claimed source; otherwise the operation is rejected
+as `invalid_lifecycle`. Whether a forgery is detected, and with what
+probability, stays an application draw; the extension records only the
+finding. `validate_delegation_claim` is domain-neutral and takes the time to
+check as `at`.
+
 `canwu-society` is a published **social diffusion simulation
 module** (**社会传播模拟模块**). It is a domain extension built on
 `canwu-api`, not a dependency of `canwu-api` or a new kernel subsystem. It
@@ -574,6 +602,35 @@ population transitions. A ruler or policy therefore cannot directly set a
 population belief percentage. Phase 10 produces mobilization candidates only;
 downstream political or conflict packages decide what, if anything, follows.
 
+Since 0.13.0, a `PolicyPressure` may record its provenance: an optional
+`issuer` (a government, organization, or person, bound into the record's core
+references) and a `decision_version`, which requires an issuer when non-zero.
+Both fields are omitted when unused. Two canonical ingress types reach the
+society owner through one queue. The public `cohort_headcount_rebase_v1`
+packet (`CohortHeadcountRebaseV1` with a `RebaseReason`) rebases a cohort to an
+external conserved stock: the cited stock must be the current version of a
+record outside `canwu.society` when the packet is admitted, or the rebase is
+rejected as `stale_external_stock`. The internal `society_lifecycle_delta_v1`
+packet (`SocietyLifecycleDeltaV1`) carries a lifecycle provider's
+target-scoped rule, alignment, and release changes, one packet per target, for
+example from the culture boundary plugin. The event-driven phase-12 system
+`intake-society-ingress` queues admitted packets in the
+`canwu.society:ingress-queue` record, because the society writer runs only on
+Daily boundaries and only one system may write the state in a phase. The next
+Daily phase-7 settlement applies the queue after cohort transfers and before
+institutional decisions and transitions, and records each outcome in the
+cohort exchange ledger (`rebases`, `lifecycle_deltas`). A rebase re-proportions
+every distribution of the cohort with integer largest-remainder allocation, so
+each distribution totals the new headcount and every bucket stays within one
+unit of its exact share. Queued packets supplied by a scenario or snapshot are
+validated like admitted packets, and the society plugin remains the only writer
+of `canwu.society:state`.
+
+Applying a cohort transfer now invalidates the derived aggregates,
+mobilization candidates, and projections it affects, and the transfer digest
+binds only the state the transfer depends on. Before 0.13.0, the Daily boundary
+after any applied cohort transfer failed.
+
 Actor-facing queries require a valid `ViewerContext` and return only a
 previously materialized projection for that actor. Absence is an authorization
 error, never a request to decode the authoritative society record. Generic
@@ -607,6 +664,15 @@ deadline, scheduled-version, live-culture-dependency, participation, outbox,
 and applicability indexes keep ordinary settlement proportional to due or
 changed work rather than immutable history.
 
+Since 0.13.0, procedure stages tally integer vote weights, can require a
+number of unit blocks in the `For` position with a `status-quo` or
+`casting-seat:<seat>` tie-break, and can be advisory `Consultation` stages whose
+ballots never count and which complete at their deadline. A stage that stops
+accepting ballots expires its pending seat work, and a late seat response is
+recorded as a rejected outcome instead of failing the plugin boundary. The
+[culture and legal institutional systems](architecture-culture-law.md#weighted-unit-block-and-consultation-stages)
+page specifies the tally, compile checks, and consultation rules.
+
 ### Technology and historical research / 技术与历史研究
 
 `canwu-technology` is a published domain extension built only
@@ -625,7 +691,9 @@ adoption; a transmission opportunity never grants knowledge or capability by
 itself. Qualifications declare `valid_from` / optional `valid_until`,
 implementations declare `installed_at`, and practice transmission records the
 exact qualification or implementation that made the source capable when the
-opportunity opened. This permits historical entry without allowing a later
+opportunity opened, or instead an external source (manifest-bound content
+evidence with a declared reliability) for an off-map teacher that has no live
+capability record. This permits historical entry without allowing a later
 installation to justify an earlier transmission. At creation, that exact
 source must also be the current version in the boundary's replayed state; later
 deactivation blocks new transmission without invalidating prior opportunities.
@@ -685,7 +753,9 @@ and terminal demand archives. Retained reservations must match the policy while
 their demand is retained; active reservations require that demand. Archive
 payloads retain canonical policy shape and authenticated demand digests.
 
-A source policy selects accounts; it does not prove cross-custodian delegation.
+A `Pooled` or `ExactAccounts` source policy selects accounts; it does not prove
+cross-custodian delegation, which only a `Granted` policy backed by an access
+grant expresses.
 The host application controls use of pooled demands and requester identity.
 Holder-relative reports keep their existing visibility contract and do not
 automatically disclose the source list. Standalone DTOs default a missing field
@@ -726,9 +796,66 @@ scope rejects as `invalid_definition` and an attached transport as
 account, immutable, and defaults to `None`; a tracked `CreateAccount` that sets
 it fails with `InvalidAuthority`. A tracked command must come from the
 destination custodian. None of these operations grants access to another
-custodian's stock; delegated resource access remains a separate proposal. The
-resource plugin semantic hash and holder-report knowledge schema changed with
-these operations, while default values keep their previous canonical encoding.
+custodian's stock; only an access grant does. The resource plugin semantic hash
+and holder-report knowledge schema changed with these operations, while
+default values keep their previous canonical encoding.
+
+Since 0.13.0, a delegated access grant (`ResourceAccessGrantV1`) records a
+grantor custodian's consent that a grantee may draw on its stock of one exact
+resource and unit revision, up to `cap_quantity` within the half-open window
+`valid_from..valid_until`, citing the exact `authority_evidence` record version
+that justifies it. Grantor and grantee are `KnowledgeHolderRef` values.
+`ResourceOperationRequestV1::IssueAccessGrant` is admitted only as a tracked
+command whose subject is the grantor custodian and whose authority evidence is
+an available exact record version; `RevokeAccessGrant` also comes from the
+grantor, with the expected grant revision, and is refused once anything is
+reserved or debited under the grant. Adapter ingress cannot issue or revoke
+grants. The resource command descriptor therefore reads the administrative
+domain-record set to resolve that evidence.
+
+A demand draws on a grant through
+`ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. Admission and
+allocation require the grant to be active with the requester as grantee, the
+demand's resource and unit to match, the demand's window to lie inside the
+grant window, every listed account to be open and custodied by the grantor,
+and the quantity to fit the remaining cap. The grant is checked before
+scarcity arbitration, and nothing falls back to pooled or other accounts.
+`ResourceAccessGrantRecordV1` keeps `cap_quantity = remaining + reserved +
+debited`: allocation moves quantity to reserved, its debit moves it to debited,
+so each unit is charged once, and released or expired reservations return to
+remaining. `ResourceState::validate` rejects a grant whose reserved or debited
+quantity disagrees with the reservations, transfers, and consumptions drawn
+under it, and a grant-backed transfer must name exactly the grant its demand
+drew on.
+
+The grantor's consent is the grant; the debit of a granted allocation runs
+under the grantee's own completion lease. An activated lease does not expire,
+so a granted debit settles only in a boundary whose time equals the debit's
+certified time, and the grant window must contain that time; a debit certified
+inside the window but settled later is rejected. In an exchange the rule
+applies per granted leg, and a granted allocation pass supplies nothing unless
+the grant is current at both its requested time and the settling boundary. A
+lease held by
+anyone else, including the grantor, cannot debit a granted allocation. A
+tracked `BeginTransfer` or `BeginExchange` leg on a granted allocation comes
+from the grantee, the transfer records its `access_grant`, and the grantee
+controls its cancellation, return, and loss. Grants stay hot, bounded by
+`MAX_RESOURCE_ACCESS_GRANTS`, and `resource_access_grant_status` is the
+holder-bound read for the grantor or grantee. Who may grant whom stays
+application authority.
+
+Version 0.13.0 also fixes two resource behaviors. `AmendDemand` may no longer
+change a demand's lifecycle status, rejection reason, or requester; such an amendment is a
+durable rejection instead of a change that jammed later boundaries. And a live
+production completion now settles its output: the resource side of an
+execution's completion lease locked the production runtime at the version
+current when the lease was granted, before the execution existed, so on 0.11
+and 0.12 a live completion could never settle its credit. The credit now cites
+the version production pinned as the execution's `output_source`; the resource
+runtime accepts the locked record at or after its locked version and requires
+the pinned source exactly. Production credits settle only through the
+production output batch ingress; the generic resource adapter ingress rejects
+them.
 
 Non-force consumption providers publish a top-level `resource_consumption_intents`
 map in their owned, active domain record. Map keys equal the IDs of sealed
@@ -996,7 +1123,9 @@ sequenceDiagram
 - Domain integration API: typed plugin commands and detached read projections;
   `canwu-reference-world` is the runnable example, not a foundation dependency.
 - Viewer API: actor- or institution-scoped knowledge queries through
-  `CanwuViewer`, plus event/failure explanations from committed evidence.
+  `CanwuViewer`, evidence-free rule-evaluation traces through
+  `CanwuViewer::evaluation_traces`, plus event/failure explanations from
+  committed evidence.
 - Debug API: trusted entity/domain-record/event reads. The reference UI uses
   the same command dispatcher and reference-world plugin as every other client.
 
@@ -1104,10 +1233,11 @@ is:
 | --- | --- |
 | reference integration or domain records | topology, stations, timetables, availability, terrain, and historical content |
 | `canwu-routing` | pure deterministic planning over an actor-relative `PlanningSnapshot` |
-| `canwu-transport` | itinerary revisions, leg execution, custody handoffs, bookings, and completion saga |
+| `canwu-transport` | itinerary revisions, leg execution, custody handoffs, bookings, capacity pools, pure booking allocation, and completion saga records |
+| `canwu-movement` | the lifecycle of movement orders and transport executions: leg settlement, capacity-pool allocation, incidents, retention, and holder-relative movement reports |
 | `canwu-information` | per-recipient delivery attempts and immutable logical deadlines |
 | `canwu-correspondence` | communication demand, holder-relative address/network resolution, accepted routes, incident policy, and exact cross-extension evidence |
-| application/channel/infrastructure adapter | prepares content and dispatches, publishes period-specific network knowledge, and admits scarce capacity |
+| application/channel/infrastructure adapter | prepares content and dispatches, publishes period-specific network knowledge, decides incidents and hazards, and admits scarce capacity outside `canwu-movement` pools |
 | `canwu-sim` | canonical ingress, scheduling, rollback, persistence, and replay |
 
 `RoutePlan.estimated_arrival_at` is an execution estimate. It must not rewrite
@@ -1121,10 +1251,37 @@ the dispatch. Replanning the same attempt is available only while it is
 from knowledge relay, and arrival first enters an explicit arrival-pending saga
 before an admitted completion operation reconciles the two extensions.
 
-The current correspondence plugin admits only a carrier holder identical to the
-sender and reads only that sender-owned holder ledger. Delegated carriers need a
-future capability and disclosure contract; naming another holder is not read
-authority. Its request contract likewise exposes only
+The correspondence plugin plans and resolves the address from the carrier
+holder's ledger. A carrier other than the sender is admitted only when the
+request's `carrier_delegation` cites an admitted `delegate_carrier_v1` command
+(`CarrierDelegationRequest`) that the carrier issued under its own command
+authority, whose `DelegationClaimV1` names the carrier as `performed_by`, the
+sender as `performed_for`, lists `carry_correspondence`, and has a validity
+interval covering each dispatch. The claim lives in the carrier's command
+rather than in the sender's request, so a sender cannot vouch for itself or
+plan from another holder's private ledger. The plugin records each accepted
+delegation, from the next boundary, as the carrier's current delegation for that
+sender; a newer delegation for the same pair replaces it, which is also how a
+carrier withdraws one. Admission of an initiate or retry command resolves
+`CorrespondenceIntent::carrier_authority` from that record rather than from the
+command, so a run whose evidence was sealed decides exactly as its replay, and a
+replaced delegation can no longer be cited. Settlement re-checks only the
+admitted claim's validity interval, and replanning the same attempt does not
+re-check it, so bound `expires_at` when the carrying should end.
+Naming another holder without that delegation is not read authority. The
+engine publishes none of the carrier's knowledge to the sender.
+
+`CorrespondenceIncidentKind::CarrierSeized { seized_by, custody_handoff }` ends
+the attempt, unlike `Interception`: the current leg fails, a terminal seizure
+handoff is recorded under `custody_handoff`, the attempt closes as failed, and
+the dispatch stays active for the sender's retry or finalization. A carrier
+waiting for a route can also be seized. A zero handoff ID, a malformed seizer,
+or the carrier as its own seizer rejects the incident; a handoff ID that
+already names another handoff is kept as suppressed evidence. Only the carrier
+holder receives an `attempt_report` (`CorrespondenceAttemptReport`), which does
+not name the seizer; a sender that delegated the carrying learns of the seizure
+only when the application relays it. The correspondence request contract
+exposes only
 `CorrespondenceCapacityAdmission::Unconstrained`: the plugin neither checks nor
 persists a booking. Constrained transport requires a future admission variant
 backed by exact booking or simulation-reservation evidence.
@@ -1150,12 +1307,67 @@ domain record; like `Cargo`, it requires a positive quantity, here a head count,
 and `MovementSubjectRole::requires_quantity` states the rule. `Handoff.kind`
 distinguishes `HandoffKind::Planned`, the default omitted from JSON, from
 `Seizure { by }`, custody taken by an entity outside the itinerary. A seizure
-follows the same leg rules as a planned handoff. `ItineraryRevisionReason`
+follows the same leg rules as a planned handoff, except that a terminal seizure
+names its failed source leg as both ends: custody leaves the itinerary and no
+leg receives it. `ItineraryRevisionReason`
 gains `ExternalCondition { record, version, kind }`, which cites an
 application-owned condition record at an exact positive version with a
 non-empty label and is validated for both the initial itinerary and a reroute
 before mutation. Transport records these facts; incidents, hostility, hazards,
 and their authority stay in application systems.
+
+`canwu-transport.v5` adds capacity pools and closes an execution on a terminal
+seizure. A `TransportCapacityPoolV1` offers a windowed quantity of one
+interchangeable resource held by a custodian; confirmed bookings hold
+`booked`, consumed bookings hold `consumed`, and the pool revision advances with
+every change. `allocate_capacity_bookings` is a pure function over one pool
+revision: it visits `CapacityBookingRequestV1` values by descending priority,
+ascending `valid_from`, tie-break key, admission sequence, and booking
+identity, confirms each booking in full when its window lies inside the pool
+window, has not ended, and fits the remaining capacity, and otherwise fails it
+with a `CapacityAllocationFailureV1` reason, so a later, smaller request may
+still fit. Each `BookingAllocationV1` carries replayable
+`CapacityBookingAllocationEvidenceV1` with a domain-separated digest. A booking
+may be confirmed, failed, or cancelled before its window opens but consumed
+only inside it; an execution can request a booking, be cancelled, and settle
+its arrival without a delivery attempt. A terminal seizure must be recorded on
+a leg of the active revision of a non-terminal execution, only one is allowed,
+no other custody may leave that leg, and afterwards the execution can no
+longer fail or reroute a leg, arrive, settle, book capacity, or record another
+handoff: its owner closes it as failed or cancelled.
+
+`canwu-movement` owns the lifecycle of these records, because plugins build
+on `canwu-api`, which depends on `canwu-transport`, so a plugin inside
+`canwu-transport` would form a dependency cycle. `MovementPlugin`
+keeps every admitted order and execution in one `MovementState` record
+(`canwu.movement:runtime`) and advances executions only through the transport
+transition methods. The tracked command `apply_movement_operation_v1` carries a
+`MovementCommandV1` from the issuer's own holder with an `Order`, `StartLeg`,
+`CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`, `RequestBooking`,
+`Cancel`, or `OfferPool` operation. Moving anyone but the owner needs an
+`authority_basis`: the current version of a declared application record whose
+references name the owner as `movement_grantee` and every other subject as
+`movement_subject`. Seizures and reconciliations are accepted only from
+application systems through the `movement_incident_v1` ingress with an exact
+evidence record of a declared kind. Operation keys are unique per holder, or
+per evidence kind for incidents, and each has one durable outcome.
+
+The phase-7 system `movement_lifecycle_apply_v1` applies admitted operations
+and incidents in admission order, runs one allocation pass per pool, applies
+due legs from the internal `movement_leg_due_v1` ingress, and retires closed
+executions; phase 8 validates the candidate runtime, and phase 13 publishes
+`canwu.movement/movement_report` knowledge. Pools are allocated in phase 7
+rather than through kernel phase-6 reservations, which must name fixed
+identities at registration, may grant partial quantities, and cannot order by
+window start or admission sequence. A departing leg consumes its confirmed
+bookings; a leg whose booking failed or expired fails with
+`capacity_unavailable`. Reports are holder-relative: the owner and operator see
+the current execution, a delayed remote observer sees coarse progress as of its
+delay, holders without a grant see nothing, and reports go only to living
+person holders. A closed execution retires once final reports are out, and at
+most 365 days after it closed; `MovementLimitsV1` bounds orders, pools,
+outcomes, and reports with per-owner and per-holder quotas. The plugin never
+draws randomness.
 
 The router supports fixed, scheduled, and piecewise traversal. Historical
 content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
@@ -1219,7 +1431,9 @@ and external live dependencies, before commit. A successor must be active when
 the retirement is admitted; later retirement of that successor can extend a
 stable, cycle-free succession chain without invalidating earlier links. Domain
 record collections are ordered and are queryable through both `Simulation` and
-`Canwu`. Scenarios that contain initial domain records must use a plugin-aware
+`Canwu`. Initial domain records may reference entities listed only in
+`Scenario::entities`; since 0.13.0 snapshot restore accepts them as the live
+state check already did. Scenarios that contain initial domain records must use a plugin-aware
 constructor such as `new_with_plugins`; ordinary constructors reject them
 instead of returning a half-configured runtime that could emit an unloadable
 snapshot.
@@ -1276,7 +1490,8 @@ next-boundary values remain hidden from current-state reads until settlement has
 finished. Invariant systems can separately inspect every staged candidate with
 `proposed_component` or `proposed_domain_record`, still subject to their declared
 read set. Ordinary changes commit at phase nine. Historical candidates stage a
-separate transition bundle for phase eleven. Strategic aggregation and
+separate transition bundle for phase eleven, which the kernel first audits
+against every transition manifest ready at the boundary (see below). Strategic aggregation and
 perspective/report materialization use the same ownership and visibility rules.
 Any fatal error restores time, queues, state, journals, random state, counters,
 and boundary records to their pre-boundary values.
@@ -1285,7 +1500,8 @@ Each successful boundary persists its ID, time, correlation, cadence set,
 admitted command attempts, accepted commands, admitted and boundary-generated
 ingress, and events, reservation evidence, allocations, random draws, field
 changes, domain record lifecycle changes, person availability changes with the
-tickets they cancelled, created persons, exact producer plugin/system/phase/
+tickets they cancelled, created persons, rule-evaluation traces, transition
+manifest registrations and audits, exact producer plugin/system/phase/
 visibility provenance, a deterministic state hash, and the previous and current
 boundary hashes. Every
 committed domain record change has one indexed, causally linked evidence event.
@@ -1567,6 +1783,101 @@ counter movement, or elapsed simulation time proves execution already began.
 There is no pre-1.0 continuation or migration exception for format 2, 3, 4, or
 5 data. Hosts that need to retain those saves must use the old engine or perform
 an explicit application-owned export outside Canwu.
+
+### Transition manifests and audit / 转移清单与审计
+
+A multi-owner conditional transition can declare its participants so that an
+omitted writer cannot pass unnoticed. A phase-7, phase-10, or phase-12 system
+whose contract declares `StateKey::core_transitions()` as a write proposes
+`BoundaryDirective::RegisterTransitionManifest` with a `TransitionManifest`:
+a `lineage_id`, an `attempt`, a `ready_at` boundary, and one
+`TransitionParticipant` per plugin with `expected_pre` versions
+(`DomainRecordVersionRef`) and `expected_post` versions
+(`TransitionRecordVersion`). The kernel records the registering plugin as the
+coordinator, so the identity is `TransitionManifestId { coordinator,
+lineage_id, attempt }`. A phase-7 registration may be ready in the same
+boundary; phase-10 and phase-12 registrations must name a later boundary, at
+most `MAX_TRANSITION_READY_HORIZON` (1,024) boundaries ahead. Every participant
+must be a registered plugin with a phase-10 system declaring the same write,
+and every expected record must be of a registered kind. A coordinator may hold
+one pending manifest per lineage and
+`MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR` (32) manifests, within
+`MAX_PENDING_TRANSITION_MANIFESTS` (128) overall; a manifest lists at most
+`MAX_TRANSITION_PARTICIPANTS` (16) participants and
+`MAX_TRANSITION_EXPECTED_VERSIONS` (64) versions. Registration is a directive
+rather than internal ingress, so it is checked against the contract and
+recorded on the hash-chained `BoundaryRecord::transition_manifests`.
+
+In phase 10 of the ready boundary, a listed participant's phase-10 system
+declaring `core_transitions` proposes
+`BoundaryDirective::StageTransitionWrite { manifest_id, writes }`. The kernel
+unwraps the staged writes into ordinary directives, so every declared-write,
+ownership, phase, and visibility rule applies, and they commit with that
+system's visibility; an empty list records presence. Staging by an unlisted
+plugin fails the boundary with `InvalidAuthority`. Before phase 11 commits, the
+kernel audits every manifest ready at the boundary. When some but not all
+participants staged, the boundary fails closed with
+`TransitionParticipantMissing`. When an `expected_pre` version differs from the
+committed state phase 10 read, or an `expected_post` version differs from the
+version produced as of phase 11 (committed versions plus a dry run of the
+boundary's pending next-boundary phase-7 and phase-10 writes), it fails with
+`TransitionVersionMismatch`. Phase-12 and phase-13 writes may still change a
+record afterwards. When every participant is silent, the manifest expires with
+`TransitionAuditOutcome::Expired`, so a single-participant manifest cannot fail
+for omission. That is also the recovery path from a ready boundary that fails
+on every retry: settle it with a cadence under which no participant runs, then
+register a new attempt. There is no withdrawal directive.
+
+The `TransitionAuditRecord { manifest_id, ready_at, outcome, participants }`
+is recorded on `BoundaryRecord::transition_audits` and
+`BoundaryReceipt::transition_audits`; manifest IDs may be reused after
+settlement, so `(manifest_id, ready_at)` identifies an audit. Phase-12 systems
+of the coordinator and participants read it through
+`SimulationView::transition_audits`, and only they list pending manifests
+through `SimulationView::transition_manifests`. Pending manifests live in
+scheduler state, roll back with a failed boundary, persist as
+`SimulationSnapshot::pending_transition_manifests` under an optional scheduler
+sub-root, and are read by hosts through `pending_transition_manifests` on
+`Simulation`, `CompactedSimulation`, `Canwu`, and `CompactedCanwu`. Snapshot
+validation rebuilds the pending set from registration and audit evidence, and
+exact replay proves the participant and version checks. Runs without manifests
+hash exactly as before, and phase-10 directives outside a manifest keep their
+previous behavior.
+
+### Rule-evaluation traces / 规则评估轨迹
+
+Any phase-7 or phase-12 system may propose
+`BoundaryDirective::RecordEvaluationTrace { trace }` without a contract
+declaration. The `canwu-core` `EvaluationTraceRecord` names a `rule_id`,
+`rule_version`, `subject`, ordered `EvaluationTerm { term_id, contribution,
+evidence }` values, the `result` as the rule computed it, and the current
+boundary. The kernel checks the shape, the subject identity, and that every
+term's evidence is committed evidence visible to the proposal; it does not
+require the result to equal the sum of the contributions. A trace is recorded
+as `BoundaryEvaluationTrace { plugin, system, phase, trace }` in
+`BoundaryRecord::evaluation_traces`, hashed into the boundary chain only when
+present, and sealed and archived with its boundary record. It is never state:
+no system, command handler, or policy can read it back.
+
+`RunConfiguration::evaluation_limits` (`EvaluationLimitsV1`, set with
+`with_evaluation_limits` and read through
+`RunConfigurationSnapshot::evaluation_limits`) bounds traces per boundary
+across all systems and terms per trace: 4,096 and 32 by default, 65,536 and
+256 at most, with fixed bounds of 16 evidence references per term and 256
+bytes per rule ID, version, or term ID. The default is omitted from the wire
+and so from the configuration hash. Exceeding a bound fails the boundary with
+`ErrorCode::EvaluationTraceLimitExceeded`; the engine never samples or drops
+traces, and a zero bound forbids them. Phase-13 proposals cannot record traces.
+
+`CanwuViewer::evaluation_traces(subject, after)` returns evidence-free
+`EvaluationTraceView` values. A person or institution principal sees the traces
+about its own entity, and the traces about another subject evaluated strictly
+after the first knowledge change naming that subject reached its ledger,
+ordered by boundary and phase; a next-boundary publication counts from the end
+of its boundary. Research and developer principals see every trace, and a
+public principal is refused with `InvalidKnowledgeAuthority`. The full record,
+including evidence and the producing system, stays on the trusted
+`Canwu::boundaries` read.
 
 ## External renderer integration
 

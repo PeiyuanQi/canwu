@@ -30,7 +30,7 @@ pub const TECHNOLOGY_COMMAND: &str = "apply_technology_operation_v1";
 pub(crate) const TECHNOLOGY_COMMAND_INGRESS: &str = "technology_command_v1";
 pub const TECHNOLOGY_RESULT_INGRESS: &str = "technology_result_v1";
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "ab7e52dd84e24e862e5c1f14f8048db2b473d108c7958a333b72d8e852a03080";
+const SEMANTIC_HASH: &str = "63f9af9a4d6eea65122dc4d372ada9ebc282e960f96adfdcc1286359f79a23ed";
 pub(crate) const INPUT_HASH_DOMAIN: &str = "canwu.technology.operation-input.v1";
 pub(crate) const CONFLICT_HASH_DOMAIN: &str = "canwu.technology.operation-conflict.v1";
 pub(crate) const APPLY_SYSTEM: &str = "technology_operation_apply_v1";
@@ -104,8 +104,12 @@ impl SimulationPlugin for TechnologyPlugin {
             .map(canwu_api::DomainRecordSchema::state_key)
             .collect();
         apply.reads.push(StateKey::core_ingress());
+        // The administrative record read lets evidence checks resolve
+        // manifest-bound content records owned outside the technology domain,
+        // such as an external transmission source.
         apply.reads.extend([
             StateKey::core_commands(),
+            StateKey::core_domain_records(),
             StateKey::core_events(),
             StateKey::core_evidence(),
         ]);

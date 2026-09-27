@@ -1815,3 +1815,136 @@ fn persistence_boundaries_reject_unloadable_or_noncanonical_state() {
     assert_eq!(error.code, ErrorCode::IdentifierExhausted);
     assert_eq!(before, restored.snapshot());
 }
+
+fn evaluate_commander(
+    _view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    Ok(BoundaryProposal {
+        directives: vec![BoundaryDirective::RecordEvaluationTrace {
+            trace: EvaluationTraceRecord {
+                rule_id: "fixture.levy".to_owned(),
+                rule_version: "1".to_owned(),
+                subject: EntityRef::Person(PersonId::new(1)),
+                terms: vec![EvaluationTerm {
+                    term_id: "base".to_owned(),
+                    contribution: 7,
+                    evidence: (context.boundary_id.get() > 1)
+                        .then(|| {
+                            EvidenceRef::Boundary(BoundaryId::new(context.boundary_id.get() - 1))
+                        })
+                        .into_iter()
+                        .collect(),
+                }],
+                result: 7,
+                boundary: context.boundary_id,
+            },
+        }],
+        ..BoundaryProposal::default()
+    })
+}
+
+struct EvaluationTracePlugin;
+
+type TraceTamper = fn(&mut BoundaryEvaluationTrace);
+
+impl SimulationPlugin for EvaluationTracePlugin {
+    fn name(&self) -> &'static str {
+        "fixture-evaluation-trace"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "0000000000000000000000000000000000000000000000000000000000000660"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_boundary_system(
+            BoundarySystemContract::new(
+                "levy",
+                BoundaryPhase::DomainDeltaProposal,
+                SystemCadence::Daily,
+            ),
+            evaluate_commander,
+        )?;
+        registrar.register_boundary_system(
+            BoundarySystemContract::new(
+                "report",
+                BoundaryPhase::PerspectiveAndReportMaterialization,
+                SystemCadence::Daily,
+            ),
+            no_op_boundary,
+        )
+    }
+}
+
+#[test]
+fn rehashed_evaluation_trace_evidence_is_revalidated_on_load() {
+    let (scenario, _) = demo_scenario();
+    let mut simulation = Simulation::new(66, scenario).expect("the demo scenario should load");
+    simulation
+        .register_plugin(&EvaluationTracePlugin)
+        .expect("trace plugin");
+    for day in 1..=2 {
+        simulation
+            .settle_boundary(
+                BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(day))
+                    .with_cadence(SystemCadence::Daily),
+            )
+            .expect("traced boundary");
+    }
+    let valid = simulation.snapshot();
+    let mut rehashed = valid.clone();
+    rehash_tampered_snapshot(&mut rehashed);
+    assert_eq!(rehashed, valid, "an untouched snapshot rehashes to itself");
+
+    let tampers: [(&str, &str, TraceTamper); 5] = [
+        ("relabelled phase", "producer, phase", |entry| {
+            entry.phase = BoundaryPhase::StrategicAggregation;
+        }),
+        ("phase-13 producer", "producer, phase", |entry| {
+            entry.system = "report".to_owned();
+        }),
+        ("foreign boundary", "name the boundary", |entry| {
+            entry.trace.boundary = BoundaryId::new(1);
+        }),
+        ("unknown subject", "unknown subject", |entry| {
+            entry.trace.subject = EntityRef::Person(PersonId::new(999));
+        }),
+        ("terms over the limit", "terms-per-trace", |entry| {
+            let term = entry.trace.terms[0].clone();
+            entry.trace.terms = (0..=EvaluationLimitsV1::DEFAULT.terms_per_trace)
+                .map(|index| EvaluationTerm {
+                    term_id: format!("term-{index}"),
+                    ..term.clone()
+                })
+                .collect();
+        }),
+    ];
+    for (label, reason, tamper) in tampers {
+        let mut forged = valid.clone();
+        let head = forged.boundaries.last_mut().expect("head boundary");
+        tamper(&mut head.evaluation_traces[0]);
+        rehash_tampered_snapshot(&mut forged);
+        let Err(error) = Simulation::from_snapshot(forged) else {
+            panic!("a rehashed snapshot with a {label} trace must be rejected");
+        };
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+        assert!(error.message.contains(reason), "{label}: {}", error.message);
+    }
+
+    let mut over_limit = valid;
+    let head = over_limit.boundaries.last_mut().expect("head boundary");
+    let entry = head.evaluation_traces[0].clone();
+    head.evaluation_traces =
+        vec![entry; EvaluationLimitsV1::DEFAULT.traces_per_boundary as usize + 1];
+    rehash_tampered_snapshot(&mut over_limit);
+    let Err(error) = Simulation::from_snapshot(over_limit) else {
+        panic!("a rehashed snapshot over the trace limit must be rejected");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(error.message.contains("traces exceed"), "{}", error.message);
+}

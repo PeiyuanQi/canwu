@@ -387,6 +387,45 @@ pub fn resource_completion_status(
         .map_err(resource_error)
 }
 
+/// Holder-bound view of one access grant and its cap accounting, readable only
+/// by the grant's grantor custodian or grantee.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceAccessGrantStatusDtoV1 {
+    pub grant: crate::ResourceAccessGrantV1,
+    pub revision: ResourceRevision,
+    pub status: crate::ResourceAccessGrantStatusV1,
+    pub reserved_quantity: u64,
+    pub debited_quantity: u64,
+    pub remaining_quantity: u64,
+}
+
+pub fn resource_access_grant_status(
+    canwu: &Canwu,
+    holder: &KnowledgeHolderRef,
+    grant: &crate::ResourceAccessGrantId,
+) -> Result<ResourceAccessGrantStatusDtoV1, CanwuError> {
+    let (_, state) =
+        resource_state(canwu)?.ok_or_else(|| unavailable("resource runtime is absent"))?;
+    let record = state
+        .access_grants
+        .get(grant)
+        .ok_or_else(|| unavailable("resource access grant is unavailable"))?;
+    if &record.grant.grantor_custodian != holder && &record.grant.grantee != holder {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "resource access grant status is readable only by its grantor or grantee",
+        ));
+    }
+    Ok(ResourceAccessGrantStatusDtoV1 {
+        grant: record.grant.clone(),
+        revision: record.revision,
+        status: record.status,
+        reserved_quantity: record.reserved_quantity,
+        debited_quantity: record.debited_quantity,
+        remaining_quantity: record.remaining(),
+    })
+}
+
 pub fn exact_resource_completion_certificate(
     canwu: &Canwu,
     exact: &crate::CompletionLeaseActivationCertificateV1,

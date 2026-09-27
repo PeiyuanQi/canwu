@@ -1,30 +1,32 @@
 use crate::knowledge::{
-    ADDRESS_KNOWLEDGE_SCHEMA, CONNECTION_KNOWLEDGE_SCHEMA, ENDPOINT_KNOWLEDGE_SCHEMA,
-    NetworkKnowledgeSeed, build_planning_snapshot, correspondence_knowledge_schemas,
-    planning_knowledge_query, schema_id,
+    ADDRESS_KNOWLEDGE_SCHEMA, ATTEMPT_REPORT_KNOWLEDGE_SCHEMA, CONNECTION_KNOWLEDGE_SCHEMA,
+    ENDPOINT_KNOWLEDGE_SCHEMA, NetworkKnowledgeSeed, carrier_planning_snapshot,
+    correspondence_knowledge_schemas, schema_id,
 };
 use crate::model::{
-    CommunicationOpportunity, CommunicationOpportunityRecord, CommunicationOpportunityRequest,
-    CommunicationOpportunityStatus, CorrespondenceAuthority, CorrespondenceIncident,
-    CorrespondenceIncidentKind, CorrespondenceIncidentRequest, CorrespondenceIntent,
-    CorrespondenceOperation, CorrespondenceOperationRecord, CorrespondencePlanningEvidence,
-    CorrespondenceRecovery, CorrespondenceRecoveryAction, CorrespondenceStatus,
-    InformationSagaStep, InitiateCorrespondenceRequest, KnowledgeSeedReceipt, KnowledgeSeedRecord,
+    CarrierAuthority, CarrierDelegationRecord, CarrierDelegationRequest, CommunicationOpportunity,
+    CommunicationOpportunityRecord, CommunicationOpportunityRequest,
+    CommunicationOpportunityStatus, CorrespondenceAttemptOutcome, CorrespondenceAttemptReport,
+    CorrespondenceAuthority, CorrespondenceIncident, CorrespondenceIncidentKind,
+    CorrespondenceIncidentRequest, CorrespondenceIntent, CorrespondenceOperation,
+    CorrespondenceOperationRecord, CorrespondencePlanningEvidence, CorrespondenceRecovery,
+    CorrespondenceRecoveryAction, CorrespondenceStatus, InformationSagaStep,
+    InitiateCorrespondenceRequest, KnowledgeSeedReceipt, KnowledgeSeedRecord,
     PendingInformationOperation, ProgressAction, ProgressRequest, ResolveCorrespondenceRequest,
-    correspondence_operation_ref, knowledge_seed_ref, opportunity_ref,
+    carrier_delegation_ref, correspondence_operation_ref, knowledge_seed_ref, opportunity_ref,
 };
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
     CanwuError, CauseRef, CommandContext, CommandIngress, DecisionOrigin, DomainRecord,
     DomainRecordDraft, DomainRecordMutation, DomainRecordSchema, DomainRecordType,
     DomainRecordVersionRef, DomainReference, DomainReferenceSchema, DomainReferenceTarget,
-    DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceRef, IngressClass, IngressPayload,
-    KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeWriteGrant, PayloadSchema,
-    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar,
-    RandomOperationTarget, RandomStreamKey, ReconciliationOutcome, RoutingRequest, SimDuration,
-    SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemDirective, TransportExecution, TransportExecutionState, TypedDomainRecordRef,
-    canonical_hash, plan_route,
+    DomainReferenceTargetKind, EntityRef, ErrorCode, EvidenceRef, HandoffId, HandoffKind,
+    IngressClass, IngressPayload, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecordDraft,
+    KnowledgeWriteGrant, LegExecutionStatus, PayloadSchema, PluginActionDescriptor,
+    PluginIngressDescriptor, PluginIngressTarget, PluginRegistrar, RandomOperationTarget,
+    RandomStreamKey, ReconciliationOutcome, RoutingRequest, SimDuration, SimTime, SimulationPlugin,
+    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective, TransportExecution,
+    TransportExecutionState, TypedDomainRecordRef, canonical_hash, plan_route,
 };
 use canwu_information::{
     Access, AccessPayload, AddressedDeliveryAttemptDraft, Channel, DeliveryAttempt,
@@ -33,6 +35,7 @@ use canwu_information::{
     InformationOperationId, InformationOperationRecord, InformationOperationStatus,
     InformationOutputKind, InformationOutputSlot, LifecycleRequest, RecordBinding, Representation,
     addressed_attempt_output_slot, derive_operation_record_ref, derive_output_record_ref,
+    validate_delegation_claim,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,9 +50,22 @@ pub const INCIDENT_INGRESS: &str = "correspondence_incident_v1";
 pub const OPPORTUNITY_INGRESS: &str = "communication_opportunity_v1";
 pub const KNOWLEDGE_INGRESS: &str = "install_correspondence_knowledge_v1";
 const RESOLUTION_INGRESS: &str = "resolve_correspondence_v1";
+/// Plugin-internal ingress that publishes one attempt report; only the
+/// lifecycle system schedules it.
+const REPORT_INGRESS: &str = "correspondence_attempt_report_v1";
+/// Records an accepted carrier delegation; only the delegation command enqueues it.
+const DELEGATION_INGRESS: &str = "record_carrier_delegation_v1";
+/// Command by which a carrier accepts carrying correspondence for a sender;
+/// see [`CarrierDelegationRequest`].
+pub const CARRIER_DELEGATION_COMMAND: &str = "delegate_carrier_v1";
+/// The delegation capability a carrier other than the sender must hold: the
+/// claim of the cited [`CARRIER_DELEGATION_COMMAND`] must list it.
+pub const CARRY_CORRESPONDENCE_CAPABILITY: &str = "carry_correspondence";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "a6052380a8e6e041ba6d282db70eec65a8a99a702db71544cd44d9da036be698";
+const SEMANTIC_HASH: &str = "a3f74357d75d36feae882c946ae7701277f300d1cd848a9cf8c20a7352c6f380";
+const SEIZURE_FAILURE_REASON: &str = "carrier seized";
+const REPORT_ORIGIN_METHOD: &str = "correspondence_attempt_report_v1";
 const INPUT_HASH_DOMAIN: &str = "canwu.correspondence.input.v1";
 const OPPORTUNITY_HASH_DOMAIN: &str = "canwu.correspondence.opportunity.v1";
 const INCIDENT_HASH_DOMAIN: &str = "canwu.correspondence.incident.v1";
@@ -63,12 +79,26 @@ struct AdmittedStart {
     request: InitiateCorrespondenceRequest,
     authority: CorrespondenceAuthority,
     accepted_command: canwu_api::CommandId,
+    /// The carrier delegation resolved at command admission; absent for a
+    /// sender-owned carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    carrier_authority: Option<CarrierAuthority>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct AdmittedRecovery {
     request: ResolveCorrespondenceRequest,
     accepted_command: canwu_api::CommandId,
+}
+
+/// Payload of [`REPORT_INGRESS`]: the seizure incident whose confirmed
+/// closure is reported. Phase 13 derives the whole report from persisted
+/// records, so the payload asserts nothing it could get wrong.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AttemptReportRequest {
+    operation_key: String,
+    incident_key: String,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -91,6 +121,7 @@ impl SimulationPlugin for CorrespondencePlugin {
         registrar.register_record_schema(operation_schema())?;
         registrar.register_record_schema(opportunity_schema())?;
         registrar.register_record_schema(knowledge_seed_schema())?;
+        registrar.register_record_schema(carrier_delegation_schema())?;
         let knowledge_schemas = correspondence_knowledge_schemas();
         for schema in &knowledge_schemas {
             registrar.register_knowledge_schema(schema.clone())?;
@@ -101,6 +132,7 @@ impl SimulationPlugin for CorrespondencePlugin {
                 description: "Initiate one decision-backed addressed correspondence".to_owned(),
                 payload_schema: PayloadSchema::Any,
                 reads: vec![
+                    record_state::<CarrierDelegationRecord>(),
                     record_state::<CommunicationOpportunityRecord>(),
                     record_state::<Channel>(),
                     record_state::<Dispatch>(),
@@ -111,10 +143,22 @@ impl SimulationPlugin for CorrespondencePlugin {
         )?;
         registrar.register_command(
             PluginActionDescriptor {
+                name: CARRIER_DELEGATION_COMMAND.to_owned(),
+                description: "Accept carrying correspondence for a sender under a delegation claim"
+                    .to_owned(),
+                payload_schema: PayloadSchema::Any,
+                reads: Vec::new(),
+                writes: Vec::new(),
+            },
+            carrier_delegation_command_handler,
+        )?;
+        registrar.register_command(
+            PluginActionDescriptor {
                 name: RESOLVE_CORRESPONDENCE_COMMAND.to_owned(),
                 description: "Replan, retry, or finalize one failed correspondence".to_owned(),
                 payload_schema: PayloadSchema::Any,
                 reads: vec![
+                    record_state::<CarrierDelegationRecord>(),
                     record_state::<CorrespondenceOperationRecord>(),
                     record_state::<DeliveryAttempt>(),
                     record_state::<Dispatch>(),
@@ -162,6 +206,21 @@ impl SimulationPlugin for CorrespondencePlugin {
                 payload_schema: PayloadSchema::Any,
             })?;
         }
+        // Only the delegation command enqueues delegation records, and only
+        // the lifecycle system schedules reports; the host cannot author
+        // either, so the permits are not retained.
+        registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: DELEGATION_INGRESS.to_owned(),
+            description: "Record one accepted carrier delegation".to_owned(),
+            class: IngressClass::Acknowledgement,
+            payload_schema: PayloadSchema::Any,
+        })?;
+        registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: REPORT_INGRESS.to_owned(),
+            description: "Publish one holder-relative correspondence attempt report".to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Any,
+        })?;
 
         let mut lifecycle = BoundarySystemContract::new(
             "correspondence-lifecycle-v1",
@@ -171,6 +230,7 @@ impl SimulationPlugin for CorrespondencePlugin {
         lifecycle.reads = vec![
             StateKey::core_ingress(),
             StateKey::core_knowledge(),
+            record_state::<CarrierDelegationRecord>(),
             record_state::<CommunicationOpportunityRecord>(),
             record_state::<CorrespondenceOperationRecord>(),
             record_state::<Dispatch>(),
@@ -178,6 +238,7 @@ impl SimulationPlugin for CorrespondencePlugin {
             record_state::<InformationOperationRecord>(),
         ];
         lifecycle.writes = vec![
+            record_state::<CarrierDelegationRecord>(),
             record_state::<CommunicationOpportunityRecord>(),
             record_state::<CorrespondenceOperationRecord>(),
         ];
@@ -196,6 +257,9 @@ impl SimulationPlugin for CorrespondencePlugin {
         );
         knowledge.reads = vec![
             StateKey::core_ingress(),
+            record_state::<CorrespondenceOperationRecord>(),
+            record_state::<DeliveryAttempt>(),
+            record_state::<InformationOperationRecord>(),
             record_state::<KnowledgeSeedRecord>(),
         ];
         knowledge.writes = vec![record_state::<KnowledgeSeedRecord>()];
@@ -223,6 +287,13 @@ fn initiate_correspondence_command(
     }
     let request: InitiateCorrespondenceRequest = decode(payload, "correspondence request")?;
     validate_start_request(&request)?;
+    let carrier_authority = current_carrier_authority(
+        view,
+        &request.sender,
+        &request.carrier,
+        request.carrier_delegation,
+        context.simulation_time,
+    )?;
     if request.due_at < context.simulation_time {
         return Err(invalid_record(
             "correspondence deadline cannot precede command admission",
@@ -334,12 +405,71 @@ fn initiate_correspondence_command(
         request,
         authority,
         accepted_command: context.command_id,
+        carrier_authority,
     };
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: SimDuration::ZERO,
         packet_type: START_INGRESS.to_owned(),
         priority: 0,
         payload: serde_json::to_value(admitted).map_err(encode_error)?,
+        affected: Vec::new(),
+    }])
+}
+
+/// Admits a carrier's acceptance of carrying correspondence for a sender.
+///
+/// Only the carrier's own command authority can issue it: the decision origin
+/// must control the claim's `performed_by`. The claim must be well formed,
+/// list [`CARRY_CORRESPONDENCE_CAPABILITY`], delegate to another party than
+/// the carrier itself, and not already have expired. The admitted command's
+/// ID is what a later [`InitiateCorrespondenceRequest::carrier_delegation`]
+/// cites. At the next boundary the lifecycle persists the claim as the
+/// carrier's current [`CarrierDelegationRecord`] for that principal (one
+/// record per carrier and principal, replaced by a newer delegation), which
+/// admission reads instead of command evidence. The delegation is citable
+/// once that record exists.
+fn carrier_delegation_command_handler(
+    _view: &SimulationView<'_>,
+    context: &CommandContext,
+    payload: &Value,
+) -> Result<Vec<SystemDirective>, CanwuError> {
+    if context.ingress == CommandIngress::LegacyDirect {
+        return Err(invalid_authority(
+            "carrier delegation requires tracked command ingress",
+        ));
+    }
+    let request: CarrierDelegationRequest = decode(payload, "carrier delegation")?;
+    let claim = &request.claim;
+    if !origin_controls_sender(&context.authority.decision_origin, &claim.performed_by) {
+        return Err(invalid_authority(
+            "carrier delegation requires the carrier's command authority",
+        ));
+    }
+    if holder_from_entity(&claim.performed_by) == claim.performed_for {
+        return Err(invalid_authority(
+            "a carrier cannot delegate carrying to itself",
+        ));
+    }
+    let earliest = claim.not_before.map_or(context.simulation_time, |start| {
+        start.max(context.simulation_time)
+    });
+    validate_delegation_claim(
+        claim,
+        &claim.performed_by,
+        &claim.performed_for,
+        CARRY_CORRESPONDENCE_CAPABILITY,
+        earliest,
+    )
+    .map_err(|error| invalid_authority(format!("carrier delegation claim is invalid: {error}")))?;
+    let accepted = CarrierAuthority {
+        delegation: context.command_id,
+        claim: request.claim,
+    };
+    Ok(vec![SystemDirective::EnqueuePluginIngress {
+        after: SimDuration::ZERO,
+        packet_type: DELEGATION_INGRESS.to_owned(),
+        priority: 0,
+        payload: serde_json::to_value(accepted).map_err(encode_error)?,
         affected: Vec::new(),
     }])
 }
@@ -368,6 +498,15 @@ fn resolve_correspondence_command_handler(
         ));
     }
     validate_recovery_request(&operation, &request, context.simulation_time)?;
+    if matches!(
+        &request.action,
+        CorrespondenceRecoveryAction::RetryDelivery { .. }
+    ) {
+        // A retry dispatches again, so it must cite the carrier's current
+        // delegation; when the retry settles only the admitted claim's
+        // window is checked again.
+        intent_carrier_authority(view, &operation.intent, context.simulation_time)?;
+    }
     if !matches!(
         &request.action,
         CorrespondenceRecoveryAction::ReplanCurrentAttempt
@@ -423,6 +562,7 @@ fn settle_correspondence_lifecycle(
     let mut directives = Vec::new();
     let mut seen = BTreeSet::new();
     let mut seen_operations = BTreeSet::new();
+    let mut delegations = BTreeMap::new();
     for progress_pass in [false, true] {
         for ingress_id in &context.admitted_ingress {
             let Some(ingress) = view.ingress(*ingress_id)? else {
@@ -437,7 +577,10 @@ fn settle_correspondence_lifecycle(
             else {
                 continue;
             };
-            if plugin != PLUGIN_NAME || packet_type == KNOWLEDGE_INGRESS {
+            if plugin != PLUGIN_NAME
+                || packet_type == KNOWLEDGE_INGRESS
+                || packet_type == REPORT_INGRESS
+            {
                 continue;
             }
             if (packet_type == PROGRESS_INGRESS) != progress_pass {
@@ -487,14 +630,68 @@ fn settle_correspondence_lifecycle(
                     &mut seen_operations,
                     &mut directives,
                 )?,
+                DELEGATION_INGRESS => {
+                    collect_delegation(ingress.cause.as_ref(), payload, &mut delegations)?;
+                }
                 _ => {}
             }
         }
     }
+    record_delegations(view, delegations, &mut directives)?;
     Ok(BoundaryProposal {
         directives,
         ..BoundaryProposal::default()
     })
+}
+
+/// Collects one accepted delegation for [`record_delegations`], keeping the
+/// newest delegation command per (carrier, principal) pair in this boundary.
+fn collect_delegation(
+    cause: Option<&CauseRef>,
+    payload: &Value,
+    delegations: &mut BTreeMap<canwu_api::DomainRecordRef, CarrierAuthority>,
+) -> Result<(), CanwuError> {
+    let accepted: CarrierAuthority = decode(payload, "accepted carrier delegation")?;
+    if cause != Some(&CauseRef::Command(accepted.delegation)) {
+        return Err(invalid_authority(
+            "carrier delegation ingress is not caused by its delegation command",
+        ));
+    }
+    let reference =
+        carrier_delegation_ref(&accepted.claim.performed_by, &accepted.claim.performed_for)?
+            .into_untyped();
+    if delegations
+        .get(&reference)
+        .is_none_or(|kept| kept.delegation < accepted.delegation)
+    {
+        delegations.insert(reference, accepted);
+    }
+    Ok(())
+}
+
+/// Persists each pair's newest accepted delegation as its current
+/// [`CarrierDelegationRecord`], replacing an older one. An older or repeated
+/// delegation than the recorded one changes nothing.
+fn record_delegations(
+    view: &SimulationView<'_>,
+    delegations: BTreeMap<canwu_api::DomainRecordRef, CarrierAuthority>,
+    directives: &mut Vec<BoundaryDirective>,
+) -> Result<(), CanwuError> {
+    for (reference, accepted) in delegations {
+        let reference = typed::<CarrierDelegationRecord>(reference)?;
+        let mutation = match view.typed_domain_record(&reference)? {
+            None => create_typed(&reference, &accepted, Vec::new())?,
+            Some(existing) => {
+                let current = existing.decode_payload::<CarrierDelegationRecord>()?;
+                if current.delegation >= accepted.delegation {
+                    continue;
+                }
+                update_typed(&reference, &accepted, Vec::new(), existing.version)?
+            }
+        };
+        directives.push(mutate(mutation, "Record the carrier's current delegation"));
+    }
+    Ok(())
 }
 
 fn settle_opportunity(
@@ -622,13 +819,22 @@ fn settle_start(
         }
         return Ok(());
     }
-    let knowledge = view.knowledge_records(
-        admitted.request.carrier.clone(),
-        &planning_knowledge_query(),
+    // The dispatch happens now, so the delegation admitted with the command
+    // must still cover this boundary. The record is not read again: a newer
+    // delegation recorded since admission does not revoke an admitted start.
+    admitted_authority_covers(
+        &admitted.request.sender,
+        &admitted.request.carrier,
+        admitted.carrier_authority.as_ref(),
+        context.at,
     )?;
-    let (snapshot, address) =
-        build_planning_snapshot(&knowledge, &admitted.request.recipient, context.at)
-            .map_err(invalid_record)?;
+    let carrier_authority = admitted.carrier_authority.clone();
+    let (snapshot, address) = carrier_planning_snapshot(
+        view,
+        &admitted.request.carrier,
+        &admitted.request.recipient,
+        context.at,
+    )?;
     let route_plan = plan_route(
         &snapshot,
         &RoutingRequest {
@@ -661,6 +867,7 @@ fn settle_start(
         prepared_dispatch: admitted.request.prepared_dispatch.clone(),
         authority: admitted.authority.clone(),
         accepted_command: admitted.accepted_command,
+        carrier_authority,
     };
     let planning_snapshot_digest = snapshot.digest();
     let planning_evidence = CorrespondencePlanningEvidence {
@@ -999,6 +1206,9 @@ fn reconcile_information(
                     CorrespondenceStatus::Failed
                 };
                 advance_sequence(operation)?;
+                if let Some(report) = seizure_report_directive(operation, &pending.id)? {
+                    directives.push(report);
+                }
                 directives.push(update_operation(record, operation)?);
                 return Ok(());
             }
@@ -1338,6 +1548,7 @@ fn settle_incident(
         }
         return Ok(());
     }
+    validate_seizure_citation(&operation, &request.kind)?;
     let suppressed_reason = incident_suppression_reason(&operation, &request.kind);
     let roll = u16::try_from(view.random_range_for_operation(
         &correspondence_random_stream(),
@@ -1398,6 +1609,26 @@ fn settle_incident(
                     directives,
                 )?;
             }
+            CorrespondenceIncidentKind::CarrierSeized {
+                seized_by,
+                custody_handoff,
+            } => {
+                let envelope = seize_carrier(
+                    context,
+                    ingress_id,
+                    &mut operation,
+                    seized_by,
+                    *custody_handoff,
+                )?;
+                information_operation = Some(envelope.id.clone());
+                directives.push(schedule_information(&envelope)?);
+                directives.push(schedule_progress(
+                    &operation.operation_key,
+                    operation.next_sequence,
+                    ProgressAction::ReconcileInformation,
+                    SimDuration::ZERO,
+                )?);
+            }
         }
     }
     operation.incidents.insert(
@@ -1422,10 +1653,16 @@ fn incident_suppression_reason(
     operation: &CorrespondenceOperation,
     kind: &CorrespondenceIncidentKind,
 ) -> Option<String> {
-    if !matches!(
-        operation.status,
-        CorrespondenceStatus::Scheduled | CorrespondenceStatus::InTransit
-    ) {
+    // A carrier waiting for a route still holds the packet and can be seized;
+    // other incidents need a moving or scheduled attempt.
+    let waiting_seizure = operation.status == CorrespondenceStatus::WaitingForRoute
+        && matches!(kind, CorrespondenceIncidentKind::CarrierSeized { .. });
+    if !waiting_seizure
+        && !matches!(
+            operation.status,
+            CorrespondenceStatus::Scheduled | CorrespondenceStatus::InTransit
+        )
+    {
         return Some("incident is not applicable outside an active transport attempt".to_owned());
     }
     if operation.pending_information.is_some() {
@@ -1447,7 +1684,7 @@ fn incident_suppression_reason(
     {
         return Some("disaster is suppressed outside a replan-capable transport state".to_owned());
     }
-    None
+    seizure_citation_mismatch(operation, kind)
 }
 
 fn active_disaster_connections(
@@ -1462,7 +1699,8 @@ fn active_disaster_connections(
                 blocked_connections,
                 ..
             } => Some(blocked_connections.as_slice()),
-            CorrespondenceIncidentKind::Interception { .. } => None,
+            CorrespondenceIncidentKind::Interception { .. }
+            | CorrespondenceIncidentKind::CarrierSeized { .. } => None,
         })
         .flatten()
         .cloned()
@@ -1470,6 +1708,168 @@ fn active_disaster_connections(
     excluded.sort();
     excluded.dedup();
     excluded
+}
+
+/// Rejects a malformed seizure: a zero custody handoff identity, a malformed
+/// seizing identity, or the carrier seizing itself. A citation that collides
+/// with a recorded handoff depends on execution progress, so it suppresses
+/// the incident instead (see [`incident_suppression_reason`]).
+fn validate_seizure_citation(
+    operation: &CorrespondenceOperation,
+    kind: &CorrespondenceIncidentKind,
+) -> Result<(), CanwuError> {
+    let CorrespondenceIncidentKind::CarrierSeized {
+        seized_by,
+        custody_handoff,
+    } = kind
+    else {
+        return Ok(());
+    };
+    if custody_handoff.0 == 0 {
+        return Err(invalid_record("custody handoff identity must be nonzero"));
+    }
+    if let EntityRef::Domain(record) = seized_by
+        && (record.kind.namespace.trim().is_empty()
+            || record.kind.name.trim().is_empty()
+            || record.id.trim().is_empty())
+    {
+        return Err(invalid_record(
+            "carrier seizure requires a well-formed seizing identity",
+        ));
+    }
+    if *seized_by == holder_entity(&operation.intent.carrier) {
+        return Err(invalid_record("a carrier cannot seize its own custody"));
+    }
+    Ok(())
+}
+
+/// The suppression reason of a seizure whose cited custody handoff identity
+/// is already recorded in the current execution. Every recorded handoff is
+/// a different custody transfer, so the cited one is never this seizure's.
+fn seizure_citation_mismatch(
+    operation: &CorrespondenceOperation,
+    kind: &CorrespondenceIncidentKind,
+) -> Option<String> {
+    let CorrespondenceIncidentKind::CarrierSeized {
+        custody_handoff, ..
+    } = kind
+    else {
+        return None;
+    };
+    operation
+        .execution
+        .handoffs
+        .iter()
+        .any(|handoff| handoff.id == *custody_handoff)
+        .then(|| "cited custody handoff identity is already recorded".to_owned())
+}
+
+/// Applies a triggered carrier seizure: fails the current leg unless a
+/// disaster already failed it, records the terminal seizure handoff under
+/// the cited identity, and closes the delivery attempt as failed through the
+/// information lifecycle. The report is scheduled once that closure is
+/// confirmed.
+fn seize_carrier(
+    context: &BoundaryContext,
+    ingress_id: canwu_api::IngressId,
+    operation: &mut CorrespondenceOperation,
+    seized_by: &EntityRef,
+    custody_handoff: HandoffId,
+) -> Result<InformationOperationEnvelope, CanwuError> {
+    let leg_plan = current_route_leg(operation)?.clone();
+    let active = operation
+        .execution
+        .active_itinerary_revision
+        .ok_or_else(|| invalid_record("seizure has no active itinerary"))?;
+    let current_leg_index = operation.execution.current_leg_index;
+    let leg = operation
+        .execution
+        .legs
+        .iter()
+        .find(|leg| leg.itinerary_revision == active && leg.leg_index == current_leg_index)
+        .cloned()
+        .ok_or_else(|| invalid_record("seized transport leg is missing"))?;
+    let location = if leg.status == LegExecutionStatus::Departed {
+        leg_plan.connection.as_str().to_owned()
+    } else {
+        leg_plan.from.as_str().to_owned()
+    };
+    if leg.status != LegExecutionStatus::Failed {
+        operation
+            .execution
+            .fail_current_leg(SEIZURE_FAILURE_REASON.to_owned(), context.at)
+            .map_err(transport_error)?;
+    }
+    let attempt = operation
+        .execution
+        .delivery_attempt
+        .clone()
+        .ok_or_else(|| invalid_record("seizure lacks delivery-attempt evidence"))?;
+    let mut evidence = vec![
+        EvidenceRef::Ingress(ingress_id),
+        EvidenceRef::DomainRecordVersion(attempt.clone()),
+    ];
+    evidence.sort();
+    operation
+        .execution
+        .record_handoff(canwu_api::Handoff {
+            id: custody_handoff,
+            from_leg: leg.id,
+            to_leg: leg.id,
+            from_custodian: format!("connection:{}", leg_plan.connection.as_str()),
+            to_custodian: format!("seizure:{seized_by}"),
+            at: context.at,
+            location,
+            evidence,
+            kind: HandoffKind::Seizure {
+                by: seized_by.clone(),
+            },
+        })
+        .map_err(transport_error)?;
+    let envelope = attempt_transition_operation(
+        operation,
+        &attempt,
+        DeliveryAttemptStatus::Failed,
+        context.at,
+        "carrier-seized",
+    )?;
+    operation.pending_information = Some(PendingInformationOperation {
+        step: InformationSagaStep::CompleteDelivery,
+        id: envelope.id.clone(),
+        expected_status: InformationOperationStatus::Completed,
+    });
+    operation.status = CorrespondenceStatus::AwaitingInformationCompletion;
+    operation.last_error = None;
+    advance_sequence(operation)?;
+    Ok(envelope)
+}
+
+/// Schedules the attempt report when `closing` is the information operation
+/// through which a triggered carrier seizure closed the current attempt.
+fn seizure_report_directive(
+    operation: &CorrespondenceOperation,
+    closing: &InformationOperationId,
+) -> Result<Option<BoundaryDirective>, CanwuError> {
+    let Some(request) = operation.incidents.values().find_map(|incident| {
+        (matches!(
+            incident.kind,
+            CorrespondenceIncidentKind::CarrierSeized { .. }
+        ) && incident.triggered
+            && incident.information_operation.as_ref() == Some(closing))
+        .then(|| AttemptReportRequest {
+            operation_key: operation.operation_key.clone(),
+            incident_key: incident.incident_key.clone(),
+        })
+    }) else {
+        return Ok(None);
+    };
+    Ok(Some(BoundaryDirective::ScheduleIngress {
+        after: SimDuration::ZERO,
+        packet_type: REPORT_INGRESS.to_owned(),
+        priority: 0,
+        payload: serde_json::to_value(request).map_err(encode_error)?,
+        affected: Vec::new(),
+    }))
 }
 
 fn install_replanned_route(
@@ -1502,13 +1902,12 @@ fn install_replanned_route(
         .delivery_attempt
         .clone()
         .ok_or_else(|| invalid_record("reroute lacks delivery-attempt evidence"))?;
-    let knowledge = view.knowledge_records(
-        operation.intent.carrier.clone(),
-        &planning_knowledge_query(),
+    let (mut snapshot, address) = carrier_planning_snapshot(
+        view,
+        &operation.intent.carrier,
+        &operation.intent.recipient,
+        context.at,
     )?;
-    let (mut snapshot, address) =
-        build_planning_snapshot(&knowledge, &operation.intent.recipient, context.at)
-            .map_err(invalid_record)?;
     snapshot
         .network
         .connections
@@ -1650,6 +2049,15 @@ fn install_planning_knowledge(
         else {
             continue;
         };
+        if plugin == PLUGIN_NAME && packet_type == REPORT_INGRESS {
+            if !matches!(ingress.cause, Some(CauseRef::Boundary(_))) {
+                return Err(invalid_authority(
+                    "correspondence attempt reports require boundary-generated ingress",
+                ));
+            }
+            directives.push(attempt_report_publication(view, *ingress_id, payload)?);
+            continue;
+        }
         if plugin != PLUGIN_NAME || packet_type != KNOWLEDGE_INGRESS {
             continue;
         }
@@ -1729,6 +2137,93 @@ fn install_planning_knowledge(
     })
 }
 
+/// Publishes one attempt report to the carrier holder. The report is derived
+/// from persisted records only: the triggered seizure incident, the
+/// information operation that closed the attempt, and the closed delivery
+/// attempt record.
+fn attempt_report_publication(
+    view: &SimulationView<'_>,
+    ingress_id: canwu_api::IngressId,
+    payload: &Value,
+) -> Result<BoundaryDirective, CanwuError> {
+    let request: AttemptReportRequest = decode(payload, "correspondence attempt report")?;
+    let operation = view
+        .typed_domain_record(&correspondence_operation_ref(&request.operation_key))?
+        .ok_or_else(|| invalid_record("attempt report names a missing correspondence"))?
+        .decode_payload::<CorrespondenceOperationRecord>()?;
+    let mismatch = || invalid_record("attempt report does not match a closed seizure");
+    let incident = operation
+        .incidents
+        .get(&request.incident_key)
+        .filter(|incident| incident.triggered)
+        .ok_or_else(mismatch)?;
+    let (
+        CorrespondenceIncidentKind::CarrierSeized {
+            custody_handoff, ..
+        },
+        Some(closing),
+    ) = (&incident.kind, incident.information_operation.as_ref())
+    else {
+        return Err(mismatch());
+    };
+    let closing = view
+        .typed_domain_record(&derive_operation_record_ref(closing))?
+        .ok_or_else(mismatch)?
+        .decode_payload::<InformationOperationRecord>()?;
+    let attempt_kind = canwu_api::DomainRecordKind::for_type::<DeliveryAttempt>();
+    let attempt_version = closing
+        .domain_result_evidence
+        .iter()
+        .find(|evidence| evidence.record.kind == attempt_kind)
+        .filter(|_| closing.status == InformationOperationStatus::Completed)
+        .cloned()
+        .ok_or_else(mismatch)?;
+    let attempt_record = view
+        .typed_domain_record(&typed::<DeliveryAttempt>(attempt_version.record.clone())?)?
+        .ok_or_else(mismatch)?;
+    let attempt = attempt_record.decode_payload::<DeliveryAttempt>()?;
+    if attempt_record.version != attempt_version.version
+        || attempt.status != DeliveryAttemptStatus::Failed
+    {
+        return Err(mismatch());
+    }
+    let report = CorrespondenceAttemptReport {
+        operation_key: operation.operation_key.clone(),
+        attempt_number: attempt.attempt_number,
+        ended_at: incident.at,
+        outcome: CorrespondenceAttemptOutcome::CarrierSeized {
+            custody_handoff: *custody_handoff,
+        },
+    };
+    let mut evidence = vec![
+        EvidenceRef::Ingress(ingress_id),
+        EvidenceRef::DomainRecordVersion(attempt_version),
+    ];
+    evidence.sort();
+    Ok(BoundaryDirective::PublishKnowledge {
+        holder: operation.intent.carrier.clone(),
+        visibility: StateVisibility::SameBoundary,
+        producer_correlation: Some(format!(
+            "attempt-report:{}:{}",
+            report.operation_key, report.attempt_number
+        )),
+        records: vec![KnowledgeRecordDraft {
+            schema: schema_id(ATTEMPT_REPORT_KNOWLEDGE_SCHEMA),
+            subjects: Vec::new(),
+            payload: serde_json::to_value(&report).map_err(encode_error)?,
+            as_of: None,
+            confidence_per_mille: 1_000,
+            origin: KnowledgeOrigin {
+                method: REPORT_ORIGIN_METHOD.to_owned(),
+                evidence,
+            },
+            supersedes: Vec::new(),
+            contradicts: Vec::new(),
+        }],
+        summary: "Publish a holder-relative correspondence attempt report".to_owned(),
+    })
+}
+
 fn activation_operation(
     request: &InitiateCorrespondenceRequest,
     dispatch: TypedDomainRecordRef<Dispatch>,
@@ -1796,14 +2291,21 @@ fn begin_retry(
     else {
         return Err(invalid_record("retry helper requires retry action"));
     };
-    let excluded = active_disaster_connections(operation);
-    let knowledge = view.knowledge_records(
-        operation.intent.carrier.clone(),
-        &planning_knowledge_query(),
+    // The retry dispatches a new attempt now, so the delegation admitted with
+    // the retry command must still cover this boundary.
+    admitted_authority_covers(
+        &operation.intent.sender,
+        &operation.intent.carrier,
+        operation.intent.carrier_authority.as_ref(),
+        context.at,
     )?;
-    let (mut snapshot, address) =
-        build_planning_snapshot(&knowledge, &operation.intent.recipient, context.at)
-            .map_err(invalid_record)?;
+    let excluded = active_disaster_connections(operation);
+    let (mut snapshot, address) = carrier_planning_snapshot(
+        view,
+        &operation.intent.carrier,
+        &operation.intent.recipient,
+        context.at,
+    )?;
     snapshot
         .network
         .connections
@@ -2328,6 +2830,10 @@ fn knowledge_seed_schema() -> DomainRecordSchema {
     schema
 }
 
+fn carrier_delegation_schema() -> DomainRecordSchema {
+    DomainRecordSchema::for_record::<CarrierDelegationRecord>()
+}
+
 fn reference_schema(
     role: &str,
     targets: Vec<DomainReferenceTargetKind>,
@@ -2389,16 +2895,125 @@ fn validate_start_request(request: &InitiateCorrespondenceRequest) -> Result<(),
             "correspondence execution and dispatch versions must be nonzero",
         ));
     }
-    let carrier = match &request.carrier {
+    Ok(())
+}
+
+/// Resolves the carrier's current delegation for the sender, requires it to
+/// be the `cited` delegation command, and checks its claim at `at`.
+///
+/// A sender-owned carrier cites none and takes none. Any other carrier must
+/// cite the accepted [`CARRIER_DELEGATION_COMMAND`] that its
+/// [`CarrierDelegationRecord`] for this sender currently holds; naming
+/// another holder without it, or citing a delegation the carrier has since
+/// replaced, is not read authority. The claim must give
+/// [`CARRY_CORRESPONDENCE_CAPABILITY`] to the carrier (`performed_by`) for
+/// the sender (`performed_for`) over an interval covering `at`. The record is
+/// a persisted fact, so the decision is the same live and in replay even
+/// after command evidence is sealed.
+fn current_carrier_authority(
+    view: &SimulationView<'_>,
+    sender: &EntityRef,
+    carrier: &KnowledgeHolderRef,
+    cited: Option<canwu_api::CommandId>,
+    at: SimTime,
+) -> Result<Option<CarrierAuthority>, CanwuError> {
+    let carrier_entity = holder_entity(carrier);
+    if carrier_entity == *sender {
+        return if cited.is_some() {
+            Err(invalid_authority(
+                "a sender-owned carrier takes no carrier delegation",
+            ))
+        } else {
+            Ok(None)
+        };
+    }
+    let Some(cited) = cited else {
+        return Err(invalid_authority(
+            "a carrier other than the sender requires an admitted carrier delegation",
+        ));
+    };
+    let principal = holder_from_entity(sender);
+    let authority = view
+        .typed_domain_record(&carrier_delegation_ref(&carrier_entity, &principal)?)?
+        .map(DomainRecord::decode_payload::<CarrierDelegationRecord>)
+        .transpose()?
+        .filter(|authority| authority.delegation == cited)
+        .ok_or_else(|| {
+            invalid_authority(
+                "cited carrier delegation is not the carrier's current delegation for the sender",
+            )
+        })?;
+    validate_delegation_claim(
+        &authority.claim,
+        &carrier_entity,
+        &principal,
+        CARRY_CORRESPONDENCE_CAPABILITY,
+        at,
+    )
+    .map_err(|error| invalid_authority(format!("carrier delegation claim is invalid: {error}")))?;
+    Ok(Some(authority))
+}
+
+/// Checks, at settlement, that the delegation resolved when the command was
+/// admitted still covers `at`. Settlement happens at the admission instant,
+/// so the admission-time record check stands; only the claim window is
+/// re-checked, which never depends on records written after admission.
+fn admitted_authority_covers(
+    sender: &EntityRef,
+    carrier: &KnowledgeHolderRef,
+    authority: Option<&CarrierAuthority>,
+    at: SimTime,
+) -> Result<(), CanwuError> {
+    let carrier_entity = holder_entity(carrier);
+    let Some(authority) = authority else {
+        return if carrier_entity == *sender {
+            Ok(())
+        } else {
+            Err(invalid_authority(
+                "a carrier other than the sender requires an admitted carrier delegation",
+            ))
+        };
+    };
+    validate_delegation_claim(
+        &authority.claim,
+        &carrier_entity,
+        &holder_from_entity(sender),
+        CARRY_CORRESPONDENCE_CAPABILITY,
+        at,
+    )
+    .map_err(|error| invalid_authority(format!("carrier delegation claim is invalid: {error}")))
+}
+
+/// Re-resolves an admitted correspondence's carrier delegation at `at`.
+fn intent_carrier_authority(
+    view: &SimulationView<'_>,
+    intent: &CorrespondenceIntent,
+    at: SimTime,
+) -> Result<Option<CarrierAuthority>, CanwuError> {
+    current_carrier_authority(
+        view,
+        &intent.sender,
+        &intent.carrier,
+        intent
+            .carrier_authority
+            .as_ref()
+            .map(|authority| authority.delegation),
+        at,
+    )
+}
+
+fn holder_entity(holder: &KnowledgeHolderRef) -> EntityRef {
+    match holder {
         KnowledgeHolderRef::Person(person) => EntityRef::Person(*person),
         KnowledgeHolderRef::Entity(entity) => entity.clone(),
-    };
-    if carrier != request.sender {
-        return Err(invalid_authority(
-            "correspondence currently requires sender-owned carrier knowledge",
-        ));
     }
-    Ok(())
+}
+
+fn holder_from_entity(entity: &EntityRef) -> KnowledgeHolderRef {
+    match entity {
+        EntityRef::Person(person) => KnowledgeHolderRef::Person(*person),
+        entity => KnowledgeHolderRef::Entity(entity.clone()),
+    }
 }
 
 fn claim_operation_update(seen_operations: &mut BTreeSet<String>, operation_key: &str) -> bool {

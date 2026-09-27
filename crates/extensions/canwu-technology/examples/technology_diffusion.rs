@@ -270,6 +270,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     source: Some(KnowledgeHolderRef::Person(operator)),
                     source_site: Some(EntityRef::Territory(workshop)),
                     source_capability: Some(implementation),
+                    external_source: None,
                     destination: KnowledgeHolderRef::Person(learner),
                     destination_site: EntityRef::Territory(destination),
                     revision: Some(catalog.revision),

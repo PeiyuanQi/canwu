@@ -62,7 +62,7 @@ crates.io can resolve every completed group before continuing:
 4. `canwu-transport`
 5. `canwu-api`
 6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`,
-   `canwu-resource`, `canwu-law`, `canwu-military`
+   `canwu-resource`, `canwu-law`, `canwu-military`, `canwu-movement`
 7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`,
    `canwu-production`, `canwu-ming-fiscal`, `canwu-military-reference-content`
 8. `canwu-economy-reference-content`

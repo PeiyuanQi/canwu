@@ -38,6 +38,30 @@ ownership and commit contract: each institution owns its state, the central
 manifest states what must be produced, and one transaction either commits the
 complete transition or rolls it back.
 
+## Built-in transition manifests
+
+The example keeps its own `ReliefOrder` manifest and read-only audit, which
+remains a valid application pattern. Since 0.13.0, Canwu offers the same
+guarantee as a built-in contract, the transition manifest:
+
+- The central plugin's `publish-order` system registers a `TransitionManifest`
+  with `lineage_id` set to the order ID, the treasury and county plugins as
+  participants, and the record versions each must hold before and after
+  (`expected_pre`, `expected_post`) in place of a post-state hash.
+- In phase 10 of the ready boundary, each office's system stages its own record
+  through `StageTransitionWrite`, still writing only the state it owns.
+- Before phase 11 commits, the simulation core audits the manifest. If one office staged
+  and the other did not, or a version differs, the whole boundary rolls back;
+  if neither office acted, the order expires and the center can register a new
+  attempt.
+- The central `audit-order` system reads the `TransitionAuditRecord` in phase
+  12 instead of rechecking both records itself.
+
+A manifest that must catch a missing office needs at least two participants.
+If the order also needs a council's approval, `canwu-law` procedures can now
+weigh seats, count unit blocks such as regional delegations, and hold an
+advisory consultation stage before the deciding vote.
+
 ## Domain mapping
 
 The example deliberately keeps period-specific semantics outside Canwu:

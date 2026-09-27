@@ -123,7 +123,7 @@ Active -> Dormant -> Retired
 `Active` 目标有参与人口、传播活动、制度/政策输入或已安排的重新激活路径，因此其分布、规则和投影可参与普通结算。
 
 在配置的 quiet window 内没有 engaged population 且没有准入工作后，目标进入 `Dormant`。engaged headcount 不是分布总量：
-只有中性 bucket 的关系不会让目标保持活跃。休眠目标离开文化 hot/dirty index；上层应用显式同步 society 生命周期后，
+只有中性 bucket 的关系不会让目标保持活跃。休眠目标离开文化 hot/dirty index；显式同步 society 生命周期后，
 其由文化计划编译的转移规则也停止运行。已有的 society 分布和紧凑的 reactivation descriptor 保留，休眠可逆且不表示历史被抹除。
 
 ### Retired 与资格判断
@@ -141,7 +141,7 @@ Active -> Dormant -> Retired
 
 ### 原子生命周期同步
 
-上层应用应优先使用 `settle_culture_society_boundary`：它先准备有界 runtime delta，只有出现生命周期变化时才暂存 society 变化。
+使用由上层应用驱动的 `CulturePlugin` 时，上层应用应优先使用 `settle_culture_society_boundary`：它先准备有界 runtime delta，只有出现生命周期变化时才暂存 society 变化。
 如果存在活的外部依赖，退休会在任一调用方状态改变前失败。上层应用必须在同一个权威事务中保存 culture record、society state 和类型化生命周期转移。
 完整扫描的 `synchronize_society_lifecycle` 只适用于加载修复和显式维护检查点。
 
@@ -149,9 +149,21 @@ Active -> Dormant -> Retired
 除非先准入显式的 reactivation command 或 ingress。重新激活只初始化必要的 active 关系，引用旧 tombstone 并创建新 generation；
 它不会改写旧历史，也不会悄悄复活所有旧 cohort。
 
+## 由文化结算插件在引擎内结算
+
+自 0.13.0 起，一次运行可以让引擎结算文化生命周期：在 society 插件旁注册文化结算插件（`CultureBoundaryPlugin`），而不是 `CulturePlugin`。两种流程只能二选一：使用文化结算插件的运行不能再调用 `settle_culture_society_boundary`；`CulturePlugin` 及其由上层应用驱动的流程保持不变。
+
+1. 场景安装用 `culture_definition_record` 构建的文化定义记录、文化状态记录，以及经 `install_into_society` 准备好的 society 状态。边界处理器只是普通函数指针，因此插件每月重新编译定义记录，而不持有编译好的计划。
+2. 信息或通信提供方以公开的 `culture_exposure_v1` 输入提交已解决的接触结果。每个接触信号批次（`CultureExposureSignalBatch`）写明目标 ID 与代际、cohort 范围、解释保真度、证据和最早可结算的边界。事件驱动的第 12 阶段系统把已准入批次排入队列；引用其他代际的批次会被拒绝，并发出 `culture_exposure_rejected_v1`。
+3. 每月第 7 阶段系统 `culture_lifecycle_settle_v1` 消费队列和针对文化 alignment 的已接受制度决策，从 society 快照推导参与人口与活依赖，基于该快照调用 `settle_culture_society_boundary`，并保存 `canwu.culture:state`。已有制度决策的目标仍是活依赖，因此不会进入休眠或退休。
+4. 对每个发生转移的目标，插件安排一条内部 `society_lifecycle_delta_v1` 输入。society 插件在第 12 阶段把它排入队列，并在下一次每日结算时应用，因此 society 插件仍是 `canwu.society:state` 的唯一写入者。society 拒绝的变化会被记录，而不会被强行应用；此后每次每月结算，插件都会把 society 状态与已提交的文化生命周期比较，并重新发送仍缺失的变化，society 以幂等方式应用这些变化。
+5. 每个到期的编译效果都会成为发给自身的 `cultural_signal_batch_v1` 输入；法律插件等消费者在下一边界准入它，并核验其生产者。
+
+被拒绝的生命周期步骤会发出 `culture_lifecycle_rejected_v1`，并保持文化状态不变；每次结算的转移都会发出 `culture_lifecycle_transition_v1`。由于所有第 7 阶段系统读取同一个边界快照，文化步骤最多要经过两个边界才会反映到 society 状态。
+
 ## 从文化信号到法律制度
 
-信息和通信扩展先解决访问和解释，再可以发出有界的 `CultureExposureSignalBatch`。文化结算更新 awareness、private assent、practice、
+信息和通信扩展先解决访问和解释，再可以发出有界的 `CultureExposureSignalBatch`（即 `culture_exposure_v1` 输入的载荷）。文化结算更新 awareness、private assent、practice、
 public alignment、organization tie 和 mobilization 等状态，并产生有界的 `CulturalSignalBatch`。批次包含 target generation、scope、strength、
 persistence class、cadence 和 evidence；它是法律输入，不是权限授予。
 
@@ -191,6 +203,17 @@ CulturalSignalBatch
 它们是类型化法律分片状态的成员，不是新的 core entity kind，也不是可由 host 独立修改的记录。
 
 编译期要求每个程序席位只能解析到一个同时声明该程序与席位的机构，并把 holder、permission profile 与采用长度前缀的无碰撞 controller ID 冻结进计划。缺失或歧义的权限定义会在运行开始前失败。
+
+### 加权、表决单元与征询阶段
+
+自 0.13.0 起，程序阶段可以为席位加权、按表决单元计票，程序也可以包含仅供咨询的征询阶段。
+
+- **表决权重。** `seat_weights` 为席位指定整数权重；未列出的席位权重为 1，因此空映射就是各席位等额计票。`quorum` 与投出任意选票（包括弃权）的席位权重之和比较；`threshold` 是阶段所需的、`For` 权重在 `For` 与 `Against` 权重之和中所占的千分比。否决是席位权力，从不加权。
+- **表决单元。** `block_of_seat` 把阶段中的每个席位分配到恰好一个表决单元，`block_threshold`（1 到单元总数之间）规定至少有多少个单元须取 `For`。单元的立场取其席位的加权多数；双方加权票数相等的单元，或者没有 `For`、`Against` 选票的单元，不表态。带表决单元的阶段只有在加权席位规则成立、且取 `For` 的单元足够多时才通过。
+- **平局规则。** 取 `For` 与 `Against` 的单元数相等时，适用程序的 `deterministic_tie_break`；只有包含带表决单元阶段的程序才读取它。`status-quo` 不增加单元，因此平局的阶段会等待更多选票或截止时间。`casting-seat:<seat>` 在该席位自己于本阶段投出 `For` 票时增加一个 `For` 单元；决定票席位必须属于每个带表决单元的阶段，且每个单元门槛都必须超过单元总数的一半，因此没有它就不会以平局通过。不带表决单元的阶段不使用平局规则；若平分必须失败，可把 threshold 设为 501。
+- **征询阶段。** `Consultation` 阶段仅供咨询。其席位收到 context 中带 `"advisory": true` 的票据，选票作为参与记录保存，但从不计入完成、否决或采纳。该阶段需要正的截止时间，不能设置 quorum、threshold、权重或表决单元，也不能是程序的最后一个阶段。它在截止时间之后法律插件运行的第一个边界完成，使未回应的席位工作过期，并开启下一阶段；零张选票也是有效结果。到截止时间仍未取得容量预留的程序则会过期。
+
+编译器在运行开始前检查这些规则；未使用的字段不写入 JSON，因此现有计划的编码和内容哈希保持不变。同样自 0.13.0 起，不再接受选票的阶段（已通过、已完成或所属程序已关闭）会使其待处理和已入队的席位工作过期；之后才到达的席位回应会记为被拒绝的结果，而不会使插件边界失败；结算前的预算检查也会计入恰在截止分钟发出的票据工作。
 
 `LegalProposal` 是尚未制定的、带版本的程序输入。它至少记录：
 
@@ -282,6 +305,8 @@ Format 8 将法律状态持久化为独立版本的 plan、directory、order/jur
 - 未解决的 live level dependency 会阻止文化退休；
 - 未来生效的 live-level dependency 也会阻止提前退休；
 - 过期程序会同时过期未解决的 pending/enqueued outbox；
+- 不再接受选票的阶段会使席位工作过期，迟到的席位回应成为被拒绝的结果；
+- 使用文化结算插件时，society 插件仍是唯一的 society 写入者，运行可以精确重放；
 - proposal、law、evidence、archive、snapshot、fork 和 exact replay 保持一致；
 - 无关目标、observer 和退休目录条目不会扰动有 key 的结果或已声明预算。
 

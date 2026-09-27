@@ -33,6 +33,14 @@ opportunity citing a source capability current at that time. An implementation
 retains its exact installation-time qualification evidence; a later
 qualification update does not implicitly stop the implementation, which must
 be deactivated explicitly when it can no longer serve as a source.
+An off-map teacher with no live capability record may instead be cited as an
+`external_source` (`ExternalTransmissionSourceV1`): manifest-bound content
+evidence (an initial-scenario domain-record version owned outside
+`canwu.technology`) with a declared reliability. Demonstration,
+apprenticeship, and personnel-transfer opportunities cite exactly one of the
+live `source_capability` and the external source; an external source has no
+simulated holder or site, so the destination opens the opportunity. Document
+and artifact modes keep their rules and do not accept an external source.
 New implementations must bind a qualification and assets that are still current
 and active. Trial or committed adoption must likewise bind current active
 implementations; an older exact version remains historical evidence, not fresh

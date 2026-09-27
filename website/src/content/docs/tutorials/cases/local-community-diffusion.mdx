@@ -122,6 +122,10 @@ DecisionTicket -> controller-derived authority -> plugin command
 可以让 public alignment 比 private assent 更快变化，但它仍不能直接指定“多少人
 真心相信”。
 
+自 0.13.0 起，`PolicyPressure` 还可以记录来源：可选的 `issuer`（政府、组织或人物，
+会绑定到记录的核心引用中），以及设定该压力的决策版本 `decision_version`。非零版本
+必须有签发者；两个字段未使用时都不会写入编码。
+
 ### 第四步：为角色生成估计，而不是泄露真值
 
 `projection_for_viewer()` 要求参伍签发的 `ViewerContext`，并且只返回在
@@ -139,6 +143,22 @@ aggregate 不同；没有 observer profile 的角色会得到错误，不会自�
 `MobilizationCandidate`，但它不是冲突事件。抗议、镇压、迁移、暴乱、结盟或
 战争仍应由独立的政治与安全扩展判断。
 
+### 按外部存量校准 cohort 人口
+
+自 0.13.0 起，cohort 人口可以跟随其他领域拥有的人口，例如户籍记录，或吸收了新兵的
+驻军。发送公开的 `cohort_headcount_rebase_v1` 输入，携带 cohort 人口校准
+（`CohortHeadcountRebaseV1`）：cohort、新人口数、外部存量记录的精确版本，以及
+`RebaseReason`（`ExternalStockChange` 或 `Correction`）。输入准入时，所引用的版本
+必须是 `canwu.society` 以外某条记录的当前版本，否则校准会以 `stale_external_stock`
+被拒绝。
+
+由于 society 写入系统只在每日边界运行，事件驱动的第 12 阶段系统会先把输入排入
+队列。下一次每日结算在 cohort 转移之后、制度决策之前应用它，并以整数最大余数法
+重新分配该 cohort 的每个分布：每个分布的合计等于新人口数，每个 bucket 与其精确
+份额的差距不超过一个单位。结果记录在 cohort 交换账本中。从发送校准到看到完成校准的
+cohort，最多可能相差两个边界。0.13.0 同时修复了 0.12.0 的一个缺陷：任何 cohort 转移
+应用之后，下一个每日边界都会失败。
+
 ## 模拟领域扩展边界
 
 这个模拟领域扩展中的可复用引擎部分是 cohort、稀疏多维分布、确定性迁移、影响边、组织拓扑、
@@ -151,8 +171,11 @@ aggregate 不同；没有 observer profile 的角色会得到错误，不会自�
 
 面向更大规模文化系统时，已正式发布的 `canwu-culture` SDK 会把这些定义编译成有界的文化执行计划，
 并提供可恢复的待处理关系集合与热目标索引。当前社会聚合仍使用全状态路径，完整增量刷新属于后续工作。
-没有参与人口的目标可以进入 `Dormant` 并离开文化热索引；上层应用同步 society 后会停用文化计划编译出的转移规则。
+没有参与人口的目标可以进入 `Dormant` 并离开文化热索引；下一次同步 society 后会停用文化计划编译出的转移规则。
 随后进入 `Retired` 时，同步操作会释放目标相关动态状态，并由墓碑保留历史。显式重新激活会创建新一代目标。
+使用 `CulturePlugin` 时，由上层应用驱动这一同步。自 0.13.0 起，也可以改为在 society 插件旁注册文化结算插件
+（`CultureBoundaryPlugin`）：它的每月系统结算生命周期，并把每项变化作为排队的生命周期变化交给 society 插件，
+因此 society 插件仍是 society 状态的唯一写入者。
 生命周期概览见[文化和法律制度系统](/architecture/culture-law/)，
 完整性能基准（benchmark）契约见[设计提案](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)。
 

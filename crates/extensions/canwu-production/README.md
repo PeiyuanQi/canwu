@@ -52,6 +52,13 @@ samples, and boundary so restore and replay reject changed draws or bodies.
 Starting an execution requires an activated completion lease certificate plus
 exact package and resource capacity grants. The certificate locks the output
 account, every consumed allocation leg, and the production runtime version.
+That locked version predates the execution, and every later production
+transition, including a live `CompleteExecution`, advances the runtime record.
+The output credit therefore cites the exact version the output dispatch pinned
+on the execution as `output_source`, which proves the completion; the resource
+plugin accepts that source as the locked record at or after its locked version
+and requires it to equal the pinned source. The credit settles at the dispatch
+boundary's time, at or after the execution's start.
 Production consumes its package grant when work starts and completes it only
 after cancellation or the terminal resource output acknowledgement; there is no
 caller-authored completion flag. Callers submit capacity allocations as

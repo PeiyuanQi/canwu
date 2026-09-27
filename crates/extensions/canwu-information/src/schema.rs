@@ -374,6 +374,7 @@ pub fn information_record_schemas() -> Vec<DomainRecordSchema> {
         record_schema::<Interpretation>(
             true,
             object_schema(&[
+                ("authenticity", PayloadValueType::Object, false),
                 ("capability", PayloadValueType::String, true),
                 ("confidence_per_mille", PayloadValueType::Integer, true),
                 ("interpreted_at", PayloadValueType::Integer, true),

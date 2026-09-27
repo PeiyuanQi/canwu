@@ -1,6 +1,7 @@
 mod boundary;
 mod decision;
 mod error;
+mod evaluation;
 mod event_payloads;
 mod hashing;
 mod ingress;
@@ -22,6 +23,7 @@ mod scheduling;
 mod settlement;
 mod state;
 mod transactions;
+mod transitions;
 mod validation;
 mod view;
 
@@ -36,9 +38,9 @@ pub use boundary::{
     ReservationPoolKey, ReservationRef, ReservationRequest, ReservationRequestRecord,
 };
 pub use canwu_core::{
-    DomainRecordVersionRef, DomainRecordVersionSource, EvidenceRef, HolderKnowledgeRecordId,
-    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind,
-    KnowledgeSchemaId,
+    DomainRecordVersionRef, DomainRecordVersionSource, EvaluationTerm, EvaluationTraceRecord,
+    EvidenceRef, HolderKnowledgeRecordId, KnowledgeHolderPolicy, KnowledgeHolderRef,
+    KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId,
 };
 pub use canwu_decision::{
     ControllerDecision, DECISION_ARCHIVE_BUCKET_PAGE_FORMAT_VERSION,
@@ -67,6 +69,7 @@ pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
     PreparedDecisionIngress,
 };
+pub use evaluation::{BoundaryEvaluationTrace, EvaluationLimitsV1};
 pub use ingress::{
     IngressCancellationAuthority, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
     MAX_INGRESS_CANCELLATION_REASON_BYTES, MaintenanceChangeRecord, MaintenanceDisposition,
@@ -131,6 +134,13 @@ pub use records::{
     DomainRecordOperation, DomainRecordPageRoots, DomainRecordSchema, DomainReference,
     DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, PatriciaStoreMetrics,
     PersistentDomainRecordStore, format8_patricia_scale_probe,
+};
+pub use transitions::{
+    MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
+    MAX_TRANSITION_EXPECTED_VERSIONS, MAX_TRANSITION_LINEAGE_ID_BYTES, MAX_TRANSITION_PARTICIPANTS,
+    MAX_TRANSITION_READY_HORIZON, PendingTransitionManifest, TransitionAuditOutcome,
+    TransitionAuditRecord, TransitionManifest, TransitionManifestId, TransitionParticipant,
+    TransitionParticipantAudit, TransitionRecordVersion,
 };
 
 use canwu_core::{
@@ -748,6 +758,18 @@ impl StateKey {
     #[must_use]
     pub fn core_evidence() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "evidence")
+    }
+
+    /// Pending transition manifests and the transition audits of the current
+    /// boundary. A phase-7, phase-10, or phase-12 boundary system that
+    /// declares this key as a write may propose
+    /// `BoundaryDirective::RegisterTransitionManifest`; a phase-10 system that
+    /// declares it may propose `BoundaryDirective::StageTransitionWrite`.
+    /// Reading manifests or audits requires declaring it as a read, and a
+    /// reader sees only those its plugin coordinates or participates in.
+    #[must_use]
+    pub fn core_transitions() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "transitions")
     }
 }
 
@@ -1477,6 +1499,7 @@ impl Simulation {
                     actions: BTreeMap::new(),
                     pending_ingress: BTreeSet::new(),
                     cancelled_ingress: BTreeSet::new(),
+                    transition_manifests: BTreeMap::new(),
                 },
                 counters: RuntimeCounters {
                     next_event_id: 1,
@@ -2013,6 +2036,8 @@ impl Simulation {
             &self.state.metadata.run_configuration,
         )?;
         let initial_scenario = hashing::committed_initial_scenario(self.bound_initial_scenario());
+        let transition_manifests: Vec<_> =
+            self.state.scheduler.transition_manifests.values().collect();
         state_hash(&StateHashMaterial {
             engine_version: ENGINE_VERSION,
             snapshot_format_version: SNAPSHOT_FORMAT_VERSION,
@@ -2037,6 +2062,7 @@ impl Simulation {
             plugin_descriptors: &plugin_descriptors,
             schema: &self.schema,
             scheduled: &scheduled,
+            transition_manifests: &transition_manifests,
             root_seed: self.state.current.root_seed,
             authority_root_seed: self.state.current.authority_root_seed,
             random_streams: &random_streams,
@@ -2110,7 +2136,13 @@ impl Simulation {
                         action: action.clone(),
                     })
                     .collect();
-                scheduler_commitment_root(self.state.scheduler.now, &scheduled)
+                let transition_manifests: Vec<_> =
+                    self.state.scheduler.transition_manifests.values().collect();
+                scheduler_commitment_root(
+                    self.state.scheduler.now,
+                    &scheduled,
+                    &transition_manifests,
+                )
             })
             .transpose()?;
         let random_streams = needs
@@ -2466,6 +2498,11 @@ impl Simulation {
                         .collect(),
                     pending_ingress,
                     cancelled_ingress,
+                    transition_manifests: snapshot
+                        .pending_transition_manifests
+                        .into_iter()
+                        .map(|manifest| (manifest.id(), manifest))
+                        .collect(),
                 },
                 counters: RuntimeCounters {
                     next_event_id: snapshot.next_event_id,

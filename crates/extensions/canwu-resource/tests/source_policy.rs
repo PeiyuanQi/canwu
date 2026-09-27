@@ -384,7 +384,10 @@ fn allocated(
     let leg = resource.allocation_legs.values().next().unwrap();
     let expected_account = match &policy {
         ResourceDemandSourcePolicyV1::Pooled => FIRST,
-        ResourceDemandSourcePolicyV1::ExactAccounts(accounts) => accounts.first().unwrap().as_str(),
+        ResourceDemandSourcePolicyV1::ExactAccounts(accounts)
+        | ResourceDemandSourcePolicyV1::Granted { accounts, .. } => {
+            accounts.first().unwrap().as_str()
+        }
     };
     assert_eq!(leg.account.as_str(), expected_account);
     assert_eq!(leg.quantity, 60);
@@ -578,6 +581,49 @@ fn assert_rejected_command(
         before,
         "rejection must not mutate resource state"
     );
+}
+
+#[test]
+fn amending_a_demand_lifecycle_status_is_a_durable_rejection() {
+    let plugin = ResourcePlugin::default();
+    let mut simulation = new_simulation(&plugin, false);
+    submit_demand(&mut simulation, 1, demand(RELIEF, 20, 277));
+    let id = ResourceDemandId::new(RELIEF).unwrap();
+    let current = state(&simulation).demands[&id].clone();
+    let mut replacement = current.clone();
+    replacement.status = DemandStatus::Cancelled;
+    let operation_key = ResourceOperationKey::new("fixture:amend:status").unwrap();
+    let request = ResourceOperationRequestV1::AmendDemand(ResourceAmendDemandRequestV1 {
+        operation_key: operation_key.clone(),
+        expected_demand_revision: current.revision,
+        replacement,
+    });
+    simulation
+        .enqueue_command(
+            SimTime::from_minutes(137),
+            0,
+            CommandRequest::new(
+                CommandRequestId::new(2),
+                simulation.revision(),
+                envelope(holder(), request, 137),
+            ),
+        )
+        .unwrap();
+    for boundary in ["amendment admission", "amendment settlement"] {
+        simulation
+            .step_canonical()
+            .expect(boundary)
+            .expect(boundary);
+    }
+    let settled = state(&simulation);
+    let outcome = &settled.outcomes[&operation_key];
+    assert_eq!(outcome.status, ResourceOperationStatus::Rejected);
+    assert_eq!(outcome.rejection_code.as_deref(), Some("invalid_lifecycle"));
+    assert_eq!(settled.demands[&id], current);
+    // Later boundaries still settle: the demand allocates normally.
+    allocate(&mut simulation);
+    assert_eq!(state(&simulation).allocation_legs.len(), 1);
+    exact_replay(&simulation, &plugin);
 }
 
 #[test]

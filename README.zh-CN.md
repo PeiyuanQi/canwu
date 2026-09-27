@@ -28,11 +28,11 @@ Rust 应用应依赖官方支持的对外 API，而不是直接依赖实现 crat
 
 ```toml
 [dependencies]
-canwu-api = "=0.12.0"
+canwu-api = "=0.13.0"
 ```
 
 需要持久化 Canwu 存档的应用应固定已发布的引擎版本，并且只在同时提供明确
-存档迁移时升级。上例选择不可变的 `0.12.0` 版本，而不是持续变化的 `main` 分支。
+存档迁移时升级。上例选择不可变的 `0.13.0` 版本，而不是持续变化的 `main` 分支。
 
 `canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
 细节，不建议应用代码直接依赖，也不单独承诺兼容性。模拟领域扩展也会作为
@@ -98,33 +98,35 @@ cargo run --locked -p canwu-debug
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
 - `canwu-knowledge`：每个角色知道什么，以及信息来自何时
 - `canwu-routing`：确定性的角色相对路线规划
-- `canwu-transport`：行程、保管权交接、容量预订和运送执行
-- `canwu-sim`：不公开的模拟状态、命令、调度和插件
-- `canwu-api`：供程序、智能体、解释工具和调试工具使用的公开 API
+- `canwu-transport`：行程、保管权交接、容量预订、运力池和运送执行记录
+- `canwu-sim`：不公开的模拟状态、命令、调度、插件和多所有者转移审计
+- `canwu-api`：供程序、智能体、解释（包括规则评估轨迹）和调试工具使用的公开 API
 - `canwu-reference-world`：可替换的示例实体、脱离式投影、移动插件、路由适配器
   和可运行的持久化/重演入门示例
 - `canwu-debug`：建立在公开 API 与参考整合包之上的小型参考客户端
-- `canwu-information`：已正式发布的信息生命周期扩展
+- `canwu-information`：已正式发布的信息生命周期扩展，包括真伪判定
 - `canwu-correspondence`：建立在寻路、运输与信息生命周期之上的已正式发布
-  通信模拟领域扩展和模拟插件
+  通信模拟领域扩展和模拟插件，支持受托承运人
 - `canwu-society`：已正式发布的社会传播模拟模块（`social diffusion simulation module`）；
   在架构上属于建立在 `canwu-api` 之上的模拟领域扩展（`domain extension`）
 - `canwu-culture`：已正式发布的文化编写、编译与生命周期扩展，建立在
-  `canwu-society` 之上
-- `canwu-law`：实验性的确定性法律编写、制度程序、版本化法律、适用、
-  承继与退休扩展
+  `canwu-society` 之上，提供由上层应用驱动和在引擎内结算两种插件
+- `canwu-law`：实验性的确定性法律编写、制度程序（包括加权、表决单元与
+  征询阶段）、版本化法律、适用、承继与退休扩展
 - `canwu-technology`：已发布的通用技术模拟扩展，负责证据、本地能力、实施、
   按用途采用和传播机会
 - `canwu-history-research`：已发布、位于基础技术真值下游的三个可选历史研究评估插件
 - `canwu-fiscal`：已发布的通用财政程序扩展，负责地区法规采纳、核算、减免、
   授权、执行凭证与报告
-- `canwu-resource`：可选的守恒物资账户、需求、分配、运输托管、原子交换、消费、
-  损耗、履约和持有人相对报告扩展
+- `canwu-resource`：可选的守恒物资账户、需求、分配、运输托管、原子交换、
+  动用授权、消费、损耗、履约和持有人相对报告扩展
 - `canwu-production`：可选的工艺、地点、设施、工单、在制品、维护、修复和
   产出结算扩展
 - `canwu-economy-reference-content`：以出处、model card 和精确地点/时期/资源/
   工艺覆盖键约束的经济参考内容
 - `canwu-military`：可选的军事模拟扩展，负责军队、行动、战斗、占领、军事知识和军政管理
+- `canwu-movement`：可选的移动生命周期扩展，在 `canwu-transport` 记录之上负责
+  移动命令、路段结算、运力池分配和持有人相对的移动报告
 - `canwu-force-supply-reference`：可替换的军需资源消费者，用于证明物资履约和
   军事后果属于不同领域
 - `canwu-economy-reference`：可运行的 G1b 粮食纵向切片，以及脱离式 G5 地方

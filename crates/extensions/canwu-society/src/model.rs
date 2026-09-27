@@ -1,14 +1,16 @@
 use crate::PLUGIN_NAME;
+use crate::ingress::CohortHeadcountRebaseV1;
 use canwu_api::{
-    CanwuError, CoreEntityKind, DomainRecord, DomainRecordClass, DomainRecordDraft,
+    BoundaryId, CanwuError, CoreEntityKind, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordType, DomainReference, DomainReferenceTarget,
-    DomainValueKindClass, EntityRef, ErrorCode, PersonId, SimTime, TerritoryId,
+    DomainValueKindClass, EntityRef, ErrorCode, IngressId, PersonId, SimTime, TerritoryId,
     TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const SOCIETY_SCHEMA_VERSION: u32 = 2;
+pub(crate) const SOCIETY_NAMESPACE: &str = "canwu.society";
 const ROOT_ID: &str = "root";
 
 pub struct SocietyStateRecord;
@@ -95,14 +97,73 @@ pub struct CohortTransferOutcome {
     pub result: String,
 }
 
+/// Terminal status of one queued society ingress packet.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SocietyIngressStatus {
+    Applied,
+    Rejected,
+}
+
+/// Ledger entry for one admitted cohort headcount rebase.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CohortHeadcountRebaseOutcome {
+    pub ingress: IngressId,
+    pub admitted_at: BoundaryId,
+    pub settled_at: SimTime,
+    pub status: SocietyIngressStatus,
+    /// Stable rejection code or message; present exactly when rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
+    /// The decoded rebase; absent only when the payload was malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebase: Option<CohortHeadcountRebaseV1>,
+    /// Cohort headcount before an applied rebase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_headcount: Option<u64>,
+}
+
+/// Ledger entry for one admitted lifecycle delta.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocietyLifecycleDeltaOutcome {
+    pub ingress: IngressId,
+    pub admitted_at: BoundaryId,
+    pub settled_at: SimTime,
+    pub status: SocietyIngressStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejection: Option<String>,
+    /// Targets of an applied delta whose release was blocked by a stored
+    /// institutional decision or another live society dependency. Their
+    /// rules were still deactivated; their dynamic state was kept.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub blocked_releases: BTreeSet<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SocietyCohortExchangeLedger {
     pub schema_version: u32,
     pub outcomes: BTreeMap<String, CohortTransferOutcome>,
+    /// Rebase outcomes keyed by the decimal ingress ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rebases: BTreeMap<String, CohortHeadcountRebaseOutcome>,
+    /// Lifecycle delta outcomes keyed by the decimal ingress ID.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lifecycle_deltas: BTreeMap<String, SocietyLifecycleDeltaOutcome>,
 }
 
 impl SocietyCohortExchangeLedger {
     pub const SCHEMA_VERSION: u32 = 1;
+
+    /// Returns an empty ledger at the current schema version.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            ..Self::default()
+        }
+    }
 
     /// # Errors
     ///
@@ -117,6 +178,47 @@ impl SocietyCohortExchangeLedger {
             if key != &outcome.operation_id || key.is_empty() || outcome.quantity == 0 {
                 return Err(invalid(
                     "society cohort exchange ledger contains an invalid outcome",
+                ));
+            }
+        }
+        for (key, outcome) in &self.rebases {
+            let consistent = match outcome.status {
+                SocietyIngressStatus::Applied => {
+                    outcome.rejection.is_none()
+                        && outcome.previous_headcount.is_some()
+                        && outcome
+                            .rebase
+                            .as_ref()
+                            .is_some_and(|rebase| rebase.new_headcount > 0)
+                }
+                SocietyIngressStatus::Rejected => {
+                    outcome
+                        .rejection
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty())
+                        && outcome.previous_headcount.is_none()
+                }
+            };
+            if key != &outcome.ingress.get().to_string() || !consistent {
+                return Err(invalid(
+                    "society cohort exchange ledger contains an invalid rebase outcome",
+                ));
+            }
+        }
+        for (key, outcome) in &self.lifecycle_deltas {
+            let consistent = match outcome.status {
+                SocietyIngressStatus::Applied => outcome.rejection.is_none(),
+                SocietyIngressStatus::Rejected => {
+                    outcome
+                        .rejection
+                        .as_ref()
+                        .is_some_and(|reason| !reason.is_empty())
+                        && outcome.blocked_releases.is_empty()
+                }
+            };
+            if key != &outcome.ingress.get().to_string() || !consistent {
+                return Err(invalid(
+                    "society cohort exchange ledger contains an invalid lifecycle delta outcome",
                 ));
             }
         }
@@ -318,6 +420,20 @@ pub struct PolicyPressure {
     pub material_penalty_per_mille: u16,
     pub disruption_per_mille: u16,
     pub migration_pressure_per_mille: u16,
+    /// Authority that issued this pressure: a government, organization, or
+    /// person. The issuer is bound into the record's core references, so it
+    /// must name a live core entity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<EntityRef>,
+    /// Version of the issuer's decision that produced this pressure; zero
+    /// means no decision provenance. A non-zero version requires an issuer.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub decision_version: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -470,6 +586,22 @@ impl Default for SocietyState {
 }
 
 impl SocietyState {
+    /// Clears materialized aggregates, mobilization candidates, and
+    /// projections with their timestamps.
+    ///
+    /// Every owner-side change to cohort headcounts or distributions (a
+    /// cohort transfer or a rebase) calls this, so the derived state is
+    /// rematerialized by the next phase-10, phase-12, and phase-13 systems
+    /// instead of failing exact derived-state validation.
+    pub(crate) fn invalidate_derived_state(&mut self) {
+        self.aggregates.clear();
+        self.mobilization_candidates.clear();
+        self.projections.clear();
+        self.last_aggregation_at = None;
+        self.last_mobilization_at = None;
+        self.last_projection_at = None;
+    }
+
     /// Merges duplicate disposition buckets and removes empty buckets.
     ///
     /// # Errors
@@ -726,6 +858,23 @@ impl SocietyState {
             ] {
                 validate_per_mille(value, name)?;
             }
+            if let Some(issuer) = &policy.issuer
+                && !matches!(
+                    issuer,
+                    EntityRef::Government(_) | EntityRef::Organization(_) | EntityRef::Person(_)
+                )
+            {
+                return Err(invalid(format!(
+                    "policy {} issuer must be a government, organization, or person",
+                    policy.id
+                )));
+            }
+            if policy.decision_version > 0 && policy.issuer.is_none() {
+                return Err(invalid(format!(
+                    "policy {} records decision version {} without an issuer",
+                    policy.id, policy.decision_version
+                )));
+            }
         }
         for rule in self.transition_rules.values() {
             validate_target_and_cohorts(self, &rule.target_id, &rule.affected_cohorts, &rule.id)?;
@@ -871,6 +1020,24 @@ impl SocietyState {
             references.insert(DomainReference {
                 role: "actor".to_owned(),
                 target: DomainReferenceTarget::Core(EntityRef::Person(observer.actor)),
+            });
+        }
+        for issuer in self
+            .policies
+            .values()
+            .filter_map(|policy| policy.issuer.as_ref())
+        {
+            // A person issuer is bound under the actor role and a government
+            // or organization under the institution role, so the reference
+            // schema is unchanged.
+            let role = if matches!(issuer, EntityRef::Person(_)) {
+                "actor"
+            } else {
+                "institution"
+            };
+            references.insert(DomainReference {
+                role: role.to_owned(),
+                target: DomainReferenceTarget::Core(issuer.clone()),
             });
         }
         references.into_iter().collect()

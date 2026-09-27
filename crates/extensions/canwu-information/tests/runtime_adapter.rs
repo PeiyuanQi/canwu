@@ -576,6 +576,7 @@ fn record_interpretation_operation(
                     status: InterpretationStatus::Succeeded,
                     capability: "decode_fixture".to_owned(),
                     confidence_per_mille: 900,
+                    authenticity: None,
                 },
                 authority,
             },

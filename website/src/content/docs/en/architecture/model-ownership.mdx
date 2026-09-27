@@ -72,6 +72,28 @@ That rule gives the two candidate crates different outcomes:
 
 Typed payloads for movement, army arrival, person travel, letter delivery, report dispatch, knowledge, and debug fields are no longer public `canwu-event` variants. Private compatibility payloads in the reference runtime still validate the legacy tags and fields strictly; they move again with their world, knowledge, or debug integration. Plugin events expose their compatibility namespace through `plugin_identity`.
 
+## Domain ownership after 0.13.0
+
+The same rule decides where the downstream gap-set contracts of 0.12.0 and 0.13.0 live. The engine owns what must be deterministic, authoritative, and replayable; the application keeps period content and its own authority.
+
+| Concern | Owner | Application boundary |
+| --- | --- | --- |
+| Person life and custody state, runtime person creation, queued-ingress cancellation | `canwu-sim` core state and directives (0.12.0) | When a person dies, is captured, is released, or appears; what to withdraw |
+| Multi-owner conditional transitions | `canwu-sim` transition manifest, phase-10 staging, and phase-11 audit | The participants, expected versions, and meaning of each transition |
+| Rule-evaluation evidence | `canwu-core` record, `canwu-sim` boundary evidence, `canwu-api` viewer read | Rule IDs and the meaning of their terms |
+| Decision lineage and seat succession | `canwu-decision` ticket and controller binding | Who holds a seat and when a successor takes it |
+| Delegated resource access | `canwu-resource` access grant and `Granted` source policy | Who may grant whom, and the authority evidence record |
+| Movement lifecycle and capacity pools | `canwu-movement` runtime record and plugin; `canwu-transport` records and pure allocation | Incidents, hazards, hostility, their random draws, and authority-basis records |
+| Delegated carriers and carrier seizure | `canwu-correspondence` | The relationship behind a delegation, and relaying news of a seizure to the sender |
+| Authenticity finding | `canwu-information` interpretation | How likely a forgery is to be detected |
+| Weighted, unit-block, and advisory procedure stages | `canwu-law` compiled procedure | Seat weights, blocks, and the tie-break choice |
+| Culture boundary settlement | `canwu-culture` `CultureBoundaryPlugin` settles the lifecycle and produces deltas; `canwu-society` remains the single writer of `canwu.society:state` | Exposure signals and the culture definition |
+| Policy-pressure provenance and cohort headcount rebase | `canwu-society` | The external stock record a rebase cites |
+| External transmission source | `canwu-technology` | The cited content record and its declared reliability |
+| Fiscal archive, observer bound, batched consumption, production limits | Not shipped; deferred series items | — |
+
+Two names are easy to confuse. The reference-world movement plugin moves the example world's armies and people through `OrderMovement`; it is replaceable example code. `canwu-movement` is the generic movement lifecycle extension for `canwu-transport` records, and it knows nothing about the reference world.
+
 ## Why direct merges fail
 
 - Folding `canwu-world` into `canwu-core` would make one historical worldview foundational.

@@ -145,6 +145,7 @@ fn gap_g21_transport_persons_group() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn gap_g22_transport_seizure_handoff() {
     let mut execution = execution_with_failed_first_leg(&["a", "b", "c"]);
     let seizure = Handoff {
@@ -207,6 +208,137 @@ fn gap_g22_transport_seizure_handoff() {
     let loaded: Handoff = serde_json::from_value(legacy).unwrap();
     assert_eq!(loaded.kind, HandoffKind::Planned);
     assert_eq!(loaded.id, HandoffId(9));
+
+    // A terminal seizure ends custody on the failed current leg of a live
+    // execution, no earlier than the failure.
+    let terminal = |id: u64, leg: u64, minute: i64| Handoff {
+        id: HandoffId(id),
+        from_leg: LegExecutionId(leg),
+        to_leg: LegExecutionId(leg),
+        from_custodian: "carrier/escort".to_owned(),
+        to_custodian: "army:3".to_owned(),
+        at: SimTime::from_minutes(minute),
+        location: "a-b".to_owned(),
+        evidence: Vec::new(),
+        kind: HandoffKind::Seizure {
+            by: EntityRef::Army(ArmyId::new(3)),
+        },
+    };
+    let mut seized = execution_with_failed_first_leg(&["a", "b", "c"]);
+    assert!(matches!(
+        seized.record_handoff(terminal(1, 1, 4)),
+        Err(TransportError::InvalidHandoff(_))
+    ));
+    let mut planned_self = terminal(1, 1, 5);
+    planned_self.kind = HandoffKind::Planned;
+    assert!(seized.record_handoff(planned_self).is_err());
+    seized.record_handoff(terminal(1, 1, 5)).unwrap();
+    assert!(seized.custody_left_itinerary());
+    assert_eq!(round_trip(&seized), seized);
+
+    // Custody does not come back: no reroute, arrival, successful
+    // reconciliation, or further handoff, including a second terminal
+    // seizure. The owner can still close the execution.
+    assert!(matches!(
+        seized.reroute(
+            revision(
+                2,
+                Some(1),
+                plan(&["a", "c"]),
+                SimTime::from_minutes(6),
+                ItineraryRevisionReason::Recovery {
+                    explanation: "resume".to_owned(),
+                },
+            ),
+            SimTime::from_minutes(6),
+        ),
+        Err(TransportError::InvalidState(_))
+    ));
+    for refused in [
+        seized.mark_arrival_pending(),
+        seized.fail_current_leg("again".to_owned(), SimTime::from_minutes(6)),
+        seized.reconcile_information(canwu_transport::ReconciliationOutcome::Success),
+        seized.request_booking(
+            canwu_transport::CapacityBooking::new(
+                canwu_transport::CapacityBookingId(1),
+                TransportExecutionId(1),
+                "seat".to_owned(),
+                SimTime::from_minutes(10),
+                SimTime::from_minutes(20),
+                1,
+                0,
+            )
+            .unwrap(),
+        ),
+    ] {
+        assert!(matches!(refused, Err(TransportError::InvalidState(_))));
+    }
+    assert!(matches!(
+        seized.record_handoff(terminal(2, 1, 6)),
+        Err(TransportError::InvalidHandoff(_))
+    ));
+    assert_eq!(seized.legs[0].failed_at, Some(SimTime::from_minutes(5)));
+    seized.cancel().unwrap();
+    assert_eq!(seized.state, TransportExecutionState::Cancelled);
+
+    // An execution with a delivery saga closes as failed.
+    let attempt = canwu_core::DomainRecordVersionRef {
+        record: DomainRecordRef::new("fixture.information", "delivery_attempt", "d"),
+        version: 1,
+        established_by: canwu_core::DomainRecordVersionSource::InitialScenario,
+    };
+    let mut delivering = TransportExecution::new(TransportExecutionId(2), Some(attempt.clone()));
+    delivering
+        .install_initial_itinerary(revision(
+            1,
+            None,
+            plan(&["a", "b"]),
+            SimTime::EPOCH,
+            ItineraryRevisionReason::Initial,
+        ))
+        .unwrap();
+    delivering
+        .begin_saga(attempt, "fixture-delivery".to_owned())
+        .unwrap();
+    delivering.start_current_leg(SimTime::EPOCH).unwrap();
+    delivering
+        .fail_current_leg("seized".to_owned(), SimTime::from_minutes(5))
+        .unwrap();
+    delivering.record_handoff(terminal(1, 1, 5)).unwrap();
+    delivering
+        .reconcile_information(canwu_transport::ReconciliationOutcome::Failure {
+            error: "carrier seized".to_owned(),
+        })
+        .unwrap();
+    assert_eq!(delivering.state, TransportExecutionState::Failed);
+
+    // A superseded revision's leg, a leg another handoff already left, and a
+    // terminal execution admit no terminal seizure.
+    let mut rerouted = execution_with_failed_first_leg(&["a", "b", "c"]);
+    rerouted
+        .reroute(
+            revision(
+                2,
+                Some(1),
+                plan(&["a", "c"]),
+                SimTime::from_minutes(6),
+                ItineraryRevisionReason::Recovery {
+                    explanation: "detour".to_owned(),
+                },
+            ),
+            SimTime::from_minutes(6),
+        )
+        .unwrap();
+    assert!(rerouted.record_handoff(terminal(1, 1, 6)).is_err());
+    let mut continued = execution_with_failed_first_leg(&["a", "b", "c"]);
+    let mut onward = terminal(1, 1, 5);
+    onward.to_leg = LegExecutionId(2);
+    continued.record_handoff(onward).unwrap();
+    assert!(continued.record_handoff(terminal(2, 1, 6)).is_err());
+    let mut closed = execution_with_failed_first_leg(&["a", "b", "c"]);
+    closed.cancel().unwrap();
+    assert!(closed.record_handoff(terminal(1, 1, 6)).is_err());
+    assert!(!closed.custody_left_itinerary());
 }
 
 #[test]

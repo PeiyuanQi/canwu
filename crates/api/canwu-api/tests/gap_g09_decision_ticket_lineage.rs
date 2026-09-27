@@ -1,6 +1,8 @@
 //! Gap G-09: decision ticket lineage. A follow-up ticket names a terminal
-//! parent of the same decision maker; the parent is validated at admission,
-//! persisted on the ticket and its trace, and survives save/load and replay.
+//! parent of the same decision maker, or, for a seat succession, a parent
+//! whose controller is bound to the same seat; the parent is validated at
+//! admission, persisted on the ticket and its trace, and survives save/load
+//! and replay.
 
 use canwu_api::{
     Canwu, DecisionAttemptErrorCode, DecisionAttemptOutcome, DecisionAuthority, DecisionContext,
@@ -13,6 +15,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 const CONTROLLER: &str = "lineage-controller";
+const SEAT_HOLDER: &str = "north-seat-holder";
+const SEAT_SUCCESSOR: &str = "north-seat-successor";
+const OTHER_SEAT: &str = "south-seat-holder";
 
 fn policy() -> WeightedUtilityPolicy {
     WeightedUtilityPolicy::new(
@@ -25,11 +30,20 @@ fn policy() -> WeightedUtilityPolicy {
 }
 
 fn draft(id: u64, decision_maker: EntityRef, parent: Option<u64>) -> DecisionTicketDraft {
+    seat_draft(CONTROLLER, id, decision_maker, parent)
+}
+
+fn seat_draft(
+    controller: &str,
+    id: u64,
+    decision_maker: EntityRef,
+    parent: Option<u64>,
+) -> DecisionTicketDraft {
     DecisionTicketDraft {
         id: DecisionTicketId::new(id),
         definition: "fixture.follow-up".to_owned(),
         decision_maker,
-        assigned_controller: CONTROLLER.to_owned(),
+        assigned_controller: controller.to_owned(),
         summary: format!("Fixture decision {id}"),
         context: DecisionContext::new("fixture.follow-up.v1", json!({ "ticket": id })),
         options: vec![DecisionOption {
@@ -173,6 +187,67 @@ fn gap_g09_decision_ticket_lineage() {
         canwu.decision_history_location(&DecisionHistoryKey::Ticket(DecisionTicketId::new(1))),
         DecisionHistoryLocation::Hot
     );
+
+    // Seat succession: the seat's first holder cannot continue, so a
+    // successor holder, a different decision maker, registers a new
+    // controller bound to the same seat and follows the cancelled ticket.
+    let seat_controller = |id: &str, actor, seat: &str| DecisionMutation::RegisterController {
+        controller: DecisionControllerBinding::new(
+            id,
+            policy().identity.clone(),
+            DecisionAuthority::Actor { actor },
+        )
+        .with_seat(seat, "fixture.seat-profile"),
+    };
+    settle(
+        &mut canwu,
+        vec![
+            (
+                11,
+                seat_controller(SEAT_HOLDER, ids.commander, "seat.north"),
+            ),
+            (
+                12,
+                seat_controller(SEAT_SUCCESSOR, ids.observer, "seat.north"),
+            ),
+            (13, seat_controller(OTHER_SEAT, ids.observer, "seat.south")),
+            (14, open(seat_draft(SEAT_HOLDER, 7, holder.clone(), None))),
+        ],
+    );
+    settle(&mut canwu, vec![(15, cancel(7))]);
+    settle(
+        &mut canwu,
+        vec![
+            // The successor holder of the same seat.
+            (
+                16,
+                open(seat_draft(SEAT_SUCCESSOR, 8, other_holder.clone(), Some(7))),
+            ),
+            // The same successor under a controller of another seat.
+            (
+                17,
+                open(seat_draft(OTHER_SEAT, 9, other_holder.clone(), Some(7))),
+            ),
+            // A controller without a seat never continues another maker's
+            // ticket.
+            (18, open(draft(10, other_holder.clone(), Some(7)))),
+        ],
+    );
+    let successor = canwu
+        .decision_ticket(DecisionTicketId::new(8))
+        .expect("the same seat should admit the successor's follow-up ticket");
+    assert_eq!(successor.parent_ticket, Some(DecisionTicketId::new(7)));
+    assert_eq!(successor.decision_maker, other_holder);
+    for (request_id, ticket_id) in [(17, 9), (18, 10)] {
+        let (code, message) = rejection(&canwu, request_id);
+        assert_eq!(code, DecisionAttemptErrorCode::InvalidDecision);
+        assert!(message.contains("different decision maker"), "{message}");
+        assert!(
+            canwu
+                .decision_ticket(DecisionTicketId::new(ticket_id))
+                .is_none()
+        );
+    }
 
     // Lineage is persisted state: old-default tickets keep their shape, and
     // the chain survives strict save/load and exact replay.

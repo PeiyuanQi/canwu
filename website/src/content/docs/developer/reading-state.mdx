@@ -12,9 +12,9 @@ sidebar:
 
 | 调用者 | 推荐接口 | 说明 |
 | --- | --- | --- |
-| 受信任服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()`、`person_availabilities()` | 读取通用权威状态与完整证据 |
+| 受信任服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()`、`person_availabilities()`、`pending_transition_manifests()` | 读取通用权威状态与完整证据 |
 | 领域规则或渲染适配器 | 整合的 `snapshot()` 或类似投影 | 把类型化领域记录组装为只读视图 |
-| 玩家或角色智能体 | `viewer_for_actor()` + `query_knowledge()` | 只读取指定角色的知识，不泄露真值 |
+| 玩家或角色智能体 | `viewer_for_actor()` + `query_knowledge()` 或 `evaluation_traces()` | 只读取指定角色的知识及其可以看到的规则说明，不泄露真值 |
 | 解释界面 | `explain()` | 从已记录事件或失败生成因果说明 |
 
 ## 两条读取路径（节选）
@@ -69,6 +69,26 @@ let plan = plan_route(&snapshot, &request)?;
 请在声明了 `canwu.core.knowledge` 读取的插件系统或命令处理器中调用它。它只采用持有人账本在视图给出的读取切面上声明的端点和连接；若某条已知连接指向持有人不知道的端点，构建会失败。快照的 `knowledge_cut` 记录该切面；返回的 `KnowledgeReadCutDigest` 证明读取了哪些事实，只要这些事实不变，摘要就不变。视图读取本身属于系统访问，因此 `holder` 必须取自已准入的权限，例如命令签发者，而不能取自未经验证的载荷。
 
 在运行时之外，可以把已有的查询结果（例如受限查看器的 `query_knowledge(&planning_knowledge_query())`）交给纯函数 `planning_snapshot_from_knowledge_result`。分页结果会被拒绝，因为部分页面无法证明持有人的完整网络。
+
+## 解释规则结果
+
+边界系统记录[评估轨迹](/architecture/settlement/#评估轨迹)后，玩家或智能体可以看到某条规则如何得出一个数值，而看不到背后的证据：
+
+```rust
+let viewer = canwu.viewer_for_actor(ids.commander)?;
+for trace in viewer.evaluation_traces(&EntityRef::Army(ids.army), None)? {
+    println!("{} {} = {}", trace.rule_id, trace.rule_version, trace.result);
+    for term in &trace.terms {
+        println!("  {}: {}", term.term_id, term.contribution);
+    }
+}
+```
+
+`evaluation_traces(subject, after)` 按边界与记录顺序返回 `after` 之后各边界的 `EvaluationTraceView`；传入 `None` 时返回所有保留边界的轨迹。视图保留规则、对象、边界、结果和每一项的贡献值，但不含证据，也不含产生它的插件与系统。人物或机构可以看到关于自身实体的轨迹；关于其他对象的轨迹，只有在提及该对象的知识发布于轨迹评估之前进入其账本时才可见，因此持有人不会获得它尚未得知的对象的计算明细。研究与开发者主体可以看到全部轨迹，公开主体会收到 `InvalidKnowledgeAuthority`。受信任的 `boundaries()` 读取保留带证据的完整记录。
+
+## 跟踪多所有者转移
+
+转移清单只能通过受信任的上层应用接口读取。`pending_transition_manifests()` 列出就绪边界尚未结算的已登记清单；每个边界的 `BoundaryReceipt::transition_audits` 与 `BoundaryRecord::transition_audits` 记录在该边界结算的清单，结果为 `Committed` 或 `Expired`。在模拟内部，只有清单的协调者和参与者可以在声明 `canwu.core.transitions` 读取后，通过 `SimulationView::transition_manifests` 与 `transition_audits` 读取它。向玩家呈现转移时，应使用应用自己的记录或报告，而不是审计记录。
 
 ## 表现层只复制，不回写
 

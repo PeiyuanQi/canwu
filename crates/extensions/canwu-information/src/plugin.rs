@@ -45,7 +45,7 @@ pub const AUTHORITY_COMMAND_PRODUCER: &str = "canwu-authority";
 pub const AUTHORITY_COMMAND_TYPE: &str = "delegate_interpretation_v1";
 
 const PLUGIN_VERSION: &str = env!("CARGO_PKG_VERSION");
-const SEMANTIC_HASH: &str = "8b20a4c41417220c920b8d0312a6011c4cf7ec98566bad61e82bbc5fada30bc8";
+const SEMANTIC_HASH: &str = "8c43afad0a0f483573b11ec595087f16a3a0aa2f3bf8ae0f43c7d019f79d50d7";
 const AUTHORITY_GRANTS_HASH: &str =
     "1f956d1dbee04d6cf7a076f778bb058e47a0a6155cd778c4163f78ccbbfe4b5c";
 const INPUT_HASH_DOMAIN: &str = "canwu.information.operation-input.v1";
@@ -397,6 +397,17 @@ fn apply_lifecycle_boundary(
             ));
             continue;
         };
+        if !authenticity_binding_is_current(view, envelope)? {
+            let mut proposed = previous.clone();
+            proposed.status = InformationOperationStatus::Rejected;
+            proposed.rejection_code = Some("invalid_lifecycle".to_owned());
+            validate_operation_transition(&previous, &proposed).map_err(invalid_record)?;
+            directives.push(mutate(
+                operation_update(existing, &proposed)?,
+                "Persist rejected neutral information authenticity binding",
+            ));
+            continue;
+        }
         match InformationLifecycle::plan(
             &records,
             &envelope.operation.request,
@@ -1087,6 +1098,31 @@ fn validate_runtime_interpretation_authority(
     canonical_hash(AUTHORITY_CLAIM_HASH_DOMAIN, &claim)
         .map(Some)
         .map_err(|error| invalid_record(error.to_string()))
+}
+
+/// An interpretation's authenticity finding must cite the exact current
+/// version of a representation record, including the evidence that
+/// established that version; the lifecycle plan then checks that it is one of
+/// the interpreted representations and that it claims a source.
+fn authenticity_binding_is_current(
+    view: &SimulationView<'_>,
+    envelope: &InformationOperationEnvelope,
+) -> Result<bool, CanwuError> {
+    let LifecycleRequest::RecordInterpretation { payload, .. } = &envelope.operation.request else {
+        return Ok(true);
+    };
+    let Some(finding) = &payload.authenticity else {
+        return Ok(true);
+    };
+    if !finding
+        .representation
+        .record
+        .kind
+        .matches_type::<Representation>()
+    {
+        return Ok(false);
+    }
+    view.domain_record_version_is_current(&finding.representation)
 }
 
 fn authority_evidence_payload(

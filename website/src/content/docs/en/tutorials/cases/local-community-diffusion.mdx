@@ -142,6 +142,12 @@ distribution is unchanged. On day two, institutional enforcement may move
 public alignment faster than private assent, but it still cannot assign a
 percentage of sincere belief directly.
 
+Since 0.13.0, a `PolicyPressure` can also record where it came from: an
+optional `issuer` (a government, organization, or person, bound into the
+record's core references) and the `decision_version` of the decision that set
+it. A non-zero version requires an issuer, and both fields are omitted when
+unused.
+
 ### Step four: generate actor estimates instead of leaking truth
 
 `projection_for_viewer()` requires a Canwu-issued `ViewerContext` and returns
@@ -164,6 +170,27 @@ conflict event. Separate political and security extensions must decide whether
 the result qualifies as protest, repression, migration, riot, coalition, or
 war.
 
+### Rebase a cohort to an external stock
+
+Since 0.13.0, a cohort's headcount can follow a population that another domain
+owns, such as a census record or a garrison that absorbed recruits. Send public
+`cohort_headcount_rebase_v1` ingress carrying a cohort headcount rebase
+(`CohortHeadcountRebaseV1`): the cohort, the new headcount, the exact version of
+the external stock record, and a `RebaseReason` (`ExternalStockChange` or
+`Correction`). The cited version must be the current version of a record
+outside `canwu.society` when the packet is admitted, or the rebase is rejected
+as `stale_external_stock`.
+
+An event-driven phase-12 intake queues the packet, because the society writer
+runs only on Daily boundaries. The next Daily settlement applies it after
+cohort transfers and before institutional decisions, re-proportioning every
+distribution of the cohort with integer largest-remainder allocation: each
+distribution totals the new headcount, and every bucket stays within one unit
+of its exact share. The outcome is recorded in the cohort exchange ledger.
+Expect up to two boundaries between sending a rebase and seeing the rebased
+cohort. Version 0.13.0 also fixes a 0.12.0 defect in which the Daily boundary
+after any applied cohort transfer failed.
+
 ## Domain-extension boundary
 
 Reusable mechanics in this domain extension are cohorts, sparse multidimensional
@@ -181,10 +208,15 @@ For larger culture systems, the published `canwu-culture` SDK compiles these
 definitions into a bounded execution plan and exposes restorable dirty-relationship
 and hot-target indexes. Society aggregation still uses the full-state path;
 incremental refresh remains follow-up work. A target with no engaged population
-can become `Dormant` and leave the culture hot index; host-driven society sync
-then stops its compiled culture transition rules. If it later becomes `Retired`, synchronization
+can become `Dormant` and leave the culture hot index; the next society
+synchronization then stops its compiled culture transition rules. If it later becomes `Retired`, synchronization
 releases target-scoped dynamic state while a tombstone preserves its history.
-Explicit reactivation creates a new generation. See the [culture and legal institutional systems](/en/architecture/culture-law/)
+Explicit reactivation creates a new generation. With `CulturePlugin`, the host
+drives that synchronization. Since 0.13.0, a run can instead register the
+culture boundary plugin (`CultureBoundaryPlugin`) beside the society plugin:
+its Monthly system settles the lifecycle and hands each change to the society
+plugin as a queued lifecycle delta, so the society plugin remains the only
+writer of society state. See the [culture and legal institutional systems](/en/architecture/culture-law/)
 and the [complete benchmark contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md).
 
 ## 3. Where is the code?

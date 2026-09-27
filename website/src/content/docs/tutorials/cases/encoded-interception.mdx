@@ -76,6 +76,10 @@ checkpoint 恢复。
 - 能看到符号副本，不等于有能力解读。
 - 替别人解读，不会让解读者自动获得对方的知识。
 
+## 判断声称的来源
+
+自 0.13.0 起，interpretation 还可以判断来源。`InterpretationPayload::authenticity` 可以携带真伪判定（`AuthenticityFinding`）：所解读的某个 representation 的精确版本、是否接受其声称的来源（`claimed_source_accepted`）、不超过 256 字节的简短依据，以及以千分比表示的置信度。该 representation 必须是本次 interpretation 的输入且为当前版本，并且必须带有声称的来源，否则操作会以 `invalid_lifecycle` 被拒绝。因此，一份伪造的命令可以被记录为“已经读懂，但不接受其声称的发送者”。解读者能否识破伪造、概率多大，仍由应用抽样决定；扩展只记录判定结果。本案例的示例没有使用真伪判定。
+
 ## 可替换的应用层部分
 
 `grouped_symbols_v1`、`decode_k1`、`decode_k2`、节点编号和相对时延都是应用配置。

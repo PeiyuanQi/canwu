@@ -12,9 +12,9 @@ Canwu separates generic authoritative state from actor knowledge, while a domain
 
 | Caller | Preferred interface | Purpose |
 | --- | --- | --- |
-| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()`, `person_availabilities()` | Read generic authoritative state and complete evidence |
+| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()`, `person_availabilities()`, `pending_transition_manifests()` | Read generic authoritative state and complete evidence |
 | Domain rule or renderer adapter | Integration `snapshot()` or equivalent projection | Assemble typed domain records into a detached view |
-| Player or in-world agent | `viewer_for_actor()` + `query_knowledge()` | Read only that actor's knowledge without leaking ground truth |
+| Player or in-world agent | `viewer_for_actor()` + `query_knowledge()` or `evaluation_traces()` | Read only that actor's knowledge, and the rule explanations it may see, without leaking ground truth |
 | Explanation UI | `explain()` | Build causal explanations from recorded events or failures |
 
 ## Two read paths (excerpt)
@@ -69,6 +69,26 @@ let plan = plan_route(&snapshot, &request)?;
 Call it inside a plugin system or command handler that declares the `canwu.core.knowledge` read. It admits only the endpoints and connections that the holder's ledger asserts at the read cut the view derives, and it fails if a known connection names an endpoint the holder does not know. The snapshot's `knowledge_cut` records that cut. The returned `KnowledgeReadCutDigest` is evidence of which facts were read, and it stays the same while those facts are unchanged. The view read itself is system access, so take `holder` from admitted authority, such as the command issuer, never from an unvalidated payload.
 
 Outside the runtime, pass a query result you already hold, such as a restricted viewer's `query_knowledge(&planning_knowledge_query())`, to the pure `planning_snapshot_from_knowledge_result`. A paginated result is rejected because a partial page cannot prove the holder's whole network.
+
+## Explain a rule result
+
+When a boundary system records an [evaluation trace](/en/architecture/settlement/#evaluation-traces), a player or agent can see how a rule arrived at a number without seeing the evidence behind it:
+
+```rust
+let viewer = canwu.viewer_for_actor(ids.commander)?;
+for trace in viewer.evaluation_traces(&EntityRef::Army(ids.army), None)? {
+    println!("{} {} = {}", trace.rule_id, trace.rule_version, trace.result);
+    for term in &trace.terms {
+        println!("  {}: {}", term.term_id, term.contribution);
+    }
+}
+```
+
+`evaluation_traces(subject, after)` returns `EvaluationTraceView` values from the boundaries after `after`, or from every retained boundary for `None`, in boundary and recording order. A view keeps the rule, subject, boundary, result, and each term's contribution; it omits evidence and the producing plugin and system. A person or institution sees traces about its own entity, and traces about another subject only when a knowledge publication naming that subject reached its ledger before the trace was evaluated, so a holder never gains the breakdown of a subject it had not yet learned of. Research and developer principals see every trace, and a public principal receives `InvalidKnowledgeAuthority`. The trusted `boundaries()` read keeps the full records with their evidence.
+
+## Follow multi-owner transitions
+
+Only trusted host reads expose transition manifests. `pending_transition_manifests()` lists the registered manifests whose ready boundary has not settled, and each boundary's `BoundaryReceipt::transition_audits` and `BoundaryRecord::transition_audits` record the manifests that settled there as `Committed` or `Expired`. Inside the simulation, only a manifest's coordinator and participants read it, through `SimulationView::transition_manifests` and `transition_audits` after declaring the `canwu.core.transitions` read. Present a transition to players from the application's own records or reports, not from the audit.
 
 ## Presentation copies state; it does not write back
 

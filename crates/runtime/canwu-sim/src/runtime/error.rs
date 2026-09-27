@@ -82,6 +82,24 @@ pub enum ErrorCode {
     /// A decision maker resolves to a person who is not alive or is detained
     /// or captive.
     DecisionMakerUnavailable,
+    /// Boundary proposals exceed the run's rule-evaluation trace limits.
+    EvaluationTraceLimitExceeded,
+    /// A transition manifest ready at the boundary was staged by some, but
+    /// not all, of its listed participants. The message names the manifest
+    /// and the missing participant plugins; the whole boundary rolled back.
+    ///
+    /// A retry of the same boundary with the same inputs fails the same way.
+    /// A ready boundary in which no participant stages, for example one
+    /// settled with a cadence under which no participant system runs,
+    /// expires the manifest instead; the coordinator may then register a new
+    /// attempt.
+    TransitionParticipantMissing,
+    /// A transition manifest's `expected_pre` or `expected_post` version
+    /// differs from the version the boundary holds or produces. The message
+    /// names the manifest and each mismatched record, which are also listed
+    /// in `related_entities`; the whole boundary rolled back. Recovery is the
+    /// same as for [`Self::TransitionParticipantMissing`].
+    TransitionVersionMismatch,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -195,5 +213,8 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::ValueOutOfRange => "value_out_of_range",
         ErrorCode::IssuerUnavailable => "issuer_unavailable",
         ErrorCode::DecisionMakerUnavailable => "decision_maker_unavailable",
+        ErrorCode::EvaluationTraceLimitExceeded => "evaluation_trace_limit_exceeded",
+        ErrorCode::TransitionParticipantMissing => "transition_participant_missing",
+        ErrorCode::TransitionVersionMismatch => "transition_version_mismatch",
     }
 }

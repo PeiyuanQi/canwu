@@ -161,7 +161,8 @@ replay and audit. It releases only rebuildable target-scoped society state.
 Historical domain-record versions, events, actor knowledge, and archived
 evidence remain queryable.
 
-Hosts should use `settle_culture_society_boundary`: it prepares a bounded
+With the host-driven `CulturePlugin`, hosts should use
+`settle_culture_society_boundary`: it prepares a bounded
 runtime delta and stages society changes only when a lifecycle transition
 occurs. A live external dependency rejects retirement before caller-owned state
 changes. The host persists the culture record, society state, and typed
@@ -176,10 +177,54 @@ Reactivation initializes only required active relationships, cites the old
 tombstone, and creates a new generation; it does not rewrite history or revive
 every former cohort silently.
 
+## In-engine settlement with the culture boundary plugin
+
+Since 0.13.0, a run can let the engine settle the culture lifecycle. It
+registers the culture boundary plugin, `CultureBoundaryPlugin`, beside the
+society plugin instead of `CulturePlugin`. The two flows are alternatives: a
+run that uses the boundary plugin must not also call
+`settle_culture_society_boundary`, and `CulturePlugin` with its host-driven flow
+is unchanged.
+
+1. The scenario installs the culture definition record built with
+   `culture_definition_record`, the culture state record, and a society state
+   prepared with `install_into_society`. Boundary handlers are plain function
+   pointers, so the plugin recompiles the definition record each month instead
+   of holding a compiled plan.
+2. Information or correspondence providers submit resolved exposure as public
+   `culture_exposure_v1` ingress. Each exposure signal batch
+   (`CultureExposureSignalBatch`) names the target ID and generation, the
+   cohort scope, fidelity, evidence, and the earliest eligible boundary. An
+   event-driven phase-12 intake queues admitted batches; a batch for another
+   generation is rejected with `culture_exposure_rejected_v1`.
+3. The Monthly phase-7 system `culture_lifecycle_settle_v1` consumes the queue
+   and accepted institutional decisions on culture alignments, derives
+   engagement and live dependencies from the society snapshot, calls
+   `settle_culture_society_boundary` on that snapshot, and persists
+   `canwu.culture:state`. A target an institution has decided on remains a live
+   dependency, so it does not go dormant or retire.
+4. For each transitioned target, the plugin schedules one internal
+   `society_lifecycle_delta_v1` packet. The society plugin queues it in phase 12
+   and applies it at its next Daily settlement, so it remains the only writer of
+   `canwu.society:state`. A delta the society refuses is recorded, not forced.
+   At each later Monthly settlement the plugin compares society state with the
+   committed culture lifecycle and re-sends whatever delta is still missing;
+   society applies deltas idempotently.
+5. Each due compiled effect becomes a self-addressed `cultural_signal_batch_v1`
+   ingress, which consumers such as the law plugin admit at the next boundary
+   and verify by its producer.
+
+A rejected lifecycle step emits `culture_lifecycle_rejected_v1` and leaves
+culture state unchanged, and each settled transition emits
+`culture_lifecycle_transition_v1`. Because all phase-7 systems read the same
+boundary snapshot, a culture step reaches society state up to two boundaries
+later.
+
 ## From cultural signal to law
 
 Information and correspondence first resolve access and interpretation, then
-may emit a bounded `CultureExposureSignalBatch`. Culture settlement updates
+may emit a bounded `CultureExposureSignalBatch`, the payload of the
+`culture_exposure_v1` ingress. Culture settlement updates
 awareness, private assent, practice, public alignment, organization tie, and
 mobilization, then emits a bounded `CulturalSignalBatch` containing target
 generation, scope, strength, persistence class, cadence, and evidence. This
@@ -245,6 +290,48 @@ Compilation requires every procedure seat to resolve to exactly one institution
 that declares both the procedure and seat. Its holder, permission profile, and
 collision-free length-prefixed controller ID are frozen into the plan; missing
 or ambiguous authority fails before the run starts.
+
+### Weighted, unit-block, and consultation stages
+
+Since 0.13.0, a procedure stage can weigh seats and count unit blocks, and a
+procedure can include an advisory consultation.
+
+- **Vote weight.** `seat_weights` gives a seat an integer weight; a seat
+  without an entry weighs 1, so an empty map is the equal-seat count. `quorum`
+  is compared with the summed weight of seats that cast any ballot, abstentions
+  included, and `threshold` is the per-mille share of `For` weight among `For`
+  plus `Against` weight that the stage needs.
+  Vetoes are seat powers and are never weighted.
+- **Unit blocks.** `block_of_seat` assigns every seat of a stage to exactly one
+  unit block, and `block_threshold`, from 1 to the number of blocks, says how
+  many blocks must be `For`. A block takes the weighted-majority position of its
+  seats; an evenly divided block, or one without `For` or `Against` ballots,
+  takes none. A blocked stage passes only when its weighted seat rule holds and
+  enough blocks are `For`.
+- **Tie-breaks.** When as many blocks are `For` as `Against`, the procedure's
+  `deterministic_tie_break` applies; only procedures with a blocked stage read
+  it. `status-quo` adds no block, so a tied stage waits for more ballots or its
+  deadline. `casting-seat:<seat>` adds one `For` block when that seat's own
+  ballot in the stage is `For`. The casting seat must sit in every blocked
+  stage, and each block threshold must exceed half the blocks, so a tie never
+  passes without it. Stages without blocks have no tie-break; use a threshold
+  of 501 when an even split must fail.
+- **Consultation.** A `Consultation` stage is advisory. Its seats receive
+  tickets whose context carries `"advisory": true`, and their ballots persist
+  as participation records but never count toward completion, veto, or
+  adoption. The stage needs a positive deadline and no quorum, threshold,
+  weights, or blocks, and it cannot be a procedure's last stage. It completes at
+  the first law-plugin boundary after its deadline, expires unanswered seat work,
+  and opens the next stage; zero ballots is a valid outcome. A procedure that
+  still lacks its capacity reservation at that deadline expires instead.
+
+The compiler checks these rules before a run starts, and unused fields are
+omitted from JSON, so existing plans keep their encoding and content hash. Also
+since 0.13.0, a stage that stops accepting ballots (it passed, completed, or its
+procedure closed) expires its pending and enqueued seat work. A seat response
+that arrives afterwards is recorded as a rejected outcome instead of failing
+the plugin boundary, and the pre-settlement budget check counts ticket work
+emitted at the exact deadline minute.
 
 `LegalProposal` is a non-enacted, versioned proceeding input. It records the
 jurisdiction, sponsor and subjects, bounded typed clauses or eligibility rules,
@@ -450,6 +537,10 @@ Conformance evidence should prove that:
 - an unresolved live-level dependency blocks culture retirement;
 - a future-effective live-level dependency also blocks early retirement;
 - expired procedures expire unresolved pending/enqueued outbox work;
+- a stage that stops accepting ballots expires its seat work, and a late seat
+  response becomes a rejected outcome;
+- with the culture boundary plugin, the society plugin stays the only society
+  writer and the run replays exactly;
 - proposal, law, evidence, archive, snapshot, fork, and exact replay remain
   consistent; and
 - unrelated targets, observers, and retired catalog entries do not perturb

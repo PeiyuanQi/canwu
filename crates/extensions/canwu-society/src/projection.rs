@@ -1,8 +1,23 @@
+use crate::ingress::{
+    COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, SOCIETY_INGRESS_MALFORMED_REJECTION,
+    SocietyIngressQueue, SocietyIngressQueueRecord, rebase_admission_rejection,
+    society_ingress_queue_reference,
+};
+use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
 use crate::plugin::{PLUGIN_NAME, policy_decision_key, validate_policy_decision};
 use crate::{
     SocietyPlugin, SocietyProjection, SocietyState, SocietyStateRecord, society_state_reference,
 };
-use canwu_api::{Canwu, CanwuError, ErrorCode, PluginComponentRecord, ViewerContext};
+use canwu_api::{
+    BoundaryId, BoundaryPhase, BoundaryRecord, Canwu, CanwuError, CauseRef, DomainRecordRef,
+    DomainRecordVersionRef, DomainRecordVersionSource, ErrorCode, IngressId, IngressPayload,
+    IngressRecord, PluginComponentRecord, StateVisibility, ViewerContext,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// System name the engine records on owner-authorized maintenance record
+/// changes, which commit when the maintenance ingress is admitted.
+const OWNER_AUTHORIZED_MAINTENANCE_SYSTEM: &str = "owner-authorized-maintenance";
 
 /// Loads and validates the authoritative society record.
 ///
@@ -25,11 +40,228 @@ pub fn load_society_state(canwu: &Canwu) -> Result<SocietyState, CanwuError> {
     state.validate_at(canwu.time())?;
     state.validate_record_binding(record)?;
     validate_policy_components(canwu, &state)?;
+    load_ingress_queue(canwu)?;
     Ok(state)
 }
 
+/// Loads the owner-side ingress queue and rejects entries an initial
+/// scenario seeded, since only the intake may write admitted packets.
+fn load_ingress_queue(canwu: &Canwu) -> Result<Option<SocietyIngressQueue>, CanwuError> {
+    let Some(record) = canwu.typed_domain_record(&society_ingress_queue_reference()) else {
+        return Ok(None);
+    };
+    let queue = record.decode_payload::<SocietyIngressQueueRecord>()?;
+    queue.validate()?;
+    if !queue.entries.is_empty()
+        && canwu
+            .current_domain_record_version(&record.reference)?
+            .is_none_or(|version| {
+                version.established_by == DomainRecordVersionSource::InitialScenario
+            })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "an initial scenario cannot seed admitted society ingress",
+        ));
+    }
+    Ok(Some(queue))
+}
+
+/// Re-derives every queued packet from the journal: the packet must be the
+/// exact society ingress admitted at its recorded boundary, a lifecycle delta
+/// must have been generated inside the engine, and a rebase's admission
+/// verdict must match the stock history at the admission cut (changes
+/// committed through phase 11 of the admitting boundary).
+fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
+    let Some(queue) = load_ingress_queue(canwu)? else {
+        return Ok(());
+    };
+    if queue.entries.is_empty() {
+        return Ok(());
+    }
+    let ingress = canwu
+        .ingress_log()
+        .iter()
+        .map(|record| (record.id, record))
+        .collect::<BTreeMap<IngressId, &IngressRecord>>();
+    let boundaries = canwu
+        .boundaries()
+        .iter()
+        .map(|record| (record.id, record))
+        .collect::<BTreeMap<BoundaryId, &BoundaryRecord>>();
+    let phases = canwu
+        .plugin_descriptors()
+        .flat_map(|descriptor| {
+            descriptor
+                .boundary_systems
+                .iter()
+                .map(|system| ((descriptor.name.clone(), system.name.clone()), system.phase))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let versions = cited_stock_versions(canwu, &queue);
+    let history = StockHistory {
+        boundaries: &boundaries,
+        phases: &phases,
+        versions: &versions,
+    };
+    let queue_error = |message: &str| CanwuError::new(ErrorCode::InvalidAuthority, message);
+    for entry in &queue.entries {
+        let record = ingress
+            .get(&entry.ingress)
+            .ok_or_else(|| queue_error("queued society ingress has no retained ingress record"))?;
+        let admitted = boundaries
+            .get(&entry.admitted_at)
+            .is_some_and(|boundary| boundary.admitted_ingress.contains(&entry.ingress));
+        let same_packet = matches!(
+            &record.payload,
+            IngressPayload::Plugin { plugin, packet_type, payload, .. }
+                if plugin == PLUGIN_NAME
+                    && *packet_type == entry.packet_type
+                    && *payload == entry.payload
+        );
+        if !admitted || !same_packet {
+            return Err(queue_error(
+                "queued society ingress does not match the packet admitted at its boundary",
+            ));
+        }
+        if entry.packet_type == SOCIETY_LIFECYCLE_DELTA_INGRESS {
+            let generated = match &record.cause {
+                Some(CauseRef::Boundary(producer)) => {
+                    boundaries.get(producer).is_some_and(|boundary| {
+                        boundary
+                            .generated_ingress
+                            .iter()
+                            .any(|generation| generation.ingress == entry.ingress)
+                    })
+                }
+                _ => false,
+            };
+            if !generated {
+                return Err(queue_error(
+                    "queued lifecycle delta was not generated by a boundary system",
+                ));
+            }
+        } else if entry.packet_type == COHORT_REBASE_INGRESS {
+            let expected =
+                match serde_json::from_value::<CohortHeadcountRebaseV1>(entry.payload.clone()) {
+                    Err(_) => Some(SOCIETY_INGRESS_MALFORMED_REJECTION.to_owned()),
+                    Ok(rebase) => {
+                        let current = history.current_at_admission(
+                            canwu,
+                            &rebase.external_stock,
+                            entry.admitted_at,
+                        );
+                        rebase_admission_rejection(&rebase, current)
+                    }
+                };
+            if expected != entry.admission_rejection {
+                return Err(queue_error(
+                    "queued rebase admission verdict does not match its stock history",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Indexes, once, where each retained version of a stock record cited by a
+/// queued rebase was established.
+fn cited_stock_versions(
+    canwu: &Canwu,
+    queue: &SocietyIngressQueue,
+) -> BTreeMap<(DomainRecordRef, u64), (BoundaryId, usize)> {
+    let cited = queue
+        .entries
+        .iter()
+        .filter(|entry| entry.packet_type == COHORT_REBASE_INGRESS)
+        .filter_map(|entry| {
+            serde_json::from_value::<CohortHeadcountRebaseV1>(entry.payload.clone()).ok()
+        })
+        .map(|rebase| rebase.external_stock.record)
+        .collect::<BTreeSet<_>>();
+    let mut versions = BTreeMap::new();
+    for boundary in canwu.boundaries() {
+        for (index, change) in boundary.record_changes.iter().enumerate() {
+            if cited.contains(&change.current.reference) {
+                versions
+                    .entry((change.current.reference.clone(), change.current.version))
+                    .or_insert((boundary.id, index));
+            }
+        }
+    }
+    versions
+}
+
+/// Retained record history needed to recompute a rebase admission verdict.
+struct StockHistory<'a> {
+    boundaries: &'a BTreeMap<BoundaryId, &'a BoundaryRecord>,
+    phases: &'a BTreeMap<(String, String), BoundaryPhase>,
+    versions: &'a BTreeMap<(DomainRecordRef, u64), (BoundaryId, usize)>,
+}
+
+impl StockHistory<'_> {
+    /// Whether a record change was visible to the phase-12 intake of
+    /// `admitted_at`: it committed in an earlier boundary, it is a
+    /// maintenance change (committed at admission, before every phase), or it
+    /// is a same-boundary change a phase-7 or phase-10 system proposed with
+    /// `SameBoundary` visibility. Unknown writers fail closed as invisible.
+    fn visible(&self, admitted_at: BoundaryId, boundary: BoundaryId, index: usize) -> bool {
+        boundary < admitted_at
+            || (boundary == admitted_at
+                && self
+                    .boundaries
+                    .get(&boundary)
+                    .and_then(|record| record.record_changes.get(index))
+                    .is_some_and(|change| {
+                        change.system == OWNER_AUTHORIZED_MAINTENANCE_SYSTEM
+                            || (change.visibility == StateVisibility::SameBoundary
+                                && self
+                                    .phases
+                                    .get(&(change.plugin.clone(), change.system.clone()))
+                                    .is_some_and(|phase| {
+                                        *phase < BoundaryPhase::StrategicAggregation
+                                    }))
+                    }))
+    }
+
+    /// Whether the exact stock version was current for the phase-12 intake
+    /// of boundary `admitted_at`.
+    fn current_at_admission(
+        &self,
+        canwu: &Canwu,
+        stock: &DomainRecordVersionRef,
+        admitted_at: BoundaryId,
+    ) -> bool {
+        if !canwu.domain_record_version_evidence_exists(stock) {
+            return false;
+        }
+        let established = match &stock.established_by {
+            DomainRecordVersionSource::InitialScenario => true,
+            DomainRecordVersionSource::BoundaryChange {
+                boundary,
+                change_index,
+            } => usize::try_from(*change_index)
+                .is_ok_and(|index| self.visible(admitted_at, *boundary, index)),
+        };
+        if !established {
+            return false;
+        }
+        let Some(next) = stock.version.checked_add(1) else {
+            return true;
+        };
+        match self.versions.get(&(stock.record.clone(), next)) {
+            Some((boundary, index)) => !self.visible(admitted_at, *boundary, *index),
+            // A successor outside the retained history predates it.
+            None => canwu
+                .domain_record(&stock.record)
+                .is_some_and(|record| record.version == stock.version),
+        }
+    }
+}
+
 /// Rehydrates a snapshot with the society plugin and revalidates its semantic
-/// payload-to-reference binding before returning the simulation.
+/// payload-to-reference binding and every queued rebase or lifecycle delta
+/// against the ingress journal before returning the simulation.
 ///
 /// # Errors
 ///
@@ -38,8 +270,23 @@ pub fn load_society_state(canwu: &Canwu) -> Result<SocietyState, CanwuError> {
 pub fn from_society_snapshot_json(json: &str) -> Result<Canwu, CanwuError> {
     let plugin = SocietyPlugin;
     let canwu = Canwu::from_snapshot_json_with_plugins(json, &[&plugin])?;
-    load_society_state(&canwu)?;
+    validate_society_runtime(&canwu)?;
     Ok(canwu)
+}
+
+/// Validates restored society state: the root record (as
+/// [`load_society_state`] does) and every queued rebase or lifecycle delta,
+/// re-derived from the ingress journal. Hosts that restore society together
+/// with other plugins call this after `Canwu::from_snapshot_json_with_plugins`.
+///
+/// # Errors
+///
+/// Returns an error when the society record is invalid or a queued packet is
+/// not the exact admitted packet its entry claims, including a rebase whose
+/// recorded admission verdict disagrees with the stock history.
+pub fn validate_society_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
+    load_society_state(canwu)?;
+    validate_queued_ingress(canwu)
 }
 
 fn validate_policy_components(canwu: &Canwu, state: &SocietyState) -> Result<(), CanwuError> {

@@ -45,6 +45,41 @@ an operation-keyed boundary draw, while External and LLM controllers use the
 ordinary strict decision request/response DTOs. Neither path grants the selector
 new legal options or command authority.
 
+Procedure stages tally integer vote weight. A seat weighs its entry in
+`seat_weights`, or 1 when absent, so an empty map is the equal-seat count; an
+explicit weight of 1 is removed when the plan compiles. `quorum` is the minimum
+summed weight of seats that cast any ballot, and `threshold` is the per-mille
+share of `For` among `For` plus `Against` weight; vetoes are seat powers and are
+never weighted. When `block_of_seat` assigns every seat of a stage to exactly
+one unit block, the stage also needs `block_threshold` blocks in the `For`
+position. A block's position is the weighted majority of its seats; an evenly
+divided block, or one without counted ballots, takes no position. When as many
+blocks are `For` as `Against`, the procedure's `deterministic_tie_break`
+applies. `status-quo` adds no block, so a tied stage passes only if
+`block_threshold` is already met and otherwise waits for more ballots or its
+deadline. `casting-seat:<seat>` adds one `For` block when that seat's own
+ballot in the stage is `For`; the seat must belong to every blocked stage, and
+each such stage's `block_threshold` must exceed half its blocks, so a tie never
+passes without it. Stages are evaluated over the ballots admitted so far, so
+later ballots can break or create a tie before the deadline. Weights, blocks,
+and the tie-break are validated when the plan compiles, and unused fields are
+omitted from JSON so existing plans keep their hashes.
+
+When a stage stops accepting ballots (it passed, completed, or its procedure
+closed), its pending or enqueued seat work expires, later preparation or
+acknowledgement of that work is ignored, and a seat response that still
+arrives is recorded as a rejected intent outcome instead of failing the
+boundary.
+
+A `consultation` stage is advisory. Its seats receive tickets whose context
+carries `"advisory": true`, and their ballots persist as participation records,
+but they never count toward completion, veto, or adoption. The stage completes
+at the first legal boundary after its deadline, expires its unanswered seat
+work, and opens the next stage; zero ballots is a valid outcome. A procedure
+that still lacks its capacity reservation at that deadline expires instead. A
+consultation needs a positive `deadline_minutes`, no quorum, threshold, weights,
+or blocks, and cannot be a procedure's final stage.
+
 All authored collections are canonically sorted, stable IDs are preserved,
 dense plan-local keys are deterministic, and hashes use Canwu's canonical hash
 contract. Law-local `LegalRecordRef` values name records inside the aggregate;

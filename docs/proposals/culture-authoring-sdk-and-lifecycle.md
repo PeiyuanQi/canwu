@@ -4,10 +4,14 @@ Status: first implementation slice complete as the published
 `canwu-culture` crate. The authoring schema, deterministic compiler, society
 adapter, dirty-set API, effect persistence classes, lifecycle index, tombstone,
 reactivation, complete runtime-state hydration, and explicit atomic lifecycle
-synchronization into `canwu-society` are implemented. Boundary-system
-registration, canonical cross-extension ingress, incremental society
-aggregate/projection settlement, and benchmark evidence remain follow-up work.
-This document does not add a culture type to the simulation core.
+synchronization into `canwu-society` are implemented. Since 0.13.0,
+`CultureBoundaryPlugin` adds boundary-system registration (a Monthly phase-7
+lifecycle system) and canonical cross-extension ingress: `culture_exposure_v1`
+exposure batches, `cultural_signal_batch_v1` signal batches, and
+`society_lifecycle_delta_v1` deltas applied by the society plugin.
+Incremental society aggregate/projection settlement and benchmark evidence
+remain follow-up work. This document does not add a culture type to the
+simulation core.
 
 ## Decision
 
@@ -365,8 +369,22 @@ The current crate exposes `CultureDefinition`, `compile_culture`,
 `synchronize_society_lifecycle`, and the atomic target-delta
 `settle_culture_society_boundary` adapter.
 `CulturePlugin` registers the complete lifecycle runtime record, and
-`load_culture_runtime` rehydrates its schedules and hot/dirty indexes. The host
-still drives settlement, persists returned lifecycle transitions, synchronizes
-society state, and admits emitted batches; no boundary system, synchronous
-cross-extension callback, canonical ingress adapter, or direct legal write is
-provided yet.
+`load_culture_runtime` rehydrates its schedules and hot/dirty indexes. With
+`CulturePlugin`, the host still drives settlement, persists returned lifecycle
+transitions, synchronizes society state, and admits emitted batches.
+
+Since 0.13.0, `CultureBoundaryPlugin` is the alternative in-engine flow. The
+scenario installs the definition record (`culture_definition_record`), the
+culture state record, and a society state prepared with `install_into_society`.
+An event-driven phase-12 intake queues admitted `culture_exposure_v1` batches
+(`CultureExposureSignalBatch`, which gained a `target_id`), and the Monthly
+phase-7 system `culture_lifecycle_settle_v1` settles the lifecycle against the
+society snapshot, persists `canwu.culture:state`, hands one
+`society_lifecycle_delta_v1` packet per transitioned target to the society
+plugin, and emits due compiled effects as `cultural_signal_batch_v1` ingress.
+The society plugin remains the only writer of `canwu.society:state` and applies
+the delta at its next Daily settlement, up to two boundaries after the culture
+step; a refused delta is recorded and reconciled. A run registers one of the
+two plugins and never also calls `settle_culture_society_boundary` with the
+boundary plugin. No synchronous cross-extension callback or direct legal write
+is provided.

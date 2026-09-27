@@ -77,6 +77,8 @@ pub fn compile_law(definition: &LegalDefinition) -> Result<CompiledLawPlan, Canw
             stage.seats.dedup();
             stage.allowed_ballots.sort();
             stage.allowed_ballots.dedup();
+            // Weight 1 is the default: one canonical encoding for equal seats.
+            stage.seat_weights.retain(|_, weight| *weight != 1);
         }
     }
     for clause in &mut canonical.clauses {
@@ -575,12 +577,17 @@ pub fn validate_definition(definition: &LegalDefinition) -> Result<(), CanwuErro
                     procedure.id
                 )));
             }
-            if stage.quorum > 1000 || stage.threshold > 1000 || stage.deadline_minutes < 0 {
+            let counts_weight = weighs_seats(stage) || !stage.block_of_seat.is_empty();
+            if (!counts_weight && stage.quorum > 1000)
+                || stage.threshold > 1000
+                || stage.deadline_minutes < 0
+            {
                 return Err(invalid(format!(
                     "procedure {} stage {} has invalid threshold",
                     procedure.id, stage.id
                 )));
             }
+            validate_stage_tally(procedure, stage)?;
             if stage.allowed_ballots.is_empty()
                 || !stage.allowed_ballots.contains(&Ballot::For)
                 || (stage.kind != ProcedureStageKind::Veto
@@ -598,6 +605,7 @@ pub fn validate_definition(definition: &LegalDefinition) -> Result<(), CanwuErro
                 resolve_procedure_seat(definition, &procedure.id, seat)?;
             }
         }
+        validate_procedure_tally(procedure)?;
         if procedure.reservation_quantity > 0
             && procedure
                 .reservation_pool
@@ -800,6 +808,128 @@ pub fn validate_definition(definition: &LegalDefinition) -> Result<(), CanwuErro
         )));
     }
     Ok(())
+}
+
+/// Validates one stage's weight, block, and consultation contract.
+fn validate_stage_tally(
+    procedure: &ProcedureProfileDefinition,
+    stage: &ProcedureStageDefinition,
+) -> Result<(), CanwuError> {
+    let fail = |reason: &str| {
+        Err(invalid(format!(
+            "procedure {} stage {} {reason}",
+            procedure.id, stage.id
+        )))
+    };
+    let seats = stage.seats.iter().collect::<BTreeSet<_>>();
+    for (seat, weight) in &stage.seat_weights {
+        if !seats.contains(seat) {
+            return fail("weights a seat outside the stage");
+        }
+        if *weight == 0 {
+            return fail("has a zero seat weight");
+        }
+    }
+    if stage.block_of_seat.is_empty() {
+        if stage.block_threshold.is_some() {
+            return fail("has a block threshold without blocks");
+        }
+    } else {
+        if stage
+            .block_of_seat
+            .iter()
+            .any(|(seat, block)| !seats.contains(seat) || !canonical_id(block))
+        {
+            return fail("assigns a seat outside the stage or a non-canonical block");
+        }
+        if seats
+            .iter()
+            .any(|seat| !stage.block_of_seat.contains_key(*seat))
+        {
+            return fail("has a seat that belongs to no block");
+        }
+        let blocks = stage.block_of_seat.values().collect::<BTreeSet<_>>().len();
+        if stage
+            .block_threshold
+            .is_none_or(|threshold| threshold == 0 || usize::from(threshold) > blocks)
+        {
+            return fail("needs a block threshold between one and its block count");
+        }
+    }
+    if weighs_seats(stage) || !stage.block_of_seat.is_empty() {
+        let total_weight = seats
+            .iter()
+            .map(|seat| {
+                stage
+                    .seat_weights
+                    .get(*seat)
+                    .map_or(1, |weight| u64::from(*weight))
+            })
+            .sum::<u64>();
+        if u64::from(stage.quorum) > total_weight {
+            return fail("has a quorum above its total seat weight");
+        }
+    }
+    if stage.kind == ProcedureStageKind::Consultation
+        && (stage.quorum != 0
+            || stage.threshold != 0
+            || weighs_seats(stage)
+            || !stage.block_of_seat.is_empty()
+            || stage.deadline_minutes <= 0)
+    {
+        return fail(
+            "is a consultation with a quorum, threshold, weight, block, or no positive deadline",
+        );
+    }
+    Ok(())
+}
+
+/// Validates the procedure-level consultation placement and block tie-break.
+fn validate_procedure_tally(procedure: &ProcedureProfileDefinition) -> Result<(), CanwuError> {
+    if procedure
+        .stages
+        .last()
+        .is_some_and(|stage| stage.kind == ProcedureStageKind::Consultation)
+    {
+        return Err(invalid(format!(
+            "procedure {} ends with an advisory consultation stage",
+            procedure.id
+        )));
+    }
+    let mut blocked = procedure
+        .stages
+        .iter()
+        .filter(|stage| !stage.block_of_seat.is_empty())
+        .peekable();
+    if blocked.peek().is_none() {
+        return Ok(());
+    }
+    // A casting seat must always matter: with a majority block threshold no
+    // tie can pass on its own, so the casting ballot is the only way through.
+    let valid = match BlockTieBreak::parse(&procedure.deterministic_tie_break) {
+        Some(BlockTieBreak::StatusQuo) => true,
+        Some(BlockTieBreak::CastingSeat(seat)) => blocked.all(|stage| {
+            let blocks = stage.block_of_seat.values().collect::<BTreeSet<_>>().len();
+            stage.seats.iter().any(|candidate| candidate == seat)
+                && stage
+                    .block_threshold
+                    .is_some_and(|threshold| usize::from(threshold) * 2 > blocks)
+        }),
+        None => false,
+    };
+    if !valid {
+        return Err(invalid(format!(
+            "procedure {} needs a status-quo tie-break, or a casting seat in every blocked stage \
+             whose block threshold is a majority of its blocks",
+            procedure.id
+        )));
+    }
+    Ok(())
+}
+
+/// Whether a stage has any seat weight other than the default of 1.
+fn weighs_seats(stage: &ProcedureStageDefinition) -> bool {
+    stage.seat_weights.values().any(|weight| *weight != 1)
 }
 
 fn resolve_procedure_seat<'a>(

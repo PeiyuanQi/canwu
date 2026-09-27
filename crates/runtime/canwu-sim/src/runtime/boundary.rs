@@ -6,7 +6,8 @@ use super::{
 };
 use canwu_core::{
     BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId, DecisionTicketId,
-    EntityRef, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId, PersonId, RandomDrawId,
+    EntityRef, EvaluationTraceRecord, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId,
+    PersonId, RandomDrawId,
 };
 use canwu_knowledge::{KnowledgeRecord, KnowledgeRecordDraft};
 use canwu_time::{SimDuration, SimTime};
@@ -214,6 +215,61 @@ pub enum BoundaryDirective {
     CancelPluginIngress {
         ingress_id: IngressId,
         reason: String,
+    },
+    /// Records how an application rule produced one result for one subject.
+    /// Accepted from any phase-7 or phase-12 system without a contract
+    /// declaration. The trace must name this boundary, its subject identity
+    /// must exist, and every term's evidence must be committed evidence
+    /// visible to the proposal.
+    ///
+    /// The trace is recorded, with its producing system, in
+    /// [`crate::BoundaryRecord::evaluation_traces`] as hash-chained boundary
+    /// evidence. It is never state: it changes nothing, no system can read it
+    /// back, and it is sealed and archived with its boundary record. The run
+    /// configuration's [`crate::EvaluationLimitsV1`] bound the traces of the
+    /// whole boundary and the terms of each trace; a proposal set that
+    /// exceeds either bound fails the boundary with
+    /// [`crate::ErrorCode::EvaluationTraceLimitExceeded`].
+    RecordEvaluationTrace { trace: EvaluationTraceRecord },
+    /// Registers a transition manifest coordinated by this system's plugin.
+    /// Accepted from a phase-7, phase-10, or phase-12 system that declares
+    /// `StateKey::core_transitions()` as a write.
+    ///
+    /// A manifest registered in phase 7 may be ready in the same boundary;
+    /// one registered in phase 10 or 12 must name a later boundary, and none
+    /// may be ready more than [`crate::MAX_TRANSITION_READY_HORIZON`]
+    /// boundaries ahead. Every participant must be a registered plugin with a
+    /// phase-10 system that declares the same write, and every expected record
+    /// must be of a registered kind. One coordinator may have one pending
+    /// manifest per lineage and at most
+    /// [`crate::MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR`] pending
+    /// manifests, within [`crate::MAX_PENDING_TRANSITION_MANIFESTS`] overall.
+    /// The registration becomes visible to the coordinator and participants
+    /// from the next phase through
+    /// [`crate::SimulationView::transition_manifests`] and is recorded in
+    /// [`BoundaryRecord::transition_manifests`].
+    RegisterTransitionManifest { manifest: crate::TransitionManifest },
+    /// Stages ordinary directives as this plugin's part of a transition
+    /// manifest that is ready at this boundary. Accepted only from a phase-10
+    /// system of a listed participant that declares
+    /// `StateKey::core_transitions()` as a write; another plugin's staging
+    /// fails the boundary with [`crate::ErrorCode::InvalidAuthority`].
+    ///
+    /// Each staged write must be a directive this system could propose
+    /// directly: its declared writes, ownership, and phase rules apply, and it
+    /// commits with the system's visibility. An empty `writes` list records
+    /// the participant's presence without writing. Before phase 11 commits,
+    /// the kernel audits every ready manifest: when some, but not all,
+    /// participants staged ([`crate::ErrorCode::TransitionParticipantMissing`])
+    /// or an expected version differs
+    /// ([`crate::ErrorCode::TransitionVersionMismatch`]), the whole boundary
+    /// fails closed; when none staged, the manifest expires, so a
+    /// single-participant manifest cannot fail for omission. The audit is
+    /// recorded in [`BoundaryRecord::transition_audits`] and readable through
+    /// [`crate::SimulationView::transition_audits`].
+    StageTransitionWrite {
+        manifest_id: crate::TransitionManifestId,
+        writes: Vec<BoundaryDirective>,
     },
 }
 
@@ -437,6 +493,16 @@ pub struct BoundaryRecord {
     pub person_availability_changes: Vec<BoundaryPersonAvailabilityChange>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_persons: Vec<BoundaryPersonCreation>,
+    /// Rule-evaluation traces recorded by this boundary's systems, in system
+    /// execution order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evaluation_traces: Vec<crate::BoundaryEvaluationTrace>,
+    /// Transition manifests registered in this boundary, in admission order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transition_manifests: Vec<crate::PendingTransitionManifest>,
+    /// Manifests settled at this, their ready boundary, in manifest-ID order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transition_audits: Vec<crate::TransitionAuditRecord>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     /// Untagged legacy full-state hash or a `v1:` incremental state commitment.
@@ -464,4 +530,7 @@ pub struct BoundaryReceipt {
     /// producing plugin, system, and correlation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub created_persons: Vec<CreatedPerson>,
+    /// Transition manifests settled at this boundary, in manifest-ID order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transition_audits: Vec<crate::TransitionAuditRecord>,
 }

@@ -22,9 +22,9 @@ Choose the recovery goal first, then use the matching interface.
 
 ## Version and format contract
 
-As of September 27, 2026, the workspace version is `0.12.0` and the snapshot format is 8.
-The exact `engine_version` remains part of the persistence contract, so snapshots from 0.11.1 or earlier cannot be loaded into a 0.12.0 run.
-Version 0.12.0 adds person availability, person creation, plugin ingress cancellation, the guarded utility policy, parent tickets, account-level loss, atomic exchange, local acceptance, realized output, the acting actor, and new transport record kinds. The resource, production, and fiscal plugin semantic identities change, `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v4`, and the snapshot format remains 8; see [Version 0.12.0](#version-0120) below. A local engine checkout does not update a downstream application's pinned registry dependency.
+As of September 27, 2026, the workspace version is `0.13.0` and the snapshot format is 8.
+The exact `engine_version` remains part of the persistence contract, so snapshots from 0.12.0 or earlier cannot be loaded into a 0.13.0 run.
+Version 0.13.0 adds transition manifests, evaluation traces, seat succession, access grants, the `canwu-movement` extension with capacity pools, delegated carriers and carrier seizure, authenticity findings, weighted, unit-block, and consultation law stages, the culture boundary plugin, cohort headcount rebases, policy-pressure provenance, and external transmission sources. The resource, correspondence, information, society, technology, and law plugin semantic identities change, `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v5`, and the snapshot format remains 8; see [Version 0.13.0](#version-0130) below. A local engine checkout does not update a downstream application's pinned registry dependency.
 The simulation core does not silently migrate an old snapshot, and changing only its format number does not make it compatible.
 
 Applications that retain state should pin an exact published release or Git revision. To carry history across an engine boundary,
@@ -108,6 +108,18 @@ or research assumption. Each fork still advances through normal command and time
 - Simulate an outbox timeout and verify that retrying by `delivery_id` does not duplicate an external effect.
 - Document whether an upgrade exports, migrates, or deliberately abandons old saves.
 
+
+## Version 0.13.0
+
+Canwu 0.13.0 is a minor release. Its new contracts are additive capabilities, but new enum variants and struct fields break exhaustive matches and struct literals, so it is not source-compatible for code that uses them. Snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4 are unchanged, and fields for contracts a run does not use are not serialized.
+
+- Snapshots gain `pending_transition_manifests`. Boundary records gain `evaluation_traces`, `transition_manifests`, and `transition_audits`, and boundary receipts gain `transition_audits`. A run that registers no manifest and records no trace hashes exactly as before.
+- Evaluation traces are sealed and archived with their boundary records and count toward journal size. The run configuration's `evaluation_limits` is omitted at its default, so the configuration hash changes only if you set it.
+- `canwu-movement` keeps its runtime in one `canwu.movement:runtime` domain record. The culture boundary plugin adds the `canwu.culture:definition` and `canwu.culture:exposure-queue` records, and the society plugin adds `canwu.society:ingress-queue`.
+- The resource, correspondence, information, society, technology, and law plugin semantic hashes change. `MovementPlugin` and `CultureBoundaryPlugin` are new plugin identities, while `CulturePlugin`, production, and fiscal keep theirs, and existing law plans keep their encoding and content hash. `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v5`.
+- Several fixes change results for existing runs: live production completions now settle their output; `AmendDemand` can no longer change a demand's status, rejection reason, or requester; law seat work expires when a stage stops accepting ballots, and a late seat response is recorded as a rejection; the society Daily boundary after a cohort transfer no longer fails; and snapshot restore accepts initial records that reference entities listed only in `Scenario::entities`.
+
+A 0.12.0 snapshot must not be relabeled or loaded into 0.13.0. Keep the previous engine or run an explicit export.
 
 ## Version 0.12.0
 

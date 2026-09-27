@@ -50,6 +50,10 @@ select different modes, hops, capacity, or deadlines.
 - [x] Re-export the transport boundary through `canwu-api`.
 - [ ] Add a domain-specific capacity allocator once a second domain extension
   requires the shared reservation adapter.
+  Since 0.13.0, `canwu-transport` provides capacity pools and the pure
+  `allocate_capacity_bookings` function, which `canwu-movement` runs in phase 7
+  without kernel reservations; correspondence admission still exposes only
+  `Unconstrained`.
 
 Gate: competing claims have deterministic results and no booking mutation can
 be hidden in a route-cache hit.

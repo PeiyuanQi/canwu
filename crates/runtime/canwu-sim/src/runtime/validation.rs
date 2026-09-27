@@ -453,7 +453,8 @@ pub(super) fn validate_snapshot(
         || snapshot.next_decision_trace_id != 1
         || !snapshot.person_availability.is_empty()
         || !snapshot.created_persons.is_empty()
-        || snapshot.next_person_id != 0;
+        || snapshot.next_person_id != 0
+        || !snapshot.pending_transition_manifests.is_empty();
     if has_execution_evidence && !snapshot.plugin_registration_closed {
         return invalid_snapshot(
             "snapshot execution evidence requires plugin registration to remain closed",
@@ -496,6 +497,7 @@ pub(super) fn validate_snapshot(
             initial_domain_records.as_ref(),
         )?;
     super::persons::validate_snapshot_persons(snapshot, plugins)?;
+    super::transitions::validate_snapshot_transitions(snapshot, plugins)?;
     if snapshot.admitted_attempt_count != admission_cursors.attempts
         || snapshot.admitted_command_count != admission_cursors.commands
         || snapshot.admitted_event_count != admission_cursors.events
@@ -2836,15 +2838,24 @@ fn validate_boundary_records(
             "boundary domain-record history does not match the manifest-bound initial scenario",
         );
     }
-    let initial_world = snapshot
+    // Live construction accepts core identities listed in the scenario's
+    // entity registry as well as its compatibility world, so the restored
+    // initial store must too. The registry is canonical (sorted and unique)
+    // once the snapshot contract has been validated.
+    let (initial_entities, initial_world) = snapshot
         .initial_scenario
         .as_ref()
-        .map_or(&snapshot.world, |scenario| &scenario.world);
+        .map_or((None, &snapshot.world), |scenario| {
+            (Some(scenario.entities.as_slice()), &scenario.world)
+        });
     records::validate_record_store(
         &domain_record_values,
         &plugins.record_schemas,
         snapshot.initial_time,
-        &|entity| core_world_entity_exists(initial_world, entity),
+        &|entity| {
+            initial_entities.is_some_and(|entities| entities.binary_search(entity).is_ok())
+                || core_world_entity_exists(initial_world, entity)
+        },
     )
     .map_err(|error| {
         invalid_snapshot_error(format!(
@@ -2861,6 +2872,11 @@ fn validate_boundary_records(
     let mut max_correlation_id = 0;
     let mut history = DomainRecordHistory::from_initial_records(&domain_record_values);
     let requires_state_hash = matches!(snapshot.run_manifest, Some(RunManifest::Declared { .. }));
+    let evaluation_limits = snapshot
+        .run_configuration
+        .as_ref()
+        .map(RunConfigurationSnapshot::evaluation_limits)
+        .unwrap_or_default();
 
     for (index, record) in snapshot.boundaries.iter().enumerate() {
         let expected_id = u64::try_from(index)
@@ -2909,6 +2925,14 @@ fn validate_boundary_records(
             &cuts,
             &mut knowledge_values,
             &mut next_knowledge_id,
+        )?;
+        super::evaluation::validate_snapshot_boundary_traces(
+            record,
+            snapshot,
+            plugins,
+            &domain_record_values,
+            &cuts,
+            evaluation_limits,
         )?;
         for change in &record.changes {
             let key = component_key(
@@ -3364,7 +3388,7 @@ fn validate_boundary_ingress_generation(
                             &generation.plugin,
                             &generation.system,
                         ),
-                        _ => core_world_entity_exists(&snapshot.world, entity),
+                        _ => snapshot_core_entity_exists(snapshot, entity),
                     })
             }
             IngressPayload::Decision { request } => {
@@ -3643,7 +3667,7 @@ fn validate_boundary_record_changes(
                 values,
                 &plugins.record_schemas,
                 record.at,
-                &|entity| core_world_entity_exists(&snapshot.world, entity),
+                &|entity| snapshot_core_entity_exists(snapshot, entity),
                 requests,
             )
             .map_err(|error| {
@@ -3717,7 +3741,7 @@ fn expected_owner_authorized_record_changes(
                     &current,
                     plugins,
                     record.at,
-                    &|entity| core_world_entity_exists(&snapshot.world, entity),
+                    &|entity| snapshot_core_entity_exists(snapshot, entity),
                 )
                 .map_err(|error| {
                     invalid_snapshot_error(format!(
@@ -4682,6 +4706,14 @@ pub(super) fn core_world_entity_exists(world: &WorldSnapshot, entity: &EntityRef
         EntityRef::Domain(_) | EntityRef::Organization(_) => false,
         EntityRef::Resource(id) => world.letter(super::LetterId::new(id.get())).is_some(),
     }
+}
+
+/// Whether a core (non-domain) identity exists in the snapshot: in its
+/// canonical entity registry, which live settlement checks, or in its
+/// compatibility world.
+fn snapshot_core_entity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
+    snapshot.entities.binary_search(entity).is_ok()
+        || core_world_entity_exists(&snapshot.world, entity)
 }
 
 fn entity_exists_in_parts(

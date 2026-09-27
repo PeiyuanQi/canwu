@@ -56,6 +56,10 @@ restore.
 6. Knowledge drafts remain holder-scoped: `H-603` receives its access and failed-interpretation facts, `H-602` receives its access, commissioned interpretation, and release-availability facts, and `H-605` receives only review-release availability. Performing the interpretation does not itself give `H-604` holder knowledge.
 </Steps>
 
+## Judging a claimed source
+
+Since 0.13.0, an interpretation can also judge provenance. `InterpretationPayload::authenticity` may carry an authenticity finding (`AuthenticityFinding`): the exact version of one interpreted representation, whether its claimed source is accepted (`claimed_source_accepted`), a short basis of at most 256 bytes, and a per-mille confidence. The representation must be one of the interpretation's inputs at its current version and must carry a claimed source; otherwise the operation is rejected as `invalid_lifecycle`. A forged order can therefore be recorded as read but not accepted as coming from its claimed sender. Whether the interpreting holder notices a forgery, and how likely that is, remains an application draw; the extension records only the finding. The example in this case does not use it.
+
 ## Replaceable application details
 
 `grouped_symbols_v1`, `decode_k1`, `decode_k2`, node identifiers, and relative

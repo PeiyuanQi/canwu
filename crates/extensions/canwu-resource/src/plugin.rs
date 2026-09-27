@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "50dacee2853d6ef5ac0c30249a37306be553b2f028ca56d7c6da00ea62a2de8c";
+    "45ad5005551ce351e17151e997bba1ed2749234317270a6aed3467f103bc0663";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -327,7 +327,13 @@ impl SimulationPlugin for ResourcePlugin {
         )?;
         registrar.register_archive_reachability_participant(resource_archive_reachability)?;
 
-        let mut command_reads = vec![StateKey::core_evidence(), resource_state_key()];
+        // The administrative domain-record read lets admission resolve an
+        // access grant's application authority evidence of any record kind.
+        let mut command_reads = vec![
+            StateKey::core_domain_records(),
+            StateKey::core_evidence(),
+            resource_state_key(),
+        ];
         command_reads.extend(self.adapter_state_keys());
         command_reads.sort();
         command_reads.dedup();
@@ -624,7 +630,7 @@ fn settle_resource_lifecycle(
                     continue;
                 }
                 state
-                    .apply_operation(&admitted.value.request)
+                    .apply_operation_at(&admitted.value.request, context.at)
                     .map_err(resource_canwu_error)?;
                 affected.push(holder_entity(&admitted.value.subject));
                 changed = true;
@@ -640,34 +646,10 @@ fn settle_resource_lifecycle(
                 {
                     continue;
                 }
-                let production_execution =
-                    validate_adapter_packet(view, context.at, &packet, &state)?;
+                validate_adapter_packet(view, context.at, &packet, &state)?;
                 state
-                    .apply_operation(&packet.request)
+                    .apply_operation_at(&packet.request, context.at)
                     .map_err(resource_canwu_error)?;
-                if let Some(execution) = production_execution {
-                    let outcome = state
-                        .outcomes
-                        .get(&packet.request.operation_key())
-                        .ok_or_else(|| {
-                            CanwuError::new(
-                                ErrorCode::InvalidDomainRecord,
-                                "resource production credit did not persist its exact outcome",
-                            )
-                        })?;
-                    directives.push(BoundaryDirective::SchedulePluginIngress {
-                        target_plugin: "canwu-production".to_owned(),
-                        after: canwu_api::SimDuration::ZERO,
-                        packet_type: "production_output_ack_v1".to_owned(),
-                        priority: 0,
-                        payload: serde_json::json!({
-                            "execution": execution,
-                            "production_source": packet.provider_source,
-                            "outcome": outcome,
-                        }),
-                        affected: Vec::new(),
-                    });
-                }
                 changed = true;
             }
             RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
@@ -708,7 +690,7 @@ fn settle_resource_lifecycle(
                     continue;
                 }
                 state
-                    .apply_authorized_allocation(&packet.requester, &packet.request)
+                    .apply_authorized_allocation(&packet.requester, &packet.request, context.at)
                     .map_err(resource_canwu_error)?;
                 affected.push(holder_entity(&packet.requester));
                 changed = true;
@@ -1321,7 +1303,8 @@ fn validate_adapter_packet(
     at: SimTime,
     packet: &ResourceAdapterOperationV1,
     resource_state: &crate::ResourceState,
-) -> Result<Option<Value>, CanwuError> {
+) -> Result<(), CanwuError> {
+    reject_adapter_production_credit(&packet.request)?;
     let source = view
         .domain_record_version(&packet.provider_source)?
         .ok_or_else(|| {
@@ -1366,6 +1349,24 @@ fn validate_adapter_packet(
     validate_request_certificate_evidence(view, &packet.request)?;
     validate_local_provider_participant(resource_state, packet)?;
     authoritative_provider_operation(&source.payload, packet, resource_state)
+}
+
+/// Production output credits settle only through
+/// [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`], which binds every output leg
+/// of one execution to the source version production pinned on it. Adapter
+/// ingress never credits production output.
+fn reject_adapter_production_credit(
+    request: &ResourceOperationRequestV1,
+) -> Result<(), CanwuError> {
+    if let ResourceOperationRequestV1::Credit(credit) = request
+        && matches!(credit.source, crate::ResourceCreditSourceV1::Production(_))
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "production output credits settle only through the production output batch ingress",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_production_output_batch(
@@ -1449,7 +1450,38 @@ fn validate_production_output_batch(
             "production output batch does not match its consumed resource participant grant",
         ));
     }
-    authoritative_production_output_batch(&source.payload, packet)
+    let execution = authoritative_production_output_batch(&source.payload, packet)?;
+    require_pinned_output_source(view, &packet.provider_source, &execution)?;
+    Ok(execution)
+}
+
+/// The completion lease locked an older coordinator version, and the resource
+/// runtime accepts a production credit source as that record at or after the
+/// locked version. Exactness therefore comes from the coordinator itself: the
+/// credit must cite the exact source version the coordinator pinned on the
+/// execution (`output_source`) when it dispatched the output.
+fn require_pinned_output_source(
+    view: &SimulationView<'_>,
+    provider_source: &canwu_api::DomainRecordVersionRef,
+    execution: &Value,
+) -> Result<(), CanwuError> {
+    let pinned = view
+        .domain_record(&provider_source.record)?
+        .and_then(|current| {
+            current
+                .payload
+                .get("executions")?
+                .get(execution.as_str()?)?
+                .get("output_source")
+                .cloned()
+        });
+    if pinned != Some(encode(provider_source)?) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "production output credit does not cite the coordinator's pinned output source",
+        ));
+    }
+    Ok(())
 }
 
 fn authoritative_production_output_batch(
@@ -1663,96 +1695,18 @@ fn authoritative_provider_operation(
     payload: &Value,
     packet: &ResourceAdapterOperationV1,
     resource_state: &crate::ResourceState,
-) -> Result<Option<Value>, CanwuError> {
+) -> Result<(), CanwuError> {
     match &packet.request {
-        ResourceOperationRequestV1::Credit(request)
-            if matches!(request.source, crate::ResourceCreditSourceV1::Production(_)) =>
-        {
-            authoritative_production_credit(payload, packet, request)
-        }
         ResourceOperationRequestV1::Consume(request)
             if packet.provider_plugin == "canwu-force-supply-reference" =>
         {
-            authoritative_force_consumption(payload, request)?;
-            Ok(None)
+            authoritative_force_consumption(payload, request)
         }
         ResourceOperationRequestV1::Consume(request) => {
-            authoritative_typed_consumption(payload, packet, request, resource_state)?;
-            Ok(None)
+            authoritative_typed_consumption(payload, packet, request, resource_state)
         }
-        _ => Ok(None),
+        _ => Ok(()),
     }
-}
-
-fn authoritative_production_credit(
-    payload: &Value,
-    packet: &ResourceAdapterOperationV1,
-    request: &crate::ResourceCreditRequestV1,
-) -> Result<Option<Value>, CanwuError> {
-    if packet.provider_plugin != "canwu-production" {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            "resource production credit requires the canonical production provider",
-        ));
-    }
-    let executions = payload
-        .get("executions")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidDomainRecord,
-                "production provider payload has no authoritative execution table",
-            )
-        })?;
-    let certificate = serde_json::to_value(&request.completion_certificate).map_err(|error| {
-        CanwuError::new(
-            ErrorCode::InvalidPayload,
-            format!("resource production certificate could not be encoded: {error}"),
-        )
-    })?;
-    let mut matched = executions.values().filter(|execution| {
-        let output = execution.get("output_request");
-        execution.get("lifecycle").and_then(Value::as_str)
-            == Some("completed_pending_output_settlement")
-            && execution.get("output_outcome").is_none_or(Value::is_null)
-            && execution.get("completion_certificate") == Some(&certificate)
-            && output.and_then(|value| value.get("operation_key"))
-                == serde_json::to_value(&request.operation_key).ok().as_ref()
-            && output.and_then(|value| value.get("account"))
-                == serde_json::to_value(&request.account).ok().as_ref()
-            && output.and_then(|value| value.get("expected_account_revision"))
-                == serde_json::to_value(request.expected_account_revision)
-                    .ok()
-                    .as_ref()
-            && output.and_then(|value| value.get("resource"))
-                == serde_json::to_value(&request.resource_revision)
-                    .ok()
-                    .as_ref()
-            && output.and_then(|value| value.get("unit"))
-                == serde_json::to_value(&request.unit_revision).ok().as_ref()
-            && output
-                .and_then(|value| value.get("quantity"))
-                .and_then(Value::as_u64)
-                == Some(request.quantity)
-    });
-    let execution = matched.next().ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            "production provider payload does not authorize the exact resource credit",
-        )
-    })?;
-    if matched.next().is_some() {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidDomainRecord,
-            "production provider payload ambiguously authorizes the resource credit",
-        ));
-    }
-    execution.get("id").cloned().map(Some).ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::InvalidDomainRecord,
-            "production provider execution has no canonical identity",
-        )
-    })
 }
 
 fn authoritative_force_consumption(
@@ -2498,7 +2452,9 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         | ResourceOperationRequestV1::CancelTransfer(_)
         | ResourceOperationRequestV1::SetProtectedFloor(_)
         | ResourceOperationRequestV1::CancelDemand(_)
-        | ResourceOperationRequestV1::Completion(_) => false,
+        | ResourceOperationRequestV1::Completion(_)
+        | ResourceOperationRequestV1::IssueAccessGrant(_)
+        | ResourceOperationRequestV1::RevokeAccessGrant(_) => false,
     }
 }
 
@@ -2528,7 +2484,9 @@ fn validate_resource_authority(
             Some(request.account.custodian.clone())
         }
         ResourceOperationRequestV1::SubmitDemand(request) => {
-            state.validate_demand_sources(&request.demand).map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
+            state
+                .validate_demand_admission(&request.demand, false)
+                .map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
             Some(request.demand.requester.clone())
         }
         ResourceOperationRequestV1::AmendDemand(request) => {
@@ -2544,20 +2502,41 @@ fn validate_resource_authority(
                     "resource demand amendment changes its authority holder",
                 ));
             }
-            state.validate_demand_sources(&request.replacement).map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
+            let drawn = current.fulfilled > 0
+                || state
+                    .reservation_by_demand
+                    .get(&current.id)
+                    .is_some_and(|ids| !ids.is_empty());
+            state
+                .validate_demand_admission(&request.replacement, drawn)
+                .map_err(|error| CanwuError::new(ErrorCode::InvalidAuthority, error.to_string()))?;
             Some(current.requester.clone())
         }
-        ResourceOperationRequestV1::BeginTransfer(request) => state
-            .accounts
-            .get(&request.allocation.account)
-            .map(|account| account.custodian.clone()),
+        // A leg reserved under an access grant is debited by the grantee;
+        // any other leg by its source custodian.
+        ResourceOperationRequestV1::BeginTransfer(request) => {
+            state.allocation_debit_holder(&request.allocation)
+        }
         // The subject initiates through `leg_a`; settlement additionally
         // requires each leg's completion lease to be held by that leg's own
-        // source custodian, so the counterparty's consent is its own lease.
-        ResourceOperationRequestV1::BeginExchange(request) => state
-            .accounts
-            .get(&request.leg_a.allocation.account)
-            .map(|account| account.custodian.clone()),
+        // source custodian (or grantee for a granted leg), so the
+        // counterparty's consent is its own lease.
+        ResourceOperationRequestV1::BeginExchange(request) => {
+            state.allocation_debit_holder(&request.leg_a.allocation)
+        }
+        ResourceOperationRequestV1::IssueAccessGrant(request) => {
+            if !view.domain_record_version_evidence_exists(&request.grant.authority_evidence)? {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "resource access grant authority evidence is not an available exact record version",
+                ));
+            }
+            Some(request.grant.grantor_custodian.clone())
+        }
+        ResourceOperationRequestV1::RevokeAccessGrant(request) => state
+            .access_grants
+            .get(&request.grant_id)
+            .map(|record| record.grant.grantor_custodian.clone()),
         ResourceOperationRequestV1::RecordLoss(request) => state
             .accounts
             .get(&request.account)
@@ -2569,10 +2548,7 @@ fn validate_resource_authority(
                     "resource transfer target is unavailable",
                 )
             })?;
-            state
-                .accounts
-                .get(&transfer.source)
-                .map(|account| account.custodian.clone())
+            state.transfer_controller(transfer)
         }
         ResourceOperationRequestV1::CompleteTransfer(request) => {
             if matches!(
@@ -2591,19 +2567,18 @@ fn validate_resource_authority(
                     "resource transfer target is unavailable",
                 )
             })?;
-            let account_id = match &request.disposition {
+            match &request.disposition {
                 crate::ResourceTransferDispositionV1::Accept { destination, .. }
-                | crate::ResourceTransferDispositionV1::AcceptLocal { destination, .. } => {
-                    destination
-                }
+                | crate::ResourceTransferDispositionV1::AcceptLocal { destination, .. } => state
+                    .accounts
+                    .get(destination)
+                    .map(|account| account.custodian.clone()),
                 crate::ResourceTransferDispositionV1::Lose { .. }
                 | crate::ResourceTransferDispositionV1::Return { .. }
-                | crate::ResourceTransferDispositionV1::ExternalOutflow { .. } => &transfer.source,
-            };
-            state
-                .accounts
-                .get(account_id)
-                .map(|account| account.custodian.clone())
+                | crate::ResourceTransferDispositionV1::ExternalOutflow { .. } => {
+                    state.transfer_controller(transfer)
+                }
+            }
         }
         ResourceOperationRequestV1::ExternalOutflow(request) => state
             .accounts
@@ -2708,7 +2683,11 @@ pub fn resource_command_descriptor() -> PluginActionDescriptor {
         name: RESOURCE_COMMAND.to_owned(),
         description: "Admit one authority-bound resource operation".to_owned(),
         payload_schema: PayloadSchema::Any,
-        reads: vec![StateKey::core_evidence(), resource_state_key()],
+        reads: vec![
+            StateKey::core_domain_records(),
+            StateKey::core_evidence(),
+            resource_state_key(),
+        ],
         writes: Vec::new(),
     }
 }
@@ -2725,6 +2704,7 @@ pub fn resource_adapter_ingress(
     due_at: SimTime,
     packet: &ResourceAdapterOperationV1,
 ) -> Result<PluginIngressRequest, CanwuError> {
+    reject_adapter_production_credit(&packet.request)?;
     Ok(PluginIngressRequest::new(
         PLUGIN_NAME,
         RESOURCE_ADAPTER_INGRESS,

@@ -737,6 +737,8 @@ fn tutorial_state() -> SocietyState {
             material_penalty_per_mille: 0,
             disruption_per_mille: 0,
             migration_pressure_per_mille: 0,
+            issuer: None,
+            decision_version: 0,
         },
     );
     state.transition_rules.insert(

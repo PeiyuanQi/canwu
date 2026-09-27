@@ -6,11 +6,12 @@ pub use canwu_core::{
     ArmyId, BoundaryId, CommandAttemptId, CommandId, CommandRequestId, CoreEntityKind,
     DecisionRequestId, DecisionTicketId, DecisionTraceId, DomainEntityKindClass, DomainEntityType,
     DomainKindClass, DomainRecordKind, DomainRecordRef, DomainRecordType, DomainRecordVersionRef,
-    DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EventId,
-    EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId, KnowledgeHolderPolicy,
-    KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId, LetterId,
-    OrganizationId, PersonId, RandomDrawId, ResourceId, RouteId, SchemaRegistry,
-    SchemaRegistryError, SimulationGranularity, TerritoryId, TypeSchema, TypedDomainRecordRef,
+    DomainRecordVersionSource, DomainValueKindClass, DomainValueType, EntityRef, EvaluationTerm,
+    EvaluationTraceRecord, EventId, EvidenceRef, GovernmentId, HolderKnowledgeRecordId, IngressId,
+    KnowledgeHolderPolicy, KnowledgeHolderRef, KnowledgeRecordId, KnowledgeRecordKind,
+    KnowledgeSchemaId, LetterId, OrganizationId, PersonId, RandomDrawId, ResourceId, RouteId,
+    SchemaRegistry, SchemaRegistryError, SimulationGranularity, TerritoryId, TypeSchema,
+    TypedDomainRecordRef,
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
@@ -31,10 +32,10 @@ pub use canwu_sim::{
     ArchiveStoreOutcome, ArchivedEvidenceLocator, ArchivedEvidenceReceipt,
     ArchivedPluginIngressProvenance, ArchivedSegmentHeader, Army, ArtifactManifest, BoundaryChange,
     BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPersonAvailabilityChange,
-    BoundaryPersonCreation, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
-    BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
-    CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
+    BoundaryEvaluationTrace, BoundaryIngressGeneration, BoundaryKnowledgeChange,
+    BoundaryPersonAvailabilityChange, BoundaryPersonCreation, BoundaryPhase, BoundaryProposal,
+    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
+    BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
     CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CanwuError, CheckpointJournal, Command,
     CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
     CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
@@ -57,15 +58,16 @@ pub use canwu_sim::{
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation,
     DomainRecordPage, DomainRecordPageRoots, DomainRecordSchema, DomainReference,
     DomainReferenceSchema, DomainReferenceTarget, DomainReferenceTargetKind, ENGINE_VERSION,
-    ErrorCode, EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry, EvidenceItemLocator,
-    EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator,
-    EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
-    ExternalPolicy, Government, GuardedUtilityPolicy, HumanDecisionResponse, HumanPolicy,
-    IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
-    IdentityEvidenceDependenciesV1, IngressCancellationAuthority, IngressClass, IngressPayload,
-    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
-    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo,
-    LetterStatus, LifeState, LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
+    ErrorCode, EvaluationLimitsV1, EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry,
+    EvidenceItemLocator, EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment,
+    EvidenceNestedLocator, EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest,
+    ExternalDecisionResponse, ExternalPolicy, Government, GuardedUtilityPolicy,
+    HumanDecisionResponse, HumanPolicy, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
+    IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION, IdentityEvidenceDependenciesV1,
+    IngressCancellationAuthority, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
+    InteractionPolicy, Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema,
+    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo, LetterStatus, LifeState,
+    LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
     MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE,
     MAX_INGRESS_CANCELLATION_REASON_BYTES, MAX_OWNER_AUTHORIZED_MUTATIONS,
     MAX_OWNER_AUTHORIZED_PARTICIPANTS, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES,
@@ -106,14 +108,25 @@ pub use canwu_sim::{
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
     prepare_state_delta, state_page_id, verify_state_delta,
 };
+// Transition manifests and their audit (gap G-04).
+pub use canwu_sim::{
+    MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
+    MAX_TRANSITION_EXPECTED_VERSIONS, MAX_TRANSITION_LINEAGE_ID_BYTES, MAX_TRANSITION_PARTICIPANTS,
+    MAX_TRANSITION_READY_HORIZON, PendingTransitionManifest, TransitionAuditOutcome,
+    TransitionAuditRecord, TransitionManifest, TransitionManifestId, TransitionParticipant,
+    TransitionParticipantAudit, TransitionRecordVersion,
+};
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
-    CapacityBooking, CapacityBookingId, CapacityBookingStatus, DeliveryCompletionRequest,
-    DeliverySaga, Handoff, HandoffId, HandoffKind, ItineraryRevision, ItineraryRevisionId,
+    BookingAllocationV1, CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN, CapacityAllocationFailureV1,
+    CapacityBooking, CapacityBookingAllocationEvidenceV1, CapacityBookingId,
+    CapacityBookingRequestV1, CapacityBookingStatus, DeliveryCompletionRequest, DeliverySaga,
+    Handoff, HandoffId, HandoffKind, ItineraryRevision, ItineraryRevisionId,
     ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, MovementInitiative,
     MovementOrder, MovementOrderError, MovementOrderId, MovementSubject, MovementSubjectRole,
-    ReconciliationOutcome, SagaState, TRANSPORT_SEMANTIC_VERSION, TransportError,
-    TransportExecution, TransportExecutionId, TransportExecutionState,
+    ReconciliationOutcome, SagaState, TRANSPORT_SEMANTIC_VERSION, TransportCapacityPoolV1,
+    TransportError, TransportExecution, TransportExecutionId, TransportExecutionState,
+    allocate_capacity_bookings, capacity_booking_allocation_operation_key,
     delivery_completion_operation_key,
 };
 use serde::{Deserialize, Serialize};
@@ -306,6 +319,13 @@ impl Canwu {
     /// person-ID order. Persons without an entry are alive and free.
     pub fn person_availabilities(&self) -> impl Iterator<Item = (&PersonId, &PersonAvailability)> {
         self.simulation.person_availabilities()
+    }
+
+    /// Trusted host access to the registered transition manifests whose
+    /// ready boundary has not settled, in manifest-ID order. Settled
+    /// manifests leave their audit on the boundary record and receipt.
+    pub fn pending_transition_manifests(&self) -> impl Iterator<Item = &PendingTransitionManifest> {
+        self.simulation.pending_transition_manifests()
     }
 
     /// Trusted host/admin access to the complete knowledge snapshot.
@@ -1137,6 +1157,13 @@ impl CompactedCanwu {
         self.simulation.person_availabilities()
     }
 
+    /// Trusted host access to the registered transition manifests whose
+    /// ready boundary has not settled, in manifest-ID order. Settled
+    /// manifests leave their audit on the boundary record and receipt.
+    pub fn pending_transition_manifests(&self) -> impl Iterator<Item = &PendingTransitionManifest> {
+        self.simulation.pending_transition_manifests()
+    }
+
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
@@ -1516,6 +1543,154 @@ impl CanwuViewer<'_> {
                 visible_change(&context, event, &audience)
             })
             .collect()
+    }
+
+    /// Returns the holder-facing projection of the retained rule-evaluation
+    /// traces of `subject` that this principal may see, from boundaries after
+    /// `after` (every retained boundary when `None`), in boundary and
+    /// recording order.
+    ///
+    /// Visibility follows the holder ledger that [`Self::query_knowledge`]
+    /// reads. A person or institution principal sees a trace when the subject
+    /// is its own entity, or when a knowledge publication to its ledger that
+    /// names the subject (as an entity target or, for a domain entity, as a
+    /// domain-record target) was visible before the trace was evaluated: in
+    /// an earlier boundary, or as a same-boundary publication in phase 4 of
+    /// the same boundary. A holder
+    /// therefore never gains the breakdowns of a subject evaluated before it
+    /// learned of it. Research and developer principals see every trace; a
+    /// public principal cannot read traces, as it cannot read a private
+    /// ledger.
+    ///
+    /// Like holder knowledge views, the projection omits evidence. Term
+    /// evidence and the producing plugin and system stay on the trusted
+    /// [`BoundaryRecord::evaluation_traces`] read through [`Canwu::boundaries`].
+    pub fn evaluation_traces(
+        &self,
+        subject: &EntityRef,
+        after: Option<BoundaryId>,
+    ) -> Result<Vec<EvaluationTraceView>, CanwuError> {
+        let (own, holder) = match &self.context.principal {
+            ObservationPrincipal::Person(actor) => (
+                EntityRef::Person(*actor),
+                KnowledgeHolderRef::Person(*actor),
+            ),
+            ObservationPrincipal::Institution(entity) => {
+                (entity.clone(), KnowledgeHolderRef::Entity(entity.clone()))
+            }
+            ObservationPrincipal::Research | ObservationPrincipal::Developer => {
+                return Ok(self.canwu.evaluation_trace_views(subject, after, None));
+            }
+            ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
+        };
+        if &own == subject {
+            return Ok(self.canwu.evaluation_trace_views(subject, after, None));
+        }
+        // Every generic ledger record is committed by exactly one boundary
+        // knowledge change, so the first change naming the subject is the
+        // exact cut at which the holder learned of it. A next-boundary
+        // publication becomes known only once its boundary has settled.
+        let learned = self.canwu.boundaries().iter().find_map(|boundary| {
+            boundary
+                .knowledge_changes
+                .iter()
+                .filter(|change| {
+                    change.holder == holder
+                        && change
+                            .records
+                            .iter()
+                            .any(|record| knowledge_names_subject(record, subject))
+                })
+                .map(|change| match change.visibility {
+                    StateVisibility::SameBoundary => (boundary.id, change.phase),
+                    StateVisibility::NextBoundary => {
+                        (boundary.id, BoundaryPhase::SaveReplayAndDiagnosticHashing)
+                    }
+                })
+                .min()
+        });
+        Ok(learned.map_or_else(Vec::new, |learned| {
+            self.canwu
+                .evaluation_trace_views(subject, after, Some(learned))
+        }))
+    }
+}
+
+impl Canwu {
+    fn evaluation_trace_views(
+        &self,
+        subject: &EntityRef,
+        after: Option<BoundaryId>,
+        learned: Option<(BoundaryId, BoundaryPhase)>,
+    ) -> Vec<EvaluationTraceView> {
+        let boundaries = self.boundaries();
+        let start = after.map_or(0, |after| {
+            boundaries.partition_point(|boundary| boundary.id <= after)
+        });
+        boundaries[start..]
+            .iter()
+            .flat_map(|boundary| {
+                boundary
+                    .evaluation_traces
+                    .iter()
+                    .map(move |entry| (boundary.id, entry))
+            })
+            .filter(|(boundary, entry)| {
+                &entry.trace.subject == subject
+                    && learned.is_none_or(|learned| learned < (*boundary, entry.phase))
+            })
+            .map(|(_, entry)| EvaluationTraceView::from(&entry.trace))
+            .collect()
+    }
+}
+
+fn knowledge_names_subject(record: &KnowledgeRecord, subject: &EntityRef) -> bool {
+    record.subjects.iter().any(|named| match &named.target {
+        KnowledgeSubjectTarget::Entity(entity) => entity == subject,
+        KnowledgeSubjectTarget::DomainRecord(reference) => {
+            matches!(subject, EntityRef::Domain(domain) if domain == reference)
+        }
+        KnowledgeSubjectTarget::Event(_) => false,
+    })
+}
+
+/// Holder-facing projection of one [`EvaluationTraceRecord`], returned by
+/// [`CanwuViewer::evaluation_traces`]. It keeps the rule, subject, boundary,
+/// result, and each term's contribution, and omits evidence identities.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvaluationTraceView {
+    pub rule_id: String,
+    pub rule_version: String,
+    pub subject: EntityRef,
+    pub terms: Vec<EvaluationTermView>,
+    pub result: i64,
+    pub boundary: BoundaryId,
+}
+
+/// One term of an [`EvaluationTraceView`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvaluationTermView {
+    pub term_id: String,
+    pub contribution: i64,
+}
+
+impl From<&EvaluationTraceRecord> for EvaluationTraceView {
+    fn from(record: &EvaluationTraceRecord) -> Self {
+        Self {
+            rule_id: record.rule_id.clone(),
+            rule_version: record.rule_version.clone(),
+            subject: record.subject.clone(),
+            terms: record
+                .terms
+                .iter()
+                .map(|term| EvaluationTermView {
+                    term_id: term.term_id.clone(),
+                    contribution: term.contribution,
+                })
+                .collect(),
+            result: record.result,
+            boundary: record.boundary,
+        }
     }
 }
 

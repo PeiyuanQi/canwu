@@ -1,9 +1,17 @@
+use crate::ingress::{
+    COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, MAX_SOCIETY_INGRESS_QUEUE,
+    QueuedSocietyIngress, SOCIETY_INGRESS_MALFORMED_REJECTION, SocietyIngressQueue,
+    SocietyIngressQueueRecord, is_queued_packet, rebase_admission_rejection,
+    society_ingress_queue_reference,
+};
+use crate::lifecycle::{SOCIETY_LIFECYCLE_DELTA_INGRESS, SocietyLifecycleDeltaV1};
 use crate::model::{
-    CohortTransferIntent, CohortTransferOutcome, DispositionBucket, InstitutionalAlignment,
-    PendingCohortTransfer, PolicyDecision, SocietyCohortExchangeLedger,
+    CohortHeadcountRebaseOutcome, CohortTransferIntent, CohortTransferOutcome, DispositionBucket,
+    InstitutionalAlignment, PendingCohortTransfer, PolicyDecision, SocietyCohortExchangeLedger,
     SocietyCohortExchangeLedgerRecord, SocietyCohortTransferPending,
-    SocietyCohortTransferPendingRecord, SocietyState, SocietyStateRecord, core_reference_schemas,
-    invalid, society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
+    SocietyCohortTransferPendingRecord, SocietyIngressStatus, SocietyLifecycleDeltaOutcome,
+    SocietyState, SocietyStateRecord, core_reference_schemas, invalid,
+    society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
     society_state_reference,
 };
 use crate::settle_transitions;
@@ -13,7 +21,7 @@ use canwu_api::{
     CanwuError, Command, CommandId, DecisionOrigin, DomainRecord, DomainRecordDraft,
     DomainRecordMutation, DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass,
     IngressPayload, Issuer, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimulationPlugin,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimTime, SimulationPlugin,
     SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
 };
 use serde_json::Value;
@@ -34,9 +42,26 @@ impl SimulationPlugin for SocietyPlugin {
     }
 
     fn semantic_hash(&self) -> &'static str {
-        "a4e005ac53d979c74d6fa1d01302df1116fc5322c6461a60edfb1d83c6dddfd1"
+        "23cf74dbfc68789336bbab5c8fbb04227d765673b887f1d7dc8bc6734d6bba38"
     }
 
+    fn validate_activation(&self, records: &[DomainRecord]) -> Result<(), CanwuError> {
+        for record in records {
+            if record.reference == society_ingress_queue_reference().into_untyped() {
+                record
+                    .decode_payload::<SocietyIngressQueueRecord>()?
+                    .validate()?;
+            } else if record.reference == society_cohort_exchange_ledger_reference().into_untyped()
+            {
+                record
+                    .decode_payload::<SocietyCohortExchangeLedgerRecord>()?
+                    .validate()?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         let mut schema = DomainRecordSchema::for_record::<SocietyStateRecord>();
         schema.payload_schema = society_payload_schema();
@@ -50,6 +75,59 @@ impl SimulationPlugin for SocietyPlugin {
         registrar.register_record_schema(DomainRecordSchema::for_record::<
             SocietyCohortTransferPendingRecord,
         >())?;
+        let mut queue_schema = DomainRecordSchema::for_record::<SocietyIngressQueueRecord>();
+        queue_schema.payload_schema = PayloadSchema::Object {
+            properties: BTreeMap::from([
+                (
+                    "schema_version".to_owned(),
+                    required(PayloadValueType::Integer),
+                ),
+                ("entries".to_owned(), required(PayloadValueType::Array)),
+            ]),
+            allow_additional: false,
+        };
+        registrar.register_record_schema(queue_schema)?;
+
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: COHORT_REBASE_INGRESS.to_owned(),
+            description: "Rebase one cohort headcount to an exact external stock version"
+                .to_owned(),
+            class: IngressClass::Information,
+            payload_schema: rebase_payload_schema(),
+        })?;
+        // Only boundary systems that declare this target may schedule a
+        // lifecycle delta; the host cannot author one.
+        let _lifecycle_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: SOCIETY_LIFECYCLE_DELTA_INGRESS.to_owned(),
+            description: "Apply one provider-computed target lifecycle delta".to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Object {
+                properties: BTreeMap::from([
+                    ("installs".to_owned(), optional(PayloadValueType::Array)),
+                    (
+                        "deactivations".to_owned(),
+                        optional(PayloadValueType::Array),
+                    ),
+                    ("releases".to_owned(), optional(PayloadValueType::Array)),
+                ]),
+                allow_additional: false,
+            },
+        })?;
+
+        let mut ingress_intake = BoundarySystemContract::new(
+            "intake-society-ingress",
+            BoundaryPhase::StrategicAggregation,
+            SystemCadence::EventDriven,
+        );
+        ingress_intake.reads = vec![
+            ingress_queue_key(),
+            StateKey::core_domain_records(),
+            StateKey::core_ingress(),
+        ];
+        ingress_intake.writes = vec![ingress_queue_key()];
+        ingress_intake.emits = vec![SOCIETY_INGRESS_REJECTED_EVENT.to_owned()];
+        ingress_intake.visibility = StateVisibility::SameBoundary;
+        registrar.register_boundary_system(ingress_intake, intake_society_ingress)?;
 
         registrar.register_command(
             PluginActionDescriptor {
@@ -105,9 +183,14 @@ impl SimulationPlugin for SocietyPlugin {
             policy_decision_key(),
             cohort_exchange_ledger_key(),
             pending_transfer_key(),
+            ingress_queue_key(),
             StateKey::core_ingress(),
         ];
-        transition.writes = vec![society_state_key(), cohort_exchange_ledger_key()];
+        transition.writes = vec![
+            society_state_key(),
+            cohort_exchange_ledger_key(),
+            ingress_queue_key(),
+        ];
         transition.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(transition, settle_social_transitions)?;
 
@@ -229,6 +312,11 @@ fn transfer_cohort_population(
 }
 
 const COHORT_TRANSFER_INGRESS: &str = "cohort-transfer";
+/// Event the society intake emits for an admitted packet it cannot queue.
+pub const SOCIETY_INGRESS_REJECTED_EVENT: &str = "society_ingress_rejected_v1";
+const TRANSFER_COMPLETED: &str = "completed";
+const TRANSFER_STALE_SOURCE: &str = "stale_source";
+const TRANSFER_REJECTED: &str = "rejected";
 
 fn pending_transfer_key() -> StateKey {
     StateKey::new(
@@ -390,9 +478,12 @@ fn cohort_transfer_digest(
         .cohorts
         .get(&intent.destination_cohort_id)
         .ok_or_else(|| invalid("unknown destination cohort"))?;
+    // Bind only the cohorts the transfer moves between. Their dispositions
+    // may keep changing through ordinary transitions; the transfer moves the
+    // proportional share current when it settles.
     canwu_api::canonical_hash(
-        "canwu.society.cohort-transfer-source.v1",
-        &(source, destination, &state.distributions),
+        "canwu.society.cohort-transfer-source.v2",
+        &(source, destination),
     )
 }
 
@@ -491,6 +582,7 @@ fn apply_cohort_transfer(
         .get_mut(&intent.destination_cohort_id)
         .expect("destination exists")
         .headcount += intent.quantity;
+    state.invalidate_derived_state();
     Ok(())
 }
 
@@ -527,13 +619,7 @@ fn load_ledger(
 ) -> Result<(SocietyCohortExchangeLedger, Option<DomainRecord>), CanwuError> {
     let Some(record) = view.typed_domain_record(&society_cohort_exchange_ledger_reference())?
     else {
-        return Ok((
-            SocietyCohortExchangeLedger {
-                schema_version: SocietyCohortExchangeLedger::SCHEMA_VERSION,
-                outcomes: BTreeMap::new(),
-            },
-            None,
-        ));
+        return Ok((SocietyCohortExchangeLedger::empty(), None));
     };
     let ledger = record.decode_payload::<SocietyCohortExchangeLedgerRecord>()?;
     ledger.validate()?;
@@ -697,18 +783,27 @@ fn settle_social_transitions(
         if transfer.intent.due_time > context.at {
             continue;
         }
-        let digest = cohort_transfer_digest(&state, &transfer.intent)?;
-        if digest != transfer.source_digest {
-            return Err(CanwuError::new(
-                ErrorCode::DomainRecordVersionConflict,
-                "pending cohort transfer source digest is stale",
-            ));
-        }
+        // An applied transfer stays in the intake-owned pending record; its
+        // ledger outcome, not its (now changed) source digest, settles it.
         if ledger.outcomes.contains_key(&operation_id) {
             pending.transfers.remove(&operation_id);
             continue;
         }
-        apply_cohort_transfer(&mut state, &transfer.intent)?;
+        // A source that changed after intake (for example through a rebase
+        // or lifecycle delta) or a transfer that no longer fits settles as a
+        // terminal rejection instead of failing every later Daily boundary.
+        let result = if cohort_transfer_digest(&state, &transfer.intent)? == transfer.source_digest
+        {
+            let mut draft = state.clone();
+            if apply_cohort_transfer(&mut draft, &transfer.intent).is_ok() {
+                state = draft;
+                TRANSFER_COMPLETED
+            } else {
+                TRANSFER_REJECTED
+            }
+        } else {
+            TRANSFER_STALE_SOURCE
+        };
         ledger.outcomes.insert(
             operation_id.clone(),
             CohortTransferOutcome {
@@ -721,16 +816,24 @@ fn settle_social_transitions(
                 authority_alignment_id: transfer.intent.authority_alignment_id.clone(),
                 due_time: transfer.intent.due_time,
                 completed_at: context.at,
-                result: "completed".to_owned(),
+                result: result.to_owned(),
             },
         );
         pending.transfers.remove(&operation_id);
         transfer_changed = true;
     }
+    // Queued rebases and lifecycle deltas apply in admission order, after
+    // transfers and before institutional decisions and transitions.
+    let (queue, queue_record) = load_ingress_queue(view)?;
+    let queue_consumed = !queue.entries.is_empty();
+    for entry in &queue.entries {
+        settle_queued_ingress(view, &mut state, &mut ledger, entry, context.at)?;
+    }
     apply_pending_policies(view, &mut state)?;
     settle_transitions(&mut state, context.at)?;
     if state == before
         && !transfer_changed
+        && !queue_consumed
         && pending_record.is_some()
         && pending.transfers == load_pending(view)?.0.transfers
     {
@@ -741,7 +844,22 @@ fn settle_social_transitions(
     } else {
         update_state(&record, state, "Settled aggregate social transitions")?
     };
-    if transfer_changed {
+    if let (true, Some(queue_record)) = (queue_consumed, queue_record) {
+        proposal.directives.push(BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Update {
+                record: DomainRecordDraft::from_typed(
+                    society_ingress_queue_reference(),
+                    &SocietyIngressQueue {
+                        schema_version: SocietyIngressQueue::SCHEMA_VERSION,
+                        entries: Vec::new(),
+                    },
+                )?,
+                expected_version: queue_record.version,
+            },
+            summary: "Consumed queued society ingress".to_owned(),
+        });
+    }
+    if transfer_changed || queue_consumed {
         ledger.validate()?;
         let mutation = match ledger_record {
             Some(record) => DomainRecordMutation::Update {
@@ -760,11 +878,251 @@ fn settle_social_transitions(
         };
         proposal.directives.push(BoundaryDirective::MutateRecord {
             mutation,
-            summary: "Recorded society cohort transfer outcome".to_owned(),
+            summary: "Recorded society cohort exchange outcomes".to_owned(),
         });
     }
 
     Ok(proposal)
+}
+
+/// Applies one queued packet to the in-progress state and records its
+/// terminal outcome. A rejected packet leaves the state unchanged.
+fn settle_queued_ingress(
+    view: &SimulationView<'_>,
+    state: &mut SocietyState,
+    ledger: &mut SocietyCohortExchangeLedger,
+    entry: &QueuedSocietyIngress,
+    at: SimTime,
+) -> Result<(), CanwuError> {
+    let key = entry.ingress.get().to_string();
+    match entry.packet_type.as_str() {
+        COHORT_REBASE_INGRESS => {
+            if ledger.rebases.contains_key(&key) {
+                return Ok(());
+            }
+            let rebase =
+                serde_json::from_value::<CohortHeadcountRebaseV1>(entry.payload.clone()).ok();
+            let result = match (&entry.admission_rejection, &rebase) {
+                (Some(reason), _) => Err(reason.clone()),
+                (None, None) => Err(SOCIETY_INGRESS_MALFORMED_REJECTION.to_owned()),
+                (None, Some(rebase)) => state
+                    .rebase_cohort(&rebase.cohort_id, rebase.new_headcount)
+                    .map_err(|error| error.message),
+            };
+            let (status, rejection, previous_headcount) = match result {
+                Ok(previous) => (SocietyIngressStatus::Applied, None, Some(previous)),
+                Err(reason) => (SocietyIngressStatus::Rejected, Some(reason), None),
+            };
+            ledger.rebases.insert(
+                key,
+                CohortHeadcountRebaseOutcome {
+                    ingress: entry.ingress,
+                    admitted_at: entry.admitted_at,
+                    settled_at: at,
+                    status,
+                    rejection,
+                    rebase,
+                    previous_headcount,
+                },
+            );
+        }
+        SOCIETY_LIFECYCLE_DELTA_INGRESS => {
+            if ledger.lifecycle_deltas.contains_key(&key) {
+                return Ok(());
+            }
+            let (status, rejection, blocked_releases) = match &entry.admission_rejection {
+                Some(reason) => (
+                    SocietyIngressStatus::Rejected,
+                    Some(reason.clone()),
+                    BTreeSet::new(),
+                ),
+                None => {
+                    match serde_json::from_value::<SocietyLifecycleDeltaV1>(entry.payload.clone()) {
+                        Err(_) => (
+                            SocietyIngressStatus::Rejected,
+                            Some(SOCIETY_INGRESS_MALFORMED_REJECTION.to_owned()),
+                            BTreeSet::new(),
+                        ),
+                        Ok(delta) => apply_queued_lifecycle_delta(view, state, delta)?,
+                    }
+                }
+            };
+            ledger.lifecycle_deltas.insert(
+                key,
+                SocietyLifecycleDeltaOutcome {
+                    ingress: entry.ingress,
+                    admitted_at: entry.admitted_at,
+                    settled_at: at,
+                    status,
+                    rejection,
+                    blocked_releases,
+                },
+            );
+        }
+        other => {
+            return Err(invalid(format!(
+                "society ingress queue contains unsupported packet {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Applies one delivered lifecycle delta. A release is blocked, while the
+/// rest of the delta still applies, when a released alignment carries a
+/// stored institutional decision (decision components are permanent, so
+/// releasing the alignment would orphan them) or when a live society
+/// dependency would make the release fail; blocked targets are recorded on
+/// the outcome.
+fn apply_queued_lifecycle_delta(
+    view: &SimulationView<'_>,
+    state: &mut SocietyState,
+    mut delta: SocietyLifecycleDeltaV1,
+) -> Result<(SocietyIngressStatus, Option<String>, BTreeSet<String>), CanwuError> {
+    let mut blocked = BTreeSet::new();
+    for set in delta
+        .deactivations
+        .iter()
+        .filter(|set| delta.releases.contains(&set.target_id))
+    {
+        for alignment in &set.alignments {
+            if let Some(stored) = state.institutional_alignments.get(&alignment.id)
+                && view
+                    .component(&policy_decision_key(), &stored.institution, &stored.id)?
+                    .is_some()
+            {
+                blocked.insert(set.target_id.clone());
+            }
+        }
+    }
+    delta.releases.retain(|target| !blocked.contains(target));
+    let result = match state.apply_lifecycle_delta(&delta) {
+        Err(_) if !delta.releases.is_empty() => {
+            blocked.append(&mut delta.releases);
+            state.apply_lifecycle_delta(&delta)
+        }
+        result => result,
+    };
+    Ok(match result {
+        Ok(()) => (SocietyIngressStatus::Applied, None, blocked),
+        Err(error) => (
+            SocietyIngressStatus::Rejected,
+            Some(error.message),
+            BTreeSet::new(),
+        ),
+    })
+}
+
+/// Appends every admitted rebase and lifecycle delta to the owner-side queue.
+///
+/// Runs in phase 12 of any boundary that admits ingress, so the rebase stock
+/// check sees the state committed through phase 11 of the admitting boundary.
+/// The next Daily phase-7 settlement consumes the queue.
+fn intake_society_ingress(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let (mut queue, queue_record) = load_ingress_queue(view)?;
+    let mut directives = Vec::new();
+    let mut changed = false;
+    for ingress_id in &context.admitted_ingress {
+        let Some(ingress) = view.ingress(*ingress_id)? else {
+            continue;
+        };
+        let IngressPayload::Plugin {
+            plugin,
+            packet_type,
+            payload,
+            ..
+        } = &ingress.payload
+        else {
+            continue;
+        };
+        if !is_queued_packet(plugin, packet_type) {
+            continue;
+        }
+        if queue.entries.len() >= MAX_SOCIETY_INGRESS_QUEUE {
+            directives.push(BoundaryDirective::Emit {
+                event_type: SOCIETY_INGRESS_REJECTED_EVENT.to_owned(),
+                summary: format!(
+                    "Rejected society ingress {ingress_id}: the ingress queue is full"
+                ),
+                affected: Vec::new(),
+            });
+            continue;
+        }
+        let admission_rejection = if packet_type == COHORT_REBASE_INGRESS {
+            match serde_json::from_value::<CohortHeadcountRebaseV1>(payload.clone()) {
+                Err(_) => Some(SOCIETY_INGRESS_MALFORMED_REJECTION.to_owned()),
+                Ok(rebase) => {
+                    let current = rebase.external_stock.record.kind.namespace
+                        != crate::model::SOCIETY_NAMESPACE
+                        && view.domain_record_version_is_current(&rebase.external_stock)?;
+                    rebase_admission_rejection(&rebase, current)
+                }
+            }
+        } else {
+            None
+        };
+        queue.entries.push(QueuedSocietyIngress {
+            ingress: *ingress_id,
+            admitted_at: context.boundary_id,
+            packet_type: packet_type.clone(),
+            payload: payload.clone(),
+            admission_rejection,
+        });
+        changed = true;
+    }
+    if changed {
+        queue.validate()?;
+        let draft = DomainRecordDraft::from_typed(society_ingress_queue_reference(), &queue)?;
+        let mutation = match queue_record {
+            Some(record) => DomainRecordMutation::Update {
+                record: draft,
+                expected_version: record.version,
+            },
+            None => DomainRecordMutation::Create { record: draft },
+        };
+        directives.push(BoundaryDirective::MutateRecord {
+            mutation,
+            summary: "Queued admitted society ingress".to_owned(),
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+fn load_ingress_queue(
+    view: &SimulationView<'_>,
+) -> Result<(SocietyIngressQueue, Option<DomainRecord>), CanwuError> {
+    let Some(record) = view.typed_domain_record(&society_ingress_queue_reference())? else {
+        return Ok((
+            SocietyIngressQueue {
+                schema_version: SocietyIngressQueue::SCHEMA_VERSION,
+                entries: Vec::new(),
+            },
+            None,
+        ));
+    };
+    let queue = record.decode_payload::<SocietyIngressQueueRecord>()?;
+    queue.validate()?;
+    // Only the intake writes queue entries. A non-empty queue whose current
+    // version the initial scenario established was never admitted.
+    if !queue.entries.is_empty()
+        && view
+            .current_domain_record_version(&record.reference)?
+            .is_none_or(|version| {
+                version.established_by == canwu_api::DomainRecordVersionSource::InitialScenario
+            })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "an initial scenario cannot seed admitted society ingress",
+        ));
+    }
+    Ok((queue, Some(record.clone())))
 }
 
 fn evaluate_mobilization(
@@ -918,6 +1276,39 @@ pub(crate) fn policy_decision_key() -> StateKey {
     StateKey::new("canwu.society", "policy-decisions")
 }
 
+/// Component state holding versioned institutional policy decisions that the
+/// society plugin applies at its next Daily settlement. A reader (for example
+/// a lifecycle provider) declares this key to observe accepted decisions.
+#[must_use]
+pub fn society_policy_decision_state_key() -> StateKey {
+    policy_decision_key()
+}
+
+fn ingress_queue_key() -> StateKey {
+    StateKey::new(
+        SocietyIngressQueueRecord::NAMESPACE,
+        SocietyIngressQueueRecord::NAME,
+    )
+}
+
+fn rebase_payload_schema() -> PayloadSchema {
+    PayloadSchema::Object {
+        properties: BTreeMap::from([
+            ("cohort_id".to_owned(), required(PayloadValueType::String)),
+            (
+                "new_headcount".to_owned(),
+                required(PayloadValueType::Integer),
+            ),
+            (
+                "external_stock".to_owned(),
+                required(PayloadValueType::Object),
+            ),
+            ("reason".to_owned(), required(PayloadValueType::String)),
+        ]),
+        allow_additional: false,
+    }
+}
+
 fn cohort_transfer_payload_schema() -> PayloadSchema {
     PayloadSchema::Object {
         properties: BTreeMap::from([
@@ -956,6 +1347,11 @@ fn exchange_ledger_payload_schema() -> PayloadSchema {
                 required(PayloadValueType::Integer),
             ),
             ("outcomes".to_owned(), required(PayloadValueType::Object)),
+            ("rebases".to_owned(), optional(PayloadValueType::Object)),
+            (
+                "lifecycle_deltas".to_owned(),
+                optional(PayloadValueType::Object),
+            ),
         ]),
         allow_additional: false,
     }

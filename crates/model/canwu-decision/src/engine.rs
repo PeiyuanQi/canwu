@@ -2135,7 +2135,11 @@ impl DecisionState {
                 let lineage_valid = match self.tickets.get(&parent_id) {
                     Some(parent) => {
                         !parent.is_open()
-                            && parent.decision_maker == ticket.decision_maker
+                            && self.lineage_links(
+                                parent,
+                                &ticket.decision_maker,
+                                &ticket.assigned_controller,
+                            )
                             && parent.updated_at <= ticket.opened_at
                     }
                     None => self.contains_archived_key(&DecisionHistoryKey::Ticket(parent_id)),
@@ -2308,7 +2312,11 @@ impl DecisionState {
                     ));
                 }
                 if let Some(parent_id) = ticket.parent_ticket {
-                    self.validate_parent_admission(parent_id, &ticket.decision_maker)?;
+                    self.validate_parent_admission(
+                        parent_id,
+                        &ticket.decision_maker,
+                        &ticket.assigned_controller,
+                    )?;
                 }
                 let persisted = DecisionTicket {
                     id: ticket.id,
@@ -2437,15 +2445,40 @@ impl DecisionState {
         Ok(prepared)
     }
 
+    /// Whether a terminal `parent` may be named by a ticket of
+    /// `decision_maker` assigned to `assigned_controller`: the parent has the
+    /// same decision maker, or both tickets' controllers are bound to the same
+    /// seat (a seat succession). Controller bindings are immutable and never
+    /// removed, so the parent's seat is always resolvable while it is hot.
+    fn lineage_links(
+        &self,
+        parent: &DecisionTicket,
+        decision_maker: &canwu_core::EntityRef,
+        assigned_controller: &str,
+    ) -> bool {
+        if &parent.decision_maker == decision_maker {
+            return true;
+        }
+        let seat = |controller: &str| {
+            self.controllers
+                .get(controller)
+                .and_then(|binding| binding.seat_id.as_deref())
+        };
+        seat(&parent.assigned_controller)
+            .is_some_and(|parent_seat| seat(assigned_controller) == Some(parent_seat))
+    }
+
     /// Decision lineage admission: the parent must be a terminal ticket in hot
-    /// decision history and must share the child's exact decision maker. An
-    /// archived parent is rejected like an absent one: its decision maker
+    /// decision history and must share the child's exact decision maker or,
+    /// for a seat succession, the seat of the child's controller. An archived
+    /// parent is rejected like an absent one: its decision maker and controller
     /// cannot be checked inside the admission transaction, and the outcome must
     /// not depend on which archive locator pages happen to be resident.
     fn validate_parent_admission(
         &self,
         parent_id: DecisionTicketId,
         decision_maker: &canwu_core::EntityRef,
+        assigned_controller: &str,
     ) -> Result<(), DecisionError> {
         let Some(parent) = self.ticket(parent_id) else {
             return Err(DecisionError::new(
@@ -2459,10 +2492,12 @@ impl DecisionState {
                 format!("decision ticket parent {parent_id} is still open"),
             ));
         }
-        if &parent.decision_maker != decision_maker {
+        if !self.lineage_links(parent, decision_maker, assigned_controller) {
             return Err(DecisionError::new(
                 DecisionErrorCode::InvalidDecision,
-                format!("decision ticket parent {parent_id} belongs to a different decision maker"),
+                format!(
+                    "decision ticket parent {parent_id} belongs to a different decision maker and controller seat"
+                ),
             ));
         }
         Ok(())

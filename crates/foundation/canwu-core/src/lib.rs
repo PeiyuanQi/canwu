@@ -502,6 +502,37 @@ impl EntityRef {
     }
 }
 
+/// One named contribution to a rule evaluation, with the evidence it read.
+///
+/// Term IDs and their meaning are application content. The contribution is an
+/// integer in the rule's own fixed unit.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvaluationTerm {
+    pub term_id: String,
+    pub contribution: i64,
+    /// Persisted evidence the term read, strictly sorted and unique.
+    pub evidence: Vec<EvidenceRef>,
+}
+
+/// Explains how one application rule produced one integer result for one
+/// subject at one boundary.
+///
+/// A trace is boundary evidence, never simulation state: nothing reads it back
+/// to decide an outcome. Rule IDs, versions, and term semantics are
+/// application content; the engine checks only shape, limits, subject
+/// identity, and evidence availability. The result is recorded as the rule
+/// computed it and need not equal the sum of the term contributions.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EvaluationTraceRecord {
+    pub rule_id: String,
+    pub rule_version: String,
+    pub subject: EntityRef,
+    pub terms: Vec<EvaluationTerm>,
+    pub result: i64,
+    /// Boundary whose settlement evaluated the rule.
+    pub boundary: BoundaryId,
+}
+
 /// `SplitMix64` is compact, deterministic, serializable, and sufficient for the
 /// initial movement slice.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

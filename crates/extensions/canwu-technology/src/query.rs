@@ -830,24 +830,48 @@ impl TechnologyRecordSet {
             if let Some(revision) = &value.revision {
                 self.require_version(revision)?;
             }
-            if value.source.is_none()
-                && !matches!(
-                    value.mode,
-                    crate::model::TransmissionMode::IndependentInvestigation
-                )
-            {
-                return Err(invalid("non-independent transmission requires a source"));
-            }
             let requires_practice_capability = matches!(
                 value.mode,
                 crate::model::TransmissionMode::Demonstration
                     | crate::model::TransmissionMode::Apprenticeship
                     | crate::model::TransmissionMode::PersonnelTransfer
             );
-            if requires_practice_capability && value.source_capability.is_none() {
-                return Err(invalid(
-                    "practice transmission requires an exact source capability",
-                ));
+            if let Some(external) = &value.external_source {
+                if !requires_practice_capability {
+                    return Err(invalid(
+                        "an external transmission source is accepted only for demonstration, apprenticeship, or personnel transfer",
+                    ));
+                }
+                if value.source_capability.is_some() {
+                    return Err(invalid(
+                        "practice transmission cites both a live source capability and an external source",
+                    ));
+                }
+                if value.source.is_some() || value.source_site.is_some() {
+                    return Err(invalid(
+                        "an external transmission source has no simulated holder or site",
+                    ));
+                }
+                if value.revision.is_none() {
+                    return Err(invalid(
+                        "an external transmission source requires an exact technique revision",
+                    ));
+                }
+                validate_external_source(external)?;
+            } else {
+                if value.source.is_none()
+                    && !matches!(
+                        value.mode,
+                        crate::model::TransmissionMode::IndependentInvestigation
+                    )
+                {
+                    return Err(invalid("non-independent transmission requires a source"));
+                }
+                if requires_practice_capability && value.source_capability.is_none() {
+                    return Err(invalid(
+                        "practice transmission requires an exact source capability or an external source",
+                    ));
+                }
             }
             if let Some(source_capability) = &value.source_capability {
                 self.validate_transmission_source(&value, source_capability)?;
@@ -1203,6 +1227,31 @@ fn require_evidence_at(
         return Err(invalid(format!(
             "{label} cites evidence unavailable at its semantic time cut"
         )));
+    }
+    Ok(())
+}
+
+/// An external source cites identity evidence of manifest-bound content: an
+/// initial-scenario domain-record version owned outside the technology
+/// domain. Its existence is checked with the transmission's other evidence.
+fn validate_external_source(
+    external: &crate::model::ExternalTransmissionSourceV1,
+) -> Result<(), CanwuError> {
+    if external.declared_reliability_per_mille > 1_000 {
+        return Err(invalid(
+            "external transmission source reliability exceeds 1000 per mille",
+        ));
+    }
+    let manifest_bound = matches!(
+        &external.evidence,
+        EvidenceRef::DomainRecordVersion(version)
+            if version.established_by == DomainRecordVersionSource::InitialScenario
+                && version.record.kind.namespace != crate::PLUGIN_NAMESPACE
+    );
+    if !manifest_bound {
+        return Err(invalid(
+            "external transmission evidence must be a manifest-bound content record outside the technology domain",
+        ));
     }
     Ok(())
 }

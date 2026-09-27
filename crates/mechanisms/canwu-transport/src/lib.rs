@@ -6,12 +6,25 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use canwu_core::{DomainRecordRef, DomainRecordVersionRef, EntityRef, EvidenceRef};
+use canwu_core::{
+    DomainRecordRef, DomainRecordVersionRef, EntityRef, EvidenceRef, KnowledgeHolderRef,
+};
 use canwu_routing::{RoutePlan, RoutingNodeRef};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
 
-pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v4";
+/// Semantic identity of the transport record and transition contract.
+///
+/// `v5` adds capacity pools with deterministic booking allocation, booking
+/// requests on an execution, cancellation, arrival settlement for executions
+/// without a delivery attempt, and booking confirmation or cancellation before
+/// the booking window opens.
+pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v5";
+
+/// Hash domain of [`CapacityBookingAllocationEvidenceV1::semantic_digest`].
+pub const CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN: &str =
+    "canwu.transport.capacity-booking-allocation.v1";
 
 #[must_use]
 pub fn delivery_completion_operation_key(
@@ -299,10 +312,20 @@ pub enum HandoffKind {
     Planned,
     /// Custody taken by an entity outside the itinerary. Transport records the
     /// seizing identity; the incident, hostility, and authority behind it stay
-    /// application systems. A seizure follows the same leg rules as a planned
-    /// handoff: it is recorded after the source leg arrived or failed, into a
-    /// startable leg (typically the first leg of a replacement revision), and
-    /// `to_custodian` remains the application's custody label.
+    /// application systems. Unless it is terminal (below), a seizure follows
+    /// the same leg rules as a planned handoff: it is recorded after the
+    /// source leg arrived or failed, into a startable leg (typically the first
+    /// leg of a replacement revision), and `to_custodian` remains the
+    /// application's custody label.
+    ///
+    /// A seizure may instead end the itinerary's custody. Such a *terminal*
+    /// seizure names the failed current leg of a non-terminal execution's
+    /// active itinerary as both `from_leg` and `to_leg`. It is recorded no
+    /// earlier than that leg failed and only if no other handoff left it, and
+    /// at most once per execution. Afterwards the execution records no
+    /// handoff and cannot fail or reroute a leg, arrive, settle successfully,
+    /// or book capacity (see [`TransportExecution::custody_left_itinerary`]); its
+    /// owner closes it as failed or cancelled.
     Seizure { by: EntityRef },
 }
 
@@ -392,14 +415,22 @@ impl CapacityBooking {
         })
     }
 
+    /// Moves the booking through its windowed state machine.
+    ///
+    /// A request may be confirmed, failed, or cancelled, and a confirmed
+    /// booking released or cancelled, before its window opens; capacity can
+    /// only be consumed inside the window, confirmed only until it ends, and
+    /// expired only after it ends.
     pub fn transition(
         &mut self,
         status: CapacityBookingStatus,
         at: SimTime,
     ) -> Result<(), TransportError> {
-        if at < self.valid_from {
+        if status == CapacityBookingStatus::Consumed
+            && (at < self.valid_from || at > self.valid_until)
+        {
             return Err(TransportError::InvalidBooking(
-                "booking cannot transition before its validity window".to_owned(),
+                "booking capacity can only be consumed inside its validity window".to_owned(),
             ));
         }
         let allowed = matches!(
@@ -438,6 +469,421 @@ impl CapacityBooking {
         self.status = status;
         Ok(())
     }
+}
+
+/// A windowed pool of interchangeable transport capacity, such as ferry
+/// crossings, carriage places, or relay mounts for one period.
+///
+/// `quantity` is the capacity offered for the whole window. `booked` is held
+/// by confirmed bookings and `consumed` by consumed ones; released, expired,
+/// cancelled, and failed bookings hold nothing. `revision` advances whenever
+/// the offer or either counter changes, so allocation evidence can cite the
+/// exact pool state it read.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TransportCapacityPoolV1 {
+    pub id: String,
+    pub resource: String,
+    pub custodian: KnowledgeHolderRef,
+    pub window_from: SimTime,
+    pub window_until: SimTime,
+    pub quantity: u64,
+    pub booked: u64,
+    pub consumed: u64,
+    pub revision: u64,
+}
+
+impl TransportCapacityPoolV1 {
+    /// Creates an empty pool at revision one.
+    pub fn new(
+        id: String,
+        resource: String,
+        custodian: KnowledgeHolderRef,
+        window_from: SimTime,
+        window_until: SimTime,
+        quantity: u64,
+    ) -> Result<Self, TransportError> {
+        let pool = Self {
+            id,
+            resource,
+            custodian,
+            window_from,
+            window_until,
+            quantity,
+            booked: 0,
+            consumed: 0,
+            revision: 1,
+        };
+        pool.validate()?;
+        Ok(pool)
+    }
+
+    pub fn validate(&self) -> Result<(), TransportError> {
+        if !is_canonical_label(&self.id)
+            || !is_canonical_label(&self.resource)
+            || self.window_until < self.window_from
+            || self.revision == 0
+        {
+            return Err(TransportError::InvalidCapacityPool(
+                "capacity pool requires a canonical identity and resource, a non-inverted window, and a positive revision"
+                    .to_owned(),
+            ));
+        }
+        if self
+            .booked
+            .checked_add(self.consumed)
+            .is_none_or(|held| held > self.quantity)
+        {
+            return Err(TransportError::InvalidCapacityPool(
+                "capacity pool holds more than it offers".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Capacity neither booked nor consumed.
+    #[must_use]
+    pub const fn available(&self) -> u64 {
+        self.quantity
+            .saturating_sub(self.booked)
+            .saturating_sub(self.consumed)
+    }
+
+    /// Replaces the offered window and quantity. The new quantity must still
+    /// cover everything booked or consumed.
+    pub fn revise(
+        &mut self,
+        window_from: SimTime,
+        window_until: SimTime,
+        quantity: u64,
+    ) -> Result<(), TransportError> {
+        let mut revised = self.clone();
+        revised.window_from = window_from;
+        revised.window_until = window_until;
+        revised.quantity = quantity;
+        revised.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(TransportError::Overflow)?;
+        revised.validate()?;
+        *self = revised;
+        Ok(())
+    }
+
+    /// Commits one allocation pass computed by [`allocate_capacity_bookings`]
+    /// against this exact pool revision, then advances the revision.
+    pub fn apply_allocations(
+        &mut self,
+        allocations: &[BookingAllocationV1],
+    ) -> Result<(), TransportError> {
+        if allocations.is_empty() {
+            return Ok(());
+        }
+        let mut bookings = allocations
+            .iter()
+            .map(|allocation| allocation.booking)
+            .collect::<Vec<_>>();
+        bookings.sort_unstable();
+        if bookings.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(TransportError::InvalidCapacityPool(
+                "an allocation pass names each booking once".to_owned(),
+            ));
+        }
+        let mut confirmed = 0_u64;
+        for allocation in allocations {
+            let evidence = &allocation.evidence;
+            if evidence.pool != self.id
+                || evidence.pool_revision != self.revision
+                || evidence.booking != allocation.booking
+                || evidence.quantity != allocation.quantity
+                || evidence.status != allocation.status
+                || !evidence.digest_matches()
+            {
+                return Err(TransportError::InvalidCapacityPool(
+                    "allocation evidence does not bind this pool revision".to_owned(),
+                ));
+            }
+            match allocation.status {
+                CapacityBookingStatus::Confirmed => {
+                    confirmed = confirmed
+                        .checked_add(allocation.quantity)
+                        .ok_or(TransportError::Overflow)?;
+                }
+                CapacityBookingStatus::Failed if allocation.quantity == 0 => {}
+                _ => {
+                    return Err(TransportError::InvalidCapacityPool(
+                        "an allocation either confirms its quantity or fails with none".to_owned(),
+                    ));
+                }
+            }
+        }
+        let mut next = self.clone();
+        next.booked = self
+            .booked
+            .checked_add(confirmed)
+            .ok_or(TransportError::Overflow)?;
+        next.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(TransportError::Overflow)?;
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+
+    /// Applies the capacity effect of one booking transition made after
+    /// allocation: consumption moves quantity from `booked` to `consumed`,
+    /// while releasing, cancelling, or expiring a confirmed booking and
+    /// releasing a consumed one return it. Cancelling or failing a request
+    /// holds nothing and leaves the pool unchanged. Confirmation happens only
+    /// through [`Self::apply_allocations`].
+    pub fn apply_booking_transition(
+        &mut self,
+        quantity: u64,
+        from: CapacityBookingStatus,
+        to: CapacityBookingStatus,
+    ) -> Result<(), TransportError> {
+        use CapacityBookingStatus::{
+            Cancelled, Confirmed, Consumed, Expired, Failed, Released, Requested,
+        };
+        let underflow =
+            || TransportError::InvalidCapacityPool("capacity pool counter underflow".to_owned());
+        let mut next = self.clone();
+        match (from, to) {
+            (Requested, Cancelled | Failed) => return Ok(()),
+            (Confirmed, Consumed) => {
+                next.booked = next.booked.checked_sub(quantity).ok_or_else(underflow)?;
+                next.consumed = next
+                    .consumed
+                    .checked_add(quantity)
+                    .ok_or(TransportError::Overflow)?;
+            }
+            (Confirmed, Released | Cancelled | Expired) => {
+                next.booked = next.booked.checked_sub(quantity).ok_or_else(underflow)?;
+            }
+            (Consumed, Released) => {
+                next.consumed = next.consumed.checked_sub(quantity).ok_or_else(underflow)?;
+            }
+            _ => {
+                return Err(TransportError::InvalidCapacityPool(
+                    "booking transition has no capacity-pool effect".to_owned(),
+                ));
+            }
+        }
+        next.revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(TransportError::Overflow)?;
+        next.validate()?;
+        *self = next;
+        Ok(())
+    }
+}
+
+/// One requested booking offered to a pool allocation pass, with the caller's
+/// deterministic tie-break key and admission sequence.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapacityBookingRequestV1 {
+    pub booking: CapacityBooking,
+    pub tie_break: String,
+    pub admitted_sequence: u64,
+}
+
+/// Why an allocation pass failed a booking request.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CapacityAllocationFailureV1 {
+    /// The request does not fit the capacity left after earlier grants.
+    InsufficientCapacity,
+    /// The booking window is not inside the pool window.
+    OutsidePoolWindow,
+    /// The booking window ended before the allocation time.
+    WindowElapsed,
+}
+
+/// Replayable evidence of one allocation decision.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CapacityBookingAllocationEvidenceV1 {
+    pub pool: String,
+    pub pool_revision: u64,
+    pub booking: CapacityBookingId,
+    pub execution: TransportExecutionId,
+    pub requested: u64,
+    /// Granted quantity: the full request when confirmed, zero when failed.
+    pub quantity: u64,
+    pub status: CapacityBookingStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<CapacityAllocationFailureV1>,
+    /// Pool capacity left after this decision, in allocation order.
+    pub remaining_after: u64,
+    pub allocated_at: SimTime,
+    pub operation_key: String,
+    /// Domain-separated BLAKE3 digest over every other field; see
+    /// [`CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN`].
+    pub semantic_digest: String,
+}
+
+impl CapacityBookingAllocationEvidenceV1 {
+    /// Recomputes the digest over every field except `semantic_digest`.
+    #[must_use]
+    pub fn expected_digest(&self) -> String {
+        let material = (
+            &self.pool,
+            self.pool_revision,
+            self.booking,
+            self.execution,
+            self.requested,
+            self.quantity,
+            self.status,
+            self.failure,
+            self.remaining_after,
+            self.allocated_at,
+            &self.operation_key,
+        );
+        domain_digest(CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN, &material)
+    }
+
+    #[must_use]
+    pub fn digest_matches(&self) -> bool {
+        self.semantic_digest == self.expected_digest()
+    }
+}
+
+/// One booking's allocation result, in allocation order.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BookingAllocationV1 {
+    pub booking: CapacityBookingId,
+    /// Granted quantity: the full request when confirmed, zero when failed.
+    pub quantity: u64,
+    /// `Confirmed` or `Failed`.
+    pub status: CapacityBookingStatus,
+    pub evidence: CapacityBookingAllocationEvidenceV1,
+}
+
+/// Stable operation key of one booking's allocation at one pool revision.
+#[must_use]
+pub fn capacity_booking_allocation_operation_key(
+    pool: &str,
+    pool_revision: u64,
+    booking: CapacityBookingId,
+) -> String {
+    format!(
+        "transport/pool/{pool}/revision/{pool_revision}/booking/{}/allocation",
+        booking.0
+    )
+}
+
+/// Allocates requested bookings against one pool revision, all or nothing
+/// per booking.
+///
+/// Requests are visited by descending priority, then ascending `valid_from`,
+/// tie-break key, admission sequence, and booking identity, so the result
+/// does not depend on input order. A request is confirmed when its window
+/// lies inside the pool window, has not ended at `at`, and its full quantity
+/// fits the capacity left by earlier grants; otherwise it fails with a
+/// recorded reason, and a later, smaller request may still fit. The function
+/// reads only its arguments; commit the result with
+/// [`TransportCapacityPoolV1::apply_allocations`] and
+/// [`CapacityBooking::transition`].
+pub fn allocate_capacity_bookings(
+    pool: &TransportCapacityPoolV1,
+    requests: &[CapacityBookingRequestV1],
+    at: SimTime,
+) -> Result<Vec<BookingAllocationV1>, TransportError> {
+    pool.validate()?;
+    let mut ids = Vec::with_capacity(requests.len());
+    for request in requests {
+        let booking = &request.booking;
+        if booking.status != CapacityBookingStatus::Requested
+            || booking.resource != pool.resource
+            || booking.quantity == 0
+            || booking.valid_until < booking.valid_from
+            || !is_canonical_label(&request.tie_break)
+        {
+            return Err(TransportError::InvalidCapacityPool(
+                "allocation accepts only well-formed requested bookings for the pool resource"
+                    .to_owned(),
+            ));
+        }
+        ids.push(booking.id);
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(TransportError::InvalidCapacityPool(
+            "allocation requests must have unique booking identities".to_owned(),
+        ));
+    }
+    let mut ordered = requests.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| allocation_order(left, right));
+    let mut remaining = pool.available();
+    let mut allocations = Vec::with_capacity(ordered.len());
+    for request in ordered {
+        let booking = &request.booking;
+        let failure = if at > booking.valid_until {
+            Some(CapacityAllocationFailureV1::WindowElapsed)
+        } else if booking.valid_from < pool.window_from || booking.valid_until > pool.window_until {
+            Some(CapacityAllocationFailureV1::OutsidePoolWindow)
+        } else if booking.quantity > remaining {
+            Some(CapacityAllocationFailureV1::InsufficientCapacity)
+        } else {
+            None
+        };
+        let (status, quantity) = if failure.is_none() {
+            remaining -= booking.quantity;
+            (CapacityBookingStatus::Confirmed, booking.quantity)
+        } else {
+            (CapacityBookingStatus::Failed, 0)
+        };
+        let mut evidence = CapacityBookingAllocationEvidenceV1 {
+            pool: pool.id.clone(),
+            pool_revision: pool.revision,
+            booking: booking.id,
+            execution: booking.execution,
+            requested: booking.quantity,
+            quantity,
+            status,
+            failure,
+            remaining_after: remaining,
+            allocated_at: at,
+            operation_key: capacity_booking_allocation_operation_key(
+                &pool.id,
+                pool.revision,
+                booking.id,
+            ),
+            semantic_digest: String::new(),
+        };
+        evidence.semantic_digest = evidence.expected_digest();
+        allocations.push(BookingAllocationV1 {
+            booking: booking.id,
+            quantity,
+            status,
+            evidence,
+        });
+    }
+    Ok(allocations)
+}
+
+fn allocation_order(left: &CapacityBookingRequestV1, right: &CapacityBookingRequestV1) -> Ordering {
+    right
+        .booking
+        .priority
+        .cmp(&left.booking.priority)
+        .then_with(|| left.booking.valid_from.cmp(&right.booking.valid_from))
+        .then_with(|| left.tie_break.cmp(&right.tie_break))
+        .then_with(|| left.admitted_sequence.cmp(&right.admitted_sequence))
+        .then_with(|| left.booking.id.cmp(&right.booking.id))
+}
+
+fn is_canonical_label(value: &str) -> bool {
+    !value.is_empty() && value.trim() == value
+}
+
+fn domain_digest<T: Serialize>(domain: &str, value: &T) -> String {
+    let encoded = serde_json::to_vec(value).expect("transport digest material must serialize");
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    hasher.update(&encoded);
+    hasher.finalize().to_hex().to_string()
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -551,6 +997,7 @@ impl TransportExecution {
         revision: ItineraryRevision,
         at: SimTime,
     ) -> Result<(), TransportError> {
+        self.ensure_custody_in_itinerary()?;
         let active = self
             .active_itinerary_revision
             .ok_or(TransportError::MissingItinerary)?;
@@ -721,6 +1168,7 @@ impl TransportExecution {
     }
 
     pub fn fail_current_leg(&mut self, reason: String, at: SimTime) -> Result<(), TransportError> {
+        self.ensure_custody_in_itinerary()?;
         let active = self
             .active_itinerary_revision
             .ok_or(TransportError::MissingItinerary)?;
@@ -737,6 +1185,7 @@ impl TransportExecution {
     }
 
     pub fn mark_arrival_pending(&mut self) -> Result<(), TransportError> {
+        self.ensure_custody_in_itinerary()?;
         let saga = self.saga.as_mut().ok_or(TransportError::MissingSaga)?;
         saga.step = saga.step.checked_add(1).ok_or(TransportError::Overflow)?;
         saga.state = SagaState::ArrivalPending;
@@ -745,7 +1194,8 @@ impl TransportExecution {
     }
 
     pub fn record_handoff(&mut self, handoff: Handoff) -> Result<(), TransportError> {
-        if handoff.from_leg == handoff.to_leg
+        let terminal_seizure = !handoff.kind.is_planned() && handoff.from_leg == handoff.to_leg;
+        if (handoff.from_leg == handoff.to_leg && !terminal_seizure)
             || handoff.from_custodian.trim().is_empty()
             || handoff.to_custodian.trim().is_empty()
             || handoff.location.trim().is_empty()
@@ -772,11 +1222,37 @@ impl TransportExecution {
                 "handoff identity is already recorded".to_owned(),
             ));
         }
+        if self.custody_left_itinerary() {
+            return Err(TransportError::InvalidHandoff(
+                "custody already left the itinerary by a terminal seizure".to_owned(),
+            ));
+        }
         let from_leg = self
             .legs
             .iter()
             .find(|leg| leg.id == handoff.from_leg)
             .ok_or(TransportError::MissingLeg)?;
+        if terminal_seizure {
+            if self.state.is_terminal()
+                || Some(from_leg.itinerary_revision) != self.active_itinerary_revision
+                || from_leg.leg_index != self.current_leg_index
+                || from_leg.status != LegExecutionStatus::Failed
+                || from_leg
+                    .failed_at
+                    .is_some_and(|failed_at| handoff.at < failed_at)
+                || self
+                    .handoffs
+                    .iter()
+                    .any(|existing| existing.from_leg == handoff.from_leg)
+            {
+                return Err(TransportError::InvalidHandoff(
+                    "a terminal seizure must follow the failed current leg of a live execution, which no other handoff leaves"
+                        .to_owned(),
+                ));
+            }
+            self.handoffs.push(handoff);
+            return Ok(());
+        }
         let to_leg = self
             .legs
             .iter()
@@ -800,6 +1276,162 @@ impl TransportExecution {
             ));
         }
         self.handoffs.push(handoff);
+        Ok(())
+    }
+
+    /// Whether a terminal seizure has taken custody out of the itinerary.
+    ///
+    /// Such an execution cannot fail or reroute a leg, arrive, settle
+    /// successfully, book capacity, or record another handoff. Its owner
+    /// closes it: an execution with a delivery saga through
+    /// [`Self::reconcile_information`] with a failure, which leaves it
+    /// `Failed`, and one without a saga through [`Self::cancel`].
+    #[must_use]
+    pub fn custody_left_itinerary(&self) -> bool {
+        self.handoffs
+            .iter()
+            .any(|handoff| handoff.from_leg == handoff.to_leg && !handoff.kind.is_planned())
+    }
+
+    fn ensure_custody_in_itinerary(&self) -> Result<(), TransportError> {
+        if self.custody_left_itinerary() {
+            return Err(TransportError::InvalidState(
+                "custody left the itinerary by a terminal seizure; the execution can only be closed"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Adds one requested capacity booking to this execution.
+    ///
+    /// The booking must name this execution, still be `Requested`, carry no
+    /// allocation evidence, and have an identity unique within the execution.
+    /// A terminal execution accepts no further bookings.
+    pub fn request_booking(&mut self, booking: CapacityBooking) -> Result<(), TransportError> {
+        self.ensure_custody_in_itinerary()?;
+        if self.state.is_terminal() {
+            return Err(TransportError::InvalidState(
+                "a terminal transport execution cannot request capacity".to_owned(),
+            ));
+        }
+        if booking.execution != self.id
+            || booking.status != CapacityBookingStatus::Requested
+            || !booking.allocation_evidence.is_empty()
+            || booking.quantity == 0
+            || booking.valid_until < booking.valid_from
+        {
+            return Err(TransportError::InvalidBooking(
+                "a booking request must name this execution, be requested, and carry a positive quantity and window"
+                    .to_owned(),
+            ));
+        }
+        if self
+            .bookings
+            .iter()
+            .any(|existing| existing.id == booking.id)
+        {
+            return Err(TransportError::InvalidBooking(
+                "capacity booking identity is already recorded on this execution".to_owned(),
+            ));
+        }
+        self.bookings.push(booking);
+        Ok(())
+    }
+
+    /// Completes the final departed leg of an execution that carries no
+    /// delivery attempt and settles it.
+    ///
+    /// A movement that does not complete an information delivery has nothing
+    /// to reconcile, so arrival is its terminal fact. An execution with a
+    /// delivery attempt or saga must instead use
+    /// [`Self::complete_current_leg`], which enters `ArrivalPending`, and then
+    /// [`Self::reconcile_information`].
+    pub fn settle_arrival(&mut self, at: SimTime, endpoint: String) -> Result<(), TransportError> {
+        if self.delivery_attempt.is_some() || self.saga.is_some() {
+            return Err(TransportError::InvalidState(
+                "an execution with a delivery attempt settles through reconciliation".to_owned(),
+            ));
+        }
+        let active = self
+            .active_itinerary_revision
+            .ok_or(TransportError::MissingItinerary)?;
+        let active_leg_count = self
+            .legs
+            .iter()
+            .filter(|leg| leg.itinerary_revision == active)
+            .count();
+        let next_leg_index = self
+            .current_leg_index
+            .checked_add(1)
+            .ok_or(TransportError::Overflow)?;
+        if next_leg_index != active_leg_count {
+            return Err(TransportError::InvalidState(
+                "only the final leg of the active itinerary can settle an arrival".to_owned(),
+            ));
+        }
+        let leg = self
+            .legs
+            .iter_mut()
+            .find(|leg| leg.itinerary_revision == active && leg.leg_index == self.current_leg_index)
+            .ok_or(TransportError::MissingLeg)?;
+        if leg.status != LegExecutionStatus::Departed
+            || leg
+                .actual_departure_at
+                .is_some_and(|departure| at < departure)
+        {
+            return Err(TransportError::InvalidState(
+                "the final leg must have departed no later than its arrival".to_owned(),
+            ));
+        }
+        leg.status = LegExecutionStatus::Arrived;
+        leg.actual_arrival_at = Some(at);
+        self.current_endpoint = Some(endpoint);
+        self.current_leg_index = next_leg_index;
+        self.state = TransportExecutionState::Settled;
+        Ok(())
+    }
+
+    /// Cancels a non-terminal execution whose subject is not travelling.
+    ///
+    /// No leg of the active itinerary may be departed (a leg in progress must
+    /// first arrive or fail) and an arrival-pending execution must reconcile
+    /// instead. Unstarted legs of the active itinerary become `Cancelled`; a
+    /// delivery saga enters `CompensationPending`. Bookings are not changed:
+    /// the caller closes them through [`CapacityBooking::transition`].
+    pub fn cancel(&mut self) -> Result<(), TransportError> {
+        if self.state.is_terminal() || self.state == TransportExecutionState::ArrivalPending {
+            return Err(TransportError::InvalidState(
+                "only a non-terminal execution that has not arrived can be cancelled".to_owned(),
+            ));
+        }
+        let active = self.active_itinerary_revision;
+        if self.legs.iter().any(|leg| {
+            Some(leg.itinerary_revision) == active && leg.status == LegExecutionStatus::Departed
+        }) {
+            return Err(TransportError::InvalidState(
+                "a departed leg must arrive or fail before its execution is cancelled".to_owned(),
+            ));
+        }
+        for leg in &mut self.legs {
+            if Some(leg.itinerary_revision) == active
+                && matches!(
+                    leg.status,
+                    LegExecutionStatus::Planned
+                        | LegExecutionStatus::Booked
+                        | LegExecutionStatus::Loaded
+                        | LegExecutionStatus::Waiting
+                )
+            {
+                leg.status = LegExecutionStatus::Cancelled;
+            }
+        }
+        if let Some(saga) = self.saga.as_mut() {
+            saga.step = saga.step.checked_add(1).ok_or(TransportError::Overflow)?;
+            saga.state = SagaState::CompensationPending;
+            saga.last_error = Some("transport execution cancelled".to_owned());
+        }
+        self.state = TransportExecutionState::Cancelled;
         Ok(())
     }
 
@@ -845,6 +1477,9 @@ impl TransportExecution {
         &mut self,
         outcome: ReconciliationOutcome,
     ) -> Result<(), TransportError> {
+        if matches!(outcome, ReconciliationOutcome::Success) {
+            self.ensure_custody_in_itinerary()?;
+        }
         let saga = self.saga.as_mut().ok_or(TransportError::MissingSaga)?;
         saga.step = saga.step.checked_add(1).ok_or(TransportError::Overflow)?;
         match outcome {
@@ -875,6 +1510,8 @@ pub enum TransportError {
     InvalidBooking(String),
     InvalidHandoff(String),
     MissingDeliveryAttempt,
+    /// A capacity pool, a pool revision, or an allocation input is invalid.
+    InvalidCapacityPool(String),
 }
 
 #[cfg(test)]

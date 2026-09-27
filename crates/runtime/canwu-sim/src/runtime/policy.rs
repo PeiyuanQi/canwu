@@ -1,4 +1,4 @@
-use super::{CanwuError, ErrorCode, canonical_hash};
+use super::{CanwuError, ErrorCode, EvaluationLimitsV1, canonical_hash};
 use canwu_core::{EntityRef, PersonId};
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +81,10 @@ pub struct RunConfiguration {
     pub declared_interventions: Vec<String>,
     pub diagnostic_commands_enabled: bool,
     pub require_idempotency_keys: bool,
+    /// Per-boundary bounds on rule-evaluation traces. Omitted from the wire,
+    /// and so from the configuration hash, at [`EvaluationLimitsV1::DEFAULT`].
+    #[serde(default, skip_serializing_if = "EvaluationLimitsV1::is_default")]
+    pub evaluation_limits: EvaluationLimitsV1,
 }
 
 /// Command-relevant policy deliberately omits run purpose, observation, and
@@ -126,6 +130,7 @@ impl RunConfiguration {
             declared_interventions: Vec::new(),
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
+            evaluation_limits: EvaluationLimitsV1::DEFAULT,
         }
     }
 
@@ -143,6 +148,7 @@ impl RunConfiguration {
             declared_interventions: Vec::new(),
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
+            evaluation_limits: EvaluationLimitsV1::DEFAULT,
         }
     }
 
@@ -171,7 +177,15 @@ impl RunConfiguration {
             declared_interventions: Vec::new(),
             diagnostic_commands_enabled: false,
             require_idempotency_keys: true,
+            evaluation_limits: EvaluationLimitsV1::DEFAULT,
         }
+    }
+
+    /// Replaces the per-boundary rule-evaluation trace bounds.
+    #[must_use]
+    pub const fn with_evaluation_limits(mut self, limits: EvaluationLimitsV1) -> Self {
+        self.evaluation_limits = limits;
+        self
     }
 
     pub(crate) fn canonicalize(&mut self) {
@@ -199,6 +213,7 @@ impl RunConfiguration {
                 "declared interventions must be unique, canonical, and sorted",
             );
         }
+        self.evaluation_limits.validate()?;
 
         match self.seat {
             SeatPolicy::CharacterBound => {
@@ -327,6 +342,9 @@ impl RunConfiguration {
     }
 }
 
+// One value per run: boxing the declared variant would change the public
+// shape for no measurable gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(
     tag = "provenance",
@@ -361,6 +379,18 @@ impl RunConfigurationSnapshot {
         match self {
             Self::Declared(configuration) => Some(configuration),
             Self::CompatibilityV1 | Self::ManifestOnlyV1 | Self::LegacyUnspecified => None,
+        }
+    }
+
+    /// The run's rule-evaluation trace bounds; undeclared provenance uses
+    /// [`EvaluationLimitsV1::DEFAULT`].
+    #[must_use]
+    pub const fn evaluation_limits(&self) -> EvaluationLimitsV1 {
+        match self {
+            Self::Declared(configuration) => configuration.evaluation_limits,
+            Self::CompatibilityV1 | Self::ManifestOnlyV1 | Self::LegacyUnspecified => {
+                EvaluationLimitsV1::DEFAULT
+            }
         }
     }
 

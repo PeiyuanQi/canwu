@@ -58,6 +58,8 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
 | [原子提交](/architecture/settlement/) | atomic commit | — | 一次性应用边界中所有通过验证的变化，避免暴露部分状态。 |
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
+| [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
+| [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
 
 ## 插件与扩展
 
@@ -77,7 +79,16 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [文化执行计划](/architecture/culture-law/) | compiled culture plan | `CompiledCulturePlan` | 从文化定义编译出的外部不可变、绑定内容哈希的运行时计划，包含紧凑 ID、反向索引、预算和生命周期策略。 |
 | [休眠目标](/architecture/culture-law/) | dormant target | `Dormant` | 没有参与人口或已准入工作的文化目标；它离开热结算索引，但保留显式重新激活描述。 |
 | [退休目标](/architecture/culture-law/) | retired target | `Retired` | 从动态热状态移除的文化目标；历史身份和证据仍通过墓碑与归档契约保留。 |
+| [文化结算插件](/architecture/culture-law/) | culture boundary plugin | `CultureBoundaryPlugin` | 在引擎内完成文化结算的插件形式：每月第 7 阶段系统消费已准入的接触信号批次，保存文化状态，并把 society 生命周期变化交给 society 插件；society 插件仍是唯一写入者。一次运行只能在它与由上层应用驱动的 `CulturePlugin` 流程之间二选一。 |
+| [接触信号批次](/architecture/culture-law/) | exposure signal batch | `CultureExposureSignalBatch`, `culture_exposure_v1` | 信息或通信提供方在解决访问与解释之后产生的有界、带证据的报告，说明哪些 cohort 接触了某一文化目标代际；它在之后的边界准入。 |
+| [cohort 人口校准](/tutorials/cases/local-community-diffusion/) | cohort headcount rebase | `CohortHeadcountRebaseV1`, `cohort_headcount_rebase_v1` | 把 cohort 人口重置为所引用外部存量记录的规范化输入；输入准入时，该记录必须是当前版本。下一次 Daily society 结算会按确定性的整数最大余数法，按比例重算每个分布。 |
+| [表决权重](/architecture/culture-law/) | vote weight | `ProcedureStageDefinition::seat_weights` | 某席位的选票在程序阶段中所占的整数权重；未列出的席位权重为 1。quorum 与 threshold 都按权重合计；否决是席位权力，从不加权。 |
+| [表决单元](/architecture/culture-law/) | unit block | `ProcedureStageDefinition::block_of_seat` | 程序阶段中作为一个整体表态的一组席位，其立场取组内席位的加权多数；双方加权票数相等或没有计入选票的单元不表态。 |
+| [单元门槛](/architecture/culture-law/) | block threshold | `ProcedureStageDefinition::block_threshold` | 带表决单元的阶段除满足加权席位规则外，还须有多少个表决单元取 `For` 立场才能通过。 |
+| [决定票席位](/architecture/culture-law/) | casting seat | `casting-seat:<seat>` tie-break | 程序平局规则指定的席位：取 `For` 与 `Against` 的单元数相等时，该席位自己的 `For` 票可以增加一个 `For` 单元。该席位必须属于每个带表决单元的阶段；`status-quo` 平局规则则不增加单元。 |
+| [征询阶段](/architecture/culture-law/) | consultation stage | `ProcedureStageKind::Consultation` | 仅供咨询的程序阶段。其席位收到标注为 advisory 的票据，选票作为参与证据保存，但从不计入结果；阶段在截止时间完成，并开启下一阶段。 |
 | [技术模拟扩展](/tutorials/technology-diffusion/) | technology simulation extension | `canwu-technology` | 处理技术修订、证据、本地能力、实施、按用途采用和传播机会的可选通用扩展，不是全局科技树。 |
+| [外部传播来源](/tutorials/technology-diffusion/) | external transmission source | `ExternalTransmissionSourceV1` | 模拟之外的实践传播来源，例如地图外的师傅；以初始场景中的内容记录和声明的可靠度代替实时能力记录，并由目的地开启传播机会。 |
 | [历史研究插件](/tutorials/technology-diffusion/) | historical research plugin | `canwu-history-research` | 记录研究者对证据所作有界评估的可选模拟插件，不会改变基础技术真值。 |
 | [命令插件](/tutorials/command-plugin/) | command plugin | `register_command()` | 注册带 schema 校验命令及其处理器的模拟插件。 |
 | [边界系统](/architecture/settlement/) | boundary system | `BoundarySystemContract` | 在结算阶段运行，并声明读取、写入、资源与随机范围的系统。 |
@@ -93,7 +104,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [财政覆盖单元](/tutorials/cases/ming-fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `（证据种类，外部操作 ID）` 组合最多结算一张凭证；凭证不拥有资源真值。 |
 | [代理角色](/tutorials/cases/ming-fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
-| [权限依据](/tutorials/cases/ming-fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis` | 授予代理角色权限的精确应用记录版本，其记录种类须由财政插件声明；该记录出现新版本或退役后，授权随之结束。 |
+| [权限依据](/tutorials/cases/ming-fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须由所属插件声明。它可以授予财政授权绑定中的代理角色权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
 | [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
 | [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStageV1` | 带生效期和出处的勘探、矿藏刻画、准入、开采准备、在产、枯竭或明确未知/不适用状态；不是永恒的矿藏布尔值。 |
@@ -102,8 +113,10 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
+| [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgressVersionV1` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
+| [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
 | [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责军队、行动、战斗、占领、军事知识和跨领域凭证；不是通用战斗模型。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
@@ -121,8 +134,9 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [随机决策策略](/tutorials/cases/uncertainty-resolution/) | random decision policy | `DecisionPolicyKind::Random` | 由声明过的边界系统使用可重放抽样证据结算的有界票据选择器，不是通用世界事件生成器。 |
 | [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
 | [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。 |
+| [评估轨迹](/architecture/settlement/) | evaluation trace | `EvaluationTraceRecord`, `BoundaryDirective::RecordEvaluationTrace` | 有界的边界证据，逐项说明某条应用规则如何为一个对象得出一个整数结果。它不属于状态；持有人只能通过 `CanwuViewer::evaluation_traces` 读取关于自身实体的轨迹，或者在轨迹评估之前其账本就已得知的对象的轨迹。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
-| 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户，或由申请者保管的有界精确账户列表；该策略不授予跨保管人的权限。 |
+| 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户、由申请者保管的有界精确账户列表，或在动用授权下列出的授权方账户。只有 `Granted` 形式带有跨保管人的权限，且仅限于该授权。 |
 | [资源分配](/architecture/settlement/) | allocation | `ReservationAllocation` | 在供给约束下确定性结算竞争申请的结果。 |
 | [可见性](/architecture/settlement/) | visibility | `StateVisibility` | 控制状态和证据可以到达哪些读取者的策略。 |
 | [快照](/developer/persistence/) | snapshot | `SimulationSnapshot` | 恢复时必须完整校验的持久化状态映像。 |
@@ -149,11 +163,16 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
+| [受托承运人](/tutorials/cases/routed-correspondence/) | delegated carrier | `delegate_carrier_v1`, `InitiateCorrespondenceRequest::carrier_delegation` | 发送者以外、以自己的委托命令接受承运的承运人；其声明指明发送者，并覆盖每次派发。规划读取承运人的账本，引擎不会把承运人的任何知识发布给发送者。 |
+| [承运人扣押](/tutorials/cases/routed-correspondence/) | carrier seizure | `CorrespondenceIncidentKind::CarrierSeized` | 承运人连同信件被他人夺走的事故。与截取不同，它会终止投递尝试：终态扣押交接之后，运输执行只能由其所有者关闭，只有承运持有人会收到尝试报告。 |
+| [真伪判定](/tutorials/cases/encoded-interception/) | authenticity finding | `AuthenticityFinding` | 解读信息的持有人作出的判断，绑定到所解读 representation 的精确版本，说明是否接受其声称的来源，并附依据和置信度。伪造被识破的概率仍由应用抽样决定。 |
 | [改道](/tutorials/cases/routed-correspondence/) | reroute | `ItineraryRevision` | 因灾害或路线知识变化，为同一个投递尝试建立后继行程。 |
 | [外部条件](/tutorials/routing-transport/) | external condition | `ItineraryRevisionReason::ExternalCondition` | 引用应用所有的条件记录精确正数版本及应用标签的改道原因；运输只记录引用，不解释条件本身。 |
 | [投递重试](/tutorials/cases/routed-correspondence/) | delivery retry | `DomainReference` 角色 `"previous_attempt"` | 终态失败后新建的后继投递尝试，不是对旧 attempt 的改道。 |
 | [人员群体](/tutorials/routing-transport/) | persons group | `MovementSubjectRole::PersonsGroup` | 作为一个整体移动的一群人所对应的移动主体，以正数人数作为数量；其身份通常是应用领域记录。 |
-| [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份；背后的事件和权限仍属于应用系统。其余交接均为计划交接。 |
+| [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份。终态扣押以失败路段同时作为起止路段，保管权离开行程，此后运输执行只能由其所有者关闭。背后的事件和权限仍属于应用系统；其余交接均为计划交接。 |
+| [运力池](/tutorials/routing-transport/) | capacity pool | `TransportCapacityPoolV1` | 由一个持有人提供、在时间窗口内可以互换的运输能力数量，例如渡船班次或驿马。已确认和已消耗的预订占用它；每次变化都会推进其修订号，便于分配证据引用。 |
+| [预订分配](/tutorials/routing-transport/) | booking allocation | `allocate_capacity_bookings`, `CapacityBookingAllocationEvidenceV1` | 针对某一运力池修订、结果与输入顺序无关的纯函数分配：按优先级、窗口开始时间、平局决胜键、准入序号和预订标识依次处理请求，每项预订要么全额确认，要么记录原因后失败。它从不抢占已确认的运力。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |
@@ -164,7 +183,8 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [决策阶段](/tutorials/cases/warlord-aid-decision/) | decision stage | `DecisionStage` | 组合策略中产生决定的阶段（`Guard`、`Utility` 或 `Random`），与触发的前置规则一起记录在决策轨迹上；它与结算阶段无关。 |
 | [随机平局决胜](/tutorials/cases/uncertainty-resolution/) | random tie-break | `DecisionOutcome::PendingRandom` | 控制者须显式启用的路径：前置规则效用策略只列出分数接近的最高选项，再由边界系统以一次均匀的操作定址随机抽样从中选择。 |
 | [决策票据](/tutorials/cases/warlord-aid-decision/) | decision ticket | `DecisionTicket` | 请求一个控制者从带版本的当前有效选项中选择的持久化对象。 |
-| [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的、同一决策者的终态票据，例如为另一控制者重新开启的已取消票据。该关联会复制到新票据的决策轨迹上。 |
+| [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
+| [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 尝试解决票据时形成的权威准入、接受或拒绝记录。 |
 | [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |

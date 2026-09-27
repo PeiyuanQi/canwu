@@ -36,10 +36,15 @@ dependency graph remains acyclic.
    single-recipient `Prepared` addressed `Dispatch`.
 2. A decision ticket, direct decision-backed command, or selected automatic
    `CommunicationOpportunity` admits an `InitiateCorrespondenceRequest`.
-3. The correspondence plugin currently requires the carrier holder to be the
-   sender. It reads only that sender-owned address and routing knowledge,
-   creates a deterministic `PlanningSnapshot`, calls the pure router, and
-   persists the accepted `RoutePlan` and exact knowledge cut.
+3. The correspondence plugin reads the carrier holder's address and routing
+   knowledge, creates a deterministic `PlanningSnapshot`, calls the pure
+   router, and persists the accepted `RoutePlan` and exact knowledge cut. The
+   carrier is normally the sender. Since 0.13.0 a different carrier is admitted
+   only when the request cites an admitted `delegate_carrier_v1` command that
+   the carrier issued under its own authority, whose claim names the carrier,
+   the sender, and the `carry_correspondence` capability and covers each
+   dispatch. The plugin records it as the carrier's current delegation for that
+   sender from the next boundary (a newer delegation replaces it) and publishes none of the carrier's knowledge to the sender.
 4. One information operation atomically changes the dispatch to `Active` and
    creates exactly one initial `DeliveryAttempt`. The attempt's `due_at` is the
    admitted logical deadline; route ETA never rewrites it.
@@ -117,7 +122,11 @@ changes the prior attempt's deadline.
 
 Interception creates an information `Access` operation for the interceptor.
 It does not by itself stop, destroy, decode, or redirect the original delivery.
-Those consequences require explicit domain policy and evidence.
+Those consequences require explicit domain policy and evidence. Since 0.13.0 a
+`CarrierSeized` incident is the exception that does end the attempt: the leg
+fails, a terminal seizure handoff leaves the transport execution only closable, the attempt
+closes as failed, and only the carrier holder receives an `attempt_report`.
+The dispatch stays active for the sender's explicit retry or finalization.
 
 ## Determinism and persistence
 

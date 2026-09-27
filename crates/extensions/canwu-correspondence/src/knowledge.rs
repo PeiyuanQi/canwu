@@ -12,6 +12,9 @@ use std::collections::BTreeMap;
 pub const ENDPOINT_KNOWLEDGE_SCHEMA: &str = "routing_endpoint";
 pub const CONNECTION_KNOWLEDGE_SCHEMA: &str = "routing_connection";
 pub const ADDRESS_KNOWLEDGE_SCHEMA: &str = "address";
+/// Knowledge schema name of the holder-relative
+/// [`crate::CorrespondenceAttemptReport`].
+pub const ATTEMPT_REPORT_KNOWLEDGE_SCHEMA: &str = "attempt_report";
 const KNOWLEDGE_NAMESPACE: &str = "canwu.correspondence";
 const KNOWLEDGE_CUT_HASH_DOMAIN: &str = "canwu.correspondence.knowledge-cut.v1";
 const TOPOLOGY_HASH_DOMAIN: &str = "canwu.correspondence.topology.v1";
@@ -65,6 +68,10 @@ pub fn correspondence_knowledge_schemas() -> Vec<PluginKnowledgeSchema> {
         (
             ADDRESS_KNOWLEDGE_SCHEMA,
             "5a4ad47b7a51305f90582a09956a99f4f9ff194acf605e1f27bfed79c5992901",
+        ),
+        (
+            ATTEMPT_REPORT_KNOWLEDGE_SCHEMA,
+            "82bb41a4bff5a48c97e8c07ceded1ceb1f3dd1848eeb5dd6a12b93d5cd48da2b",
         ),
         (
             CONNECTION_KNOWLEDGE_SCHEMA,
@@ -147,6 +154,23 @@ pub fn planning_snapshot_from_knowledge_result(
     let snapshot = facts.snapshot(result, observed_at).map_err(invalid)?;
     let digest = facts.read_set_digest(&result.holder)?;
     Ok((snapshot, digest))
+}
+
+/// The lifecycle's planning read: the carrier's current planning-knowledge
+/// heads through the same bounded query and admission rule as
+/// [`planning_snapshot_from_holder_knowledge`], plus the recipient address
+/// resolved from that same read. A host that repeats the public builder for
+/// the carrier at the same cut therefore sees the network the plugin planned
+/// over.
+pub(crate) fn carrier_planning_snapshot(
+    view: &SimulationView<'_>,
+    carrier: &KnowledgeHolderRef,
+    recipient: &KnowledgeHolderRef,
+    observed_at: SimTime,
+) -> Result<(PlanningSnapshot, AddressResolution), CanwuError> {
+    let result = view.knowledge_records(carrier.clone(), &planning_knowledge_query())?;
+    build_planning_snapshot(&result, recipient, observed_at)
+        .map_err(|message| CanwuError::new(ErrorCode::InvalidDomainRecord, message))
 }
 
 pub(crate) fn build_planning_snapshot(

@@ -371,8 +371,17 @@ pub struct DecisionTicketDraft {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<SimTime>,
     /// Earlier ticket this decision follows up. At admission the parent must
-    /// be a terminal ticket in hot decision history with the same
-    /// `decision_maker`.
+    /// be a terminal ticket in hot decision history, and either have exactly
+    /// the same `decision_maker` or be a seat succession: the parent's and
+    /// this ticket's assigned controllers are both bound to the same
+    /// [`DecisionControllerBinding::seat_id`]. A successor holder therefore
+    /// registers a new controller bound to the seat and links its ticket to
+    /// the previous holder's cancelled one. Controller bindings are immutable
+    /// and never removed, so the rule reads the parent's binding directly and
+    /// snapshot validation re-checks it. Seat IDs are host content declared
+    /// when a controller is registered; the engine does not tie them to the
+    /// run's seat binding. An archived or absent parent is rejected as
+    /// `TicketNotFound`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ticket: Option<DecisionTicketId>,
 }
@@ -423,7 +432,9 @@ pub struct DecisionTicket {
     pub deadline: Option<SimTime>,
     pub version: u64,
     pub state: DecisionTicketState,
-    /// Terminal ticket, of the same decision maker, that this ticket follows.
+    /// Terminal ticket that this ticket follows, of the same decision maker
+    /// or of a controller bound to the same seat
+    /// (see [`DecisionTicketDraft::parent_ticket`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_ticket: Option<DecisionTicketId>,
 }

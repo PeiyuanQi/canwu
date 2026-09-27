@@ -43,7 +43,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "0.12.0", optional = true }
+canwu-resource = { version = "0.13.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -53,7 +53,9 @@ Create scenario state with `ResourceState::empty`, install immutable
 definitions/units and opening accounts, then use `ResourceState::into_record`
 to obtain the one authoritative `DomainRecord` root. Activate
 `ResourcePlugin::new(adapter_evidence_kinds)` with the exact external record
-kinds allowed to prove consumption, production credit, or outflow.
+kinds allowed to prove adapter consumption, external-inflow credit, loss, or
+outflow. Production output credits do not use adapter ingress; they settle
+through the production output batch ingress.
 
 Player and institution decisions use tracked command ingress:
 
@@ -123,7 +125,9 @@ source field before settlement.
   consents to the whole exchange and cannot be reused for other terms. Leg
   keys become the transfers' operation identities; only the exchange key
   receives an outcome. A tracked command must come from the `leg_a` source
-  custodian. Terminal dispositions of the two transfers stay independent.
+  custodian (or its grantee for a granted leg, which must be certified at the
+  exchange's settlement time; see "Delegated access grants"). Terminal
+  dispositions of the two transfers stay independent.
 - `ResourceTransferDispositionV1::AcceptLocal` settles a transfer without a
   transport execution when the transfer is still `PendingDispatch` with no
   transport link and both accounts declare the same `ResourceAccount::place_scope`.
@@ -214,11 +218,106 @@ Since 0.11.0, every `ResourceDemand` persists a `source_policy`:
 
 - `ResourceDemandSourcePolicyV1::Pooled` preserves allocation across all open accounts with matching resource and unit revisions, in deterministic account-ID order.
 - `ExactAccounts(Vec<ResourceAccountId>)` lists 1–256 accounts in strictly increasing ID order, with no duplicates. Each must exist, be open, match both exact revisions, and have the demand requester as its custodian. Invalid lists reject the command before resources change; allocation validates them again.
+- `Granted { grant_id, accounts }` lists 1–256 accounts the same way, but each must be custodied by the grantor of the named access grant, whose grantee must be the requester (see "Delegated access grants").
 
 The allocator computes available supply, minimum useful quantity and partial fulfillment from the selected accounts only. An insufficient exact list never falls back to the pool. Existing protected floors and later transfer/consumption authority checks still apply. The exact path visits only the listed accounts, bounded by `MAX_DEMAND_SOURCE_ACCOUNTS`; pooled selection retains its existing account scan.
 
-A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended.
+A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended. An amendment also cannot change the demand's lifecycle status, rejection reason, requester, fulfilled quantity, or resource and unit revisions; such an amendment settles as a durable `invalid_lifecycle` rejection.
 
-`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. Cross-custodian appointments, delegation, purpose and spending limits remain application/domain responsibilities; an account-ID list proves none of them. Transfer custody and completion-lease checks remain separate requirements.
+`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. An `ExactAccounts` list proves no delegation either. Cross-custodian delegation with a cap and a window is expressed only by an access grant and a `Granted` policy; appointments, purposes and who may grant whom remain application/domain responsibilities. Transfer custody and completion-lease checks remain separate requirements.
 
 The policy is included in request digests, runtime snapshots, exact replay and terminal demand archive payloads. Restore validates live source references and retained reservation membership; archive validation preserves the policy and its digest. Holder-relative reports retain their existing visibility contract and do not expose the authoritative source list automatically. Missing `source_policy` fields deserialize as `Pooled` in a standalone DTO, but this does not migrate old snapshots: exact engine-version and plugin-identity checks still apply. Rust struct literals must add the field; this is a 0.11.0 source break.
+
+## Delegated access grants
+
+`ResourceAccessGrantV1` is a grantor custodian's explicit, bounded consent that
+a grantee may draw on its stock of one exact resource and unit revision:
+`grant_id`, `grantor_custodian`, `grantee`, `resource_revision`,
+`unit_revision`, `cap_quantity`, the half-open window `valid_from..valid_until`,
+and the exact `authority_evidence` record version that justifies it (for
+example an application's accepted requisition record).
+
+- `ResourceOperationRequestV1::IssueAccessGrant(ResourceIssueAccessGrantRequestV1)`
+  is admitted only as a tracked command whose subject is the grantor custodian,
+  and only when the authority evidence is an available exact record version.
+  Adapter ingress cannot issue or revoke grants. The applied outcome keeps the
+  authority evidence as its exact evidence.
+- `RevokeAccessGrant(ResourceRevokeAccessGrantRequestV1)` also comes from the
+  grantor custodian with the expected grant revision. Like a source-policy
+  amendment it stops at the first reservation: a grant with reserved or
+  debited quantity is fixed and settles a `invalid_lifecycle` rejection.
+- A `Granted { grant_id, accounts }` demand is admitted only when the grant is
+  active, its grantee is the requester, the demand's resource and unit match the
+  grant, `due_at >= valid_from` and `expires_at <= valid_until`, every listed
+  account is open and custodied by the grantor, and the requested quantity fits
+  the grant's remaining cap.
+- Allocation checks the grant before scarcity arbitration: a revoked or
+  out-of-window grant supplies nothing (a demand that has drawn nothing is
+  rejected with `access_grant_unavailable`), no allocation exceeds the remaining
+  cap, and there is no fallback to pooled or other accounts. A listed account
+  whose protected-floor policy the grantor changed after admission supplies
+  nothing instead of failing the grantee's allocation pass.
+
+Cap accounting is persisted on `ResourceAccessGrantRecordV1`:
+`cap_quantity = remaining + reserved_quantity + debited_quantity`. Allocation
+moves quantity from remaining to reserved; the debit of that allocation
+(consumption or a transfer start, including an exchange leg) moves it from
+reserved to debited, so each unit is charged exactly once. Released or expired
+reservations return to remaining because the stock never left the grantor's
+account; a debit stays charged even if its transfer is later returned.
+`ResourceState::validate` rejects any grant whose reserved quantity differs from
+the active reservations drawn under it or whose charges exceed its cap.
+
+Completion-lease authority for delegated stock is explicit. The grantor's
+consent is the grant; the debit of a granted allocation runs under the
+grantee's own completion lease and only while the grant is current. An
+activated lease does not expire, so the plugin settles a granted debit only in
+a boundary whose time equals the debit's certified time (the request `at`,
+which is the lease eligibility time), as adapter ingress already requires of
+every irreversible operation, and the grant window must contain that time. A
+debit certified inside the window but settled after it, or settled at any other
+time than its certified one, is rejected. In a `BeginExchange` the rule applies
+per leg: a granted leg must be certified in the same instant the exchange
+settles, so a granted party certifying earlier than its counterparty rejects
+the whole exchange, while an ordinary leg keeps the plain exchange rules. A
+granted allocation pass likewise supplies nothing unless the grant is current
+at both its requested time and the settling boundary. A lease
+held by anyone else, including the grantor custodian, cannot debit a granted
+allocation, and a tracked `BeginTransfer` or `BeginExchange` leg
+on a granted allocation must come from the grantee. A transfer started this way
+records `access_grant`, and its grantee (not the source custodian) controls its
+cancellation, return, and loss; local acceptance still belongs to the
+destination custodian.
+
+Demand expiry stays lazy, as for every demand: reservations of a granted
+demand past its `expires_at` (and so past the grant window) are released, and
+returned to the cap, by the next allocation pass for the grantee, which the host
+runs with `enqueue_resource_allocation`. Revocation cannot withdraw unused cap
+after the first reservation, so size the cap and window to the delegation.
+Validation also requires every grant's debited quantity to cover the hot
+transfers and consumptions debited under it, and a grant-backed transfer to
+name exactly the grant its (hot) demand drew on.
+
+`resource_access_grant_status` is the holder-bound read of a grant and its
+accounting for the grantor or grantee. Grants stay in hot state, bounded by one
+global `MAX_RESOURCE_ACCESS_GRANTS`; they are not archived, so a host should
+control who may issue grants, as it does for account creation. Grants, granted demands,
+and grant-backed transfers persist, hash, restore, and replay with the resource
+root; states without grants keep their canonical encoding.
+
+## Production output credit
+
+A production output credit carries the execution's completion certificate. The
+resource participant grant of that lease locked the production runtime at the
+version current when the lease was granted, before the execution existed, and
+every later production transition, including the completion itself, advances
+that record. The credit therefore cites the exact production version the
+coordinator pinned on the execution when it dispatched the output; the resource
+runtime accepts it when it is the locked record at or after the locked version,
+and the production output batch ingress additionally requires it to equal the
+execution's pinned `output_source`. Production credits settle only through that
+batch ingress; `RESOURCE_ADAPTER_INGRESS` and `resource_adapter_ingress` reject
+them. The participant grant was consumed at
+the execution's start time, and the credit settles it at or after that time.
+Completing an execution through a live command, at the start time or later,
+settles its output.

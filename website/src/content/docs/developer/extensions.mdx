@@ -17,6 +17,8 @@ sidebar:
 | 多个系统在同一日结、回合或时间点协调 | 用 `register_boundary_system()` 注册边界系统 |
 | 插件拥有类型化领域数据 | 注册领域 schema，并通过领域记录 API 读写 |
 | 结果需要稳定随机性 | 声明插件随机流，让每次抽样进入证据记录 |
+| 多个插件必须共同写入一次转移，并且要发现沉默的参与者 | 登记转移清单，并在第 10 阶段暂存各参与者的写入；见[转移清单](/architecture/settlement/#转移清单) |
+| 玩家或智能体需要知道某条规则为什么得出某个值 | 由算出该值的第 7 或第 12 阶段系统记录评估轨迹；见[评估轨迹](/architecture/settlement/#评估轨迹) |
 
 ## 最小模拟插件结构（节选）
 
@@ -77,13 +79,16 @@ cargo run -p canwu-api --example plugin
 | 包 | 状态与用途 | 继续阅读 |
 | --- | --- | --- |
 | `canwu-society` | 已发布的社会扩散模拟模块 | [地方共同体扩散案例](/tutorials/cases/local-community-diffusion/) |
-| `canwu-culture` | 已发布的文化编写、编译和生命周期扩展 | [文化与法律制度](/architecture/culture-law/) |
-| `canwu-law` | 实验性的法律制度化扩展 | [文化与法律制度](/architecture/culture-law/) |
+| `canwu-culture` | 已发布的文化编写、编译和生命周期扩展，提供由上层应用驱动（`CulturePlugin`）和在引擎内（`CultureBoundaryPlugin`）两种结算方式 | [文化与法律制度](/architecture/culture-law/) |
+| `canwu-law` | 实验性的法律制度化扩展，支持加权、表决单元与征询程序阶段 | [文化与法律制度](/architecture/culture-law/) |
 | `canwu-technology` | 已发布的技术证据、地方能力和传播扩展 | [技术传播教程](/tutorials/technology-diffusion/) |
 | `canwu-fiscal` | 通用财政程序扩展；不拥有资源余额或运输 | [明代财政案例](/tutorials/cases/ming-fiscal/) |
-| `canwu-resource` | 已发布的守恒资源账户、需求、分配、转移与履约扩展 | [生产、资源与运输边界](/developer/production-economy/) |
+| `canwu-resource` | 已发布的守恒资源账户、需求、分配、转移、动用授权与履约扩展 | [生产、资源与运输边界](/developer/production-economy/) |
 | `canwu-production` | 已发布的生产工艺、设施、工单与产出结算扩展 | [生产、资源与运输边界](/developer/production-economy/) |
 | `canwu-military` | 可选的军事模拟扩展；不是通用战斗模型 | [军事模拟扩展](/tutorials/military-domain/) |
+| `canwu-movement` | 已发布的移动生命周期扩展：移动命令、路段结算、运力池和持有人相对的移动报告 | [路线规划与送信执行](/tutorials/routing-transport/#移动生命周期与运力池) |
+| `canwu-information` | 已发布的信息生命周期扩展，包括解读中的真伪判定 | [编码传递与中途截取](/tutorials/cases/encoded-interception/) |
+| `canwu-correspondence` | 已发布的通信扩展，支持持有人相对规划、受托承运人与承运人扣押 | [经路线规划的通信](/tutorials/cases/routed-correspondence/) |
 
 选择这些扩展时，先确认它们的公开版本、依赖关系和存档合同。历史内容、场景参数和上层应用规则
 仍由内容包或上层应用拥有。

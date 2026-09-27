@@ -69,7 +69,7 @@ The practical classification is: **1 and 3 write state, 2 computes an allocation
 2. Build the boundary admission set: command attempts, accepted commands, ingress, admitted events, and applicable calendar cadences.
 3. Capture an immutable boundary snapshot so early phases read one baseline instead of plugin-order-dependent intermediate state.
 4. Execute all fourteen phases; systems within a phase are ordered by `(plugin name, system name)`.
-5. Persist the boundary evidence, atomic commits, conditional transitions, perspective materialization, and replay/diagnostic hashes.
+5. Persist the boundary evidence, atomic commits, conditional transitions and their audits, evaluation traces, perspective materialization, and replay/diagnostic hashes.
 6. If a fatal error occurs, restore time, queues, state, journals, random streams, counters, and boundary records.
 </Steps>
 
@@ -86,9 +86,9 @@ The practical classification is: **1 and 3 write state, 2 computes an allocation
 | 7 | `DomainDeltaProposal` | Propose component, record, and event changes |
 | 8 | `InvariantValidation` | Validate candidate changes against invariants |
 | 9 | `AtomicDomainCommit` | Commit ordinary domain changes atomically |
-| 10 | `HistoricalCandidateEvaluation` | Evaluate historical transition candidates |
-| 11 | `ConditionalTransitionCommit` | Commit eligible historical transitions |
-| 12 | `StrategicAggregation` | Produce strategic-level aggregates |
+| 10 | `HistoricalCandidateEvaluation` | Evaluate historical transition candidates; manifest participants stage their writes |
+| 11 | `ConditionalTransitionCommit` | Audit ready transition manifests, then commit eligible historical transitions |
+| 12 | `StrategicAggregation` | Produce strategic-level aggregates and read transition audits |
 | 13 | `PerspectiveAndReportMaterialization` | Materialize actor perspectives and reports |
 | 14 | `SaveReplayAndDiagnosticHashing` | Persist evidence and update replay/diagnostic hashes |
 
@@ -97,6 +97,8 @@ The practical classification is: **1 and 3 write state, 2 computes an allocation
 Phase six systems first declare supply and competing demand; the kernel performs the allocation. Ordering is by pool, descending priority, explicit tie-break key, and reservation identity. Results distinguish fulfilled, partial, and rejected requests. Only systems that declare `reservation_reads` may consume an allocation.
 
 This separates “who runs first” from “who receives resources.” Registration order, hash-map iteration, and hidden shared mutation cannot influence the result.
+
+Not every allocation uses phase 6. Since 0.13.0, the movement lifecycle extension allocates transport capacity pools in phase 7 with the pure `allocate_capacity_bookings` function. Kernel reservations must name fixed identities at registration and may grant partial quantities, while a capacity booking is confirmed in full or failed, and bookings are ordered by priority, window start, tie-break key, admission sequence, and booking identity. Each decision is recorded as `CapacityBookingAllocationEvidenceV1`, and capacity already confirmed is never preempted by a later request.
 
 ## Visibility and commit
 
@@ -114,6 +116,68 @@ Most directives write plugin-owned state. Three directives change kernel-owned s
 
 Several systems may declare the two core person keys, so conflicting writes are detected per person during settlement rather than at registration.
 
+## Transition manifests
+
+Some transitions need several plugins to write together, and a participant that stays silent must not go unnoticed. Since 0.13.0, a **transition manifest** declares who must write, and the kernel audits the result before phase 11 commits it.
+
+<MermaidDiagram
+  label="Lifecycle of a transition manifest from registration through staging and the phase-11 audit"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same lifecycle."
+  definition={`flowchart LR
+    Register["Phase 7, 10, or 12<br/>coordinator registers the manifest"] --> Stage["Ready boundary, phase 10<br/>listed participants stage writes"]
+    Stage --> Audit{"Phase 11 audit"}
+    Audit -- "all staged, versions hold" --> Committed["Committed<br/>staged writes commit"]
+    Audit -- "nobody staged" --> Expired["Expired<br/>nothing written"]
+    Audit -- "partly staged or version differs" --> Failed["Whole boundary fails<br/>and rolls back"]
+    Committed --> Read["Phase 12<br/>coordinator and participants read the audit"]
+    Expired --> Read
+`}
+/>
+
+<Steps>
+1. **Register.** A phase-7, phase-10, or phase-12 system of the coordinating plugin that declares `StateKey::core_transitions()` as a write proposes `BoundaryDirective::RegisterTransitionManifest`. The `TransitionManifest` names a `lineage_id`, an `attempt`, a `ready_at` boundary, and each participant plugin with the exact record versions it expects before (`expected_pre`) and after (`expected_post`) the transition. Its identity is `TransitionManifestId { coordinator, lineage_id, attempt }`, and the kernel, not the content, records the coordinator. A phase-7 registration may be ready in the same boundary; a phase-10 or phase-12 registration must name a later boundary, and no manifest may be ready more than 1,024 boundaries ahead.
+2. **Stage.** In phase 10 of the ready boundary, a listed participant's phase-10 system that declares the same write proposes `StageTransitionWrite { manifest_id, writes }`. The staged writes are ordinary directives, so that system's declared writes, ownership, phase rules, and visibility all apply. An empty list records presence without writing. Staging by an unlisted plugin fails the boundary with `InvalidAuthority`.
+3. **Audit.** Before phase 11 commits, the kernel settles every manifest ready at this boundary. When every participant staged and every expected version holds, the outcome is `Committed`. When no participant staged, the manifest is `Expired` and nothing was written for it. When some but not all participants staged, the whole boundary fails with `TransitionParticipantMissing`; when an expected version differs, it fails with `TransitionVersionMismatch`.
+4. **Read.** The `TransitionAuditRecord`, with the outcome and the number of writes each participant staged, is recorded on `BoundaryRecord::transition_audits` and `BoundaryReceipt::transition_audits`. Phase-12 systems of the coordinator and participants read it through `SimulationView::transition_audits`.
+</Steps>
+
+`expected_pre` names versions of the committed state that phase 10 reads. `expected_post` is checked as of phase 11, after the boundary's same-boundary phase-10 writes commit and with its pending next-boundary phase-7 and phase-10 writes applied; a phase-12 or phase-13 write may still change the record later in the same boundary.
+
+The rules fail closed and keep manifests bounded:
+
+- A coordinator holds at most one pending manifest per lineage and 32 pending manifests, within 128 across all coordinators. A manifest lists at most 16 participants and 64 expected versions. Each participant must be a registered plugin with a phase-10 system that declares `core_transitions`, and each expected record must be of a registered kind.
+- A manifest is visible only to its coordinator and participants, through `SimulationView::transition_manifests` after declaring the `canwu.core.transitions` read, from the phase after its registration. Hosts read the pending set with `Canwu::pending_transition_manifests`.
+- There is no withdrawal directive. Because silence expires a manifest, a manifest whose ready boundary fails on every retry is recovered by settling that boundary with a cadence under which no participant runs, then registering a new attempt. A manifest ID may be reused after it settles, so `(manifest_id, ready_at)` identifies an audit.
+- Pending manifests persist in the snapshot and roll back with a failed boundary. Snapshot validation rebuilds them from registration and audit evidence, and a run that never registers a manifest hashes exactly as before.
+- Phase-10 directives outside any manifest keep their previous behavior. A manifest that must catch an omitted participant needs at least two participants: with one, silence only expires it.
+
+## Evaluation traces
+
+A phase-7 or phase-12 system may explain an application rule it evaluated by proposing `BoundaryDirective::RecordEvaluationTrace { trace }`; the directive needs no contract declaration. An `EvaluationTraceRecord` carries the rule ID and version, the subject entity, a list of `EvaluationTerm` values (term ID, integer contribution, and the evidence the term read), the result as the rule computed it, and the current boundary. The kernel checks the shape, that the subject exists, and that every evidence reference is committed evidence visible to the proposal. It does not check that the terms add up to the result.
+
+- A trace is boundary evidence, never state. It is recorded with its producing plugin, system, and phase in `BoundaryRecord::evaluation_traces`, hashed into the boundary chain, and sealed and archived with its boundary record. No system, command handler, or decision policy can read a trace back to decide an outcome.
+- The run configuration bounds traces with `EvaluationLimitsV1` (`RunConfiguration::with_evaluation_limits`). The default is 4,096 traces per boundary across all systems and 32 terms per trace; the maximum is 65,536 and 256. Each term cites at most 16 evidence references, and each rule ID, rule version, or term ID is at most 256 bytes. A proposal set that exceeds a bound fails the boundary deterministically with `EvaluationTraceLimitExceeded`; the engine never samples or drops traces, and a limit of zero forbids them.
+- Phase 13 cannot record traces, so emit a trace from the phase-7 or phase-12 system that computed the value. Traces count toward journal size.
+- Players and agents read traces through `CanwuViewer::evaluation_traces`, which omits evidence and follows the holder's knowledge; see [reading state](/en/developer/reading-state/#explain-a-rule-result).
+
+## Where the 0.13.0 extension systems run
+
+| Extension | Phase and cadence | System and work |
+| --- | --- | --- |
+| `canwu-movement` | 7, event-driven | `movement_lifecycle_apply_v1` applies admitted operations and incidents in admission order, runs one allocation pass per capacity pool, applies due legs, and retires closed executions. |
+| `canwu-movement` | 8, event-driven | `movement_lifecycle_validate_v1` validates the candidate movement runtime. |
+| `canwu-movement` | 13, event-driven | `movement_report_publish_v1` publishes changed holder-relative movement reports. |
+| `canwu-culture` (`CultureBoundaryPlugin`) | 12, event-driven | `culture_exposure_intake_v1` queues admitted `culture_exposure_v1` batches. |
+| `canwu-culture` (`CultureBoundaryPlugin`) | 7, Monthly | `culture_lifecycle_settle_v1` consumes the queue and accepted institutional decisions, settles the lifecycle against the boundary snapshot of society state, persists culture state, and schedules society deltas and signal batches as next-boundary ingress. |
+| `canwu-society` | 12, event-driven | `intake-society-ingress` queues admitted `cohort_headcount_rebase_v1` and `society_lifecycle_delta_v1` packets. |
+| `canwu-society` | 7, Daily | The society writer applies the queue after cohort transfers and before institutional decisions and transitions. |
+
+Movement leg timing uses the internal scheduled ingress `movement_leg_due_v1`: an order schedules its first departure, a departure schedules its arrival after the leg's planned duration, and an arrival schedules the next departure. A due packet acts only when it matches the order's persisted pending due, so an explicit operation makes older packets stale, and due work never fails a boundary.
+
+The two intake queues exist because only one system may write a state in a phase and the owners' writers run on coarser cadences. All phase-7 systems read the same boundary snapshot, so every culture hand-off is next-boundary: signal batches are admitted at the next boundary, and a society delta is applied at the first Daily settlement after it is admitted. Expect up to two boundaries of lag between a culture step and its society effect, and between a rebase packet and the rebased cohort. The society plugin remains the only writer of `canwu.society:state`.
+
 ## Plugin contract
 
 A `BoundarySystemContract` declares:
@@ -123,6 +187,8 @@ A `BoundarySystemContract` declares:
 - reservation offers, requests, and allocation reads;
 - the random streams it owns;
 - emitted events, domain records, and visibility.
+
+Kernel-owned keys follow the same rule: transition directives need `StateKey::core_transitions()`, and person directives need the two core person keys. Evaluation traces need no declaration because they write no state.
 
 The kernel rejects undeclared reads, writes, reservation reads, and random draws. Plugin registration, snapshot rehydration, and exact replay require matching package identity, version, and semantic hash.
 

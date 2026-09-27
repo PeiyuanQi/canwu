@@ -62,6 +62,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
         Resource["canwu-resource"]
         Production["canwu-production"]
         Military["canwu-military"]
+        Movement["canwu-movement"]
     end
 
     subgraph Examples["示例"]
@@ -114,6 +115,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Production --> Resource
     Production --> Technology
     Military --> Api
+    Movement --> Api
     MingFiscal --> Api
     MingFiscal --> Fiscal
     EconomyContent --> Api
@@ -186,31 +188,35 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `canwu-reference-world` | 可替换的示例实体、移动插件、脱离式投影、路由适配器与入门示例 |
 | `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
 | `canwu-routing` | 确定性时变路由原语 |
-| `canwu-transport` | 运输执行、行程修订、交接、预订与 saga 原语 |
-| `canwu-sim` | 私有运行时、调度、插件和结算 |
+| `canwu-transport` | 运输执行、行程修订、交接、预订、运力池分配与 saga 记录原语 |
+| `canwu-sim` | 私有运行时、调度、插件、结算、转移清单与评估轨迹证据 |
 | `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重放 |
-| `canwu-information` | 已正式发布的权威信息生命周期扩展 |
-| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件 |
+| `canwu-information` | 已正式发布的权威信息生命周期扩展，包括解读中的真伪判定 |
+| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件，支持受托承运人与承运人扣押 |
 | `canwu-society` | 已正式发布的社会传播模拟模块 |
-| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展 |
-| `canwu-law` | 已实现的实验性法律编写、制度程序、版本化法律与适用扩展 |
+| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展，提供由上层应用驱动和在引擎内结算两种插件 |
+| `canwu-law` | 已实现的实验性法律编写、制度程序（包括加权、表决单元与征询阶段）、版本化法律与适用扩展 |
 | `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
 | `canwu-history-research` | 可选的下游历史研究评估插件 |
 | `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
-| `canwu-resource` | 守恒资源账户、受保护底线、需求、预留、分配、转移、消费、损耗与履约扩展 |
+| `canwu-resource` | 守恒资源账户、受保护底线、需求、预留、分配、转移、消费、损耗、动用授权与履约扩展 |
 | `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、生产执行、项目与产出结算扩展 |
+| `canwu-military` | 可选的军事模拟扩展，负责军队、行动、战斗、占领、军事知识和跨领域凭证；不是通用战斗模型 |
+| `canwu-movement` | 移动生命周期扩展：在 `canwu-transport` 记录之上处理移动命令、路段结算、运力池分配和持有人相对的移动报告 |
 | `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
 | `canwu-economy-reference-content` | 带模型卡、出处、覆盖声明和明确未知/不适用状态的经济参考内容包 |
+| `canwu-military-reference-content` | 版本化、明确为合成数据的军事规则集，供军事扩展使用；不是历史数据集 |
 | `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
 | `canwu-force-supply-reference` | 使用公共资源 API 的可替换军事补给消费者与征发 saga 参考整合 |
 | `canwu-economy-reference` | 组合资源、生产、运输、军事补给、粮食循环、稀缺度和价格证据的可运行参考整合 |
+| `canwu-military-reference` | 组合军事扩展、其合成内容与参考世界的可运行对外 API 军事参考整合 |
 | `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
 
 已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
 它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
-和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果 cadence。休眠目标离开文化热索引；
-上层应用显式同步 society 后会停用其由文化计划编译的转移规则。退休目标还会释放目标相关的动态社会状态并保留历史证据。
-边界系统注册、规范化信号准入和增量聚合仍是后续工作。
+和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果节奏。休眠目标离开文化热索引；
+显式同步 society 后，其由文化计划编译的转移规则也会停用。退休目标还会释放目标相关的动态社会状态并保留历史证据。
+自 0.13.0 起，文化结算插件（`CultureBoundaryPlugin`）以每月边界系统运行这一生命周期，并通过规范化输入准入接触信号批次；society 的增量聚合仍是后续工作。
 详见独立的[文化和法律制度系统](/architecture/culture-law/)，其中合并说明文化编写、生命周期和法律制度化设计。
 
 ## 从领域扩展到可运行套件
@@ -224,6 +230,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 接受的路径、遇灾与截取政策，以及跨机制证据；在执行形式上，它同时是一个
 `SimulationPlugin`，通过权威命令、规范化输入（canonical ingress）和边界系统接入运行时。
 它依赖 `canwu-api` 与 `canwu-information`，反向依赖不存在，因此不会形成依赖环。
+
+`canwu-movement` 以同样的方式处理移动。`canwu-transport` 仍是记录库，包含移动命令、
+运输执行、行程修订、交接、预订和运力池。它不能承载插件：插件建立在 `canwu-api` 之上，
+而 `canwu-api` 依赖 `canwu-transport`，在其中放置插件会形成依赖环。
+`canwu-movement` 只依赖 `canwu-api`，负责这些记录的生命周期：把所有已准入的移动命令和
+运输执行保存在一条领域记录中，在到期时结算路段，分配运力池，并发布持有人相对的移动报告。
+事故、危险、敌对行为以及与之相关的所有随机抽样仍由应用系统负责。
 
 资源与生产沿用同一边界：`canwu-resource` 只拥有守恒数量和履约；
 `canwu-production` 消费资源结果与精确技术证据，拥有生产资产和工单生命周期；
@@ -271,7 +284,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 需求来源策略
 
-自 0.11.0 起，`ResourceDemand::source_policy` 明确记录 `Pooled` 或 `ExactAccounts`。后者列出 1–256 个严格排序、不重复、由需求申请者保管的账户，资源和单位版本必须精确匹配。来源检查先于稀缺资源分配，不会回退到资源池。一旦有资源预留或履约，策略便固定，包括已消费、但仍对应在途托管余额的预留。快照、重放和终止归档均保留策略。资源池选择不授予转移权限；资源池需求的使用权限及跨保管人的委托由上层应用负责。参见[完整合同](/developer/production-economy/#需求来源策略)。
+自 0.11.0 起，`ResourceDemand::source_policy` 明确记录 `Pooled` 或 `ExactAccounts`。后者列出 1–256 个严格排序、不重复、由需求申请者保管的账户，资源和单位版本必须精确匹配。来源检查先于稀缺资源分配，不会回退到资源池。一旦有资源预留或履约，策略便固定，包括已消费、但仍对应在途托管余额的预留。快照、重放和终止归档均保留策略。资源池选择不授予转移权限；资源池需求的使用权限由上层应用负责。自 0.13.0 起，跨保管人的委托只能通过动用授权和第三种策略 `Granted` 表达（见[动用授权](/developer/production-economy/#动用授权)）。参见[完整合同](/developer/production-economy/#需求来源策略)。
 
 ## 人物可用性与排队输入
 
@@ -280,3 +293,23 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 ## 损耗、交换与本地验收
 
 自 0.12.0 起，`canwu-resource` 可以不经转移记录账户损耗，以原子交换同时发起两项转移（每条腿的租约都绑定约定条款），并在两个账户共享上层应用声明的地点范围时，不经运输结算同地转移。这些操作都不授予跨保管人的权限。参见[完整合同](/developer/production-economy/#账户损耗)。
+
+## 0.13.0 合同的归属
+
+0.13.0 交付了下游大战略缺口集里除延后系列项之外的全部合同。所有合同都是增量能力，快照格式仍为 8；每项合同只有一个所有者，引擎不应替应用作出的决定仍留在应用中。
+
+| 合同 | 所有者 | 所有者负责 | 仍由应用负责 |
+| --- | --- | --- | --- |
+| 转移清单与转移审计 | `canwu-sim` | 记录一次多所有者转移中哪些参与者必须写入，在第 10 阶段暂存其写入，并在转移提交前于第 11 阶段审计 | 参与者、预期版本和转移的含义 |
+| 评估轨迹 | `canwu-core` 记录、`canwu-sim` 证据、`canwu-api` 视图读取 | 把规则结果的逐项说明作为有界的边界证据保存，只向可以看到该对象的持有人展示 | 规则 ID、各项内容及其含义 |
+| 席位继任 | `canwu-decision` | 允许新票据指定其控制者曾占据同一席位的终态票据 | 谁占据该席位 |
+| 动用授权 | `canwu-resource` | 记录授权方带上限和期限的同意，并在被授权方自己的租约下对每个单位只扣减一次 | 谁可以授权给谁，以及权限证据 |
+| 移动生命周期与运力池 | `canwu-movement`，基于 `canwu-transport` 记录 | 准入移动命令、结算路段、分配运力池并发布移动报告 | 事故、危险、敌对行为及其随机抽样，以及权限依据记录 |
+| 受托承运人与承运人扣押 | `canwu-correspondence` | 只凭承运人自己的委托接受承运，按其账本规划路线，并在扣押时结束投递尝试 | 把扣押消息转告发送者 |
+| 真伪判定 | `canwu-information` | 把持有人对声称来源的判断绑定到所解读 representation 的精确版本 | 伪造被识破的概率 |
+| 加权、表决单元与征询阶段 | `canwu-law` | 按整数表决权重和表决单元计票，并运行仅供咨询的征询阶段 | 席位权重、表决单元和平局规则的选择 |
+| 引擎内文化结算 | `canwu-culture`（`CultureBoundaryPlugin`）；`canwu-society` 仍是唯一的 society 写入者 | 在引擎内结算文化生命周期，并把 society 变化交给 society 插件 | 接触信号和文化定义 |
+| 政策压力来源与 cohort 人口校准 | `canwu-society` | 记录政策压力由谁发出，并把 cohort 校准到所引用的外部存量 | 外部存量记录 |
+| 外部传播来源 | `canwu-technology` | 在实践传播中接受有引用的地图外来源，代替实时能力记录 | 内容记录及其声明的可靠度 |
+
+各合同在边界中的运行时机见[结算系统](/architecture/settlement/#转移清单)；[模型归属](/architecture/model-ownership/#0130-之后的领域归属)把这些边界与 0.12.0 合同汇总在一起。

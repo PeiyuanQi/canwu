@@ -1,14 +1,16 @@
 use canwu_api::{
-    CommandId, DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef,
-    EvidenceRef, HolderKnowledgeRecordId, ItineraryRevisionId, KnowledgeHolderRef,
-    KnowledgeReadCut, RoutePlan, RoutingConnectionRef, RoutingNodeRef, RoutingPolicy, SimTime,
-    TransportExecution, TransportExecutionId, TypedDomainRecordRef,
+    CanwuError, CommandId, DomainRecordType, DomainRecordVersionRef, DomainValueKindClass,
+    EntityRef, EvidenceRef, HandoffId, HolderKnowledgeRecordId, ItineraryRevisionId,
+    KnowledgeHolderRef, KnowledgeReadCut, RoutePlan, RoutingConnectionRef, RoutingNodeRef,
+    RoutingPolicy, SimTime, TransportExecution, TransportExecutionId, TypedDomainRecordRef,
+    canonical_hash,
 };
-use canwu_information::{InformationOperationId, InformationOperationStatus};
+use canwu_information::{DelegationClaimV1, InformationOperationId, InformationOperationStatus};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const CORRESPONDENCE_NAMESPACE: &str = "canwu.correspondence";
+const CARRIER_DELEGATION_KEY_DOMAIN: &str = "canwu.correspondence.carrier-delegation-pair.v1";
 
 pub struct CommunicationOpportunityRecord;
 
@@ -38,6 +40,25 @@ impl DomainRecordType for KnowledgeSeedRecord {
 
     const NAMESPACE: &'static str = CORRESPONDENCE_NAMESPACE;
     const NAME: &'static str = "knowledge_seed";
+}
+
+/// The carrier's current delegation for one principal: the persisted fact of
+/// the newest accepted delegation command for that (carrier, principal) pair
+/// (see [`carrier_delegation_ref`]).
+///
+/// Correspondence admission resolves a cited delegation from this record, not
+/// from command evidence, so a run whose evidence was sealed into an archive
+/// decides exactly as its replay does. A newer delegation for the same pair
+/// replaces the record, so an older delegation command stops being citable
+/// and the records stay bounded by the number of pairs.
+pub struct CarrierDelegationRecord;
+
+impl DomainRecordType for CarrierDelegationRecord {
+    type Payload = CarrierAuthority;
+    type Class = DomainValueKindClass;
+
+    const NAMESPACE: &'static str = CORRESPONDENCE_NAMESPACE;
+    const NAME: &'static str = "carrier_delegation";
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -101,6 +122,45 @@ pub struct CorrespondenceIntent {
     pub prepared_dispatch: DomainRecordVersionRef,
     pub authority: CorrespondenceAuthority,
     pub accepted_command: CommandId,
+    /// The delegation under which a carrier other than the sender carries
+    /// this correspondence, resolved from
+    /// [`InitiateCorrespondenceRequest::carrier_delegation`]; `None` for a
+    /// sender-owned carrier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier_authority: Option<CarrierAuthority>,
+}
+
+/// Payload of the carrier delegation command
+/// ([`crate::CARRIER_DELEGATION_COMMAND`]).
+///
+/// The command is admitted only under the command authority of the carrier
+/// the claim names as `performed_by`, so it records the carrier's own
+/// acceptance of carrying correspondence for `performed_for`. The claim must
+/// list [`crate::CARRY_CORRESPONDENCE_CAPABILITY`] and must not already have
+/// expired.
+///
+/// An accepted delegation is recorded at the boundary after its command and
+/// is citable from then on. Only the newest accepted delegation for a
+/// (carrier, principal) pair is citable; issuing a new one replaces the
+/// previous one, which is how a carrier narrows or ends its delegation early.
+/// A correspondence that already started keeps its admitted delegation for
+/// the current attempt, but its retries must cite the carrier's current
+/// delegation, so a replaced delegation also stops them. Otherwise a
+/// delegation stays citable until its `expires_at`, and one without
+/// `expires_at` never lapses.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarrierDelegationRequest {
+    pub claim: DelegationClaimV1,
+}
+
+/// A resolved carrier delegation: the admitted delegation command and the
+/// claim it carries.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarrierAuthority {
+    pub delegation: CommandId,
+    pub claim: DelegationClaimV1,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -179,9 +239,28 @@ pub enum CorrespondenceIncidentKind {
         blocked_connections: Vec<RoutingConnectionRef>,
         explanation: String,
     },
+    /// Records access for the interceptor; the delivery attempt continues.
     Interception {
         intercepted_by: KnowledgeHolderRef,
         extent_per_mille: u16,
+    },
+    /// The carrier and the packet were taken by `seized_by`. Unlike
+    /// [`Self::Interception`], a triggered seizure terminates the delivery
+    /// attempt: the current leg fails, a terminal
+    /// [`canwu_api::HandoffKind::Seizure`] custody handoff is recorded in the
+    /// correspondence's transport execution under `custody_handoff`, the
+    /// attempt closes as failed, and the carrier holder receives a
+    /// [`CorrespondenceAttemptReport`]. The dispatch stays active for the
+    /// sender's explicit retry or finalization.
+    ///
+    /// A zero `custody_handoff`, a malformed seizing identity, or the carrier
+    /// itself as `seized_by` rejects the incident. A `custody_handoff` that
+    /// already names a recorded handoff of the execution (for example a
+    /// planned one) does not apply: the incident is retained as suppressed
+    /// evidence and the attempt continues.
+    CarrierSeized {
+        seized_by: EntityRef,
+        custody_handoff: HandoffId,
     },
 }
 
@@ -271,6 +350,38 @@ pub struct InitiateCorrespondenceRequest {
     pub execution_id: TransportExecutionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub automatic_opportunity: Option<TypedDomainRecordRef<CommunicationOpportunityRecord>>,
+    /// Required exactly when `carrier` differs from `sender`: an admitted
+    /// carrier delegation command ([`crate::CARRIER_DELEGATION_COMMAND`])
+    /// whose claim names the carrier as `performed_by` and the sender as
+    /// `performed_for`, lists [`crate::CARRY_CORRESPONDENCE_CAPABILITY`], and
+    /// whose validity interval covers each dispatch (the initial one and every
+    /// retry). With it, route planning and address resolution read the
+    /// carrier's knowledge ledger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carrier_delegation: Option<CommandId>,
+}
+
+/// A holder-relative report that one delivery attempt ended.
+///
+/// Published to the carrier holder, the party that experienced the ending.
+/// When the sender is its own carrier that is the sender; a sender that
+/// delegated the carrying learns of the ending only through the application.
+/// The report names no seizing identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorrespondenceAttemptReport {
+    pub operation_key: String,
+    pub attempt_number: u32,
+    pub ended_at: SimTime,
+    pub outcome: CorrespondenceAttemptOutcome,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CorrespondenceAttemptOutcome {
+    /// The attempt ended because the carrier was seized; `custody_handoff`
+    /// is the seizure handoff in the attempt's transport execution.
+    CarrierSeized { custody_handoff: HandoffId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -315,4 +426,13 @@ pub fn knowledge_seed_ref(
     seed_key: impl Into<String>,
 ) -> TypedDomainRecordRef<KnowledgeSeedRecord> {
     TypedDomainRecordRef::new(seed_key)
+}
+
+/// The record of `carrier`'s current delegation for `principal`.
+pub fn carrier_delegation_ref(
+    carrier: &EntityRef,
+    principal: &KnowledgeHolderRef,
+) -> Result<TypedDomainRecordRef<CarrierDelegationRecord>, CanwuError> {
+    let pair = canonical_hash(CARRIER_DELEGATION_KEY_DOMAIN, &(carrier, principal))?;
+    Ok(TypedDomainRecordRef::new(format!("pair:{pair}")))
 }

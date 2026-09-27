@@ -13,12 +13,11 @@ rust-version.workspace = true
 publish = ["crates-io"]
 
 [dependencies]
+blake3.workspace = true
 canwu-core.workspace = true
 canwu-routing.workspace = true
 canwu-time.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
 serde_json.workspace = true
 
 [lints]

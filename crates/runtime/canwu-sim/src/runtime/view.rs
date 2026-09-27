@@ -70,6 +70,7 @@ pub struct SimulationView<'a> {
     pub(super) allowed_reservations: Option<&'a [ReservationRef]>,
     pub(super) random_session: Option<RefCell<random::RandomSession>>,
     pub(super) plugin_archive_provider: &'a dyn super::PluginArchiveObjectProvider,
+    pub(super) transitions: Option<&'a super::transitions::BoundaryTransitionLedger>,
 }
 
 impl SimulationView<'_> {
@@ -352,6 +353,53 @@ impl SimulationView<'_> {
         }
         records.sort_by_key(|record| record.id);
         Ok(records)
+    }
+
+    /// Lists the pending transition manifests that this boundary system's
+    /// plugin coordinates or participates in, in manifest-ID order, after an
+    /// explicit `canwu.core.transitions` read.
+    ///
+    /// A manifest's expected versions name other plugins' records, so the
+    /// list is relative to the reading plugin; other plugins' manifests and
+    /// views not bound to a boundary system list nothing. Inside a boundary,
+    /// a manifest registered by an earlier phase is listed from the next phase
+    /// on, and a manifest that settled at phase 11 is no longer listed. A
+    /// participant stages for the manifests whose `ready_at` is the current
+    /// boundary and that list its plugin.
+    pub fn transition_manifests(
+        &self,
+    ) -> Result<Vec<&super::PendingTransitionManifest>, CanwuError> {
+        self.require_read(&StateKey::core_transitions())?;
+        let (Some(reader), Some(ledger)) = (self.ingress_plugin, self.transitions) else {
+            return Ok(Vec::new());
+        };
+        Ok(ledger
+            .pending()
+            .filter(|manifest| manifest.involves(reader))
+            .collect())
+    }
+
+    /// Returns the audits of the transition manifests that settled at phase 11
+    /// of the current boundary and that this boundary system's plugin
+    /// coordinates or participates in, in manifest-ID order, after an
+    /// explicit `canwu.core.transitions` read.
+    ///
+    /// A failed audit fails the boundary instead of leaving a record, so every
+    /// outcome is [`crate::TransitionAuditOutcome::Committed`] or
+    /// [`crate::TransitionAuditOutcome::Expired`]. Earlier phases and views
+    /// not bound to a boundary system see no audits; hosts read settled
+    /// audits from [`crate::BoundaryRecord::transition_audits`] and
+    /// [`crate::BoundaryReceipt::transition_audits`].
+    pub fn transition_audits(&self) -> Result<Vec<&super::TransitionAuditRecord>, CanwuError> {
+        self.require_read(&StateKey::core_transitions())?;
+        let (Some(reader), Some(ledger)) = (self.ingress_plugin, self.transitions) else {
+            return Ok(Vec::new());
+        };
+        Ok(ledger
+            .audits()
+            .iter()
+            .filter(|audit| audit.involves(reader))
+            .collect())
     }
 
     /// Matches retained, plugin-generated ingress provenance without exposing its payload.

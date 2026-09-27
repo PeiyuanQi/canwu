@@ -717,6 +717,7 @@ fn fixture(
                 source: Some(KnowledgeHolderRef::Person(PersonId::new(1))),
                 source_site: Some(EntityRef::Territory(TerritoryId::new(1))),
                 source_capability: None,
+                external_source: None,
                 destination: KnowledgeHolderRef::Person(person_id(destination)),
                 destination_site: EntityRef::Territory(territory_id(destination)),
                 revision: Some(revision.clone()),
