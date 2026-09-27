@@ -12,7 +12,7 @@ sidebar:
 
 | 调用者 | 推荐接口 | 说明 |
 | --- | --- | --- |
-| 受信任服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()` | 读取通用权威状态与完整证据 |
+| 受信任服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()`、`person_availabilities()` | 读取通用权威状态与完整证据 |
 | 领域规则或渲染适配器 | 整合的 `snapshot()` 或类似投影 | 把类型化领域记录组装为只读视图 |
 | 玩家或角色智能体 | `viewer_for_actor()` + `query_knowledge()` | 只读取指定角色的知识，不泄露真值 |
 | 解释界面 | `explain()` | 从已记录事件或失败生成因果说明 |
@@ -53,6 +53,22 @@ let commander_knowledge = canwu
 ```
 
 这个结构由上层应用定义。它只能包含角色知识查询已经返回的内容；不要把 `server_world`、隐藏实体或调试字段混入响应。
+
+## 按持有人知识规划路线
+
+为某个人物或机构规划路线时，只应使用该持有人知道的内容。`canwu-correspondence` 按其插件内部使用的同一规则构建这种持有人规划快照：
+
+```rust
+use canwu_correspondence::planning_snapshot_from_holder_knowledge;
+
+let (snapshot, read_set) =
+    planning_snapshot_from_holder_knowledge(view, &holder, observed_at)?;
+let plan = plan_route(&snapshot, &request)?;
+```
+
+请在声明了 `canwu.core.knowledge` 读取的插件系统或命令处理器中调用它。它只采用持有人账本在视图给出的读取切面上声明的端点和连接；若某条已知连接指向持有人不知道的端点，构建会失败。快照的 `knowledge_cut` 记录该切面；返回的 `KnowledgeReadCutDigest` 证明读取了哪些事实，只要这些事实不变，摘要就不变。视图读取本身属于系统访问，因此 `holder` 必须取自已准入的权限，例如命令签发者，而不能取自未经验证的载荷。
+
+在运行时之外，可以把已有的查询结果（例如受限查看器的 `query_knowledge(&planning_knowledge_query())`）交给纯函数 `planning_snapshot_from_knowledge_result`。分页结果会被拒绝，因为部分页面无法证明持有人的完整网络。
 
 ## 表现层只复制，不回写
 

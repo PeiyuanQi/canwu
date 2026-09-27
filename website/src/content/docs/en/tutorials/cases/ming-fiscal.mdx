@@ -100,6 +100,19 @@ resource plugin from deciding whether an assessment is lawful. Currency
 conversion stores an exact quote version; Canwu never assumes that one unit of
 silver has equal purchasing power in different places or years.
 
+### Acting actors
+
+Since 0.12.0, a `FiscalAuthorityBinding` may name an acting actor next to its
+standing `authorized_actor`, together with an exact `authority_basis` record
+version, such as a host grant record whose kind is declared with
+`FiscalPlugin::with_authority_basis_kinds`. Actions from the acting actor,
+directly or as a decision-ticket origin, are admitted only while that basis is
+the current version of its record, and settlement checks it again. Once the
+record advances or retires, the acting actor is rejected with
+`FISCAL_ACTING_BASIS_NOT_CURRENT`, while the authorized actor is still
+admitted. Who may appoint an acting actor, and for how long, is host content
+recorded in that basis record.
+
 ## Three runnable starts
 
 | Fixture | Game question it is designed to test |

@@ -24,13 +24,13 @@ use canwu_api::{
     DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionIngressRequest,
     DecisionMutation, DecisionOption, DecisionPolicyIdentity, DecisionPolicyKind,
     DecisionRequestId, DecisionTicketDraft, DecisionTicketId, DomainRecordRef,
-    DomainRecordVersionRef, EntityRef, EvidenceRef, Handoff, HandoffId, Issuer, ItineraryRevision,
-    ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef, PersonId, PlanningSnapshot,
-    PluginIngressRequest, PolicyDecision, ReconciliationOutcome, RoutePlan, RoutingConnection,
-    RoutingConnectionRef, RoutingEndpoint, RoutingEndpointKind, RoutingNetwork, RoutingNodeRef,
-    RoutingPolicy, RoutingRequest, Scenario, SimDuration, SimTime, SimulationPlugin, SystemCadence,
-    TransferMode, TransportError, TransportExecution, TransportExecutionId, TraversalModel,
-    canonical_hash, plan_route,
+    DomainRecordVersionRef, EntityRef, EvidenceRef, Handoff, HandoffId, HandoffKind, Issuer,
+    ItineraryRevision, ItineraryRevisionId, ItineraryRevisionReason, KnowledgeHolderRef, PersonId,
+    PlanningSnapshot, PluginIngressRequest, PolicyDecision, ReconciliationOutcome, RoutePlan,
+    RoutingConnection, RoutingConnectionRef, RoutingEndpoint, RoutingEndpointKind, RoutingNetwork,
+    RoutingNodeRef, RoutingPolicy, RoutingRequest, Scenario, SimDuration, SimTime,
+    SimulationPlugin, SystemCadence, TransferMode, TransportError, TransportExecution,
+    TransportExecutionId, TraversalModel, canonical_hash, plan_route,
 };
 use canwu_economy_reference_content::{compile_content_pack, synthetic_grain_fixture};
 use canwu_force_supply_reference::{
@@ -460,6 +460,7 @@ impl GrainHarness {
             capacity: Some(60_000),
             protected_floor_policy: None,
             closed: false,
+            place_scope: None,
         })?;
         resources.install_opening_account(ResourceAccount {
             id: army_account.clone(),
@@ -471,6 +472,7 @@ impl GrainHarness {
             capacity: Some(20_000),
             protected_floor_policy: None,
             closed: false,
+            place_scope: None,
         })?;
         resources.install_report_grant(ResourceReportGrantV1 {
             id: ResourceReportGrantId::new("canwu.economy-reference:report-grant:granary-manager")?,
@@ -1265,6 +1267,7 @@ impl GrainHarness {
                 fulfillments,
                 transfers,
                 consumptions,
+                losses: Vec::new(),
                 source_versions: vec![provider_source.clone()],
                 semantic_digest: String::new(),
             }
@@ -1369,6 +1372,7 @@ impl GrainHarness {
                         context,
                         options: options.clone(),
                         deadline: Some(self.canwu.time()),
+                        parent_ticket: None,
                     },
                 },
             ),
@@ -1646,6 +1650,7 @@ impl GrainHarness {
                         context,
                         options: options.to_owned(),
                         deadline: Some(self.canwu.time()),
+                        parent_ticket: None,
                     },
                 },
             ),
@@ -2021,6 +2026,7 @@ impl GrainHarness {
                     at: self.canwu.time(),
                     location: endpoint,
                     evidence: Vec::new(),
+                    kind: HandoffKind::Planned,
                 })
                 .map_err(transport_error)?;
         }

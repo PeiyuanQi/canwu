@@ -59,6 +59,7 @@ fn random_resolution_system(
                 controller_id: ticket.assigned_controller.clone(),
                 sample,
                 option_weights,
+                tie_break: None,
             },
         }],
         ..BoundaryProposal::default()
@@ -135,6 +136,7 @@ fn enqueue_ticket(
                         DecisionOption::new("fail", "Reject the law"),
                     ],
                     deadline: None,
+                    parent_ticket: None,
                 },
             },
         ),

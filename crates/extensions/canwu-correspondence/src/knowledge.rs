@@ -1,11 +1,13 @@
 use crate::model::AddressResolution;
 use canwu_api::{
-    KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeQuery, KnowledgeQueryResult,
-    KnowledgeRecordKind, KnowledgeSchemaId, MAX_KNOWLEDGE_PAGE_SIZE, PayloadSchema,
-    PlanningSnapshot, PluginKnowledgeSchema, RoutingConnection, RoutingEndpoint, RoutingNetwork,
-    SimTime, canonical_hash,
+    CanwuError, ErrorCode, HolderKnowledgeRecordId, KnowledgeHistoryView, KnowledgeHolderRef,
+    KnowledgeQuery, KnowledgeQueryResult, KnowledgeRecordKind, KnowledgeRecordView,
+    KnowledgeSchemaId, MAX_KNOWLEDGE_PAGE_SIZE, PayloadSchema, PlanningSnapshot,
+    PluginKnowledgeSchema, RoutingConnection, RoutingConnectionRef, RoutingEndpoint,
+    RoutingNetwork, RoutingNodeRef, SimTime, SimulationView, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const ENDPOINT_KNOWLEDGE_SCHEMA: &str = "routing_endpoint";
 pub const CONNECTION_KNOWLEDGE_SCHEMA: &str = "routing_connection";
@@ -13,6 +15,7 @@ pub const ADDRESS_KNOWLEDGE_SCHEMA: &str = "address";
 const KNOWLEDGE_NAMESPACE: &str = "canwu.correspondence";
 const KNOWLEDGE_CUT_HASH_DOMAIN: &str = "canwu.correspondence.knowledge-cut.v1";
 const TOPOLOGY_HASH_DOMAIN: &str = "canwu.correspondence.topology.v1";
+const PLANNING_READ_SET_HASH_DOMAIN: &str = "canwu.correspondence.planning-read-set.v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnownRoutingEndpoint {
@@ -83,6 +86,69 @@ pub fn correspondence_knowledge_schemas() -> Vec<PluginKnowledgeSchema> {
     .collect()
 }
 
+/// Read-set digest of the holder knowledge a planning snapshot was built from:
+/// the canonical hash of the holder plus the versioned schema and
+/// holder-relative ID of every endpoint and connection record admitted into
+/// the network at the read cut.
+///
+/// Knowledge records are immutable, so a record ID pins its content. The
+/// digest stays equal while the admitted records are unchanged, even when
+/// unrelated holder records move the read cut itself, and changes when a newer
+/// record replaces an admitted fact. It is evidence for what the planner read;
+/// it is not a commitment over the holder ledger.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct KnowledgeReadCutDigest(pub String);
+
+/// Builds a holder-relative planning snapshot inside a plugin system or
+/// command handler.
+///
+/// Reads only the holder's current knowledge heads through
+/// [`planning_knowledge_query`]; the caller must declare the
+/// `canwu.core.knowledge` read, and no route or other world state is read. The
+/// network admits exactly the endpoints and connections the holder's ledger
+/// asserts at the read cut the view derives, taking the latest fact per
+/// endpoint or connection ID; the snapshot's `knowledge_cut` commits to that
+/// cut. Recipient addresses are not required. A known connection whose
+/// endpoint the holder does not know fails the build rather than being
+/// dropped.
+///
+/// The view read is omniscient system access, not actor authorization: derive
+/// `holder` from the admitted authority (for example the command issuer), not
+/// from an unvalidated payload.
+pub fn planning_snapshot_from_holder_knowledge(
+    view: &SimulationView<'_>,
+    holder: &KnowledgeHolderRef,
+    observed_at: SimTime,
+) -> Result<(PlanningSnapshot, KnowledgeReadCutDigest), CanwuError> {
+    let result = view.knowledge_records(holder.clone(), &planning_knowledge_query())?;
+    planning_snapshot_from_knowledge_result(&result, observed_at)
+}
+
+/// Pure form of [`planning_snapshot_from_holder_knowledge`] over a query
+/// result the caller already holds, such as a restricted viewer's
+/// `query_knowledge(&planning_knowledge_query())`.
+///
+/// Records outside this crate's planning knowledge schemas are ignored, and
+/// address records never enter the network. A paginated result is rejected
+/// because a partial page cannot prove the holder's full network.
+pub fn planning_snapshot_from_knowledge_result(
+    result: &KnowledgeQueryResult,
+    observed_at: SimTime,
+) -> Result<(PlanningSnapshot, KnowledgeReadCutDigest), CanwuError> {
+    if result.next.is_some() {
+        return Err(CanwuError::new(
+            ErrorCode::KnowledgeLimitExceeded,
+            "planning knowledge exceeds the bounded current-head query",
+        ));
+    }
+    let invalid = |message: String| CanwuError::new(ErrorCode::InvalidKnowledgeRecord, message);
+    let facts = PlanningFacts::collect(result).map_err(invalid)?;
+    let snapshot = facts.snapshot(result, observed_at).map_err(invalid)?;
+    let digest = facts.read_set_digest(&result.holder)?;
+    Ok((snapshot, digest))
+}
+
 pub(crate) fn build_planning_snapshot(
     result: &KnowledgeQueryResult,
     recipient: &KnowledgeHolderRef,
@@ -91,117 +157,168 @@ pub(crate) fn build_planning_snapshot(
     if result.next.is_some() {
         return Err("planning knowledge exceeds the bounded current-head query".to_owned());
     }
-    let mut endpoint_facts = std::collections::BTreeMap::new();
-    let mut connection_facts = std::collections::BTreeMap::new();
-    let mut address_facts = std::collections::BTreeMap::new();
-    for record in &result.records {
-        let name = record.schema.kind.name.as_str();
-        match name {
-            ENDPOINT_KNOWLEDGE_SCHEMA => {
+    let facts = PlanningFacts::collect(result)?;
+    let address = facts
+        .addresses
+        .get(recipient)
+        .ok_or_else(|| "carrier knowledge must contain one current recipient address".to_owned())?;
+    let snapshot = facts.snapshot(result, observed_at)?;
+    Ok((
+        snapshot,
+        AddressResolution {
+            recipient: recipient.clone(),
+            destination: address.payload.destination.clone(),
+            resolved_at: observed_at,
+            read_cut: result.read_cut.clone(),
+            source_record: address.record,
+        },
+    ))
+}
+
+/// The latest holder fact per endpoint, connection, and recipient key. Shared
+/// by the plugin and the public builders so their admission rule cannot drift.
+struct PlanningFacts {
+    endpoints: BTreeMap<RoutingNodeRef, HolderFact<KnownRoutingEndpoint>>,
+    connections: BTreeMap<RoutingConnectionRef, HolderFact<KnownRoutingConnection>>,
+    addresses: BTreeMap<KnowledgeHolderRef, HolderFact<KnownAddress>>,
+}
+
+struct HolderFact<V> {
+    learned_at: SimTime,
+    record: HolderKnowledgeRecordId,
+    payload: V,
+}
+
+#[derive(Serialize)]
+struct PlanningReadSetMaterial<'a> {
+    holder: &'a KnowledgeHolderRef,
+    records: Vec<(KnowledgeSchemaId, HolderKnowledgeRecordId)>,
+}
+
+impl PlanningFacts {
+    fn collect(result: &KnowledgeQueryResult) -> Result<Self, String> {
+        let endpoint_schema = schema_id(ENDPOINT_KNOWLEDGE_SCHEMA);
+        let connection_schema = schema_id(CONNECTION_KNOWLEDGE_SCHEMA);
+        let address_schema = schema_id(ADDRESS_KNOWLEDGE_SCHEMA);
+        let mut facts = Self {
+            endpoints: BTreeMap::new(),
+            connections: BTreeMap::new(),
+            addresses: BTreeMap::new(),
+        };
+        for record in &result.records {
+            if record.schema == endpoint_schema {
                 let payload: KnownRoutingEndpoint = serde_json::from_value(record.payload.clone())
                     .map_err(|error| format!("routing endpoint knowledge is invalid: {error}"))?;
                 let key = payload.endpoint.id.clone();
-                replace_latest(
-                    &mut endpoint_facts,
-                    key,
-                    record.learned_at,
-                    record.id,
-                    payload,
-                );
-            }
-            CONNECTION_KNOWLEDGE_SCHEMA => {
+                replace_latest(&mut facts.endpoints, key, record, payload);
+            } else if record.schema == connection_schema {
                 let payload: KnownRoutingConnection =
                     serde_json::from_value(record.payload.clone()).map_err(|error| {
                         format!("routing connection knowledge is invalid: {error}")
                     })?;
                 let key = payload.connection.id.clone();
-                replace_latest(
-                    &mut connection_facts,
-                    key,
-                    record.learned_at,
-                    record.id,
-                    payload,
-                );
-            }
-            ADDRESS_KNOWLEDGE_SCHEMA => {
+                replace_latest(&mut facts.connections, key, record, payload);
+            } else if record.schema == address_schema {
                 let payload: KnownAddress = serde_json::from_value(record.payload.clone())
                     .map_err(|error| format!("address knowledge is invalid: {error}"))?;
-                replace_latest(
-                    &mut address_facts,
-                    payload.recipient.clone(),
-                    record.learned_at,
-                    record.id,
-                    payload,
-                );
+                let key = payload.recipient.clone();
+                replace_latest(&mut facts.addresses, key, record, payload);
             }
-            _ => {}
         }
+        Ok(facts)
     }
-    let (_, source_record, address) = address_facts
-        .get(recipient)
-        .ok_or_else(|| "carrier knowledge must contain one current recipient address".to_owned())?;
-    let endpoints = endpoint_facts
-        .values()
-        .map(|(_, _, payload)| payload.endpoint.clone())
-        .collect::<Vec<_>>();
-    let connections = connection_facts
-        .values()
-        .map(|(_, _, payload)| payload.connection.clone())
-        .collect::<Vec<_>>();
-    let topology_version = canonical_hash(
-        TOPOLOGY_HASH_DOMAIN,
-        &(
-            endpoint_facts
-                .values()
-                .map(|(_, _, payload)| payload)
-                .collect::<Vec<_>>(),
-            connection_facts
-                .values()
-                .map(|(_, _, payload)| payload)
-                .collect::<Vec<_>>(),
-        ),
-    )
-    .map_err(|error| error.to_string())?;
-    let network = RoutingNetwork::new(topology_version.clone(), endpoints, connections)
+
+    fn snapshot(
+        &self,
+        result: &KnowledgeQueryResult,
+        observed_at: SimTime,
+    ) -> Result<PlanningSnapshot, String> {
+        let endpoints = self
+            .endpoints
+            .values()
+            .map(|fact| fact.payload.endpoint.clone())
+            .collect::<Vec<_>>();
+        let connections = self
+            .connections
+            .values()
+            .map(|fact| fact.payload.connection.clone())
+            .collect::<Vec<_>>();
+        let topology_version = canonical_hash(
+            TOPOLOGY_HASH_DOMAIN,
+            &(
+                self.endpoints
+                    .values()
+                    .map(|fact| &fact.payload)
+                    .collect::<Vec<_>>(),
+                self.connections
+                    .values()
+                    .map(|fact| &fact.payload)
+                    .collect::<Vec<_>>(),
+            ),
+        )
         .map_err(|error| error.to_string())?;
-    let knowledge_cut = canonical_hash(KNOWLEDGE_CUT_HASH_DOMAIN, &result.read_cut)
-        .map_err(|error| error.to_string())?;
-    let snapshot = PlanningSnapshot {
-        observer: serde_json::to_string(&result.holder).map_err(|error| error.to_string())?,
-        observed_at,
-        valid_until: None,
-        knowledge_cut,
-        topology_version,
-        timetable_version: None,
-        network,
-    };
-    snapshot.validate().map_err(|error| error.to_string())?;
-    Ok((
-        snapshot,
-        AddressResolution {
-            recipient: recipient.clone(),
-            destination: address.destination.clone(),
-            resolved_at: observed_at,
-            read_cut: result.read_cut.clone(),
-            source_record: *source_record,
-        },
-    ))
+        let network = RoutingNetwork::new(topology_version.clone(), endpoints, connections)
+            .map_err(|error| error.to_string())?;
+        let knowledge_cut = canonical_hash(KNOWLEDGE_CUT_HASH_DOMAIN, &result.read_cut)
+            .map_err(|error| error.to_string())?;
+        let snapshot = PlanningSnapshot {
+            observer: serde_json::to_string(&result.holder).map_err(|error| error.to_string())?,
+            observed_at,
+            valid_until: None,
+            knowledge_cut,
+            topology_version,
+            timetable_version: None,
+            network,
+        };
+        snapshot.validate().map_err(|error| error.to_string())?;
+        Ok(snapshot)
+    }
+
+    fn read_set_digest(
+        &self,
+        holder: &KnowledgeHolderRef,
+    ) -> Result<KnowledgeReadCutDigest, CanwuError> {
+        let endpoint_schema = schema_id(ENDPOINT_KNOWLEDGE_SCHEMA);
+        let connection_schema = schema_id(CONNECTION_KNOWLEDGE_SCHEMA);
+        let mut records = self
+            .endpoints
+            .values()
+            .map(|fact| (endpoint_schema.clone(), fact.record))
+            .chain(
+                self.connections
+                    .values()
+                    .map(|fact| (connection_schema.clone(), fact.record)),
+            )
+            .collect::<Vec<_>>();
+        records.sort();
+        canonical_hash(
+            PLANNING_READ_SET_HASH_DOMAIN,
+            &PlanningReadSetMaterial { holder, records },
+        )
+        .map(KnowledgeReadCutDigest)
+    }
 }
 
 fn replace_latest<K, V>(
-    facts: &mut std::collections::BTreeMap<K, (SimTime, canwu_api::HolderKnowledgeRecordId, V)>,
+    facts: &mut BTreeMap<K, HolderFact<V>>,
     key: K,
-    learned_at: SimTime,
-    record: canwu_api::HolderKnowledgeRecordId,
+    record: &KnowledgeRecordView,
     payload: V,
 ) where
     K: Ord,
 {
-    let replace = facts.get(&key).is_none_or(|(prior_at, prior_record, _)| {
-        (learned_at, record) > (*prior_at, *prior_record)
-    });
+    let replace = facts
+        .get(&key)
+        .is_none_or(|prior| (record.learned_at, record.id) > (prior.learned_at, prior.record));
     if replace {
-        facts.insert(key, (learned_at, record, payload));
+        facts.insert(
+            key,
+            HolderFact {
+                learned_at: record.learned_at,
+                record: record.id,
+                payload,
+            },
+        );
     }
 }
 

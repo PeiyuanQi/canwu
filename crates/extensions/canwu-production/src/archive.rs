@@ -1621,6 +1621,7 @@ fn outcome_matches_execution(
         }
         | crate::ProductionOperation::CompleteExecution {
             execution: advanced,
+            ..
         } if advanced == &execution.id => {
             outcome.work_order.is_none() && outcome.execution.as_ref() == Some(&execution.id)
         }

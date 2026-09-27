@@ -1195,8 +1195,8 @@ impl DecisionState {
 
     /// Returns the exact locator pages required to validate references from
     /// bounded hot state into archived decision history. The result is bounded
-    /// by hot traces, resolved tickets, and accepted attempts rather than by
-    /// total archive size.
+    /// by hot traces, resolved or child tickets, and accepted attempts rather
+    /// than by total archive size.
     pub fn required_archived_dependency_page_keys(
         &self,
     ) -> Result<OrdSet<DecisionArchivePageKey>, DecisionError> {
@@ -1214,6 +1214,13 @@ impl DecisionState {
             {
                 pages.insert(decision_history_page_key(&DecisionHistoryKey::Trace(
                     trace_id,
+                ))?);
+            }
+            if let Some(parent_id) = ticket.parent_ticket
+                && !self.tickets.contains_key(&parent_id)
+            {
+                pages.insert(decision_history_page_key(&DecisionHistoryKey::Ticket(
+                    parent_id,
                 ))?);
             }
         }
@@ -2124,6 +2131,22 @@ impl DecisionState {
                 ));
             }
             ticket.validate()?;
+            if let Some(parent_id) = ticket.parent_ticket {
+                let lineage_valid = match self.tickets.get(&parent_id) {
+                    Some(parent) => {
+                        !parent.is_open()
+                            && parent.decision_maker == ticket.decision_maker
+                            && parent.updated_at <= ticket.opened_at
+                    }
+                    None => self.contains_archived_key(&DecisionHistoryKey::Ticket(parent_id)),
+                };
+                if !lineage_valid {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidDecision,
+                        "decision ticket lineage references an open, foreign, later, or unavailable parent",
+                    ));
+                }
+            }
         }
         for (ordinal, trace) in self.traces.ordinals().zip(self.traces.iter()) {
             if trace.id.get() != ordinal || ordinal >= self.traces.next_ordinal() {
@@ -2133,7 +2156,9 @@ impl DecisionState {
                 ));
             }
             let ticket_version_valid = self.tickets.get(&trace.ticket_id).is_some_and(|ticket| {
-                trace.ticket_version != 0 && trace.ticket_version <= ticket.version
+                trace.ticket_version != 0
+                    && trace.ticket_version <= ticket.version
+                    && trace.parent_ticket == ticket.parent_ticket
             }) || self
                 .contains_archived_key(&DecisionHistoryKey::Ticket(trace.ticket_id));
             if !ticket_version_valid || !self.controllers.contains_key(&trace.controller_id) {
@@ -2282,6 +2307,9 @@ impl DecisionState {
                         "decision deadline precedes its admission time",
                     ));
                 }
+                if let Some(parent_id) = ticket.parent_ticket {
+                    self.validate_parent_admission(parent_id, &ticket.decision_maker)?;
+                }
                 let persisted = DecisionTicket {
                     id: ticket.id,
                     definition: ticket.definition,
@@ -2295,6 +2323,7 @@ impl DecisionState {
                     deadline: ticket.deadline,
                     version: 1,
                     state: DecisionTicketState::Open,
+                    parent_ticket: ticket.parent_ticket,
                 };
                 if let Some(deadline) = persisted.deadline {
                     self.deadline_index
@@ -2408,6 +2437,37 @@ impl DecisionState {
         Ok(prepared)
     }
 
+    /// Decision lineage admission: the parent must be a terminal ticket in hot
+    /// decision history and must share the child's exact decision maker. An
+    /// archived parent is rejected like an absent one: its decision maker
+    /// cannot be checked inside the admission transaction, and the outcome must
+    /// not depend on which archive locator pages happen to be resident.
+    fn validate_parent_admission(
+        &self,
+        parent_id: DecisionTicketId,
+        decision_maker: &canwu_core::EntityRef,
+    ) -> Result<(), DecisionError> {
+        let Some(parent) = self.ticket(parent_id) else {
+            return Err(DecisionError::new(
+                DecisionErrorCode::TicketNotFound,
+                format!("decision ticket parent {parent_id} is not in hot decision history"),
+            ));
+        };
+        if parent.is_open() {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                format!("decision ticket parent {parent_id} is still open"),
+            ));
+        }
+        if &parent.decision_maker != decision_maker {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                format!("decision ticket parent {parent_id} belongs to a different decision maker"),
+            ));
+        }
+        Ok(())
+    }
+
     fn open_ticket_mut(
         &mut self,
         ticket_id: DecisionTicketId,
@@ -2463,12 +2523,29 @@ impl DecisionState {
                 "decision resolution policy does not match the persisted controller binding",
             ));
         }
-        if (controller.policy.kind == crate::DecisionPolicyKind::Random)
-            != decision.random.is_some()
-        {
+        // Random controllers draw over every available option and carry no
+        // stage. A utility controller that opted into tie-breaks may carry
+        // draw evidence only for a random tie-break among near-equivalent
+        // candidates.
+        let random_evidence_matches_policy = match controller.policy.kind {
+            crate::DecisionPolicyKind::Random => {
+                decision.random.is_some() && decision.stage.is_none()
+            }
+            crate::DecisionPolicyKind::Utility => {
+                decision.random.is_some() == decision.is_random_tie_break()
+                    && (controller.random_tie_break || decision.random.is_none())
+            }
+            crate::DecisionPolicyKind::Rule
+            | crate::DecisionPolicyKind::Human
+            | crate::DecisionPolicyKind::External
+            | crate::DecisionPolicyKind::Llm => {
+                decision.random.is_none() && !decision.is_random_tie_break()
+            }
+        };
+        if !random_evidence_matches_policy {
             return Err(DecisionError::new(
                 DecisionErrorCode::PolicyMismatch,
-                "random decision controllers require random draw evidence, and other controllers reject it",
+                "random decision controllers require random draw evidence, utility controllers accept it only for a random tie-break, and other controllers reject it",
             ));
         }
         let previous_ticket = self
@@ -2494,7 +2571,7 @@ impl DecisionState {
                 ticket.option(option_id).map(|option| option.action.clone())
             }
             DecisionOutcome::Deferred { .. } => None,
-            DecisionOutcome::Pending { .. } => {
+            DecisionOutcome::Pending { .. } | DecisionOutcome::PendingRandom { .. } => {
                 return Err(DecisionError::new(
                     DecisionErrorCode::InvalidDecision,
                     "pending policy outcomes are not authoritative decision mutations",
@@ -2520,6 +2597,9 @@ impl DecisionState {
             external: decision.external,
             random: decision.random,
             command_request_id,
+            stage: decision.stage,
+            fired_guards: decision.fired_guards,
+            parent_ticket: ticket.parent_ticket,
         };
         ticket.updated_at = at;
         ticket.version = ticket.version.checked_add(1).ok_or_else(|| {
@@ -2943,6 +3023,7 @@ pub fn format8_trace_locator_scale_probe(
         state: DecisionTicketState::Cancelled {
             reason: "Scale fixture is terminal".to_owned(),
         },
+        parent_ticket: None,
     };
     ticket.validate()?;
     state.insert_hot_history_record(&DecisionArchiveRecord::Ticket {
@@ -2970,6 +3051,9 @@ pub fn format8_trace_locator_scale_probe(
             external: None,
             random: None,
             command_request_id: None,
+            stage: None,
+            fired_guards: Vec::new(),
+            parent_ticket: None,
         };
         state.insert_hot_history_record(&DecisionArchiveRecord::Trace {
             trace: trace.clone(),
@@ -3068,6 +3152,7 @@ mod archive_restart_tests {
                     reason: "terminal fixture".to_owned(),
                 }
             },
+            parent_ticket: None,
         };
         state
             .insert_hot_history_record(&DecisionArchiveRecord::Ticket {
@@ -3096,6 +3181,9 @@ mod archive_restart_tests {
             external: None,
             random: None,
             command_request_id: None,
+            stage: None,
+            fired_guards: Vec::new(),
+            parent_ticket: None,
         };
         state
             .insert_hot_history_record(&DecisionArchiveRecord::Trace {
@@ -3384,14 +3472,30 @@ impl DecisionController {
         }
         let decision = policy.decide(ticket)?;
         decision.validate(ticket)?;
-        if matches!(decision.outcome, DecisionOutcome::Pending { .. }) {
+        if decision.random.is_some() {
+            return Err(DecisionError::new(
+                DecisionErrorCode::PolicyMismatch,
+                "policies cannot supply random draw evidence; draws come from a boundary resolution",
+            ));
+        }
+        if matches!(decision.outcome, DecisionOutcome::PendingRandom { .. })
+            && !controller.random_tie_break
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::PolicyMismatch,
+                "the controller binding does not permit random tie-breaks",
+            ));
+        }
+        if decision.outcome.is_pending() {
             return Ok(ControllerDecision::Pending(decision));
         }
         let action = match &decision.outcome {
             DecisionOutcome::Selected { option_id } => {
                 ticket.option(option_id).map(|option| option.action.clone())
             }
-            DecisionOutcome::Deferred { .. } | DecisionOutcome::Pending { .. } => None,
+            DecisionOutcome::Deferred { .. }
+            | DecisionOutcome::Pending { .. }
+            | DecisionOutcome::PendingRandom { .. } => None,
         };
         Ok(ControllerDecision::Authoritative { action, decision })
     }

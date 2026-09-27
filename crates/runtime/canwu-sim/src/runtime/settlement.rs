@@ -1,4 +1,5 @@
 use super::event_payloads::{KnowledgePublished, RuntimeEventPayload};
+use super::ingress::{PluginIngressCancellationProof, valid_ingress_cancellation_reason};
 use super::validation::{
     EvidenceAvailability, RuntimeValidationContext, resolve_evidence_reference,
 };
@@ -9,17 +10,18 @@ use super::{
     BoundaryRequest, BoundaryStateHashFormat, BoundarySystemContract,
     BoundaryTransactionCheckpoint, CanwuError, CauseRef, Command, CommandEnvelope, CommandIngress,
     CommandRequest, CommitmentDomains, DecisionAction, DecisionIngressRequest, DecisionMutation,
-    DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DomainRecord, DomainRecordChange,
-    DomainRecordRef, DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef,
-    GENESIS_BOUNDARY_HASH, HashSet, IngressPayload, KnowledgeHolderRef, KnowledgeRecord,
-    KnowledgeRecordId, PluginComponentKey, PluginComponentRecord, PluginRegistry, PolicyDecision,
-    RandomDrawAddress, RandomDrawOutcome, RandomOperationTarget, RefCell, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot,
-    RuntimeCurrentState, RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation,
-    SimulationView, SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective,
-    canonical_hash, canonical_text, catch_unwind, claim_counter, component_key,
-    compute_boundary_hash, invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
+    DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage, DomainRecord,
+    DomainRecordChange, DomainRecordRef, DomainRecordVersionSource, EntityRef, ErrorCode,
+    EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH, HashSet, IngressCancellationAuthority,
+    IngressPayload, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, PluginComponentKey,
+    PluginComponentRecord, PluginRegistry, PolicyDecision, RandomDrawAddress, RandomDrawOutcome,
+    RandomOperationTarget, RefCell, ReservationAllocation, ReservationDisposition,
+    ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
+    ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot, RuntimeCurrentState,
+    RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation, SimulationView,
+    SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective, canonical_hash,
+    canonical_text, catch_unwind, claim_counter, component_key, compute_boundary_hash,
+    invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
     proposal_entity_identity_exists, random, record_change_affected_entities, records,
     runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
@@ -118,6 +120,12 @@ impl Simulation {
                 }
                 IngressPayload::Calendar { cadences } => request.cadences.extend(cadences),
                 IngressPayload::Plugin { .. } => {}
+                IngressPayload::PluginCancellation { .. } => {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidSnapshot,
+                        "a terminal ingress cancellation cannot be admitted",
+                    ));
+                }
                 IngressPayload::Decision { request } => {
                     self.apply_decision_request(*request)?;
                 }
@@ -276,6 +284,7 @@ impl Simulation {
         let mut transitions = Vec::new();
         let mut deferred = Vec::new();
         let mut evidence = PendingBoundaryEvidence::default();
+        let mut person_writes = super::persons::BoundaryPersonWrites::default();
         for change in maintenance_record_changes {
             let change_index = u64::try_from(evidence.record_changes.len()).map_err(|_| {
                 CanwuError::new(
@@ -419,6 +428,7 @@ impl Simulation {
                     &registered.plugin,
                     &registered.contract,
                     view_current,
+                    &boundary_snapshot.person_availability,
                     view_now,
                     &self.state,
                     boundary_id,
@@ -428,6 +438,11 @@ impl Simulation {
                     &visible_knowledge_overlay,
                     &proposal,
                     &random_execution.draws,
+                )?;
+                person_writes.stage(
+                    &registered.plugin,
+                    &registered.contract.name,
+                    &proposal.directives,
                 )?;
                 random::extend_keyed_draws(&mut keyed_random_draws, &random_execution.draws)?;
                 random_overlay.extend(random_execution.states);
@@ -459,11 +474,19 @@ impl Simulation {
                     }
                 }));
                 phase_directives.extend(proposal.directives.into_iter().map(|directive| {
+                    // Created persons commit at the end of the boundary and
+                    // become visible to systems at the next boundary.
+                    let visibility = if matches!(directive, BoundaryDirective::CreatePerson { .. })
+                    {
+                        StateVisibility::NextBoundary
+                    } else {
+                        registered.contract.visibility
+                    };
                     StagedBoundaryDirective {
                         plugin: registered.plugin.clone(),
                         system: registered.contract.name.clone(),
                         phase,
-                        visibility: registered.contract.visibility,
+                        visibility,
                         directive,
                     }
                 }));
@@ -607,6 +630,8 @@ impl Simulation {
             emissions,
             mut generated_ingress,
             random_decisions,
+            mut person_availability_changes,
+            created_persons,
         } = evidence;
         self.invalidate_commitments(CommitmentDomains::RANDOM_STREAMS);
         self.state.current.random_streams = random_overlay;
@@ -623,12 +648,7 @@ impl Simulation {
                         "random decision ticket disappeared before boundary commit",
                     )
                 })?;
-            let option_id = DecisionRandomEvidence::selected_option(
-                ticket,
-                &pending.resolution.option_weights,
-                pending.resolution.sample.value,
-            )
-            .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+            let option_id = random_resolution_selection(ticket, &pending.resolution)?;
             let previous = random_outcomes.insert(
                 (
                     pending.resolution.sample.stream.clone(),
@@ -659,6 +679,7 @@ impl Simulation {
             &committed_random_draws,
             &mut generated_ingress,
         )?;
+        self.cancel_unavailable_person_tickets(&mut person_availability_changes)?;
         let random_draws = committed_random_draws
             .iter()
             .map(|draw| draw.id)
@@ -707,6 +728,8 @@ impl Simulation {
             knowledge_changes: pending_knowledge_changes.clone(),
             maintenance_changes,
             maintenance_terminal_root,
+            person_availability_changes,
+            created_persons: created_persons.clone(),
             emissions: emissions.clone(),
             state_hash: Some(state_hash),
             previous_hash,
@@ -741,6 +764,10 @@ impl Simulation {
                 .map(|change| change.records.len())
                 .sum(),
             allocations: allocation_records,
+            created_persons: created_persons
+                .iter()
+                .map(super::CreatedPerson::from)
+                .collect(),
         })
     }
 
@@ -792,7 +819,10 @@ impl Simulation {
                 | BoundaryDirective::ScheduleIngress { .. }
                 | BoundaryDirective::SchedulePluginIngress { .. }
                 | BoundaryDirective::ResolveDecisionRandomly { .. }
-                | BoundaryDirective::PublishKnowledge { .. } => None,
+                | BoundaryDirective::PublishKnowledge { .. }
+                | BoundaryDirective::SetPersonAvailability { .. }
+                | BoundaryDirective::CreatePerson { .. }
+                | BoundaryDirective::CancelPluginIngress { .. } => None,
             })
             .collect();
         let mut stage_record_changes = BTreeMap::new();
@@ -843,7 +873,10 @@ impl Simulation {
                     .find(|entity| !runtime_entity_identity_exists(&self.state, entity)),
                 BoundaryDirective::MutateRecord { .. }
                 | BoundaryDirective::ResolveDecisionRandomly { .. }
-                | BoundaryDirective::PublishKnowledge { .. } => None,
+                | BoundaryDirective::PublishKnowledge { .. }
+                | BoundaryDirective::SetPersonAvailability { .. }
+                | BoundaryDirective::CreatePerson { .. }
+                | BoundaryDirective::CancelPluginIngress { .. } => None,
             };
             if let Some(entity) = unavailable {
                 return Err(CanwuError::new(
@@ -1071,6 +1104,55 @@ impl Simulation {
                         visibility: staged.visibility,
                     });
                 }
+                BoundaryDirective::CancelPluginIngress { ingress_id, reason } => {
+                    self.ensure_canonical_ingress_can_start()?;
+                    let cancelled_in_this_boundary = generated_ingress.iter().any(|generation| {
+                        self.state
+                            .evidence
+                            .retained_ingress(generation.ingress)
+                            .is_some_and(|record| {
+                                matches!(
+                                    record.payload,
+                                    IngressPayload::PluginCancellation { cancelled, .. }
+                                        if cancelled == ingress_id
+                                )
+                            })
+                    });
+                    if cancelled_in_this_boundary {
+                        return Err(CanwuError::new(
+                            ErrorCode::InvalidBoundary,
+                            format!(
+                                "multiple boundary proposals cancel ingress {ingress_id}; boundary system {}.{} must not repeat a cancellation",
+                                staged.plugin, staged.system
+                            ),
+                        ));
+                    }
+                    let target = self.plugin_ingress_cancellation_target(
+                        ingress_id,
+                        IngressCancellationAuthority::BoundarySystem,
+                        PluginIngressCancellationProof {
+                            permit: None,
+                            replay: false,
+                            boundary_plugin: Some(&staged.plugin),
+                            current_generations: generated_ingress,
+                        },
+                        &reason,
+                    )?;
+                    let receipt = self.append_plugin_ingress_cancellation(
+                        target,
+                        IngressCancellationAuthority::BoundarySystem,
+                        reason,
+                        Some(CauseRef::Boundary(boundary_id)),
+                        true,
+                    )?;
+                    generated_ingress.push(BoundaryIngressGeneration {
+                        ingress: receipt.ingress_id,
+                        plugin: staged.plugin,
+                        system: staged.system,
+                        phase: staged.phase,
+                        visibility: staged.visibility,
+                    });
+                }
                 BoundaryDirective::ResolveDecisionRandomly { resolution } => {
                     evidence
                         .random_decisions
@@ -1081,6 +1163,38 @@ impl Simulation {
                             visibility: staged.visibility,
                             resolution,
                         });
+                }
+                BoundaryDirective::SetPersonAvailability {
+                    person,
+                    availability,
+                    summary,
+                } => {
+                    let change = self.apply_person_availability(
+                        (
+                            &staged.plugin,
+                            &staged.system,
+                            staged.phase,
+                            staged.visibility,
+                        ),
+                        person,
+                        availability,
+                        summary,
+                    )?;
+                    evidence.person_availability_changes.push(change);
+                }
+                BoundaryDirective::CreatePerson {
+                    draft,
+                    correlation,
+                    summary,
+                } => {
+                    let creation = self.apply_person_creation(
+                        &staged.plugin,
+                        &staged.system,
+                        draft,
+                        correlation,
+                        summary,
+                    )?;
+                    evidence.created_persons.push(creation);
                 }
             }
         }
@@ -1143,12 +1257,7 @@ impl Simulation {
                         "random decision controller disappeared before ingress generation",
                     )
                 })?;
-            let option_id = DecisionRandomEvidence::selected_option(
-                &ticket,
-                &resolution.option_weights,
-                resolution.sample.value,
-            )
-            .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+            let option_id = random_resolution_selection(&ticket, resolution)?;
             let option = ticket.option(&option_id).ok_or_else(|| {
                 CanwuError::new(
                     ErrorCode::InvalidDecision,
@@ -1184,19 +1293,34 @@ impl Simulation {
                 }
                 DecisionAction::None => None,
             };
-            let decision = PolicyDecision {
-                outcome: DecisionOutcome::Selected {
-                    option_id: option_id.clone(),
+            let random = Some(DecisionRandomEvidence {
+                draw_id,
+                value: resolution.sample.value,
+                upper_exclusive: resolution.sample.upper_exclusive,
+                option_weights: resolution.option_weights.clone(),
+            });
+            let outcome = DecisionOutcome::Selected {
+                option_id: option_id.clone(),
+            };
+            let decision = match &resolution.tie_break {
+                None => PolicyDecision {
+                    outcome,
+                    summary: random_policy_summary(&option_id),
+                    evaluations: Vec::new(),
+                    external: None,
+                    random,
+                    stage: None,
+                    fired_guards: Vec::new(),
                 },
-                summary: format!("random policy selected {option_id}"),
-                evaluations: Vec::new(),
-                external: None,
-                random: Some(DecisionRandomEvidence {
-                    draw_id,
-                    value: resolution.sample.value,
-                    upper_exclusive: resolution.sample.upper_exclusive,
-                    option_weights: resolution.option_weights.clone(),
-                }),
+                Some(pending) => PolicyDecision {
+                    outcome,
+                    summary: random_tie_break_summary(&option_id),
+                    evaluations: pending.evaluations.clone(),
+                    external: None,
+                    random,
+                    stage: Some(DecisionStage::Random),
+                    fired_guards: pending.fired_guards.clone(),
+                },
             };
             let mutation = DecisionMutation::Resolve {
                 ticket_id: ticket.id,
@@ -1577,6 +1701,8 @@ struct PendingBoundaryEvidence {
     emissions: Vec<BoundaryEmission>,
     generated_ingress: Vec<BoundaryIngressGeneration>,
     random_decisions: Vec<PendingRandomDecisionResolution>,
+    person_availability_changes: Vec<super::BoundaryPersonAvailabilityChange>,
+    created_persons: Vec<super::BoundaryPersonCreation>,
 }
 
 struct PendingRandomDecisionResolution {
@@ -1647,6 +1773,7 @@ fn validate_boundary_proposal(
     plugin: &str,
     contract: &BoundarySystemContract,
     current: &RuntimeCurrentState,
+    committed_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
     now: SimTime,
     runtime: &RuntimeState,
     boundary_id: BoundaryId,
@@ -1743,6 +1870,7 @@ fn validate_boundary_proposal(
     let mut producer_correlations = BTreeSet::new();
     let mut canonical_drafts = BTreeSet::new();
     let mut random_decision_samples = BTreeSet::new();
+    let mut cancelled_ingress = BTreeSet::new();
     for directive in &proposal.directives {
         match directive {
             BoundaryDirective::SetComponent {
@@ -2079,14 +2207,68 @@ fn validate_boundary_proposal(
                     ));
                 }
             }
+            BoundaryDirective::CancelPluginIngress { ingress_id, reason } => {
+                if !valid_ingress_cancellation_reason(reason)
+                    || !cancelled_ingress.insert(*ingress_id)
+                {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        format!(
+                            "boundary system {plugin}.{} proposed a duplicate or malformed ingress cancellation",
+                            contract.name
+                        ),
+                    ));
+                }
+            }
             BoundaryDirective::ResolveDecisionRandomly { resolution } => {
                 validate_random_decision_resolution(
                     plugin,
                     contract,
                     current,
+                    committed_availability,
                     pending_random_draws,
                     &mut random_decision_samples,
                     resolution,
+                )?;
+            }
+            BoundaryDirective::SetPersonAvailability {
+                person,
+                availability,
+                summary,
+            } => {
+                super::persons::validate_availability_directive(
+                    plugin,
+                    contract,
+                    now,
+                    *person,
+                    availability,
+                    summary,
+                    &entity_exists,
+                )?;
+            }
+            BoundaryDirective::CreatePerson {
+                draft,
+                correlation,
+                summary,
+            } => {
+                super::persons::validate_person_draft(
+                    &super::persons::PersonDraftContext {
+                        plugin,
+                        contract,
+                        now,
+                        government_exists: &|id| current.governments.contains_key(&id),
+                        territory_exists: &|id| current.territories.contains_key(&id),
+                        entity_exists: &entity_exists,
+                    },
+                    draft,
+                    correlation,
+                    summary,
+                )?;
+                validate_proposal_evidence_reference(
+                    runtime,
+                    boundary_id,
+                    pending_evidence,
+                    &draft.provenance,
                 )?;
             }
         }
@@ -2094,10 +2276,24 @@ fn validate_boundary_proposal(
     Ok(())
 }
 
+/// Validates one `ResolveDecisionRandomly` directive before its draw is
+/// committed.
+///
+/// Availability is read from `committed_availability`, the state committed
+/// before this boundary began: a resolution whose ticket has an unavailable
+/// person decision maker (`DecisionMakerUnavailable`) or an assigned
+/// controller with an unavailable authority person (`IssuerUnavailable`)
+/// fails the boundary. The sweep and `Open` admission normally keep such
+/// tickets closed, so this is a safeguard. Changes made in the same boundary
+/// are deliberately not consulted; failing here would roll back that change
+/// with the rest of the boundary and repeat on every retry. Such a draw is
+/// committed and the end-of-boundary sweep then cancels the ticket, so the
+/// generated resolution is rejected at its admission.
 fn validate_random_decision_resolution(
     plugin: &str,
     contract: &BoundarySystemContract,
     current: &RuntimeCurrentState,
+    committed_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
     pending_random_draws: &[random::PendingRandomDraw],
     used_samples: &mut BTreeSet<(super::RandomStreamKey, RandomDrawAddress)>,
     resolution: &super::RandomDecisionResolution,
@@ -2140,11 +2336,16 @@ fn validate_random_decision_resolution(
                 "random decision resolution references an unknown controller",
             )
         })?;
-    if controller.policy.kind != DecisionPolicyKind::Random {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidDecision,
-            "random decision resolution requires a controller with random policy identity",
-        ));
+    super::persons::validate_decision_preparation(committed_availability, ticket, controller)?;
+    match &resolution.tie_break {
+        None if controller.policy.kind != DecisionPolicyKind::Random => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidDecision,
+                "random decision resolution requires a controller with random policy identity",
+            ));
+        }
+        None => {}
+        Some(pending) => validate_random_tie_break(controller, ticket, resolution, pending)?,
     }
     if !contract.random_streams.contains(&resolution.sample.stream) {
         return Err(CanwuError::new(
@@ -2210,12 +2411,7 @@ fn validate_random_decision_resolution(
             "random decision option weights disagree with the draw bound",
         ));
     }
-    let selected = DecisionRandomEvidence::selected_option(
-        ticket,
-        &resolution.option_weights,
-        resolution.sample.value,
-    )
-    .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))?;
+    let selected = random_resolution_selection(ticket, resolution)?;
     let action = &ticket
         .option(&selected)
         .expect("validated random decision selected an existing option")
@@ -2227,6 +2423,73 @@ fn validate_random_decision_resolution(
         ));
     }
     Ok(())
+}
+
+/// Validates the pending utility-policy decision a random tie-break resolves:
+/// the draw covers exactly its near-equivalent candidates, and the generated
+/// resolution can carry its evaluations and fired guards unchanged.
+fn validate_random_tie_break(
+    controller: &super::DecisionControllerBinding,
+    ticket: &super::DecisionTicket,
+    resolution: &super::RandomDecisionResolution,
+    pending: &PolicyDecision,
+) -> Result<(), CanwuError> {
+    if controller.policy.kind != DecisionPolicyKind::Utility || !controller.random_tie_break {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "a random tie-break requires a utility-policy controller that permits tie-breaks",
+        ));
+    }
+    let DecisionOutcome::PendingRandom { candidates } = &pending.outcome else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "a random tie-break must carry a pending random policy decision",
+        ));
+    };
+    if candidates != &resolution.option_weights
+        || !pending.is_random_tie_break()
+        || pending.external.is_some()
+        || pending.random.is_some()
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidDecision,
+            "random tie-break weights must equal the pending candidates of an evidence-free random stage",
+        ));
+    }
+    pending
+        .validate(ticket)
+        .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))
+}
+
+/// Selects the option a random decision resolution draws: every available
+/// option for a random-policy controller, only the pending candidates for a
+/// utility-policy tie-break.
+pub(super) fn random_resolution_selection(
+    ticket: &super::DecisionTicket,
+    resolution: &super::RandomDecisionResolution,
+) -> Result<String, CanwuError> {
+    if resolution.tie_break.is_some() {
+        DecisionRandomEvidence::selected_candidate(
+            ticket,
+            &resolution.option_weights,
+            resolution.sample.value,
+        )
+    } else {
+        DecisionRandomEvidence::selected_option(
+            ticket,
+            &resolution.option_weights,
+            resolution.sample.value,
+        )
+    }
+    .map_err(|error| CanwuError::new(ErrorCode::InvalidDecision, error.to_string()))
+}
+
+pub(super) fn random_policy_summary(option_id: &str) -> String {
+    format!("random policy selected {option_id}")
+}
+
+pub(super) fn random_tie_break_summary(option_id: &str) -> String {
+    format!("random tie-break selected {option_id}")
 }
 
 fn validate_proposal_evidence_reference(
@@ -2429,7 +2692,10 @@ fn extend_boundary_domain_record_overlay(
             | BoundaryDirective::ScheduleIngress { .. }
             | BoundaryDirective::SchedulePluginIngress { .. }
             | BoundaryDirective::ResolveDecisionRandomly { .. }
-            | BoundaryDirective::PublishKnowledge { .. } => None,
+            | BoundaryDirective::PublishKnowledge { .. }
+            | BoundaryDirective::SetPersonAvailability { .. }
+            | BoundaryDirective::CreatePerson { .. }
+            | BoundaryDirective::CancelPluginIngress { .. } => None,
         })
         .collect();
     if requests.is_empty() {

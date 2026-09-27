@@ -7,7 +7,7 @@ sidebar:
   label: 生产与资源边界
 ---
 
-参伍 0.11.0 提供可选的资源与生产扩展，但不会把粮食、工厂、价格、历史资源点或军队写进模拟内核。
+参伍 0.12.0 提供可选的资源与生产扩展，但不会把粮食、工厂、价格、历史资源点或军队写进模拟内核。
 
 ## 推荐边界
 
@@ -44,7 +44,7 @@ sidebar:
 
 ## 授权自定义消费者
 
-0.11.0 支持自定义消费提供方使用现有 `ResourceConsumptionIntentV1` 合同。
+0.12.0 支持自定义消费提供方使用现有 `ResourceConsumptionIntentV1` 合同。
 在插件拥有的有效领域记录中保存顶层 `resource_consumption_intents` 映射，
 每个键等于对应已封存意图的 `id`。无需回调，也无需冒用参考提供方名称。
 在 `ResourcePlugin::new` 中注册该记录种类，使适配器能够读取精确来源。
@@ -83,4 +83,36 @@ sidebar:
 
 `Pooled` 是选择策略，不是动用其他保管人库存的授权。上层应用必须控制谁可以提交资源池需求，以及使用哪个申请者。跨保管人的任命、委托、用途和支出限额仍由应用或领域规则负责；账户 ID 列表不能证明这些权限。转移保管权限和完成租约仍需单独验证。
 
-策略进入请求摘要、运行时快照、精确重放和终止需求归档载荷。恢复时验证有效来源引用与保留预留的账户归属；归档验证保留策略及其摘要。持有人相对报告沿用现有可见性合同，不会自动公开权威来源列表。独立 DTO 缺少 `source_policy` 时反序列化为 `Pooled`，但这不迁移旧快照：引擎版本和插件身份的精确检查仍然适用。Rust 结构体字面量必须补充该字段，因此这是 0.11.0 的源码兼容性变更。
+策略进入请求摘要、运行时快照、精确重放和终止需求归档载荷。恢复时验证有效来源引用与保留预留的账户归属；归档验证保留策略及其摘要。持有人相对报告沿用现有可见性合同，不会自动公开权威来源列表。独立 DTO 缺少 `source_policy` 时反序列化为 `Pooled`，但这不迁移旧快照：引擎版本和插件身份的精确检查仍然适用。Rust 结构体字面量必须补充该字段，因此这是 0.11.0 的源码不兼容变更。
+
+## 账户损耗
+
+自 0.12.0 起，`ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` 可以直接在单个账户上记录腐坏、失窃或其他损耗，而不必虚构一次转移。请求携带自己的 `loss_id`、精确账户版本、数量、原因和完成凭证，结算为 `account: Some(..)`、`transfer: None` 的 `ResourceLoss`，并在守恒总量中计为已准入损耗。
+
+扣减不会动用已预留存量；除非设置 `allow_protected`，否则遵守受保护底线；账户版本过期会被拒绝。带请求标识的命令必须来自账户保管人；规范适配器输入可以把原因记录作为提供方来源引用。持有人报告会包含 `ResourceLossObservationV1` 条目，其可见性与转移详情相同。
+
+## 原子交换
+
+`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` 同时发起两条转移腿：两项转移要么都创建，要么都不创建；无论成功还是被拒绝，唯一的 `BeginExchange` 结果都会在 `cited_transfers` 中列出两个转移 ID。
+
+1. 双方先约定 `ResourceExchangeTermsV1`：交换键，以及每条腿的转移 ID、精确分配和目的地。
+2. `ResourceExchangeTermsV1::leg_operation_keys` 从这些条款的摘要派生每条腿的操作键。
+3. 每条腿的来源保管人为该腿的派生键取得完成租约，因此每份租约都表示同意整个交换，不能用于其他条款。
+4. 由 `leg_a` 的来源保管人把交换作为带请求标识的命令提交。
+
+交换本身没有单独的完成凭证。发起之后，两项转移各自独立结算，因此可能一项被验收、另一项损耗或退回。原子交换不是委托访问：每一方仍只能动用自己保管的存量。
+
+## 本地验收
+
+`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` 不经运输执行即可结算一项转移，例如同一仓库或同一城镇内的交接。它只适用于仍处于 `PendingDispatch`、没有运输关联的转移，并且两个账户必须声明相同的 `ResourceAccount::place_scope`。
+
+地点范围由场景在安装账户时声明，不可更改，引擎也不会推断；默认值为 `None`，带请求标识的 `CreateAccount` 命令不能设置它。缺少或不一致的地点范围会以 `invalid_definition` 拒绝，已关联运输的转移会以 `invalid_lifecycle` 拒绝。终止凭证会锁定精确的交接记录；带请求标识的命令必须来自目的地保管人。
+
+## 实际产出
+
+`ProductionOperation::CompleteExecution` 可以携带 `realized_output_per_mille` 和 `realization_evidence`。该比例以工艺名义产出的千分比表示，`None` 表示 1,000。第 7 阶段按该比例对每项产出结算数量向下取整缩放，并把两个值保存在生产执行上；资源入账和产出确认随后精确结算缩放后的数量。
+
+- 任何非 1,000 的比例都需要精确证据记录版本，其种类必须列在工艺版本的 `realization_evidence_kinds` 中；名义比例若附带证据会被拒绝。该列表默认为空，因此默认工艺只接受名义产出。
+- 比例必须为正数，也不能把任何产出腿缩放为零。完全损失应通过取消工单记录。
+- 比例不能超过工艺版本的 `max_realized_per_mille`，默认值为 1,000；更高的上限允许有证据支持的超名义产出。
+- 持有人、生命周期、比例和种类规则会先于证据记录解析运行，因此拒绝结果不会泄露其他记录是否存在。

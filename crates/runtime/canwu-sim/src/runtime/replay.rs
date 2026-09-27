@@ -405,7 +405,8 @@ impl Simulation {
                 }
                 IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. }
-                | IngressPayload::Maintenance { .. } => None,
+                | IngressPayload::Maintenance { .. }
+                | IngressPayload::PluginCancellation { .. } => None,
             })
             .collect();
         let mut next_ingress = 0;
@@ -601,6 +602,15 @@ fn enqueue_replay_ingress_cut(
                         commit.clone(),
                     )?,
             },
+            IngressPayload::PluginCancellation {
+                cancelled,
+                authority,
+                reason,
+            } => simulation.replay_plugin_ingress_cancellation(
+                *cancelled,
+                *authority,
+                reason.clone(),
+            )?,
         };
         if receipt.ingress_id != record.id
             || simulation.state.evidence.ingress.last() != Some(record)

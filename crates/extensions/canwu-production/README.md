@@ -58,6 +58,22 @@ caller-authored completion flag. Callers submit capacity allocations as
 `Reserved`; the Phase 7 lifecycle writer alone transitions them to `Consumed`
 when the execution starts.
 
+`CompleteExecution` may record a realized output ratio in thousandths of the
+nominal output. Phase 7 floor-scales every output settlement quantity by
+`realized_output_per_mille` and stores the ratio and its exact
+`realization_evidence` record version on the execution; `None` is the nominal
+1,000, and evidence is rejected for a nominal ratio. Any other ratio must be
+positive (record a total loss by cancelling the work order), must not scale an
+output leg to zero, may not exceed the process revision's
+`max_realized_per_mille` (default 1,000; a higher bound admits evidenced yields
+above nominal), and requires evidence of a kind listed in the process
+revision's `realization_evidence_kinds` (default empty, so nominal only). The
+holder, lifecycle, ratio, and kind rules run before the evidence is resolved as
+an available exact record version, so a rejection does not reveal whether other
+records exist.
+The resource credit and output acknowledgement settle exactly the scaled
+quantities, so production and resource balances stay conserved.
+
 Facility construction and repair use the same authoritative completion path.
 A project names an existing planned/authorized or repairing facility generation,
 exact consumed resource inputs, exact provider and technology evidence, one
@@ -118,6 +134,7 @@ The `g3_contract` tests demonstrate:
 - exact fuel, maintenance, access, and organization blockers;
 - rejection of overlapping capacity;
 - WIP completion followed by later resource-owned output settlement;
+- evidence-bounded realized output that floor-scales output settlement;
 - real persisted/forked/replayed degraded-facility decision branches;
 - operation-keyed incident draws with snapshot/replay/tamper checks;
 - distinct operator and delayed remote-owner observation cuts; and

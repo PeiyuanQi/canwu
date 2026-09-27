@@ -102,6 +102,7 @@ fn exercise_information_flow_api_delta() {
         knowledge_batch_count: 1,
         knowledge_record_count: 0,
         allocations: Vec::new(),
+        created_persons: Vec::new(),
     };
     let event = EventKind::from_fields(
         "knowledge_published",

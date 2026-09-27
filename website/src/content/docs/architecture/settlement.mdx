@@ -22,7 +22,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   noScriptMessage="图表预览需要 JavaScript；下方阶段表格仍然可用。"
   renderFailureMessage="图表预览不可用；下方阶段表格仍然可用。"
   definition={`flowchart LR
-    Input["接纳工作"] --> Read["固定读取基线"] --> Think["计算、感知、决策"] --> Supply["分配稀缺资源"] --> Propose["暂存领域变化"] --> Check["校验"] --> Commit["提交"] --> History["应用历史转移"] --> Reports["生成角色相对视图"] --> Evidence["保存证据与哈希"]
+    Input["准入工作"] --> Read["固定读取基线"] --> Think["计算、感知、决策"] --> Supply["分配稀缺资源"] --> Propose["暂存领域变化"] --> Check["校验"] --> Commit["提交"] --> History["应用历史转移"] --> Reports["生成角色相对视图"] --> Evidence["保存证据与哈希"]
 `}
 />
 
@@ -79,7 +79,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | 顺序 | 阶段 | 作用 |
 | ---: | --- | --- |
-| 1 | `EventIngress` | 接纳到期命令、事件和插件输入 |
+| 1 | `EventIngress` | 准入到期命令、事件和插件输入 |
 | 2 | `BoundarySnapshot` | 固定本边界的读取基线 |
 | 3 | `DerivedFieldSolve` | 计算声明的派生字段 |
 | 4 | `PerceptionAndAttentionRefresh` | 更新角色注意力与感知输入 |
@@ -105,6 +105,16 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 第七阶段的变化以边界快照为基线进行暂存。`SameBoundary` 变化可以进入本边界的只读覆盖层；`NextBoundary` 变化在结算完成前对当前状态读取保持不可见。不变量系统可以通过 `proposed_component` 或 `proposed_domain_record` 查看候选值，但仍受声明的读取集合限制。
 
 普通变化在第九阶段提交，历史候选在第十一阶段提交。边界产生的事件不会调用旧式即时 reactor，而是进入下一个边界的正常事件准入，因此不会回写已经完成的边界。
+
+## 人物与输入指令
+
+大多数指令写入插件拥有的状态。以下三种指令修改内核拥有的状态，并遵循固定规则：
+
+- `SetPersonAvailability` 替换某个人物的生存状态与人身状态。只接受声明了 `StateKey::core_person_availability()` 的第 7 或第 10 阶段系统提交；同一边界内对同一人物写入两次会使边界失败。边界结束时，在随机决策物化之后，决策者或控制者权限人物已不可用的未关闭票据会被取消，并列入边界记录。
+- `CreatePerson` 由声明了 `StateKey::core_people()` 的第 7 阶段系统提交，用于创建人物。ID 由引擎分配，回执中的 `created_persons` 把它绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。
+- `CancelPluginIngress` 在到期之前撤回本系统所属插件安排、仍在等待的输入。请从 `SimulationView::cancellable_plugin_ingress` 选取目标；若目标属于其他插件、已经到期或已被撤回，或者已有另一提案撤回同一目标，整个边界都会失败。
+
+多个系统可以声明这两个人物核心键，因此冲突写入会在结算时按人物检测，而不是在注册时检测。
 
 ## 插件契约
 

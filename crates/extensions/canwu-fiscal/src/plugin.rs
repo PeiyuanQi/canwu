@@ -1,26 +1,27 @@
 use crate::derive::{compute_aggregates, compute_projections, compute_transition_candidates};
 use crate::model::{
-    CompiledFiscalCatalog, FiscalAction, FiscalActionDisposition, FiscalActionOutcome,
-    FiscalActionRequest, FiscalAdoptionStage, FiscalAdoptionState, FiscalAssessment,
-    FiscalAuditFinding, FiscalCatalogRecord, FiscalExecutionEvidence, FiscalExecutionReceipt,
-    FiscalExecutionReceiptPacket, FiscalExecutionRequest, FiscalExternalOperationRef,
-    FiscalHistoricalContextPacket, FiscalReceiptDisposition, FiscalRemission, FiscalState,
-    FiscalStateRecord, MAX_FISCAL_ACTION_OUTCOMES, MAX_FISCAL_EVIDENCE_PER_RECORD,
-    fiscal_state_reference, invalid, validate_identifier,
+    CompiledFiscalCatalog, FISCAL_ACTING_BASIS_NOT_CURRENT, FiscalAction, FiscalActionDisposition,
+    FiscalActionOutcome, FiscalActionRequest, FiscalAdoptionStage, FiscalAdoptionState,
+    FiscalAssessment, FiscalAuditFinding, FiscalCatalogRecord, FiscalExecutionEvidence,
+    FiscalExecutionReceipt, FiscalExecutionReceiptPacket, FiscalExecutionRequest,
+    FiscalExternalOperationRef, FiscalHistoricalContextPacket, FiscalReceiptDisposition,
+    FiscalRemission, FiscalState, FiscalStateRecord, MAX_FISCAL_ACTION_OUTCOMES,
+    MAX_FISCAL_EVIDENCE_PER_RECORD, fiscal_state_reference, invalid, validate_identifier,
 };
 use crate::projection::{load_fiscal_catalog, load_fiscal_state};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
     Canwu, CanwuError, CauseRef, Command, CommandContext, CommandIngress, DecisionOrigin,
     DomainRecord, DomainRecordKind, DomainRecordMutation, DomainRecordMutationPolicy,
-    DomainRecordSchema, DomainRecordType, DomainReferenceSchema, DomainReferenceTargetKind,
-    ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer, KnowledgeOrigin,
-    KnowledgeRecordDraft, KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId,
-    KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema,
-    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginKnowledgeSchema,
-    PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemDirective, payload_required_evidence_continuation_property_v1,
+    DomainRecordSchema, DomainRecordType, DomainRecordVersionRef, DomainReferenceSchema,
+    DomainReferenceTargetKind, ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer,
+    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordId, KnowledgeRecordKind,
+    KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget,
+    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PayloadSchema, PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest,
+    PluginKnowledgeSchema, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemDirective,
+    payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -32,7 +33,7 @@ pub const FISCAL_EXECUTION_RECEIPT_INGRESS: &str = "fiscal_execution_receipt_v1"
 pub const FISCAL_HISTORICAL_CONTEXT_INGRESS: &str = "fiscal_historical_context_v1";
 
 const PLUGIN_VERSION: &str = "0.1.0-experimental";
-const SEMANTIC_HASH: &str = "4326696d6dd9771fd696d080747250b132e6e128edd601bd0eac99dc6a86384f";
+const SEMANTIC_HASH: &str = "01691929ee6bb913d39af123fe10c952af099a7c3280f92ac9def23ea3b30f47";
 const FISCAL_REPORT_KNOWLEDGE: &str = "fiscal_report";
 const FISCAL_REPORT_SCHEMA_HASH: &str =
     "820036a60b05e071d4833590800432f6b0d2a1c0fa89b19e813ebe7131e1a14a";
@@ -41,6 +42,10 @@ const FISCAL_REPORT_SCHEMA_HASH: &str =
 struct AdmittedFiscalAction {
     request: FiscalActionRequest,
     command: canwu_api::CommandId,
+    /// Exact authority basis the command was admitted under when it came from
+    /// the binding's acting actor; settlement re-checks that it is current.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    acting_basis: Option<DomainRecordVersionRef>,
 }
 
 struct ValidatedExecutionEvidence {
@@ -52,25 +57,45 @@ struct ValidatedExecutionEvidence {
 #[derive(Clone, Debug, Default)]
 pub struct FiscalPlugin {
     external_evidence_kinds: Vec<DomainRecordKind>,
+    authority_basis_kinds: Vec<DomainRecordKind>,
 }
 
 impl FiscalPlugin {
     #[must_use]
     pub fn new(external_evidence_kinds: impl IntoIterator<Item = DomainRecordKind>) -> Self {
-        let mut external_evidence_kinds: Vec<_> = external_evidence_kinds.into_iter().collect();
-        external_evidence_kinds.sort();
-        external_evidence_kinds.dedup();
         Self {
-            external_evidence_kinds,
+            external_evidence_kinds: canonical_kinds(external_evidence_kinds),
+            authority_basis_kinds: Vec::new(),
         }
     }
 
-    fn external_evidence_state_keys(&self) -> Vec<StateKey> {
+    /// Declares the record kinds that authority bindings may cite as an acting
+    /// actor's `authority_basis`. The plugin reads exactly these kinds to check
+    /// that a basis is still the current version of its record; activation
+    /// rejects a binding whose basis kind is not declared here.
+    #[must_use]
+    pub fn with_authority_basis_kinds(
+        mut self,
+        authority_basis_kinds: impl IntoIterator<Item = DomainRecordKind>,
+    ) -> Self {
+        self.authority_basis_kinds = canonical_kinds(authority_basis_kinds);
+        self
+    }
+
+    fn external_record_state_keys(&self) -> Vec<StateKey> {
         self.external_evidence_kinds
             .iter()
+            .chain(&self.authority_basis_kinds)
             .map(|kind| StateKey::new(kind.namespace.clone(), kind.name.clone()))
             .collect()
     }
+}
+
+fn canonical_kinds(kinds: impl IntoIterator<Item = DomainRecordKind>) -> Vec<DomainRecordKind> {
+    let mut kinds: Vec<_> = kinds.into_iter().collect();
+    kinds.sort();
+    kinds.dedup();
+    kinds
 }
 
 impl SimulationPlugin for FiscalPlugin {
@@ -86,12 +111,36 @@ impl SimulationPlugin for FiscalPlugin {
         SEMANTIC_HASH
     }
 
+    fn validate_activation(&self, records: &[DomainRecord]) -> Result<(), CanwuError> {
+        for record in records
+            .iter()
+            .filter(|record| record.reference.kind.matches_type::<FiscalStateRecord>())
+        {
+            let state = record.decode_payload::<FiscalStateRecord>()?;
+            if state
+                .authority_bindings
+                .values()
+                .filter_map(|binding| binding.authority_basis.as_ref())
+                .any(|basis| {
+                    self.authority_basis_kinds
+                        .binary_search(&basis.record.kind)
+                        .is_err()
+                })
+            {
+                return Err(invalid(
+                    "fiscal authority basis kind is not declared by FiscalPlugin::with_authority_basis_kinds",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
         register_fiscal_record_schemas(registrar)?;
         let report_schema = register_fiscal_report_schema(registrar)?;
 
         let mut action_reads = vec![StateKey::core_evidence(), catalog_key(), state_key()];
-        action_reads.extend(self.external_evidence_state_keys());
+        action_reads.extend(self.external_record_state_keys());
         action_reads.sort();
         action_reads.dedup();
         registrar.register_command(
@@ -141,7 +190,7 @@ impl SimulationPlugin for FiscalPlugin {
             catalog_key(),
             state_key(),
         ];
-        settle.reads.extend(self.external_evidence_state_keys());
+        settle.reads.extend(self.external_record_state_keys());
         settle.reads.sort();
         settle.reads.dedup();
         settle.writes = vec![state_key()];
@@ -262,7 +311,7 @@ fn admit_fiscal_action(
         .authority_bindings
         .get(&request.authority_binding_id)
         .ok_or_else(|| invalid_authority("fiscal authority binding is unavailable"))?;
-    validate_authority(context, binding)?;
+    let acting_basis = validate_authority(view, context, binding)?;
     validate_action_scope_authority(&state, &request.action, &binding.institution)?;
     if let FiscalAction::OpenAssessment {
         commutation_quote: Some(reference),
@@ -281,6 +330,7 @@ fn admit_fiscal_action(
         payload: serde_json::to_value(AdmittedFiscalAction {
             request,
             command: context.command_id,
+            acting_basis,
         })
         .map_err(encode_error)?,
         affected: vec![binding.institution.clone()],
@@ -361,40 +411,116 @@ fn validate_action_scope_authority(
     Ok(())
 }
 
+/// The binding role an admitted fiscal command acts under.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FiscalAuthorityRole {
+    Principal,
+    Acting,
+}
+
+fn actor_role(
+    binding: &crate::FiscalAuthorityBinding,
+    actor: canwu_api::PersonId,
+) -> Option<FiscalAuthorityRole> {
+    if binding.authorized_actor == Some(actor) {
+        Some(FiscalAuthorityRole::Principal)
+    } else if binding.acting_actor == Some(actor) {
+        Some(FiscalAuthorityRole::Acting)
+    } else {
+        None
+    }
+}
+
+/// Admits the command issuer under the binding and returns the exact
+/// authority basis when the acting actor, rather than the principal, issued it.
 fn validate_authority(
+    view: &SimulationView<'_>,
     context: &CommandContext,
     binding: &crate::FiscalAuthorityBinding,
-) -> Result<(), CanwuError> {
-    match (&context.issuer, context.decision_controller_id.as_deref()) {
-        (Issuer::Actor(actor), None) if binding.authorized_actor == Some(*actor) => Ok(()),
+) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+    let role = match (&context.issuer, context.decision_controller_id.as_deref()) {
+        (Issuer::Actor(actor), None) => actor_role(binding, *actor).ok_or_else(|| {
+            invalid_authority(
+                "fiscal action requires its bound actor or validated decision controller",
+            )
+        })?,
         (Issuer::Human(issuer) | Issuer::Ai(issuer), Some(controller)) if issuer == controller => {
             if context.authority.command_subject.as_ref() != Some(&binding.institution) {
                 return Err(invalid_authority(
                     "fiscal decision subject does not match the bound institution",
                 ));
             }
-            match (&context.authority.decision_origin, binding.authorized_actor) {
-                (DecisionOrigin::Actor { actor }, Some(authorized)) if *actor == authorized => {
-                    Ok(())
+            match &context.authority.decision_origin {
+                DecisionOrigin::Actor { actor } => actor_role(binding, *actor),
+                DecisionOrigin::Institution {
+                    institution,
+                    responsible_actor,
+                } if institution == &binding.institution => {
+                    if *responsible_actor == binding.authorized_actor {
+                        Some(FiscalAuthorityRole::Principal)
+                    } else if responsible_actor.is_some()
+                        && *responsible_actor == binding.acting_actor
+                    {
+                        Some(FiscalAuthorityRole::Acting)
+                    } else {
+                        None
+                    }
                 }
-                (
-                    DecisionOrigin::Institution {
-                        institution,
-                        responsible_actor,
-                    },
-                    expected,
-                ) if institution == &binding.institution && *responsible_actor == expected => {
-                    Ok(())
-                }
-                _ => Err(invalid_authority(
-                    "fiscal decision origin does not satisfy the authority binding",
-                )),
+                _ => None,
             }
+            .ok_or_else(|| {
+                invalid_authority("fiscal decision origin does not satisfy the authority binding")
+            })?
         }
-        _ => Err(invalid_authority(
-            "fiscal action requires its bound actor or validated decision controller",
-        )),
+        _ => {
+            return Err(invalid_authority(
+                "fiscal action requires its bound actor or validated decision controller",
+            ));
+        }
+    };
+    match role {
+        FiscalAuthorityRole::Principal => Ok(None),
+        FiscalAuthorityRole::Acting => {
+            let basis = binding
+                .authority_basis
+                .as_ref()
+                .ok_or_else(|| invalid_authority(FISCAL_ACTING_BASIS_NOT_CURRENT))?;
+            require_current_acting_basis(view, basis)?;
+            Ok(Some(basis.clone()))
+        }
     }
+}
+
+fn require_current_acting_basis(
+    view: &SimulationView<'_>,
+    basis: &DomainRecordVersionRef,
+) -> Result<(), CanwuError> {
+    if view.domain_record_version_is_current(basis)? {
+        Ok(())
+    } else {
+        Err(invalid_authority(FISCAL_ACTING_BASIS_NOT_CURRENT))
+    }
+}
+
+/// Re-checks, at the settlement boundary, that an action admitted from the
+/// acting actor still holds a current authority basis on an unchanged binding.
+fn settlement_authority(
+    view: &SimulationView<'_>,
+    state: &FiscalState,
+    admitted: &AdmittedFiscalAction,
+) -> Result<(), CanwuError> {
+    let Some(basis) = &admitted.acting_basis else {
+        return Ok(());
+    };
+    if state
+        .authority_bindings
+        .get(&admitted.request.authority_binding_id)
+        .and_then(|binding| binding.authority_basis.as_ref())
+        != Some(basis)
+    {
+        return Err(invalid_authority(FISCAL_ACTING_BASIS_NOT_CURRENT));
+    }
+    require_current_acting_basis(view, basis)
 }
 
 fn ensure_action_outcome_capacity(
@@ -454,6 +580,7 @@ fn preflight_action_outcome_batch(
     ensure_action_outcome_capacity(state, pending_action_ids.len())
 }
 
+#[allow(clippy::too_many_lines)]
 fn settle_fiscal_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -488,10 +615,12 @@ fn settle_fiscal_ingress(
             FISCAL_ACTION_INGRESS => {
                 let admitted: AdmittedFiscalAction = decode(payload, "admitted fiscal action")?;
                 validate_admitted_action(view, ingress.cause.as_ref(), &admitted)?;
+                let authority = settlement_authority(view, &state, &admitted);
                 if settle_action(
                     &mut state,
                     &catalog,
                     admitted,
+                    authority,
                     context.at,
                     expected_version_consumed,
                 )? {
@@ -722,6 +851,7 @@ fn settle_action(
     state: &mut FiscalState,
     catalog: &CompiledFiscalCatalog,
     admitted: AdmittedFiscalAction,
+    authority: Result<(), CanwuError>,
     at: SimTime,
     expected_version_consumed: bool,
 ) -> Result<bool, CanwuError> {
@@ -739,6 +869,8 @@ fn settle_action(
             ErrorCode::DomainRecordVersionConflict,
             "fiscal action was stale at its settlement boundary",
         ))
+    } else if let Err(error) = authority {
+        Err(error)
     } else {
         let mut next = state.clone();
         let result = apply_action(&mut next, catalog, &admitted.request, at)

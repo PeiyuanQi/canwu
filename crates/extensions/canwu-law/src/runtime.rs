@@ -8949,6 +8949,7 @@ fn decision_ticket_draft(
         ),
         options,
         deadline: Some(procedure.deadline),
+        parent_ticket: None,
     })
 }
 

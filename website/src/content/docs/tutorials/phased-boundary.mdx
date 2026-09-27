@@ -15,7 +15,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个示例展示两个插件如何在每日边界上竞争同一批粮食，同时留下可检查的预留与分配证据。
+这个示例展示两个插件如何在每日边界上围绕同一粮食池协作，同时留下可检查的预留与分配证据。
 
 ## 运行
 
@@ -23,11 +23,11 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 cargo run -p canwu-api --example phased_boundary
 ```
 
-## 三阶段协作
+## 协作流程
 
 <Steps>
 1. `SupplyPlugin` 在 `ReservationAndAllocation` 阶段声明粮食池和容量。
-2. `DemandPlugin` 在同一阶段声明数量、优先级和确定性 tie-break。
+2. `DemandPlugin` 在同一阶段声明数量、优先级和确定性平局决胜键。
 3. 参伍完成分配后，`DomainDeltaProposal` 阶段通过 `SimulationView::reservation()` 读取授予结果。
 4. 插件返回组件更新与领域事件，参伍在边界中统一应用并记录证据。
 </Steps>

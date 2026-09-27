@@ -7,7 +7,7 @@ sidebar:
   label: 路线规划与送信
 ---
 
-> **当前合同。** 路由和运输类型最早在 0.5 引入，并仍属于当前 0.11.1 对外 API。集成方仍需提供网络与历史内容数据；地图导入、通用容量分配器、通用历史数据集和把运输记录提升为核心快照字段仍是后续工作。
+> **当前合同。** 路由和运输类型最早在 0.5 引入，并仍属于当前 0.12.0 对外 API。集成方仍需提供网络与历史内容数据；地图导入、通用容量分配器、通用历史数据集和把运输记录提升为核心快照字段仍是后续工作。
 
 如需直接运行把这些机制接入定向信息投递的完整流程，请看
 [从无锡出发的经路线规划通信](/tutorials/cases/routed-correspondence/)。该案例使用
@@ -43,6 +43,7 @@ let plan = plan_route(&planning_snapshot, &request)?;
 ```
 
 `PlanningSnapshot` 可以来自当前世界的路线适配器，也可以由铁路、空运、电报或古代驿站扩展自己提供。它绑定 `observer`、`knowledge_cut`、拓扑版本和有效期，所以一个知道铁路时刻表的人，和一个只知道驿站传闻的人，可以得到不同的合法计划。
+如需只用某个持有人知道的内容构建快照，可使用 `canwu-correspondence` 的 `planning_snapshot_from_holder_knowledge`，见[按持有人知识规划路线](/developer/reading-state/#按持有人知识规划路线)。
 
 如果近邻收件人的投递点位于同一地区，路由可能只需要一条短途步行或马匹 leg；去北京则可能需要多个驿站、车站和交接。路由器不会因为目标是“另一个人”就把两者当成同一个终点。
 
@@ -89,6 +90,16 @@ execution.begin_saga(
 每一 leg 有自己的状态和实际出发/到达时间。到达中转站后，先记录 `Handoff`，再开始下一 leg。遇到洪水、战乱、天气或线路中断时，领域系统记录明确的失败原因，执行进入 `ReplanPending`，然后基于新的 `PlanningSnapshot` 安装后继行程修订；新修订还会记录从失败路段到新首段的保管权交接。到达前后不适用的事故会保留为 suppressed 证据，不会改写信息状态或到达等待状态。路由器不会自行“猜”灾害。
 
 最后一 leg 到达后，执行进入 `ArrivalPending`。`completion_request()` 产生稳定的 operation key 和证据，上层应用通过规范化输入（canonical ingress）调用信息扩展完成送达；重复提交同一 key 不应重复完成。
+
+## 人员群体、扣押与外部条件
+
+自 0.12.0（`canwu-transport.v4`）起，运输记录新增三项常用表达：
+
+- `MovementSubjectRole::PersonsGroup` 表示人员群体：把一群人作为一个移动主体，其身份通常是应用领域记录。与货物一样，它必须带正数数量，这里表示人数；`requires_quantity()` 给出这条规则。
+- `HandoffKind::Seizure { by }` 记录扣押交接：行程之外的主体夺取保管权，例如盗匪或敌方驻军。它与计划交接遵循相同的路段规则；普通交接仍是计划交接（`Planned`），序列化结果与以前相同。
+- `ItineraryRevisionReason::ExternalCondition { record, version, kind }` 以外部条件说明改道：引用应用所有的条件记录（例如洪水或封关记录）的精确版本及应用标签；初始行程和每次改道都会校验它。
+
+运输只记录这些事实。是否发生扣押或灾害、由谁授权，仍由应用系统决定。
 
 ## 容量与确定性
 

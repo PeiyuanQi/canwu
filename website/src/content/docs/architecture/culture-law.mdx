@@ -60,8 +60,8 @@ canwu-society 稀疏社会运行时
 ## 文化系统编写
 
 参考内容包提供可拥有、可序列化的 `CultureDefinition`。Rust builder 与 JSON/TOML loader 应共享同一套校验器，
-这样手写内容和生成内容就具有相同的确定性规则。运行开始前，任何超过预算的定义都应被拒绝，而不是把不受控的
-扇出留到游戏过程中。
+这样手写内容和生成内容就具有相同的确定性规则。运行会在结算开始前拒绝超出任一数量、条款、扇出、内存、状态或每边界工作预算的定义，
+而不是把不受控的扇出留到游戏过程中。
 
 ### 定义组件
 
@@ -158,16 +158,16 @@ persistence class、cadence 和 evidence；它是法律输入，不是权限授�
 法律桥接只处理 dirty 或到期的辖区和提案：
 
 1. 根据 signal kind 与 scope 的反向索引找到受影响的辖区和开放提案，不扫描无关法律；
-2. 类型化 `LegalMutation` 与 holder-context ingress 进入事件驱动的法律插件；插件校验内嵌编译计划绑定、精确 directory/shard 版本、host-owned `expected_versions`、引用的文化 generation、信号提供者精确的 `(plugin, packet_type)`，以及内核提交的生产 boundary；host 直接注入同一 provider namespace 不构成证据，调用方自报的 signal kind 也不具权威性；公开事件还必须匹配保留的 provider payload（proposal、时间、媒介和辖区），一般习俗信号则采用身份与生产 boundary 证据；
+2. 类型化 `LegalMutation` 与 holder-context ingress 进入事件驱动的法律插件；插件校验内嵌编译计划绑定、精确 directory/shard 版本、host-owned `expected_versions`、引用的文化 generation、信号提供者精确的 `(plugin, packet_type)`，以及内核提交的信号产生边界；host 直接注入同一 provider namespace 不构成证据，调用方自报的 signal kind 也不具权威性；公开事件还必须匹配保留的 provider payload（精确提案、发生时间、媒介和范围），一般习俗信号则采用身份与产生边界证据；
 3. 程序创建绑定 holder 的决策 outbox。适配器先持久化预期 revision，每个精确席位 controller 最多注册一次，后续 ticket 复用它；只有所需结果都是 `Accepted` 且当前 controller/ticket 与持久化草案精确一致时，ACK 才会通过，ingress 归档不会破坏该证明；
 4. 授权控制者从既有选项中选择；被接受的命令只能安排有界的 pending legal intent，不能直接写法律；
-5. 后续法律插件边界重新校验权限、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子提交 owner-scoped 法律分片 mutation bundle；下游适配器在各自声明的边界消费结果。
+5. 后续法律插件边界重新校验职权、程序、revision/effective-time guard、条款/证据上限和文化 generation，然后原子提交 owner-scoped 法律分片 mutation bundle；下游适配器在各自声明的边界消费结果。
 
 如果席位 controller 尚不存在，`canwu-law` 会创建默认 Human controller。上层
 应用也可以提前使用相同的稳定 controller ID 注册 Utility、Rule、Random、External
 或 LLM 策略；只要 authority、seat、permission profile 和 command subject 与编译计划
 完全一致，法律适配器会保留该策略而不是覆盖它。Random 通过操作定址边界抽样
-生成决策准入，External/LLM 通过严格的选项选择 DTO 返回已有 option ID；两者都
+生成决策输入，External/LLM 通过严格的选项选择 DTO 返回已有 option ID；两者都
 不能改变法律选项或权限。
 
 权威路径是：
@@ -199,12 +199,12 @@ CulturalSignalBatch
 - 所需程序、截止时间和状态：`draft`、`submitted`、`deliberating`、`adopted`、`rejected`、`expired` 或 `withdrawn`；
 - `CulturalSignalBatch` 与其他证据引用；
 - 开放中的 `DecisionTicket` 身份和 option version；
-- 主张的法律权限、瑕疵、效力状态，以及精确的裁决、协议或承继来源。
+- 主张的法律职权、瑕疵、效力状态，以及精确的裁决、协议或承继来源。
 
 内核授权只证明谁提交了命令，不能让一个越权行为自动取得世界内法律效力。提案可以引用某个 cultural target generation，
-但这只是证据，不能赋予文化扩展修改或制定法律的权限。
+但这只是证据，不会因此获得修改或通过该提案的权限。
 
-机构权限采用默认拒绝：必须同时覆盖法律秩序、辖区、事项、渊源模式、操作、程序、法院和裁判权。每个渊源 profile 还显式声明程序机构或证据主张这两种 authority policy、允许的来源类型、公开政策与编译后的公开信号提供方、证据上下限、claimant 要求与追溯许可。公开事件只能在对应 provider ingress 实际发生的边界记录；未来公开计划不能冒充已发生事件。`Promulgated` 必须经过程序；`Agreed` 还会编译精确的文书 namespace/kind、至少两方当事人和批准证据。
+机构职权采用默认拒绝：必须同时覆盖法律秩序、辖区、事项、渊源模式、操作、程序、法院和裁判权。每个渊源 profile 还显式声明程序机构或证据主张这两种 authority policy、允许的来源类型、公开政策与编译后的公开信号提供方、证据上下限、claimant 要求与追溯许可。公开事件只能在对应 provider ingress 实际发生的边界记录；未来公开计划不能冒充已发生事件。`Promulgated` 必须经过程序；`Agreed` 还会编译精确的文书 namespace/kind、至少两方当事人和批准证据。
 
 一个被接受的提案产生一条不可变 `LegalSourceVersion`、稳定 `LegalRule` 和一条不可变 `LawVersion`。
 法律渊源保存精确提案和裁决、协议或承继来源，其模式显式区分 `Promulgated`、`Adjudicated`、`Accreted`、`Agreed` 与 `Received`。
@@ -247,7 +247,7 @@ CulturalSignalBatch
   -> LawVersion 提交
 ```
 
-命令 subject 必须是提案冻结的精确主体；机构是否具有世界内法律权限由独立 competence contract 判断。context 携带已校验的 `decision_controller_id`、decision origin、seat、permission profile、request identity 以及预期 revision/time guard。
+命令 subject 必须是提案冻结的精确主体；机构是否具有世界内法律职权由独立的职权（competence）契约判断。context 携带已校验的 `decision_controller_id`、decision origin、seat、permission profile、request identity 以及预期 revision/time guard。
 外部服务或模型可以推荐选项，但不能伪造权限，也不能提交绕过票据的原始法律 payload。
 
 已公开的法律可以通过领域投影提供。私人草案、异议和角色特定知识使用 `ViewerContext` 与 holder ledger，不能用真值回退。
@@ -273,7 +273,7 @@ Format 8 将法律状态持久化为独立版本的 plan、directory、order/jur
 
 每个规范归档结果都会按 retention handle 保留，直到上层应用完成 store 侧交接。finalization 从重新加载的权威法律 runtime 推导已记录结果，并排入私有确认 ingress 来退休该恢复记录。同步 helper 会先认证与 store 绑定的完整 archive head，再在克隆上应用；错误根或失败的 store 转换不会提前释放热载荷。分页决策恢复也遵守相同的有界原则：校验前只加载仍被热决策对象引用的精确归档 ticket/trace locator 页面。
 
-测试和基准证明：
+一致性证据应证明：
 
 - 文化信号不能直接修改法律记录；
 - 只有绑定控制者的授权命令能制定、修订或废止法律；

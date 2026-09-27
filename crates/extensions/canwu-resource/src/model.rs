@@ -276,6 +276,15 @@ pub struct ResourceAccount {
     pub capacity: Option<u64>,
     pub protected_floor_policy: Option<ProtectedFloorPolicyRevisionId>,
     pub closed: bool,
+    /// Host-declared place scope of the stock held by this account. The host
+    /// sets it when installing the account; it is never inferred, never
+    /// changes, and tracked `CreateAccount` commands cannot set it. Two
+    /// accounts with the same declared scope may settle a transfer through
+    /// [`crate::ResourceTransferDispositionV1::AcceptLocal`] without a
+    /// transport execution. `None` declares no place, so local acceptance is
+    /// unavailable for the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place_scope: Option<ResourceScopeId>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -610,6 +619,9 @@ impl From<&ResourceConsumption> for ResourceConsumptionVersionV1 {
     }
 }
 
+/// Terminal loss evidence. Exactly one of `account` (an account-level loss
+/// settled by [`crate::ResourceOperationRequestV1::RecordLoss`]) or `transfer`
+/// (in-transit escrow settled by a `Lose` disposition) is present.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceLoss {
     pub id: ResourceLossId,
@@ -702,6 +714,10 @@ pub enum ResourceOperationKind {
     CancelDemand,
     Observation,
     CompletionLease,
+    /// Account-level loss settled without a transfer.
+    Loss,
+    /// Atomic start of two transfer legs under one operation outcome.
+    BeginExchange,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -715,6 +731,12 @@ pub struct ResourceOperationOutcome {
     pub quantity: u64,
     pub remainder: u64,
     pub result_ref: Option<ResourceRecordRefV1>,
+    /// Transfer identities named by the request, in request order. Only a
+    /// [`ResourceOperationKind::BeginExchange`] outcome carries them, for
+    /// both applied and rejected exchanges; every other outcome keeps it
+    /// empty and omits it from its canonical encoding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cited_transfers: Vec<ResourceTransferId>,
     pub rejection_code: Option<String>,
     pub rejection_reason: Option<String>,
     pub exact_evidence: Vec<DomainRecordVersionRef>,
@@ -773,6 +795,22 @@ impl ResourceOperationOutcome {
             }
         }
 
+        // A rejected exchange cites exactly what its request named, even a
+        // malformed pair; an applied exchange always created two transfers.
+        let citations_ok = if self.kind == ResourceOperationKind::BeginExchange {
+            self.cited_transfers.len() == 2
+                && (self.status != ResourceOperationStatus::Applied
+                    || self.cited_transfers[0] != self.cited_transfers[1])
+        } else {
+            self.cited_transfers.is_empty()
+        };
+        if !citations_ok {
+            return Err(ResourceError::InvalidDefinition(
+                "resource operation outcome transfer citations do not match its operation kind"
+                    .to_owned(),
+            ));
+        }
+
         if self.status == ResourceOperationStatus::Applied
             && !result_ref_matches_kind(
                 self.kind,
@@ -793,7 +831,8 @@ impl ResourceOperationOutcome {
                     evidence_count == 1
                 }
                 ResourceOperationKind::AdvanceTransfer => evidence_count == 1,
-                ResourceOperationKind::Credit => evidence_count <= 1,
+                ResourceOperationKind::Credit | ResourceOperationKind::Loss => evidence_count <= 1,
+                ResourceOperationKind::BeginExchange => evidence_count == 0,
                 ResourceOperationKind::CompletionLease => {
                     completion_evidence_shape(self.operation_key.as_str(), evidence_count)
                 }
@@ -853,6 +892,8 @@ fn result_ref_matches_kind(
             result_ref,
             Some(ResourceRecordRefV1::Transfer(_) | ResourceRecordRefV1::Loss(_))
         ),
+        ResourceOperationKind::Loss => matches!(result_ref, Some(ResourceRecordRefV1::Loss(_))),
+        ResourceOperationKind::BeginExchange => result_ref.is_none(),
         ResourceOperationKind::CompletionLease => {
             let Some(suffix) = operation_key.strip_prefix("resource:completion:") else {
                 return false;

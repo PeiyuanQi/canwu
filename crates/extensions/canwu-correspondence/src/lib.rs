@@ -16,9 +16,10 @@ pub use host::{
     correspondence_recovery_decision_ticket, resolve_correspondence_command,
 };
 pub use knowledge::{
-    ADDRESS_KNOWLEDGE_SCHEMA, CONNECTION_KNOWLEDGE_SCHEMA, ENDPOINT_KNOWLEDGE_SCHEMA, KnownAddress,
-    KnownRoutingConnection, KnownRoutingEndpoint, NetworkKnowledgeSeed,
-    correspondence_knowledge_schemas, planning_knowledge_query,
+    ADDRESS_KNOWLEDGE_SCHEMA, CONNECTION_KNOWLEDGE_SCHEMA, ENDPOINT_KNOWLEDGE_SCHEMA,
+    KnowledgeReadCutDigest, KnownAddress, KnownRoutingConnection, KnownRoutingEndpoint,
+    NetworkKnowledgeSeed, correspondence_knowledge_schemas, planning_knowledge_query,
+    planning_snapshot_from_holder_knowledge, planning_snapshot_from_knowledge_result,
 };
 pub use model::{
     AddressResolution, CommunicationOpportunity, CommunicationOpportunityRecord,

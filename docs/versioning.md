@@ -1,6 +1,6 @@
 # Versioning and Persistence
 
-Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.11 runtime
+Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.12 runtime
 writes and reads only its current contracts. There is no implicit loader or
 runtime migration for format 2 through 6 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.11.1`. A live `SimulationSnapshot` has:
+The workspace version is `0.12.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,68 @@ The workspace version is `0.11.1`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.12.0 ships the first release of the
+[downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md).
+Every contract is additive:
+
+- `canwu-sim`, re-exported by `canwu-api`: core person availability
+  (`PersonAvailability`, `LifeState`, `CustodyState`) changed only by the
+  `SetPersonAvailability` boundary directive. Commands from an unavailable
+  issuer are rejected with `IssuerUnavailable`; decision tickets whose person
+  decision maker or controller authority person is unavailable cannot be
+  opened, prepared, or resolved (`DecisionMakerUnavailable`,
+  `IssuerUnavailable`), and open ones are cancelled at the end of the boundary
+  that made the person unavailable (`decision_maker_unavailable`,
+  `controller_authority_unavailable`). Runtime person creation adds
+  `CreatePerson`, `PersonDraft`, and correlation-keyed `created_persons`
+  receipts. Queued plugin ingress can be withdrawn before its due time through
+  `cancel_plugin_ingress`, `cancel_permitted_plugin_ingress`, or the
+  `CancelPluginIngress` directive, journaled as
+  `IngressPayload::PluginCancellation`.
+- `canwu-decision`: `GuardedUtilityPolicy`, `RuleChoice::Exclude`,
+  `DecisionStage`, `DecisionOutcome::PendingRandom`, the controller opt-in
+  `random_tie_break`, `DecisionPolicyIdentity::semantic_hash`, and ticket
+  `parent_ticket` lineage.
+- `canwu-resource`: account-level `RecordLoss`, atomic `BeginExchange`,
+  same-place `AcceptLocal` gated by the host-declared
+  `ResourceAccount::place_scope`, and loss observations in holder reports.
+- `canwu-production`: realized output at `CompleteExecution`, bounded by
+  `ProcessRevision::max_realized_per_mille` and the process's declared
+  realization evidence kinds.
+- `canwu-fiscal`: an acting actor admitted while its exact authority basis
+  record version is current (`FiscalPlugin::with_authority_basis_kinds`).
+- `canwu-transport`: the `PersonsGroup` subject role, `HandoffKind::Seizure`,
+  and the `ExternalCondition` itinerary revision reason.
+- `canwu-correspondence`: `planning_snapshot_from_holder_knowledge`, its pure
+  form `planning_snapshot_from_knowledge_result`, and `KnowledgeReadCutDigest`.
+
+New enum variants (including `ErrorCode`, `DecisionAttemptErrorCode`,
+`BoundaryDirective`, `IngressPayload`, `RuleChoice`, `DecisionOutcome`,
+`ResourceOperationRequestV1`, `ResourceOperationKind`,
+`ResourceTransferDispositionV1`, `MovementSubjectRole`, and
+`ItineraryRevisionReason`) and new public struct fields (for example on
+`BoundaryRecord`, `BoundaryReceipt`, `SimulationSnapshot`, `DecisionTicket`,
+`DecisionTrace`, `DecisionControllerBinding`, `ResourceAccount`,
+`ProcessRevision`, `FiscalAuthorityBinding`, `Handoff`, and the
+`CompleteExecution` operation) are source-incompatible: exhaustive matches and
+struct literals must be updated, so the release is a pre-1.0 minor version. New
+serialized fields are omitted while empty or at their default, so records that
+do not use a contract keep their canonical encoding and hashes. Snapshot format
+8, commitment format 4, and checkpoint/evidence-journal format 4 are retained.
+The resource, production, and fiscal plugin semantic identities change, as does
+the resource holder-report knowledge schema; `TRANSPORT_SEMANTIC_VERSION` is
+`canwu-transport.v4`; the correspondence plugin semantic hash is unchanged.
+Host-authored decision ingress that carries random draw evidence is now
+rejected, both live and on load: only a boundary `ResolveDecisionRandomly`
+resolution may produce draw evidence, for random-policy controllers and
+guarded-utility tie-breaks alike. Exact engine-version and plugin-descriptor
+checks still apply: a 0.11.1 snapshot must not be relabeled or loaded into
+0.12.0; retain the previous engine or use an explicit application-owned export.
+The documented publish order now lists every publishable crate, including
+`canwu-law` and the military crates `canwu-military` and
+`canwu-military-reference-content` (last published at 0.10.0), so all 23
+publishable library crates move to 0.12.0 together.
 
 Version 0.11.0 added a persisted source policy to resource demands: `Pooled`
 retains shared-pool behavior, while bounded `ExactAccounts` names lawful
@@ -196,7 +258,11 @@ and evidence already admitted to the journal are replayed as records.
 Its format-8 evidence consists of an operation-keyed draw targeting the exact
 ticket version, a `DecisionSelection` outcome, canonical option weights in the
 decision trace, and boundary-generated decision ingress. New optional random
-evidence fields remain absent on historical non-random decision traces.
+evidence fields remain absent on historical non-random decision traces. Since
+0.12.0, a guarded-utility random tie-break uses the same evidence, with weights
+naming only the pending near-equivalent candidates and the trace recording the
+`Random` stage; the stage, fired-guard, and parent-ticket fields are absent on
+traces that do not use them.
 
 ## Durable outbox
 

@@ -1,11 +1,12 @@
 use super::{
-    ArmyId, BoundaryReceipt, BoundaryRequest, CanwuError, CauseRef, CommandAttemptId, CommandId,
-    CommandPolicyContext, CommandRequestId, CommandTransactionCheckpoint, Deserialize, EntityRef,
-    ErrorCode, EventId, IngressId, IngressTransactionCheckpoint, InteractionPolicy, LetterId,
-    PayloadSchema, PersonId, RejectionTransactionCheckpoint, Serialize, SimDuration, SimTime,
-    Simulation, SystemCadence, TerritoryId, Value, canonical_hash, claim_counter,
-    invalid_snapshot_error, is_expected_command_rejection, resolve_command_authority,
-    runtime_entity_exists, runtime_entity_identity_exists, runtime_has_unqueued_command_history,
+    ArmyId, BoundaryIngressGeneration, BoundaryReceipt, BoundaryRequest, CanwuError, CauseRef,
+    CommandAttemptId, CommandId, CommandPolicyContext, CommandRequestId,
+    CommandTransactionCheckpoint, Deserialize, EntityRef, ErrorCode, EventId, IngressId,
+    IngressTransactionCheckpoint, InteractionPolicy, LetterId, PayloadSchema, PersonId,
+    RejectionTransactionCheckpoint, Serialize, SimDuration, SimTime, Simulation, SystemCadence,
+    TerritoryId, Value, canonical_hash, claim_counter, invalid_snapshot_error,
+    is_expected_command_rejection, resolve_command_authority, runtime_entity_exists,
+    runtime_entity_identity_exists, runtime_has_unqueued_command_history,
     validate_command_ingress_policy, validate_runtime_cause,
 };
 use std::cmp::Reverse;
@@ -410,6 +411,96 @@ pub enum IngressPayload {
     Maintenance {
         request: Box<MaintenanceIngressRequest>,
     },
+    /// Terminal withdrawal of one still-pending plugin ingress item, recorded
+    /// strictly before that item's due time.
+    ///
+    /// The record is never queued or admitted itself: it takes effect when it
+    /// is appended, its `due_at` equals its `issued_at`, and the withdrawn
+    /// item never reaches a boundary. Nothing is rolled back; the withdrawn
+    /// record stays in the journal as evidence.
+    PluginCancellation {
+        /// The withdrawn plugin ingress item.
+        cancelled: IngressId,
+        authority: IngressCancellationAuthority,
+        reason: String,
+    },
+}
+
+/// Authority that withdrew a queued plugin ingress item.
+///
+/// Only the issuer of an item may withdraw it: the trusted host for items it
+/// enqueued through the ordinary host API, the owning plugin's opaque
+/// registration permit for its internal packet types, or a boundary system of
+/// the plugin that scheduled the item inside the engine.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressCancellationAuthority {
+    /// Host withdrawal of a host-enqueued item whose packet type any host may
+    /// enqueue without a permit.
+    Host,
+    /// Withdrawal through the owning plugin's [`PluginIngressPermit`] for the
+    /// item's exact internal packet type. Covers host-enqueued items of that
+    /// type and items the same plugin scheduled inside the engine.
+    PluginPermit,
+    /// Withdrawal by a boundary system of the plugin that scheduled the item
+    /// inside the engine, through [`super::BoundaryDirective::CancelPluginIngress`].
+    BoundarySystem,
+}
+
+/// Maximum UTF-8 byte length of a plugin ingress cancellation reason.
+pub const MAX_INGRESS_CANCELLATION_REASON_BYTES: usize = 1_024;
+
+pub(super) fn valid_ingress_cancellation_reason(reason: &str) -> bool {
+    !reason.is_empty()
+        && reason == reason.trim()
+        && reason.len() <= MAX_INGRESS_CANCELLATION_REASON_BYTES
+}
+
+/// Evidence presented with one cancellation request.
+#[derive(Clone, Copy)]
+pub(super) struct PluginIngressCancellationProof<'a> {
+    /// Opaque permit presented by a live host call.
+    pub(super) permit: Option<&'a PluginIngressPermit>,
+    /// Exact replay reproduces a recorded permit withdrawal without the token.
+    pub(super) replay: bool,
+    /// Plugin whose boundary system proposed the cancellation directive.
+    pub(super) boundary_plugin: Option<&'a str>,
+    /// Generation evidence staged earlier in the current boundary.
+    pub(super) current_generations: &'a [BoundaryIngressGeneration],
+}
+
+/// Who issued a queued plugin ingress item, as far as cancellation authority
+/// is concerned.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PluginIngressIssuer<'a> {
+    /// Enqueued by the trusted host (with or without a permit).
+    Host,
+    /// Scheduled inside the engine by this plugin's boundary system or command.
+    Plugin(&'a str),
+}
+
+/// Checks the issuer-only authority rule shared by live cancellation and
+/// snapshot validation. The caller has already proved any permit token.
+pub(super) fn plugin_ingress_cancellation_authorized(
+    authority: IngressCancellationAuthority,
+    issuer: PluginIngressIssuer<'_>,
+    target_plugin: &str,
+    internal: bool,
+    boundary_plugin: Option<&str>,
+) -> bool {
+    match authority {
+        IngressCancellationAuthority::Host => issuer == PluginIngressIssuer::Host && !internal,
+        IngressCancellationAuthority::PluginPermit => {
+            internal
+                && match issuer {
+                    PluginIngressIssuer::Host => true,
+                    PluginIngressIssuer::Plugin(plugin) => plugin == target_plugin,
+                }
+        }
+        IngressCancellationAuthority::BoundarySystem => {
+            boundary_plugin.is_some_and(|plugin| issuer == PluginIngressIssuer::Plugin(plugin))
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -585,6 +676,306 @@ impl Simulation {
         self.enqueue_plugin_ingress_inner(request, None, true)
     }
 
+    /// Withdraws a pending plugin ingress item that the host enqueued through
+    /// [`Self::enqueue_plugin_ingress`].
+    ///
+    /// The item must still be queued and strictly before its due time;
+    /// otherwise (including archived IDs) the call fails with
+    /// [`ErrorCode::LateIngress`]. Items of internal packet types require
+    /// [`Self::cancel_permitted_plugin_ingress`], and items scheduled inside
+    /// the engine can be withdrawn only by their issuing plugin; both fail
+    /// here with [`ErrorCode::InvalidAuthority`]. Unknown IDs fail with
+    /// [`ErrorCode::EvidenceUnavailable`]; non-plugin targets and reasons
+    /// that are empty, untrimmed, or longer than
+    /// [`MAX_INGRESS_CANCELLATION_REASON_BYTES`] fail with
+    /// [`ErrorCode::InvalidPayload`]; declared read-only runs fail with
+    /// [`ErrorCode::InteractionReadOnly`].
+    ///
+    /// The withdrawal is appended to the ingress journal as a terminal
+    /// [`IngressPayload::PluginCancellation`] record; the returned receipt
+    /// names that record. The withdrawn item is never admitted and never
+    /// settles, and nothing is rolled back.
+    pub fn cancel_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.cancel_plugin_ingress_inner(
+            ingress_id,
+            IngressCancellationAuthority::Host,
+            None,
+            reason.into(),
+            false,
+        )
+    }
+
+    /// Withdraws a pending plugin ingress item of an internal packet type
+    /// through the owning plugin's opaque registration permit.
+    ///
+    /// The permit must match the item's exact plugin and packet type. It
+    /// covers host-enqueued items of that type and items the same plugin
+    /// scheduled inside the engine, but not items another plugin scheduled
+    /// into this packet type. Timing and journal rules match
+    /// [`Self::cancel_plugin_ingress`].
+    pub fn cancel_permitted_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        permit: &PluginIngressPermit,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.cancel_plugin_ingress_inner(
+            ingress_id,
+            IngressCancellationAuthority::PluginPermit,
+            Some(permit),
+            reason.into(),
+            false,
+        )
+    }
+
+    pub(super) fn replay_plugin_ingress_cancellation(
+        &mut self,
+        ingress_id: IngressId,
+        authority: IngressCancellationAuthority,
+        reason: String,
+    ) -> Result<IngressReceipt, CanwuError> {
+        if authority == IngressCancellationAuthority::BoundarySystem {
+            return Err(CanwuError::new(
+                ErrorCode::ReplayMismatch,
+                "boundary-system ingress cancellation must be reproduced by its boundary",
+            ));
+        }
+        self.cancel_plugin_ingress_inner(ingress_id, authority, None, reason, true)
+    }
+
+    fn cancel_plugin_ingress_inner(
+        &mut self,
+        ingress_id: IngressId,
+        authority: IngressCancellationAuthority,
+        permit: Option<&PluginIngressPermit>,
+        reason: String,
+        replay: bool,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.ensure_runtime_ready()?;
+        self.ensure_canonical_ingress_can_start()?;
+        if !replay
+            && self
+                .state
+                .metadata
+                .run_configuration
+                .declared()
+                .is_some_and(|configuration| {
+                    configuration.interaction == InteractionPolicy::ReadOnly
+                })
+        {
+            return Err(CanwuError::new(
+                ErrorCode::InteractionReadOnly,
+                "the run interaction policy rejects newly authored plugin ingress cancellation",
+            ));
+        }
+        let target = self.plugin_ingress_cancellation_target(
+            ingress_id,
+            authority,
+            PluginIngressCancellationProof {
+                permit,
+                replay,
+                boundary_plugin: None,
+                current_generations: &[],
+            },
+            &reason,
+        )?;
+        self.append_plugin_ingress_cancellation(target, authority, reason, None, false)
+    }
+
+    /// Resolves and authorizes one cancellation target, returning its exact
+    /// pending queue entry.
+    pub(super) fn plugin_ingress_cancellation_target(
+        &self,
+        ingress_id: IngressId,
+        authority: IngressCancellationAuthority,
+        proof: PluginIngressCancellationProof<'_>,
+        reason: &str,
+    ) -> Result<IngressQueueKey, CanwuError> {
+        if !valid_ingress_cancellation_reason(reason) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!(
+                    "plugin ingress cancellation reason must be nonempty trimmed text of at most {MAX_INGRESS_CANCELLATION_REASON_BYTES} bytes"
+                ),
+            ));
+        }
+        let Some(record) = self.state.evidence.retained_ingress(ingress_id) else {
+            if ingress_id.get() != 0
+                && ingress_id.get() <= self.state.evidence.archived.ingress_count
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::LateIngress,
+                    format!("ingress {ingress_id} is archived and no longer pending"),
+                ));
+            }
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceUnavailable,
+                format!("ingress {ingress_id} does not exist"),
+            ));
+        };
+        let IngressPayload::Plugin {
+            plugin,
+            packet_type,
+            ..
+        } = &record.payload
+        else {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!("ingress {ingress_id} is not plugin ingress and cannot be cancelled"),
+            ));
+        };
+        let internal = self
+            .plugins
+            .internal_ingress
+            .contains(&(plugin.clone(), packet_type.clone()));
+        if authority == IngressCancellationAuthority::PluginPermit && !proof.replay {
+            let permitted = match proof.permit {
+                Some(permit) => self.plugin_ingress_permit_matches(plugin, packet_type, permit)?,
+                None => false,
+            };
+            if !permitted {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "plugin ingress cancellation requires the item's exact opaque registration permit",
+                ));
+            }
+        }
+        let issuer = self.plugin_ingress_issuer(record, plugin, proof.current_generations)?;
+        if !plugin_ingress_cancellation_authorized(
+            authority,
+            issuer,
+            plugin,
+            internal,
+            proof.boundary_plugin,
+        ) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                format!("only the issuer of ingress {ingress_id} may cancel it"),
+            ));
+        }
+        let key = IngressQueueKey::from_record(record);
+        if !self.state.scheduler.pending_ingress.contains(&key)
+            || record.due_at <= self.state.scheduler.now
+        {
+            return Err(CanwuError::new(
+                ErrorCode::LateIngress,
+                format!(
+                    "ingress {ingress_id} is already due, admitted, or cancelled at {}",
+                    self.state.scheduler.now
+                ),
+            ));
+        }
+        Ok(key)
+    }
+
+    /// Returns who issued a retained plugin ingress record.
+    pub(super) fn plugin_ingress_issuer<'a>(
+        &'a self,
+        record: &IngressRecord,
+        plugin: &'a str,
+        current_generations: &'a [BoundaryIngressGeneration],
+    ) -> Result<PluginIngressIssuer<'a>, CanwuError> {
+        match &record.cause {
+            None | Some(CauseRef::System(_)) => Ok(PluginIngressIssuer::Host),
+            Some(CauseRef::Command(_)) => Ok(PluginIngressIssuer::Plugin(plugin)),
+            Some(CauseRef::Boundary(boundary)) => self
+                .state
+                .evidence
+                .retained_boundary(*boundary)
+                .map_or(current_generations, |boundary| {
+                    boundary.generated_ingress.as_slice()
+                })
+                .iter()
+                .find(|generation| generation.ingress == record.id)
+                .map(|generation| PluginIngressIssuer::Plugin(generation.plugin.as_str()))
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidSnapshot,
+                        "boundary-generated ingress lacks its generation evidence",
+                    )
+                }),
+            Some(CauseRef::Event(_)) => Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "event-caused ingress has no cancellable issuer",
+            )),
+        }
+    }
+
+    fn plugin_ingress_permit_matches(
+        &self,
+        plugin: &str,
+        packet_type: &str,
+        permit: &PluginIngressPermit,
+    ) -> Result<bool, CanwuError> {
+        let semantic_hash = self
+            .plugins
+            .descriptors
+            .get(plugin)
+            .map(|descriptor| descriptor.semantic_hash.as_str())
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::PluginNotActive,
+                    "internal plugin ingress owner is unavailable",
+                )
+            })?;
+        let expected_token = super::canonical_hash(
+            "canwu.plugin.internal-ingress-permit.v1",
+            &(plugin, packet_type, semantic_hash),
+        )?;
+        Ok(permit.plugin == plugin
+            && permit.packet_type == packet_type
+            && permit.semantic_hash == semantic_hash
+            && permit.token == expected_token)
+    }
+
+    /// Appends one terminal cancellation record and removes its target from
+    /// the canonical queue in the same transaction.
+    pub(super) fn append_plugin_ingress_cancellation(
+        &mut self,
+        target: IngressQueueKey,
+        authority: IngressCancellationAuthority,
+        reason: String,
+        cause: Option<CauseRef>,
+        after_current_boundary: bool,
+    ) -> Result<IngressReceipt, CanwuError> {
+        let transaction = IngressTransactionCheckpoint::capture(&self.state);
+        let (id, next_id, eligible_boundary_count) =
+            self.next_ingress_identity(after_current_boundary)?;
+        let now = self.state.scheduler.now;
+        let record = IngressRecord {
+            id: IngressId::new(id),
+            issued_at: now,
+            eligible_boundary_count,
+            due_at: now,
+            class: target.class,
+            priority: 0,
+            payload: IngressPayload::PluginCancellation {
+                cancelled: target.id,
+                authority,
+                reason,
+            },
+            cause,
+        };
+        self.state.counters.next_ingress_id = next_id;
+        self.state.scheduler.pending_ingress.remove(&target);
+        self.state.scheduler.cancelled_ingress.insert(target.id);
+        self.state.evidence.ingress.push(record);
+        self.state.metadata.plugin_registration_closed = true;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            transaction.restore_cancellation(&mut self.state, target);
+            return Err(error);
+        }
+        Ok(IngressReceipt {
+            ingress_id: IngressId::new(id),
+            issued_at: now,
+            due_at: now,
+        })
+    }
+
     fn enqueue_plugin_ingress_inner(
         &mut self,
         mut request: PluginIngressRequest,
@@ -620,27 +1011,15 @@ impl Simulation {
         })?;
         let internal = self.plugins.internal_ingress.contains(&key);
         if internal && !replay {
-            let semantic_hash = self
-                .plugins
-                .descriptors
-                .get(&request.plugin)
-                .map(|descriptor| descriptor.semantic_hash.as_str())
-                .ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::PluginNotActive,
-                        "internal plugin ingress owner is unavailable",
-                    )
-                })?;
-            let expected_token = super::canonical_hash(
-                "canwu.plugin.internal-ingress-permit.v1",
-                &(&request.plugin, &request.packet_type, semantic_hash),
-            )?;
-            if permit.is_none_or(|permit| {
-                permit.plugin != request.plugin
-                    || permit.packet_type != request.packet_type
-                    || permit.semantic_hash != semantic_hash
-                    || permit.token != expected_token
-            }) {
+            let permitted = match permit {
+                Some(permit) => self.plugin_ingress_permit_matches(
+                    &request.plugin,
+                    &request.packet_type,
+                    permit,
+                )?,
+                None => false,
+            };
+            if !permitted {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
                     "plugin-owned internal ingress requires its opaque registration permit",
@@ -771,6 +1150,39 @@ impl Simulation {
             ));
         }
         let transaction = IngressTransactionCheckpoint::capture(&self.state);
+        let (id, next_id, eligible_boundary_count) =
+            self.next_ingress_identity(after_current_boundary)?;
+        let record = IngressRecord {
+            id: IngressId::new(id),
+            issued_at: self.state.scheduler.now,
+            eligible_boundary_count,
+            due_at,
+            class,
+            priority,
+            payload,
+            cause,
+        };
+        let queue_key = IngressQueueKey::from_record(&record);
+        self.state.counters.next_ingress_id = next_id;
+        self.state.scheduler.pending_ingress.insert(queue_key);
+        self.state.evidence.ingress.push(record.clone());
+        self.state.metadata.plugin_registration_closed = true;
+        if let Err(error) = self.refresh_checkpoint_hash() {
+            transaction.restore(&mut self.state, &queue_key);
+            return Err(error);
+        }
+        Ok(IngressReceipt {
+            ingress_id: record.id,
+            issued_at: record.issued_at,
+            due_at: record.due_at,
+        })
+    }
+
+    /// Claims the next ingress identifier and its journal eligibility cut.
+    fn next_ingress_identity(
+        &self,
+        after_current_boundary: bool,
+    ) -> Result<(u64, u64, u64), CanwuError> {
         let (id, next_id) = claim_counter(self.state.counters.next_ingress_id, "ingress ID")?;
         let boundary_count = self
             .state
@@ -801,30 +1213,7 @@ impl Simulation {
         } else {
             boundary_count
         };
-        let record = IngressRecord {
-            id: IngressId::new(id),
-            issued_at: self.state.scheduler.now,
-            eligible_boundary_count,
-            due_at,
-            class,
-            priority,
-            payload,
-            cause,
-        };
-        let queue_key = IngressQueueKey::from_record(&record);
-        self.state.counters.next_ingress_id = next_id;
-        self.state.scheduler.pending_ingress.insert(queue_key);
-        self.state.evidence.ingress.push(record.clone());
-        self.state.metadata.plugin_registration_closed = true;
-        if let Err(error) = self.refresh_checkpoint_hash() {
-            transaction.restore(&mut self.state, &queue_key);
-            return Err(error);
-        }
-        Ok(IngressReceipt {
-            ingress_id: record.id,
-            issued_at: record.issued_at,
-            due_at: record.due_at,
-        })
+        Ok((id, next_id, eligible_boundary_count))
     }
 
     pub fn process_command(
@@ -907,6 +1296,12 @@ impl Simulation {
                     self.state.scheduler.now
                 ),
             );
+            if record_attempt {
+                return self.record_command_rejection(attempt_id, admission, envelope, error);
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.validate_command_issuer(&envelope.issuer, &authority) {
             if record_attempt {
                 return self.record_command_rejection(attempt_id, admission, envelope, error);
             }

@@ -42,10 +42,25 @@ let sample = view.random_sample_for_operation(
 
 随后把 `sample` 和 `weights` 放入
 `BoundaryDirective::ResolveDecisionRandomly`。内核校验随机流所有权、操作目标、
-权重总和和当前 controller，并为下一可用边界生成标准决策准入。抽样记录与
-`DecisionTrace.random` 会互相绑定；来源边界失败时，抽样与生成的决策准入一起回滚。
+权重总和和当前 controller，并为下一可用边界生成标准决策输入。抽样记录与
+`DecisionTrace.random` 会互相绑定；来源边界失败时，抽样与生成的决策输入一起回滚。
 每个来源边界最多生成一个 Random 决策结算，并立即交给下一可用边界；多个独立
 随机决策应拆到不同来源边界，以保持全局 revision guard 明确。
+
+## 只对真正的平局随机决胜
+
+自 0.12.0 起，确定性的效用选择器可以只把真正的平局交给随机性。
+`GuardedUtilityPolicy` 先运行有序前置规则，再为剩余选项评分；若设置了
+`random_tie_break`，且有两个或更多选项与最高分的差距不超过其近似相等阈值，
+策略返回 `DecisionOutcome::PendingRandom`，只列出这些候选，每个权重为 1。
+随后，边界系统按上述方式对精确票据版本抽样，并把这个待定决定作为
+`ResolveDecisionRandomly` 的 `tie_break` 提交；权重必须与候选完全一致。控制者
+必须通过 `with_random_tie_break` 显式启用，决策轨迹会记录 `Random` 阶段。策略
+未设置该标志时，最高分获胜；分数完全相同时按最小 option ID 决出。
+
+抽样证据只能来自这类边界结算：上层应用自行提交、带抽样证据的决策输入会在
+运行时和加载时被拒绝。若票据的决策者或其控制者的权限人物在边界开始时已经
+不可用，该结算会在抽样前使边界失败，因此负责结算的系统应跳过这些票据。
 
 如果另一种运行配置改用 LLM，可以复用相同票据契约和选项，但必须在开票前注册
 相应 controller；运行中不能替换一个已注册 controller 的 policy。上层应用把
@@ -61,7 +76,7 @@ let sample = view.random_sample_for_operation(
 ```
 
 模型看不到权威命令载荷，也不能增加选项。适配器把答案校验并转换成
-`ExternalDecisionResponse`；正式进入模拟的是标准决策准入和证据，精确重放不会
+`ExternalDecisionResponse`；正式进入模拟的是标准决策输入和证据，精确重放不会
 再次调用模型。目前 `QueuedLlmPolicy` 已保留这条接口，不要求引擎接入具体模型。
 
 ## 四类领域怎样用
@@ -83,7 +98,7 @@ let sample = view.random_sample_for_operation(
 ## 验证清单
 
 1. 随机流和边界系统已经声明，operation ID、目标和 purpose 稳定。
-2. 权重按 option ID 规范排序，完整覆盖当前可用票据选项，且总和等于抽样上界。
+2. 权重按 option ID 规范排序，完整覆盖当前可用票据选项（随机平局决胜时恰好等于待定候选），且总和等于抽样上界。
 3. LLM 只能返回当前票据版本中的一个 option ID。
 4. 所有变更仍经过标准决策或命令准入。
 5. 测试快照恢复、精确重放、回滚、陈旧票据和抽样证据篡改。

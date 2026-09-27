@@ -8,8 +8,8 @@ use crate::{
     ResourceScopeId, ResourceState, canonical_digest, resource_runtime_reference,
 };
 use canwu_api::{
-    Canwu, CanwuError, DomainRecord, DomainRecordVersionRef, ErrorCode, KnowledgeHolderRef,
-    PluginArchiveObjectProvider, ReplayJournal, SimTime, SimulationPlugin,
+    Canwu, CanwuError, DomainRecord, DomainRecordVersionRef, ErrorCode, EvidenceRef,
+    KnowledgeHolderRef, PluginArchiveObjectProvider, ReplayJournal, SimTime, SimulationPlugin,
 };
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -91,6 +91,17 @@ pub struct ResourceConsumptionObservationV1 {
     pub status: crate::ConsumptionStatus,
 }
 
+/// Holder-visible loss evidence: an account-level loss (`account`) or lost
+/// transfer escrow (`transfer`), with its quantity and cause.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceLossObservationV1 {
+    pub loss: crate::ResourceLossId,
+    pub account: Option<ResourceAccountId>,
+    pub transfer: Option<crate::ResourceTransferId>,
+    pub quantity: u64,
+    pub cause: EvidenceRef,
+}
+
 /// Persisted provider-owned holder observation. Reports are materialized from
 /// this cut and never reconstructed from current authoritative balances.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -114,6 +125,9 @@ pub struct ResourceObservationHeadV1 {
     pub transfers: Vec<ResourceTransferObservationV1>,
     #[serde(default)]
     pub consumptions: Vec<ResourceConsumptionObservationV1>,
+    /// Loss details, gated like transfer and consumption details.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<ResourceLossObservationV1>,
     pub source_versions: Vec<DomainRecordVersionRef>,
     pub semantic_digest: String,
 }
@@ -134,6 +148,8 @@ impl ResourceObservationHeadV1 {
             .sort_by(|left, right| left.transfer.cmp(&right.transfer));
         self.consumptions
             .sort_by(|left, right| left.consumption.cmp(&right.consumption));
+        self.losses
+            .sort_by(|left, right| left.loss.cmp(&right.loss));
         self.semantic_digest.clear();
         self.semantic_digest = canonical_digest("canwu.resource.observation-head.v1", &self)?;
         Ok(self)
@@ -163,6 +179,9 @@ impl ResourceObservationHeadV1 {
         canonical
             .consumptions
             .sort_by(|left, right| left.consumption.cmp(&right.consumption));
+        canonical
+            .losses
+            .sort_by(|left, right| left.loss.cmp(&right.loss));
         if self.confidence_per_mille > 1_000
             || canonical != sealed
             || self.semantic_digest
@@ -194,6 +213,8 @@ pub struct ResourceReportDtoV1 {
     pub fulfillments: Vec<ResourceFulfillmentObservationV1>,
     pub transfers: Vec<ResourceTransferObservationV1>,
     pub consumptions: Vec<ResourceConsumptionObservationV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<ResourceLossObservationV1>,
     pub sorting_evidence: Vec<String>,
     pub digest: String,
 }
@@ -219,6 +240,8 @@ pub struct ResourceObservationWitnessV1 {
     pub fulfillments: Vec<ResourceFulfillmentObservationV1>,
     pub transfers: Vec<ResourceTransferObservationV1>,
     pub consumptions: Vec<ResourceConsumptionObservationV1>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub losses: Vec<ResourceLossObservationV1>,
     pub source_versions: Vec<DomainRecordVersionRef>,
     pub adapter_revision: crate::ResourceObservationAdapterRevisionId,
     pub digest: String,
@@ -525,6 +548,7 @@ pub fn resource_observation_witness(
         fulfillments: head.fulfillments.clone(),
         transfers: head.transfers.clone(),
         consumptions: head.consumptions.clone(),
+        losses: head.losses.clone(),
         source_versions: head.source_versions.clone(),
         adapter_revision,
         digest: String::new(),
@@ -605,6 +629,11 @@ pub fn materialize_resource_report(
                 .iter()
                 .map(|value| format!("consumption:{}", value.consumption.as_str())),
         )
+        .chain(
+            head.losses
+                .iter()
+                .map(|value| format!("loss:{}", value.loss.as_str())),
+        )
         .collect();
     let id = ResourceReportId::new(format!(
         "resource:report:{}:{}",
@@ -626,6 +655,7 @@ pub fn materialize_resource_report(
         fulfillments: head.fulfillments.clone(),
         transfers: head.transfers.clone(),
         consumptions: head.consumptions.clone(),
+        losses: head.losses.clone(),
         sorting_evidence,
         digest: String::new(),
     };

@@ -48,7 +48,8 @@ Random decision policy uses this path too:
 `RandomOperationTarget::DecisionTicket` binds an exact ticket version,
 `DecisionOptionWeight` maps the draw interval to existing ticket options, and
 `ResolveDecisionRandomly` lets the kernel generate ordinary decision ingress
-for the next boundary. Another run configuration selected before ticket opening
+for the next boundary. Since 0.12.0, a guarded utility policy's random tie-break
+uses the same path, drawing only among the near-equivalent top options. Another run configuration selected before ticket opening
 may use LLM, Human, or External selection, but a registered controller policy
 cannot be replaced at runtime. These selectors also do not replace stochastic
 world events such as weather, failure, or epidemic incidents.
@@ -70,7 +71,7 @@ Draw records and stream state enter snapshots, boundary evidence, and hashes. On
 
 ## Reloading, alternative realities, and repeated trials
 
-Deterministic replay is not the same as save-scumming. The same authoritative state, command or decision input, plugin semantic environment, and simulation time must produce the same draw result; reloading a snapshot from before an event does not automatically roll the same event again with a different outcome.
+Deterministic replay is not by itself an anti-save-scumming policy, but it removes the easy reroll: the same authoritative state, command or decision input, plugin semantic environment, and simulation time must produce the same draw result; reloading a snapshot from before an event does not automatically roll the same event again with a different outcome.
 
 If a caller issues a different command from the same snapshot, `fork()` or an equivalent fork entry can produce a valid alternative reality. That is a new alternative reality, not an exact replay of the original run. Whether to expose manual saves, single-writer saves, or research forks to players belongs to the application's save policy, not to a changed random seed.
 
@@ -79,7 +80,7 @@ If a caller issues a different command from the same snapshot, `fork()` or an eq
 1. Give each independent domain mechanic a stable named stream; do not reuse an unscoped shared stream.
 2. Put the semantic reason in `purpose` so debug and replay output can explain the result.
 3. Review stream declarations with the plugin version and semantic hash.
-4. Never use wall-clock time, thread order, or container iteration order as a seed or tie-break.
+4. Never use wall time, thread order, or container iteration order as a seed or tie-break.
 5. Do not randomize missing facts; model unknown knowledge, actor choices, discrete incidents, and aggregate-rate settlement separately.
 
 ## Replay contract

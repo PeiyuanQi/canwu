@@ -85,12 +85,12 @@ Typed payloads for movement, army arrival, person travel, letter delivery, repor
 1. Representative JSON saves, event journals, `canwu-api` calls, and exact replay outcomes are frozen.
 2. `EventKind` is now a generic structured record and its concrete public variants are extracted without changing legacy JSON. A complete cross-integration namespace and payload-version contract remains future work.
 3. `canwu-reference-world` now owns the concrete entities, movement behavior, detached projection, and routing conversion through public APIs.
-4. Format 7 writes the entity registry and initial scenario into a self-describing snapshot; the runnable starter proves save/load, fork, and exact replay.
+4. Since Format 7, snapshots self-describe the entity registry and initial scenario (current Format 8 keeps this); the runnable starter proves save/load, fork, and exact replay.
 5. `canwu-world` is retired after reaching zero normal consumers. The independent `canwu-event` decision remains separate.
 </Steps>
 
 ## Completion gates
 
-Format 7 rejects Format 2–6 saves and journals. Format 8 preserves those migration contracts and additionally rejects Format 7 persistence. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
+Since Format 7, Canwu rejects Format 2–6 saves and journals. Format 8 preserves those migration contracts and additionally rejects Format 7 persistence. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
 
 The canonical repository audit records the complete per-type rationale, dependency evidence, and gates.

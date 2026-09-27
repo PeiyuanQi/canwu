@@ -8,6 +8,14 @@ owner of engine truth. Each section is independently implementable; the
 suggested release grouping is at the end. No section is accepted until its
 public-API fixture fails on 0.11.1 and passes on the implementation branch.
 
+Sections §1, §2, §3, §7, §8, §9, §10, §11, §12, §13, §14, §17, §18, §19, and
+§30 shipped in 0.12.0. Where the shipped contract differs from the sketch
+below, the [0.12.0 implementation notes](#0120-implementation-notes) and the
+canonical [architecture](../architecture.md) and
+[versioning](../versioning.md) documents are authoritative; the sketches are
+kept as the original design record. Open questions 1 and 2 are answered. All
+other sections remain proposals for 0.13.0 or later.
+
 ## Decision and invariant
 
 Accept the gap set as two additive pre-1.0 minor releases. The simulation core
@@ -722,12 +730,119 @@ workspace.
 
 ## Release grouping
 
-- **0.12.0 (first release):** §1, §2, §3, §7, §8, §9, §10, §11, §12, §13, §14,
+- **0.12.0 (shipped):** §1, §2, §3, §7, §8, §9, §10, §11, §12, §13, §14,
   §17, §18, §19, §30, plus `versioning.md`, `end-state.md`, terminology, and
   website mirrors. All additive; format 8 retained.
 - **0.13.0:** §4, §5, §6, §15, §16, §20, §21, §22, §25, §26, §27, §28, and
   §23–§24 if the downstream application confirms `canwu-law` adoption.
 - **Later:** §29.
+
+## 0.12.0 implementation notes
+
+The shipped contracts follow the sketches except for the points below.
+
+- **§1 person availability.** As sketched, plus a controller-authority rule.
+  The authority person of a controller is the actor of
+  `DecisionAuthority::Actor` or the responsible actor of
+  `DecisionAuthority::Institution`. `Open` refuses a ticket whose person
+  decision maker is unavailable (`DecisionMakerUnavailable`) or whose assigned
+  controller's authority person is unavailable (`IssuerUnavailable`); `Resolve`
+  and host preparation apply the controller check too. At the end of the
+  boundary that makes a person unavailable, after random decisions are
+  materialized, open tickets whose decision maker is that person are cancelled
+  with `decision_maker_unavailable`, and then open tickets whose controller's
+  authority person is that person with `controller_authority_unavailable`
+  (`CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`). The "trace" is the
+  `cancelled_tickets` and `cancelled_controller_tickets` lists on the
+  hash-chained `BoundaryPersonAvailabilityChange`. A ticket cannot be
+  reassigned: a successor reopens the decision as a new ticket whose
+  `parent_ticket` names the cancelled one. `ResolveDecisionRandomly` fails its
+  boundary before any draw when the maker or the controller authority person is
+  unavailable in the availability committed before that boundary. Knowledge
+  publication to a dead person's ledger is rejected; the sketched read-only
+  restriction on admin and custodian reads was not added. Scenarios cannot
+  declare initial availability. The core write keys are kernel-owned, so
+  several systems may declare them, and registration restricts them to phase 7
+  or 10.
+- **§2 person creation.** Receipt entries are
+  `CreatedPerson { plugin, system, correlation, person }` rather than
+  `(correlation, PersonId)` pairs. A persisted created-person registry backs
+  `SimulationView::persons_created_by_correlation`, so binding the ID later does
+  not depend on retained evidence. The writer declares `StateKey::core_people()`,
+  and the counter starts past every scenario person.
+- **§3 ingress cancellation.** Two host methods instead of one:
+  `cancel_plugin_ingress(id, reason)` for public packets the host enqueued and
+  `cancel_permitted_plugin_ingress(id, permit, reason)` for an internal packet
+  type, covering host-enqueued items of that type and items the same plugin
+  scheduled. A boundary directive, `CancelPluginIngress`, lets a plugin's system
+  withdraw items its plugin scheduled inside the engine, choosing targets from
+  the `SimulationView::cancellable_plugin_ingress` read. The journal record is
+  `IngressPayload::PluginCancellation { cancelled, authority, reason }` with
+  `IngressCancellationAuthority`; there is no separate `IngressCancelled` type.
+  Errors reuse existing codes (`LateIngress`, `InvalidAuthority`,
+  `EvidenceUnavailable`, `InvalidPayload`, `InteractionReadOnly`, and
+  `InvalidBoundary` for a duplicate target in one boundary).
+- **§7 holder planning snapshot.** No caller `read_cut` parameter: the engine
+  derives the read cut, and the snapshot's `knowledge_cut` records it. A pure
+  variant, `planning_snapshot_from_knowledge_result`, accepts a query result the
+  caller already holds. The digest covers the holder and the sorted versioned
+  schema ID and holder-local record ID of every admitted endpoint and
+  connection fact, so unrelated holder records do not change it.
+- **§8 guarded utility policy.** The margin is a `u64`. Tie-break candidates
+  are the top-scored available options within the margin, at uniform weight 1
+  in option-ID order, and at least two. The pending result is
+  `DecisionOutcome::PendingRandom`, and a resolution carries it as
+  `RandomDecisionResolution::tie_break`. A controller must opt in through
+  `DecisionControllerBinding::with_random_tie_break`. The policy identity gains
+  an optional `semantic_hash` over the guard policy identity, guard IDs,
+  weights, margin, and tie-break flag. Traces also record `fired_guards`.
+  `RuleChoice::Exclude` is honored by `OrderedRulePolicy` as well. Host-authored
+  decision ingress carrying draw evidence is now rejected live and on load,
+  which also closes that gap for random-policy controllers.
+- **§9 ticket lineage.** The parent must have exactly the same
+  `decision_maker` (`EntityRef` equality, not a holder or institution family)
+  and must be in hot decision history; an archived parent is rejected as
+  `TicketNotFound`. The parent is copied onto `DecisionTrace`.
+- **§10 account-level loss.** The request carries its own `loss_id`. A tracked
+  command must come from the account custodian; canonical adapter ingress may
+  cite the cause record as its provider source. Holder heads, reports, and
+  witnesses carry `ResourceLossObservationV1`.
+- **§11 atomic exchange.** There is no exchange-level completion certificate.
+  Each leg keeps its own lease, held by that leg's source custodian and bound to
+  an operation key derived from the digest of the agreed
+  `ResourceExchangeTermsV1`, so each lease consents to the whole exchange. The
+  outcome lists both transfer IDs in `cited_transfers`. A tracked command must
+  come from the `leg_a` source custodian.
+- **§12 local acceptance.** The shared scope is the host-declared
+  `ResourceAccount::place_scope`, set when the scenario installs the account and
+  immutable, rather than a property of the definition revision or custodian.
+  Rejections use the resource reasons `invalid_definition` (missing or
+  mismatched scope) and `invalid_lifecycle` (transport attached). A tracked
+  command must come from the destination custodian. Accounts created at runtime
+  cannot receive a scope.
+- **§13 realized output.** Evidence is required for any non-nominal ratio,
+  including ratios above 1,000, and rejected for the nominal ratio. The allowed
+  evidence kinds are declared per process revision
+  (`realization_evidence_kinds`, empty by default), and `max_realized_per_mille`
+  must be at least 1,000. A zero ratio, or one that scales an output leg to
+  zero, is rejected; a total loss cancels the work order. Admission orders its
+  checks so that a rejection never reveals whether an evidence record exists.
+- **§14 acting fiscal actor.** The permitted basis record kinds are declared on
+  the plugin with `FiscalPlugin::with_authority_basis_kinds`, which is also its
+  exact read set; activation rejects a binding citing an undeclared kind. The
+  acting actor and basis are set together, and the acting actor must differ
+  from the authorized actor. A stale basis rejects with
+  `FISCAL_ACTING_BASIS_NOT_CURRENT` (`InvalidAuthority`) and is checked again
+  at settlement. Bindings are set in the starting scenario.
+- **§17–§19 transport records.** As sketched, with
+  `MovementSubjectRole::requires_quantity`, `Handoff.kind` omitted from JSON
+  when planned, and `ExternalCondition` validated for both initial itineraries
+  and reroutes. `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v4`.
+- **§30 lockstep publication.** `canwu-law` and `canwu-military` join publish
+  group 6 and `canwu-military-reference-content` joins group 7.
+- **Engine fix.** `SimulationView::domain_record_version_evidence_exists`
+  previously accepted the administrative domain-record read but then required
+  the exact kind read internally; it now resolves evidence under either read.
 
 ## Verification evidence expected for every section
 
@@ -745,9 +860,15 @@ workspace.
 ## Open questions
 
 1. §1: should `Hostage` block command issuance by default, or is that an
-   application rule? The sketch admits it.
+   application rule? The sketch admits it. *Answered in 0.12.0:* hostage,
+   hiding, and exile are admissible by default; only not-alive, detained, and
+   captive persons are blocked, and an application may restrict further in its
+   own rules.
 2. §2: is the receipt-keyed correlation sufficient, or should `CreatePerson`
    accept a caller-proposed `PersonId` from a reserved application range?
+   *Answered in 0.12.0:* the receipt-keyed correlation is sufficient. IDs are
+   engine-allocated only, and the persisted created-person registry lets the
+   proposing plugin bind them at a later boundary.
 3. §4: should a manifest be allowed to span two boundaries (`ready_at` in the
    future) so participants can stage across a report boundary?
 4. §6: evidence-journal growth — should traces be sampled by rule id under a

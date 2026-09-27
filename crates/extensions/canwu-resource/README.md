@@ -43,7 +43,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "0.11.0", optional = true }
+canwu-resource = { version = "0.12.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -100,6 +100,44 @@ Adapter packets bind `provider_plugin`, an exact
 the cited record body, owner, configured evidence kind, and request-specific
 source field before settlement.
 
+## Account loss, exchange, and local acceptance
+
+- `ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)`
+  debits one account in place and settles a `ResourceLoss` with
+  `account: Some(..)` and `transfer: None`. It counts as admitted loss in
+  `ConservationTotalsV1`, never touches reserved stock, respects the protected
+  floor unless `allow_protected` is set, requires the exact account revision,
+  and uses the `Loss` operation kind. The completion certificate locks the
+  account revision and, for a domain-record cause, that record version. A
+  tracked command must come from the account custodian; canonical adapter
+  ingress may cite the cause record as its provider source.
+- `ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)`
+  starts two `ResourceTransferStartRequestV1` legs atomically: both transfers
+  are created or neither is, and the single `BeginExchange` outcome cites both
+  transfer IDs in `cited_transfers`, whether applied or rejected. The parties
+  first agree on `ResourceExchangeTermsV1` (exchange key plus each leg's
+  transfer ID, exact allocation, and destination);
+  `ResourceExchangeTermsV1::leg_operation_keys` derives each leg's operation
+  key from the terms digest. Each leg carries its own completion certificate
+  for that derived key, held by the leg's source custodian, so each lease
+  consents to the whole exchange and cannot be reused for other terms. Leg
+  keys become the transfers' operation identities; only the exchange key
+  receives an outcome. A tracked command must come from the `leg_a` source
+  custodian. Terminal dispositions of the two transfers stay independent.
+- `ResourceTransferDispositionV1::AcceptLocal` settles a transfer without a
+  transport execution when the transfer is still `PendingDispatch` with no
+  transport link and both accounts declare the same `ResourceAccount::place_scope`.
+  The scope is host-declared when an opening account is installed (tracked
+  `CreateAccount` commands cannot set it), is immutable, and defaults to
+  `None`, which makes local acceptance unavailable. The exact handover record
+  is locked by the terminal certificate and kept as evidence. A tracked
+  command must come from the destination custodian; canonical adapter ingress
+  may cite the handover record as its provider source.
+
+Holder observation heads, reports, and witnesses carry optional
+`ResourceLossObservationV1` entries, gated like transfer details. New fields
+are omitted from canonical JSON while empty, so existing digests are unchanged.
+
 ## Completion capacity
 
 `CompletionLeaseBookV1` and `RunBudgetRevisionV1` are public coordinator
@@ -112,7 +150,8 @@ fairness and replay behavior independently testable.
 
 All irreversible requests (`ResourceConsumptionRequestV1`,
 `ResourceTransferStartRequestV1`, `ResourceTransferDispositionRequestV1`,
-`ResourceCreditRequestV1`, and `ResourceExternalOutflowRequestV1`) require a
+`ResourceCreditRequestV1`, `ResourceExternalOutflowRequestV1`, and
+`ResourceAccountLossRequestV1`) require a
 non-optional `CompletionLeaseActivationCertificateV1` plus exact locked target
 revisions. The persisted lease book verifies that certificate before any debit,
 escrow move, loss, outflow, or credit. Use `resource_completion_certificate`,

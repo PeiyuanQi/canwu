@@ -22,9 +22,9 @@ Choose the recovery goal first, then use the matching interface.
 
 ## Version and format contract
 
-As of September 21, 2026, the workspace version is `0.11.1` and the snapshot format is 8.
-The exact `engine_version` remains part of the persistence contract, so snapshots from 0.10.1 or earlier cannot be loaded into a 0.11.1 run.
-Version 0.11.0 added the persisted resource-demand source policy: `Pooled` preserves shared-pool behavior and bounded `ExactAccounts` restricts allocation to requester-custodied accounts. Admission, amendment, allocation, restore and replay validate this policy before reservation, with no silent fallback. The resource plugin semantic identity changes; the snapshot format remains 8. A local engine checkout does not update a downstream application's pinned registry dependency.
+As of September 27, 2026, the workspace version is `0.12.0` and the snapshot format is 8.
+The exact `engine_version` remains part of the persistence contract, so snapshots from 0.11.1 or earlier cannot be loaded into a 0.12.0 run.
+Version 0.12.0 adds person availability, person creation, plugin ingress cancellation, the guarded utility policy, parent tickets, account-level loss, atomic exchange, local acceptance, realized output, the acting actor, and new transport record kinds. The resource, production, and fiscal plugin semantic identities change, `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v4`, and the snapshot format remains 8; see [Version 0.12.0](#version-0120) below. A local engine checkout does not update a downstream application's pinned registry dependency.
 The simulation core does not silently migrate an old snapshot, and changing only its format number does not make it compatible.
 
 Applications that retain state should pin an exact published release or Git revision. To carry history across an engine boundary,
@@ -108,6 +108,18 @@ or research assumption. Each fork still advances through normal command and time
 - Simulate an outbox timeout and verify that retrying by `delivery_id` does not duplicate an external effect.
 - Document whether an upgrade exports, migrates, or deliberately abandons old saves.
 
+
+## Version 0.12.0
+
+Canwu 0.12.0 is a minor release. Its new contracts are additive capabilities, but new enum variants and struct fields break exhaustive matches and struct literals, so it is not source-compatible for code that uses them. Snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4 are unchanged. Fields for contracts a run does not use are not serialized, so those records keep their previous encoding and hashes.
+
+- Snapshots gain `person_availability`, the `created_persons` registry, and a person counter; boundary records gain person availability changes (with the tickets they cancelled) and created persons.
+- Plugin input withdrawn with `cancel_plugin_ingress`, `cancel_permitted_plugin_ingress`, or `CancelPluginIngress` stays in the ingress journal as a `PluginCancellation` record. Restore leaves the withdrawn item out of the pending queue, and exact replay reapplies the withdrawal.
+- Decision tickets and traces can carry `parent_ticket`, the decision stage, and the guards that fired; controllers can carry the random tie-break opt-in.
+- Host-authored decision ingress that carries random draw evidence is rejected, both live and when a snapshot loads.
+- The resource, production, and fiscal plugin semantic hashes change, as does the resource holder-report knowledge schema; `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v4`; the correspondence plugin semantic hash is unchanged.
+
+A 0.11.1 snapshot must not be relabeled or loaded into 0.12.0. Keep the previous engine or run an explicit export.
 
 ## Version 0.11.1
 

@@ -7,7 +7,7 @@ sidebar:
   label: Production and resource boundary
 ---
 
-Canwu 0.11.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
+Canwu 0.12.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
 
 ## Recommended boundary
 
@@ -44,7 +44,7 @@ The account amount is the only writable quantity. Reserved, available, and prote
 
 ## Authorize a custom consumer
 
-Version 0.11.0 supports custom consumption providers using the existing
+Version 0.12.0 supports custom consumption providers using the existing
 `ResourceConsumptionIntentV1` contract. Keep a top-level
 `resource_consumption_intents` map in your plugin's owned, active domain record;
 each key is the sealed intent's `id`. No callback or reference-provider name is
@@ -91,3 +91,35 @@ A demand may change its policy before its first allocation, with the expected re
 `Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses. Cross-custodian appointments, delegation, purpose and spending limits remain application/domain responsibilities; an account-ID list proves none of them. Transfer custody and completion-lease checks remain separate requirements.
 
 The policy is included in request digests, runtime snapshots, exact replay and terminal demand archive payloads. Restore validates live source references and retained reservation membership; archive validation preserves the policy and its digest. Holder-relative reports retain their existing visibility contract and do not expose the authoritative source list automatically. Missing `source_policy` fields deserialize as `Pooled` in a standalone DTO, but this does not migrate old snapshots: exact engine-version and plugin-identity checks still apply. Rust struct literals must add the field; this is a 0.11.0 source break.
+
+## Account-level loss
+
+Since 0.12.0, `ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` records spoilage, theft, or another loss directly on one account without inventing a transfer. The request carries its own `loss_id`, the exact account revision, a quantity, a cause, and a completion certificate. It settles a `ResourceLoss` with `account: Some(..)` and `transfer: None`, which the conservation totals count as admitted loss.
+
+The debit never touches reserved stock and respects the protected floor unless `allow_protected` is set; a stale revision is rejected. A tracked command must come from the account custodian, and canonical adapter ingress may cite the cause record as its provider source. Holder reports carry `ResourceLossObservationV1` entries, gated like transfer details.
+
+## Atomic exchange
+
+`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` starts two transfer legs together: both transfers are created or neither is, and the single `BeginExchange` outcome lists both transfer IDs in `cited_transfers`, whether it applied or rejected.
+
+1. The parties agree on `ResourceExchangeTermsV1`: the exchange key and, for each leg, its transfer ID, exact allocation, and destination.
+2. `ResourceExchangeTermsV1::leg_operation_keys` derives each leg's operation key from the digest of those terms.
+3. Each leg's source custodian acquires the completion lease for that leg's derived key, so each lease consents to the whole exchange and cannot authorize other terms.
+4. The `leg_a` source custodian submits the exchange as a tracked command.
+
+There is no exchange-level certificate. After the start, the two transfers settle independently, so one may be accepted while the other is lost or returned. An exchange is not delegated access: each side still spends only stock it holds in custody.
+
+## Local acceptance
+
+`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` settles a transfer without a transport execution, such as a handover inside one warehouse or town. It applies only while the transfer is `PendingDispatch` with no transport link, and only when both accounts declare the same `ResourceAccount::place_scope`.
+
+The scenario declares that scope when it installs an account. It is immutable, never inferred, and `None` by default, and a tracked `CreateAccount` command cannot set it. A missing or mismatched scope rejects as `invalid_definition` and an attached transport as `invalid_lifecycle`. The terminal certificate locks the exact handover record, and a tracked command must come from the destination custodian.
+
+## Realized output
+
+`ProductionOperation::CompleteExecution` may carry `realized_output_per_mille` and `realization_evidence`. The ratio is in thousandths of the nominal process output, and `None` means 1,000. Phase 7 floor-scales every output settlement quantity by it and stores both values on the execution; the resource credit and output acknowledgement then settle exactly the scaled quantities.
+
+- Any ratio other than 1,000 needs an exact evidence record version whose kind the process revision lists in `realization_evidence_kinds`, and evidence is rejected for the nominal ratio. The list is empty by default, so a default process admits only nominal output.
+- The ratio must be positive and must not scale any output leg to zero. Record a total loss by cancelling the work order.
+- The ratio may not exceed the process revision's `max_realized_per_mille`, which defaults to 1,000; a larger bound admits evidenced yields above nominal.
+- Holder, lifecycle, ratio, and kind rules run before the evidence record is resolved, so a rejection does not reveal whether another record exists.

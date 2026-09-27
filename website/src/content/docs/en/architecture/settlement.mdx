@@ -104,6 +104,16 @@ Phase-seven changes are staged against the boundary snapshot. `SameBoundary` cha
 
 Ordinary changes commit in phase nine, while historical candidates commit in phase eleven. Events emitted by a boundary enter the next boundary's normal admission path instead of invoking legacy immediate reactors.
 
+## Person and ingress directives
+
+Most directives write plugin-owned state. Three directives change kernel-owned state and follow fixed rules:
+
+- `SetPersonAvailability` replaces one person's life and custody state. It is accepted from a phase-7 or phase-10 system that declares `StateKey::core_person_availability()`, and two writes for the same person in one boundary fail the boundary. At the end of the boundary, after random decisions are materialized, open tickets whose decision maker or controller authority person became unavailable are cancelled, and the boundary record lists them.
+- `CreatePerson` creates a person from a phase-7 system that declares `StateKey::core_people()`. The engine allocates the ID, the receipt's `created_persons` binds it to the proposing plugin, system, and correlation, and the new person is visible from the next boundary.
+- `CancelPluginIngress` withdraws a still-pending item that the system's own plugin scheduled, strictly before it is due. Take targets from `SimulationView::cancellable_plugin_ingress`; a foreign, due, or already withdrawn target, or one another proposal already withdraws, fails the whole boundary.
+
+Several systems may declare the two core person keys, so conflicting writes are detected per person during settlement rather than at registration.
+
 ## Plugin contract
 
 A `BoundarySystemContract` declares:

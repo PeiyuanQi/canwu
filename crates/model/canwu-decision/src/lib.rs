@@ -35,13 +35,13 @@ pub use model::{
     DecisionAuthority, DecisionContext, DecisionControllerBinding, DecisionError,
     DecisionErrorCode, DecisionExternalEvidence, DecisionFactorContribution, DecisionMutation,
     DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight, DecisionOutcome,
-    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketState, DecisionTrace, PolicyDecision,
+    DecisionPolicyIdentity, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage,
+    DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace, PolicyDecision,
 };
 pub use policy::{
     DecisionPolicy, DecisionRule, ExternalDecisionOption, ExternalDecisionRequest,
-    ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse, HumanPolicy, LlmModelIdentity,
-    LlmPolicy, OrderedRulePolicy, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy,
-    RuleChoice, RulePolicy, UtilityEvaluator, UtilityPolicy, UtilityProfile,
-    WeightedUtilityEvaluator, WeightedUtilityPolicy,
+    ExternalDecisionResponse, ExternalPolicy, GuardedUtilityPolicy, HumanDecisionResponse,
+    HumanPolicy, LlmModelIdentity, LlmPolicy, OrderedRulePolicy, QueuedExternalPolicy,
+    QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice, RulePolicy, UtilityEvaluator, UtilityPolicy,
+    UtilityProfile, WeightedUtilityEvaluator, WeightedUtilityPolicy,
 };

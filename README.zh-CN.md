@@ -28,11 +28,11 @@ Rust 应用应依赖官方支持的对外 API，而不是直接依赖实现 crat
 
 ```toml
 [dependencies]
-canwu-api = "=0.11.1"
+canwu-api = "=0.12.0"
 ```
 
 需要持久化 Canwu 存档的应用应固定已发布的引擎版本，并且只在同时提供明确
-存档迁移时升级。上例选择不可变的 `0.11.1` 版本，而不是持续变化的 `main` 分支。
+存档迁移时升级。上例选择不可变的 `0.12.0` 版本，而不是持续变化的 `main` 分支。
 
 `canwu-api` 依赖图中的 crate 会一并发布，供 Cargo 解析依赖。它们属于实现
 细节，不建议应用代码直接依赖，也不单独承诺兼容性。模拟领域扩展也会作为
@@ -92,7 +92,8 @@ cargo run --locked -p canwu-debug
 ## 项目结构
 
 - `canwu-core`：稳定 ID、可重复的随机数和结构元数据
-- `canwu-decision`：决策票据、控制者、决策轨迹、通用效用评估器和策略 SDK 接口
+- `canwu-decision`：决策票据、控制者、决策轨迹、通用效用评估器、前置规则效用策略和
+  策略 SDK 接口
 - `canwu-time`：不依赖画面帧率的历史时间
 - `canwu-event`：可保存的事件，以及原因和结果之间的关系
 - `canwu-knowledge`：每个角色知道什么，以及信息来自何时
@@ -117,8 +118,8 @@ cargo run --locked -p canwu-debug
 - `canwu-history-research`：已发布、位于基础技术真值下游的三个可选历史研究评估插件
 - `canwu-fiscal`：已发布的通用财政程序扩展，负责地区法规采纳、核算、减免、
   授权、执行凭证与报告
-- `canwu-resource`：可选的守恒物资账户、需求、分配、运输托管、消费、损失、
-  履约和持有人相对报告扩展
+- `canwu-resource`：可选的守恒物资账户、需求、分配、运输托管、原子交换、消费、
+  损耗、履约和持有人相对报告扩展
 - `canwu-production`：可选的工艺、地点、设施、工单、在制品、维护、修复和
   产出结算扩展
 - `canwu-economy-reference-content`：以出处、model card 和精确地点/时期/资源/

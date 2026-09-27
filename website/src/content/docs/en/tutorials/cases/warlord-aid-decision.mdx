@@ -230,9 +230,22 @@ You can substitute several decision styles:
 
 - `WeightedUtilityPolicy` for deterministic strategic, personality, or doctrine scores;
 - `OrderedRulePolicy` for ordered selection or deferral rules;
+- `GuardedUtilityPolicy` for ordered guard rules that select, defer, or exclude options before utility scoring, with an optional random tie-break among near-equivalent top scores;
 - `QueuedHumanPolicy` for a UI or player response bound to the ticket version;
 - `QueuedExternalPolicy` for a host adapter that calls an external decision service;
 - `QueuedLlmPolicy` for model selection over context and option descriptions without exposing command actions.
+
+Since 0.12.0, the trace records the decision stage (`Guard`, `Utility`, or
+`Random`) and the guards that fired. A ticket can also name a `parent_ticket`:
+a terminal ticket of exactly the same decision maker that it follows up.
+
+If Warlord B dies or is captured, Canwu cancels the open tickets where Warlord B
+is the decision maker at the end of that boundary, and refuses new tickets for
+Warlord B while they remain unavailable. If only a controller's authority
+person, the person the controller acts for, becomes unavailable, Canwu cancels
+that controller's open tickets and refuses new ones for it. To continue such a
+decision, open a new ticket for an available controller and set
+`parent_ticket` to the cancelled ticket; the link is copied onto the new trace.
 
 ## 3. Where is the code?
 

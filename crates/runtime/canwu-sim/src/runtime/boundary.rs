@@ -1,10 +1,12 @@
 use super::{
-    CanwuError, DecisionOptionWeight, DomainRecordChange, DomainRecordMutation, RandomSample,
-    RandomStreamKey, SimulationView, StateKey, StateVisibility, SystemCadence,
+    BoundaryPersonAvailabilityChange, BoundaryPersonCreation, CanwuError, CreatedPerson,
+    DecisionOptionWeight, DomainRecordChange, DomainRecordMutation, PersonAvailability,
+    PersonDraft, PolicyDecision, RandomSample, RandomStreamKey, SimulationView, StateKey,
+    StateVisibility, SystemCadence,
 };
 use canwu_core::{
     BoundaryId, CommandAttemptId, CommandId, CommandRequestId, DecisionRequestId, DecisionTicketId,
-    EntityRef, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId, RandomDrawId,
+    EntityRef, EventId, IngressId, KnowledgeHolderRef, KnowledgeSchemaId, PersonId, RandomDrawId,
 };
 use canwu_knowledge::{KnowledgeRecord, KnowledgeRecordDraft};
 use canwu_time::{SimDuration, SimTime};
@@ -131,6 +133,31 @@ pub enum BoundaryDirective {
         payload: Value,
         affected: Vec<EntityRef>,
     },
+    /// Resolves an open ticket with an operation-keyed random draw bound to
+    /// the ticket and its version, either for a controller with random policy
+    /// identity or as a guarded utility policy's random tie-break. The
+    /// boundary generates the `Resolve` decision ingress, admitted at the next
+    /// boundary.
+    ///
+    /// Before any draw is committed, the directive fails the boundary when
+    /// the ticket's person decision maker
+    /// ([`crate::ErrorCode::DecisionMakerUnavailable`]) or its assigned
+    /// controller's authority person ([`crate::ErrorCode::IssuerUnavailable`])
+    /// is unavailable in the availability committed before this boundary. The
+    /// authority person is the actor of an actor authority or the responsible
+    /// actor of an institution authority. Because the end-of-boundary sweep
+    /// and `Open` admission keep such tickets from staying open, this is a
+    /// safeguard. Any availability change made in the same boundary does not
+    /// fail the directive, because failing would roll the change back and
+    /// repeat on every retry; the draw is then committed, the end-of-boundary
+    /// sweep cancels the ticket (see
+    /// [`BoundaryDirective::SetPersonAvailability`]), and the generated
+    /// resolution is rejected at admission. To avoid that wasted draw,
+    /// tie-break and random-policy systems should skip tickets whose decision
+    /// maker or controller authority person is unavailable, read through
+    /// [`crate::SimulationView::person_availability`] (which requires
+    /// declaring `StateKey::core_person_availability()` in the contract's
+    /// reads).
     ResolveDecisionRandomly {
         resolution: RandomDecisionResolution,
     },
@@ -140,6 +167,53 @@ pub enum BoundaryDirective {
         producer_correlation: Option<String>,
         records: Vec<KnowledgeRecordDraft>,
         summary: String,
+    },
+    /// Replaces one person's core life and custody state. Accepted from a
+    /// phase-7 or phase-10 system that declares
+    /// `StateKey::core_person_availability()` as a write; two writes for the
+    /// same person in one boundary fail the boundary.
+    ///
+    /// Making a person unavailable cancels, at the end of the same boundary
+    /// and after the boundary's random decisions are materialized, every open
+    /// decision ticket whose decision maker is that person
+    /// ([`crate::DECISION_MAKER_UNAVAILABLE_REASON`]) and then every remaining
+    /// open ticket whose assigned controller's authority person is that
+    /// person ([`crate::CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`]). The
+    /// authority person is the actor of an actor authority or the responsible
+    /// actor of an institution authority; council and no-responsible-actor
+    /// authorities are never affected. A ticket that qualifies for both
+    /// reasons carries the decision-maker reason. The cancelled IDs are
+    /// recorded in ticket-ID order on the boundary's
+    /// [`crate::BoundaryPersonAvailabilityChange`].
+    SetPersonAvailability {
+        person: PersonId,
+        availability: PersonAvailability,
+        summary: String,
+    },
+    /// Creates a person with an engine-allocated ID. Accepted from a phase-7
+    /// system that declares `StateKey::core_people()` as a write. The person
+    /// is committed at the end of the boundary and becomes visible to systems
+    /// at the next boundary; `correlation` is unique per plugin, system, and
+    /// boundary and binds the receipt's allocated ID.
+    CreatePerson {
+        draft: PersonDraft,
+        correlation: String,
+        summary: String,
+    },
+    /// Withdraws one still-pending plugin ingress item that this system's
+    /// plugin scheduled inside the engine (through `ScheduleIngress`,
+    /// `SchedulePluginIngress`, or a plugin command), strictly before the
+    /// item's due time. The boundary records a terminal
+    /// [`crate::IngressPayload::PluginCancellation`] entry among its generated
+    /// ingress; the withdrawn item is never admitted.
+    ///
+    /// Take targets from [`crate::SimulationView::cancellable_plugin_ingress`]
+    /// in the same boundary. A target that is foreign, already due, admitted,
+    /// or cancelled, or that another proposal already cancels in this
+    /// boundary, fails the whole boundary deterministically.
+    CancelPluginIngress {
+        ingress_id: IngressId,
+        reason: String,
     },
 }
 
@@ -154,6 +228,14 @@ pub struct RandomDecisionResolution {
     pub controller_id: String,
     pub sample: RandomSample,
     pub option_weights: Vec<DecisionOptionWeight>,
+    /// The pending decision of a utility-policy controller whose
+    /// `PendingRandom` candidates this draw resolves. `None` for a
+    /// random-policy controller, whose weights cover every available option.
+    /// When present, `option_weights` must equal the pending candidates, and
+    /// the generated resolution keeps the pending evaluations, fired guards,
+    /// and random stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tie_break: Option<Box<PolicyDecision>>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
@@ -351,6 +433,10 @@ pub struct BoundaryRecord {
     pub maintenance_changes: Vec<crate::MaintenanceChangeRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_terminal_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub person_availability_changes: Vec<BoundaryPersonAvailabilityChange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_persons: Vec<BoundaryPersonCreation>,
     pub emissions: Vec<BoundaryEmission>,
     #[serde(default)]
     /// Untagged legacy full-state hash or a `v1:` incremental state commitment.
@@ -374,4 +460,8 @@ pub struct BoundaryReceipt {
     pub knowledge_batch_count: usize,
     pub knowledge_record_count: usize,
     pub allocations: Vec<ReservationAllocation>,
+    /// Engine-allocated IDs of persons created in this boundary, keyed by
+    /// producing plugin, system, and correlation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_persons: Vec<CreatedPerson>,
 }

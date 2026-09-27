@@ -384,6 +384,8 @@ fn process(id: &str, industrial: bool) -> ProcessRevision {
             quantity: 1,
         }],
         adoption_required: industrial,
+        max_realized_per_mille: NOMINAL_REALIZED_OUTPUT_PER_MILLE,
+        realization_evidence_kinds: BTreeSet::new(),
     }
 }
 
@@ -1221,6 +1223,8 @@ fn start_execution(
         completion_certificate: certificate,
         production_completion_grant: production_grant,
         resource_completion_grant: resource_grant,
+        realized_output_per_mille: None,
+        realization_evidence: None,
     };
     let allocation = ProductionCapacityAllocation {
         id: allocation_id,
@@ -1524,6 +1528,7 @@ fn resource_state_for_project(
                 fulfillments: Vec::new(),
                 transfers: Vec::new(),
                 consumptions: Vec::new(),
+                losses: Vec::new(),
                 source_versions: vec![report_source],
                 semantic_digest: String::new(),
             }
@@ -1714,6 +1719,7 @@ fn resource_state_for_execution(
                 capacity: None,
                 protected_floor_policy: None,
                 closed: false,
+                place_scope: None,
             },
         );
     }
@@ -2079,6 +2085,7 @@ fn archived_resource_input_payloads(
         result_ref: Some(canwu_resource::ResourceRecordRefV1::Consumption(
             consumption.id.clone(),
         )),
+        cited_transfers: Vec::new(),
         rejection_code: None,
         rejection_reason: None,
         exact_evidence: vec![consumption.consumer_evidence.clone()],
@@ -2311,6 +2318,8 @@ fn settled_state_for_archive() -> (ProductionState, ProductionExecutionId) {
                 "production:complete:archive",
                 ProductionOperation::CompleteExecution {
                     execution: execution.clone(),
+                    realized_output_per_mille: None,
+                    realization_evidence: None,
                 },
             ),
             SimTime::from_minutes(20),
@@ -2342,6 +2351,7 @@ fn settled_state_for_archive() -> (ProductionState, ProductionExecutionId) {
         quantity: output.quantity,
         remainder: 0,
         result_ref: None,
+        cited_transfers: Vec::new(),
         rejection_code: None,
         rejection_reason: None,
         exact_evidence: vec![source.clone()],
@@ -2587,6 +2597,8 @@ fn capacity_cannot_overlap_and_a_consumed_slot_releases_only_after_output_ack() 
                 "production:complete:one",
                 ProductionOperation::CompleteExecution {
                     execution: first.clone(),
+                    realized_output_per_mille: None,
+                    realization_evidence: None,
                 },
             ),
             SimTime::from_minutes(20),
@@ -2624,6 +2636,7 @@ fn capacity_cannot_overlap_and_a_consumed_slot_releases_only_after_output_ack() 
         quantity: output_request.quantity,
         remainder: 0,
         result_ref: None,
+        cited_transfers: Vec::new(),
         rejection_code: None,
         rejection_reason: None,
         exact_evidence: vec![production_source.clone()],
@@ -2745,6 +2758,8 @@ fn multiple_outputs_settle_atomically_and_replay_exactly() {
                 "production:multiple-outputs:complete",
                 ProductionOperation::CompleteExecution {
                     execution: execution.clone(),
+                    realized_output_per_mille: None,
+                    realization_evidence: None,
                 },
             ),
             SimTime::EPOCH,
@@ -4652,6 +4667,8 @@ fn archive_commit_survives_restart_and_authenticates_damage_waste_and_output_evi
         expected_runtime_revision: state.revision.saturating_sub(1),
         operation: ProductionOperation::CompleteExecution {
             execution: execution.clone(),
+            realized_output_per_mille: None,
+            realization_evidence: None,
         },
     };
     let command_hash = canwu_api::canonical_hash("canwu.production.operation-input.v1", &command)
@@ -4940,4 +4957,372 @@ fn tamper_incident_random_value(value: &mut serde_json::Value) -> bool {
         serde_json::Value::Array(values) => values.iter_mut().any(tamper_incident_random_value),
         _ => false,
     }
+}
+
+/// Application-owned evidence record that justifies a non-nominal yield.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct HarvestReportPayload {
+    realized_per_mille: u16,
+}
+
+struct HarvestReport;
+
+impl DomainRecordType for HarvestReport {
+    type Payload = HarvestReportPayload;
+    type Class = canwu_api::DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "fixture.harvest";
+    const NAME: &'static str = "report";
+}
+
+struct HarvestEvidencePlugin;
+
+impl canwu_api::SimulationPlugin for HarvestEvidencePlugin {
+    fn name(&self) -> &'static str {
+        "fixture-harvest"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "00000000000000000000000000000000000000000000000000000000000000d1"
+    }
+
+    fn register(
+        &self,
+        registrar: &mut canwu_api::PluginRegistrar<'_>,
+    ) -> Result<(), canwu_api::CanwuError> {
+        registrar
+            .register_record_schema(canwu_api::DomainRecordSchema::for_record::<HarvestReport>())
+    }
+}
+
+#[test]
+fn gap_g14_production_realized_output() {
+    let (mut production, holder, _site, facility) = base_state();
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process ID");
+    {
+        let process = production.processes.get_mut(&process_id).expect("process");
+        process.max_realized_per_mille = 1_200;
+        process.realization_evidence_kinds =
+            BTreeSet::from([canwu_api::DomainRecordKind::for_type::<HarvestReport>()]);
+        let unit = process.outputs[0].unit.clone();
+        process.outputs.push(ProductionOutputSpec {
+            resource: ResourceDefinitionRevisionId::new("resource:bran:v1")
+                .expect("byproduct resource"),
+            unit,
+            quantity: 3,
+            quality_class: "feed-grade".to_owned(),
+        });
+    }
+    let order = work_order(
+        "production:order:realized-output",
+        &holder,
+        &process_id,
+        &production.facilities[&facility].site,
+    );
+    let order_id = order.id.clone();
+    for (id, operation) in [
+        (
+            "production:realized-output:create",
+            ProductionOperation::CreateWorkOrder { work_order: order },
+        ),
+        (
+            "production:realized-output:authorize",
+            ProductionOperation::AuthorizeWorkOrder {
+                work_order: order_id.clone(),
+            },
+        ),
+    ] {
+        production
+            .apply_operation(
+                &command(&production, &holder, id, operation),
+                SimTime::EPOCH,
+            )
+            .expect("prepare realized-output order");
+    }
+    let execution = start_execution(
+        &mut production,
+        &holder,
+        &facility,
+        &order_id,
+        "realized-output",
+        PRODUCTION_RUNTIME_ID,
+        vec![
+            evidence(
+                ProductionRequirementKind::LaborCapability,
+                "customary-hand-milling",
+                1,
+            ),
+            evidence(
+                ProductionRequirementKind::Authorization,
+                "household-authority",
+                1,
+            ),
+        ],
+        CapacityAllocationState::Reserved,
+    )
+    .expect("start realized-output execution");
+    production
+        .apply_operation(
+            &command(
+                &production,
+                &holder,
+                "production:realized-output:advance",
+                ProductionOperation::AdvanceExecution {
+                    execution: execution.clone(),
+                    completed_units: 10,
+                },
+            ),
+            SimTime::EPOCH,
+        )
+        .expect("finish all realized-output work units");
+    let running = production.executions[&execution].clone();
+    let nominal = running
+        .output_requests
+        .iter()
+        .map(|request| request.quantity)
+        .collect::<Vec<_>>();
+    assert_eq!(nominal, vec![8, 3]);
+    let resource = resource_state_for_execution(&production, &running);
+    production.observation_dirty_index.clear();
+    production.observation_due_index.clear();
+
+    let harvest = TypedDomainRecordRef::<HarvestReport>::new("harvest:realized-output");
+    let realization = DomainRecordVersionRef {
+        record: harvest.clone().into_untyped(),
+        version: 1,
+        established_by: DomainRecordVersionSource::InitialScenario,
+    };
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let harvest_plugin = HarvestEvidencePlugin;
+    let plugins: [&dyn canwu_api::SimulationPlugin; 3] =
+        [&production_plugin, &resource_plugin, &harvest_plugin];
+    let start = |production: ProductionState, seed: u64| {
+        let harvest_draft = canwu_api::DomainRecordDraft::from_typed(
+            harvest.clone(),
+            &HarvestReportPayload {
+                realized_per_mille: 875,
+            },
+        )
+        .expect("harvest evidence draft");
+        let mut scenario = scenario_with_production(production);
+        scenario.domain_records.extend([
+            resource
+                .clone()
+                .into_record()
+                .expect("resource output root"),
+            canwu_api::DomainRecord {
+                reference: harvest_draft.reference,
+                owner: "fixture-harvest".to_owned(),
+                class: canwu_api::DomainRecordClass::Record,
+                version: 1,
+                lifecycle: canwu_api::DomainRecordLifecycle::Active,
+                payload: harvest_draft.payload,
+                references: harvest_draft.references,
+            },
+        ]);
+        Canwu::new_with_plugins(seed, scenario, &plugins).expect("realized-output runtime")
+    };
+    let complete = |per_mille: Option<u16>, evidence: Option<DomainRecordVersionRef>| {
+        ProductionOperation::CompleteExecution {
+            execution: execution.clone(),
+            realized_output_per_mille: per_mille,
+            realization_evidence: evidence,
+        }
+    };
+    let quantities = |state: &ProductionState| {
+        state.executions[&execution]
+            .output_requests
+            .iter()
+            .map(|request| request.quantity)
+            .collect::<Vec<_>>()
+    };
+
+    // Canonical command path: each invalid completion is a stable rejected
+    // outcome that leaves the nominal output requests untouched.
+    let mut canwu = start(production.clone(), 214);
+    let unavailable = DomainRecordVersionRef {
+        version: 2,
+        ..realization.clone()
+    };
+    for (request_id, operation_id, per_mille, evidence, code) in [
+        (
+            1,
+            "production:realized-output:above-bound",
+            Some(1_300),
+            Some(realization.clone()),
+            "value_out_of_range",
+        ),
+        (
+            2,
+            "production:realized-output:unevidenced",
+            Some(875),
+            None,
+            "invalid_payload",
+        ),
+        (
+            3,
+            "production:realized-output:zero",
+            Some(0),
+            Some(realization.clone()),
+            "value_out_of_range",
+        ),
+        (
+            4,
+            "production:realized-output:undeclared-evidence-kind",
+            Some(875),
+            Some(DomainRecordVersionRef {
+                record: production_runtime_reference().into_untyped(),
+                version: 1,
+                established_by: DomainRecordVersionSource::InitialScenario,
+            }),
+            "invalid_authority",
+        ),
+        (
+            5,
+            "production:realized-output:unavailable-evidence",
+            Some(875),
+            Some(unavailable),
+            "domain_record_not_found",
+        ),
+    ] {
+        enqueue_tracked_production_operation(
+            &mut canwu,
+            &holder,
+            request_id,
+            operation_id,
+            complete(per_mille, evidence),
+        );
+        settle_at_epoch(&mut canwu, &format!("{operation_id} command boundary"));
+        settle_at_epoch(&mut canwu, &format!("{operation_id} apply boundary"));
+        let state = production_state(&canwu);
+        let outcome = state
+            .operation_outcomes
+            .get(&ProductionOperationOutcomeId::new(operation_id).expect("operation ID"))
+            .expect("invalid completion outcome");
+        assert_eq!(
+            outcome.disposition,
+            ProductionOperationDisposition::Rejected,
+            "{operation_id}"
+        );
+        assert_eq!(
+            outcome.rejection_code.as_deref(),
+            Some(code),
+            "{operation_id}"
+        );
+        assert_eq!(
+            state.executions[&execution].lifecycle,
+            WorkOrderLifecycle::Running
+        );
+        assert_eq!(quantities(&state), nominal);
+    }
+
+    // An evidenced 875 per mille completion floor-scales every output leg in
+    // Phase 7 (8 -> 7, 3 -> 2) and persists the ratio and its evidence.
+    enqueue_tracked_production_operation(
+        &mut canwu,
+        &holder,
+        6,
+        "production:realized-output:complete",
+        complete(Some(875), Some(realization.clone())),
+    );
+    settle_at_epoch(&mut canwu, "realized completion command boundary");
+    settle_at_epoch(&mut canwu, "realized completion apply boundary");
+    let completed = production_state(&canwu);
+    let completed_execution = &completed.executions[&execution];
+    assert_eq!(
+        completed_execution.lifecycle,
+        WorkOrderLifecycle::CompletedPendingOutputSettlement
+    );
+    assert_eq!(completed_execution.realized_output_per_mille, Some(875));
+    assert_eq!(
+        completed_execution.realization_evidence.as_ref(),
+        Some(&realization)
+    );
+    assert_eq!(quantities(&completed), vec![7, 2]);
+
+    // Save/load and exact replay reproduce the realized completion.
+    let snapshot = canwu.snapshot_json().expect("realized-output snapshot");
+    let restored =
+        Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins).expect("restored run");
+    assert_eq!(production_state(&restored), completed);
+    assert_eq!(
+        restored.snapshot_json().expect("restored snapshot"),
+        snapshot
+    );
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("realized-output replay");
+    assert_eq!(production_state(&replayed), completed);
+    assert_eq!(
+        replayed.snapshot_json().expect("replayed snapshot"),
+        snapshot
+    );
+
+    // Resource conservation: the resource-owned credits settle exactly the
+    // realized quantities. The completion is applied through the same reducer
+    // before start so the certificate's exact production source stays current.
+    let mut realized = production;
+    realized
+        .apply_operation(
+            &command(
+                &realized,
+                &holder,
+                "production:realized-output:complete",
+                complete(Some(875), Some(realization.clone())),
+            ),
+            SimTime::EPOCH,
+        )
+        .expect("apply realized completion");
+    assert_eq!(quantities(&realized), vec![7, 2]);
+    let mut canwu = start(realized, 215);
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            PLUGIN_NAME,
+            PRODUCTION_OBSERVATION_WAKE_INGRESS,
+            SimTime::EPOCH,
+            serde_json::json!({ "reason": "resume-realized-output" }),
+        ))
+        .expect("resume realized output settlement");
+    for boundary in 0..10 {
+        settle_at_epoch(&mut canwu, &format!("realized-output boundary {boundary}"));
+        if production_state(&canwu)
+            .executions
+            .get(&execution)
+            .is_some_and(|execution| execution.lifecycle == WorkOrderLifecycle::Settled)
+        {
+            break;
+        }
+    }
+    let settled = production_state(&canwu);
+    let settled_execution = &settled.executions[&execution];
+    assert_eq!(settled_execution.lifecycle, WorkOrderLifecycle::Settled);
+    let (_, resources) = canwu_resource::resource_state(&canwu)
+        .expect("resource state query")
+        .expect("resource state");
+    for (request, outcome) in settled_execution
+        .output_requests
+        .iter()
+        .zip(&settled_execution.output_outcomes)
+    {
+        assert_eq!(outcome.quantity, request.quantity);
+        assert_eq!(
+            resources.accounts[&request.account].balance,
+            request.quantity
+        );
+    }
+    assert_eq!(quantities(&settled), vec![7, 2]);
+    let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())
+        .expect("realized settlement replay");
+    assert_eq!(production_state(&replayed), settled);
+    assert_eq!(
+        canwu_resource::resource_state(&replayed)
+            .expect("replayed resource state query")
+            .expect("replayed resource state")
+            .1,
+        resources
+    );
 }

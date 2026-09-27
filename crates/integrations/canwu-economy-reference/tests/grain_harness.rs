@@ -88,6 +88,7 @@ fn grain_ticket_rejects_a_command_from_a_different_option() {
                         ),
                         options: source.options.clone(),
                         deadline: Some(now),
+                        parent_ticket: None,
                     },
                 },
             ),

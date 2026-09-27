@@ -36,7 +36,7 @@ cargo run -p canwu-correspondence --example routed_correspondence
 
 <Steps>
 1. 应用或渠道适配器准备一个仅含单一收件人的定向 `Dispatch`，并确定逻辑截止时间 `due_at`。
-2. 经过决策支持的命令，或确定性选中的自动 `CommunicationOpportunity`，准入通信意图。
+2. 由决策票据支撑的命令，或确定性选中的自动 `CommunicationOpportunity`，准入通信意图。
 3. 当前插件要求承运持有人就是发送者，只读取该发送者持有的地址、端点和连接知识，然后持久化接受的 `RoutePlan` 与精确知识读取切面。
 4. 一个原子信息操作激活 dispatch，并创建第一次 `DeliveryAttempt`。
 5. `TransportExecution` 推进各路段，并在承运人或方式变化处记录显式保管权交接 `Handoff`。
@@ -49,9 +49,9 @@ cargo run -p canwu-correspondence --example routed_correspondence
 
 ## 灾害、截取与随机需求
 
-灾害使用 operation-keyed RNG，使当前路段失败，并从当前位置重新规划。路段历史
+灾害使用操作定址随机抽样，使当前路段失败，并从当前位置重新规划。路段历史
 保持只追加并按行程修订区分；每个接受的修订都保留精确知识读取切面和规划证据。
-同一个 delivery attempt 在后继行程修订下继续；新修订的首段会记录从失败路段转入新路段的保管权交接，并携带失败时间和投递尝试证据。不适用于当前运输尝试的事故会保留为 suppressed 证据，不会改写操作状态。
+同一个投递尝试在后继行程修订下继续；新修订的首段会记录从失败路段转入新路段的保管权交接，并携带失败时间和投递尝试证据。不适用于当前运输尝试的事故会保留为已抑制（suppressed）证据，不会改写操作状态。
 
 当前 attempt 处于 `WaitingForRoute` 且运输为 `ReplanPending` 时，发送者授权的
 `resolve_correspondence_v1` 命令可以在知识变化后重新规划同一个 attempt。attempt
@@ -77,7 +77,7 @@ dispatch 保持 `Active`，也不会改写上一次 attempt 的截止时间。
 铁路、航空、驿递或信号容量需要未来的准入变体携带精确 `CapacityBooking` 或模拟
 资源预留证据。因此，本案例只证明不受容量约束的投递。
 
-测试会恢复存档并精确重放完整操作，也覆盖灾后改道保留既有路段、知识更新后的
+测试会恢复存档并精确重放完整操作，也覆盖交接后遇灾改道仍保留既有路段与交接证据、知识更新后的
 无路恢复、后继投递重试、显式结束、拒绝外部伪造推进，以及持有人读取权限。
 持久化证据包括需求决策、每个修订的知识读取切面、路线、交接、灾害、恢复命令、
 信息操作，以及 dispatch/attempt 的精确记录版本。

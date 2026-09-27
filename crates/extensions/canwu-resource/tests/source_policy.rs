@@ -109,6 +109,7 @@ fn scenario(requester_first: bool) -> Scenario {
                 capacity: None,
                 protected_floor_policy: None,
                 closed: false,
+                place_scope: None,
             })
             .unwrap();
     }

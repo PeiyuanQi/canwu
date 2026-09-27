@@ -21,8 +21,8 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 把它还原成有意义的话。指定收件人收到原件后，请一名有权限的持有人代为解读，得到
 一份结果内容，再把结果只开放给收件人和一名复核者查看。
 
-这件事最容易混淆的地方，可以用一句话概括：**看见了，不等于看懂了；看懂了，也不
-等于有权替别人发布。**
+这件事最容易混淆的地方，可以用一句话概括：**看见了，不等于看懂了；替别人看懂了，
+也不等于自己知道了。**
 
 ## 运行
 
@@ -63,7 +63,7 @@ checkpoint 恢复。
 
 <Steps>
 1. 截取首先生成 representation copy；`SameContent` 和 parent edge 说明“这是同一份内容的复制件”，不会把它伪装成指定收件人已经收到的原件。
-2. 取得 access 不等于取得 interpretation。`H-603` 可以完整看到暗号副本，但因为只有 `decode_k1`，只能得到一次失败记录。
+2. 取得 access 不等于取得 interpretation。`H-603` 可以完整看到符号副本，但因为只有 `decode_k1`，只能得到一次失败记录。
 3. `Failed` interpretation 不允许绑定 `result_content`；`Succeeded` interpretation 必须绑定解读结果。
 4. 每次 interpretation 都同时记录输入 access、输入 representation、实际执行者 `performed_by` 和服务对象 `performed_for`，因此能看出“谁看了、谁解了、替谁解”。
 5. 定向 delivery 仍按自己的 attempt 状态推进；中途截取不会替换指定收件人的交付证据。
@@ -73,8 +73,8 @@ checkpoint 恢复。
 ## 读完后只记住三句话
 
 - 截到副本，不等于截到对方已经理解的内容。
-- 能看到暗号，不等于有能力解读。
-- 能替别人解读，也不等于自动拥有替别人发布的权力。
+- 能看到符号副本，不等于有能力解读。
+- 替别人解读，不会让解读者自动获得对方的知识。
 
 ## 可替换的应用层部分
 

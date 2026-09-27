@@ -34,12 +34,12 @@ implementation crates:
 
 ```toml
 [dependencies]
-canwu-api = "=0.11.1"
+canwu-api = "=0.12.0"
 ```
 
 Applications that persist Canwu snapshots should pin a published engine
 release exactly and upgrade only alongside an explicit save migration. The
-example above selects the immutable `0.11.1` release rather than the moving
+example above selects the immutable `0.12.0` release rather than the moving
 `main` branch.
 
 The crates in `canwu-api`'s dependency graph are published so Cargo can resolve
@@ -105,7 +105,7 @@ viewer` opens the browser trace viewer against the same live trace dump.
 
 - `canwu-core`: stable IDs, repeatable random numbers, and schema metadata
 - `canwu-decision`: decision tickets, controllers, traces, utility evaluation,
-  and policy SDK contracts
+  guarded utility policies, and policy SDK contracts
 - `canwu-time`: historical time that is independent of rendering speed
 - `canwu-event`: stored events and links between causes and effects
 - `canwu-knowledge`: what each actor knows and when they learned it
@@ -132,7 +132,8 @@ viewer` opens the browser trace viewer against the same live trace dump.
 - `canwu-fiscal`: published generic fiscal-procedure extension for regional
   law adoption, assessment, remission, authorization, receipts, and reports
 - `canwu-resource`: optional conserved resource accounts, demand, allocation,
-  transfer escrow, consumption, loss, fulfillment, and holder-relative reports
+  transfer escrow, atomic exchange, consumption, loss, fulfillment, and
+  holder-relative reports
 - `canwu-production`: optional process, site, facility, work-order, WIP,
   maintenance, repair, and output-settlement extension
 - `canwu-economy-reference-content`: source/model-card-bound economy profiles

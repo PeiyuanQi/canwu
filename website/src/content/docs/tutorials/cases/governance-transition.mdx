@@ -40,10 +40,10 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 cargo run -p canwu-api --example governance_transition
 ```
 
-程序会先发布中央 manifest。它发出的两个零延迟 plugin ingress 不会在同一个
-系统调用中重入，而是在下一个 transaction 才被接纳。随后国库和县级系统各自
+程序会先发布中央 manifest。它发出的两个零延迟插件输入不会在同一个
+系统调用中重入，而是在下一个结算边界（transaction）才被准入。随后国库和县级系统各自
 准备 600 单位粮食的执行记录，中央审计验证双方的 owner、版本、状态和
-post-state hash，程序最后确认 exact replay 与原始快照一致。
+post-state hash，程序最后确认精确重放与原始快照一致。
 
 ### 实现流程
 
@@ -51,7 +51,7 @@ post-state hash，程序最后确认 exact replay 与原始快照一致。
 中央 issue ingress
   -> publish-order 写入 manifest
   -> 生成国库 / 县级 execute ingress
-  -> 下一个 transaction 接纳双方 ingress
+  -> 下一个结算边界准入双方输入
   -> 两个 owner 在 phase 10 准备记录
   -> 中央 phase 12 只读审计
   -> 原子提交或完整回滚

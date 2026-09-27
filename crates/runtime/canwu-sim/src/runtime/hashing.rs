@@ -11,10 +11,10 @@ use super::{
     boundary_state_hash_format, command_attempt_id_slice_is_empty, command_attempt_slice_is_empty,
     component_key, domain_record_change_slice_is_empty, domain_record_slice_is_empty,
     ingress_record_slice_is_empty, invalid_snapshot, invalid_snapshot_error, is_one_u64,
-    maintenance_change_slice_is_empty, manifest, policy,
+    is_zero_u64, maintenance_change_slice_is_empty, manifest, policy,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 /// Canonical roots for independent authoritative state and evidence domains.
@@ -49,6 +49,10 @@ pub(super) struct StateHashMaterial<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) entities: Option<&'a [EntityRef]>,
     pub(super) world: &'a WorldSnapshot,
+    #[serde(skip_serializing_if = "person_availability_is_empty")]
+    pub(super) person_availability: &'a BTreeMap<super::PersonId, super::PersonAvailability>,
+    #[serde(skip_serializing_if = "created_person_slice_is_empty")]
+    pub(super) created_persons: &'a [super::CreatedPerson],
     pub(super) knowledge: &'a KnowledgeSnapshot,
     pub(super) events: &'a [SimEvent],
     pub(super) commands: &'a [CommandRecord],
@@ -82,6 +86,19 @@ pub(super) struct StateHashMaterial<'a> {
     pub(super) next_correlation_id: u64,
     #[serde(skip_serializing_if = "is_one_u64")]
     pub(super) next_decision_trace_id: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub(super) next_person_id: u64,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn person_availability_is_empty(
+    value: &&BTreeMap<super::PersonId, super::PersonAvailability>,
+) -> bool {
+    value.is_empty()
+}
+
+fn created_person_slice_is_empty(value: &&[super::CreatedPerson]) -> bool {
+    value.is_empty()
 }
 
 #[derive(Serialize)]
@@ -93,6 +110,10 @@ struct WorldCommitmentMaterial<'a> {
     armies: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     entities: Option<&'a [EntityRef]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    person_availability: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created_persons: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -143,6 +164,8 @@ pub(super) struct ControlCommitmentMaterial {
     pub(super) next_correlation_id: u64,
     #[serde(skip_serializing_if = "is_one_u64")]
     pub(super) next_decision_trace_id: u64,
+    #[serde(skip_serializing_if = "is_zero_u64")]
+    pub(super) next_person_id: u64,
 }
 
 #[derive(Serialize)]
@@ -218,6 +241,8 @@ pub(super) fn committed_initial_scenario(scenario: Option<&Scenario>) -> Option<
 pub(super) fn world_commitment_root(
     world: &WorldSnapshot,
     entities: &[EntityRef],
+    person_availability: &BTreeMap<super::PersonId, super::PersonAvailability>,
+    created_persons: &[super::CreatedPerson],
 ) -> Result<String, CanwuError> {
     canonical_hash(
         "canwu.commitment.world.v1",
@@ -248,6 +273,19 @@ pub(super) fn world_commitment_root(
                 |value| value.id,
             )?,
             entities: committed_entities(entities, world),
+            person_availability: (!person_availability.is_empty())
+                .then(|| {
+                    canonical_hash(
+                        "canwu.commitment.world.person-availability.v1",
+                        person_availability,
+                    )
+                })
+                .transpose()?,
+            created_persons: (!created_persons.is_empty())
+                .then(|| {
+                    canonical_hash("canwu.commitment.world.created-persons.v1", created_persons)
+                })
+                .transpose()?,
         },
     )
 }
@@ -357,7 +395,12 @@ fn commitment_roots(
     boundary_head: Option<&str>,
     journal_roots: Option<&JournalCommitmentRoots>,
 ) -> Result<CommitmentRoots, CanwuError> {
-    let world = world_commitment_root(material.world, material.entities.unwrap_or_default())?;
+    let world = world_commitment_root(
+        material.world,
+        material.entities.unwrap_or_default(),
+        material.person_availability,
+        material.created_persons,
+    )?;
     let knowledge = knowledge_commitment_root(material.knowledge)?;
     let plugin_components = plugin_component_commitment_root(material.plugin_components)?;
     let domain_records = domain_record_commitment_root(material.domain_records)?;
@@ -444,6 +487,7 @@ fn commitment_roots(
             next_schedule_sequence: material.next_schedule_sequence,
             next_correlation_id: material.next_correlation_id,
             next_decision_trace_id: material.next_decision_trace_id,
+            next_person_id: material.next_person_id,
         },
     )?;
     Ok(CommitmentRoots {
@@ -563,6 +607,8 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         plugin_registration_closed: snapshot.plugin_registration_closed,
         entities: committed_entities(&snapshot.entities, &snapshot.world),
         world: &snapshot.world,
+        person_availability: &snapshot.person_availability,
+        created_persons: &snapshot.created_persons,
         knowledge: &snapshot.knowledge,
         events: &snapshot.events,
         commands: &snapshot.commands,
@@ -588,6 +634,7 @@ pub(super) fn snapshot_state_hash(snapshot: &SimulationSnapshot) -> Result<Strin
         next_schedule_sequence: snapshot.next_schedule_sequence,
         next_correlation_id: snapshot.next_correlation_id,
         next_decision_trace_id: snapshot.next_decision_trace_id,
+        next_person_id: snapshot.next_person_id,
     })
 }
 
@@ -650,6 +697,8 @@ pub(super) fn snapshot_commitment_roots(
             plugin_registration_closed: snapshot.plugin_registration_closed,
             entities: committed_entities(&snapshot.entities, &snapshot.world),
             world: &snapshot.world,
+            person_availability: &snapshot.person_availability,
+            created_persons: &snapshot.created_persons,
             knowledge: &snapshot.knowledge,
             events: &snapshot.events,
             commands: &snapshot.commands,
@@ -675,6 +724,7 @@ pub(super) fn snapshot_commitment_roots(
             next_schedule_sequence: snapshot.next_schedule_sequence,
             next_correlation_id: snapshot.next_correlation_id,
             next_decision_trace_id: snapshot.next_decision_trace_id,
+            next_person_id: snapshot.next_person_id,
         },
         snapshot
             .boundaries
@@ -849,12 +899,26 @@ pub(super) fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> boo
     if admitted_commands.len() != snapshot.commands.len() {
         return false;
     }
-    let admitted_ingress: BTreeSet<_> = snapshot
+    let mut settled_ingress: BTreeSet<_> = snapshot
         .boundaries
         .iter()
         .flat_map(|record| record.admitted_ingress.iter().copied())
         .collect();
-    if admitted_ingress.len() != snapshot.ingress.len() {
+    let boundary_count = u64::try_from(snapshot.boundaries.len()).unwrap_or(u64::MAX);
+    for record in &snapshot.ingress {
+        if let super::IngressPayload::PluginCancellation { cancelled, .. } = &record.payload {
+            // A host cancellation issued after the head boundary changes the
+            // journal past that boundary's recorded state hash.
+            if record.eligible_boundary_count >= boundary_count
+                && !matches!(record.cause, Some(super::CauseRef::Boundary(_)))
+            {
+                return false;
+            }
+            settled_ingress.insert(record.id);
+            settled_ingress.insert(*cancelled);
+        }
+    }
+    if settled_ingress.len() != snapshot.ingress.len() {
         return false;
     }
     let accounted_events: BTreeSet<_> = snapshot
@@ -897,6 +961,10 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         maintenance_changes: &'a [super::MaintenanceChangeRecord],
         #[serde(skip_serializing_if = "Option::is_none")]
         maintenance_terminal_root: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        person_availability_changes: Option<&'a [super::BoundaryPersonAvailabilityChange]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_persons: Option<&'a [super::BoundaryPersonCreation]>,
         emissions: &'a [BoundaryEmission],
         state_hash: &'a Option<String>,
         previous_hash: &'a str,
@@ -924,6 +992,10 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
             record_changes: &record.record_changes,
             maintenance_changes: &record.maintenance_changes,
             maintenance_terminal_root: &record.maintenance_terminal_root,
+            person_availability_changes: (!record.person_availability_changes.is_empty())
+                .then_some(record.person_availability_changes.as_slice()),
+            created_persons: (!record.created_persons.is_empty())
+                .then_some(record.created_persons.as_slice()),
             emissions: &record.emissions,
             state_hash: &record.state_hash,
             previous_hash: &record.previous_hash,

@@ -294,6 +294,15 @@ fn validate_execution_restore(
             "production execution resource completion authority differs at restore",
         ));
     }
+    if execution
+        .realization_evidence
+        .as_ref()
+        .is_some_and(|evidence| !canwu.domain_record_version_evidence_exists(evidence))
+    {
+        return Err(invalid(
+            "production realization evidence is unavailable at restore",
+        ));
+    }
     for evidence in &execution.evidence {
         let record = canwu
             .domain_record_version(&evidence.version)
@@ -885,8 +894,7 @@ pub fn production_observation_witness(
     let mut witness = ProductionObservationWitnessV1 {
         provider_plugin: crate::PLUGIN_NAME.to_owned(),
         provider_version: env!("CARGO_PKG_VERSION").to_owned(),
-        provider_semantic_hash: "dc6dc9fda679601313939c880d83ae0f5679652691eb7c47a0c1aed5a2249553"
-            .to_owned(),
+        provider_semantic_hash: crate::PRODUCTION_SEMANTIC_HASH.to_owned(),
         provider_state_revision: head.provider_state_revision,
         holder: holder.clone(),
         scope: scope.clone(),
@@ -1055,6 +1063,7 @@ pub fn degraded_facility_decision_ticket(
         ),
         options,
         deadline,
+        parent_ticket: None,
     })
 }
 

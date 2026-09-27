@@ -71,9 +71,9 @@ See [phased boundary and allocation](/en/tutorials/phased-boundary/) for a compl
 4. Submit domain commands or canonical ingress through public entry points; do not retain a live runtime reference.
 5. Verify save/load, exact replay, authority failure, and atomic rollback.
 
-## Available domain extensions
+## Common domain extensions
 
-These packages are optional capabilities built on the public API, not hard-coded simulation-core subsystems.
+These packages are optional capabilities built on the public API, not hard-coded simulation-core subsystems. See [crates/README.md](https://github.com/PeiyuanQi/canwu/blob/main/crates/README.md) for the complete crate list.
 
 | Package | Status and use | Continue with |
 | --- | --- | --- |
@@ -82,6 +82,9 @@ These packages are optional capabilities built on the public API, not hard-coded
 | `canwu-law` | Experimental legal-institutionalization extension | [Culture and legal institutions](/en/architecture/culture-law/) |
 | `canwu-technology` | Published technology-evidence, local-capability, and diffusion extension | [Technology diffusion](/en/tutorials/technology-diffusion/) |
 | `canwu-fiscal` | Generic fiscal-procedure extension; it does not own resource balances or transport | [Ming fiscal case](/en/tutorials/cases/ming-fiscal/) |
+| `canwu-resource` | Published conserved-resource accounts, demand, allocation, transfer, and fulfillment extension | [Production, resource, and transport boundary](/en/developer/production-economy/) |
+| `canwu-production` | Published production process, facility, work-order, and output-settlement extension | [Production, resource, and transport boundary](/en/developer/production-economy/) |
+| `canwu-military` | Optional military simulation extension; not a universal combat model | [Military simulation extension](/en/tutorials/military-domain/) |
 
 Before selecting an extension, confirm its public version, dependency graph, and persistence contract.
 Historical content, scenario parameters, and host rules remain owned by content packs or the host application.
@@ -94,4 +97,4 @@ Historical content, scenario parameters, and host rules remain owned by content 
 - Treat a semantic-hash change as an executable-behavior change that requires migration or a new version.
 - Consume extension contracts through `canwu-api` from application code.
 
-Before implementation, review the [five architectural boundaries](/en/architecture/#five-architectural-boundaries), then start from the public example closest to your use case.
+Before implementation, review the public boundaries in the [architecture overview](/en/architecture/), then start from the public example closest to your use case.

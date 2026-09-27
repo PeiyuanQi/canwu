@@ -50,6 +50,7 @@ fn resolve_ticket_randomly(
                 controller_id: ticket.assigned_controller.clone(),
                 sample,
                 option_weights,
+                tie_break: None,
             },
         }],
         ..BoundaryProposal::default()
@@ -182,6 +183,7 @@ fn random_policy_resolution_is_generated_replayable_and_tamper_evident() {
                             DecisionOption::new("fail", "Fail"),
                         ],
                         deadline: None,
+                        parent_ticket: None,
                     },
                 },
             ),

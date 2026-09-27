@@ -86,6 +86,30 @@ cargo run -p canwu-reference-world --example starter
 
 领域整合负责把 UI 或智能体意图转成类型化领域命令。无论选择哪个入口，调用方都不会取得可变世界引用。
 
+## 撤回排队的插件输入
+
+用 `enqueue_plugin_ingress` 排队的插件输入，只要仍在队列中且尚未到期，就可以撤回：
+
+```rust
+let queued = canwu.enqueue_plugin_ingress(request)?;
+// 玩家在命令到期前撤回了它。
+canwu.cancel_plugin_ingress(queued.ingress_id, "withdrawn by player")?;
+```
+
+只有签发者可以撤回。上层应用用 `cancel_plugin_ingress` 撤回自己提交的公开数据包；内部数据包类型需要用 `cancel_permitted_plugin_ingress` 并出示所属插件的注册许可，该许可也覆盖该插件自己安排的输入；插件的边界系统用 `BoundaryDirective::CancelPluginIngress` 撤回本插件安排的输入。撤回会作为独立的 `IngressPayload::PluginCancellation` 记录写入日志，记下被撤回的输入、`IngressCancellationAuthority` 和不超过 1,024 字节的原因。被撤回的输入永远不会被准入，也不会发生回滚。已经到期、已准入、已归档或已撤回的输入会以 `LateIngress` 失败；其他签发者的输入以 `InvalidAuthority` 失败；未知 ID 以 `EvidenceUnavailable` 失败。快照、检查点日志和精确重放都会保留这次撤回。
+
+## 已无法行事的人物
+
+自 0.12.0 起，运行时为每个人物保存人物可用性（`PersonAvailability`）：生存状态（`Alive`、`Dead`、`Missing`）与人身状态（`Free`、`Detained`、`Hostage`、`Captive`、`Hiding`、`Exile`）。人物何时死亡、被俘或获释由上层应用决定，并由声明了 `StateKey::core_person_availability()` 的第 7 或第 10 阶段边界系统返回 `BoundaryDirective::SetPersonAvailability` 来记录。用 `canwu.person_availability(person)` 读取；`None` 表示存活且自由。
+
+未存活、被拘押或被俘的人物不可用：
+
+- 若命令的签发者、决策角色或机构责任角色不可用，命令准入会以 `IssuerUnavailable` 拒绝；带请求标识的命令会记录为持久化拒绝；
+- 若决策票据的人物决策者（`DecisionMakerUnavailable`）或其控制者的权限人物（`IssuerUnavailable`）不可用，就不能开启、准备或结算该票据；
+- 在使人物变为不可用的边界结束时，以该人物为决策者的未关闭票据会以 `decision_maker_unavailable` 取消，由其担任控制者权限人物的未关闭票据会以 `controller_authority_unavailable` 取消。
+
+人质、藏匿和流亡状态默认仍可准入；更严格的规则由你自己的系统实现。已取消的票据不会被改派。若只是控制者的权限人物变为不可用，要继续这项决策，请为可用的控制者开启新票据，并把 `parent_ticket` 设为已取消的票据。决策者仍不可用时，不能为其开启新票据。
+
 ## 驱动时间
 
 <Steps>

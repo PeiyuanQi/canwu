@@ -256,7 +256,7 @@ evidence, the integration does not invent a price.
     Domain --> Integration["Reference integrations"]
     Pack --> Integration
     Integration --> Starter["Starter kits"]
-    Starter -. "copy or replace" .-> Game["CM, user games, research tools"]
+    Starter -. "copy or replace" .-> Game["Celestial Mandate, user games, research tools"]
     Pack -. "reuse directly" .-> Game
     Integration -. "reuse directly" .-> Game
 `}
@@ -286,3 +286,11 @@ its specialized adapter. See [the developer contract](/en/developer/production-e
 ## Demand source policy
 
 Since 0.11.0, `ResourceDemand::source_policy` records either `Pooled` or `ExactAccounts`. The latter lists 1–256 sorted unique requester-custodied accounts with exact matching resource/unit revisions. Source checks precede scarcity arbitration, with no fallback to pooled accounts. The policy is fixed after any reservation or fulfillment, including consumed reservations supporting in-flight escrow. Snapshots, replay and terminal archives preserve it. Pooled selection does not grant transfer authority; the host application controls pooled demand use and cross-custodian delegation. See the [full contract](/en/developer/production-economy/#demand-source-policy).
+
+## Person availability and queued input
+
+Since 0.12.0, the kernel keeps each person's life and custody state as `PersonAvailability`, changed only by declared boundary systems. Commands and decisions from a person who is not alive, or who is detained or captive, are rejected, and the open decision tickets that depend on that person are cancelled at the end of the boundary that makes them unavailable. Boundary systems can also create persons with engine-allocated IDs, and the issuer of queued plugin input can withdraw it before it is due. See [integration and driving](/en/developer/integration/#people-who-can-no-longer-act) and [the settlement system](/en/architecture/settlement/#person-and-ingress-directives).
+
+## Loss, exchange, and local acceptance
+
+Since 0.12.0, `canwu-resource` records account-level loss without a transfer, starts two transfers as one atomic exchange whose per-leg leases bind the agreed terms, and settles a same-place transfer without transport when both accounts share a host-declared place scope. None of these grants cross-custodian authority. See the [full contract](/en/developer/production-economy/#account-level-loss).

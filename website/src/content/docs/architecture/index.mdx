@@ -244,7 +244,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
     Domain --> Integration["参考整合包"]
     Pack --> Integration
     Integration --> Starter["入门套件"]
-    Starter -. "可复制或替换" .-> Game["CM、用户游戏、研究工具"]
+    Starter -. "可复制或替换" .-> Game["Celestial Mandate、用户游戏、研究工具"]
     Pack -. "可直接复用" .-> Game
     Integration -. "可直接复用" .-> Game
 `}
@@ -272,3 +272,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 ## 需求来源策略
 
 自 0.11.0 起，`ResourceDemand::source_policy` 明确记录 `Pooled` 或 `ExactAccounts`。后者列出 1–256 个严格排序、不重复、由需求申请者保管的账户，资源和单位版本必须精确匹配。来源检查先于稀缺资源分配，不会回退到资源池。一旦有资源预留或履约，策略便固定，包括已消费、但仍对应在途托管余额的预留。快照、重放和终止归档均保留策略。资源池选择不授予转移权限；资源池需求的使用权限及跨保管人的委托由上层应用负责。参见[完整合同](/developer/production-economy/#需求来源策略)。
+
+## 人物可用性与排队输入
+
+自 0.12.0 起，内核以 `PersonAvailability` 保存每个人物的生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物签发的命令和作出的决策会被拒绝；依赖该人物的未关闭决策票据会在使其不可用的边界结束时取消。边界系统还可以创建由引擎分配 ID 的人物；排队插件输入的签发者可以在到期前撤回它。参见[接入与驱动](/developer/integration/#已无法行事的人物)和[结算系统](/architecture/settlement/#人物与输入指令)。
+
+## 损耗、交换与本地验收
+
+自 0.12.0 起，`canwu-resource` 可以不经转移记录账户损耗，以原子交换同时发起两项转移（每条腿的租约都绑定约定条款），并在两个账户共享上层应用声明的地点范围时，不经运输结算同地转移。这些操作都不授予跨保管人的权限。参见[完整合同](/developer/production-economy/#账户损耗)。

@@ -269,6 +269,8 @@ pub(crate) fn validate_snapshot_records(
             .cloned()
             .map(|value| (value.id, value))
             .collect(),
+        person_availability: snapshot.person_availability.clone(),
+        created_persons: snapshot.created_persons.clone(),
         letters: snapshot
             .world
             .letters
@@ -410,6 +412,17 @@ pub(crate) fn validate_holder_for_publication(
         return Err(CanwuError::new(
             ErrorCode::InvalidKnowledgeHolder,
             "knowledge holder is missing, retired, deleted, duplicated as a person entity, or ineligible",
+        ));
+    }
+    if let KnowledgeHolderRef::Person(id) = holder
+        && current
+            .person_availability
+            .get(id)
+            .is_some_and(|availability| availability.life == super::LifeState::Dead)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidKnowledgeHolder,
+            "knowledge cannot be published to a dead person's holder ledger",
         ));
     }
     Ok(())
@@ -646,6 +659,8 @@ mod tests {
         RuntimeCurrentState {
             entities: BTreeSet::new(),
             people: BTreeMap::new(),
+            person_availability: BTreeMap::new(),
+            created_persons: Vec::new(),
             letters: BTreeMap::new(),
             governments: BTreeMap::new(),
             territories: BTreeMap::new(),

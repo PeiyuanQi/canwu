@@ -1,11 +1,11 @@
 use super::{
-    Army, ArmyId, CommitmentRoots, DecisionState, DomainRecordRef, IngressQueueKey,
-    KnowledgeSnapshot, LetterCargo, LetterId, PersistentDomainRecordStore, Person, PersonId,
-    PluginComponentKey, PluginComponentRecord, RandomStreamKey, RandomStreamState,
-    RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState, ScheduleKey,
-    ScheduledAction, SimTime,
+    Army, ArmyId, CommitmentRoots, DecisionState, DomainRecordRef, EntityRef, IngressQueueKey,
+    KnowledgeSnapshot, LetterCargo, LetterId, PersistentDomainRecordStore, Person,
+    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomStreamKey,
+    RandomStreamState, RuntimeCommitmentCache, RuntimeCounters, RuntimeScheduler, RuntimeState,
+    ScheduleKey, ScheduledAction, SimTime,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct RejectionTransactionCheckpoint {
     next_command_attempt_id: u64,
@@ -74,6 +74,18 @@ impl IngressTransactionCheckpoint {
         state.metadata.commitment_roots = self.commitment_roots;
         state.metadata.commitment_cache = self.commitment_cache;
     }
+
+    /// Restores a failed cancellation append and requeues its exact target.
+    pub(super) fn restore_cancellation(self, state: &mut RuntimeState, target: IngressQueueKey) {
+        state.counters.next_ingress_id = self.next_ingress_id;
+        state.scheduler.pending_ingress.insert(target);
+        state.scheduler.cancelled_ingress.remove(&target.id);
+        state.evidence.ingress.truncate(self.ingress_count);
+        state.metadata.plugin_registration_closed = self.plugin_registration_closed;
+        state.metadata.checkpoint_hash = self.checkpoint_hash;
+        state.metadata.commitment_roots = self.commitment_roots;
+        state.metadata.commitment_cache = self.commitment_cache;
+    }
 }
 
 pub(super) struct CommandTransactionCheckpoint {
@@ -135,7 +147,10 @@ impl CommandTransactionCheckpoint {
 }
 
 pub(super) struct BoundaryTransactionCheckpoint {
+    entities: BTreeSet<EntityRef>,
     people: BTreeMap<PersonId, Person>,
+    person_availability: BTreeMap<PersonId, PersonAvailability>,
+    created_persons: Vec<super::CreatedPerson>,
     letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
     knowledge: KnowledgeSnapshot,
@@ -161,7 +176,10 @@ pub(super) struct BoundaryTransactionCheckpoint {
 impl BoundaryTransactionCheckpoint {
     pub(super) fn capture(state: &RuntimeState) -> Self {
         Self {
+            entities: state.current.entities.clone(),
             people: state.current.people.clone(),
+            person_availability: state.current.person_availability.clone(),
+            created_persons: state.current.created_persons.clone(),
             letters: state.current.letters.clone(),
             armies: state.current.armies.clone(),
             knowledge: state.current.knowledge.clone(),
@@ -186,7 +204,10 @@ impl BoundaryTransactionCheckpoint {
     }
 
     pub(super) fn restore(self, state: &mut RuntimeState) {
+        state.current.entities = self.entities;
         state.current.people = self.people;
+        state.current.person_availability = self.person_availability;
+        state.current.created_persons = self.created_persons;
         state.current.letters = self.letters;
         state.current.armies = self.armies;
         state.current.knowledge = self.knowledge;

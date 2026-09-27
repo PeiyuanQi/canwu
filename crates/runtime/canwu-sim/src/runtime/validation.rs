@@ -4,6 +4,9 @@ use super::event_payloads::{
     MOVE_ORDERED, MoveOrdered, PERSON_ARRIVED, PERSON_MOVE_ORDERED, PLUGIN, PersonArrived,
     PersonMoveOrdered, REPORT_DISPATCHED, ReportDispatched, RuntimeEventPayload,
 };
+use super::ingress::{
+    PluginIngressIssuer, plugin_ingress_cancellation_authorized, valid_ingress_cancellation_reason,
+};
 use super::{
     ADMISSION_CURSOR_FORMAT_VERSION, ArmyId, BoundaryDirective, BoundaryDomainEntityCuts,
     BoundaryEmissionKind, BoundaryId, BoundaryPhase, BoundaryProposal, BoundaryRecord,
@@ -360,15 +363,7 @@ pub(super) fn validate_snapshot(
             .map(|record| (record.reference.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>(),
     );
-    if snapshot
-        .initial_scenario
-        .as_ref()
-        .is_some_and(|scenario| scenario.entities != snapshot.entities)
-    {
-        return invalid_snapshot(
-            "snapshot entity registry does not match its manifest-bound initial scenario",
-        );
-    }
+    super::persons::validate_snapshot_entity_registry(snapshot)?;
     if !is_canonical_hash(&snapshot.run_manifest_hash)
         || manifest::hash(run_manifest)? != snapshot.run_manifest_hash
     {
@@ -455,7 +450,10 @@ pub(super) fn validate_snapshot(
         || snapshot.next_schedule_sequence != 1
         || snapshot.next_correlation_id != 1
         || !snapshot.decisions.is_empty()
-        || snapshot.next_decision_trace_id != 1;
+        || snapshot.next_decision_trace_id != 1
+        || !snapshot.person_availability.is_empty()
+        || !snapshot.created_persons.is_empty()
+        || snapshot.next_person_id != 0;
     if has_execution_evidence && !snapshot.plugin_registration_closed {
         return invalid_snapshot(
             "snapshot execution evidence requires plugin registration to remain closed",
@@ -497,6 +495,7 @@ pub(super) fn validate_snapshot(
             &domain_records,
             initial_domain_records.as_ref(),
         )?;
+    super::persons::validate_snapshot_persons(snapshot, plugins)?;
     if snapshot.admitted_attempt_count != admission_cursors.attempts
         || snapshot.admitted_command_count != admission_cursors.commands
         || snapshot.admitted_event_count != admission_cursors.events
@@ -1559,6 +1558,7 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     let mut current_revision = 0_u64;
     let mut reconstructed_archive_commits = 0_u64;
     let mut rejected_archive_commits = 0_u64;
+    let mut persons = super::persons::PersonReplayCut::new(snapshot);
     for boundary in &snapshot.boundaries {
         let mut maintenance_change_index = 0_usize;
         for ingress_id in &boundary.admitted_ingress {
@@ -1590,6 +1590,9 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
                 IngressPayload::Decision { .. }
                 | IngressPayload::Plugin { .. }
                 | IngressPayload::Calendar { .. } => {}
+                IngressPayload::PluginCancellation { .. } => {
+                    return invalid_snapshot("a boundary admits a terminal ingress cancellation");
+                }
                 IngressPayload::Maintenance { request } => {
                     let change = boundary
                         .maintenance_changes
@@ -1631,6 +1634,7 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             };
             reconstruct_decision_ingress(
                 snapshot,
+                &persons,
                 request,
                 boundary.at,
                 &command_attempts_by_request,
@@ -1651,8 +1655,10 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
             boundary,
             snapshot,
             &reconstructed,
+            &persons.availability,
             current_revision,
         )?;
+        persons.apply_boundary(boundary, &mut reconstructed)?;
         current_revision = current_revision
             .checked_add(1)
             .ok_or_else(|| invalid_snapshot_error("authoritative revision range is exhausted"))?;
@@ -1699,10 +1705,13 @@ fn validate_decision_state(snapshot: &SimulationSnapshot) -> Result<(), CanwuErr
     Ok(())
 }
 
+/// `availability` is the person availability committed before `boundary`,
+/// which is the state its random decision resolutions were validated against.
 fn validate_generated_random_decisions_at_boundary(
     boundary: &BoundaryRecord,
     snapshot: &SimulationSnapshot,
     decisions: &DecisionState,
+    availability: &BTreeMap<PersonId, super::PersonAvailability>,
     revision_before_boundary: u64,
 ) -> Result<(), CanwuError> {
     let expected_revision = revision_before_boundary
@@ -1750,13 +1759,17 @@ fn validate_generated_random_decisions_at_boundary(
                 "boundary-generated random decision must select an available option",
             );
         };
-        let selected =
+        let tie_break = decision.is_random_tie_break();
+        let selected = if tie_break {
+            DecisionRandomEvidence::selected_candidate(ticket, &random.option_weights, random.value)
+        } else {
             DecisionRandomEvidence::selected_option(ticket, &random.option_weights, random.value)
-                .map_err(|error| {
-                invalid_snapshot_error(format!(
-                    "boundary-generated random decision weights are invalid: {error}"
-                ))
-            })?;
+        }
+        .map_err(|error| {
+            invalid_snapshot_error(format!(
+                "boundary-generated random decision weights are invalid: {error}"
+            ))
+        })?;
         let option = ticket.option(option_id).ok_or_else(|| {
             invalid_snapshot_error(
                 "boundary-generated random decision selected an unknown ticket option",
@@ -1782,17 +1795,33 @@ fn validate_generated_random_decisions_at_boundary(
             }
             (DecisionAction::None, Some(_)) | (DecisionAction::Command { .. }, None) => false,
         };
+        // A random-policy draw carries no policy reasoning. A utility-policy
+        // tie-break keeps the pending decision's evaluations and fired guards;
+        // they are checked here against the source-boundary ticket because a
+        // rejected generated attempt never reaches `DecisionState`.
+        let provenance_matches = if tie_break {
+            policy.kind == DecisionPolicyKind::Utility
+                && controller.random_tie_break
+                && decision.summary == super::settlement::random_tie_break_summary(option_id)
+                && decision.validate(ticket).is_ok()
+        } else {
+            policy.kind == DecisionPolicyKind::Random
+                && decision.stage.is_none()
+                && decision.summary == super::settlement::random_policy_summary(option_id)
+                && decision.evaluations.is_empty()
+                && decision.fired_guards.is_empty()
+        };
         if !ticket.is_open()
             || ticket.version != *expected_version
             || ticket.assigned_controller != *controller_id
             || controller.policy != *policy
-            || policy.kind != DecisionPolicyKind::Random
+            || !provenance_matches
             || request.expected_revision != expected_revision
             || selected != *option_id
-            || decision.summary != format!("random policy selected {option_id}")
-            || !decision.evaluations.is_empty()
             || decision.external.is_some()
             || !command_matches
+            || super::persons::validate_decision_preparation(availability, ticket, controller)
+                .is_err()
         {
             return invalid_snapshot(
                 "boundary-generated random decision disagrees with its source-boundary ticket or controller",
@@ -1805,6 +1834,7 @@ fn validate_generated_random_decisions_at_boundary(
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn reconstruct_decision_ingress(
     snapshot: &SimulationSnapshot,
+    persons: &super::persons::PersonReplayCut,
     request: &super::DecisionIngressRequest,
     at: super::SimTime,
     command_attempts_by_request: &BTreeMap<canwu_core::CommandRequestId, &CommandAttemptRecord>,
@@ -1829,11 +1859,25 @@ fn reconstruct_decision_ingress(
                 request.request_id, request.expected_revision, current_revision
             ),
         })
-    } else if let Some(message) = snapshot_decision_entity_error(snapshot, &request.mutation) {
+    } else if let Some(message) = snapshot_decision_entity_error(
+        &|entity| match entity {
+            EntityRef::Person(person) => persons
+                .runtime_person_exists(*person)
+                .unwrap_or_else(|| snapshot_entity_identity_exists(snapshot, entity)),
+            _ => snapshot_entity_identity_exists(snapshot, entity),
+        },
+        &request.mutation,
+    ) {
         base_attempt(DecisionAttemptOutcome::Rejected {
             code: DecisionAttemptErrorCode::EntityUnavailable,
             message,
         })
+    } else if let Some((code, message)) = super::persons::decision_mutation_availability_error(
+        &request.mutation,
+        reconstructed,
+        &persons.availability,
+    ) {
+        base_attempt(DecisionAttemptOutcome::Rejected { code, message })
     } else {
         let trace_id = matches!(request.mutation, DecisionMutation::Resolve { .. })
             .then(|| DecisionTraceId::new(*next_trace_id));
@@ -1950,10 +1994,9 @@ fn reconstruct_decision_ingress(
 }
 
 fn snapshot_decision_entity_error(
-    snapshot: &SimulationSnapshot,
+    entity_exists: &dyn Fn(&EntityRef) -> bool,
     mutation: &DecisionMutation,
 ) -> Option<String> {
-    let entity_exists = |entity: &EntityRef| snapshot_entity_identity_exists(snapshot, entity);
     match mutation {
         DecisionMutation::RegisterController { controller } => {
             let authority_exists = match &controller.authority {
@@ -1999,6 +2042,7 @@ fn validate_ingress_records(
     let boundary_count = u64::try_from(snapshot.boundaries.len())
         .map_err(|_| invalid_snapshot_error("boundary count exceeds the ingress journal range"))?;
     let mut generated_by_boundary = BTreeMap::new();
+    let mut generated_plugin = BTreeMap::new();
     for boundary in &snapshot.boundaries {
         if boundary
             .generated_ingress
@@ -2018,6 +2062,7 @@ fn validate_ingress_records(
                     "ingress is claimed as generated by more than one boundary",
                 );
             }
+            generated_plugin.insert(generation.ingress, generation.plugin.as_str());
             let index =
                 usize::try_from(generation.ingress.get().saturating_sub(1)).map_err(|_| {
                     invalid_snapshot_error(
@@ -2035,7 +2080,9 @@ fn validate_ingress_records(
                 || record.cause != Some(CauseRef::Boundary(boundary.id))
                 || !matches!(
                     &record.payload,
-                    IngressPayload::Plugin { .. } | IngressPayload::Decision { .. }
+                    IngressPayload::Plugin { .. }
+                        | IngressPayload::Decision { .. }
+                        | IngressPayload::PluginCancellation { .. }
                 )
             {
                 return invalid_snapshot(
@@ -2208,6 +2255,20 @@ fn validate_ingress_records(
                         ))
                     })?;
             }
+            IngressPayload::PluginCancellation {
+                cancelled,
+                authority,
+                reason,
+            } => validate_snapshot_ingress_cancellation(
+                snapshot,
+                plugins,
+                &generated_by_boundary,
+                &generated_plugin,
+                record,
+                *cancelled,
+                *authority,
+                reason,
+            )?,
             IngressPayload::Calendar { cadences } => {
                 if record.class != IngressClass::ScheduledSystem
                     || record.priority != 0
@@ -2235,6 +2296,11 @@ fn validate_ingress_records(
                             "decision ingress cause disagrees with boundary-generation evidence",
                         );
                     }
+                }
+                if record.cause.is_none() && request.carries_random_evidence() {
+                    return invalid_snapshot(
+                        "host-authored decision ingress cannot carry random draw evidence",
+                    );
                 }
                 if snapshot
                     .run_configuration
@@ -2322,7 +2388,7 @@ fn validate_ingress_records(
             if record.issued_at > boundary.at {
                 return invalid_snapshot("ingress is assigned to a boundary before it was issued");
             }
-            pending.insert(IngressQueueKey::from_record(record));
+            issue_snapshot_ingress(snapshot, &mut pending, record)?;
             cursor += 1;
         }
         if pending.first().is_some_and(|key| key.due_at < boundary.at) {
@@ -2413,7 +2479,8 @@ fn validate_ingress_records(
                     }
                     IngressPayload::Plugin { .. }
                     | IngressPayload::Command { .. }
-                    | IngressPayload::Maintenance { .. } => {}
+                    | IngressPayload::Maintenance { .. }
+                    | IngressPayload::PluginCancellation { .. } => {}
                 }
             }
             pending.remove(&IngressQueueKey::from_record(record));
@@ -2434,7 +2501,7 @@ fn validate_ingress_records(
         if record.eligible_boundary_count != boundary_count {
             return invalid_snapshot("ingress issue cuts skip a completed boundary");
         }
-        pending.insert(IngressQueueKey::from_record(record));
+        issue_snapshot_ingress(snapshot, &mut pending, record)?;
     }
     if pending.iter().any(|key| key.due_at < snapshot.now) {
         return invalid_snapshot("snapshot retains ingress overdue before committed time");
@@ -2450,6 +2517,108 @@ fn validate_ingress_records(
         }
     }
     Ok(snapshot.ingress.last().map_or(0, |record| record.id.get()))
+}
+
+/// Queues one issued record while rebuilding the canonical queue, or applies a
+/// terminal cancellation to the exact still-pending item it withdraws.
+fn issue_snapshot_ingress(
+    snapshot: &SimulationSnapshot,
+    pending: &mut BTreeSet<IngressQueueKey>,
+    record: &IngressRecord,
+) -> Result<(), CanwuError> {
+    let IngressPayload::PluginCancellation { cancelled, .. } = &record.payload else {
+        pending.insert(IngressQueueKey::from_record(record));
+        return Ok(());
+    };
+    let Some(target) = snapshot_ingress_by_id(snapshot, *cancelled) else {
+        return invalid_snapshot("ingress cancellation references an unknown record");
+    };
+    if !pending.remove(&IngressQueueKey::from_record(target)) {
+        return invalid_snapshot("ingress cancellation withdraws an item that is not pending");
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_snapshot_ingress_cancellation(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    generated_by_boundary: &BTreeMap<IngressId, BoundaryId>,
+    generated_plugin: &BTreeMap<IngressId, &str>,
+    record: &IngressRecord,
+    cancelled: IngressId,
+    authority: super::IngressCancellationAuthority,
+    reason: &str,
+) -> Result<(), CanwuError> {
+    use super::IngressCancellationAuthority as Authority;
+    let Some(target) =
+        snapshot_ingress_by_id(snapshot, cancelled).filter(|_| cancelled < record.id)
+    else {
+        return invalid_snapshot("ingress cancellation references an unknown or later record");
+    };
+    let IngressPayload::Plugin {
+        plugin,
+        packet_type,
+        ..
+    } = &target.payload
+    else {
+        return invalid_snapshot("ingress cancellation must withdraw plugin ingress");
+    };
+    if !valid_ingress_cancellation_reason(reason)
+        || record.class != target.class
+        || record.priority != 0
+        || record.due_at != record.issued_at
+        || record.issued_at >= target.due_at
+    {
+        return invalid_snapshot(
+            "ingress cancellation is not canonical or does not precede the due time of its item",
+        );
+    }
+    let issuer = match &target.cause {
+        None | Some(CauseRef::System(_)) => PluginIngressIssuer::Host,
+        Some(CauseRef::Command(_)) => PluginIngressIssuer::Plugin(plugin),
+        Some(CauseRef::Boundary(_)) => match generated_plugin.get(&target.id) {
+            Some(generator) => PluginIngressIssuer::Plugin(generator),
+            None => {
+                return invalid_snapshot(
+                    "cancelled boundary ingress lacks its generation evidence",
+                );
+            }
+        },
+        Some(CauseRef::Event(_)) => {
+            return invalid_snapshot("event-caused ingress has no cancellable issuer");
+        }
+    };
+    let boundary_plugin = match (&record.cause, authority) {
+        (None, Authority::Host | Authority::PluginPermit) => None,
+        (Some(CauseRef::Boundary(boundary)), Authority::BoundarySystem)
+            if generated_by_boundary.get(&record.id) == Some(boundary) =>
+        {
+            generated_plugin.get(&record.id).copied()
+        }
+        _ => {
+            return invalid_snapshot("ingress cancellation authority disagrees with its cause");
+        }
+    };
+    let internal = plugins
+        .internal_ingress
+        .contains(&(plugin.clone(), packet_type.clone()));
+    if !plugin_ingress_cancellation_authorized(authority, issuer, plugin, internal, boundary_plugin)
+    {
+        return invalid_snapshot("ingress cancellation lacks the issuer authority of its item");
+    }
+    if record.cause.is_none()
+        && snapshot
+            .run_configuration
+            .as_ref()
+            .and_then(RunConfigurationSnapshot::declared)
+            .is_some_and(|configuration| configuration.interaction == InteractionPolicy::ReadOnly)
+    {
+        return invalid_snapshot(
+            "declared read-only runs cannot contain newly authored ingress cancellation",
+        );
+    }
+    Ok(())
 }
 
 fn validate_snapshot_ingress_cause(
@@ -3135,7 +3304,7 @@ fn validate_snapshot_reservation_pool(
     Ok(())
 }
 
-fn snapshot_boundary_contract<'a>(
+pub(super) fn snapshot_boundary_contract<'a>(
     plugins: &'a PluginRegistry,
     plugin: &str,
     system: &str,
@@ -3264,7 +3433,12 @@ fn validate_boundary_ingress_generation(
                     random.upper_exclusive,
                 )
                 .is_ok_and(|selected| selected == *option_id);
-                policy.kind == DecisionPolicyKind::Random
+                let policy_matches = if decision.is_random_tie_break() {
+                    policy.kind == DecisionPolicyKind::Utility
+                } else {
+                    policy.kind == DecisionPolicyKind::Random
+                };
+                policy_matches
                     && producer_matches
                     && outcome_matches
                     && target_matches
@@ -3274,6 +3448,9 @@ fn validate_boundary_ingress_generation(
                     && decision.external.is_none()
                     && *command_request_id
                         == request.command.as_ref().map(|command| command.request_id)
+            }
+            IngressPayload::PluginCancellation { authority, .. } => {
+                *authority == super::IngressCancellationAuthority::BoundarySystem
             }
             IngressPayload::Command { .. }
             | IngressPayload::Calendar { .. }
@@ -4523,7 +4700,7 @@ fn entity_exists_in_parts(
     }
 }
 
-fn snapshot_entity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
+pub(super) fn snapshot_entity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
     entity_exists_in_parts(
         &snapshot.entities,
         &snapshot.world,
@@ -4606,7 +4783,10 @@ fn snapshot_entity_exists_for_boundary_proposal(
     }
 }
 
-fn snapshot_entity_identity_exists(snapshot: &SimulationSnapshot, entity: &EntityRef) -> bool {
+pub(super) fn snapshot_entity_identity_exists(
+    snapshot: &SimulationSnapshot,
+    entity: &EntityRef,
+) -> bool {
     match entity {
         EntityRef::Domain(reference) => snapshot.domain_records.iter().any(|record| {
             &record.reference == reference && record.class == DomainRecordClass::Entity
@@ -4674,7 +4854,8 @@ pub(super) fn has_unqueued_command_history(
             }
             IngressPayload::Plugin { .. }
             | IngressPayload::Calendar { .. }
-            | IngressPayload::Maintenance { .. } => None,
+            | IngressPayload::Maintenance { .. }
+            | IngressPayload::PluginCancellation { .. } => None,
         })
         .collect();
     commands.iter().any(|command| command.attempt_id.is_none())

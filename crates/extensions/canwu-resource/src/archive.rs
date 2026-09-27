@@ -1327,6 +1327,8 @@ fn validate_resource_terminal_archive_record(
             };
             let digest = canonical_digest("canwu.resource.loss.v1", value)?;
             if id != &value.id
+                || value.quantity == 0
+                || value.account.is_some() == value.transfer.is_some()
                 || record.operation_key != value.operation_key
                 || record.quantity != value.quantity
                 || record.remainder != 0

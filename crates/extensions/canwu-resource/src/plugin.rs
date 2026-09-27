@@ -32,10 +32,10 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "f57c8bc26d7f4e2b34d6b4e1c9f94ddf31ef8e4e5a63cf1b8a2a8f7394f3ac27";
+    "50dacee2853d6ef5ac0c30249a37306be553b2f028ca56d7c6da00ea62a2de8c";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
-    "c4aed3aebb1f4cb54f889c644647d15671be3c5338731330d6fc693c3933493b";
+    "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
 const RESOURCE_REPORT_HOT_CAPACITY: usize = 8_192;
 static RESOURCE_COMPLETION_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static RESOURCE_ALLOCATION_INGRESS_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -1532,6 +1532,7 @@ fn validate_local_provider_participant(
             Some(&value.completion_certificate)
         }
         ResourceOperationRequestV1::ExternalOutflow(value) => Some(&value.completion_certificate),
+        ResourceOperationRequestV1::RecordLoss(value) => Some(&value.completion_certificate),
         _ => None,
     };
     let Some(certificate) = certificate else {
@@ -1892,6 +1893,7 @@ const fn request_time(request: &ResourceOperationRequestV1) -> Option<SimTime> {
         ResourceOperationRequestV1::CompleteTransfer(value) => Some(value.at),
         ResourceOperationRequestV1::Credit(value) => Some(value.at),
         ResourceOperationRequestV1::ExternalOutflow(value) => Some(value.at),
+        ResourceOperationRequestV1::RecordLoss(value) => Some(value.at),
         _ => None,
     }
 }
@@ -2392,15 +2394,20 @@ fn validate_request_certificate_evidence(
     view: &SimulationView<'_>,
     request: &ResourceOperationRequestV1,
 ) -> Result<(), CanwuError> {
-    let certificate = match request {
-        ResourceOperationRequestV1::Consume(value) => Some(&value.completion_certificate),
-        ResourceOperationRequestV1::BeginTransfer(value) => Some(&value.completion_certificate),
-        ResourceOperationRequestV1::CompleteTransfer(value) => Some(&value.completion_certificate),
-        ResourceOperationRequestV1::Credit(value) => Some(&value.completion_certificate),
-        ResourceOperationRequestV1::ExternalOutflow(value) => Some(&value.completion_certificate),
-        _ => None,
+    let certificates = match request {
+        ResourceOperationRequestV1::Consume(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::BeginTransfer(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::CompleteTransfer(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::Credit(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::ExternalOutflow(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::RecordLoss(value) => vec![&value.completion_certificate],
+        ResourceOperationRequestV1::BeginExchange(value) => vec![
+            &value.leg_a.completion_certificate,
+            &value.leg_b.completion_certificate,
+        ],
+        _ => Vec::new(),
     };
-    if let Some(certificate) = certificate {
+    for certificate in certificates {
         for target in &certificate.locked_target_versions {
             if let crate::CompletionLockedTargetV1::ExternalRecord { version } = target {
                 require_exact_body(view, version)?;
@@ -2457,6 +2464,10 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         ResourceOperationRequestV1::ExternalOutflow(value) => {
             value.authority_evidence == packet.provider_source
         }
+        ResourceOperationRequestV1::RecordLoss(value) => matches!(
+            &value.cause,
+            canwu_api::EvidenceRef::DomainRecordVersion(cause) if cause == &packet.provider_source
+        ),
         ResourceOperationRequestV1::AdvanceTransfer(value) => {
             value.transport_evidence == packet.provider_source
         }
@@ -2472,6 +2483,10 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
                 &value.disposition,
                 crate::ResourceTransferDispositionV1::Accept { acceptance, .. }
                     if acceptance.evidence == packet.provider_source
+            ) || matches!(
+                &value.disposition,
+                crate::ResourceTransferDispositionV1::AcceptLocal { handover_evidence, .. }
+                    if handover_evidence == &packet.provider_source
             )
         }
         ResourceOperationRequestV1::CreateAccount(_)
@@ -2479,6 +2494,7 @@ fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
         | ResourceOperationRequestV1::AmendDemand(_)
         | ResourceOperationRequestV1::Allocate(_)
         | ResourceOperationRequestV1::BeginTransfer(_)
+        | ResourceOperationRequestV1::BeginExchange(_)
         | ResourceOperationRequestV1::CancelTransfer(_)
         | ResourceOperationRequestV1::SetProtectedFloor(_)
         | ResourceOperationRequestV1::CancelDemand(_)
@@ -2503,6 +2519,12 @@ fn validate_resource_authority(
     let state = record.decode_payload::<ResourceRuntimeRecord>()?;
     let target_holder = match &value.request {
         ResourceOperationRequestV1::CreateAccount(request) => {
+            if request.account.place_scope.is_some() {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "resource account place scope is host-declared and cannot be set by a tracked command",
+                ));
+            }
             Some(request.account.custodian.clone())
         }
         ResourceOperationRequestV1::SubmitDemand(request) => {
@@ -2528,6 +2550,17 @@ fn validate_resource_authority(
         ResourceOperationRequestV1::BeginTransfer(request) => state
             .accounts
             .get(&request.allocation.account)
+            .map(|account| account.custodian.clone()),
+        // The subject initiates through `leg_a`; settlement additionally
+        // requires each leg's completion lease to be held by that leg's own
+        // source custodian, so the counterparty's consent is its own lease.
+        ResourceOperationRequestV1::BeginExchange(request) => state
+            .accounts
+            .get(&request.leg_a.allocation.account)
+            .map(|account| account.custodian.clone()),
+        ResourceOperationRequestV1::RecordLoss(request) => state
+            .accounts
+            .get(&request.account)
             .map(|account| account.custodian.clone()),
         ResourceOperationRequestV1::CancelTransfer(request) => {
             let transfer = state.transfers.get(&request.transfer).ok_or_else(|| {
@@ -2559,7 +2592,10 @@ fn validate_resource_authority(
                 )
             })?;
             let account_id = match &request.disposition {
-                crate::ResourceTransferDispositionV1::Accept { destination, .. } => destination,
+                crate::ResourceTransferDispositionV1::Accept { destination, .. }
+                | crate::ResourceTransferDispositionV1::AcceptLocal { destination, .. } => {
+                    destination
+                }
                 crate::ResourceTransferDispositionV1::Lose { .. }
                 | crate::ResourceTransferDispositionV1::Return { .. }
                 | crate::ResourceTransferDispositionV1::ExternalOutflow { .. } => &transfer.source,

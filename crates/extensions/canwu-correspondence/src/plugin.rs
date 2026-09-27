@@ -1271,6 +1271,7 @@ fn complete_leg(
                 at: context.at,
                 location: leg.to.as_str().to_owned(),
                 evidence: vec![EvidenceRef::DomainRecordVersion(attempt)],
+                kind: canwu_api::HandoffKind::Planned,
             })
             .map_err(transport_error)?;
         operation.status = CorrespondenceStatus::Scheduled;
@@ -1596,6 +1597,7 @@ fn install_replanned_route(
                     previous_attempt,
                 )))
                 .collect(),
+            kind: canwu_api::HandoffKind::Planned,
         })
         .map_err(transport_error)?;
     operation.route_plan = plan;

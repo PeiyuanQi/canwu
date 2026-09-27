@@ -12,7 +12,7 @@ Canwu separates generic authoritative state from actor knowledge, while a domain
 
 | Caller | Preferred interface | Purpose |
 | --- | --- | --- |
-| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()` | Read generic authoritative state and complete evidence |
+| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()`, `person_availabilities()` | Read generic authoritative state and complete evidence |
 | Domain rule or renderer adapter | Integration `snapshot()` or equivalent projection | Assemble typed domain records into a detached view |
 | Player or in-world agent | `viewer_for_actor()` + `query_knowledge()` | Read only that actor's knowledge without leaking ground truth |
 | Explanation UI | `explain()` | Build causal explanations from recorded events or failures |
@@ -53,6 +53,22 @@ The host should copy only the fields its UI needs from `commander_knowledge` int
 ```
 
 The host owns this shape. It may contain only information returned by the actor-knowledge query; do not merge in `server_world`, hidden entities, or debugger-only fields.
+
+## Plan from a holder's knowledge
+
+Route planning for a person or institution should use only what that holder knows. `canwu-correspondence` builds such a holder planning snapshot with the same rule its own plugin uses:
+
+```rust
+use canwu_correspondence::planning_snapshot_from_holder_knowledge;
+
+let (snapshot, read_set) =
+    planning_snapshot_from_holder_knowledge(view, &holder, observed_at)?;
+let plan = plan_route(&snapshot, &request)?;
+```
+
+Call it inside a plugin system or command handler that declares the `canwu.core.knowledge` read. It admits only the endpoints and connections that the holder's ledger asserts at the read cut the view derives, and it fails if a known connection names an endpoint the holder does not know. The snapshot's `knowledge_cut` records that cut. The returned `KnowledgeReadCutDigest` is evidence of which facts were read, and it stays the same while those facts are unchanged. The view read itself is system access, so take `holder` from admitted authority, such as the command issuer, never from an unvalidated payload.
+
+Outside the runtime, pass a query result you already hold, such as a restricted viewer's `query_knowledge(&planning_knowledge_query())`, to the pure `planning_snapshot_from_knowledge_result`. A paginated result is rejected because a partial page cannot prove the holder's whole network.
 
 ## Presentation copies state; it does not write back
 

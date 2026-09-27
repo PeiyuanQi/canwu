@@ -867,7 +867,8 @@ impl PluginRegistrar<'_> {
                 ),
             ));
         }
-        let mut owned_state = contract.writes.clone();
+        let plugin_writes = super::persons::plugin_owned_boundary_writes(&contract)?;
+        let mut owned_state = plugin_writes.clone();
         owned_state.extend(contract.reservation_offers.iter().cloned());
         owned_state.sort();
         owned_state.dedup();
@@ -879,7 +880,7 @@ impl PluginRegistrar<'_> {
             &self.plugin,
             &contract.name,
             contract.phase,
-            &contract.writes,
+            &plugin_writes,
         )?;
         register_reservation_offerers(
             &mut candidate.reservation_offerers,
@@ -1477,7 +1478,13 @@ impl PluginRegistry {
                         "boundary system declarations are not in canonical order",
                     );
                 }
-                let mut owned_state = contract.writes.clone();
+                let plugin_writes = super::persons::plugin_owned_boundary_writes(contract)
+                    .map_err(|error| {
+                        invalid_snapshot_error(format!(
+                            "invalid boundary core-write descriptor: {error}"
+                        ))
+                    })?;
+                let mut owned_state = plugin_writes.clone();
                 owned_state.extend(contract.reservation_offers.iter().cloned());
                 owned_state.sort();
                 owned_state.dedup();
@@ -1494,7 +1501,7 @@ impl PluginRegistry {
                     &plugin,
                     &contract.name,
                     contract.phase,
-                    &contract.writes,
+                    &plugin_writes,
                 )
                 .map_err(|error| {
                     invalid_snapshot_error(format!("invalid boundary writer descriptor: {error}"))

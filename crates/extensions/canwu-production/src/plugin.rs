@@ -40,7 +40,7 @@ const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "dc6dc9fda679601313939c880d83ae0f5679652691eb7c47a0c1aed5a2249553";
+    "b4c821cfd8a6fba2faa33ea0064ade2b2ae969ae39e708fc00988662ca6b7ee2";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -95,6 +95,9 @@ pub fn production_command_descriptor() -> PluginActionDescriptor {
 
 fn production_external_state_keys() -> Vec<StateKey> {
     vec![
+        // Realization evidence is an application record of any kind; its
+        // exact version is validated against current or retained evidence.
+        StateKey::core_domain_records(),
         StateKey::core_evidence(),
         DomainRecordSchema::for_record::<canwu_resource::ResourceRuntimeRecord>().state_key(),
         DomainRecordSchema::for_record::<canwu_technology::TechniqueRevision>().state_key(),
@@ -407,7 +410,7 @@ fn admit_production_operation(
     }
     state.ensure_operation_outcome_admission_capacity(&envelope.operation)?;
     if state.project_operation_uses_reserved_outcome_at_capacity(&envelope.operation)? {
-        validate_external_operation_evidence(view, &envelope.operation)
+        validate_external_operation_evidence(view, &envelope.holder, &envelope.operation)
             .map_err(structured_reserved_project_rejection)?;
         let mut candidate = state.clone();
         candidate
@@ -470,23 +473,26 @@ fn apply_production_ingress(
                     continue;
                 }
                 let mut candidate = state.clone();
-                let result =
-                    validate_external_operation_evidence(view, &admitted.envelope.operation)
-                        .and_then(|()| candidate.apply_operation(&admitted.envelope, context.at))
-                        .and_then(|()| {
-                            if let Some(receipt) = &admitted.decision_receipt
-                                && candidate
-                                    .decision_receipts
-                                    .insert(receipt.ticket_id, receipt.clone())
-                                    .is_some()
-                            {
-                                return Err(CanwuError::new(
-                                    ErrorCode::IdempotencyConflict,
-                                    "production decision ticket already has a receipt",
-                                ));
-                            }
-                            candidate.validate()
-                        });
+                let result = validate_external_operation_evidence(
+                    view,
+                    &admitted.envelope.holder,
+                    &admitted.envelope.operation,
+                )
+                .and_then(|()| candidate.apply_operation(&admitted.envelope, context.at))
+                .and_then(|()| {
+                    if let Some(receipt) = &admitted.decision_receipt
+                        && candidate
+                            .decision_receipts
+                            .insert(receipt.ticket_id, receipt.clone())
+                            .is_some()
+                    {
+                        return Err(CanwuError::new(
+                            ErrorCode::IdempotencyConflict,
+                            "production decision ticket already has a receipt",
+                        ));
+                    }
+                    candidate.validate()
+                });
                 let (disposition, rejection_code, rejection_message) = match result {
                     Ok(()) => {
                         state = candidate;
@@ -1672,7 +1678,9 @@ fn operation_execution(
     match operation {
         crate::ProductionOperation::StartExecution { execution, .. } => Some(execution.id.clone()),
         crate::ProductionOperation::AdvanceExecution { execution, .. }
-        | crate::ProductionOperation::CompleteExecution { execution } => Some(execution.clone()),
+        | crate::ProductionOperation::CompleteExecution { execution, .. } => {
+            Some(execution.clone())
+        }
         _ => None,
     }
 }
@@ -1691,8 +1699,33 @@ fn operation_project(operation: &crate::ProductionOperation) -> Option<crate::Fa
 
 fn validate_external_operation_evidence(
     view: &SimulationView<'_>,
+    holder: &KnowledgeHolderRef,
     operation: &crate::ProductionOperation,
 ) -> Result<(), CanwuError> {
+    if let crate::ProductionOperation::CompleteExecution {
+        execution,
+        realized_output_per_mille,
+        realization_evidence: Some(evidence),
+    } = operation
+    {
+        // Holder, lifecycle, ratio, and declared-kind rules run first, so only
+        // an admissible completion ever resolves its evidence record.
+        let (_, production) = load_state(view)?
+            .ok_or_else(|| invalid("production provider validation runtime is unavailable"))?;
+        production.completion_admission(
+            holder,
+            execution,
+            *realized_output_per_mille,
+            Some(evidence),
+        )?;
+        if !view.domain_record_version_evidence_exists(evidence)? {
+            return Err(CanwuError::new(
+                ErrorCode::DomainRecordNotFound,
+                "production realization evidence is not an available exact record version",
+            ));
+        }
+        return Ok(());
+    }
     let (_, production) = load_state(view)?
         .ok_or_else(|| invalid("production provider validation runtime is unavailable"))?;
     if let crate::ProductionOperation::CreateFacilityProject { project } = operation {

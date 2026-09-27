@@ -110,6 +110,7 @@ fn fixture(balance: u64, floor: u64) -> Fixture {
                 capacity: Some(1_000),
                 protected_floor_policy: Some(floor_id.clone()),
                 closed: false,
+                place_scope: None,
             })
             .expect("account");
     }

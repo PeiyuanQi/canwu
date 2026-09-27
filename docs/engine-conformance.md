@@ -297,7 +297,11 @@ packets from the recorded system environment. The representative ingress fixture
 mixes command, communication, acknowledgement, information, and daily calendar
 work, proves priority/class ordering, command precedence over equal-time
 internal scheduled continuations, and late-input rollback, and continues an
-automatic acknowledgement through save/load and replay. This implements the
+automatic acknowledgement through save/load and replay. Since 0.12.0, the
+issuer of a queued plugin packet (host, owning-plugin permit, or scheduling
+boundary system) can withdraw it before its due time; the withdrawal is a
+terminal journal record that save/load and exact replay preserve, and the
+withdrawn packet is never admitted. This implements the
 canonical external-ingress portion of E03. Full E03 conformance remains
 open until recurring calendar policy and all internal scheduled continuation
 sources are represented by one versioned persistence abstraction.

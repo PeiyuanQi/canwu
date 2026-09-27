@@ -7,7 +7,7 @@ sidebar:
   label: Routing and transport
 ---
 
-> **Current contract.** The routing and transport types were introduced in 0.5 and remain part of the current 0.11.1 public API. Hosts must still provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
+> **Current contract.** The routing and transport types were introduced in 0.5 and remain part of the current 0.12.0 public API. Hosts must still provide network and historical content data. Map import, a general capacity allocator, a universal historical dataset, and first-class snapshot fields for transport records remain future work.
 
 For a runnable end-to-end composition with addressed information delivery, see
 [Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/).
@@ -44,6 +44,7 @@ let plan = plan_route(&planning_snapshot, &request)?;
 ```
 
 `PlanningSnapshot` may come from the current-world adapter or from a rail, air, telegraph, or relay-station extension. It binds the observer, knowledge cut, topology version, and expiry. Someone with a current railway timetable and someone who only knows a courier rumor can therefore produce different valid plans.
+To build a snapshot from exactly what one holder knows, use `planning_snapshot_from_holder_knowledge` from `canwu-correspondence`; see [Plan from a holder's knowledge](/en/developer/reading-state/#plan-from-a-holders-knowledge).
 
 If a nearby recipient is served inside the same district, the plan may contain one short walking or horse leg. Beijing may require several relays, stations, and custody transfers. The router does not collapse both destinations merely because both are “another person.”
 
@@ -90,6 +91,16 @@ execution.begin_saga(
 Each leg has its own status and actual departure/arrival times. At a relay, record a `Handoff` before starting the next leg. If flood, war, weather, or a line outage blocks the route, a domain system records the failure and reason; execution enters `ReplanPending`, and a new planning snapshot produces a successor itinerary revision. The replacement revision also records custody transfer from the failed segment into its first segment. Incidents outside an active transport attempt are retained as suppressed evidence rather than mutating an information or arrival-pending transition. The router never invents the disaster.
 
 After the final leg arrives, execution enters `ArrivalPending`. `completion_request()` yields a stable operation key and evidence; the host submits it through canonical ingress to complete the information attempt. Repeating the same key must not complete the attempt twice.
+
+## People, seizures, and external conditions
+
+Since 0.12.0 (`canwu-transport.v4`), three record additions cover common strategy-game movement:
+
+- `MovementSubjectRole::PersonsGroup` moves a persons group, several people travelling as one subject, usually identified by an application domain record. Like cargo, it must carry a positive quantity, here the head count; `requires_quantity()` states the rule.
+- `HandoffKind::Seizure { by }` records a seizure handoff: custody taken by someone outside the itinerary, such as bandits or a hostile garrison. It follows the same leg rules as a planned handoff. Ordinary handoffs stay planned handoffs (`Planned`) and serialize as before.
+- `ItineraryRevisionReason::ExternalCondition { record, version, kind }` explains a reroute by an external condition, citing an application-owned condition record, such as a flood or border-closure record, at an exact version with an application label. It is validated for the initial itinerary and for every reroute.
+
+Transport records these facts only. Whether a seizure or hazard happened, and who had the authority, stays in application systems.
 
 ## Capacity and determinism
 

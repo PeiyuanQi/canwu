@@ -44,6 +44,48 @@ must not become permanent kernel vocabulary. The accepted migration direction
 and compatibility gates are defined in the
 [world and event ownership audit](proposals/world-event-ownership-audit.md).
 
+## Persons and admission
+
+Whether a person can still act is generic engine truth, because admission,
+decision authority, and knowledge publication depend on it. Since 0.12.0 the
+kernel keeps person availability as a separate ordered map keyed by
+`PersonId`, not as a field of the legacy person projection, so it survives the
+planned world-model move. `PersonAvailability` pairs a life state (`Alive`,
+`Dead`, `Missing`) with a custody state (`Free`, `Detained`, `Hostage`,
+`Captive`, `Hiding`, `Exile`) and an optional custodian. Only a declared
+phase-7 or phase-10 boundary system changes it, through
+`SetPersonAvailability`; two writes for one person in one boundary fail that
+boundary. A person who is not alive, or who is detained or captive, cannot
+issue commands, make decisions, or act as a decision controller's authority
+person, and knowledge cannot be published to a dead person's ledger. Hostage,
+hiding, and exile remain admissible by default. Stricter rules, and the choice
+of when a person dies, is captured, or is released, stay with the
+application's own boundary systems.
+
+Open decision tickets are not left waiting on a person who can no longer act.
+At the end of the boundary that makes a person unavailable, the kernel cancels
+every open ticket whose decision maker is that person and every remaining open
+ticket whose assigned controller acts for that person, with stable reasons
+recorded on the boundary evidence. A ticket cannot be reassigned. When only the
+controller's authority person became unavailable, the decision continues as a
+new ticket for an available controller whose `parent_ticket` names the
+cancelled one. When the decision maker is unavailable, no ticket can be opened
+for that decision maker, and because lineage requires the same decision maker,
+a successor's decision is a new ticket without a parent link.
+
+Persons can also enter the world at runtime. A phase-7 `CreatePerson`
+directive supplies an application draft and provenance; the kernel allocates
+the `PersonId` from a persisted counter, commits the person at the end of the
+boundary, and returns the ID in a receipt keyed by the proposing plugin,
+system, and correlation. The person is visible from the next boundary, and
+exact replay reproduces the same identities.
+
+Queued input is likewise not a promise to settle. Before a plugin ingress item
+is due, its issuer (the host, the owning plugin's registration permit, or a
+boundary system of the plugin that scheduled it) can withdraw it. The
+withdrawal is a terminal journal record rather than a rollback, and the
+withdrawn item is never admitted.
+
 ## Information flow
 
 The reusable kernel should preserve facts about who holds which record, when it
@@ -90,7 +132,11 @@ scarce capacity. The information ledger does not acquire route search, and the
 router does not acquire dispatch or retry lifecycle state. The implemented
 slice requires the carrier holder to be the sender and reads only that
 sender-owned ledger; delegated-carrier disclosure and authority remain future
-contracts.
+contracts. Since 0.12.0 the same holder-relative planning rule is public:
+`planning_snapshot_from_holder_knowledge` builds a routing snapshot only from
+the endpoints and connections one holder's ledger asserts at the read cut and
+returns a read-set digest as evidence, so other domains can plan from what a
+holder knows without reading route truth.
 
 ## Causality and explanation
 
@@ -109,7 +155,7 @@ period-specific AI subsystem. The long-term ownership boundary is:
 | Layer | Responsibility |
 | --- | --- |
 | `canwu-core` | Stable decision request, ticket, and trace IDs only. It does not own policy or domain semantics. |
-| `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, accepted/rejected attempt records, traces, deterministic utility evaluation, and Utility/Rule/Random/Human/External/LLM policy interfaces. |
+| `canwu-decision` | Domain-neutral ticket/controller contracts, versioned options, ticket lineage, accepted/rejected attempt records, traces, deterministic utility evaluation, Utility/Rule/Random/Human/External/LLM policy interfaces, and the guarded utility composite policy. |
 | `canwu-sim` | Authoritative decision state, canonical ingress, operation-keyed random resolution, non-poisoning rejection admission, deadlines, authority derivation, transactional command admission, commitments, persistence validation, and exact replay. |
 | `canwu-api` | The supported public API for creating, refreshing, evaluating, inspecting, saving, and replaying decisions. |
 | Domain packages | Decision triggers, actor-relative fact projection, option and blocker generation, utility factors and weights, rules, personality or doctrine, and the command represented by each option. |
@@ -142,6 +188,22 @@ set, but its operation-keyed draw occurs in a declared boundary system and
 produces canonical decision ingress plus cross-linked draw evidence. It does
 not execute a hidden RNG inside an out-of-transaction policy object.
 
+Since 0.12.0 these selectors can be composed. `GuardedUtilityPolicy` runs
+ordered guard rules that may select, defer, or exclude an option with a
+recorded reason, scores the remaining options with weighted utility, and, only
+for a controller that opted in, returns the near-equivalent top-scored options
+for a bounded random tie-break. The same boundary random resolution then draws
+uniformly over those candidates only. Traces record the stage that decided and
+the guards that fired, and the policy's semantic hash binds its configuration
+to the controller, so a reconfigured policy under an unchanged identity is
+rejected. Only a boundary resolution may carry draw evidence; host-authored
+decision ingress cannot.
+
+A ticket may name a `parent_ticket`: a terminal ticket in hot decision history
+with the exact same decision maker. The link is copied onto the trace, so a
+follow-up decision, such as one reopened after its controller's authority
+person became unavailable, keeps its lineage without a second mechanism.
+
 This decision selector is distinct from stochastic world incidents. A disease
 exposure, equipment failure, or weather event remains a boundary-system
 mechanic owned by its domain. Missing or contested knowledge remains explicit
@@ -161,7 +223,7 @@ policy replays the recorded draw and generated ingress rather than drawing again
 Counterfactual branches may deliberately rerun or replace a policy, but must
 then produce new decision ingress and lineage rather than claiming exact replay.
 
-Future multi-stage deliberation, delegation, coalition voting, negotiation,
+Further multi-stage deliberation, delegation, coalition voting, negotiation,
 belief formation, and deliberation memory should compose through tickets,
 controller bindings, and domain/plugin state. They should not add
 policy-specific hidden mutable state or network clients to the simulation
@@ -170,7 +232,8 @@ kernel.
 ## Persistence and counterfactuals
 
 Snapshots contain deterministic state, clock, RNG state, scheduler sequence,
-pending serializable work, knowledge, decision tickets/controllers/attempts/traces,
+pending serializable work, knowledge, person availability and the
+created-person registry, decision tickets/controllers/attempts/traces,
 event history, and command records. A
 snapshot also retains plugin descriptors and blocks continuation until matching
 stateless executable handlers are rehydrated. It can be forked into independent
@@ -202,6 +265,15 @@ arrival-pending completion saga. It does not own the information ledger or the
 simulation scheduler. A route estimate is never the same thing as an
 information deadline: `DeliveryAttempt.due_at` remains the logical completion
 deadline, while ETA can change after a disaster and trigger a reroute.
+
+Since 0.12.0 the transport records also cover a group of people moving as one
+subject (`PersonsGroup`, counted by head count), custody taken by someone
+outside the itinerary (a seizure handoff that names the seizing identity), and
+a reroute caused by an application-owned condition record cited at an exact
+version (`ExternalCondition`). Incidents, hostility, hazards, and their
+authority remain application systems. `canwu-transport` is still a record
+library: a movement lifecycle plugin with capacity pools is a proposed later
+extension, not part of the current contract.
 
 Movement commands follow the same boundary. The canonical intent is
 `OrderMovement`, with subject-specific transit and custody state. A voluntary
@@ -252,6 +324,17 @@ for a different policy. Persistence, replay and terminal archives retain the
 policy; strict old-snapshot loading remains unsupported. Cross-custodian
 delegation and permission to submit pooled demands stay with the host/domain.
 
+Since 0.12.0, three more movements of stock are explicit. An account-level loss
+debits one account in place, cites its cause, and is conserved as admitted loss
+without inventing a transfer. An atomic exchange starts two transfers together
+or not at all: each leg's completion lease is held by that leg's source
+custodian and bound to the digest of the agreed terms, so each side consents to
+the whole exchange, and the two transfers then settle independently. Local
+acceptance settles an undispatched transfer without a transport execution when
+both accounts carry the same host-declared place scope, which the scenario sets
+at installation and the engine never infers. None of these grants delegated
+access to another custodian's stock; that remains a separate future contract.
+
 Since 0.10.1, other consumers can use the existing sealed
 `ResourceConsumptionIntentV1` map contract through canonical adapter ingress.
 Authorization is bound to an active exact current provider record, the full
@@ -267,7 +350,11 @@ order, work-in-progress, execution, project, and output-settlement lifecycles.
 Household supplementary work, distributed workshops, government workshops,
 concentrated plants, and multi-site enterprises are data profiles. Knowledge of
 a technique, the calendar year, or a generic building level never grants
-productive capacity by itself.
+productive capacity by itself. Since 0.12.0, a completion may record realized
+output as a per-mille share of the nominal output, floor-scaling every output
+settlement; any non-nominal share must cite an exact evidence record of a kind
+the process revision declares and stay within its bound, so a shortfall or an
+unusually high yield remains cited evidence rather than a hidden multiplier.
 
 Military logistics remains an independent consumer. The replaceable
 `canwu-force-supply-reference` integration submits recurring demands and typed
@@ -419,7 +506,11 @@ generic procedure, `canwu-ming-fiscal` owns source-cited longitudinal content,
 and `canwu-ming-fiscal-reference` composes three runnable starts with the
 reference world. Resource truth remains in host resource and logistics domains;
 fiscal completion is admitted only through exact external record-version
-evidence.
+evidence. Since 0.12.0 a fiscal authority binding may also name an acting actor
+next to its standing authorized actor. The acting actor is admitted only while
+the binding's authority basis, an exact application record version of a
+declared kind, is still current, and settlement checks it again; appointment,
+delegation, and their records remain application content.
 
 ## Debug client
 

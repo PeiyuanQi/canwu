@@ -51,6 +51,8 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [领域命令](/tutorials/move-army/) | domain command | `Command::Plugin` | 由领域整合定义并经公开规范入口验证的类型化意图。 |
 | [规范化输入](/architecture/events/) | canonical ingress | `IngressRecord` | 命令、通信、信息和调度系统共用的持久化确定性输入路径。首次出现时可附英文。 |
 | [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
+| [插件输入撤回](/developer/integration/) | plugin ingress cancellation | `cancel_plugin_ingress`, `IngressPayload::PluginCancellation` | 在到期之前终止撤回一项仍在排队的插件输入，并作为独立日志记录保存；被撤回的输入永远不会被准入，也不会发生回滚。 |
+| [撤回权限](/developer/integration/) | cancellation authority | `IngressCancellationAuthority` | 撤回排队插件输入的主体：上层应用撤回自己提交的公开数据包，所属插件以注册许可撤回其内部数据包类型，或由安排该输入的插件的边界系统撤回。只有签发者可以撤回。 |
 | [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |
 | [结算边界](/architecture/settlement/) | transaction | `BoundaryRequest`, `BoundaryRecord` | 准入工作、运行系统、记录证据并整体提交或回滚的一次已验证结算边界。 |
 | [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
@@ -90,11 +92,18 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [历史财政语境](/tutorials/cases/ming-fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/tutorials/cases/ming-fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `（证据种类，外部操作 ID）` 组合最多结算一张凭证；凭证不拥有资源真值。 |
+| [代理角色](/tutorials/cases/ming-fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
+| [权限依据](/tutorials/cases/ming-fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis` | 授予代理角色权限的精确应用记录版本，其记录种类须由财政插件声明；该记录出现新版本或退役后，授权随之结束。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
 | [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
 | [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStageV1` | 带生效期和出处的勘探、矿藏刻画、准入、开采准备、在产、枯竭或明确未知/不适用状态；不是永恒的矿藏布尔值。 |
 | [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevisionV1` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。 |
+| [账户损耗](/developer/production-economy/) | account-level loss | `ResourceOperationRequestV1::RecordLoss` | 不经转移、直接从单个账户扣减并引用原因的损耗；计入守恒中的已准入损耗，不动用已预留存量，除非明确允许，否则遵守受保护底线。 |
+| [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
+| [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
+| [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgressVersionV1` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
+| [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责军队、行动、战斗、占领、军事知识和跨领域凭证；不是通用战斗模型。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
@@ -131,19 +140,31 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | 中文规范写法 | English | 代码或 API | 含义与使用位置 |
 | --- | --- | --- | --- |
 | [角色](/developer/reading-state/) | actor | `PersonId` | 其知识和权限会约束视图或行动的人物或世界内主体。 |
+| [人物可用性](/developer/integration/) | person availability | `PersonAvailability` | 某个人物的核心生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物不能签发命令、作出决策，也不能作为控制者的权限人物；没有记录时视为存活且自由。 |
+| [生存状态](/developer/integration/) | life state | `LifeState` | `Alive`、`Dead` 或 `Missing`；人物可用性的一部分。 |
+| [人身状态](/developer/integration/) | custody state | `CustodyState` | `Free`、`Detained`、`Hostage`、`Captive`、`Hiding` 或 `Exile`；人物可用性的另一部分。默认只有 `Detained` 和 `Captive` 会阻止准入。 |
+| [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
 | [报告](/architecture/events/) | report | `EventKind::ReportDispatched` | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
+| [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
 | [改道](/tutorials/cases/routed-correspondence/) | reroute | `ItineraryRevision` | 因灾害或路线知识变化，为同一个投递尝试建立后继行程。 |
+| [外部条件](/tutorials/routing-transport/) | external condition | `ItineraryRevisionReason::ExternalCondition` | 引用应用所有的条件记录精确正数版本及应用标签的改道原因；运输只记录引用，不解释条件本身。 |
 | [投递重试](/tutorials/cases/routed-correspondence/) | delivery retry | `DomainReference` 角色 `"previous_attempt"` | 终态失败后新建的后继投递尝试，不是对旧 attempt 的改道。 |
+| [人员群体](/tutorials/routing-transport/) | persons group | `MovementSubjectRole::PersonsGroup` | 作为一个整体移动的一群人所对应的移动主体，以正数人数作为数量；其身份通常是应用领域记录。 |
+| [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份；背后的事件和权限仍属于应用系统。其余交接均为计划交接。 |
 | [投影](/developer/reading-state/) | projection | — | 不暴露权威领域状态而生成的角色范围物化表示。 |
 | [权限](/developer/integration/) | authority | `CommandAuthority` | 发出命令或执行动作的已验证权利；`authoritative state` 应译为“权威状态”。 |
 | [签发者](/developer/integration/) | issuer | `Issuer` | 命令声明的来源身份；权限验证决定该身份是否可以行动。 |
 | [控制者](/tutorials/cases/warlord-aid-decision/) | controller | `DecisionControllerBinding` | 绑定到席位、负责作出决策的实体或过程；代码相邻正文可附 `controller`。 |
 | [席位](/tutorials/cases/warlord-aid-decision/) | seat | `seat_id` | 可以绑定控制者的稳定决策角色。 |
 | [决策策略](/tutorials/cases/warlord-aid-decision/) | policy | `DecisionPolicy` | 从当前选项中作出选择的人类、外部服务、LLM 或确定性评估器。 |
+| [前置规则效用策略](/tutorials/cases/warlord-aid-decision/) | guarded utility policy | `GuardedUtilityPolicy` | 组合策略：有序前置规则可以选择、推迟或排除选项；加权效用为其余选项评分；可选的随机平局决胜处理分数接近的最高选项。其语义哈希把配置绑定到控制者。 |
+| [决策阶段](/tutorials/cases/warlord-aid-decision/) | decision stage | `DecisionStage` | 组合策略中产生决定的阶段（`Guard`、`Utility` 或 `Random`），与触发的前置规则一起记录在决策轨迹上；它与结算阶段无关。 |
+| [随机平局决胜](/tutorials/cases/uncertainty-resolution/) | random tie-break | `DecisionOutcome::PendingRandom` | 控制者须显式启用的路径：前置规则效用策略只列出分数接近的最高选项，再由边界系统以一次均匀的操作定址随机抽样从中选择。 |
 | [决策票据](/tutorials/cases/warlord-aid-decision/) | decision ticket | `DecisionTicket` | 请求一个控制者从带版本的当前有效选项中选择的持久化对象。 |
+| [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的、同一决策者的终态票据，例如为另一控制者重新开启的已取消票据。该关联会复制到新票据的决策轨迹上。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
 | [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 尝试解决票据时形成的权威准入、接受或拒绝记录。 |
 | [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |

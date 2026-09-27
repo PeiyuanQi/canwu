@@ -54,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         capacity: Some(500),
         protected_floor_policy: None,
         closed: false,
+        place_scope: None,
     })?;
 
     state.install_demand(ResourceDemand {

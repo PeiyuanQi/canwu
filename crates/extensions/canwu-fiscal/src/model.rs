@@ -700,11 +700,27 @@ pub struct FiscalHistoricalContext {
     pub updated_at: SimTime,
 }
 
+/// Stable rejection message used when an acting actor's authority basis is
+/// missing or no longer the current version of its record.
+pub const FISCAL_ACTING_BASIS_NOT_CURRENT: &str =
+    "fiscal acting actor authority basis is not the current record version";
+
+/// Actors who may issue fiscal procedure actions for one institution.
+///
+/// `authorized_actor` is the standing principal. `acting_actor` is an optional
+/// second actor who is admitted only while the exact `authority_basis` record
+/// version is still the current version of that record; once the basis record
+/// advances or retires, the acting actor is rejected with
+/// [`FISCAL_ACTING_BASIS_NOT_CURRENT`] while the principal remains admitted.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalAuthorityBinding {
     pub id: String,
     pub institution: EntityRef,
     pub authorized_actor: Option<PersonId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting_actor: Option<PersonId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_basis: Option<DomainRecordVersionRef>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -988,6 +1004,19 @@ impl FiscalState {
             |value| &value.id,
             "transition candidate",
         )?;
+        if self.authority_bindings.values().any(|binding| {
+            binding.acting_actor.is_some() != binding.authority_basis.is_some()
+                || binding.acting_actor.is_some()
+                    && binding.acting_actor == binding.authorized_actor
+                || binding
+                    .authority_basis
+                    .as_ref()
+                    .is_some_and(|basis| basis.version == 0)
+        }) {
+            return Err(invalid(
+                "fiscal acting actors require one exact authority basis and differ from the authorized actor",
+            ));
+        }
         if self.observer_bindings.values().any(|value| {
             value.confidence_per_mille > 1_000
                 || value.knowledge_holder != KnowledgeHolderRef::Person(value.actor)

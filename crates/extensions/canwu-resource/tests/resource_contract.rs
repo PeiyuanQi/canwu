@@ -130,6 +130,7 @@ fn fixture(balance: u64, floor: u64) -> Fixture {
                 capacity: Some(1_000),
                 protected_floor_policy: Some(floor_id.clone()),
                 closed: false,
+                place_scope: None,
             })
             .expect("account");
     }
@@ -963,6 +964,7 @@ fn admitted_transfer_terminal_work_keeps_hot_outcome_capacity_reserved() {
                     capacity: Some(1),
                     protected_floor_policy: None,
                     closed: false,
+                    place_scope: None,
                 },
             },
         ));
@@ -1033,6 +1035,7 @@ fn named_terminal_report_reservation_publishes_the_last_real_hot_slot() {
                     fulfillments: Vec::new(),
                     transfers: Vec::new(),
                     consumptions: Vec::new(),
+                    losses: Vec::new(),
                     source_versions: vec![report_source.clone()],
                     semantic_digest: String::new(),
                 }
@@ -1268,6 +1271,7 @@ fn holder_reports_use_persisted_authoritative_scope_and_reject_relabeling() {
         fulfillments: Vec::new(),
         transfers: Vec::new(),
         consumptions: Vec::new(),
+        losses: Vec::new(),
         source_versions: vec![source.clone()],
         semantic_digest: String::new(),
     }
@@ -1426,6 +1430,7 @@ fn report_observations_bind_authoritative_allocation_and_fulfillment_ownership()
         }],
         transfers: Vec::new(),
         consumptions: Vec::new(),
+        losses: Vec::new(),
         source_versions: vec![source],
         semantic_digest: String::new(),
     }
@@ -1491,6 +1496,7 @@ fn delayed_report_wakes_and_publishes_on_an_otherwise_quiet_boundary() {
                 fulfillments: Vec::new(),
                 transfers: Vec::new(),
                 consumptions: Vec::new(),
+                losses: Vec::new(),
                 source_versions: vec![source.clone()],
                 semantic_digest: String::new(),
             }
@@ -2561,6 +2567,7 @@ fn tracked_commands_cannot_cross_holder_targets() {
                     capacity: None,
                     protected_floor_policy: None,
                     closed: false,
+                    place_scope: None,
                 },
             }),
         },

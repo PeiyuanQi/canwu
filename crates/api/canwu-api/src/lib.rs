@@ -31,14 +31,16 @@ pub use canwu_sim::{
     ArchiveStoreOutcome, ArchivedEvidenceLocator, ArchivedEvidenceReceipt,
     ArchivedPluginIngressProvenance, ArchivedSegmentHeader, Army, ArtifactManifest, BoundaryChange,
     BoundaryContext, BoundaryDirective, BoundaryEmission, BoundaryEmissionKind,
-    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPhase, BoundaryProposal,
-    BoundaryReceipt, BoundaryRecord, BoundaryRequest, BoundarySystemContract,
-    BoundarySystemHandler, CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
-    CanwuError, CheckpointJournal, Command, CommandAttemptOutcome, CommandAttemptRecord,
-    CommandAuthority, CommandContext, CommandEnvelope, CommandIngress, CommandOutcome,
-    CommandPolicyContext, CommandReceipt, CommandRecord, CommandRejection, CommandRequest,
-    CommitmentRoots, CompactedSimulation, ControllerDecision, ControllerPolicy,
-    DECISION_ARCHIVE_BUCKET_PAGE_FORMAT_VERSION, DECISION_ARCHIVE_FORMAT_VERSION,
+    BoundaryIngressGeneration, BoundaryKnowledgeChange, BoundaryPersonAvailabilityChange,
+    BoundaryPersonCreation, BoundaryPhase, BoundaryProposal, BoundaryReceipt, BoundaryRecord,
+    BoundaryRequest, BoundarySystemContract, BoundarySystemHandler,
+    CHECKPOINT_JOURNAL_FORMAT_VERSION, COMMITMENT_FORMAT_VERSION,
+    CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CanwuError, CheckpointJournal, Command,
+    CommandAttemptOutcome, CommandAttemptRecord, CommandAuthority, CommandContext, CommandEnvelope,
+    CommandIngress, CommandOutcome, CommandPolicyContext, CommandReceipt, CommandRecord,
+    CommandRejection, CommandRequest, CommitmentRoots, CompactedSimulation, ControllerDecision,
+    ControllerPolicy, CreatedPerson, CustodyState, DECISION_ARCHIVE_BUCKET_PAGE_FORMAT_VERSION,
+    DECISION_ARCHIVE_FORMAT_VERSION, DECISION_MAKER_UNAVAILABLE_REASON,
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionAction, DecisionArchiveBlob,
     DecisionArchiveBucketPage, DecisionArchiveProvider, DecisionArchiveReceipt,
     DecisionArchiveRecord, DecisionArchiveStore, DecisionArchiveStoreOutcome,
@@ -49,8 +51,8 @@ pub use canwu_sim::{
     DecisionHistoryQueryBudget, DecisionHotState, DecisionIngressRequest,
     DecisionLocatorScaleMetrics, DecisionMutation, DecisionOption, DecisionOptionEvaluation,
     DecisionOptionWeight, DecisionOrigin, DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity,
-    DecisionPolicyKind, DecisionRandomEvidence, DecisionRule, DecisionState, DecisionTicket,
-    DecisionTicketDraft, DecisionTicketState, DecisionTrace, DemoIds, DomainRecord,
+    DecisionPolicyKind, DecisionRandomEvidence, DecisionRule, DecisionStage, DecisionState,
+    DecisionTicket, DecisionTicketDraft, DecisionTicketState, DecisionTrace, DemoIds, DomainRecord,
     DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordMutation, DomainRecordMutationPolicy, DomainRecordOperation,
     DomainRecordPage, DomainRecordPageRoots, DomainRecordSchema, DomainReference,
@@ -58,13 +60,14 @@ pub use canwu_sim::{
     ErrorCode, EvidenceArchiveIndex, EvidenceCursor, EvidenceIndexEntry, EvidenceItemLocator,
     EvidenceJournalKind, EvidenceJournalRoots, EvidenceJournalSegment, EvidenceNestedLocator,
     EvidenceSealToken, ExternalDecisionOption, ExternalDecisionRequest, ExternalDecisionResponse,
-    ExternalPolicy, Government, HumanDecisionResponse, HumanPolicy,
+    ExternalPolicy, Government, GuardedUtilityPolicy, HumanDecisionResponse, HumanPolicy,
     IDENTITY_EVIDENCE_DEPENDENCIES_FIELD, IDENTITY_EVIDENCE_DEPENDENCIES_FORMAT_VERSION,
-    IdentityEvidenceDependenciesV1, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
-    InteractionPolicy, Issuer, KnowledgeLimitsV1, KnowledgeSubjectSchema,
-    KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo, LetterStatus, LlmModelIdentity,
-    LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
-    MAX_DECISION_HISTORY_PAGE_SIZE, MAX_OWNER_AUTHORIZED_MUTATIONS,
+    IdentityEvidenceDependenciesV1, IngressCancellationAuthority, IngressClass, IngressPayload,
+    IngressReceipt, IngressRecord, InteractionPolicy, Issuer, KnowledgeLimitsV1,
+    KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LetterCargo,
+    LetterStatus, LifeState, LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
+    MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE,
+    MAX_INGRESS_CANCELLATION_REASON_BYTES, MAX_OWNER_AUTHORIZED_MUTATIONS,
     MAX_OWNER_AUTHORIZED_PARTICIPANTS, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES,
     MaintenanceChangeRecord, MaintenanceDependencyResolverDescriptor, MaintenanceDisposition,
     MaintenanceIngressRequest, MaintenanceRejectionReceipt, MapPoint,
@@ -77,36 +80,36 @@ pub use canwu_sim::{
     PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FORMAT_VERSION, PLUGIN_DESCRIPTOR_FORMAT_VERSION,
     PagedSimulationCheckpoint, PatriciaStoreMetrics, PayloadProperty,
     PayloadRequiredEvidenceContinuationV1, PayloadSchema, PayloadValueType,
-    PersistentDomainRecordStore, Person, PersonTransitState, PluginActionDescriptor,
-    PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant, PluginArchiveRetention,
-    PluginCommandHandler, PluginComponentRecord, PluginDescriptor, PluginIngressDescriptor,
-    PluginIngressPermit, PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema,
-    PluginRegistrar, PluginRegistry, PolicyDecision, PortablePagedSimulationCheckpoint,
-    PreparedDecisionArchive, PreparedDecisionIngress, PreparedEvidenceSeal,
-    PreparedPagedSimulationCheckpoint, PreparedStateDelta, QueuedExternalPolicy, QueuedHumanPolicy,
-    QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION, RUN_MANIFEST_FORMAT_VERSION,
-    RandomAlgorithm, RandomDecisionResolution, RandomDrawAddress, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
-    RandomSample, RandomStreamKey, RandomStreamState, ReplayJournal, ReservationAllocation,
-    ReservationDisposition, ReservationOffer, ReservationOfferRecord, ReservationPoolKey,
-    ReservationRef, ReservationRequest, ReservationRequestRecord, Route, RuleChoice, RulePolicy,
-    RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose, SNAPSHOT_FORMAT_VERSION,
-    STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario,
-    SeatBinding, SeatPolicy, SimulationCheckpoint, SimulationPlugin, SimulationSnapshot,
-    SimulationSystemHandler, SimulationView, StateKey, StatePageBlob, StatePageProvider,
-    StatePageRetentionHandle, StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore,
-    StateVisibility, SystemCadence, SystemContract, SystemDirective, Territory, TracePolicy,
-    TransitState, UtilityEvaluator, UtilityPolicy, UtilityProfile, VerifiedDecisionArchiveCommit,
-    VerifiedOwnerAuthorizedMaintenanceCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
-    WorldSnapshot, canonical_byte_hash, canonical_hash, format8_decision_locator_scale_probe,
-    format8_patricia_scale_probe, identity_evidence_dependencies_property_v1,
-    payload_required_evidence_continuation_property_v1, prepare_state_delta, state_page_id,
-    verify_state_delta,
+    PersistentDomainRecordStore, Person, PersonAvailability, PersonDraft, PersonTransitState,
+    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveReachabilityParticipant,
+    PluginArchiveRetention, PluginCommandHandler, PluginComponentRecord, PluginDescriptor,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginIngressTarget,
+    PluginKnowledgeSchema, PluginRegistrar, PluginRegistry, PolicyDecision,
+    PortablePagedSimulationCheckpoint, PreparedDecisionArchive, PreparedDecisionIngress,
+    PreparedEvidenceSeal, PreparedPagedSimulationCheckpoint, PreparedStateDelta,
+    QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RUN_CONFIGURATION_FORMAT_VERSION,
+    RUN_MANIFEST_FORMAT_VERSION, RandomAlgorithm, RandomDecisionResolution, RandomDrawAddress,
+    RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1,
+    RandomOperationTarget, RandomSample, RandomStreamKey, RandomStreamState, ReplayJournal,
+    ReservationAllocation, ReservationDisposition, ReservationOffer, ReservationOfferRecord,
+    ReservationPoolKey, ReservationRef, ReservationRequest, ReservationRequestRecord, Route,
+    RuleChoice, RulePolicy, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
+    SNAPSHOT_FORMAT_VERSION, STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION,
+    STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationCheckpoint,
+    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
+    StatePageBlob, StatePageProvider, StatePageRetentionHandle, StatePageRetentionLedger,
+    StatePageRetentionPhase, StatePageStore, StateVisibility, SystemCadence, SystemContract,
+    SystemDirective, Territory, TracePolicy, TransitState, UtilityEvaluator, UtilityPolicy,
+    UtilityProfile, VerifiedDecisionArchiveCommit, VerifiedOwnerAuthorizedMaintenanceCommit,
+    WeightedUtilityEvaluator, WeightedUtilityPolicy, WorldSnapshot, canonical_byte_hash,
+    canonical_hash, format8_decision_locator_scale_probe, format8_patricia_scale_probe,
+    identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
+    prepare_state_delta, state_page_id, verify_state_delta,
 };
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
     CapacityBooking, CapacityBookingId, CapacityBookingStatus, DeliveryCompletionRequest,
-    DeliverySaga, Handoff, HandoffId, ItineraryRevision, ItineraryRevisionId,
+    DeliverySaga, Handoff, HandoffId, HandoffKind, ItineraryRevision, ItineraryRevisionId,
     ItineraryRevisionReason, LegExecution, LegExecutionId, LegExecutionStatus, MovementInitiative,
     MovementOrder, MovementOrderError, MovementOrderId, MovementSubject, MovementSubjectRole,
     ReconciliationOutcome, SagaState, TRANSPORT_SEMANTIC_VERSION, TransportError,
@@ -290,6 +293,19 @@ impl Canwu {
     #[must_use]
     pub fn world(&self) -> WorldSnapshot {
         self.simulation.world()
+    }
+
+    /// Trusted host access to a person's committed life and custody state.
+    /// `None` means no change has been committed: the person is alive and free.
+    #[must_use]
+    pub fn person_availability(&self, person: PersonId) -> Option<&PersonAvailability> {
+        self.simulation.person_availability(person)
+    }
+
+    /// Trusted host access to every committed person availability, in
+    /// person-ID order. Persons without an entry are alive and free.
+    pub fn person_availabilities(&self) -> impl Iterator<Item = (&PersonId, &PersonAvailability)> {
+        self.simulation.person_availabilities()
     }
 
     /// Trusted host/admin access to the complete knowledge snapshot.
@@ -569,6 +585,45 @@ impl Canwu {
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation
             .enqueue_permitted_plugin_ingress(request, permit)
+    }
+
+    /// Withdraws a still-pending plugin ingress item that the host enqueued
+    /// with [`Self::enqueue_plugin_ingress`], strictly before its due time.
+    ///
+    /// Due, admitted, archived, or already cancelled items fail with
+    /// [`ErrorCode::LateIngress`]; items of internal packet types or items a
+    /// plugin scheduled inside the engine fail with
+    /// [`ErrorCode::InvalidAuthority`]; unknown IDs fail with
+    /// [`ErrorCode::EvidenceUnavailable`]; non-plugin targets and reasons that
+    /// are empty, untrimmed, or longer than
+    /// [`MAX_INGRESS_CANCELLATION_REASON_BYTES`] fail with
+    /// [`ErrorCode::InvalidPayload`]; declared read-only runs fail with
+    /// [`ErrorCode::InteractionReadOnly`]. The returned receipt names the
+    /// terminal [`IngressPayload::PluginCancellation`] journal record. The
+    /// withdrawn item is never admitted, never settles, and nothing is rolled
+    /// back; snapshots, checkpoint journals, and exact replay preserve the
+    /// cancellation.
+    pub fn cancel_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.cancel_plugin_ingress(ingress_id, reason)
+    }
+
+    /// Withdraws a still-pending item of an internal packet type through the
+    /// owning plugin's opaque registration permit. The permit covers
+    /// host-enqueued items of that exact type and items the same plugin
+    /// scheduled inside the engine; timing rules match
+    /// [`Self::cancel_plugin_ingress`].
+    pub fn cancel_permitted_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        permit: &PluginIngressPermit,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .cancel_permitted_plugin_ingress(ingress_id, permit, reason)
     }
 
     pub fn prepare_decision(
@@ -1069,6 +1124,19 @@ impl CompactedCanwu {
         self.simulation.world()
     }
 
+    /// Trusted host access to a person's committed life and custody state.
+    /// `None` means no change has been committed: the person is alive and free.
+    #[must_use]
+    pub fn person_availability(&self, person: PersonId) -> Option<&PersonAvailability> {
+        self.simulation.person_availability(person)
+    }
+
+    /// Trusted host access to every committed person availability, in
+    /// person-ID order. Persons without an entry are alive and free.
+    pub fn person_availabilities(&self) -> impl Iterator<Item = (&PersonId, &PersonAvailability)> {
+        self.simulation.person_availabilities()
+    }
+
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
@@ -1160,6 +1228,45 @@ impl CompactedCanwu {
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation
             .enqueue_permitted_plugin_ingress(request, permit)
+    }
+
+    /// Withdraws a still-pending plugin ingress item that the host enqueued
+    /// with [`Self::enqueue_plugin_ingress`], strictly before its due time.
+    ///
+    /// Due, admitted, archived, or already cancelled items fail with
+    /// [`ErrorCode::LateIngress`]; items of internal packet types or items a
+    /// plugin scheduled inside the engine fail with
+    /// [`ErrorCode::InvalidAuthority`]; unknown IDs fail with
+    /// [`ErrorCode::EvidenceUnavailable`]; non-plugin targets and reasons that
+    /// are empty, untrimmed, or longer than
+    /// [`MAX_INGRESS_CANCELLATION_REASON_BYTES`] fail with
+    /// [`ErrorCode::InvalidPayload`]; declared read-only runs fail with
+    /// [`ErrorCode::InteractionReadOnly`]. The returned receipt names the
+    /// terminal [`IngressPayload::PluginCancellation`] journal record. The
+    /// withdrawn item is never admitted, never settles, and nothing is rolled
+    /// back; snapshots, checkpoint journals, and exact replay preserve the
+    /// cancellation.
+    pub fn cancel_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.cancel_plugin_ingress(ingress_id, reason)
+    }
+
+    /// Withdraws a still-pending item of an internal packet type through the
+    /// owning plugin's opaque registration permit. The permit covers
+    /// host-enqueued items of that exact type and items the same plugin
+    /// scheduled inside the engine; timing rules match
+    /// [`Self::cancel_plugin_ingress`].
+    pub fn cancel_permitted_plugin_ingress(
+        &mut self,
+        ingress_id: IngressId,
+        permit: &PluginIngressPermit,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .cancel_permitted_plugin_ingress(ingress_id, permit, reason)
     }
 
     pub fn prepare_decision(

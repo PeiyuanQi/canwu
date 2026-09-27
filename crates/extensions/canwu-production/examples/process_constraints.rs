@@ -1,9 +1,11 @@
 use canwu_api::SimTime;
 use canwu_production::{
-    ProcessRevision, ProcessRevisionId, ProductionOutputSpec, ProductionRequirementAlternative,
-    ProductionRequirementGroup, ProductionRequirementKind, ProductionState, ResourceRequirement,
+    NOMINAL_REALIZED_OUTPUT_PER_MILLE, ProcessRevision, ProcessRevisionId, ProductionOutputSpec,
+    ProductionRequirementAlternative, ProductionRequirementGroup, ProductionRequirementKind,
+    ProductionState, ResourceRequirement,
 };
 use canwu_resource::{ResourceDefinitionRevisionId, ResourceUnitRevisionId};
+use std::collections::BTreeSet;
 
 fn main() {
     let unit = ResourceUnitRevisionId::new("resource:mass-unit:v1").expect("unit ID");
@@ -47,6 +49,8 @@ fn main() {
         }],
         capacity: Vec::new(),
         adoption_required: true,
+        max_realized_per_mille: NOMINAL_REALIZED_OUTPUT_PER_MILLE,
+        realization_evidence_kinds: BTreeSet::new(),
     };
     let state = ProductionState::default();
     for blocker in state.blockers_for(&process, &[]) {

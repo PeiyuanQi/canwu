@@ -76,6 +76,12 @@ pub enum ErrorCode {
     UnsupportedSnapshotVersion,
     UnsupportedRandomDrawAddress,
     ValueOutOfRange,
+    /// A command or decision issuer resolves to a person who is not alive or
+    /// is detained or captive.
+    IssuerUnavailable,
+    /// A decision maker resolves to a person who is not alive or is detained
+    /// or captive.
+    DecisionMakerUnavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -187,5 +193,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::UnsupportedSnapshotVersion => "unsupported_snapshot_version",
         ErrorCode::UnsupportedRandomDrawAddress => "unsupported_random_draw_address",
         ErrorCode::ValueOutOfRange => "value_out_of_range",
+        ErrorCode::IssuerUnavailable => "issuer_unavailable",
+        ErrorCode::DecisionMakerUnavailable => "decision_maker_unavailable",
     }
 }

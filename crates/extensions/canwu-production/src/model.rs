@@ -1,9 +1,9 @@
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     BoundaryId, CanwuError, CommandAttemptId, CommandRequestId, DecisionTicketId, DecisionTraceId,
-    DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle, DomainRecordType,
-    DomainRecordVersionRef, DomainValueKindClass, EntityRef, ErrorCode, EvidenceRef,
-    KnowledgeHolderRef, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
+    DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef, ErrorCode,
+    EvidenceRef, KnowledgeHolderRef, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
     PayloadRequiredEvidenceContinuationV1, RandomDrawAddress, RandomOperationTarget, RandomSample,
     RandomStreamKey, SimTime, TypedDomainRecordRef, canonical_hash,
 };
@@ -34,6 +34,18 @@ pub const MAX_ARCHIVE_OBJECTS_PER_BATCH: usize = 1_024;
 pub const MAX_ARCHIVE_BYTES_PER_BATCH: usize = 16 * 1024 * 1024;
 pub const MAX_ARCHIVE_PAGE_ENTRIES: usize = 512;
 pub const MAX_PENDING_RETENTION_HANDLES: usize = 64;
+/// Realized-output ratio, in thousandths, that settles exactly the nominal
+/// process output. It is the implicit value of an absent realized per-mille.
+pub const NOMINAL_REALIZED_OUTPUT_PER_MILLE: u16 = 1_000;
+
+const fn nominal_realized_output_per_mille() -> u16 {
+    NOMINAL_REALIZED_OUTPUT_PER_MILLE
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_nominal_realized_output_per_mille(value: &u16) -> bool {
+    *value == NOMINAL_REALIZED_OUTPUT_PER_MILLE
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProductionLimitsV1 {
@@ -222,6 +234,18 @@ pub struct ProcessRevision {
     pub outputs: Vec<ProductionOutputSpec>,
     pub capacity: Vec<CapacityRequirement>,
     pub adoption_required: bool,
+    /// Upper bound, in thousandths of the nominal output, that a completion may
+    /// realize. It is at least [`NOMINAL_REALIZED_OUTPUT_PER_MILLE`]; a value
+    /// above it admits evidenced yields larger than the nominal output.
+    #[serde(
+        default = "nominal_realized_output_per_mille",
+        skip_serializing_if = "is_nominal_realized_output_per_mille"
+    )]
+    pub max_realized_per_mille: u16,
+    /// Record kinds whose exact versions may justify a non-nominal realized
+    /// output. Empty admits only the nominal output.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub realization_evidence_kinds: BTreeSet<DomainRecordKind>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -433,6 +457,14 @@ pub struct ProductionExecution {
     pub completion_certificate: canwu_resource::CompletionLeaseActivationCertificateV1,
     pub production_completion_grant: canwu_resource::CompletionCapacityGrantId,
     pub resource_completion_grant: canwu_resource::CompletionCapacityGrantId,
+    /// Realized output ratio recorded at completion, in thousandths of the
+    /// nominal output. `None` is the nominal ratio; the output requests hold
+    /// the floor-scaled quantities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realized_output_per_mille: Option<u16>,
+    /// Exact application record version that justified the realized output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realization_evidence: Option<DomainRecordVersionRef>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -853,8 +885,17 @@ pub enum ProductionOperation {
         execution: ProductionExecutionId,
         completed_units: u64,
     },
+    /// Completes a fully advanced execution. `realized_output_per_mille`
+    /// scales every output settlement quantity by floor division; `None` is
+    /// the nominal ratio. Any other ratio must be positive, may not exceed the
+    /// process `max_realized_per_mille`, and needs `realization_evidence` of a
+    /// kind the process declares; evidence is rejected for a nominal ratio.
     CompleteExecution {
         execution: ProductionExecutionId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        realized_output_per_mille: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        realization_evidence: Option<DomainRecordVersionRef>,
     },
     CancelWorkOrder {
         work_order: WorkOrderId,
@@ -1412,6 +1453,8 @@ impl ProductionState {
                     .effective_until
                     .is_some_and(|until| until <= process.effective_from)
                 || process.requirements.len() > MAX_REQUIREMENT_GROUPS
+                || process.max_realized_per_mille < NOMINAL_REALIZED_OUTPUT_PER_MILLE
+                || process.realization_evidence_kinds.len() > MAX_REQUIREMENT_ALTERNATIVES
             {
                 return Err(invalid(format!("process revision {id} is invalid")));
             }
@@ -1613,11 +1656,17 @@ impl ProductionState {
                 || execution.output_source.as_ref().is_some_and(|source| {
                     source.record != production_runtime_reference().into_untyped()
                 })
+                || !realized_output_record_is_valid(process, execution)
                 || execution.output_requests.iter().zip(&process.outputs).any(
                     |(request, output)| {
                         request.resource != output.resource
                             || request.unit != output.unit
-                            || request.quantity != output.quantity.saturating_mul(order.quantity)
+                            || request.quantity == 0
+                            || Some(request.quantity)
+                                != realized_output_quantity(
+                                    output.quantity.saturating_mul(order.quantity),
+                                    execution.realized_output_per_mille,
+                                )
                     },
                 )
             {
@@ -2211,8 +2260,18 @@ impl ProductionState {
                 }
                 wip.updated_at = now;
             }
-            ProductionOperation::CompleteExecution { execution } => {
-                self.complete_execution(&envelope.holder, execution, now)?;
+            ProductionOperation::CompleteExecution {
+                execution,
+                realized_output_per_mille,
+                realization_evidence,
+            } => {
+                self.complete_execution(
+                    &envelope.holder,
+                    execution,
+                    *realized_output_per_mille,
+                    realization_evidence.as_ref(),
+                    now,
+                )?;
             }
             ProductionOperation::CancelWorkOrder { work_order } => {
                 self.cancel_work_order(&envelope.holder, work_order, now)?;
@@ -2698,18 +2757,23 @@ impl ProductionState {
         self.validate_allocations()
     }
 
-    fn complete_execution(
-        &mut self,
+    /// Applies every completion admission rule except the evidence record
+    /// lookup: holder authority, a fully advanced running execution, the
+    /// realized-output ratio and declared evidence kind, and a positive scaled
+    /// quantity for every output leg. Returns the canonical stored ratio
+    /// (`None` is nominal).
+    pub(crate) fn completion_admission(
+        &self,
         holder: &KnowledgeHolderRef,
         execution_id: &ProductionExecutionId,
-        now: SimTime,
-    ) -> Result<(), CanwuError> {
+        realized_output_per_mille: Option<u16>,
+        realization_evidence: Option<&DomainRecordVersionRef>,
+    ) -> Result<Option<u16>, CanwuError> {
         let execution = self
             .executions
             .get(execution_id)
             .ok_or_else(|| invalid("execution is unavailable"))?;
-        let order_id = execution.work_order.clone();
-        ensure_holder(&self.work_orders[&order_id], holder)?;
+        ensure_holder(&self.work_orders[&execution.work_order], holder)?;
         let wip_id = WorkInProgressId::new(format!("canwu.production:wip:{execution_id}"))?;
         let wip = self
             .work_in_progress
@@ -2722,12 +2786,64 @@ impl ProductionState {
                 "execution cannot complete before all work units are finished",
             ));
         }
+        let process = self
+            .processes
+            .get(&execution.process)
+            .ok_or_else(|| invalid("execution process is unavailable"))?;
+        let realized =
+            admitted_realized_output(realized_output_per_mille, realization_evidence, process)?;
+        for request in &execution.output_requests {
+            let quantity = realized_output_quantity(request.quantity, realized)
+                .ok_or_else(|| invalid("production realized output quantity overflowed"))?;
+            if quantity == 0 {
+                return Err(CanwuError::new(
+                    ErrorCode::ValueOutOfRange,
+                    "production realized output rounds an output settlement quantity to zero",
+                ));
+            }
+        }
+        Ok(realized)
+    }
+
+    fn complete_execution(
+        &mut self,
+        holder: &KnowledgeHolderRef,
+        execution_id: &ProductionExecutionId,
+        realized_output_per_mille: Option<u16>,
+        realization_evidence: Option<&DomainRecordVersionRef>,
+        now: SimTime,
+    ) -> Result<(), CanwuError> {
+        let realized = self.completion_admission(
+            holder,
+            execution_id,
+            realized_output_per_mille,
+            realization_evidence,
+        )?;
+        let execution = &self.executions[execution_id];
+        let order_id = execution.work_order.clone();
+        let realized_quantities = execution
+            .output_requests
+            .iter()
+            .map(|request| {
+                realized_output_quantity(request.quantity, realized)
+                    .ok_or_else(|| invalid("production realized output quantity overflowed"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let execution = self
             .executions
             .get_mut(execution_id)
             .expect("execution was checked");
         execution.lifecycle = WorkOrderLifecycle::CompletedPendingOutputSettlement;
         execution.completed_at = Some(now);
+        execution.realized_output_per_mille = realized;
+        execution.realization_evidence = realization_evidence.cloned();
+        for (request, quantity) in execution
+            .output_requests
+            .iter_mut()
+            .zip(realized_quantities)
+        {
+            request.quantity = quantity;
+        }
         let order = self
             .work_orders
             .get_mut(&order_id)
@@ -3669,7 +3785,7 @@ impl ProductionState {
                 .map(|order| order.site.clone()),
             ProductionOperation::StartExecution { execution, .. } => Some(execution.site.clone()),
             ProductionOperation::AdvanceExecution { execution, .. }
-            | ProductionOperation::CompleteExecution { execution } => self
+            | ProductionOperation::CompleteExecution { execution, .. } => self
                 .executions
                 .get(execution)
                 .map(|execution| execution.site.clone()),
@@ -3938,6 +4054,87 @@ fn validate_technology_binding(
         ));
     }
     Ok(())
+}
+
+/// Floor-scales one nominal output quantity by a realized per-mille ratio.
+/// `None` is the nominal ratio. Returns `None` only on arithmetic overflow.
+fn realized_output_quantity(nominal: u64, realized_output_per_mille: Option<u16>) -> Option<u64> {
+    let Some(per_mille) = realized_output_per_mille else {
+        return Some(nominal);
+    };
+    let scaled = u128::from(nominal).checked_mul(u128::from(per_mille))?
+        / u128::from(NOMINAL_REALIZED_OUTPUT_PER_MILLE);
+    u64::try_from(scaled).ok()
+}
+
+/// Applies the completion admission rules for a realized-output ratio and
+/// returns its canonical stored form (`None` for the nominal ratio). The
+/// ratio rules and the declared evidence kind are checked before any caller
+/// resolves the evidence record, so a rejection never reveals whether an
+/// arbitrary record version exists.
+fn admitted_realized_output(
+    realized_output_per_mille: Option<u16>,
+    realization_evidence: Option<&DomainRecordVersionRef>,
+    process: &ProcessRevision,
+) -> Result<Option<u16>, CanwuError> {
+    let Some(per_mille) = realized_output_per_mille
+        .filter(|per_mille| *per_mille != NOMINAL_REALIZED_OUTPUT_PER_MILLE)
+    else {
+        if realization_evidence.is_some() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPayload,
+                "production realization evidence requires a non-nominal realized output",
+            ));
+        }
+        return Ok(None);
+    };
+    if per_mille == 0 {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "production realized output must be positive; cancel the work order to record a total loss",
+        ));
+    }
+    if per_mille > process.max_realized_per_mille {
+        return Err(CanwuError::new(
+            ErrorCode::ValueOutOfRange,
+            "production realized output exceeds its process bound",
+        ));
+    }
+    let evidence = realization_evidence.ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "non-nominal production realized output requires realization evidence",
+        )
+    })?;
+    if !process
+        .realization_evidence_kinds
+        .contains(&evidence.record.kind)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "production realization evidence kind is not declared by the process revision",
+        ));
+    }
+    Ok(Some(per_mille))
+}
+
+fn realized_output_record_is_valid(
+    process: &ProcessRevision,
+    execution: &ProductionExecution,
+) -> bool {
+    match (
+        execution.completed_at,
+        execution.realized_output_per_mille,
+        &execution.realization_evidence,
+    ) {
+        (_, None, None) => true,
+        // A stored nominal ratio is non-canonical; admission rejects it
+        // because evidence is present.
+        (Some(_), Some(per_mille), Some(evidence)) => {
+            admitted_realized_output(Some(per_mille), Some(evidence), process).is_ok()
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn validate_completion_certificate(

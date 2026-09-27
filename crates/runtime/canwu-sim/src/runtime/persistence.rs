@@ -71,6 +71,12 @@ pub struct SimulationSnapshot {
     pub entities: Vec<super::EntityRef>,
     #[serde(default, skip_serializing_if = "legacy_world_is_empty")]
     pub world: WorldSnapshot,
+    /// Core person life and custody state; absent persons are alive and free.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub person_availability: BTreeMap<super::PersonId, super::PersonAvailability>,
+    /// Runtime-created persons in allocation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub created_persons: Vec<super::CreatedPerson>,
     pub knowledge: KnowledgeSnapshot,
     pub events: Vec<SimEvent>,
     pub commands: Vec<CommandRecord>,
@@ -115,6 +121,9 @@ pub struct SimulationSnapshot {
     pub(super) next_correlation_id: u64,
     #[serde(default = "one_u64", skip_serializing_if = "is_one_u64")]
     pub(super) next_decision_trace_id: u64,
+    /// Zero until the first runtime-created person.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub(super) next_person_id: u64,
 }
 
 pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 4;
@@ -1209,6 +1218,14 @@ pub(crate) fn evidence_archive_index(
             None,
         );
     }
+    let cancelled_ingress: BTreeSet<_> = segment
+        .ingress
+        .iter()
+        .filter_map(|record| match &record.payload {
+            IngressPayload::PluginCancellation { cancelled, .. } => Some(*cancelled),
+            _ => None,
+        })
+        .collect();
     for (offset, ingress) in segment.ingress.iter().enumerate() {
         let plugin_ingress_provenance = match (&ingress.payload, ingress.cause.as_ref()) {
             (
@@ -1218,12 +1235,13 @@ pub(crate) fn evidence_archive_index(
                     ..
                 },
                 Some(CauseRef::Boundary(producer_boundary)),
-            ) if segment.boundaries.iter().any(|boundary| {
-                boundary.id == *producer_boundary
-                    && boundary.generated_ingress.iter().any(|generation| {
-                        generation.ingress == ingress.id && generation.plugin == *plugin
-                    })
-            }) =>
+            ) if !cancelled_ingress.contains(&ingress.id)
+                && segment.boundaries.iter().any(|boundary| {
+                    boundary.id == *producer_boundary
+                        && boundary.generated_ingress.iter().any(|generation| {
+                            generation.ingress == ingress.id && generation.plugin == *plugin
+                        })
+                }) =>
             {
                 Some(ArchivedPluginIngressProvenance {
                     plugin: plugin.clone(),
@@ -2060,6 +2078,22 @@ impl CompactedSimulation {
         self.simulation.world()
     }
 
+    /// Returns committed availability for a person. `None` means alive and free.
+    #[must_use]
+    pub fn person_availability(
+        &self,
+        person: super::PersonId,
+    ) -> Option<&super::PersonAvailability> {
+        self.simulation.person_availability(person)
+    }
+
+    /// Returns every committed person availability in person-ID order.
+    pub fn person_availabilities(
+        &self,
+    ) -> impl Iterator<Item = (&super::PersonId, &super::PersonAvailability)> {
+        self.simulation.person_availabilities()
+    }
+
     #[must_use]
     pub fn knowledge(&self) -> &KnowledgeSnapshot {
         self.simulation.knowledge()
@@ -2157,6 +2191,26 @@ impl CompactedSimulation {
     ) -> Result<IngressReceipt, CanwuError> {
         self.simulation
             .enqueue_permitted_plugin_ingress(request, permit)
+    }
+
+    /// See [`Simulation::cancel_plugin_ingress`].
+    pub fn cancel_plugin_ingress(
+        &mut self,
+        ingress_id: super::IngressId,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation.cancel_plugin_ingress(ingress_id, reason)
+    }
+
+    /// See [`Simulation::cancel_permitted_plugin_ingress`].
+    pub fn cancel_permitted_plugin_ingress(
+        &mut self,
+        ingress_id: super::IngressId,
+        permit: &super::PluginIngressPermit,
+        reason: impl Into<String>,
+    ) -> Result<IngressReceipt, CanwuError> {
+        self.simulation
+            .cancel_permitted_plugin_ingress(ingress_id, permit, reason)
     }
 
     pub fn prepare_decision(
@@ -2566,24 +2620,30 @@ impl Simulation {
                 "live evidence sealing requires every retained command to belong to a completed boundary",
             ));
         }
-        let admitted_ingress: std::collections::BTreeSet<_> = self
+        let mut settled_ingress: std::collections::BTreeSet<_> = self
             .state
             .evidence
             .boundaries
             .iter()
             .flat_map(|record| record.admitted_ingress.iter().copied())
             .collect();
-        if admitted_ingress.len() != self.state.evidence.ingress.len()
+        for record in &self.state.evidence.ingress {
+            if let IngressPayload::PluginCancellation { cancelled, .. } = &record.payload {
+                settled_ingress.insert(record.id);
+                settled_ingress.insert(*cancelled);
+            }
+        }
+        if settled_ingress.len() != self.state.evidence.ingress.len()
             || self
                 .state
                 .evidence
                 .ingress
                 .iter()
-                .any(|record| !admitted_ingress.contains(&record.id))
+                .any(|record| !settled_ingress.contains(&record.id))
         {
             return Err(CanwuError::new(
                 ErrorCode::ArchiveNotReady,
-                "live evidence sealing requires every retained ingress record to belong to a completed boundary",
+                "live evidence sealing requires every retained ingress record to be admitted by a completed boundary or terminally cancelled",
             ));
         }
         let admitted_events: std::collections::BTreeSet<_> = self
@@ -2700,7 +2760,8 @@ impl Simulation {
                     }
                     IngressPayload::Plugin { .. }
                     | IngressPayload::Calendar { .. }
-                    | IngressPayload::Maintenance { .. } => {}
+                    | IngressPayload::Maintenance { .. }
+                    | IngressPayload::PluginCancellation { .. } => {}
                 }
             }
             Ok::<_, CanwuError>((
@@ -2817,6 +2878,7 @@ impl Simulation {
         self.state.evidence.commands.clear();
         self.state.evidence.command_attempts.clear();
         self.state.evidence.ingress.clear();
+        self.state.scheduler.cancelled_ingress.clear();
         self.state.evidence.boundaries.clear();
         self.state.evidence.random_draws.clear();
         self.state
@@ -2917,6 +2979,8 @@ impl Simulation {
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             entities: self.state.current.entities.iter().cloned().collect(),
             world: self.world(),
+            person_availability: self.state.current.person_availability.clone(),
+            created_persons: self.state.current.created_persons.clone(),
             knowledge: self.state.current.knowledge.clone(),
             events: Vec::new(),
             commands: Vec::new(),
@@ -2978,6 +3042,7 @@ impl Simulation {
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
             next_decision_trace_id: self.state.counters.next_decision_trace_id,
+            next_person_id: self.state.counters.next_person_id,
         }
     }
 

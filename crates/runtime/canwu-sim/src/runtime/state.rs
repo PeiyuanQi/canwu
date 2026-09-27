@@ -3,10 +3,10 @@ use super::{
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
     DecisionRequestId, DecisionState, DomainRecordRef, EntityRef, ErrorCode, EvidenceCursor,
     EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
-    KeyedDrawReservation, KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonId,
-    PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
-    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
-    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    KeyedDrawReservation, KnowledgeSnapshot, PersistentDomainRecordStore, Person,
+    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord,
+    RandomStreamKey, RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest,
+    Scenario, ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -438,6 +438,10 @@ pub(super) struct RuntimeScheduler {
     pub(super) now: SimTime,
     pub(super) actions: BTreeMap<ScheduleKey, ScheduledAction>,
     pub(super) pending_ingress: BTreeSet<IngressQueueKey>,
+    /// Derived index of retained plugin ingress withdrawn by a terminal
+    /// cancellation record. Rebuilt from the ingress journal on restore and
+    /// cleared when the retained journal is sealed.
+    pub(super) cancelled_ingress: BTreeSet<super::IngressId>,
 }
 
 #[derive(Clone)]
@@ -452,6 +456,9 @@ pub(super) struct RuntimeCounters {
     pub(super) next_schedule_sequence: u64,
     pub(super) next_correlation_id: u64,
     pub(super) next_decision_trace_id: u64,
+    /// Next runtime-created person ID; zero until the first creation, whose
+    /// ID follows every initial-scenario person identity.
+    pub(super) next_person_id: u64,
     pub(super) state_revision: u64,
     pub(super) admitted_attempt_count: u64,
     pub(super) admitted_command_count: u64,
@@ -482,6 +489,11 @@ pub(super) struct RuntimeMetadata {
 pub(super) struct RuntimeCurrentState {
     pub(super) entities: BTreeSet<EntityRef>,
     pub(super) people: BTreeMap<PersonId, Person>,
+    /// Core life and custody state; absent entries are alive and free.
+    pub(super) person_availability: BTreeMap<PersonId, PersonAvailability>,
+    /// Runtime-created persons in allocation order, keyed for next-boundary
+    /// correlation lookup independently of retained evidence.
+    pub(super) created_persons: Vec<super::CreatedPerson>,
     pub(super) letters: BTreeMap<canwu_core::LetterId, super::LetterCargo>,
     pub(super) governments: BTreeMap<GovernmentId, Government>,
     pub(super) territories: BTreeMap<TerritoryId, Territory>,

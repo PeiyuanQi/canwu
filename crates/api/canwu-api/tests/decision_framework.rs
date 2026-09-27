@@ -54,6 +54,7 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
                     ..DecisionOption::new("decline", "Decline aid")
                 }],
                 deadline: None,
+                parent_ticket: None,
             },
         },
     );
@@ -265,6 +266,7 @@ fn conflicting_decision_mutations_are_persisted_rejections_without_poisoning_the
                         context: DecisionContext::new("beiyang.aid-request.v1", json!({})),
                         options: vec![DecisionOption::new("decline", "Decline")],
                         deadline: None,
+                        parent_ticket: None,
                     },
                 },
             ),
@@ -374,6 +376,7 @@ fn decision_and_command_request_ids_fail_closed_before_persistence() {
                     ..DecisionOption::new("send-aid", "Send aid")
                 }],
                 deadline: None,
+                parent_ticket: None,
             },
         },
     ] {

@@ -70,9 +70,9 @@ cargo run -p canwu-api --example plugin
 4. 通过公开入口提交领域命令或规范化输入，不保留实时运行时引用。
 5. 验证保存、加载、精确重放、权限失败和原子回滚。
 
-## 已有领域扩展
+## 常用领域扩展
 
-这些包是建立在对外 API 上的可选能力，不是模拟内核中的硬编码子系统。
+这些包是建立在对外 API 上的可选能力，不是模拟内核中的硬编码子系统。完整 crate 列表见 [crates/README.md](https://github.com/PeiyuanQi/canwu/blob/main/crates/README.md)。
 
 | 包 | 状态与用途 | 继续阅读 |
 | --- | --- | --- |
@@ -80,7 +80,10 @@ cargo run -p canwu-api --example plugin
 | `canwu-culture` | 已发布的文化编写、编译和生命周期扩展 | [文化与法律制度](/architecture/culture-law/) |
 | `canwu-law` | 实验性的法律制度化扩展 | [文化与法律制度](/architecture/culture-law/) |
 | `canwu-technology` | 已发布的技术证据、地方能力和传播扩展 | [技术传播教程](/tutorials/technology-diffusion/) |
-| `canwu-fiscal` | 通用财政程序扩展；不拥有银粮余额或运输 | [明代财政案例](/tutorials/cases/ming-fiscal/) |
+| `canwu-fiscal` | 通用财政程序扩展；不拥有资源余额或运输 | [明代财政案例](/tutorials/cases/ming-fiscal/) |
+| `canwu-resource` | 已发布的守恒资源账户、需求、分配、转移与履约扩展 | [生产、资源与运输边界](/developer/production-economy/) |
+| `canwu-production` | 已发布的生产工艺、设施、工单与产出结算扩展 | [生产、资源与运输边界](/developer/production-economy/) |
+| `canwu-military` | 可选的军事模拟扩展；不是通用战斗模型 | [军事模拟扩展](/tutorials/military-domain/) |
 
 选择这些扩展时，先确认它们的公开版本、依赖关系和存档合同。历史内容、场景参数和上层应用规则
 仍由内容包或上层应用拥有。
@@ -93,4 +96,4 @@ cargo run -p canwu-api --example plugin
 - 把语义哈希变化视为可执行行为变化，并配套迁移或新版本。
 - 应用代码只通过 `canwu-api` 使用扩展合同。
 
-在实现前，先阅读[架构中的五条边界](/architecture/#五条架构边界)，再从最接近需求的公开示例开始。
+在实现前，先阅读[架构总览](/architecture/)中的公开边界，再从最接近需求的公开示例开始。

@@ -96,7 +96,7 @@ reservation evidence. This example therefore demonstrates only unconstrained
 delivery.
 
 The tests restore snapshots and replay the full operation exactly. They also
-cover post-handoff rerouting without losing prior legs, route recovery after a
+cover disaster rerouting after a handoff that keeps prior legs and handoff evidence, route recovery after a
 knowledge update, successor-attempt retry, explicit finalization, external
 progress rejection, and holder-read authority. Persisted evidence includes the
 demand decision, per-revision knowledge cuts, routes, handoffs, incidents,

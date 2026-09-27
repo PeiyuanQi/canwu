@@ -69,6 +69,7 @@ fn ticket(version: u64) -> DecisionTicket {
         deadline: None,
         version,
         state: DecisionTicketState::Open,
+        parent_ticket: None,
     }
 }
 

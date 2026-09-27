@@ -390,8 +390,9 @@ are rejected rather than migrated. / 事件迁出会破坏 Rust 源 API：调用
 
 `canwu-decision` is the official headless decision SDK. It defines persisted
 decision tickets, versioned dynamic options, controller bindings, persisted
-decision attempts and traces, a reusable weighted utility evaluator, and Utility, Rule, Human,
-Random, External, and LLM policy contracts. Domain packages still define when a
+decision attempts and traces, a reusable weighted utility evaluator, Utility, Rule, Human,
+Random, External, and LLM policy contracts, and a guarded utility policy that
+composes rules, utility, and a bounded random tie-break. Domain packages still define when a
 decision exists, what its context means, which options are legal, and which
 domain command an option represents.
 
@@ -431,6 +432,42 @@ This is a selector for a bounded ticket, not a replacement for a stochastic
 world-event mechanic; discrete incidents still belong to their owning boundary
 system, and unknown facts remain unknown rather than being randomized.
 
+`GuardedUtilityPolicy` composes the local selectors. Its ordered guard rules
+return `RuleChoice::Select`, `Defer`, `Exclude`, or `NoMatch`; the first select
+or defer decides at the `Guard` stage, while `Exclude` removes one option,
+records `excluded by <guard>: <reason>` as its blocker, and continues. A later
+rule that selects an excluded option is an error, including in
+`OrderedRulePolicy`. The remaining options are scored by the weighted utility
+evaluator. When `random_tie_break` is set and at least two options score within
+the `u64` near-equivalence margin of the best score, the policy returns
+`DecisionOutcome::PendingRandom` with exactly those candidates, weight 1 each in
+option-ID order; otherwise the best score wins and equal scores fall back to the
+lowest option ID. A pending tie-break is never an authoritative resolution. A
+boundary system resolves it with the same `ResolveDecisionRandomly` directive,
+passing the pending decision as the resolution's `tie_break`, and the draw
+covers only those candidates. The controller binding must opt in with
+`with_random_tie_break`, which only utility-policy controllers may do. Traces
+record the `DecisionStage` (`Guard`, `Utility`, or `Random`) and the guard IDs
+that fired. The policy identity reuses `DecisionPolicyKind::Utility` and carries
+a BLAKE3 `semantic_hash` over the guard policy identity, guard IDs, utility
+weights, margin, and tie-break flag, so a binding rejects a reconfigured policy
+that keeps its ID and version with `PolicyMismatch`. Guard behavior itself is
+application code outside that hash; change a guard ID or the guard policy
+version when it changes.
+
+Draw evidence can come only from a boundary resolution. Host-authored decision
+ingress that carries draw evidence is rejected live and during snapshot
+validation, for random-policy controllers and tie-breaks alike. A
+`ResolveDecisionRandomly` directive also fails its boundary before any draw is
+committed when the ticket's person decision maker (`DecisionMakerUnavailable`)
+or its controller's authority person (`IssuerUnavailable`) is unavailable in the
+person availability committed before that boundary. An availability change
+staged earlier in the same boundary does not fail the directive, because
+failing would roll the change back and repeat it on every retry; the draw
+commits, the end-of-boundary sweep cancels the ticket, and the generated
+resolution is rejected at admission. Tie-break and random-policy systems should
+therefore skip such tickets, read through `SimulationView::person_availability`.
+
 Registration, opening, option replacement, resolution, and cancellation enter
 the runtime through `DecisionIngressRequest`. They use request IDs, revision
 guards, deterministic queue order, transactional settlement, and exact-retry
@@ -438,6 +475,26 @@ semantics. A selected command option carries a serialized existing Canwu
 command; it must exactly match the nested command request admitted with the
 resolution. Decisions cannot bypass the command boundary or invent a new
 authority envelope.
+
+Admission also consults core person availability. `Open` records an expected
+`DecisionMakerUnavailable` rejection when the ticket's person decision maker is
+unavailable, and then an `IssuerUnavailable` rejection when its assigned
+controller's authority person is unavailable, so a ticket is never opened for a
+controller that could not resolve it. `Resolve` records `IssuerUnavailable`
+when the controller's authority person is unavailable. The authority person is
+the actor of `DecisionAuthority::Actor` or the responsible actor of
+`DecisionAuthority::Institution`; council and no-responsible-actor authorities
+are unaffected. Host preparation through `prepare_decision` and
+`drive_decision` applies the same two checks before evaluating a policy.
+
+`DecisionTicketDraft::parent_ticket` records decision lineage. At `Open` the
+parent must be a terminal ticket in hot decision history with exactly the same
+`decision_maker`; an archived or absent parent is rejected as `TicketNotFound`,
+and an open parent or another maker as `InvalidDecision`. The parent is copied
+onto `DecisionTicket` and `DecisionTrace`. A ticket cannot be reassigned to
+another controller, so a decision whose controller can no longer act continues
+as a new ticket for an available controller that names the cancelled ticket as
+its parent.
 
 Decision state is authoritative persisted state. Snapshots retain controller
 bindings, tickets, deadlines, versions, admission attempts, and traces; loading
@@ -635,6 +692,44 @@ automatically disclose the source list. Standalone DTOs default a missing field
 to `Pooled`; strict snapshots still require the exact engine and plugin identity.
 Adding the public Rust struct field requires the 0.11.0 minor release.
 
+`ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` records
+an account-level loss with its own `loss_id` and cause. The phase-7 lifecycle
+writer debits the account in place and settles a `ResourceLoss` with
+`account: Some(..)` and `transfer: None`, which conservation counts as admitted
+loss under `ResourceOperationKind::Loss`. The debit never touches reserved
+stock, respects the protected floor unless `allow_protected` is set, and
+requires the exact account revision and a completion certificate; a stale
+revision rejects. A tracked command must come from the account custodian, and
+canonical adapter ingress may cite the cause record as its provider source.
+Holder observation heads, reports, and witnesses carry
+`ResourceLossObservationV1` entries gated like transfer details.
+
+`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)`
+starts two `ResourceTransferStartRequestV1` legs atomically: both transfers are
+created or neither is, and the single `BeginExchange` outcome cites both
+transfer IDs in `cited_transfers` whether it applied or rejected. There is no
+exchange-level certificate. The parties agree on `ResourceExchangeTermsV1`
+(the exchange key plus each leg's transfer ID, exact allocation, and
+destination), and `leg_operation_keys` derives each leg's operation key from
+the terms digest. Each leg carries its own completion certificate for that
+derived key, held by the leg's source custodian, so each lease consents to the
+whole exchange and authorizes no other terms. A tracked exchange command must
+come from the `leg_a` source custodian. The two transfers' terminal
+dispositions remain independent.
+
+`ResourceTransferDispositionV1::AcceptLocal` settles a transfer that is still
+`PendingDispatch` with no transport link when its source and destination
+accounts declare the same `ResourceAccount::place_scope`; the terminal
+certificate locks the exact `handover_evidence` record. A missing or mismatched
+scope rejects as `invalid_definition` and an attached transport as
+`invalid_lifecycle`. The scope is host-declared when the scenario installs an
+account, immutable, and defaults to `None`; a tracked `CreateAccount` that sets
+it fails with `InvalidAuthority`. A tracked command must come from the
+destination custodian. None of these operations grants access to another
+custodian's stock; delegated resource access remains a separate proposal. The
+resource plugin semantic hash and holder-report knowledge schema changed with
+these operations, while default values keep their previous canonical encoding.
+
 Non-force consumption providers publish a top-level `resource_consumption_intents`
 map in their owned, active domain record. Map keys equal the IDs of sealed
 `ResourceConsumptionIntentV1` entries. The resource adapter requires exactly one
@@ -659,6 +754,23 @@ or concentrated plant is revisioned data rather than a universal building
 level. Roads, canals, fortifications, institutions, money, trade, and combat
 remain outside this extension unless a replaceable integration explicitly
 composes them.
+
+`ProductionOperation::CompleteExecution` may carry
+`realized_output_per_mille` and `realization_evidence`. Phase 7 floor-scales
+every output settlement quantity by the ratio and stores both on the
+execution; `None` means `NOMINAL_REALIZED_OUTPUT_PER_MILLE` (1,000), and
+evidence is rejected for a nominal ratio. Any other ratio must be positive
+(a total loss cancels the work order instead), must not scale any output leg to
+zero, may not exceed the process revision's `max_realized_per_mille` (default
+1,000; a larger bound admits evidenced yields above nominal), and requires an
+exact evidence record version of a kind listed in the process revision's
+`realization_evidence_kinds`, which is empty by default so a default process
+admits only nominal output. The holder, lifecycle, ratio, and kind rules run
+before the evidence record is resolved, so a rejection does not reveal whether
+another record exists. The resource credit and output acknowledgement settle
+exactly the scaled quantities. The production plugin now declares the
+administrative domain-record read to resolve that evidence, and its semantic
+hash changed; nominal completions serialize as before.
 
 `canwu-force-supply-reference` proves that a second independent domain can
 consume the same resource API. It owns force-local recurring demand,
@@ -687,6 +799,24 @@ home-hardware profile still treats 100 sites as paced interactive use and 500
 sites as non-interactive pressure evidence for the technology extension's own
 semantic workload; see
 [`benchmarks/2026-08-22-technology.md`](../benchmarks/2026-08-22-technology.md).
+
+### Fiscal procedure / 财政程序
+
+`canwu-fiscal` owns fiscal procedure, not resource balances. Its
+`FiscalAuthorityBinding` names the standing `authorized_actor` of an
+institution and may also name an `acting_actor` together with an exact
+`authority_basis` record version, such as a host grant record. Both fields are
+set together, the acting actor must differ from the authorized actor, and the
+basis kind must be declared with `FiscalPlugin::with_authority_basis_kinds`,
+which becomes the plugin's exact read set for those kinds; activation rejects a
+binding that cites an undeclared kind. A command from the acting actor,
+directly or as a decision-ticket origin, is admitted only while the basis is
+the current version of its record, and the fiscal settlement system checks it
+again in the domain-delta phase. Once the basis record advances or retires, the
+acting actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`
+(`InvalidAuthority`), while the authorized actor is still admitted. Bindings are
+set in the starting scenario. The fiscal plugin semantic hash changed with this
+contract.
 
 ### Reference content and starter kits / 参考内容与入门套件
 
@@ -766,6 +896,32 @@ Initial `Scenario` values currently admit stationary armies only: in-flight
 state requires the command, event, correlation, and queue evidence carried by a
 runtime snapshot. Scenario admission also rejects non-finite map coordinates so
 every accepted state can round-trip through the JSON persistence format.
+
+A queued plugin ingress item can be withdrawn, strictly before its due time, by
+its issuer only. `cancel_plugin_ingress` lets the host withdraw a public packet
+it enqueued; `cancel_permitted_plugin_ingress` presents the owning plugin's
+opaque registration permit for the item's exact internal packet type and covers
+host-enqueued items of that type plus items the same plugin scheduled itself;
+and a boundary system proposes `BoundaryDirective::CancelPluginIngress` for an
+item its own plugin scheduled inside the engine, choosing targets from
+`SimulationView::cancellable_plugin_ingress`. The withdrawal is appended as its
+own `IngressPayload::PluginCancellation { cancelled, authority, reason }`
+record, with `IngressCancellationAuthority` naming `Host`, `PluginPermit`, or
+`BoundarySystem` and a canonical reason of at most
+`MAX_INGRESS_CANCELLATION_REASON_BYTES`. The record is never queued or
+admitted; its due time equals its issue time, the withdrawn item leaves the
+queue in the same transaction, and nothing is rolled back. The errors reuse
+existing codes: due, admitted, archived, or already withdrawn items fail with
+`LateIngress`; another issuer's item with `InvalidAuthority`; an unknown ID
+with `EvidenceUnavailable`; a non-plugin target or invalid reason with
+`InvalidPayload`; and a declared read-only run with `InteractionReadOnly`. A
+boundary directive that names a foreign, due, or already withdrawn item, or
+that repeats another proposal's target, fails the whole boundary. Like
+enqueueing, a withdrawal does not advance the authoritative revision. The
+ingress commitment, archive index, and boundary hash already cover the record,
+restore rebuilds the pending queue without withdrawn items, exact replay
+re-applies host and permit withdrawals at their journal cut, and a withdrawn
+item never counts as delivered evidence.
 
 An event's `correlation_id` identifies one authoritative causal root, not an
 arbitrary time bucket. Event children must retain their parent's correlation;
@@ -882,6 +1038,62 @@ derived during reads; no mutable query index is persisted or included in the
 authoritative state hash. Any future cache or secondary index must be rebuilt
 from the canonical ledger and remain outside authoritative commitments.
 
+## Person availability and creation
+
+Person availability is a separate ordered core map keyed by `PersonId`, not a
+field of the legacy `Person` projection. `PersonAvailability` holds a
+`LifeState` (`Alive`, `Dead`, `Missing`), a `CustodyState` (`Free`,
+`Detained`, `Hostage`, `Captive`, `Hiding`, `Exile`), an optional custodian
+entity, and the time it took effect. A person without an entry is alive and
+free. `PersonAvailability::is_available` is false when the person is not alive
+or is detained or captive; hostage, hiding, and exile stay admissible, and an
+application may restrict them further in its own rules.
+
+Only a boundary system changes availability, through
+`BoundaryDirective::SetPersonAvailability` from phase 7 or phase 10, and only
+when its contract declares `StateKey::core_person_availability()` as a write.
+The core key is kernel-owned, so several systems may declare it; two writes for
+the same person in one boundary fail with `DuplicateBoundaryWriter` and roll the
+boundary back. Scenarios cannot declare initial availability. Each committed
+change is recorded as a `BoundaryPersonAvailabilityChange` on the hash-chained
+boundary record.
+
+Unavailability has fixed admission consequences. Command admission rejects a
+request with `IssuerUnavailable` when `Issuer::Actor`, the authority's decision
+actor, or an institution's responsible actor is unavailable. Decision rules are
+described under the decision framework. Knowledge publication to a dead
+person's holder ledger fails with `InvalidKnowledgeHolder`. At the end of the
+boundary that makes a person unavailable, after random decision ingress is
+materialized, the kernel cancels every open ticket whose decision maker is that
+person with `DECISION_MAKER_UNAVAILABLE_REASON` (`decision_maker_unavailable`),
+then every remaining open ticket whose assigned controller's authority person
+is that person with `CONTROLLER_AUTHORITY_UNAVAILABLE_REASON`
+(`controller_authority_unavailable`). A ticket that qualifies for both carries
+the decision-maker reason. The cancelled IDs are recorded in ticket-ID order in
+the change's `cancelled_tickets` and `cancelled_controller_tickets`, and
+snapshot validation recomputes both lists.
+
+`BoundaryDirective::CreatePerson` creates a person at runtime from a phase-7
+system that declares `StateKey::core_people()`. The `PersonDraft` supplies name,
+government, location, roles, initial availability, and committed provenance;
+the kernel allocates the `PersonId` from a persisted monotonic counter that
+starts past every scenario person. The person commits at the end of the
+boundary and is visible to systems from the next boundary. The correlation must
+be unique per plugin, system, and boundary. `BoundaryReceipt::created_persons`
+and the persisted created-person registry bind it to the allocated ID, which a
+system later reads with `SimulationView::persons_created_by_correlation`; the
+lookup does not depend on retained evidence. Fork and exact replay reproduce
+the same IDs.
+
+Hosts read committed availability through `Canwu::person_availability` and its
+compact counterpart; boundary systems use `SimulationView::person_availability`
+after declaring the read. The snapshot's `person_availability` map,
+`created_persons` registry, and person counter are omitted while empty or zero,
+so a run that never uses these contracts serializes and hashes exactly as
+before. When present, they become optional sub-roots of the world commitment
+and a counter in the control root. Validation rebuilds availability, the
+registry, and the counter from boundary evidence.
+
 ## Routing and transport execution
 
 Routing and transport are additive domain capabilities, not a second kernel
@@ -916,6 +1128,34 @@ authority. Its request contract likewise exposes only
 `CorrespondenceCapacityAdmission::Unconstrained`: the plugin neither checks nor
 persists a booking. Constrained transport requires a future admission variant
 backed by exact booking or simulation-reservation evidence.
+
+The plugin's holder-relative planning rule is also public.
+`planning_snapshot_from_holder_knowledge(view, holder, observed_at)` reads only
+the holder's current planning-knowledge heads through
+`planning_knowledge_query`, admits exactly the endpoints and connections that
+ledger asserts at the read cut the view derives, and fails when a known
+connection names an unknown endpoint. It returns the `PlanningSnapshot`, whose
+`knowledge_cut` commits to that cut, together with a `KnowledgeReadCutDigest`:
+a hash over the holder and the versioned schema and holder-local ID of every
+admitted fact. The digest is evidence of what the planner read, not a
+commitment over the ledger. `planning_snapshot_from_knowledge_result` is the
+pure form over a query result the caller already holds, such as a restricted
+viewer's, and rejects a paginated result. The caller does not pass a read cut:
+the engine derives it. The view read is system access, so callers must derive
+`holder` from admitted authority, not from an unvalidated payload.
+
+Since `canwu-transport.v4`, `MovementSubjectRole::PersonsGroup` moves an
+aggregate of people as one subject, normally identified by an application
+domain record; like `Cargo`, it requires a positive quantity, here a head count,
+and `MovementSubjectRole::requires_quantity` states the rule. `Handoff.kind`
+distinguishes `HandoffKind::Planned`, the default omitted from JSON, from
+`Seizure { by }`, custody taken by an entity outside the itinerary. A seizure
+follows the same leg rules as a planned handoff. `ItineraryRevisionReason`
+gains `ExternalCondition { record, version, kind }`, which cites an
+application-owned condition record at an exact positive version with a
+non-empty label and is validated for both the initial itinerary and a reroute
+before mutation. Transport records these facts; incidents, hostility, hazards,
+and their authority stay in application systems.
 
 The router supports fixed, scheduled, and piecewise traversal. Historical
 content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
@@ -1044,7 +1284,8 @@ and boundary records to their pre-boundary values.
 Each successful boundary persists its ID, time, correlation, cadence set,
 admitted command attempts, accepted commands, admitted and boundary-generated
 ingress, and events, reservation evidence, allocations, random draws, field
-changes, domain record lifecycle changes, exact producer plugin/system/phase/
+changes, domain record lifecycle changes, person availability changes with the
+tickets they cancelled, created persons, exact producer plugin/system/phase/
 visibility provenance, a deterministic state hash, and the previous and current
 boundary hashes. Every
 committed domain record change has one indexed, causally linked evidence event.
@@ -1135,7 +1376,8 @@ envelopes are rejected rather than reinterpreted or migrated in place.
 Boundary emissions enter the next boundary's admission cut, so an emitting
 boundary remains retained until a later completed boundary admits those events.
 This preserves the global causal-prefix invariant across every seal; the same
-rule keeps generated ingress retained through its own later admission.
+rule keeps generated ingress retained through its own later admission or
+terminal cancellation.
 
 The checkpoint/journal wire types, cursor logic, live sealing, compact
 continuation indexes, export, and reconstruction helpers live in the dedicated
@@ -1236,7 +1478,9 @@ owned tracked `CommandRequest` with an idempotency key, expected revision,
 expected simulation time, typed issuer, and explicit seat/authority context.
 Natural-clock hosts enqueue that request with `enqueue_command` and settle it
 through `advance_canonical` or `step_canonical`; plugin packets use
-`enqueue_plugin_ingress`, and explicit calendar work uses
+`enqueue_plugin_ingress` and can be withdrawn before they are due with
+`cancel_plugin_ingress` or `cancel_permitted_plugin_ingress`, and explicit
+calendar work uses
 `schedule_calendar_boundary`. Decision hosts use `enqueue_decision` for
 controller/ticket/option lifecycle changes, or `drive_decision` to evaluate a
 bound policy and enqueue an authoritative resolution. Accepted and expected-rejected command attempts are
@@ -1252,7 +1496,9 @@ advancement. Declared external commands require both guards. Live requests,
 compatibility-only legacy-direct calls, and frozen replay inputs remain distinct;
 only exact replay can consume `FrozenReplay`, and declared read-only runs reject
 newly authored plugin ingress. Plugin boundary systems can return
-`ScheduleIngress` to continue communication pipelines without host orchestration.
+`ScheduleIngress` to continue communication pipelines without host orchestration,
+and `CancelPluginIngress` to withdraw a still-pending item their plugin
+scheduled.
 Recurring calendar policy and conservation bundles remain later conformance
 work.
 

@@ -52,6 +52,26 @@ Each source boundary may generate at most one Random resolution, due
 immediately for the next eligible boundary. Put independent random decisions
 on separate source boundaries so the global revision guard remains unambiguous.
 
+## Break only a genuine tie at random
+
+Since 0.12.0, a deterministic utility selector can hand only a genuine tie to
+chance. `GuardedUtilityPolicy` runs ordered guard rules, scores the remaining
+options, and, when `random_tie_break` is set and two or more options score
+within its near-equivalence margin of the best, returns
+`DecisionOutcome::PendingRandom` with only those candidates at weight 1. A
+boundary system then draws for the exact ticket version as above and passes the
+pending decision as the `tie_break` of `ResolveDecisionRandomly`; the weights
+must equal the candidates. The controller must opt in with
+`with_random_tie_break`, and the trace records the `Random` stage. Without the
+policy flag, the best score wins and exactly equal scores fall back to the
+lowest option ID.
+
+Draw evidence can come only from such a boundary resolution: host-authored
+decision ingress that carries a draw is rejected, live and on load. A
+resolution also fails its boundary before drawing when the ticket's decision
+maker or its controller's authority person was already unavailable when the
+boundary began, so resolving systems should skip those tickets.
+
 An LLM-based run may reuse the same ticket contract and options, but the host
 must register its LLM controller before opening the ticket; a registered
 controller's policy cannot be replaced at runtime. The host sends
@@ -98,7 +118,7 @@ checklist.
 ## Verification checklist
 
 1. The stream and boundary system are declared; operation ID, target, and purpose are stable.
-2. Weights use canonical option-ID order, cover every currently available option, and sum to the draw bound.
+2. Weights use canonical option-ID order, cover every currently available option (for a tie-break, exactly the pending candidates), and sum to the draw bound.
 3. LLM output can select only one option from the exact current ticket version.
 4. Every mutation still enters through ordinary decision or command ingress.
 5. Test snapshot restore, exact replay, rollback, stale tickets, and draw-evidence tampering.

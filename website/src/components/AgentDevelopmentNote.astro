@@ -9,7 +9,7 @@ const isEnglish = locale === "en";
 const copy = isEnglish
   ? {
       summary: "Optional: use a coding agent for implementation",
-      intro: "Ask your coding agent to read and use the two official skills before it writes code, then consult this page, the developer guide, and the relevant runnable example.",
+      intro: "Before it writes code, have your coding agent read and use the two official skills:",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",
       tutorials: "tutorials",
@@ -19,7 +19,7 @@ const copy = isEnglish
     }
   : {
       summary: "可选：使用 Coding Agent 开发",
-      intro: "开始写代码前，先让你的 coding agent 读取并使用这两个官方 skill，再查阅本页、开发者指南和相关可运行示例。",
+      intro: "开始写代码前，先让你的 coding agent 读取并使用以下两个官方 skill：",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",
       tutorials: "快速开始",
@@ -45,8 +45,8 @@ const prefix = isEnglish ? "/en" : "";
       <a href={docsSkillUrl} target="_blank" rel="noreferrer"><code>{copy.docsSkill}</code></a>
       {isEnglish ? " and " : " 与 "}
       <a href={usageSkillUrl} target="_blank" rel="noreferrer"><code>{copy.usageSkill}</code></a>{isEnglish ? "." : "。"}
-      {isEnglish ? " Start with " : " 可从 "}
-      <a href={`${prefix}/tutorials/`}>{copy.tutorials}</a>{isEnglish ? ", then use the " : "，再进入"}
+      {isEnglish ? " Then start with the " : "然后从"}
+      <a href={`${prefix}/tutorials/`}>{copy.tutorials}</a>{isEnglish ? " and the relevant runnable example, and use the " : "和相关可运行示例入手，按需查阅"}
       <a href={`${prefix}/developer/`}>{copy.developer}</a>{isEnglish ? " as needed." : "。"}
     </p>
     <p class="agent-development-note-label">{copy.promptLabel}</p>

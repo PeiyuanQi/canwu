@@ -79,6 +79,8 @@ pub fn ming_fiscal_reference_scenario(
                 id: institution.authority_id.to_owned(),
                 institution: institution.entity.clone(),
                 authorized_actor: Some(institution.actor),
+                acting_actor: None,
+                authority_basis: None,
             },
         );
     }

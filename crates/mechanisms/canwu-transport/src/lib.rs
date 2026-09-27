@@ -6,12 +6,12 @@
 
 #![allow(clippy::missing_errors_doc)]
 
-use canwu_core::{DomainRecordVersionRef, EntityRef, EvidenceRef};
+use canwu_core::{DomainRecordRef, DomainRecordVersionRef, EntityRef, EvidenceRef};
 use canwu_routing::{RoutePlan, RoutingNodeRef};
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 
-pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v3";
+pub const TRANSPORT_SEMANTIC_VERSION: &str = "canwu-transport.v4";
 
 #[must_use]
 pub fn delivery_completion_operation_key(
@@ -59,6 +59,19 @@ pub enum MovementSubjectRole {
     Carrier,
     Passenger,
     Attached,
+    /// An aggregate of people moving as one subject. The subject identity is
+    /// normally an application domain-record reference, and the manifest
+    /// quantity is its positive head count.
+    PersonsGroup,
+}
+
+impl MovementSubjectRole {
+    /// Whether this role is counted by a positive integer manifest quantity:
+    /// units for [`Self::Cargo`], heads for [`Self::PersonsGroup`].
+    #[must_use]
+    pub const fn requires_quantity(self) -> bool {
+        matches!(self, Self::Cargo | Self::PersonsGroup)
+    }
 }
 
 /// One typed identity in a movement manifest.
@@ -66,8 +79,9 @@ pub enum MovementSubjectRole {
 pub struct MovementSubject {
     pub entity: EntityRef,
     pub role: MovementSubjectRole,
-    /// Cargo quantities are integer units and must be positive. Other roles
-    /// normally leave this unset because their cardinality is one identity.
+    /// Cargo quantities are integer units and persons-group quantities are
+    /// head counts; both must be present and positive. Other roles leave this
+    /// unset because their cardinality is one identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<u64>,
     /// Expected carrier/custodian identity at admission, when applicable.
@@ -126,11 +140,10 @@ impl MovementOrder {
         }
         for subject in &self.subjects {
             if subject.quantity.is_some_and(|quantity| quantity == 0)
-                || (subject.role == MovementSubjectRole::Cargo && subject.quantity.is_none())
-                || (subject.role != MovementSubjectRole::Cargo && subject.quantity.is_some())
+                || subject.role.requires_quantity() != subject.quantity.is_some()
             {
                 return Err(MovementOrderError::Invalid(
-                    "cargo requires a positive quantity and non-cargo subjects cannot carry one"
+                    "cargo and persons-group subjects require a positive quantity; other subjects cannot carry one"
                         .to_owned(),
                 ));
             }
@@ -191,10 +204,52 @@ impl TransportExecutionState {
 #[serde(rename_all = "snake_case")]
 pub enum ItineraryRevisionReason {
     Initial,
-    Disaster { explanation: String },
-    CapacityUnavailable { explanation: String },
-    KnowledgeUpdate { explanation: String },
-    Recovery { explanation: String },
+    Disaster {
+        explanation: String,
+    },
+    CapacityUnavailable {
+        explanation: String,
+    },
+    KnowledgeUpdate {
+        explanation: String,
+    },
+    Recovery {
+        explanation: String,
+    },
+    /// A revision caused by an application-owned condition record, cited at
+    /// the exact positive record version the planner acted on. `kind` is an
+    /// application label for the condition; transport does not interpret it.
+    ExternalCondition {
+        record: DomainRecordRef,
+        version: u64,
+        kind: String,
+    },
+}
+
+impl ItineraryRevisionReason {
+    fn validate(&self) -> Result<(), TransportError> {
+        if let Self::ExternalCondition {
+            record,
+            version,
+            kind,
+        } = self
+            && (*version == 0
+                || kind.trim().is_empty()
+                || !domain_record_ref_is_well_formed(record))
+        {
+            return Err(TransportError::InvalidRevision(
+                "external-condition reason requires a well-formed record, a positive version, and a kind"
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn domain_record_ref_is_well_formed(record: &DomainRecordRef) -> bool {
+    !record.kind.namespace.trim().is_empty()
+        && !record.kind.name.trim().is_empty()
+        && !record.id.trim().is_empty()
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -235,6 +290,29 @@ pub struct LegExecution {
     pub evidence: Vec<EvidenceRef>,
 }
 
+/// How custody changed hands between two legs.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffKind {
+    /// A custody transfer the itinerary planned for.
+    #[default]
+    Planned,
+    /// Custody taken by an entity outside the itinerary. Transport records the
+    /// seizing identity; the incident, hostility, and authority behind it stay
+    /// application systems. A seizure follows the same leg rules as a planned
+    /// handoff: it is recorded after the source leg arrived or failed, into a
+    /// startable leg (typically the first leg of a replacement revision), and
+    /// `to_custodian` remains the application's custody label.
+    Seizure { by: EntityRef },
+}
+
+impl HandoffKind {
+    #[must_use]
+    pub const fn is_planned(&self) -> bool {
+        matches!(self, Self::Planned)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Handoff {
     pub id: HandoffId,
@@ -245,6 +323,10 @@ pub struct Handoff {
     pub at: SimTime,
     pub location: String,
     pub evidence: Vec<EvidenceRef>,
+    /// Omitted from JSON when [`HandoffKind::Planned`], so handoffs recorded
+    /// before seizure handoffs existed keep their exact shape.
+    #[serde(default, skip_serializing_if = "HandoffKind::is_planned")]
+    pub kind: HandoffKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -432,6 +514,7 @@ impl TransportExecution {
                 "initial itinerary must be the first revision".to_owned(),
             ));
         }
+        revision.reason.validate()?;
         self.estimated_arrival_at = Some(revision.plan.estimated_arrival_at);
         self.active_itinerary_revision = Some(revision.id);
         self.current_endpoint = Some(revision.plan.origin.as_str().to_owned());
@@ -474,6 +557,7 @@ impl TransportExecution {
         if revision.predecessor != Some(active) || revision.valid_from < at {
             return Err(TransportError::InvalidRevision("reroute must reference the active revision and start no earlier than the reroute time".to_owned()));
         }
+        revision.reason.validate()?;
         if self.revisions.iter().any(|item| item.id == revision.id) {
             return Err(TransportError::InvalidRevision(
                 "itinerary revision identity must be unique within an execution".to_owned(),
@@ -668,6 +752,15 @@ impl TransportExecution {
         {
             return Err(TransportError::InvalidHandoff(
                 "handoff requires distinct legs, custodians, and location".to_owned(),
+            ));
+        }
+        if let HandoffKind::Seizure {
+            by: EntityRef::Domain(record),
+        } = &handoff.kind
+            && !domain_record_ref_is_well_formed(record)
+        {
+            return Err(TransportError::InvalidHandoff(
+                "seizure handoff requires a well-formed seizing identity".to_owned(),
             ));
         }
         if self
@@ -1081,6 +1174,7 @@ mod tests {
             at: SimTime::from_minutes(10),
             location: "b".to_owned(),
             evidence: Vec::new(),
+            kind: HandoffKind::Planned,
         };
         execution.record_handoff(handoff.clone()).unwrap();
         assert_eq!(

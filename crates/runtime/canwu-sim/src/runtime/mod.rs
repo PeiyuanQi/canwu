@@ -10,6 +10,7 @@ mod maintenance;
 mod manifest;
 mod page_store;
 mod persistence;
+mod persons;
 mod plugins;
 mod policy;
 mod random;
@@ -51,10 +52,11 @@ pub use canwu_decision::{
     DecisionHistoryPage, DecisionHistoryQueryBudget, DecisionHotState, DecisionLocatorScaleMetrics,
     DecisionMutation, DecisionOption, DecisionOptionEvaluation, DecisionOptionWeight,
     DecisionOutcome, DecisionPolicy, DecisionPolicyIdentity, DecisionPolicyKind,
-    DecisionRandomEvidence, DecisionRule, DecisionState, DecisionTicket, DecisionTicketDraft,
-    DecisionTicketState, DecisionTrace, ExternalDecisionOption, ExternalDecisionRequest,
-    ExternalDecisionResponse, ExternalPolicy, HumanDecisionResponse, HumanPolicy, LlmModelIdentity,
-    LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
+    DecisionRandomEvidence, DecisionRule, DecisionStage, DecisionState, DecisionTicket,
+    DecisionTicketDraft, DecisionTicketState, DecisionTrace, ExternalDecisionOption,
+    ExternalDecisionRequest, ExternalDecisionResponse, ExternalPolicy, GuardedUtilityPolicy,
+    HumanDecisionResponse, HumanPolicy, LlmModelIdentity, LlmPolicy,
+    MAX_DECISION_ARCHIVE_BATCH_ENTRIES, MAX_DECISION_HISTORY_PAGE_BYTES,
     MAX_DECISION_HISTORY_PAGE_SIZE, OrderedRulePolicy, PersistentDecisionLog, PolicyDecision,
     PreparedDecisionArchive, QueuedExternalPolicy, QueuedHumanPolicy, QueuedLlmPolicy, RuleChoice,
     RulePolicy, TraceLocatorScaleMetrics, UtilityEvaluator, UtilityPolicy, UtilityProfile,
@@ -66,9 +68,10 @@ pub use decision::{
     PreparedDecisionIngress,
 };
 pub use ingress::{
-    IngressClass, IngressPayload, IngressReceipt, IngressRecord, MaintenanceChangeRecord,
-    MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt,
-    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
+    IngressCancellationAuthority, IngressClass, IngressPayload, IngressReceipt, IngressRecord,
+    MAX_INGRESS_CANCELLATION_REASON_BYTES, MaintenanceChangeRecord, MaintenanceDisposition,
+    MaintenanceIngressRequest, MaintenanceRejectionReceipt, PluginArchiveRetention,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
 };
 pub use knowledge::{
     KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
@@ -102,6 +105,11 @@ pub use persistence::{
     PortablePagedSimulationCheckpoint, PreparedEvidenceSeal, PreparedPagedSimulationCheckpoint,
     ReplayJournal, SimulationCheckpoint, SimulationSnapshot, format8_paged_checkpoint_scale_probe,
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
+};
+pub use persons::{
+    BoundaryPersonAvailabilityChange, BoundaryPersonCreation,
+    CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CreatedPerson, CustodyState,
+    DECISION_MAKER_UNAVAILABLE_REASON, LifeState, PersonAvailability, PersonDraft,
 };
 pub use plugins::{
     MaintenanceDependencyResolverDescriptor, OwnerAuthorizedMaintenanceParticipant,
@@ -669,9 +677,19 @@ impl StateKey {
         }
     }
 
+    /// Core legacy person records. A phase-7 boundary system that declares
+    /// this key as a write may propose `BoundaryDirective::CreatePerson`.
     #[must_use]
     pub fn core_people() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "people")
+    }
+
+    /// Core person life and custody state. A phase-7 or phase-10 boundary
+    /// system that declares this key as a write may propose
+    /// `BoundaryDirective::SetPersonAvailability`.
+    #[must_use]
+    pub fn core_person_availability() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "person_availability")
     }
 
     #[must_use]
@@ -1407,6 +1425,8 @@ impl Simulation {
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
+                    person_availability: BTreeMap::new(),
+                    created_persons: Vec::new(),
                     letters: scenario
                         .world
                         .letters
@@ -1456,6 +1476,7 @@ impl Simulation {
                     now: scenario.start_time,
                     actions: BTreeMap::new(),
                     pending_ingress: BTreeSet::new(),
+                    cancelled_ingress: BTreeSet::new(),
                 },
                 counters: RuntimeCounters {
                     next_event_id: 1,
@@ -1468,6 +1489,7 @@ impl Simulation {
                     next_schedule_sequence: 1,
                     next_correlation_id: 1,
                     next_decision_trace_id: 1,
+                    next_person_id: 0,
                     state_revision: 0,
                     admitted_attempt_count: 0,
                     admitted_command_count: 0,
@@ -2002,6 +2024,8 @@ impl Simulation {
             plugin_registration_closed: self.state.metadata.plugin_registration_closed,
             entities: hashing::committed_entities(&entities, &world),
             world: &world,
+            person_availability: &self.state.current.person_availability,
+            created_persons: &self.state.current.created_persons,
             knowledge: &self.state.current.knowledge,
             events: &self.state.evidence.events,
             commands: &self.state.evidence.commands,
@@ -2027,6 +2051,7 @@ impl Simulation {
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
             next_decision_trace_id: self.state.counters.next_decision_trace_id,
+            next_person_id: self.state.counters.next_person_id,
         })
     }
 
@@ -2039,7 +2064,12 @@ impl Simulation {
             .then(|| {
                 let world = self.world();
                 let entities: Vec<_> = self.state.current.entities.iter().cloned().collect();
-                world_commitment_root(&world, &entities)
+                world_commitment_root(
+                    &world,
+                    &entities,
+                    &self.state.current.person_availability,
+                    &self.state.current.created_persons,
+                )
             })
             .transpose()?;
         let knowledge = needs
@@ -2180,6 +2210,7 @@ impl Simulation {
             next_schedule_sequence: self.state.counters.next_schedule_sequence,
             next_correlation_id: self.state.counters.next_correlation_id,
             next_decision_trace_id: self.state.counters.next_decision_trace_id,
+            next_person_id: self.state.counters.next_person_id,
         };
         let (domain_roots, journal_roots) = {
             let cache = self
@@ -2314,10 +2345,22 @@ impl Simulation {
             .iter()
             .flat_map(|boundary| boundary.admitted_ingress.iter().copied())
             .collect();
+        let cancelled_ingress: BTreeSet<_> = snapshot
+            .ingress
+            .iter()
+            .filter_map(|record| match &record.payload {
+                IngressPayload::PluginCancellation { cancelled, .. } => Some(*cancelled),
+                _ => None,
+            })
+            .collect();
         let pending_ingress = snapshot
             .ingress
             .iter()
-            .filter(|record| !admitted_ingress.contains(&record.id))
+            .filter(|record| {
+                !admitted_ingress.contains(&record.id)
+                    && !cancelled_ingress.contains(&record.id)
+                    && !matches!(record.payload, IngressPayload::PluginCancellation { .. })
+            })
             .map(IngressQueueKey::from_record)
             .collect();
         let initial_scenario = Some(snapshot.initial_scenario.clone().ok_or_else(|| {
@@ -2349,6 +2392,8 @@ impl Simulation {
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
+                    person_availability: snapshot.person_availability,
+                    created_persons: snapshot.created_persons,
                     letters: snapshot
                         .world
                         .letters
@@ -2420,6 +2465,7 @@ impl Simulation {
                         .map(|record| (record.key, record.action))
                         .collect(),
                     pending_ingress,
+                    cancelled_ingress,
                 },
                 counters: RuntimeCounters {
                     next_event_id: snapshot.next_event_id,
@@ -2432,6 +2478,7 @@ impl Simulation {
                     next_schedule_sequence: snapshot.next_schedule_sequence,
                     next_correlation_id: snapshot.next_correlation_id,
                     next_decision_trace_id: snapshot.next_decision_trace_id,
+                    next_person_id: snapshot.next_person_id,
                     state_revision: snapshot.state_revision,
                     admitted_attempt_count: snapshot.admitted_attempt_count,
                     admitted_command_count: snapshot.admitted_command_count,
@@ -3472,6 +3519,7 @@ const fn is_expected_command_rejection(code: &ErrorCode) -> bool {
             | ErrorCode::InvalidAuthority
             | ErrorCode::InvalidDuration
             | ErrorCode::InvalidPayload
+            | ErrorCode::IssuerUnavailable
             | ErrorCode::MissingIdempotencyKey
             | ErrorCode::MixedCommandIngress
             | ErrorCode::NoRoute

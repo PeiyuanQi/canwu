@@ -130,9 +130,11 @@ plugins, select one method, or enable all three through
 
 ## 5. Choose a home-hardware scale
 
-The current simulation core still clones and validates broad state during a transaction;
-domain paging does not remove that cost. A 20-year workload recorded on
-2026-08-22 with a Ryzen 7 7800X3D, 32 GB RAM, Windows release build produced:
+These figures were recorded on 2026-08-22 against engine 0.5.1 and have not been
+re-measured on 0.12.0. Format 8 has since removed the broad domain-state clone
+from each transaction, so treat them as historical reference, not current
+performance. The 20-year workload on a Ryzen 7 7800X3D, 32 GB RAM, Windows
+release build produced:
 
 | Profile | Sites / programs / links | Technology operation p95 | Monthly p95 | Deep validated load | Peak RSS |
 | --- | --- | ---: | ---: | ---: | ---: |
@@ -144,7 +146,7 @@ paced home-computer play. It is not whole-game certification and must not be
 extrapolated into a larger-scale or sub-100 ms interaction claim. The 500-site pressure
 profile is appropriate for campaign turns or offline research, not immediate
 interaction. Technology is capped at 5,000 records, each history plugin at
-1,000, all four extensions together at 8,000, and technology knowledge at
+1,000, technology and the three history plugins together at 8,000, and technology knowledge at
 5,000. One payload is capped at 16 KiB, 32 references, and 64 collection
 entries; one boundary permits at most 127 combined extension mutations. Capacity
 overflow leaves explicit rejection events rather than permanently blocking later

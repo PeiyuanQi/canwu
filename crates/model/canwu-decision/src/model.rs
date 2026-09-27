@@ -44,6 +44,12 @@ pub enum DecisionAttemptErrorCode {
     TicketNotFound,
     QueryBudgetExceeded,
     VersionConflict,
+    /// The resolving controller acts for a person who is not alive or is
+    /// detained or captive.
+    IssuerUnavailable,
+    /// The decision maker is a person who is not alive or is detained or
+    /// captive.
+    DecisionMakerUnavailable,
 }
 
 impl From<DecisionErrorCode> for DecisionAttemptErrorCode {
@@ -105,6 +111,13 @@ pub struct DecisionPolicyIdentity {
     pub kind: DecisionPolicyKind,
     pub id: String,
     pub version: String,
+    /// Canonical lower-case BLAKE3 digest of the policy's semantic
+    /// configuration, for SDK adapters whose configuration is part of their
+    /// identity (for example [`crate::GuardedUtilityPolicy`]). A controller
+    /// binding then rejects a policy whose configuration drifted without a
+    /// version change. `None` keeps the historical identity shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_hash: Option<String>,
 }
 
 impl DecisionPolicyIdentity {
@@ -118,12 +131,25 @@ impl DecisionPolicyIdentity {
             kind,
             id: id.into(),
             version: version.into(),
+            semantic_hash: None,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<(), DecisionError> {
         require_identifier(&self.id, "policy ID")?;
-        require_text(&self.version, "policy version")
+        require_text(&self.version, "policy version")?;
+        if self.semantic_hash.as_deref().is_some_and(|hash| {
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidController,
+                "policy semantic hash must be lower-case 32-byte hexadecimal",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -166,6 +192,17 @@ pub struct DecisionControllerBinding {
     pub permission_profile_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_subject: Option<EntityRef>,
+    /// Opts a utility-policy controller into random tie-breaks: its tickets
+    /// may then be resolved by `ResolveDecisionRandomly` over the candidates
+    /// of a pending [`DecisionOutcome::PendingRandom`] decision. Without this
+    /// opt-in, only random-policy controllers accept draw evidence.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub random_tie_break: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl DecisionControllerBinding {
@@ -182,7 +219,15 @@ impl DecisionControllerBinding {
             seat_id: None,
             permission_profile_id: None,
             command_subject: None,
+            random_tie_break: false,
         }
+    }
+
+    /// Permits random tie-breaks for this utility-policy controller.
+    #[must_use]
+    pub const fn with_random_tie_break(mut self) -> Self {
+        self.random_tie_break = true;
+        self
     }
 
     #[must_use]
@@ -217,6 +262,12 @@ impl DecisionControllerBinding {
         }
         if let Some(profile) = &self.permission_profile_id {
             require_identifier(profile, "permission-profile ID")?;
+        }
+        if self.random_tie_break && self.policy.kind != DecisionPolicyKind::Utility {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidController,
+                "only utility-policy controllers can opt into random tie-breaks",
+            ));
         }
         Ok(())
     }
@@ -319,6 +370,11 @@ pub struct DecisionTicketDraft {
     pub options: Vec<DecisionOption>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<SimTime>,
+    /// Earlier ticket this decision follows up. At admission the parent must
+    /// be a terminal ticket in hot decision history with the same
+    /// `decision_maker`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_ticket: Option<DecisionTicketId>,
 }
 
 impl DecisionTicketDraft {
@@ -329,6 +385,7 @@ impl DecisionTicketDraft {
                 "decision ticket IDs must be nonzero",
             ));
         }
+        validate_parent_reference(self.id, self.parent_ticket)?;
         require_identifier(&self.definition, "decision definition")?;
         require_identifier(&self.assigned_controller, "assigned controller")?;
         require_text(&self.summary, "decision summary")?;
@@ -366,6 +423,9 @@ pub struct DecisionTicket {
     pub deadline: Option<SimTime>,
     pub version: u64,
     pub state: DecisionTicketState,
+    /// Terminal ticket, of the same decision maker, that this ticket follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_ticket: Option<DecisionTicketId>,
 }
 
 impl DecisionTicket {
@@ -383,6 +443,7 @@ impl DecisionTicket {
     }
 
     pub(crate) fn validate(&self) -> Result<(), DecisionError> {
+        validate_parent_reference(self.id, self.parent_ticket)?;
         require_identifier(&self.definition, "decision definition")?;
         require_identifier(&self.assigned_controller, "assigned controller")?;
         require_text(&self.summary, "decision summary")?;
@@ -479,6 +540,8 @@ pub struct DecisionRandomEvidence {
 }
 
 impl DecisionRandomEvidence {
+    /// Selects the option of a random-policy draw. The weights must cover
+    /// every available ticket option exactly once, in canonical order.
     pub fn selected_option(
         ticket: &DecisionTicket,
         option_weights: &[DecisionOptionWeight],
@@ -487,6 +550,20 @@ impl DecisionRandomEvidence {
         validate_option_weights(ticket, option_weights)?;
         let upper_exclusive = checked_option_weight_total(option_weights)?;
         Self::selected_option_from_weights(option_weights, value, upper_exclusive)
+    }
+
+    /// Selects the option of a random tie-break draw. The weights name only
+    /// the near-equivalent candidates a policy left pending: at least two
+    /// distinct available ticket options, each with a positive weight, in
+    /// canonical order.
+    pub fn selected_candidate(
+        ticket: &DecisionTicket,
+        candidates: &[DecisionOptionWeight],
+        value: u64,
+    ) -> Result<String, DecisionError> {
+        validate_candidate_weights(ticket, candidates)?;
+        let upper_exclusive = checked_option_weight_total(candidates)?;
+        Self::selected_option_from_weights(candidates, value, upper_exclusive)
     }
 
     pub fn selected_option_from_weights(
@@ -529,6 +606,7 @@ impl DecisionRandomEvidence {
         &self,
         ticket: &DecisionTicket,
         selected_option: &str,
+        tie_break: bool,
     ) -> Result<(), DecisionError> {
         if self.draw_id.get() == 0 {
             return Err(DecisionError::new(
@@ -536,7 +614,11 @@ impl DecisionRandomEvidence {
                 "random decision evidence requires a nonzero draw ID",
             ));
         }
-        let observed = Self::selected_option(ticket, &self.option_weights, self.value)?;
+        let observed = if tie_break {
+            Self::selected_candidate(ticket, &self.option_weights, self.value)?
+        } else {
+            Self::selected_option(ticket, &self.option_weights, self.value)?
+        };
         if checked_option_weight_total(&self.option_weights)? != self.upper_exclusive {
             return Err(DecisionError::new(
                 DecisionErrorCode::InvalidDecision,
@@ -556,9 +638,43 @@ impl DecisionRandomEvidence {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DecisionOutcome {
-    Selected { option_id: String },
-    Deferred { reason: String },
-    Pending { reason: String },
+    Selected {
+        option_id: String,
+    },
+    Deferred {
+        reason: String,
+    },
+    Pending {
+        reason: String,
+    },
+    /// A non-authoritative outcome: the policy found near-equivalent
+    /// candidates and asks the boundary to choose among only these options
+    /// with `ResolveDecisionRandomly`. It is never persisted as a resolution.
+    PendingRandom {
+        candidates: Vec<DecisionOptionWeight>,
+    },
+}
+
+impl DecisionOutcome {
+    /// Returns whether the outcome waits for later input instead of resolving
+    /// or deferring the ticket.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        matches!(self, Self::Pending { .. } | Self::PendingRandom { .. })
+    }
+}
+
+/// The stage of a composite policy that produced a decision. Decisions from
+/// single-stage policies, and every historical trace, carry no stage.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionStage {
+    /// An ordered guard selected or deferred before utility scoring.
+    Guard,
+    /// Weighted utility scoring selected or deferred.
+    Utility,
+    /// A bounded random tie-break among near-equivalent utility candidates.
+    Random,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -571,6 +687,12 @@ pub struct PolicyDecision {
     pub external: Option<DecisionExternalEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub random: Option<DecisionRandomEvidence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<DecisionStage>,
+    /// Guard IDs that returned a choice other than no-match, in evaluation
+    /// order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_guards: Vec<String>,
 }
 
 impl PolicyDecision {
@@ -584,6 +706,8 @@ impl PolicyDecision {
             evaluations: Vec::new(),
             external: None,
             random: None,
+            stage: None,
+            fired_guards: Vec::new(),
         }
     }
 
@@ -598,10 +722,23 @@ impl PolicyDecision {
             evaluations: Vec::new(),
             external: None,
             random: None,
+            stage: None,
+            fired_guards: Vec::new(),
         }
     }
 
-    pub(crate) fn validate(&self, ticket: &DecisionTicket) -> Result<(), DecisionError> {
+    /// Returns whether this decision is a random tie-break among candidates
+    /// rather than a random-policy draw over every available option.
+    #[must_use]
+    pub fn is_random_tie_break(&self) -> bool {
+        self.stage == Some(DecisionStage::Random)
+    }
+
+    /// Validates this decision against the ticket it answers: a selection
+    /// names an available option, a pending tie-break names only available
+    /// candidates, evaluations reference ticket options, and draw evidence
+    /// selects the recorded option.
+    pub fn validate(&self, ticket: &DecisionTicket) -> Result<(), DecisionError> {
         require_text(&self.summary, "policy decision summary")?;
         match &self.outcome {
             DecisionOutcome::Selected { option_id } => {
@@ -621,6 +758,16 @@ impl PolicyDecision {
             DecisionOutcome::Deferred { reason } | DecisionOutcome::Pending { reason } => {
                 require_text(reason, "decision outcome reason")?;
             }
+            DecisionOutcome::PendingRandom { candidates } => {
+                validate_candidate_weights(ticket, candidates)?;
+                validate_candidates_top_scored(ticket, candidates, &self.evaluations)?;
+                if !self.is_random_tie_break() || self.random.is_some() {
+                    return Err(DecisionError::new(
+                        DecisionErrorCode::InvalidDecision,
+                        "a pending random tie-break requires the random stage and no draw evidence",
+                    ));
+                }
+            }
         }
         for evaluation in &self.evaluations {
             if ticket.option(&evaluation.option_id).is_none() {
@@ -629,6 +776,9 @@ impl PolicyDecision {
                     "policy evaluation references an unknown option",
                 ));
             }
+        }
+        for guard in &self.fired_guards {
+            require_identifier(guard, "fired guard ID")?;
         }
         if self.external.is_some() && self.random.is_some() {
             return Err(DecisionError::new(
@@ -643,7 +793,17 @@ impl PolicyDecision {
                     "random decision evidence requires a selected outcome",
                 ));
             };
-            random.validate(ticket, option_id)?;
+            random.validate(ticket, option_id, self.is_random_tie_break())?;
+            if self.is_random_tie_break() {
+                validate_candidates_top_scored(ticket, &random.option_weights, &self.evaluations)?;
+            }
+        } else if self.is_random_tie_break()
+            && !matches!(self.outcome, DecisionOutcome::PendingRandom { .. })
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                "the random stage either awaits a tie-break draw or selects with draw evidence",
+            ));
         }
         Ok(())
     }
@@ -667,6 +827,17 @@ pub struct DecisionTrace {
     pub random: Option<DecisionRandomEvidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_request_id: Option<CommandRequestId>,
+    /// Composite-policy stage that produced the outcome; `None` for
+    /// single-stage policies and historical traces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<DecisionStage>,
+    /// Guard IDs that fired, in evaluation order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fired_guards: Vec<String>,
+    /// The resolved ticket's parent, copied from the ticket so a trace read
+    /// from history carries its decision lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_ticket: Option<DecisionTicketId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -764,6 +935,102 @@ fn validate_option_weights(
         return Err(DecisionError::new(
             DecisionErrorCode::InvalidDecision,
             "random decision weights must cover every available option exactly once",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_weights(
+    ticket: &DecisionTicket,
+    candidates: &[DecisionOptionWeight],
+) -> Result<(), DecisionError> {
+    checked_option_weight_total(candidates)?;
+    if candidates.len() < 2 {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "a random tie-break requires at least two candidates",
+        ));
+    }
+    for candidate in candidates {
+        if candidate.weight == 0
+            || !ticket
+                .option(&candidate.option_id)
+                .is_some_and(DecisionOption::is_available)
+        {
+            return Err(DecisionError::new(
+                DecisionErrorCode::InvalidDecision,
+                format!(
+                    "random tie-break candidate {} must be an available option with a positive weight",
+                    candidate.option_id
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A tie-break is evidence about scores: the evaluations cover every available
+/// ticket option exactly once, every candidate carries an available scored
+/// evaluation, and no scored non-candidate reaches the lowest candidate score.
+fn validate_candidates_top_scored(
+    ticket: &DecisionTicket,
+    candidates: &[DecisionOptionWeight],
+    evaluations: &[DecisionOptionEvaluation],
+) -> Result<(), DecisionError> {
+    let mut evaluated = std::collections::BTreeSet::new();
+    let covered = evaluations
+        .iter()
+        .all(|evaluation| evaluated.insert(evaluation.option_id.as_str()))
+        && ticket
+            .options
+            .iter()
+            .filter(|option| option.is_available())
+            .all(|option| evaluated.contains(option.id.as_str()));
+    if !covered {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random tie-break evaluations must cover every available option exactly once",
+        ));
+    }
+    let score = |option_id: &str| {
+        evaluations
+            .iter()
+            .find(|evaluation| evaluation.option_id == option_id)
+            .filter(|evaluation| evaluation.available)
+            .and_then(|evaluation| evaluation.score)
+    };
+    let lowest_candidate = candidates
+        .iter()
+        .map(|candidate| score(&candidate.option_id))
+        .try_fold(i64::MAX, |lowest, score| {
+            score.map(|score| lowest.min(score))
+        });
+    let valid = lowest_candidate.is_some_and(|lowest| {
+        evaluations.iter().all(|evaluation| {
+            candidates
+                .iter()
+                .any(|candidate| candidate.option_id == evaluation.option_id)
+                || !evaluation.available
+                || evaluation.score.is_none_or(|score| score < lowest)
+        })
+    });
+    if !valid {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "random tie-break candidates must be exactly the top-scored available evaluations",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_parent_reference(
+    id: DecisionTicketId,
+    parent: Option<DecisionTicketId>,
+) -> Result<(), DecisionError> {
+    if parent.is_some_and(|parent| parent.get() == 0 || parent == id) {
+        return Err(DecisionError::new(
+            DecisionErrorCode::InvalidDecision,
+            "a decision ticket parent must be a different nonzero ticket ID",
         ));
     }
     Ok(())

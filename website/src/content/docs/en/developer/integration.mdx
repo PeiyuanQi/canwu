@@ -86,6 +86,30 @@ Production applications normally construct their own `Scenario` and plugins. The
 
 The domain integration translates UI or agent intent into a typed domain command. Every ingress path preserves the same rule: the host never receives a mutable world reference.
 
+## Withdraw queued plugin input
+
+Plugin input queued with `enqueue_plugin_ingress` can be withdrawn while it is still queued and strictly before its due time:
+
+```rust
+let queued = canwu.enqueue_plugin_ingress(request)?;
+// The player withdraws the order before it is due.
+canwu.cancel_plugin_ingress(queued.ingress_id, "withdrawn by player")?;
+```
+
+Only the issuer may withdraw an item. The host withdraws public packets it enqueued with `cancel_plugin_ingress`. Internal packet types need `cancel_permitted_plugin_ingress` with the owning plugin's registration permit, which also covers items that plugin scheduled itself. A plugin's boundary system withdraws items its plugin scheduled with `BoundaryDirective::CancelPluginIngress`. The withdrawal is journaled as its own `IngressPayload::PluginCancellation` record naming the item, the `IngressCancellationAuthority`, and a reason of at most 1,024 bytes. The withdrawn item is never admitted and nothing is rolled back. Items that are already due, admitted, archived, or withdrawn fail with `LateIngress`; another issuer's item fails with `InvalidAuthority`; an unknown ID fails with `EvidenceUnavailable`. Snapshots, checkpoint journals, and exact replay keep the withdrawal.
+
+## People who can no longer act
+
+Since 0.12.0 the runtime keeps each person's availability (`PersonAvailability`): a life state (`Alive`, `Dead`, `Missing`) and a custody state (`Free`, `Detained`, `Hostage`, `Captive`, `Hiding`, `Exile`). Your application decides when a person dies, is captured, or is released, and records it from a phase-7 or phase-10 boundary system that declares `StateKey::core_person_availability()` and returns `BoundaryDirective::SetPersonAvailability`. Read it with `canwu.person_availability(person)`; `None` means alive and free.
+
+A person who is not alive, or who is detained or captive, is unavailable:
+
+- command admission rejects a command whose issuer, decision actor, or responsible institutional actor is unavailable with `IssuerUnavailable`, recorded as a persisted rejection for tracked requests;
+- a decision ticket cannot be opened, prepared, or resolved while its person decision maker (`DecisionMakerUnavailable`) or its controller's authority person (`IssuerUnavailable`) is unavailable;
+- at the end of the boundary that makes the person unavailable, open tickets where they are the decision maker are cancelled with `decision_maker_unavailable`, and open tickets whose controller acts for them are cancelled with `controller_authority_unavailable`.
+
+Hostage, hiding, and exile stay admissible by default; add stricter rules in your own systems. A cancelled ticket is not reassigned. When only the controller's authority person became unavailable, continue the decision by opening a new ticket for an available controller with `parent_ticket` set to the cancelled one. No new ticket can be opened for a decision maker who is still unavailable.
+
 ## Drive time
 
 <Steps>

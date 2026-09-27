@@ -62,9 +62,16 @@ crates.io can resolve every completed group before continuing:
 4. `canwu-transport`
 5. `canwu-api`
 6. `canwu-information`, `canwu-society`, `canwu-technology`, `canwu-fiscal`,
-   `canwu-resource`
+   `canwu-resource`, `canwu-law`, `canwu-military`
 7. `canwu-culture`, `canwu-correspondence`, `canwu-history-research`,
-   `canwu-production`, `canwu-ming-fiscal`, `canwu-economy-reference-content`
+   `canwu-production`, `canwu-ming-fiscal`, `canwu-military-reference-content`
+8. `canwu-economy-reference-content`
+
+Every workspace crate that is not marked `publish = false` belongs to exactly
+one group and is published with every release, including crates that no
+downstream application currently uses. Lockstep versioning applies to the
+registry as well as to the workspace; skipping a crate leaves its registry
+version pinned to an older `canwu-api` that cannot coexist with the current one.
 
 For each package, first run its dry-run and then publish the exact locked
 source:

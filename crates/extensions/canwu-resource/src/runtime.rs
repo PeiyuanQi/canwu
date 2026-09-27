@@ -73,6 +73,85 @@ pub struct ResourceTransferStartRequestV1 {
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
 }
 
+/// Atomic start of two transfer legs. Both legs are admitted together or the
+/// whole exchange is rejected with one outcome, keyed by `operation_key`, that
+/// cites both transfer IDs.
+///
+/// Each leg is an ordinary [`ResourceTransferStartRequestV1`] with its own
+/// completion certificate, and that certificate must be a completion lease
+/// held by the custodian of the leg's source account. A leg's `operation_key`
+/// must equal the key that [`ResourceExchangeTermsV1::leg_operation_keys`]
+/// derives from the exchange terms, so each custodian's lease consents to the
+/// whole exchange (both transfers, allocations, and destinations) rather than
+/// to its own leg alone. The leg key becomes the transfer's operation
+/// identity; only the exchange key receives an operation outcome. Because each
+/// leg keeps its own lease, later terminal dispositions of the two transfers
+/// remain independent.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceExchangeStartRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub leg_a: ResourceTransferStartRequestV1,
+    pub leg_b: ResourceTransferStartRequestV1,
+}
+
+impl ResourceExchangeStartRequestV1 {
+    /// The consent-bearing terms of this exchange.
+    #[must_use]
+    pub fn terms(&self) -> ResourceExchangeTermsV1 {
+        ResourceExchangeTermsV1 {
+            operation_key: self.operation_key.clone(),
+            leg_a: ResourceExchangeLegTermsV1::from(&self.leg_a),
+            leg_b: ResourceExchangeLegTermsV1::from(&self.leg_b),
+        }
+    }
+}
+
+/// What one exchange leg moves: the transfer identity, the exact allocation
+/// it debits, and its destination. Timing and the expected source revision
+/// are bound by the leg's own completion lease instead.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceExchangeLegTermsV1 {
+    pub transfer_id: ResourceTransferId,
+    pub allocation: ResourceAllocationLegVersionV1,
+    pub destination: Option<ResourceAccountId>,
+}
+
+impl From<&ResourceTransferStartRequestV1> for ResourceExchangeLegTermsV1 {
+    fn from(value: &ResourceTransferStartRequestV1) -> Self {
+        Self {
+            transfer_id: value.transfer_id.clone(),
+            allocation: value.allocation.clone(),
+            destination: value.destination.clone(),
+        }
+    }
+}
+
+/// Terms both parties agree to before either acquires its leg's completion
+/// lease.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceExchangeTermsV1 {
+    pub operation_key: ResourceOperationKey,
+    pub leg_a: ResourceExchangeLegTermsV1,
+    pub leg_b: ResourceExchangeLegTermsV1,
+}
+
+impl ResourceExchangeTermsV1 {
+    /// Canonical digest of the terms.
+    pub fn digest(&self) -> Result<String, ResourceError> {
+        canonical_digest("canwu.resource.exchange-terms.v1", self)
+    }
+
+    /// Operation keys that `leg_a` and `leg_b`, and their completion leases,
+    /// must use: `resource:exchange-leg:{a|b}:{terms digest}`.
+    pub fn leg_operation_keys(&self) -> Result<[ResourceOperationKey; 2], ResourceError> {
+        let digest = self.digest()?;
+        Ok([
+            ResourceOperationKey::new(format!("resource:exchange-leg:a:{digest}"))?,
+            ResourceOperationKey::new(format!("resource:exchange-leg:b:{digest}"))?,
+        ])
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransferProgressV1 {
@@ -109,6 +188,16 @@ pub enum ResourceTransferDispositionV1 {
         destination: ResourceAccountId,
         expected_destination_revision: ResourceRevision,
         acceptance: ResourceTransportAcceptanceV1,
+    },
+    /// Same-place acceptance without a transport execution. Valid only while
+    /// the transfer is `PendingDispatch` with no transport link and when the
+    /// source and destination accounts declare the same
+    /// [`crate::ResourceAccount::place_scope`]. The exact handover record is
+    /// locked by the terminal completion certificate and kept as evidence.
+    AcceptLocal {
+        destination: ResourceAccountId,
+        expected_destination_revision: ResourceRevision,
+        handover_evidence: DomainRecordVersionRef,
     },
     Lose {
         loss_id: ResourceLossId,
@@ -194,6 +283,24 @@ pub struct ResourceExternalOutflowRequestV1 {
     pub quantity: u64,
     pub allow_protected: bool,
     pub authority_evidence: DomainRecordVersionRef,
+    pub at: SimTime,
+    pub completion_certificate: CompletionLeaseActivationCertificateV1,
+}
+
+/// Account-level loss settled in place, without a transfer. The debit
+/// respects reservations always and the account's protected floor unless
+/// `allow_protected` is set. The settled [`crate::ResourceLoss`] carries
+/// `account: Some(..)`, `transfer: None`, and counts as admitted loss in
+/// [`crate::ConservationTotalsV1`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourceAccountLossRequestV1 {
+    pub operation_key: ResourceOperationKey,
+    pub loss_id: ResourceLossId,
+    pub account: ResourceAccountId,
+    pub expected_account_revision: ResourceRevision,
+    pub quantity: u64,
+    pub cause: EvidenceRef,
+    pub allow_protected: bool,
     pub at: SimTime,
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
 }
@@ -332,12 +439,16 @@ pub enum ResourceOperationRequestV1 {
     CancelDemand(ResourceCancelDemandRequestV1),
     RecordObservation(ResourceObservationRequestV1),
     Completion(ResourceCompletionOperationV1),
+    RecordLoss(ResourceAccountLossRequestV1),
+    BeginExchange(ResourceExchangeStartRequestV1),
 }
 
 impl ResourceOperationRequestV1 {
     #[must_use]
     pub fn operation_key(&self) -> ResourceOperationKey {
         match self {
+            Self::RecordLoss(value) => value.operation_key.clone(),
+            Self::BeginExchange(value) => value.operation_key.clone(),
             Self::CreateAccount(value) => value.operation_key.clone(),
             Self::SubmitDemand(value) => value.operation_key.clone(),
             Self::AmendDemand(value) => value.operation_key.clone(),
@@ -374,6 +485,22 @@ impl ResourceOperationRequestV1 {
             Self::CancelDemand(_) => ResourceOperationKind::CancelDemand,
             Self::RecordObservation(_) => ResourceOperationKind::Observation,
             Self::Completion(_) => ResourceOperationKind::CompletionLease,
+            Self::RecordLoss(_) => ResourceOperationKind::Loss,
+            Self::BeginExchange(_) => ResourceOperationKind::BeginExchange,
+        }
+    }
+
+    /// Transfer identities an outcome of this request must cite. Only an
+    /// exchange names transfers; its outcome cites them whether applied or
+    /// rejected.
+    #[must_use]
+    pub fn cited_transfers(&self) -> Vec<ResourceTransferId> {
+        match self {
+            Self::BeginExchange(value) => vec![
+                value.leg_a.transfer_id.clone(),
+                value.leg_b.transfer_id.clone(),
+            ],
+            _ => Vec::new(),
         }
     }
 }
@@ -884,7 +1011,9 @@ impl ResourceState {
             }
         }
         if !grant.include_transfer_details
-            && (!head.transfers.is_empty() || !head.consumptions.is_empty())
+            && (!head.transfers.is_empty()
+                || !head.consumptions.is_empty()
+                || !head.losses.is_empty())
         {
             return Err(ResourceError::Authority(
                 "resource observation transfer details exceed its holder grant".to_owned(),
@@ -926,6 +1055,37 @@ impl ResourceState {
             {
                 return Err(ResourceError::Authority(
                     "resource observation consumption differs from authoritative holder work"
+                        .to_owned(),
+                ));
+            }
+        }
+        for observation in &head.losses {
+            let Some(loss) = self.losses.get(&observation.loss) else {
+                continue;
+            };
+            let owns_account = loss
+                .account
+                .as_ref()
+                .is_some_and(|account| grant.accounts.contains(account))
+                || loss
+                    .transfer
+                    .as_ref()
+                    .and_then(|transfer| self.transfers.get(transfer))
+                    .is_some_and(|transfer| {
+                        grant.accounts.contains(&transfer.source)
+                            || transfer
+                                .destination
+                                .as_ref()
+                                .is_some_and(|account| grant.accounts.contains(account))
+                    });
+            if !owns_account
+                || observation.account != loss.account
+                || observation.transfer != loss.transfer
+                || observation.quantity != loss.quantity
+                || observation.cause != loss.cause
+            {
+                return Err(ResourceError::Authority(
+                    "resource observation loss differs from authoritative holder custody"
                         .to_owned(),
                 ));
             }
@@ -1103,10 +1263,13 @@ impl ResourceState {
             ResourceOperationRequestV1::Consume(_) => 7,
             ResourceOperationRequestV1::Credit(_)
             | ResourceOperationRequestV1::ExternalOutflow(_) => 2,
+            // Outcome, loss record, and completed lease receipt.
+            ResourceOperationRequestV1::RecordLoss(_) => 3,
             ResourceOperationRequestV1::CompleteTransfer(
                 ResourceTransferDispositionRequestV1 {
                     disposition:
                         ResourceTransferDispositionV1::Accept { .. }
+                        | ResourceTransferDispositionV1::AcceptLocal { .. }
                         | ResourceTransferDispositionV1::Lose { .. },
                     ..
                 },
@@ -1190,6 +1353,7 @@ impl ResourceState {
             quantity,
             remainder,
             result_ref,
+            cited_transfers: request.cited_transfers(),
             rejection_code,
             rejection_reason,
             exact_evidence,
@@ -1249,6 +1413,8 @@ impl ResourceState {
             ResourceOperationRequestV1::Completion(value) => {
                 self.apply_completion(value, prepare_external_targets_current)
             }
+            ResourceOperationRequestV1::RecordLoss(value) => self.record_account_loss(value),
+            ResourceOperationRequestV1::BeginExchange(value) => self.begin_exchange(value),
         }
     }
 
@@ -2039,6 +2205,111 @@ impl ResourceState {
                 "resource transfer capacity or identity is unavailable".to_owned(),
             ));
         }
+        let (leg, targets) = self.transfer_start_targets(request)?;
+        let (acquisition, _) = self.consume_completion_certificate(
+            &request.completion_certificate,
+            request.at,
+            &request.operation_key,
+            &targets,
+        )?;
+        self.settle_transfer_start(request, leg.clone(), acquisition)?;
+        Ok(AppliedOperation {
+            quantity: leg.quantity,
+            remainder: 0,
+            result_ref: Some(ResourceRecordRefV1::Transfer(request.transfer_id.clone())),
+            exact_evidence: Vec::new(),
+        })
+    }
+
+    /// Starts both legs of an exchange on this (already detached) state. Any
+    /// error rejects the whole exchange: the caller restores the pre-operation
+    /// state, so neither leg debits, consumes a lease, or creates a transfer.
+    fn begin_exchange(
+        &mut self,
+        request: &ResourceExchangeStartRequestV1,
+    ) -> Result<AppliedOperation, ResourceError> {
+        let legs = [&request.leg_a, &request.leg_b];
+        let leg_keys = request.terms().leg_operation_keys()?;
+        if legs
+            .iter()
+            .zip(&leg_keys)
+            .any(|(leg, key)| &leg.operation_key != key)
+        {
+            return Err(ResourceError::Authority(
+                "resource exchange leg keys must be derived from the exchange terms".to_owned(),
+            ));
+        }
+        if leg_keys.iter().any(|key| self.outcomes.contains_key(key)) {
+            return Err(ResourceError::IdempotencyConflict(
+                "resource exchange leg key already has an operation outcome".to_owned(),
+            ));
+        }
+        if request.leg_a.transfer_id == request.leg_b.transfer_id
+            || request.leg_a.allocation.id == request.leg_b.allocation.id
+            || request.leg_a.completion_certificate.acquisition
+                == request.leg_b.completion_certificate.acquisition
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource exchange legs must use distinct transfers, allocations, and completion leases"
+                    .to_owned(),
+            ));
+        }
+        let projected = self
+            .transfers
+            .len()
+            .checked_add(legs.len())
+            .ok_or(ResourceError::Overflow)?;
+        if projected > self.limits.max_transfers
+            || legs
+                .iter()
+                .any(|leg| self.transfers.contains_key(&leg.transfer_id))
+        {
+            return Err(ResourceError::LimitExceeded(
+                "resource transfer capacity or identity is unavailable".to_owned(),
+            ));
+        }
+        let mut prepared = Vec::with_capacity(legs.len());
+        for leg in legs {
+            let (allocation, targets) = self.transfer_start_targets(leg)?;
+            let source = self.accounts.get(&allocation.account).ok_or_else(|| {
+                ResourceError::NotFound("exchange source account is unavailable".to_owned())
+            })?;
+            let lease_holder = self
+                .completion_leases
+                .acquisitions
+                .get(&leg.completion_certificate.acquisition)
+                .map(|acquisition| &acquisition.holder);
+            if lease_holder != Some(&source.custodian) {
+                return Err(ResourceError::Authority(
+                    "each exchange leg requires a completion lease held by its source custodian"
+                        .to_owned(),
+                ));
+            }
+            prepared.push((leg, allocation, targets));
+        }
+        for (leg, allocation, targets) in prepared {
+            let (acquisition, _) = self.consume_completion_certificate(
+                &leg.completion_certificate,
+                leg.at,
+                &leg.operation_key,
+                &targets,
+            )?;
+            self.settle_transfer_start(leg, allocation, acquisition)?;
+        }
+        Ok(AppliedOperation {
+            quantity: 0,
+            remainder: 0,
+            result_ref: None,
+            exact_evidence: Vec::new(),
+        })
+    }
+
+    /// Validates one transfer start against current state and returns its
+    /// exact allocation leg and the completion targets it must lock.
+    fn transfer_start_targets(
+        &self,
+        request: &ResourceTransferStartRequestV1,
+    ) -> Result<(ResourceAllocationLeg, Vec<CompletionLockedTargetV1>), ResourceError> {
         let leg = self.exact_allocation(&request.allocation)?.clone();
         if let Some(destination) = &request.destination {
             let account = self.accounts.get(destination).ok_or_else(|| {
@@ -2066,12 +2337,17 @@ impl ResourceState {
                 revision: leg.demand_revision,
             },
         ];
-        let (acquisition, _) = self.consume_completion_certificate(
-            &request.completion_certificate,
-            request.at,
-            &request.operation_key,
-            &targets,
-        )?;
+        Ok((leg, targets))
+    }
+
+    /// Debits the exact allocation into escrow and creates the transfer after
+    /// its completion certificate was consumed.
+    fn settle_transfer_start(
+        &mut self,
+        request: &ResourceTransferStartRequestV1,
+        leg: ResourceAllocationLeg,
+        acquisition: CompletionLeaseAcquisitionId,
+    ) -> Result<(), ResourceError> {
         self.consume_leg(&leg, request.expected_account_revision)?;
         let transfer = ResourceTransfer {
             id: request.transfer_id.clone(),
@@ -2096,12 +2372,7 @@ impl ResourceState {
         };
         self.active_transfers.insert(transfer.id.clone());
         self.transfers.insert(transfer.id.clone(), transfer);
-        Ok(AppliedOperation {
-            quantity: leg.quantity,
-            remainder: 0,
-            result_ref: Some(ResourceRecordRefV1::Transfer(request.transfer_id.clone())),
-            exact_evidence: Vec::new(),
-        })
+        Ok(())
     }
 
     fn advance_transfer(
@@ -2219,6 +2490,19 @@ impl ResourceState {
                     version: acceptance.evidence.clone(),
                 });
             }
+            ResourceTransferDispositionV1::AcceptLocal {
+                destination,
+                expected_destination_revision,
+                handover_evidence,
+            } => {
+                terminal_targets.push(CompletionLockedTargetV1::Account {
+                    id: destination.clone(),
+                    revision: *expected_destination_revision,
+                });
+                terminal_targets.push(CompletionLockedTargetV1::ExternalRecord {
+                    version: handover_evidence.clone(),
+                });
+            }
             ResourceTransferDispositionV1::Return {
                 expected_source_revision,
             } => terminal_targets.push(CompletionLockedTargetV1::Account {
@@ -2280,66 +2564,57 @@ impl ResourceState {
                     ));
                 }
                 exact_evidence.push(acceptance.evidence.clone());
-                let account = self.accounts.get_mut(destination).ok_or_else(|| {
-                    ResourceError::NotFound("destination account is unavailable".to_owned())
-                })?;
-                if account.revision != *expected_destination_revision
-                    || account.resource_revision != snapshot.resource_revision
-                    || account.unit_revision != snapshot.unit_revision
+                return self.settle_transfer_acceptance(
+                    request,
+                    &snapshot,
+                    destination,
+                    *expected_destination_revision,
+                    exact_evidence,
+                    (original_grant, terminal_acquisition, terminal_grant),
+                );
+            }
+            ResourceTransferDispositionV1::AcceptLocal {
+                destination,
+                expected_destination_revision,
+                handover_evidence,
+            } => {
+                if snapshot.state != ResourceTransferState::PendingDispatch
+                    || snapshot.transport.is_some()
+                    || request.exact_transport_evidence.is_some()
                 {
-                    return Err(ResourceError::VersionConflict(
-                        "destination account exact revisions do not match".to_owned(),
+                    return Err(ResourceError::InvalidLifecycle(
+                        "local acceptance requires a pending transfer without a transport execution"
+                            .to_owned(),
                     ));
                 }
-                credit_account(account, quantity)?;
-                let leg = self
-                    .allocation_legs
-                    .get(&snapshot.allocation_leg)
-                    .cloned()
-                    .ok_or_else(|| {
-                        ResourceError::InvalidDefinition(
-                            "transfer lost its allocation leg".to_owned(),
-                        )
-                    })?;
-                let fulfillment = self.record_fulfillment(&leg, request.operation_key.clone())?;
-                self.mark_terminal_demand_closure(&leg.demand)?;
-                let terminal_sequence = self.next_sequence()?;
-                let transfer = self
-                    .transfers
-                    .get_mut(&request.transfer)
-                    .expect("checked above");
-                transfer.accepted = quantity;
-                transfer.escrow = 0;
-                transfer.state = ResourceTransferState::Accepted;
-                transfer.revision = transfer.revision.next()?;
-                transfer.exact_evidence = exact_evidence.clone();
-                transfer.terminal_sequence = terminal_sequence;
-                let transfer_id = transfer.id.clone();
-                self.terminal_archive_candidates.insert(
-                    terminal_sequence,
-                    crate::ResourceTerminalRecordKeyV1::Transfer(transfer_id.clone()),
-                );
-                self.active_transfers.remove(&request.transfer);
-                self.completion_leases
-                    .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
-                self.completion_leases
-                    .complete_grant(&terminal_acquisition, &terminal_grant)?;
-                self.record_completed_completion(
-                    snapshot.operation_key.clone(),
-                    snapshot.completion_acquisition.clone(),
-                    original_grant,
-                )?;
-                self.record_completed_completion(
-                    request.operation_key.clone(),
-                    terminal_acquisition,
-                    terminal_grant,
-                )?;
-                return Ok(AppliedOperation {
-                    quantity,
-                    remainder: fulfillment.remainder,
-                    result_ref: Some(ResourceRecordRefV1::Transfer(transfer_id)),
+                if snapshot.destination.as_ref() != Some(destination) {
+                    return Err(ResourceError::InvalidDefinition(
+                        "acceptance destination differs from the transfer".to_owned(),
+                    ));
+                }
+                let source_scope = self
+                    .accounts
+                    .get(&snapshot.source)
+                    .and_then(|account| account.place_scope.as_ref());
+                let destination_scope = self
+                    .accounts
+                    .get(destination)
+                    .and_then(|account| account.place_scope.as_ref());
+                if source_scope.is_none() || source_scope != destination_scope {
+                    return Err(ResourceError::InvalidDefinition(
+                        "local acceptance requires source and destination accounts to declare the same place scope"
+                            .to_owned(),
+                    ));
+                }
+                exact_evidence.push(handover_evidence.clone());
+                return self.settle_transfer_acceptance(
+                    request,
+                    &snapshot,
+                    destination,
+                    *expected_destination_revision,
                     exact_evidence,
-                });
+                    (original_grant, terminal_acquisition, terminal_grant),
+                );
             }
             ResourceTransferDispositionV1::Lose { loss_id, cause } => {
                 if self.losses.contains_key(loss_id) {
@@ -2454,6 +2729,169 @@ impl ResourceState {
             quantity,
             remainder: 0,
             result_ref: Some(result_ref),
+            exact_evidence,
+        })
+    }
+
+    /// Credits the destination with the whole escrow, records fulfillment,
+    /// and closes the transfer and both completion leases. Shared by
+    /// transport-backed and same-place acceptance after their own checks.
+    fn settle_transfer_acceptance(
+        &mut self,
+        request: &ResourceTransferDispositionRequestV1,
+        snapshot: &ResourceTransfer,
+        destination: &ResourceAccountId,
+        expected_destination_revision: ResourceRevision,
+        exact_evidence: Vec<DomainRecordVersionRef>,
+        (original_grant, terminal_acquisition, terminal_grant): (
+            CompletionCapacityGrantId,
+            CompletionLeaseAcquisitionId,
+            CompletionCapacityGrantId,
+        ),
+    ) -> Result<AppliedOperation, ResourceError> {
+        let quantity = snapshot.escrow;
+        let account = self.accounts.get_mut(destination).ok_or_else(|| {
+            ResourceError::NotFound("destination account is unavailable".to_owned())
+        })?;
+        if account.revision != expected_destination_revision
+            || account.resource_revision != snapshot.resource_revision
+            || account.unit_revision != snapshot.unit_revision
+        {
+            return Err(ResourceError::VersionConflict(
+                "destination account exact revisions do not match".to_owned(),
+            ));
+        }
+        credit_account(account, quantity)?;
+        let leg = self
+            .allocation_legs
+            .get(&snapshot.allocation_leg)
+            .cloned()
+            .ok_or_else(|| {
+                ResourceError::InvalidDefinition("transfer lost its allocation leg".to_owned())
+            })?;
+        let fulfillment = self.record_fulfillment(&leg, request.operation_key.clone())?;
+        self.mark_terminal_demand_closure(&leg.demand)?;
+        let terminal_sequence = self.next_sequence()?;
+        let transfer = self
+            .transfers
+            .get_mut(&request.transfer)
+            .expect("checked above");
+        transfer.accepted = quantity;
+        transfer.escrow = 0;
+        transfer.state = ResourceTransferState::Accepted;
+        transfer.revision = transfer.revision.next()?;
+        transfer.exact_evidence = exact_evidence.clone();
+        transfer.terminal_sequence = terminal_sequence;
+        let transfer_id = transfer.id.clone();
+        self.terminal_archive_candidates.insert(
+            terminal_sequence,
+            crate::ResourceTerminalRecordKeyV1::Transfer(transfer_id.clone()),
+        );
+        self.active_transfers.remove(&request.transfer);
+        self.completion_leases
+            .complete_grant(&snapshot.completion_acquisition, &original_grant)?;
+        self.completion_leases
+            .complete_grant(&terminal_acquisition, &terminal_grant)?;
+        self.record_completed_completion(
+            snapshot.operation_key.clone(),
+            snapshot.completion_acquisition.clone(),
+            original_grant,
+        )?;
+        self.record_completed_completion(
+            request.operation_key.clone(),
+            terminal_acquisition,
+            terminal_grant,
+        )?;
+        Ok(AppliedOperation {
+            quantity,
+            remainder: fulfillment.remainder,
+            result_ref: Some(ResourceRecordRefV1::Transfer(transfer_id)),
+            exact_evidence,
+        })
+    }
+
+    /// Settles an account-level loss in place. The certificate locks the
+    /// exact account revision and, when the cause is a domain record, that
+    /// record version.
+    fn record_account_loss(
+        &mut self,
+        request: &ResourceAccountLossRequestV1,
+    ) -> Result<AppliedOperation, ResourceError> {
+        if self.losses.contains_key(&request.loss_id) {
+            return Err(ResourceError::IdempotencyConflict(
+                "resource loss identity already exists".to_owned(),
+            ));
+        }
+        let mut targets = vec![CompletionLockedTargetV1::Account {
+            id: request.account.clone(),
+            revision: request.expected_account_revision,
+        }];
+        let exact_evidence = match &request.cause {
+            EvidenceRef::DomainRecordVersion(version) => {
+                targets.push(CompletionLockedTargetV1::ExternalRecord {
+                    version: version.clone(),
+                });
+                vec![version.clone()]
+            }
+            _ => Vec::new(),
+        };
+        let (acquisition, grant) = self.consume_completion_certificate(
+            &request.completion_certificate,
+            request.at,
+            &request.operation_key,
+            &targets,
+        )?;
+        let quantities = self.account_quantities(&request.account)?;
+        let account = self.accounts.get_mut(&request.account).ok_or_else(|| {
+            ResourceError::NotFound("resource loss account is unavailable".to_owned())
+        })?;
+        if account.revision != request.expected_account_revision {
+            return Err(ResourceError::VersionConflict(
+                "resource loss expected a stale account revision".to_owned(),
+            ));
+        }
+        let losable = if request.allow_protected {
+            account.balance.saturating_sub(quantities.reserved)
+        } else {
+            quantities.available
+        };
+        if request.quantity == 0 || request.quantity > losable {
+            return Err(ResourceError::ProtectedFloor(
+                "resource loss would remove reserved or protected stock".to_owned(),
+            ));
+        }
+        debit_account(account, request.quantity)?;
+        let resource_revision = account.resource_revision.clone();
+        let unit_revision = account.unit_revision.clone();
+        self.conservation.admitted_loss = self
+            .conservation
+            .admitted_loss
+            .checked_add(u128::from(request.quantity))
+            .ok_or(ResourceError::Overflow)?;
+        let loss = ResourceLoss {
+            id: request.loss_id.clone(),
+            revision: ResourceRevision::INITIAL,
+            account: Some(request.account.clone()),
+            transfer: None,
+            resource_revision,
+            unit_revision,
+            quantity: request.quantity,
+            cause: request.cause.clone(),
+            operation_key: request.operation_key.clone(),
+            terminal_sequence: self.next_sequence()?,
+        };
+        self.terminal_archive_candidates.insert(
+            loss.terminal_sequence,
+            crate::ResourceTerminalRecordKeyV1::Loss(loss.id.clone()),
+        );
+        self.losses.insert(loss.id.clone(), loss);
+        self.completion_leases
+            .complete_grant(&acquisition, &grant)?;
+        self.record_completed_completion(request.operation_key.clone(), acquisition, grant)?;
+        Ok(AppliedOperation {
+            quantity: request.quantity,
+            remainder: 0,
+            result_ref: Some(ResourceRecordRefV1::Loss(request.loss_id.clone())),
             exact_evidence,
         })
     }
@@ -2957,6 +3395,18 @@ impl ResourceState {
                 self.completion_leases
                     .certificate(&request.completion_certificate.acquisition)
                     == Some(&request.completion_certificate)
+            }
+            ResourceOperationRequestV1::RecordLoss(request) => {
+                self.completion_leases
+                    .certificate(&request.completion_certificate.acquisition)
+                    == Some(&request.completion_certificate)
+            }
+            ResourceOperationRequestV1::BeginExchange(request) => {
+                [&request.leg_a, &request.leg_b].iter().all(|leg| {
+                    self.completion_leases
+                        .certificate(&leg.completion_certificate.acquisition)
+                        == Some(&leg.completion_certificate)
+                })
             }
             ResourceOperationRequestV1::AdvanceTransfer(request) => self
                 .transfers
@@ -3675,6 +4125,17 @@ impl ResourceState {
                 ));
             }
         }
+        for (id, loss) in &self.losses {
+            if id != &loss.id
+                || loss.quantity == 0
+                || loss.account.is_some() == loss.transfer.is_some()
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "resource loss identity, quantity, or account/transfer target is invalid"
+                        .to_owned(),
+                ));
+            }
+        }
         for (operation_key, outcome) in &self.outcomes {
             if operation_key != &outcome.operation_key {
                 return Err(ResourceError::InvalidDefinition(
@@ -3946,6 +4407,7 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         ResourceOperationRequestV1::BeginTransfer(value) => value.allocation.quantity,
         ResourceOperationRequestV1::Credit(value) => value.quantity,
         ResourceOperationRequestV1::ExternalOutflow(value) => value.quantity,
+        ResourceOperationRequestV1::RecordLoss(value) => value.quantity,
         ResourceOperationRequestV1::CancelDemand(value) => state
             .demands
             .get(&value.demand)
@@ -3957,7 +4419,8 @@ fn request_remainder(state: &ResourceState, request: &ResourceOperationRequestV1
         | ResourceOperationRequestV1::CompleteTransfer(_)
         | ResourceOperationRequestV1::SetProtectedFloor(_)
         | ResourceOperationRequestV1::RecordObservation(_)
-        | ResourceOperationRequestV1::Completion(_) => 0,
+        | ResourceOperationRequestV1::Completion(_)
+        | ResourceOperationRequestV1::BeginExchange(_) => 0,
     }
 }
 

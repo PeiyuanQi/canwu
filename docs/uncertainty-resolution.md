@@ -51,6 +51,26 @@ attempt path. Reload and exact replay never rerun an unrecorded policy.
 The runnable reference is
 `crates/api/canwu-api/examples/uncertainty_resolution.rs`.
 
+### Random tie-break in a guarded utility policy
+
+Since 0.12.0, a deterministic utility selector can hand only a genuine tie to
+chance. `GuardedUtilityPolicy` runs ordered guard rules, scores the remaining
+options, and, when `random_tie_break` is set and two or more options score
+within its near-equivalence margin of the best, returns
+`DecisionOutcome::PendingRandom` with only those candidates at weight 1. A
+declared boundary system then draws for the exact ticket version as above and
+passes the pending decision as the `tie_break` of `ResolveDecisionRandomly`;
+the weights must equal the candidates. The controller must opt in with
+`DecisionControllerBinding::with_random_tie_break`, and the trace records the
+`Random` stage. Without the policy flag, the best score wins and exactly equal
+scores fall back to the lowest option ID.
+
+Draw evidence can come only from such a boundary resolution: host-authored
+decision ingress that carries a draw is rejected live and on load. A resolution
+also fails its boundary before drawing when the ticket's decision maker or its
+controller's authority person was already unavailable when the boundary began,
+so resolving systems should skip those tickets.
+
 ### External and LLM selector interface
 
 External and LLM adapters receive `ExternalDecisionRequest`: ticket identity,
@@ -139,6 +159,22 @@ or model infrastructure.
 
 可运行参考见
 `crates/api/canwu-api/examples/uncertainty_resolution.rs`。
+
+### 前置规则效用策略中的随机平局决胜
+
+自 0.12.0 起，确定性的效用选择器可以只把真正的平局交给随机性。
+`GuardedUtilityPolicy` 先运行有序前置规则，再为剩余选项评分；若设置了
+`random_tie_break`，且有两个或更多选项与最高分的差距不超过其近似相等阈值，
+策略返回 `DecisionOutcome::PendingRandom`，只列出这些候选，每个权重为 1。
+随后，声明过的边界系统按上述方式对精确票据版本抽样，并把这个待定决定作为
+`ResolveDecisionRandomly` 的 `tie_break` 提交；权重必须与候选完全一致。控制者
+必须通过 `DecisionControllerBinding::with_random_tie_break` 显式启用，决策轨迹
+会记录 `Random` 阶段。策略未设置该标志时，最高分获胜；分数完全相同时按最小
+option ID 决出。
+
+抽样证据只能来自这类边界结算：上层应用自行提交、带抽样证据的决策准入会在
+运行时和加载时被拒绝。若票据的决策者或其控制者的权限人物在边界开始时已经
+不可用，该结算会在抽样前使边界失败，因此负责结算的系统应跳过这些票据。
 
 ### External 与 LLM 选择接口
 

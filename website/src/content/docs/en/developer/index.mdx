@@ -42,7 +42,7 @@ should use `canwu-api`.
   <LinkCard
     title="Integrate and drive the simulation"
     href="/en/developer/integration/"
-    description="Add the dependency, create a simulation, choose an ingress path, and convert host time into Canwu time."
+    description="Add the dependency, create a simulation, choose an ingress path, and convert wall time into simulation time."
   />
   <LinkCard
     title="Read and present state safely"
@@ -75,8 +75,8 @@ should use `canwu-api`.
 
 ## Core developer constraints
 
-1. Application code enters through `canwu-api`; choose a public domain integration for concrete rules, and do not use internal crates as compatibility surfaces.
+1. Application code enters through `canwu-api`; choose a domain extension or reference integration for concrete rules, and do not use internal crates as compatibility surfaces.
 2. External mutations enter through engine commands, domain commands, or canonical ingress rather than direct state edits.
 3. Players and agents read actor-relative views by default; read-only snapshots stay inside trusted host logic and debugging tools.
 4. Wall time, rendering, and input belong to the host; Canwu receives representable simulation durations.
-5. Persisted applications pin the engine version and restore the same plugin semantics during load and replay.
+5. Persisted applications pin the engine version and restore the same plugin semantic environment during load and replay.

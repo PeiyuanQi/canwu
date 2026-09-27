@@ -115,6 +115,24 @@ receipts. The four dispositions are fulfilled, partial, rejected, and excused.
 `（证据种类，外部操作 ID）` 组合都不能结算两张凭证。处置结果可以是完成、
 部分完成、拒绝或豁免。
 
+Since 0.12.0, a `FiscalAuthorityBinding` may name an acting actor next to its
+standing `authorized_actor`, together with an exact `authority_basis` record
+version, such as a host grant record of a kind declared with
+`FiscalPlugin::with_authority_basis_kinds`. Actions from the acting actor are
+admitted only while that basis is the current version of its record, and
+settlement checks it again. Once the record advances or retires, the acting
+actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`, while the authorized
+actor is still admitted. Who may appoint an acting actor, and for how long, is
+host content recorded in that basis record.
+
+自 0.12.0 起，`FiscalAuthorityBinding` 除常设的 `authorized_actor` 外，还可以
+指定一个代理角色，并附带精确的 `authority_basis` 权限依据记录版本，例如种类
+已通过 `FiscalPlugin::with_authority_basis_kinds` 声明的上层应用授权记录。只有
+当该依据仍是其记录的当前版本时，代理角色的行动才会被准入，结算时还会再次
+检查。记录出现新版本或退役后，代理角色会以 `FISCAL_ACTING_BASIS_NOT_CURRENT`
+被拒绝，常设授权角色仍可准入。谁可以任命代理角色、任期多久，属于记录在该
+权限依据中的上层应用内容。
+
 Historical content periods and host-defined accounting cycles are separate.
 Aggregates are partitioned by institution, mechanism, scope, accounting cycle,
 unit, and payment form. They keep assessed and remission-granted quantities

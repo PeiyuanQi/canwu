@@ -17,6 +17,17 @@ arbitrary world records from proving execution. Exact evidence versions and
 `(evidence kind, external_operation_id)` pairs can each settle at most one
 receipt within one `FiscalState`.
 
+A `FiscalAuthorityBinding` names its standing `authorized_actor` and may also
+name an `acting_actor` together with an exact `authority_basis` record version,
+such as a host grant record whose kind is declared with
+`FiscalPlugin::with_authority_basis_kinds` (activation rejects an undeclared
+kind). Actions from the acting actor, directly or as a decision-ticket origin,
+are admitted only while that basis is the current version of its record, and
+settlement re-checks it at the fiscal settlement system's position in the
+domain-delta phase. Once the basis record advances or retires, the acting actor
+is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT` while the authorized actor is
+still admitted.
+
 Historical content periods and host-defined accounting cycles remain separate.
 Aggregates retain institution, mechanism, scope, accounting cycle, unit, and payment-form
 dimensions. Assessment, remission, collection, remittance, disbursement,
