@@ -1,0 +1,270 @@
+---
+title: Resources and production
+description: How the resource and production extensions account for every unit of stock and turn consumed inputs into credited output, for games with stock that can run out or work that makes goods.
+sidebar:
+  order: 9
+  label: Resources and production
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Resources and production navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/developer/production-economy/">Production, resources, and transport: who owns what</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/resources-production/">中文版</a>
+</nav>
+
+`canwu-resource`, the [resource simulation extension](/en/reference/terminology/), keeps conserved stock such as grain, cloth, or ammunition in accounts and changes it only through recorded operations. `canwu-production`, the [production simulation extension](/en/reference/terminology/), turns consumed inputs and facility capacity into output that it hands back to `canwu-resource` for crediting. Read this page when your game has stock that can run out, several claims on the same stock, or work that turns inputs into goods. [Production, resources, and transport: who owns what](/en/developer/production-economy/) covers the rules of each operation.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-resource` | The `canwu.resource` namespace: resource and unit revisions, accounts, protected floors, demands, reservations, allocation legs, transfers and their escrow, consumption, loss, fulfillment, operation outcomes, access grants, completion leases, and holder reports | Published on crates.io |
+| `canwu-production` | The `canwu.production` namespace: process revisions, sites, facilities, capacity allocations, work orders, executions, work in progress, facility projects, incident receipts, and holder reports. It keeps no stock. | Published on crates.io |
+| `canwu-economy-reference-content` | Source-linked model cards, coverage cells, and three fixtures: `synthetic_grain_fixture`, `ming_workshop_fixture`, and `china_industrialization_fixture`. It has no solver or command handler. | Published on crates.io |
+| `canwu-force-supply-reference` | A replaceable military consumer: force requirements, consumption intents, readiness and shortage consequences, and the requisition saga | Repository only |
+| `canwu-economy-reference` | A replaceable composition: the fourteen-month grain loop (`GrainHarness`) and the local scarcity and price-pressure projections | Repository only |
+
+<MermaidDiagram
+  label="Crate dependencies: canwu-resource depends on canwu-api; canwu-production depends on canwu-resource and canwu-technology; canwu-force-supply-reference depends on canwu-resource and the reference content; canwu-economy-reference composes canwu-force-supply-reference and canwu-production; the host application feeds the two extensions"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same dependencies."
+  definition={`flowchart TB
+    Host["Host application<br/>(GrainHarness in the reference)"]
+    Economy["canwu-economy-reference<br/>grain loop and projections"]
+    Force["canwu-force-supply-reference<br/>force demand and consequences"]
+    Content["canwu-economy-reference-content<br/>model cards and fixtures"]
+    Production["canwu-production<br/>processes, facilities, work orders"]
+    Technology["canwu-technology<br/>technique evidence"]
+    Resource["canwu-resource<br/>conserved stock"]
+    Api["canwu-api"]
+    Host -- "scenario records, commands,<br/>allocation passes" --> Resource
+    Host -- "processes, sites,<br/>work orders" --> Production
+    Economy -- "composes" --> Force
+    Economy -- "composes" --> Production
+    Force -- "depends on" --> Content
+    Force -- "depends on" --> Resource
+    Production -- "depends on" --> Resource
+    Production -- "depends on" --> Technology
+    Resource -- "depends on" --> Api
+    Technology -- "depends on" --> Api
+`}
+/>
+
+`canwu-resource` depends only on `canwu-api`. `canwu-production` adds `canwu-resource` and `canwu-technology`. Each execution and facility project carries a `TechnologyEvidenceBinding`: an exact `TechniqueRevision`, a `CapabilityQualification` or `ImplementationRecord`, and an `AdoptionRecord` when the process sets `adoption_required`. `canwu-api` re-exports neither extension, so add them to your `Cargo.toml` yourself.
+
+`canwu-resource` is the only writer of stock balances. Production, force supply, and your own domains submit resource operations and read the outcomes. `canwu-transport` and `canwu-movement` carry cargo and supply evidence about the journey. A transfer links to that evidence through a `TransportExecutionLink`, and the cargo's balance, loss, and acceptance stay in `canwu-resource`.
+
+The two reference crates exist to show that two independent consumers can share one resource lifecycle. The [mechanism decision](/en/proposals/production-economy-mechanism/) records why that evidence was enough to publish the two extensions as optional crates outside the simulation core. Replace the reference crates with your own domains.
+
+## The conservation invariant
+
+Each `ResourceAccount` stores one quantity, `balance`. Available, reserved, and protected amounts are derived from it by `ResourceState::account_quantities`. Stock that has left its source account and has not yet arrived sits in the `escrow` field of its `ResourceTransfer` and still counts. `ConservationTotalsV1` accumulates the opening totals and every admitted source and sink, and `ResourceState::validate_conservation` checks this equation with 128-bit sums:
+
+```text
+account balances + transfer escrow
+  + admitted consumption + admitted loss + external outflow
+= opening balances + opening escrow
+  + admitted production + external inflow
+```
+
+Every term has one entry path:
+
+| Term | Operation that changes it |
+| --- | --- |
+| Opening balances | `ResourceState::install_opening_account` when the scenario is built. An account created during a run with `CreateAccount` must start at zero. |
+| Admitted production | `Credit` with `ResourceCreditSourceV1::Production`, which only the production output batch can settle |
+| External inflow | `Credit` with `ResourceCreditSourceV1::ExternalInflow`, citing its evidence |
+| Admitted consumption | `Consume` of an allocation leg |
+| Admitted loss | `RecordLoss` on an account, or the `Lose` disposition of a transfer |
+| External outflow | `ExternalOutflow`, as a request on an account or as a transfer disposition, citing authority evidence |
+
+Three more rules protect the equation. Units never convert implicitly, because every account, demand, and transfer names one exact resource revision and one exact unit revision. Every operation carries a `ResourceOperationKey`: resending the same request returns the original `ResourceOperationOutcome`, and reusing the key for a different request fails as an idempotency conflict. An operation that breaks a domain rule settles as a `Rejected` outcome and leaves every quantity where it was. If a candidate state still breaks the equation, the phase-8 check fails and the whole boundary rolls back.
+
+## Core model
+
+Resource types, all in `canwu-resource`:
+
+| Type | What it represents |
+| --- | --- |
+| `ResourceDefinitionRevision`, `ResourceUnitRevision` | An immutable resource with its quality and scope, and a unit with its scale |
+| `ResourceAccount` | One balance of one exact resource and unit, held by a custodian (a `KnowledgeHolderRef`), with an optional capacity, protected floor policy, and `place_scope` |
+| `ProtectedFloorPolicyRevision` | A floor held back from ordinary allocation, such as seed grain, and the demand classes allowed to draw below it |
+| `ResourceDemand` | A requester's claim: quantity, minimum useful quantity, `PartialFulfillmentPolicy`, due and expiry times, priority, tie-break key, and `source_policy` |
+| `ResourceReservation`, `ResourceAllocationLeg` | One allocated share of one account for one demand; consumers cite the leg as exact evidence |
+| `ResourceTransfer` | Stock in escrow between two accounts, with a `ResourceTransferState` and an optional `TransportExecutionLink` |
+| `ResourceConsumption`, `ResourceLoss`, `ResourceFulfillment` | Terminal evidence of use, of loss, and of how much of a demand was met |
+| `ResourceOperationOutcome` | The immutable receipt of every operation, with status `Applied`, `Rejected`, or `Duplicate` |
+| `ResourceAccessGrantV1` | A grantor custodian's capped, time-limited consent that a grantee may draw on its stock |
+| `CompletionLeaseActivationCertificateV1` | Proof that one holder may perform one irreversible operation, locked to the exact records it depends on |
+| `ResourceState` | The whole resource root, stored as one domain record |
+
+Production types, all in `canwu-production`:
+
+| Type | What it represents |
+| --- | --- |
+| `ProcessRevision` | An immutable recipe: requirement groups (twelve `ProductionRequirementKind` values, from `Material` to `FinanceOrganization`), inputs, outputs, capacity needs, work units, and realized-output bounds |
+| `ProductionSite` | A holder's place of production with a `ProductionSiteForm`, from `Household` to `MultiSiteEnterprise`. The form is data; there are no building levels. |
+| `FacilityAsset` | Equipment at a site: generation, `FacilityLifecycle`, condition in thousandths, capacity per capability, and incident risk |
+| `ProductionCapacityAllocation` | A half-open time slot of facility capacity held by one execution |
+| `WorkOrder`, `ProductionExecution` | A request to run a process at a site, and one run of it with its evidence, consumed inputs, and pending outputs |
+| `WorkInProgress` | Progress of an execution and the evidence for the inputs it consumed. The stock itself stays in `canwu-resource`. |
+| `FacilityProject` | Construction or repair of one facility generation |
+| `ProductionOperationOutcome` | The receipt of every production command, with disposition `Applied`, `Duplicate`, or `Rejected` |
+
+## How it runs
+
+<MermaidDiagram
+  label="Lifecycle: a demand is allocated, a completion lease authorizes the debit, stock is consumed or transferred, production cites consumed inputs, and output returns to canwu-resource as a credit acknowledged back to production"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same lifecycle."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same lifecycle."
+  definition={`flowchart TB
+    Demand["SubmitDemand<br/>requester's tracked command"] --> Alloc["Allocation pass<br/>enqueue_resource_allocation"]
+    Alloc --> Leg["Reservation and<br/>allocation leg"]
+    Leg --> Lease["Completion lease<br/>activation certificate"]
+    Lease --> Consume["Consume<br/>consumption and fulfillment"]
+    Lease --> Transfer["BeginTransfer<br/>stock moves into escrow"]
+    Transfer --> Arrive["CompleteTransfer<br/>Accept, AcceptLocal, Lose, Return"]
+    Consume --> Start["StartExecution<br/>cites consumed inputs"]
+    Start --> Complete["CompleteExecution<br/>work in progress finishes"]
+    Complete --> Batch["Output batch<br/>credited in canwu-resource"]
+    Batch --> Ack["Output acknowledgement<br/>execution Settled"]
+`}
+/>
+
+Resource operations enter by three paths. A tracked command is sent as a `CommandRequest`, with a request ID and an expected revision. Each path accepts only some operations:
+
+| Path | Who sends it | Operations |
+| --- | --- | --- |
+| Tracked command `apply_resource_operation_v1` | A holder acting on stock it controls. The command subject must be the holder that controls the target record. | `CreateAccount`, `SubmitDemand`, `AmendDemand`, `CancelDemand`, `BeginTransfer`, `BeginExchange`, `CancelTransfer`, `CompleteTransfer` with `AcceptLocal`, `Lose`, or `Return`, `RecordLoss`, `ExternalOutflow`, `SetProtectedFloor`, `IssueAccessGrant`, `RevokeAccessGrant`, and lease acquisition and abort |
+| Adapter ingress `resource_adapter_operation_v1` | A provider plugin. The request's evidence field must equal the exact record version the packet cites, and a timed request settles only at its stated time. | `Consume`, `AdvanceTransfer`, `CompleteTransfer` with `Accept`, `AcceptLocal`, or `ExternalOutflow`, `RecordLoss`, `ExternalOutflow`, external-inflow `Credit`, and observations |
+| Plugin-owned packets | The host through helper functions, or `canwu-production` | Allocation passes (`resource_authorized_allocation_v1`), lease transitions (`resource_completion_operation_v1`), and production output batches (`resource_production_output_batch_v1`) |
+
+<Steps>
+1. Set up. The host application installs resource definitions, units, opening accounts, floor policies, and report grants in a `ResourceState`, turns it into a scenario domain record with `ResourceState::into_record`, and registers `ResourcePlugin::new(adapter_evidence_kinds)`. The list names the record kinds that may prove adapter operations. Production state enters the same way through `ProductionState::into_initial_record` and `ProductionPlugin`.
+2. Demand. The requester sends the tracked [domain command](/en/reference/terminology/) `apply_resource_operation_v1`, built with `resource_command`. The command handler checks that the issuer controls the command's `subject` and that the subject has authority over every target, then queues a `resource_command_v1` packet.
+3. Allocation. The host queues one pass for one requester with `enqueue_resource_allocation`. When a boundary admits the packet, the phase-7 writer expires overdue demands and gathers that requester's due or changed demands; the pass fails if they exceed the request's `candidate_limit`. It serves them in order of descending priority, due time, tie-break key, admission sequence, and demand ID. It writes a reservation and an allocation leg for each share.
+4. Lease. Before any irreversible step, the acting holder activates a completion lease through `enqueue_resource_completion_operation`. For an execution, `canwu-production` coordinates the lease and `canwu-resource` joins as a participant. The certificate locks the exact accounts, allocation legs, and records the step depends on. Every consumption, transfer start, transfer disposition, credit, loss, and outflow must carry one.
+5. Debit. A consumer plugin sends `Consume` through adapter ingress with `enqueue_resource_adapter_operation`, citing the exact version of its own record that authorizes the debit. Or the source custodian starts a transfer with `BeginTransfer`, and the quantity moves into escrow. Transfer progress and `Accept` arrive as adapter operations that cite transport evidence. `AcceptLocal`, `Lose`, and `Return` end a transfer in the other ways. Each transfer step names the transfer's expected revision, so one arrival cannot be credited twice.
+6. Production. Production commands (`apply_production_operation_v1`) create and authorize a work order. `StartExecution` cites inputs that `canwu-resource` has already consumed: each `ResourceInputBinding` names the allocation leg, the consumption, and its outcome. It also brings capacity allocations, which phase 7 marks `Consumed`. `AdvanceExecution` moves the work in progress, and `CompleteExecution` leaves the execution `CompletedPendingOutputSettlement`. Its output quantities may be scaled by a realized output ratio.
+7. Output. In phase 12, production pins the current production record version as the execution's `output_source` and schedules one `resource_production_output_batch_v1` packet. At a later boundary the resource writer credits every output in the batch or none of them, then schedules `production_output_ack_v1`. Production's phase 7 stores the outcomes, releases the capacity, and marks the execution `Settled`.
+8. Check and publish. Phase 8 validates each extension's candidate state; a broken conservation or capacity rule fails the boundary. Phase 13 publishes holder reports.
+</Steps>
+
+Allocation runs inside the resource plugin's phase-7 writer against persisted accounts and demands. The kernel's phase-6 reservation primitive in the [phased boundary tutorial](/en/tutorials/phased-boundary/) (`ReservationRequest`) is a separate mechanism for offers and requests declared within one boundary, and `canwu-resource` does not use it.
+
+The boundary systems, all event-driven with `SameBoundary` visibility:
+
+| Crate | Phase | System | What it does |
+| --- | --- | --- | --- |
+| `canwu-resource` | 7 `DomainDeltaProposal` | `settle-resource-lifecycle-v1` | The only writer of the resource root. It applies commands, adapter operations, allocation passes, lease transitions, and output batches, and emits `canwu.resource.operation_settled.v1` to the affected actors. |
+| `canwu-resource` | 8 `InvariantValidation` | `validate-resource-invariants-v1` | Runs `ResourceState::validate`, which includes the conservation check |
+| `canwu-resource` | 12 `StrategicAggregation` | `maintain-resource-summary-v1` | Runs the same validation again |
+| `canwu-resource` | 13 `PerspectiveAndReportMaterialization` | `materialize-resource-reports-v1` | Publishes holder reports as `resource_report` knowledge |
+| `canwu-production` | 7 `DomainDeltaProposal` | `production_lifecycle_apply_v1` | The only writer of the production root. It applies commands, lease transitions, and output acknowledgements. |
+| `canwu-production` | 8 `InvariantValidation` | `production_capacity_and_lifecycle_validate_v1` | Checks record closure, work in progress totals, and that overlapping capacity slots never exceed a facility's condition-adjusted capacity |
+| `canwu-production` | 10 `HistoricalCandidateEvaluation` | `production_incident_candidate_evaluation_v1` | Draws facility incidents and stages their transitions |
+| `canwu-production` | 11 `ConditionalTransitionCommit` | `production_incident_commit_audit_v1` | Validates the state after the incident commit |
+| `canwu-production` | 12 `StrategicAggregation` | `production_output_dispatch_v1` | Pins `output_source` and schedules the output batch |
+| `canwu-production` | 13 `PerspectiveAndReportMaterialization` | `production_holder_report_publish_v1` | Publishes holder reports |
+
+Production registers no event audience, so its events stay out of actor-relative views; holders learn about production through reports. See [settlement](/en/architecture/settlement/) for the phase order.
+
+### How the reference consumers plug in
+
+The [force-supply reference consumer](/en/reference/terminology/) (`canwu-force-supply-reference`) is a second, independent user of the same lifecycle: a force's consumption intent becomes a `Consume` through adapter ingress, and its shortage consequence applies once, after the resource outcome settles. The economy reference plugin authorizes civilian consumption intents and closes each month; the [grain, production, and military supply case](/en/tutorials/cases/production-economy/) walks through both consumers.
+
+## Knowledge and visibility
+
+A trusted host can read the whole resource root with `resource_state` and validate evidence with the exact queries, such as `exact_resource_allocation_leg`, `exact_resource_operation_outcome`, and `exact_resource_fulfillment`. Players and in-world agents read holder reports:
+
+- `ResourceReportGrantV1` is an explicit allowlist for one holder: a scope, accounts, demands, whether transfer details are included, a confidence, a cadence, and a delay. Phase 13 records an observation head per grant, and `resource_report` builds a `ResourceReportDtoV1` from that head. A delayed holder sees the balance recorded at its observation time. Reports never fall back to ground truth, and they do not reveal a demand's source list.
+- Each stock observation carries the `ResourceScopeId` of the account's resource revision, so a consumer cannot relabel distant stock as local.
+- `resource_access_grant_status` shows a grant and its cap accounting to its grantor or grantee only.
+- `ProductionObserverGrant` gives a holder a role for a set of sites: `Operator`, `LocalOwner`, or `RemoteOwner`, with a delay. `production_report` requires an exact grant, and an unauthorized holder gets an authority error.
+- The force-supply reference builds its reports from typed knowledge publications available at the holder's observation cut.
+
+The economy reference also builds two detached read models for decision-making, the [local scarcity projection](/en/reference/terminology/) and the [price-pressure projection](/en/reference/terminology/). Building them changes no state; [Scarcity and price](/en/tutorials/cases/production-economy/#scarcity-and-price) in the grain case describes both.
+
+## Randomness, persistence, and replay
+
+`canwu-resource`, `canwu-force-supply-reference`, and `canwu-economy-reference` draw no random numbers. Allocation order comes from data: priority, due time, tie-break key, admission sequence, and ID.
+
+`canwu-production` declares one [random stream](/en/architecture/randomness/), `production_incident_random_stream()`, which is stream `facility-incident` version 1 of the plugin. Incident checks run only in a boundary that admitted production ingress, and each draw cites that ingress. For each due facility, phase 10 works like this:
+
+- An [operation-keyed draw](/en/architecture/randomness/#operation-keyed-random-draws) from 0 to 999 is compared with the facility's `incident_risk_per_mille`; a value below it is a hit.
+- On a hit, a second draw bounded by `incident_max_severity_per_mille` sets the condition loss.
+- A facility left at a condition of 250 or less becomes `Damaged`; otherwise it becomes `Degraded`.
+
+Your scenario supplies both probabilities on the `FacilityAsset`; a command can never supply a draw. The `ProductionIncidentTransitionV1` receipt keeps the samples and the source record version, so restore and replay reject a changed draw.
+
+What to do with a degraded facility is a [decision ticket](/en/architecture/decisions/): `degraded_facility_decision_ticket` builds one with the options `ContinueDegraded`, `StopForRepair`, and `DeferOrder`.
+
+Each extension stores one domain record: `ResourceRuntimeRecord` in `canwu.resource` and `ProductionRuntimeRecord` in `canwu.production`. Snapshots hold them next to the kernel state. Restore and replay through the wrappers, which reject forged digests, conservation failures, revision mismatches, and missing exact evidence:
+
+- resource: `from_resource_snapshot_json`, `from_resource_checkpoint_journal`, `replay_resource_from_journal`, and `validate_resource_runtime` after another loader;
+- production: `from_production_snapshot_json_with_archives`, `from_production_checkpoint_journal_with_archives`, `replay_production_from_journal_with_archives`, and `validate_production_runtime_with_archives` whenever archive state is present.
+
+Terminal records move to a package-owned archive in bounded batches, through `prepare_resource_archive`, `store_and_verify`, `enqueue_resource_archive`, and `finalize_resource_archive_retention`, with matching production functions. Ordinary settlement never scans cold history. Exact replay reads the recorded commands and ingress, so the host code that queued them and any decision controllers do not run again. See [Save, replay, and fork](/en/developer/persistence/).
+
+## What your application supplies
+
+- Content: resource and unit revisions; opening accounts with their custodians, capacities, and `place_scope`; floor policies; process revisions; sites; and facilities with their incident risk. `canwu-economy-reference-content` shows a content pack whose `ResourceCapabilityRevision` records place deposits on a `ResourceCapabilityStage` from `Potential` to `DeliveredAccepted`.
+- Authority: who may create accounts, submit demands and under which requester, and issue access grants. A `Pooled` or `ExactAccounts` source policy only selects accounts; spending another custodian's stock needs an access grant and a `Granted` policy.
+- Timing and order: when to queue an allocation pass for each requester, and the priority and tie-break key of each demand. The grain loop takes its priorities from a decision ticket.
+- Evidence kinds: the record kinds passed to `ResourcePlugin::new`, the `realization_evidence_kinds` of each process revision, and the authority records that grants and outflows cite.
+- Consumers: your plugins authorize consumption intents in a `resource_consumption_intents` map and react to outcomes.
+- Transport: itineraries and execution through `canwu-transport` and `canwu-movement`, whose evidence accepts arrivals.
+- Controllers for degraded-facility tickets, plus money, markets, prices, wages, combat formulas, and the client UI.
+
+## Limits and budgets
+
+| Limit | Value |
+| --- | --- |
+| `ResourceLimitsV1::canonical()` | 8,192 accounts, demands, and transfers each (hard maximum 262,144); 2,048 allocation candidates per pass; 2,048 dirty demands; 4,096 mutations and 256 reports per boundary; 8,192 hot operation outcomes; 256 MiB of state |
+| `MAX_DEMAND_SOURCE_ACCOUNTS` | 256 accounts in an `ExactAccounts` or `Granted` list |
+| `MAX_RESOURCE_ACCESS_GRANTS` | 4,096 grants per resource state, revoked ones included |
+| Completion leases | 16 terminal receipts per lifecycle (`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`); 16 pending acquisitions per authority and 1,024 in total; a grant that is never activated expires after 8 boundaries (`PREACTIVATION_LEASE_TTL_BOUNDARIES`) |
+| Production output batch | 1 to 64 credits under one certificate |
+| `ProductionLimitsV1::canonical()` | 2,048 process revisions and sites; 4,096 facilities, work orders, executions, capacity allocations, and projects; 512 incident checks and 64 reports per boundary; 256 MiB of state |
+| Process and report shape | 64 requirement groups (`MAX_REQUIREMENT_GROUPS`), 16 alternatives per group (`MAX_REQUIREMENT_ALTERNATIVES`), 256 facts and blockers per report (`MAX_REPORT_FACTS`) |
+| Projections | 8 source adapters (`MAX_TYPED_SOURCE_ADAPTERS`), 256 observation facts (`MAX_OBSERVATION_FACTS`), 32 price factors (`MAX_PRICE_FACTORS`) |
+
+Reaching a limit returns an error or a rejected outcome, and no stock changes. When the hot archive is full, the next lease acquisition is refused before any debit, so accepted work can still finish.
+
+## Try it
+
+```shell
+cargo run -p canwu-economy-reference --example grain_loop
+cargo run -p canwu-resource --example resource_lifecycle
+cargo run -p canwu-resource --example completion_lease
+cargo run -p canwu-production --example process_constraints
+cargo test -p canwu-resource --test resource_contract
+cargo test -p canwu-production --test g3_contract
+cargo test -p canwu-force-supply-reference --test g4_contract
+cargo test -p canwu-economy-reference --test grain_harness
+```
+
+`grain_loop` prints a `GrainLoopSummary` as JSON; its `conservation_closing` equals `final_stock` (2,860) because no transfer is left in escrow. The [grain, production, and military supply case](/en/tutorials/cases/production-economy/) walks through it month by month. `resource_lifecycle` builds a `ResourceState` without an engine and allocates one demand, `completion_lease` ends with `lease state: Activated`, and `process_constraints` prints the three blockers of a machine process (`ToolsMachines`, `Energy`, and `Maintenance`).
+
+The `resource_contract` tests cover conservation, protected floors, transfer escrow, and leases. The `g3_contract` tests cover overlapping capacity, output settled only after the acknowledgement, incidents staged in phase 10 and committed in phase 11, and degraded-facility tickets. `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` in `g4_contract` walks the requisition saga, and `snapshot_checkpoint_journal_and_fork_continue_identically` in `grain_harness` checks that a snapshot, a checkpoint journal, and a fork reach the same checkpoint hash.
+
+## Further reading
+
+- [Production, resources, and transport: who owns what](/en/developer/production-economy/): demand source policies, access grants, loss, exchange, local acceptance, realized output, and custom consumers
+- [Grain, production, and military supply](/en/tutorials/cases/production-economy/): the runnable fourteen-month case and the historical fixtures
+- [Production economy mechanism](/en/proposals/production-economy-mechanism/): why these capabilities live in optional extensions
+- [Phased boundary and allocation](/en/tutorials/phased-boundary/): the kernel's phase-6 reservation primitive
+- [Settlement system](/en/architecture/settlement/), [Randomness](/en/architecture/randomness/), [Technology](/en/architecture/technology/), [Routing, transport, and movement](/en/architecture/routing-movement/), and [Military](/en/architecture/military/)
+- The [`canwu-resource` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/README.md) and [`canwu-production` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-production/README.md)

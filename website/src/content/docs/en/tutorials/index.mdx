@@ -1,21 +1,21 @@
 ---
 title: Get started
-description: Learn Canwu's public API through small, runnable examples for game and simulation developers.
+description: Runnable examples that teach the Canwu public API, from moving one army to multi-step historical scenarios.
 template: doc
 sidebar:
   order: 1
   label: Get started
 hero:
-  tagline: Start with a runnable example, then look up the underlying APIs and rules as you need them.
+  tagline: Start with a small example you can run, then read about the calls it uses.
   actions:
     - text: Start with army movement
       link: /en/tutorials/move-army/
       icon: right-arrow
-    - text: Developer guide
+    - text: Guides
       link: /en/developer/
       variant: secondary
       icon: open-book
-    - text: 中文教程
+    - text: 中文版
       link: /tutorials/
       variant: minimal
       icon: translate
@@ -26,90 +26,123 @@ import AgentDevelopmentNote from "../../../../components/AgentDevelopmentNote.as
 
 <AgentDevelopmentNote locale="en" />
 
-> **Start with the example.** Follow the Move an army tutorial to get a minimal simulation running, then consult the developer guide when questions come up.
+Start with **Move an army**. It takes a few minutes, runs on any machine with Rust
+1.88 or newer, and shows the whole cycle: submit a command, advance time, then
+save, fork, and replay the run. Come back to the other tutorials when you need
+the feature they cover.
 
-## Pick a starting point
+## How these docs are organized
+
+| Section | Use it when | Start with |
+| --- | --- | --- |
+| Get started | You are new to Canwu and want to run something first | [Move an army](/en/tutorials/move-army/) |
+| Tutorials | You want to learn the engine's core features one at a time | [Continuous-time game loop](/en/tutorials/continuous-game-loop/) |
+| Guides | You are adding Canwu to your own application and have a specific task | [Integrate and drive the simulation](/en/developer/integration/) |
+| Engine architecture | You want to know how commands are settled, recorded, and replayed | [Architecture overview](/en/architecture/) |
+| Domain systems | You need rules for knowledge, resources, movement, war, technology, taxes, or society | [Domain systems](/en/architecture/systems/) |
+| Case studies | You want to see several systems work together in one scenario | [Case studies](/en/tutorials/cases/) |
+| Reference | You need the standard English or Chinese term for a concept | [Canwu terminology](/en/reference/terminology/) |
+
+## Tutorials
+
+These tutorials use only `canwu-api`; Move an army also uses the reference
+world. Your application still chooses its renderer, window, input, and game
+framework.
 
 <CardGrid>
   <LinkCard
-    title="Move an army: minimal runnable example"
+    title="Move an army: reference integration starter"
     href="/en/tutorials/move-army/"
-    description="Submit a validated action, advance time, and compare what different actors know."
+    description="Queue a movement command, advance time, then save, load, fork, and replay the run."
   />
   <LinkCard
     title="Continuous-time game loop"
     href="/en/tutorials/continuous-game-loop/"
-    description="Separate wall, simulation, and presentation clocks and prove FPS independence."
+    description="Drive the engine from a real-time game loop and get the same results at any frame rate."
   />
   <LinkCard
     title="Command plugin"
     href="/en/tutorials/command-plugin/"
-    description="Register a schema-validated command with authority checks and declared state access."
+    description="Add your own command: validate its payload, check who may issue it, and declare the state it reads and writes."
   />
   <LinkCard
     title="Phased boundary and allocation"
     href="/en/tutorials/phased-boundary/"
-    description="Declare supply, competing demand, and auditable allocation through phased settlement."
+    description="One plugin offers grain, another requests it in the same boundary, and a later phase reads the settled allocation."
+  />
+</CardGrid>
+
+## Domain systems
+
+Domain systems supply concrete rules for knowledge, resources, war, taxes, and
+more; most are optional crates you register as needed. Three of them also have a
+walkthrough, and their design pages are
+[Routing, transport, and movement](/en/architecture/routing-movement/),
+[Military](/en/architecture/military/), and
+[Technology](/en/architecture/technology/).
+
+<CardGrid>
+  <LinkCard
+    title="Domain systems"
+    href="/en/architecture/systems/"
+    description="Design pages for the eight domain systems and the crates that provide them."
   />
   <LinkCard
     title="Route planning and delivery execution"
     href="/en/tutorials/routing-transport/"
-    description="Compare Wuxi-to-Beijing with a nearby delivery while modeling rail, air, telegraph, capacity bookings, and disaster rerouting."
+    description="Follow a letter from Wuxi to Beijing: plan the fastest route from what one observer knows, then record each leg, handoff, and reroute."
   />
   <LinkCard
-    title="Military simulation extension"
+    title="Run the military extension: from contact to occupation"
     href="/en/tutorials/military-domain/"
-    description="Model forces, operations, combat, supply, occupation, integration, and military administration with explicit ownership boundaries."
+    description="Create forces, march into contact, resolve a battle, and establish an occupation with the optional military extension."
   />
   <LinkCard
     title="Invention, use, and technology diffusion"
     href="/en/tutorials/technology-diffusion/"
-    description="Build technology from evidence, capability, implementation, and use-specific adoption while keeping high-detail historical research optional."
+    description="Follow one technique from a workshop trial to installation, adoption for one use, and an apprenticeship that can spread it."
   />
 </CardGrid>
 
-These tutorials use `canwu-api` as the public boundary; concrete examples may explicitly add `canwu-reference-world` or the domain extensions they exercise. Rendering, windowing, input, and game-framework choices remain in the host application.
+## Case studies
 
-## Examples
-
-Examples combine several foundation contracts into complete, scenario-driven exercises.
-They live together in the sidebar's collapsed **Examples** group.
+Case studies combine several systems into one runnable historical scenario.
 
 <CardGrid>
   <LinkCard
-    title="Production, resources, and military supply"
+    title="Grain, production, and military supply"
     href="/en/tutorials/cases/production-economy/"
-    description="Run the synthetic grain loop and use source-cited Songjiang and Hanyeping archetypes to inspect production, geographic resources, and military-logistics boundaries."
+    description="Run a synthetic grain loop, then look at source-cited Songjiang and Hanyeping examples of production, resources, and military logistics."
   />
   <LinkCard
     title="A warlord asks a neighbor for military aid"
     href="/en/tutorials/cases/warlord-aid-decision/"
-    description="Compose a DecisionTicket, dynamic options, a utility policy, authority-derived command execution, traces, persistence, and exact replay."
+    description="A warlord decides whether to send troops. Shows decision tickets, options, a utility policy, and exact replay of the choice."
   />
   <LinkCard
     title="Local community diffusion and institutional response"
     href="/en/tutorials/cases/local-community-diffusion/"
-    description="Explore the published social diffusion simulation module through sparse population distributions, social influence, an institutional decision, actor estimates, and exact replay."
+    description="An idea spreads through a local community and a council responds through a decision ticket. Shows population cohorts, social influence, and an observer&apos;s estimate."
   />
   <LinkCard
     title="Confidential copy and targeted release"
     href="/en/tutorials/cases/confidential-copy-release/"
-    description="Compose access, copy derivation, a frozen audience, release withdrawal, and retained knowledge with the neutral information lifecycle."
+    description="A relay copies a document in transit, releases the copy to two readers, then withdraws it: later reads are refused and earlier reads stay on record."
   />
   <LinkCard
     title="Encoded transfer and in-path interception"
     href="/en/tutorials/cases/encoded-interception/"
-    description="Separate representation copying, access, and interpretation, then compare outcomes for different capabilities."
+    description="A relay copies a coded message but cannot decode it; the recipient has a delegate decode it. Keeps holding, reading, and understanding apart."
   />
   <LinkCard
     title="Routed correspondence from Wuxi"
     href="/en/tutorials/cases/routed-correspondence/"
-    description="Compose random demand, address and routing knowledge, transport execution, addressed delivery, disasters, and interception into one persistent replayable flow."
+    description="Send one letter from Wuxi to a local address and to Beijing, with each route planned from what the sender knows and each leg recorded."
   />
   <LinkCard
-    title="Browse all examples"
+    title="All case studies"
     href="/en/tutorials/cases/"
-    description="Choose another scenario-driven path through the public engine contracts."
+    description="Browse every scenario."
   />
 </CardGrid>
 
@@ -117,13 +150,13 @@ They live together in the sidebar's collapsed **Examples** group.
 
 <CardGrid>
   <LinkCard
-    title="Developer guide"
+    title="Guides"
     href="/en/developer/"
-    description="Learn how to integrate, read, persist, and extend Canwu through task-oriented host guidance."
+    description="Task-by-task guidance for integrating, reading state, saving, and writing plugins."
   />
   <LinkCard
-    title="GitHub examples"
+    title="Example source on GitHub"
     href="https://github.com/PeiyuanQi/canwu/tree/main/crates"
-    description="Browse the Rust examples supplied by canwu-api and the published extensions."
+    description="The Rust source of every example, in the crates that provide them."
   />
 </CardGrid>

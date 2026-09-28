@@ -1,0 +1,278 @@
+---
+title: Military
+description: How the military extension models forces, operations, combat, and occupation, which state it owns, and what your game supplies around it.
+sidebar:
+  order: 11
+  label: Military
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Military system navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/tutorials/military-domain/">Walkthrough: military extension</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/military/">中文版</a>
+</nav>
+
+The [military simulation extension](/en/reference/terminology/), `canwu-military`, keeps forces, operations, combat, and occupation as plugin-owned domain records and changes them only through validated `MilitaryCommand` input. Two companion crates add synthetic rulesets and a runnable composition with the reference world. Read this page when you decide whether to use the extension as it ships, wrap it in your own integration, or replace it.
+
+In brief: marches arrive one minute after the order, combat uses fixed built-in formulas, supply is one number per force that only goes down, and occupation stages are labels. A successful special operation currently stops the run (see [Known issue](#marches-and-combat)).
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-military` | `MilitaryPlugin`, eight record kinds under the `canwu.military` namespace, the `MilitaryCommand` domain command, the provider acknowledgement ingress, and the `military_report` knowledge schema | Published on crates.io |
+| `canwu-military-reference-content` | Two synthetic `MilitaryRulesetV1` values, `riverine_preindustrial()` and `industrial_front()`, both marked `synthetic_reference` | Published on crates.io |
+| `canwu-military-reference` | `demo_military_scenario()`, which adds a military catalog to the reference world scenario, and the `military_starter` example | Repository only |
+
+<MermaidDiagram
+  label="Military crates and their dependencies on canwu-api, beside the separate force-supply consumer, with what the host application supplies"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same dependencies."
+  definition={`flowchart TB
+    Host["Host application<br/>scenario, clock, commands,<br/>provider outcomes"]
+    Ref["canwu-military-reference<br/>demo scenario, starter"]
+    Content["canwu-military-reference-content<br/>synthetic rulesets"]
+    World["canwu-reference-world"]
+    Military["canwu-military<br/>records, commands, systems"]
+    Supply["canwu-force-supply-reference<br/>separate supply consumer"]
+    Resource["canwu-resource"]
+    Api["canwu-api"]
+    Host --> Ref
+    Host -- "MilitaryCommand,<br/>ProviderOutcome" --> Military
+    Ref --> Content
+    Ref --> World
+    Ref --> Military
+    Content --> Military
+    Military --> Api
+    World --> Api
+    Supply --> Resource
+    Resource --> Api
+`}
+/>
+
+Arrows point from a crate to what it depends on. `canwu-military` builds on `canwu-api` alone. The force-supply reference consumer sits beside it on `canwu-resource`; neither crate depends on the other.
+
+The plugin that registers a record schema owns that state, so only `canwu-military` writes `canwu.military` records. Everything else stays with its owner:
+
+| State | Owner | What `canwu-military` does with it |
+| --- | --- | --- |
+| Time, [canonical ingress](/en/reference/terminology/), commit and rollback, random draws, snapshots, replay | Simulation core | Uses them through `canwu-api` |
+| Actor knowledge ledgers | Simulation core | Publishes `military_report` records to force commanders |
+| Routes, travel time, custody, transport capacity | `canwu-routing`, `canwu-transport`, `canwu-movement` | None. A march stores `route_digest`, a hash of force and destination, and arrives one minute after the order. |
+| Resource stocks, reservation, consumption | `canwu-resource` | None. A force's `supply_per_mille` is a local number. |
+| Population and recruits | `canwu-society` or your application | None. `Recruit` carries an optional `society_operation` string only as command input. |
+| Administrative, legal, and fiscal effects of an occupation | The provider plugin you name | Queues a pending effect and waits for a `ProviderOutcome` |
+
+Supply is one number on each force, `supply_per_mille`, which starts at 1,000. An arriving march or special operation subtracts 100, and a force below 100 fails the operation and routs. No military command raises the value. A game that needs resource-backed supply models it with `canwu-resource`, as the force-supply consumer in the [production economy case](/en/tutorials/cases/production-economy/) does, and extends or replaces `canwu-military` to carry the result into force records.
+
+## Core model
+
+Each payload carries a `MilitaryRecordMeta` with schema version, revision, semantic digest, and establishment time. Typed helpers such as `force_reference` and `ledger_reference` build the record references.
+
+| Type | Record name | What it represents |
+| --- | --- | --- |
+| `MilitaryCatalog` | `catalog` (ID `root`) | Scenario content: one `MilitaryRulesetV1`, `MilitaryNodeProfile` entries, and `CommanderProfile` entries keyed by person |
+| `ForceState` | `force` | One force: owner entity, location node, commander, subunits (`SubunitState`), authorized and actual strength, per-mille training, equipment, fatigue, supply, morale, discipline, cohesion, and loyalty, loss counters, active operation, prepared ambush, and `ForceStatus` |
+| `OperationState` | `operation` | One `march`, `special`, or `strategic` operation: its single force, an optional opposing force, `OperationPhase`, start and destination nodes, and due time |
+| `CombatState` | `combat` | One battle opened on contact: attacker, defender, `CombatStage`, round, preparation, casualties, `CombatResult`, and a `RandomEnvelope` copy of each round's draw |
+| `OccupationState` | `occupation` | Control of one node: occupying force, garrison, per-mille security, administrative reach, legitimacy, collaboration, resistance, and extraction burden, `IntegrationStage`, and policy revision |
+| `MilitaryLedger` | `ledger` (ID `root`) | One `MilitaryOutcome` per operation key for idempotency, plus `PendingMilitaryEffect` entries that wait for other domains |
+| `ProviderOutcome` | `provider_outcome` | A retained copy of one acknowledged result from another domain, with its `ProviderDisposition` |
+| `MilitaryKnowledge` | `knowledge` | A registered schema for military estimates (`KnowledgeFact`); no current system reads or writes it |
+
+Every `MilitaryCommand` variant carries a `MilitaryOperationKey`. Admission checks the issuer and `expected_force_revision` only when the command names a force that already exists; the issuer must be an actor who commands it.
+
+| Variant | Also checked at admission | What the phase-7 system writes |
+| --- | --- | --- |
+| `CreateForce` | Branch is in the ruleset | A force with one subunit whose ID ends in `:initial`, status `Forming`, supply 1,000, morale 500 |
+| `AssignCommander` | Issuer, revision | Replaces the commander |
+| `Recruit` | Issuer, revision, branch | A new subunit, capped at the remaining authorized strength |
+| `TrainAndEquip` | Issuer, revision | Adds to force training and equipment, capped at 1,000 |
+| `PlanOperation` | Issuer, tactic | A `strategic` operation in `Planned`; nothing advances it later |
+| `OrderMarch` | Issuer, revision, tactic | Force `Moving`, a `march` operation, and a tick one minute later |
+| `PrepareAmbush` | Issuer, revision, tactic | A `prepared_ambush` at a node for seven days |
+| `Recon` | Issuer, revision | One draw and the event `canwu.military.transition_applied.v1` |
+| `ExecuteSpecialOperation` | Issuer | Force `Moving`, a `special` operation, and a tick one day later |
+| `EstablishOccupation` | Issuer, revision | An occupation if the force stands at the node and is not `Routing`, plus a daily tick |
+| `SetOccupationPolicy` | Values up to 1,000 | Security, collaboration, and extraction burden, if `policy_revision` matches |
+| `MilitaryAdministrationAction` | Nothing | A `PendingMilitaryEffect` in the ledger |
+| `AdvanceTick` | Nothing | Advances one operation or occupation; the plugin schedules it for itself |
+
+The branch and tactic checks run only when the scenario installs a catalog.
+
+## How it runs
+
+<MermaidDiagram
+  label="A military command passes admission, becomes a military_command_v1 packet, is applied in phase 7, schedules its own ticks, and ends in a phase-13 commander report"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same flow."
+  definition={`flowchart TB
+    Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command<br/>canonical ingress"]
+    Queue --> Admit["admit_command<br/>digest, issuer, revision,<br/>branch, tactic"]
+    Admit -- "rejected" --> Rejected["Rejected command,<br/>nothing queued"]
+    Admit -- "accepted" --> Packet["military_command_v1<br/>zero delay"]
+    Ack["enqueue_provider_outcome<br/>military_provider_ack_v1"] --> Apply
+    Packet --> Apply["Phase 7<br/>apply-military-ingress-v1"]
+    Apply -- "SchedulePluginIngress" --> Tick["AdvanceTick packet<br/>1 minute or 1 day later"]
+    Tick --> Apply
+    Apply --> Commit["Phase 9<br/>atomic commit"]
+    Commit --> Report["Phase 13<br/>materialize-military-reports-v1"]
+`}
+/>
+
+<Steps>
+1. `military_command(command)` wraps the command in a `MilitaryCommandEnvelope` with an `input_digest` of the command and returns a `Command::Plugin`. The host enqueues it with `enqueue_command` and advances the clock, for example with `advance_canonical`. The direct `submit` path is rejected with `MixedCommandIngress`.
+2. When a [boundary](/en/reference/terminology/) admits the command, the handler `admit_command` recomputes the digest and runs the checks in the table above. On success it queues a `military_command_v1` packet (ingress class `Decision`) with zero delay, which the next boundary admits.
+3. In phase 7 (`DomainDeltaProposal`), the event-driven system `apply-military-ingress-v1` reads each admitted military packet.
+4. For a command other than `AdvanceTick`, it first looks up the operation key in the ledger. The same key with the same digest is a no-op; the same key with a different digest fails with `IdempotencyConflict`.
+5. It then stages record creates and updates with `SameBoundary` visibility, draws from the military stream, and schedules follow-up `AdvanceTick` packets with `SchedulePluginIngress`. Every command except `MilitaryAdministrationAction` and `AdvanceTick` also records a `MilitaryOutcome` under its key.
+6. The same system applies `military_provider_ack_v1` packets, described under [effects in other domains](#effects-in-other-domains).
+7. The kernel validates the staged writes in phase 8 and commits them together in phase 9. Any error rolls back the whole boundary.
+8. In phase 13 (`PerspectiveAndReportMaterialization`), the event-driven system `materialize-military-reports-v1` publishes a `military_report` to each force's commander.
+9. A scheduled tick returns as a `military_command_v1` packet at its due time and runs through phase 7 again.
+</Steps>
+
+### Marches and combat
+
+<MermaidDiagram
+  label="Lifecycle of a march: arrival check, completion, failure, or combat rounds ending in victory or withdrawal"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same lifecycle."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same lifecycle."
+  definition={`flowchart TB
+    Order["OrderMarch<br/>operation Moving"] --> Arrive{"Arrival tick:<br/>supply 100 or more?"}
+    Arrive -- "no" --> Failed["Failed<br/>force Routing"]
+    Arrive -- "yes, no opponent" --> Done["Completed<br/>force Ready at destination"]
+    Arrive -- "yes, opponent named" --> Contact["Engaged<br/>combat record at Contact"]
+    Contact --> Round["Daily round<br/>one draw"]
+    Round -- "both sides remain,<br/>under four rounds" --> Round
+    Round -- "defender at 0" --> Win["Completed<br/>AttackerVictory,<br/>occupation created"]
+    Round -- "attacker at 0<br/>or fourth round" --> Withdraw["Withdrawing<br/>DefenderVictory or<br/>MutualDisengagement"]
+`}
+/>
+
+- On arrival, a force with supply of 100 or more loses 100 supply, gains 20 fatigue, loses 10 morale, and moves to the destination.
+- Contact creates the combat record `canwu.military:combat:` followed by the operation ID. A defender with an unexpired ambush prepared at that node enters with preparation 850 in place of 500, and the ambush is consumed. The record stores the fixed tactic labels `screen-and-advance` and `hold`; the tactic named in the order is checked at admission and then unused.
+- Combat resolves one round a day, at most four rounds. Each round draws a value `s` below 1,000. The attacker loses one twentieth of the defender's strength (at least 1) plus `s` mod 8; the defender loses one eighteenth of the attacker's strength (at least 1) plus (999 minus `s`) mod 8. Both sides also lose morale equal to half their loss and gain 35 fatigue. Preparation is stored on the record; the round formula reads only the two strengths and the draw.
+- When the battle ends, a side at 0 strength becomes `Routing` and a side with strength left becomes `Ready`. An `AttackerVictory` creates an occupation of the destination with ID `canwu.military:occupation:` followed by the operation ID. `Withdrawing` is a final label: no further tick runs and no force moves.
+
+A special operation resolves one day after the order. After the same supply step it draws a value below 1,000. A draw below 650 leaves the force `Routing` at the target and the operation `Failed`. A draw of 650 or more is meant to return the force to its start as `Completed`, but see the known issue below.
+
+<Aside type="caution" title="Known issue: a successful special operation stops the run">
+On a draw of 650 or more, `advance_operation` calls `expect` on the opposing force, which a special operation never has. The boundary fails with `PluginPanicked` and rolls back. The tick stays in the queue and produces the same draw on every retry, so every later `advance_canonical` call fails at that point. Until this is fixed, avoid `ExecuteSpecialOperation` in runs that must keep going, or take a snapshot before you send it so you can restore it.
+</Aside>
+
+Retreat movement, pursuit, supply reservation, route travel time, and transfers of casualties to population are outside the current plugin. Some `ForceStatus`, `OperationPhase`, `CombatStage`, and `CombatResult` variants declared in [`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-military/src/model.rs) are never set by the current systems.
+
+### Occupation
+
+`EstablishOccupation`, or an attacker victory, creates an occupation with military control 700, a garrison of one third of the force's strength, security 500, resistance 500, and stage `MilitaryControl`. The occupation updates once a day until its stage reaches `Intergenerational`. Each update adds 25 security, 20 administrative reach, and 10 collaboration, and removes 10 resistance, each within 0 to 1,000. The stage then advances by at most one step:
+
+| From | To | Needs administrative reach | Needs security |
+| --- | --- | ---: | ---: |
+| `MilitaryControl` | `AdministrativeTakeover` | 300 | 600 |
+| `AdministrativeTakeover` | `LegalRecognition` | 500 | 650 |
+| `LegalRecognition` | `FiscalIntegration` | 650 | 700 |
+| `FiscalIntegration` | `SocialIntegration` | 800 | 750 |
+| `SocialIntegration` | `CulturalPractice` | 900 | 800 |
+| `CulturalPractice` | `Intergenerational` | 1,000 | 850 |
+
+Stage names are labels on the occupation record. Advancing a stage writes no legal, fiscal, or social record. `SetOccupationPolicy` overwrites security, collaboration, and extraction burden and raises `policy_revision`; later daily updates continue from the new values.
+
+### Effects in other domains
+
+`MilitaryAdministrationAction` asks another domain to act for an occupation. The phase-7 system adds a `PendingMilitaryEffect` to the ledger with the operation key, the provider plugin name, the provider record version it expects, and the occupation. The ledger must already exist; the first recorded command outcome creates it.
+
+The provider settles the effect in its own records. Your integration then reports the result with `enqueue_provider_outcome(canwu, due_at, outcome)`, which queues a `military_provider_ack_v1` packet (ingress class `Acknowledgement`). In phase 7 the military plugin:
+
+1. finds the pending effect for `outcome.operation`, or fails with `InvalidAuthority`;
+2. requires the provider name and version to match the pending effect, or fails with `InvalidAuthority`;
+3. requires a non-empty `digest` and `provider_record`, or fails with `InvalidPayload`;
+4. removes the pending effect, records the outcome in the ledger, and keeps a copy as a `provider_outcome` record;
+5. updates the occupation. `Accepted` or `Committed` moves `MilitaryControl` to `AdministrativeTakeover`, or `AdministrativeTakeover` to `LegalRecognition`. `Rejected` or `Compensating` returns the stage to `MilitaryControl` and lowers legitimacy by 50.
+
+The check compares the names and versions stored in the ledger. The military plugin never reads the provider's record, so your integration is responsible for passing on a real outcome.
+
+### When a command fails
+
+- A wrong issuer (`InvalidAuthority`), a digest mismatch or an unknown branch or tactic (`InvalidPayload`), and direct submission (`MixedCommandIngress`) reject the command at admission. Nothing is queued.
+- A stale `expected_force_revision` fails admission with `DomainRecordVersionConflict`. The engine handles that code as a boundary failure: `advance_canonical` returns the error and the boundary rolls back.
+- Any error in the phase-7 system also fails the boundary. Examples are a reused operation key with different input, a recruit with no capacity left, a missing force, and an acknowledgement with no matching pending effect.
+
+After a boundary failure, the failing input stays in the queue, so each later `advance_canonical` call fails the same way. To continue, restore a snapshot or checkpoint saved before that input was enqueued. Check the force revision, and the provider name and version of an acknowledgement, before you enqueue. A repeated command with the same key and input is a no-op only when admission accepts it; a command that carries `expected_force_revision` fails as stale once its first copy has raised the force revision.
+
+## Knowledge and visibility
+
+The phase-13 system publishes one `military_report` knowledge record (schema `canwu.military` / `military_report`, version 1) for each force that has a commander. The holder is the commander, and the subject is the force record. The payload gives the force ID, location, strength as a range of plus or minus one tenth, supply as a range of plus or minus 100 per mille, and the observation time. Confidence is 900 per mille, and the origin cites the exact force record version.
+
+A player-facing client reads these reports through `viewer_for_actor(person)` and `CanwuViewer::query_knowledge`. Other actors, including an opposing commander, receive nothing from the military plugin: `Recon` records a draw and an event but publishes no knowledge. `Canwu::typed_domain_record`, used by the starter to read combat and occupation records, returns ground truth and belongs in trusted host code.
+
+## Randomness, persistence, and replay
+
+All draws come from one [random stream](/en/architecture/randomness/), `canwu-military / military-operation / 1` (`military_random_stream()`), declared by the phase-7 system. Each draw is an operation-keyed draw with a bound of 1,000:
+
+| Draw | Operation kind | Target and slot | Purpose | How the value is used |
+| --- | --- | --- | --- | --- |
+| `Recon` command | `military_command` | Canonical key of the operation key, slot 0 | `resolve military operation uncertainty` | Recorded only |
+| Special operation | `special-operation` | Canonical key of the operation ID, slot 0 | `special-operation-success` | Success at 650 or more |
+| Combat round | `combat-round` | Exact combat record version, slot = round | `combat-round-remainder` | Extra losses from the value mod 8 |
+
+Your application supplies no probability. The 650 threshold and the loss formula are constants in `canwu-military`. From the catalog the plugin reads only branch and tactic names; the ruleset's numeric profiles, node profiles, and commander profiles are never read.
+
+All military state lives in domain records, so snapshots save it with the knowledge ledgers, draw evidence, and the queue of scheduled ticks. The plugin identity is the name `canwu-military`, plugin version `0.1.0`, and a fixed semantic hash; restoring a snapshot or replaying a journal requires the same identity. The lifecycle test `complete_military_lifecycle_is_persisted_and_replayed` checks that a restored run and a run replayed with `replay_from_journal` reach the same checkpoint hash as the live run.
+
+## What your application supplies
+
+- Scenario content. Build a `MilitaryCatalog`, install it with `record_from(catalog_reference(), ...)` in `scenario.domain_records`, and call `MilitaryRulesetV1::validate` yourself. The ruleset hash covers the ruleset ID, profile name, and the counts of branches, tactics, and terrain modifiers.
+- Node identities. The plugin compares `MilitaryNodeId` strings for equality and never checks them against catalog nodes. Travel, routes, and adjacency belong to your integration.
+- Authority. Give each force a commander at creation: a force without one accepts no later force command, `AssignCommander` included. Decide in your host who may send `CreateForce`, `SetOccupationPolicy`, `MilitaryAdministrationAction`, and `AdvanceTick`, because admission checks no issuer for them.
+- Unique keys and current revisions. Use a new `MilitaryOperationKey` for each intent, and read the force revision just before you enqueue.
+- Provider plugins for administration effects, plus the code that calls `enqueue_provider_outcome`.
+- Supply, casualty flows, and richer combat. These need your own plugins, or a replacement for `canwu-military`.
+- Presentation: maps, reports for non-commanders, and intelligence estimates.
+
+## Limits and budgets
+
+| Constant or rule | Value | Enforcement |
+| --- | --- | --- |
+| `MAX_SUBUNITS` | 64 | `ForceState::validate` rejects a force with more subunits |
+| `SCHEMA_VERSION` | 1 | Required on rulesets and force records |
+| Military IDs | 1 to 192 bytes, with a `:` | ASCII letters, digits, and `. _ - : /` |
+| Per-mille values | At most 1,000 | Force metrics, occupation metrics, and occupation policy |
+| Report scan | 256 force records per boundary | The phase-13 system reads the first 256 force records in canonical order |
+
+`ForceState::validate` also requires the subunit strengths to add up to the actual strength, and losses to stay within the authorized strength.
+
+`MAX_RECORDS` (4,096), `MAX_COMPOSITION_ENTRIES` (64), and `MAX_OPERATION_PARTICIPANTS` (128) are declared but not enforced.
+
+## Try it
+
+```shell
+cargo run -p canwu-military-reference --example military_starter
+cargo test -p canwu-military
+cargo test -p canwu-military-reference-content
+```
+
+The starter creates a field force, recruits, plans an operation, marches on a defended node, wins the battle, and checks snapshot and replay. It prints `military_gameplan=complete` with the two ruleset names and the checkpoint hash. The walkthrough [Run the military extension: from contact to occupation](/en/tutorials/military-domain/) covers it step by step.
+
+For resource-backed supply, run `cargo run -p canwu-economy-reference --example grain_loop` and read the [grain, production, and military supply case](/en/tutorials/cases/production-economy/). For stream declarations and draw evidence, see [randomness](/en/architecture/randomness/).
+
+## Further reading
+
+- [Settlement system](/en/architecture/settlement/): the fourteen phases, staged writes, and rollback
+- [Event system](/en/architecture/events/): admission order and zero-delay packets
+- [Extend with plugins](/en/developer/extensions/): writing a plugin to replace or extend this one
+- [Military domain design notes](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-domain-design.md): a larger design than the current code implements; the code in `crates/extensions/canwu-military` is the reference for behavior

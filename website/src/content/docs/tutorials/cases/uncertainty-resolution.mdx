@@ -1,33 +1,94 @@
 ---
 title: 随机决策、LLM 选择与确定性重放
-description: 为法律、人物、信仰和人群机制选择正确的不确定性模型。
+description: 用可重放的随机抽样和 LLM 答复分别结算同一张法案表决票据，并为其他类型的不确定性选择合适的机制。
 sidebar:
-  order: 2
+  order: 3
+  label: 随机决策与 LLM 选择
 ---
 
-参伍允许模拟包含真正的随机性，同时要求同一份权威记录可以精确重放。关键不是
-“所有不确定的地方都掷骰子”，而是先判断不确定性属于哪一种。
+import { LinkButton } from "@astrojs/starlight/components";
 
-| 问题 | 应用的机制 |
-| --- | --- |
-| 事实缺失、冲突或角色不知道 | 保留 `Unknown`、`Indeterminate` 或冲突证据 |
-| 人物或机构在已有合法选项中选择 | 使用 `DecisionTicket`，selector 可为 Utility、Rule、Random、Human、External 或 LLM |
-| 离散世界事件确实有概率 | 在拥有该机制的边界系统中使用操作定址随机抽样 |
-| 大规模人群按比例变化 | 使用确定性整数转移和持久化余数 |
+## 场景
 
-## 同一票据契约支持 Random 与 LLM 配置
+议会要决定一项法案是否通过，票据的决策上下文记录了 72 席支持、28 席反对。示例用两种
+方式回答同一个“通过还是否决”的问题：第一次运行中，Random 控制者按作者设定的权重抽样，
+`fail` 为 25、`pass` 为 75；第二次运行中，LLM 控制者以结构化请求的形式收到问题，并返回一个 option ID。
 
-法律“通过 / 不通过”可以先建成普通票据。下面的 25/75 是演示用的作者设定权重，不是历史概率估计。使用 Random controller 时，边界系统
-声明随机流，对精确票据版本抽样，并提交权重：
+这个示例回答的问题是：把选择交给随机性或语言模型之后，运行怎样仍然可以精确重放？
+
+25/75 只是演示用的权重，不代表历史概率。
+
+## 示例涉及的引擎部件
+
+- [随机决策策略](/reference/terminology/)（`DecisionPolicyKind::Random`）与
+  [决策选项权重](/reference/terminology/)（`DecisionOptionWeight`）。
+- 从已声明的[随机流](/architecture/randomness/)（`RandomStreamKey`）中进行
+  [操作定址随机抽样](/architecture/randomness/)（`random_sample_for_operation`）。
+- 用 `BoundaryDirective::ResolveDecisionRandomly` 结算票据的
+  [边界系统](/architecture/settlement/)。
+- 通过 `QueuedLlmPolicy`、`ExternalDecisionRequest` 和 `ExternalDecisionResponse`
+  驱动的 LLM 控制者，示例中不发起网络请求。
+- 两次运行共用同一套[决策票据](/tutorials/cases/warlord-aid-decision/)契约。
+
+## 运行
+
+```shell
+cargo run -p canwu-api --example uncertainty_resolution
+```
+
+输出是两行较长的 JSON：
+
+```text
+random_trace={"id":1,"ticket_id":1,"ticket_version":1,"controller_id":"law-random-controller","policy":{"kind":"random","id":"weighted-random","version":"1"},"decided_at":1440,"outcome":{"type":"selected","option_id":"pass"},"summary":"random policy selected pass","random":{"draw_id":1,"value":29,"upper_exclusive":100,"option_weights":[{"option_id":"fail","weight":25},{"option_id":"pass","weight":75}]}}
+llm_request={"ticket_id":2,"ticket_version":1,"definition":"example.law-passage","summary":"Will the proposed law pass?","context":{"schema":"example.law-passage.v1","payload":{"opposing_seats":28,"public_pressure":"high","supporting_seats":72}},"options":[{"id":"fail","label":"Reject the law","description":"","metadata":null},{"id":"pass","label":"Pass the law","description":"","metadata":null}]}
+```
+
+`random_trace` 中，抽样在 `0..100` 里得到 29。权重按 option ID 顺序排列，`fail`
+占 0–24，`pass` 占 25–99，所以 29 选中 `pass`。`decided_at` 为 1440 分钟，即开始后
+一天。`random` 字段指向产生该值的抽样记录（`draw_id: 1`）。
+
+`llm_request` 就是模型能看到的全部内容：票据、票据版本、决策上下文，以及各选项的
+ID 和标签。
+
+## 代码走读
+
+代码都在
+[`uncertainty_resolution.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/uncertainty_resolution.rs)
+中。
+
+### 1. 声明负责抽样的系统
+
+`UncertaintyPlugin` 注册一个边界系统，它可以读取决策状态，并从一条随机流中抽样：
 
 ```rust
-let weights = vec![
-    DecisionOptionWeight::new("fail", 25),
-    DecisionOptionWeight::new("pass", 75),
-];
+let mut contract = BoundarySystemContract::new(
+    "resolve-random-decision",
+    BoundaryPhase::StrategicAggregation,
+    SystemCadence::Daily,
+);
+contract.reads = vec![StateKey::core_decisions()];
+contract.random_streams = vec![decision_stream()];
+registrar.register_boundary_system(contract, random_resolution_system)
+```
+
+`decision_stream()` 返回
+`RandomStreamKey::new("example-uncertainty", "decision-selection", 1)`。系统只能从
+契约中声明过的随机流抽样。
+
+### 2. 为 Random 控制者开启票据
+
+`random_branch` 调用 `enqueue_ticket`：注册控制者 `law-random-controller`，其策略身份为
+`DecisionPolicyIdentity::new(DecisionPolicyKind::Random, "weighted-random", "1")`；
+开启带 `pass`、`fail` 两个选项的票据 1；然后结算一个边界。
+
+### 3. 在边界系统中抽样并结算
+
+`random_resolution_system` 读取票据，并针对这次操作抽样：
+
+```rust
 let sample = view.random_sample_for_operation(
-    &stream,
-    cause,
+    &decision_stream(),
+    EvidenceRef::Ingress(calendar_ingress),
     "decision_selection",
     "law-proposal-42",
     RandomOperationTarget::DecisionTicket {
@@ -40,69 +101,134 @@ let sample = view.random_sample_for_operation(
 )?;
 ```
 
-随后把 `sample` 和 `weights` 放入
-`BoundaryDirective::ResolveDecisionRandomly`。内核校验随机流所有权、操作目标、
-权重总和和当前 controller，并为下一可用边界生成标准决策输入。抽样记录与
-`DecisionTrace.random` 会互相绑定；来源边界失败时，抽样与生成的决策输入一起回滚。
-每个来源边界最多生成一个 Random 决策结算，并立即交给下一可用边界；多个独立
-随机决策应拆到不同来源边界，以保持全局 revision guard 明确。
+参数依次是：随机流、起因（触发本边界的日历输入）、操作类型和操作 ID、目标票据及其版本、
+抽样槽位（0）、取值上限（100，不含），以及用途说明。抽样由这些值定址，所以重试或
+重放都会得到同一个样本。
 
-## 只对真正的平局随机决胜
+系统把样本和权重放进 `BoundaryDirective::ResolveDecisionRandomly` 的
+`RandomDecisionResolution` 中返回。模拟内核校验随机流、目标、权重之和是否等于上限且覆盖
+所有可用选项，以及控制者是否为当前控制者，然后为下一个边界生成普通的决策输入。
 
-自 0.12.0 起，确定性的效用选择器可以只把真正的平局交给随机性。
-`GuardedUtilityPolicy` 先运行有序前置规则，再为剩余选项评分；若设置了
-`random_tie_break`，且有两个或更多选项与最高分的差距不超过其近似相等阈值，
-策略返回 `DecisionOutcome::PendingRandom`，只列出这些候选，每个权重为 1。
-随后，边界系统按上述方式对精确票据版本抽样，并把这个待定决定作为
-`ResolveDecisionRandomly` 的 `tie_break` 提交；权重必须与候选完全一致。控制者
-必须通过 `with_random_tie_break` 显式启用，决策轨迹会记录 `Random` 阶段。策略
-未设置该标志时，最高分获胜；分数完全相同时按最小 option ID 决出。
+### 4. 结算来源边界和决策结算边界
 
-抽样证据只能来自这类边界结算：上层应用自行提交、带抽样证据的决策输入会在
-运行时和加载时被拒绝。若票据的决策者或其控制者的权限人物在边界开始时已经
-不可用，该结算会在抽样前使边界失败，因此负责结算的系统应跳过这些票据。
-
-如果另一种运行配置改用 LLM，可以复用相同票据契约和选项，但必须在开票前注册
-相应 controller；运行中不能替换一个已注册 controller 的 policy。上层应用把
-`ExternalDecisionRequest` 发送给模型，并要求结构化返回一个已有 option ID，例如：
-
-```json
-{
-  "ticket_version": 1,
-  "option_id": "pass",
-  "provider": "host-model-gateway",
-  "request_id": "law-proposal-42-response-1"
-}
+```rust
+let selection_at = SimTime::EPOCH + SimDuration::days(1);
+canwu.schedule_calendar_boundary(selection_at, vec![SystemCadence::Daily])?;
+canwu.step_canonical()?.expect("random source boundary");
+canwu
+    .step_canonical()?
+    .expect("generated decision resolution boundary");
 ```
 
-模型看不到权威命令载荷，也不能增加选项。适配器把答案校验并转换成
-`ExternalDecisionResponse`；正式进入模拟的是标准决策输入和证据，精确重放不会
-再次调用模型。目前 `QueuedLlmPolicy` 已保留这条接口，不要求引擎接入具体模型。
+第一步运行每日系统，完成抽样并生成决策结算输入；第二步准入这条输入并写入决策轨迹。
+来源边界失败时，抽样和生成的输入一起回滚。一个边界最多生成一条随机决策结算，互相独立的
+随机决策要放在不同的来源边界里。
 
-## 四类领域怎样用
+### 5. 用同一套票据契约询问 LLM
 
-- **法律：**法定人数、权限、计票和门槛保持确定；只有规则明确表示未建模协商或
-  批准存在概率时，才给 `pass` / `fail` 配权重。`canwu-law` 会保留上层应用用
-  稳定席位 controller ID 预注册的兼容 Random、External 或 LLM controller。
-- **人物：**性格、知识、信条、义务和当前选项进入票据 context。Utility/Rule
-  表示确定偏好，Random 表示有边界的行为波动，Human/External/LLM 使用相同选项。
-- **信仰：**大规模传播使用整数比例和余数；一次分裂、复兴、压制或领袖选择若是
-  离散事件或角色决定，再分别使用边界抽样或票据。
-- **人群：**日常流动和扩散使用确定性结算；恐慌、骚乱、踩踏等离散事故可抽样，
-  组织者如何应对则是决策票据。
+`llm_interface_branch` 为策略类型是 `DecisionPolicyKind::Llm` 的控制者开启票据 2，
+然后构造决策策略：
 
-完整可运行代码见
-[`uncertainty_resolution.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/uncertainty_resolution.rs)，
-更完整的设计与检查表见仓库中的 `docs/uncertainty-resolution.md`。
+```rust
+let mut policy = QueuedLlmPolicy::new(
+    "strict-law-selector",
+    "1",
+    LlmModelIdentity {
+        provider: "not-connected".to_owned(),
+        model: "host-selected-model".to_owned(),
+        prompt_contract: "return one existing option_id and no new action".to_owned(),
+    },
+);
+let ticket = canwu.decision_ticket(ticket_id).expect("LLM ticket");
+let request = policy.external_request(ticket);
+```
 
-## 验证清单
+实际的上层应用会把 `request` 发给模型并解析结构化答复。示例省去网络请求，直接提交答复：
 
-1. 随机流和边界系统已经声明，operation ID、目标和 purpose 稳定。
-2. 权重按 option ID 规范排序，完整覆盖当前可用票据选项（随机平局决胜时恰好等于待定候选），且总和等于抽样上界。
-3. LLM 只能返回当前票据版本中的一个 option ID。
-4. 所有变更仍经过标准决策或命令准入。
-5. 测试快照恢复、精确重放、回滚、陈旧票据和抽样证据篡改。
+```rust
+policy.submit(
+    ticket_id,
+    ExternalDecisionResponse {
+        ticket_version: request.ticket_version,
+        option_id: "pass".to_owned(),
+        provider: "not-connected".to_owned(),
+        request_id: "example-response-1".to_owned(),
+        metadata: BTreeMap::new(),
+    },
+)?;
+```
 
-继续阅读：[随机生成方法](/architecture/randomness/) ·
-[决策案例](/tutorials/cases/warlord-aid-decision/) ·
-[存档、重放与派生分支](/developer/persistence/)
+随后 `drive_decision` 按票据校验答复并作为决策输入入队，`step_canonical()` 将其记录下来。
+决策轨迹保存 provider、模型、提示词契约和请求 ID，精确重放直接读取这些记录，不再调用模型。
+
+## 值得注意的地方
+
+- 随机性只能经由已声明的边界系统进入模拟。抽样会记为[抽样证据](/architecture/randomness/)，
+  并与决策轨迹的 `random` 字段互相引用。上层应用自行写入、附带抽样的决策输入会被拒绝，
+  运行时和加载时都是如此。
+- 模型只能看到上面这份请求，并针对该票据版本返回一个 option ID。
+- 两次运行使用相同的票据定义和选项，区别只在控制者。控制者要在开启票据之前注册；
+  同一个控制者 ID 只能注册一次，因此它的决策策略在整个运行中保持不变。
+
+## 动手改一改
+
+- **权重。** 改为 `fail` 30、`pass` 70。抽样与权重无关，仍然得到 29，而 29 现在落在
+  `fail` 的区间内。
+- **种子。** 把 `random_branch` 中的 `Canwu::demo(202)` 换成其他种子，观察抽样值和结果
+  如何变化。无论哪个种子，重放结果都保持一致。
+- **无效的 LLM 答复。** 提交 `option_id: "maybe"`。`drive_decision` 返回错误
+  （`policy selected unknown option maybe`），也没有输入入队。`provider` 与模型身份
+  不一致的答复同样会被拒绝。
+
+## 示例之外
+
+### 效用策略的随机平局决胜
+
+确定性的效用策略可以只把真正的平局交给随机性。`GuardedUtilityPolicy`（前置规则效用策略）
+先运行有序前置规则，再为剩余选项打分；若设置了 `random_tie_break`，且有两个或更多选项与
+最高分的差距不超过其近似相等阈值，就返回 `DecisionOutcome::PendingRandom`，只列出这些
+候选，每个权重为 1。随后由边界系统像第 3 步那样针对票据的当前版本抽样，并把这个待定决策
+作为 `RandomDecisionResolution` 的 `tie_break` 传入；权重必须与候选完全一致。控制者需要
+调用 `with_random_tie_break` 启用这一功能，决策轨迹会记录 `Random` 决策阶段。未设置该标志时，
+最高分胜出，同分取 option ID 最小的选项。
+
+如果票据的决策者或其控制者的权限人物在边界开始时已经不可用，随机结算会在抽样之前使该
+边界失败。负责结算票据的系统应当跳过这类票据。
+
+### 为不同类型的不确定性选择机制
+
+| 情形 | 机制 |
+| --- | --- |
+| 事实缺失、存在争议，或角色并不知道 | 保留为 `Unknown`、`Indeterminate` 或有争议的证据 |
+| 人物或机构在允许的选项中做选择 | 使用 `DecisionTicket`，决策策略可为 Utility、Rule、Random、Human、External 或 LLM |
+| 离散的偶发事故确有概率 | 在负责该机制的边界系统中做操作定址随机抽样 |
+| 大规模人口按期望比例变化 | 确定性的整数转移，余数持久化保存 |
+
+放到常见领域中：
+
+- **法律。** 法定人数、权限、计票和门槛保持确定。只有在模型有意把尚未解决的博弈当作
+  随机因素时，才给 `pass` 和 `fail` 配权重。上层应用若事先用席位的稳定控制者 ID 注册了
+  兼容的 Random、External 或 LLM 控制者，`canwu-law` 会沿用它。
+- **人物。** 性格、知识、信条、义务和当前选项放进票据的决策上下文。Utility 和 Rule
+  策略表达确定的偏好，Random 表达有界的行为波动，Human、External 和 LLM 策略从同一组
+  选项中选择。
+- **信仰。** 人口层面的传播使用整数比例和余数。一次分裂、复兴或压制，若属于偶发事故就用
+  边界抽样，若由领袖决定就用票据。
+- **人群。** 日常流动和扩散用确定性结算。恐慌或骚乱可以作为偶发事故抽样，组织者如何应对
+  则是一张票据。
+
+设计说明和检查清单见仓库中的
+[`docs/uncertainty-resolution.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/uncertainty-resolution.md)。
+
+## 源码
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/uncertainty_resolution.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/tests/gap_g08_decision_guarded_utility_policy.rs" variant="secondary" icon="external">
+  阅读前置规则效用策略测试
+</LinkButton>
+
+继续阅读：[随机性](/architecture/randomness/)、
+[军阀援军决策](/tutorials/cases/warlord-aid-decision/)、
+[存档、重放与派生分支](/developer/persistence/)。

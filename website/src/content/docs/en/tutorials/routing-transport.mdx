@@ -1,37 +1,70 @@
 ---
 title: Route planning and delivery execution
-description: Model Wuxi-to-Beijing delivery, nearby recipients, rail, air, telegraph, and disaster recovery with deterministic routing and transport records.
+description: Plan a delivery from Wuxi to Beijing with deterministic routing, then record the journey leg by leg with transport records and the movement lifecycle extension.
 template: doc
 sidebar:
   order: 5
   label: Routing and transport
 ---
 
-> **Current contract.** The routing and transport types were introduced in 0.5 and remain part of the current 0.13.0 public API. Hosts must still provide network and historical content data. Since 0.13.0, the `canwu-movement` extension owns the lifecycle of the transport executions it admits and allocates capacity pools; map import, a universal historical dataset, and first-class simulation-core snapshot fields for transport records remain future work.
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-For a runnable end-to-end composition with addressed information delivery, see
-[Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/).
-That case uses the `canwu-correspondence` domain extension; this page continues
-to explain the lower-level planning and execution contracts.
+This page follows a letter from Wuxi to Beijing. You will run a routed delivery, see how `canwu-routing` picks a route from what one observer knows, and see how `canwu-transport` and `canwu-movement` record the journey leg by leg, including failures and reroutes.
 
-## Separate planning from execution
+Your application supplies the network and timetable data. `canwu-routing` and `canwu-transport` are plain Rust libraries that compute and check values; your plugins store those values as domain records and change them through canonical ingress. All of their types are re-exported from `canwu-api`.
 
-“How should a delivery travel from Wuxi to Beijing?” contains two different questions:
+## Run it
 
-1. **Planning**: which route arrives earliest within the network, timetable, risk, and capacity constraints visible to this observer?
-2. **Execution**: has the message loaded, departed, arrived at a relay, changed custody, rerouted after a disaster, and completed the recipient's delivery attempt?
+The correspondence example plans two deliveries from the same sender, one to a neighbor in Wuxi and one to Beijing:
 
-`canwu-routing` answers the first question. `canwu-transport` records the second. Neither bypasses `canwu-sim` canonical ingress or writes directly into the `canwu-information` recipient ledger.
+```shell
+cargo run -p canwu-correspondence --example routed_correspondence
+```
 
-## Wuxi to Beijing
+```text
+Wuxi local delivery: 1 leg(s), arrival minute 30
+  wuxi/hub -> wuxi/delivery/recipient via Horse
+Wuxi to Beijing: 2 leg(s), arrival minute 3060
+  wuxi/hub -> beijing/station via Rail
+  beijing/station -> beijing/delivery/recipient via Horse
+```
 
-Planning is based on an observer-relative knowledge cut rather than an omniscient world read:
+The sender's network is defined in [`examples/support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/support/mod.rs). The local letter takes one 30-minute horse leg. For Beijing the router compares a direct train (departs at minute 60, two days), a train through Nanjing (three days), and two final-mile horse legs (two and three hours). It picks the direct train and the two-hour leg: 60 + 2,880 + 120 = minute 3,060. [Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/) walks through that example in full. This page explains the planning and execution contracts underneath it.
+
+## Planning and execution
+
+"How does a letter get from Wuxi to Beijing?" is two questions:
+
+1. **Planning**: given the network, timetables, risk, and capacity this observer knows about, which route arrives earliest within the limits?
+2. **Execution**: has the letter departed, reached a relay, changed hands, been rerouted after a flood, and reached the recipient?
+
+`canwu-routing` answers the first and `canwu-transport` records the second. The recipient's knowledge changes only when the information extension completes the delivery attempt.
+
+<MermaidDiagram
+  label="Plan from an observer's knowledge, install an itinerary, book capacity, run legs, and reroute after a failure"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the sections below describe the same lifecycle."
+  renderFailureMessage="Diagram preview unavailable; the sections below describe the same lifecycle."
+  definition={`flowchart LR
+    Snap["PlanningSnapshot<br/>what the observer knows"] --> Plan["plan_route()<br/>RoutePlan"]
+    Plan --> Install["TransportExecution<br/>initial ItineraryRevision"]
+    Install --> Book["CapacityBooking<br/>(optional)"]
+    Book --> Legs["Legs: start, arrive<br/>Handoff at relays"]
+    Legs -->|"leg fails"| Replan["ReplanPending"]
+    Replan -->|"new snapshot"| Reroute["Successor<br/>ItineraryRevision"]
+    Reroute --> Legs
+    Legs -->|"final leg arrives"| Done["ArrivalPending<br/>or Settled"]
+`}
+/>
+
+## Plan a route
 
 ```rust
 let request = RoutingRequest {
-    origin: RoutingNodeRef::new("settlement/wuxi"),
-    destination: RoutingNodeRef::new("settlement/beijing"),
-    departure_at: SimTime::from_hours(8),
+    origin: RoutingNodeRef::new("wuxi/hub"),
+    destination: RoutingNodeRef::new("beijing/delivery/recipient"),
+    departure_at: SimTime::EPOCH + SimDuration::hours(1),
     policy: RoutingPolicy {
         allowed_modes: [TransferMode::Rail, TransferMode::Horse]
             .into_iter()
@@ -43,34 +76,42 @@ let request = RoutingRequest {
 let plan = plan_route(&planning_snapshot, &request)?;
 ```
 
-`PlanningSnapshot` may come from the current-world adapter or from a rail, air, telegraph, or relay-station extension. It binds the observer, knowledge cut, topology version, and expiry. Someone with a current railway timetable and someone who only knows a courier rumor can therefore produce different valid plans.
-To build a snapshot from exactly what one holder knows, use `planning_snapshot_from_holder_knowledge` from `canwu-correspondence`; see [Plan from a holder's knowledge](/en/developer/reading-state/#plan-from-a-holders-knowledge).
+A `PlanningSnapshot` is the network as one observer knows it at one moment. It records the `observer`, `observed_at`, `knowledge_cut`, `topology_version`, an optional `timetable_version`, and an optional `valid_until` expiry. Someone with a current railway timetable and someone who has only heard a courier rumor get different plans, and both plans are valid for what they knew. Two helpers build snapshots:
 
-If a nearby recipient is served inside the same district, the plan may contain one short walking or horse leg. Beijing may require several relays, stations, and custody transfers. The router does not collapse both destinations merely because both are “another person.”
+- `canwu_reference_world::planning_snapshot_from_world` builds one from the reference world's territories and routes.
+- `canwu_correspondence::planning_snapshot_from_holder_knowledge` builds one from exactly what one holder's ledger asserts; see [Plan from a holder's knowledge](/en/developer/reading-state/#plan-from-a-holders-knowledge).
 
-## ETA is not the delivery deadline
+The resulting `RoutePlan` lists `legs`, each with a mode and planned departure and arrival, plus `estimated_arrival_at` and a `digest`. A nearby recipient may need one short leg; Beijing may need several relays, stations, and custody transfers.
 
-`RoutePlan.estimated_arrival_at` is an execution estimate. `DeliveryAttempt.due_at` is the logical completion deadline in the information lifecycle. A late ETA must not silently rewrite the original deadline; the system records failure or creates a new retry attempt.
+### Modes and timetables
 
-Rerouting and retrying are also different:
+Rail, air, telegraph, and relay stations share one algorithm; the differences live in network data:
 
-- **reroute**: create a new immutable `ItineraryRevision` for the same delivery attempt;
-- **retry**: create a new delivery-attempt version, which may choose a new plan and mode.
+- Rail: `TransferMode::Rail`, station endpoints, and departure slots. A 1900 network and a 1940 network are two content packages with different timetables.
+- Air: `TransferMode::Air`, airports, and flight slots.
+- Telegraph and other signals: `TransferMode::Signal`. Office hours, latency, risk, and interception come from data or your own extension's policy.
+- Courier networks: relay-station endpoints, `Horse` or `Foot` connections, and custody handoffs between legs.
 
-## Rail, air, telegraph, and relay stations
+Each connection has a `TraversalModel`: `Fixed` for a constant duration, `Departures` for scheduled slots, and `Piecewise` for durations that change over time. The default algorithm, `FifoDijkstraV1`, assumes that leaving later never means arriving earlier. When your time-dependent data breaks that rule, set `algorithm: RoutingAlgorithm::BoundedLabelCorrectingV1` in the policy.
 
-Historical differences belong in network data instead of four copied routing algorithms:
+### Limits and caching
 
-- Rail uses `TransferMode::Rail`, station nodes, departure slots, and capacity bookings. 1900 and 1940 use different content packages and timetables.
-- Air uses `TransferMode::Air`, airports, flight slots, weather availability, and bookings.
-- Telegraph or other signals use `TransferMode::Signal`; office hours, latency, risk, and interception are data or extension policy.
-- Ancient courier networks use relay-station nodes, horse/foot traversal, and explicit custody handoffs.
+`RoutingPolicy` also sets `max_expanded_nodes`, `max_transfers`, `max_risk_per_mille`, and `max_arrival_at`. Failures such as `NoKnownRoute` and `ExpansionBudgetExceeded` are deterministic results, so replay reproduces them.
 
-Fixed durations, departure schedules, and time-dependent durations use `Fixed`, `Departures`, and `Piecewise` traversal models. A non-FIFO network must explicitly select the bounded label-correcting algorithm; the default FIFO network uses deterministic Dijkstra.
+`RoutingCache` stores plans keyed by the snapshot digest and the request, including its policy. It is a host-side cache: you can drop it at any time and rebuild it, and replay works without it.
 
-## Execution and disasters
+## ETA and delivery deadline
 
-After planning, the host installs the plan into a transport execution and creates the completion bridge for the information attempt:
+`RoutePlan.estimated_arrival_at` is an estimate for execution. The delivery attempt's `due_at` is the deadline in the information lifecycle. When the letter will arrive late, the system records a failure or creates a new attempt; the original deadline stays as it was.
+
+Rerouting and retrying are different operations:
+
+- A [reroute](/en/reference/terminology/) creates a new immutable `ItineraryRevision` for the same delivery attempt.
+- A delivery retry creates a new delivery attempt, which may use a new plan and mode.
+
+## Record the journey
+
+After planning, the host creates a `TransportExecution`, installs the plan as its first itinerary revision, and links it to the delivery attempt it must complete:
 
 ```rust
 let mut execution = TransportExecution::new(
@@ -88,36 +129,39 @@ execution.begin_saga(
 )?;
 ```
 
-Each leg has its own status and actual departure/arrival times. At a relay, record a `Handoff` before starting the next leg. If flood, war, weather, or a line outage blocks the route, a domain system records the failure and reason; execution enters `ReplanPending`, and a new planning snapshot produces a successor itinerary revision. The replacement revision also records custody transfer from the failed segment into its first segment. Incidents outside an active transport attempt are retained as suppressed evidence rather than mutating an information or arrival-pending transition. The router never invents the disaster.
+`delivery_attempt_version` is the exact domain-record version (`DomainRecordVersionRef`) of the delivery attempt, and `initial_revision` is an `ItineraryRevision` holding the `RoutePlan` with reason `ItineraryRevisionReason::Initial`. `begin_saga` moves the execution to `Executing`.
 
-After the final leg arrives, execution enters `ArrivalPending`. `completion_request()` yields a stable operation key and evidence; the host submits it through canonical ingress to complete the information attempt. Repeating the same key must not complete the attempt twice.
+Then each leg runs in order:
 
-## People, seizures, and external conditions
+- `start_current_leg(at)` departs, and `complete_current_leg(at, endpoint)` arrives. Each leg records its actual times.
+- At a relay, `record_handoff` records who hands custody to whom before the next leg starts.
+- When a flood, war, bad weather, or a line outage blocks the route, a domain system calls `fail_current_leg(reason, at)`. The execution enters `ReplanPending`. A new planning snapshot produces a successor revision, installed with `reroute(revision, at)`, and `record_handoff` records custody passing from the failed leg to the new revision's first leg. The router only plans; your systems decide that the disaster happened.
+- When the final leg arrives, the execution enters `ArrivalPending`. `completion_request()` returns a `DeliveryCompletionRequest` with a stable operation key and evidence. The host submits it through canonical ingress to complete the delivery attempt in the information extension. Submitting the same key twice completes the attempt once.
 
-Since 0.12.0 (`canwu-transport.v4`), three record additions cover common strategy-game movement:
+For execution 7, itinerary revision 1, and attempt version 1, the key is `transport/7/revision/1/delivery-completion/attempt-version/1`. An execution without a delivery attempt ends with `settle_arrival(at, endpoint)` in state `Settled`.
 
-- `MovementSubjectRole::PersonsGroup` moves a persons group, several people travelling as one subject, usually identified by an application domain record. Like cargo, it must carry a positive quantity, here the head count; `requires_quantity()` states the rule.
-- `HandoffKind::Seizure { by }` records a seizure handoff: custody taken by someone outside the itinerary, such as bandits or a hostile garrison. It follows the same leg rules as a planned handoff. Since `canwu-transport.v5`, a seizure may also be terminal: it names a failed leg of the active revision as both ends, and custody leaves the itinerary. Only one terminal seizure is allowed. Afterwards the execution can no longer fail or reroute a leg, arrive, settle, book capacity, or record another handoff; its owner must close it as failed or cancelled. Ordinary handoffs stay planned handoffs (`Planned`) and serialize as before.
-- `ItineraryRevisionReason::ExternalCondition { record, version, kind }` explains a reroute by an external condition, citing an application-owned condition record, such as a flood or border-closure record, at an exact version with an application label. It is validated for the initial itinerary and for every reroute.
+### People, seizures, and external conditions
 
-Transport records these facts only. Whether a seizure or hazard happened, and who had the authority, stays in application systems.
+These records cover common strategy-game movement:
+
+- `MovementSubjectRole::PersonsGroup` moves a persons group: several people travelling as one subject, usually identified by an application domain record. Like cargo, it carries a positive quantity, here the head count; `requires_quantity()` returns `true` for both roles.
+- `HandoffKind::Seizure { by }` records a seizure handoff: someone outside the itinerary, such as bandits or a hostile garrison, takes custody. Planned handoffs use `HandoffKind::Planned`. A seizure handoff follows the same leg rules as a planned handoff.
+- A terminal seizure names the failed current leg as both ends, so custody leaves the itinerary. An execution allows one terminal seizure. After it, the execution accepts no more handoffs, leg failures, reroutes, arrivals, successful settlement, or bookings, and only its owner can close it, as failed or cancelled.
+- `ItineraryRevisionReason::ExternalCondition { record, version, kind }` explains a reroute by citing an application-owned condition record, such as a flood or border-closure record, at an exact positive version, with an application label in `kind`. It is validated on the initial itinerary and on every reroute.
+
+Transport records these facts. Whether a seizure or hazard happened, and who had the authority, is decided by your application systems.
 
 ## Movement lifecycle and capacity pools
 
-`canwu-transport` stays a record library. Since 0.13.0, the movement lifecycle extension `canwu-movement` owns the lifecycle of those records, so a host no longer drives every leg by hand. Register `MovementPlugin::new(evidence_kinds)` with the application record kinds it may read, such as authority records, delivery attempts, external-condition records, and incident evidence; that list is its exact read set.
+`canwu-transport` holds the records. The [movement lifecycle extension](/en/reference/terminology/) `canwu-movement` runs them through one `MovementPlugin`: your host sends orders with the tracked command `apply_movement_operation_v1`, application systems report incidents through `movement_incident_v1`, and the plugin settles each leg at its due time, allocates capacity pools, and publishes holder-relative reports. The plugin draws no random numbers; your systems decide whether a hazard happens. [How it runs](/en/architecture/routing-movement/#how-it-runs) on the design page gives the full rules for orders, legs, incidents, bookings, and reports.
 
-- **Orders.** The tracked command `apply_movement_operation_v1` carries a `MovementCommandV1` from the issuer's own holder. An `Order` admits a `MovementOrder` and creates its execution. The acting holder becomes the owner, and an optional operator and delayed remote observers receive report grants. Moving anyone but the owner needs an `authority_basis`: the current version of a declared application record that names the owner under the `movement_grantee` role and every other subject under `movement_subject`.
-- **Legs.** Each leg settles at its due time through the internal `movement_leg_due_v1` ingress, while `StartLeg`, `CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`, and `Cancel` act explicitly. Arrival on the final leg settles the execution, or enters `ArrivalPending` when a delivery attempt is attached.
-- **Incidents.** Application systems report failures, reroutes, seizure handoffs, and delivery reconciliation through the public `movement_incident_v1` ingress, citing an exact evidence record of a declared kind. The plugin never draws randomness; the roll for a hazard belongs to your system.
-- **Capacity pools.** An `OfferPool` operation offers a capacity pool (`TransportCapacityPoolV1`): a windowed quantity of interchangeable capacity such as ferry crossings or relay mounts. `RequestBooking` asks for capacity for one unstarted leg inside its planned window. In phase 7, one booking-allocation pass per pool confirms every booking requested in that boundary in full or fails it with recorded evidence, ordered by priority, window start, tie-break key, admission sequence, and booking identity; confirmed capacity is never preempted. A departing leg consumes its bookings, a leg whose booking failed or expired fails with `capacity_unavailable` and waits for a reroute, and a confirmed booking whose window has not opened delays the departure.
-- **Reports.** The plugin publishes `canwu.movement/movement_report` knowledge to living person holders. The owner and operator see the current execution, a delayed remote observer sees coarse progress as it stood one delay earlier, and a holder without a grant sees nothing.
+## Capacity bookings
 
-Every operation key has one durable outcome, so an exact retry is a no-op. A closed execution retires from the runtime once its final reports are out, and at most 365 days after it closed; published reports and the record history keep what happened. The allocation function `allocate_capacity_bookings` is public and pure, so a host that runs its own lifecycle can reuse the same ordering. See the crate [README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-movement/README.md) for limits and error codes.
+Trains, aircraft, relay horses, and telegraph lines can all be booked with `CapacityBooking`, a persistent record for a time window. Its status is one of `Requested`, `Confirmed`, `Consumed`, `Released`, `Expired`, `Cancelled`, or `Failed`. A booking can be confirmed, failed, or cancelled before its window opens, and consumed only inside the window.
 
-## Capacity and determinism
+Movement executions can also draw on capacity pools; see [Capacity pools](/en/architecture/routing-movement/#capacity-pools). The correspondence extension currently offers only `CorrespondenceCapacityAdmission::Unconstrained`, so correspondence legs run without capacity limits.
 
-Trains, aircraft, relay horses, and telegraph lines can use `CapacityBooking`. A booking is a persistent windowed record with requested, confirmed, consumed, released, expired, cancelled, and failed states; since `canwu-transport.v5` it may be confirmed, failed, or cancelled before its window opens but consumed only inside it. A route-cache hit must never hide a capacity mutation. Movement executions can draw on capacity pools as described above, but the current correspondence contract still exposes only `CorrespondenceCapacityAdmission::Unconstrained` and cannot start a constrained leg. A future admission variant must carry exact booking or simulation-reservation evidence supplied by an application or infrastructure adapter.
+## Further reading
 
-`RoutingCache` is derived from the planning-snapshot digest, request, and policy. It is rebuildable, excluded from snapshots, and unnecessary for exact replay. Expansion, transfer, risk, and arrival-horizon limits are also policy inputs, so “no route” and “budget exceeded” are deterministic replayable outcomes.
-
-See the [architecture page](/en/architecture/) and the [repository routing/transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md) for the complete ownership boundary and M1–M3 checklist.
+- [Architecture overview](/en/architecture/)
+- [Routing and transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md), with the ownership boundary and the M1–M3 milestones

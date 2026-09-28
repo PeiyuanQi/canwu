@@ -1,192 +1,275 @@
 ---
 title: 本地社区传播与制度回应
-description: 通过已正式发布的社会传播模拟模块学习稀疏人口分布、社会影响、制度决策和角色相对估计。
+description: 一种新观念以整数人数从集市传入村庄，议事会通过决策票据选定政策，观察者只能读到带误差的估计。
 sidebar:
-  order: 3
+  order: 5
   label: 社区传播与制度回应
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
 
-## 1. 要解决什么问题
+## 场景
 
-`canwu-society` 是一个已正式发布的**社会传播模拟模块**（`social diffusion simulation
-module`），在参伍架构中属于**模拟领域扩展**（`domain extension`）。这个示例使用一个
-抽象的“新观念”，展示它如何组合群体接触、私人接受、公开表达、组织影响、制度响应和角色相对
-估计。案例聚焦传播机制与引擎契约，便于把同一套模型适配到不同的历史或虚构情境。
+一个 1,000 人的集市和一个 2,000 人的村庄相邻。集市里已有 200 人支持一种新观念，
+还有一个小型本地组织在推广它。两天里，人际接触把这种观念传进村庄。两天之间，
+地方议事会选定一项公开政策，第二天生效。随后，一名观察者估计村里有多少人公开表态支持。
 
-如果只给每个地区一个“接受度”数值，就无法区分听说过、私下认同、公开表态、
-实际参与和组织动员；如果制度政策一提交就直接改写私人认同，模拟也会失去可信度。
+这个示例回答的问题是：怎样用整数人数表示不断变化的观念，使其能够精确存档、恢复和重放，
+同时让政策决策和观察者的视角都经过参伍的权限与可见性校验？
 
-这个案例要实现的是：
+观念、cohort 和数字都是合成数据，不对应真实的教义或事件。
 
-- 只为真正参与传播的群体和目标保存人口分布，避免创建巨大的稠密矩阵；
-- 分别追踪 awareness、private assent、practice、public alignment、组织联系、
-  mobilization 和 visibility；
-- 让群体接触和组织网络提供传播机会，但由明确的转化规则决定人口如何迁移；
-- 让地方机构通过 `DecisionTicket` 选择政策，再由下一次社会结算边界应用制度影响；
-- 只向获授权角色返回带误差的估计，不把权威 aggregate 当作玩家可见信息；
-- 保存余数、政策、投影和证据，使恢复、fork 与精确重放得到相同结果。
+## 示例涉及的引擎部件
 
-示例使用抽象的“新观念”，不绑定具体宗教、意识形态或历史事件。历史教义、
-礼仪、人物、政策名称、文化兼容性、冲突条件和叙事都应由下游领域包提供。
-`canwu-society` 当前是已正式发布的可选扩展，也没有从 `canwu-api`
-重新导出；这个案例展示的是扩展方法，而不是已经冻结的通用社会或宗教 API。
+- `canwu-society`：可选的[模拟领域扩展](/developer/extensions/) crate，需要在 `canwu-api`
+  之外另行添加依赖，自带类型、记录 schema、命令和输入类型，非正式地称为社会传播
+  [模拟模块](/reference/terminology/)。
+- 稀疏的人口状态：每个 cohort（`SocietyCohort`，某一地区内的人口群体）有一个整数人数。
+  每个 cohort 与目标（`AffiliationTarget`，人们对其持有立场的观念或群体）的组合有一个
+  `DispositionDistribution`，把人数拆分到若干 `DispositionBucket` 中。
+- 传播：`SocialInfluenceEdge` 和 `OrganizationNode` 产生信号，`TransitionRule`
+  以整人为单位在倾向组合之间迁移人口，`TransitionRemainder` 保存不足一人的零头。
+- 由 `institutional_policy_ticket` 构造的[决策票据](/tutorials/cases/warlord-aid-decision/)，
+  选中的选项会执行[领域命令](/reference/terminology/) `set_institutional_policy`。
+- 每日（Daily）边界系统：各自位于固定的[结算阶段](/architecture/settlement/)，
+  负责应用政策、结算转化、汇总和物化投影。
+- `projection_for_viewer` 返回的[角色相对](/developer/reading-state/)估计。
+- 用 `from_society_snapshot_json` 恢复快照，以及 `fork` 和[精确重放](/developer/persistence/)。
 
-## 2. 我们如何实现
-
-这个案例组合了以下系统：
-
-| 系统 | 在案例中的作用 | 相关文档 |
-| --- | --- | --- |
-| `canwu-society` 模拟领域扩展 | 定义 cohort、分布、影响边、制度输入和角色投影 | [通过插件扩展](/developer/extensions/) |
-| 结算系统 | 按稳定顺序执行人口迁移，并把制度政策延迟到下一边界生效 | [结算系统](/architecture/settlement/) |
-| 决策与权威命令 | 让机构从已有 policy options 中选择，再提交插件命令 | [架构总览](/architecture/)、[接入并驱动模拟运行](/developer/integration/) |
-| 角色相对读取 | 为观察者物化估计，拒绝 ground-truth fallback | [安全读取与呈现状态](/developer/reading-state/) |
-| 存档与精确重放 | 保存转化余数、插件状态、投影和 journal 证据 | [存档、重放与派生分支](/developer/persistence/) |
-
-先运行示例：
+## 运行
 
 ```shell
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
-程序会建立市场与村庄两个 cohort。市场中已有少量支持者，市场接触和本地组织
-为村庄提供传播机会。第一天先出现 awareness 和少量 private assent；随后地方
-机构通过 `DecisionTicket` 选择公开政策，第二天才由社会边界应用制度输入。
-
-### 实现流程
+完整输出：
 
 ```text
-cohort + affiliation target
-  -> sparse disposition distribution
-  -> influence / organization / institution signals
-  -> deterministic integer transitions + persisted remainder
-  -> aggregate truth
-  -> authorized observer estimate
+day 1: local diffusion: aware=118 assenting=5 public=0 hidden=2000 of 2000
+policy selected; population dispositions remain unchanged until the next daily boundary
+day 2: institutional response applied: aware=229 assenting=23 public=5 hidden=1995 of 2000
+observer estimate: public=23 tied=20 (ground truth public=5 tied=0)
+snapshot restore, fork, and exact replay reproduced the same authoritative state
 ```
 
-<Steps>
-1. 为两个 cohort 创建整数人口，并只为实际参与的 `(cohort, target)` 组合保存分布。
-2. 分别表示 awareness、private assent、practice、public alignment、organization tie、mobilization 与 visibility。
-3. 用有界的 influence edge 和 organization topology 计算传播压力。
-4. 让具名 controller 从已有 policy options 中选择一个，并通过普通插件命令记录待应用政策。
-5. 在下一次 daily boundary 中应用制度输入，再按稳定 rule ID 和 cohort ID 结算整数人口转移。
-6. 为授权观察者物化带误差的估计；没有 projection 的角色会收到错误，而不是 ground-truth fallback。
-7. 保存、恢复、fork，并从 journal 精确重放相同结果。
-</Steps>
+这些计数都是村庄里针对目标 `new-idea` 的人数：`aware` 是听说过的人，`assenting`
+是私下同情及以上的人，`public` 是公开顺从或倡导的人，`hidden` 是可见性为 `Private`
+或 `Hidden` 的人，`tied` 是与某个组织有联系的人。
 
-### 第一步：用稀疏分布表示人口状态
+## 代码走读
 
-每个 active `(cohort, target)` 保存多个 `DispositionBucket`。一个 profile 把不同
-维度分开表示：
+代码都在
+[`local_community_diffusion.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs)
+中。`main` 复用已标记为 deprecated 的兼容场景 `Canwu::demo(42)` 中的实体、世界和知识，
+加入由 `tutorial_state()` 构造的一条 society 记录，注册 `SocietyPlugin`，然后结算四个边界：
+
+| 边界 | 调用位置 | 发生了什么 |
+| --- | --- | --- |
+| 1 | `settle_day(&mut canwu, 1)` | 每日边界：第一天的传播 |
+| 2 | `register_policy_decision` 中的 `step_canonical()` | 注册控制者，开启政策票据 |
+| 3 | `drive_decision` 之后的 `step_canonical()` | 写入决策轨迹，执行 `set_institutional_policy` |
+| 4 | `settle_day(&mut canwu, 2)` | 每日边界：先应用政策，再进行第二天的传播 |
+
+### 1. 用分布描述人口
+
+`DispositionProfile` 把七个维度分开记录。集市里的支持者使用下面这个倾向组合（profile）：
 
 ```rust
-DispositionProfile {
-    awareness,
-    assent,
-    practice,
-    public_alignment,
-    organizational_tie,
-    mobilization,
-    visibility,
-}
+let source = DispositionProfile {
+    awareness: AwarenessBand::Aware,
+    assent: AssentBand::Sympathetic,
+    practice: PracticeBand::Occasional,
+    public_alignment: PublicAlignmentBand::Advocating,
+    organizational_tie: OrganizationalTieBand::Member,
+    mobilization: MobilizationBand::Latent,
+    visibility: VisibilityBand::Public,
+};
 ```
 
-所有 bucket 的 `headcount` 必须恰好等于 cohort 人口。不同 target 拥有独立分布，
-因此系统不会假设所有社会身份都互斥；不存在的 pair 也不会预先占用
-`territory * cohort * target * channel` 的稠密空间。
+`tutorial_state` 为每个 cohort 建立一个针对 `new-idea` 的分布：
 
-### 第二步：把传播机会和实际转化分开
-
-`SocialInfluenceEdge` 只提供 reach 与 trust。来源可以是 cohort、organization 或
-institutional alignment；下游配置的 `TransitionRule` 再决定这些信号如何推动
-人口从一个 profile 迁移到另一个 profile。
-
-迁移只使用整数。小于一人的期望量保存在稳定的 `TransitionRemainder` 中，留到
-后续边界继续累计。这样不会因整数取整而丢失人口，也能保证存档恢复和重放保留
-同一结果。
-
-### 第三步：让制度政策在下一边界生效
-
-示例的 controller 代表一名获授权人物，并提供两个已有 option。Utility policy
-只能选择 option ID；选中的 option 再通过 `set_institutional_policy` 命令写入待
-应用组件：
-
-```text
-DecisionTicket -> controller-derived authority -> plugin command
-    -> pending policy component -> next daily society boundary
+```rust
+insert_distribution(
+    &mut state,
+    "market",
+    1_000,
+    vec![(neutral, 800), (source, 200)],
+);
+insert_distribution(&mut state, "village", 2_000, vec![(neutral, 2_000)]);
 ```
 
-命令准入后，示例会立即断言人口分布尚未改变。到第二天，制度 enforcement
-可以让 public alignment 比 private assent 更快变化，但它仍不能直接指定“多少人
-真心相信”。
+`SocietyState::validate` 要求同一分布中所有 bucket 的人数之和等于 cohort 人数。只有你
+插入的组合才有分布；转化规则作用到某个还没有分布的 cohort 时，会按需创建一个全员中性的
+分布。每个目标各有一份分布，所以同一个 cohort 可以对多个目标分别持有独立的立场。
 
-自 0.13.0 起，`PolicyPressure` 还可以记录来源：可选的 `issuer`（政府、组织或人物，
-会绑定到记录的核心引用中），以及设定该压力的决策版本 `decision_version`。非零版本
-必须有签发者；两个字段未使用时都不会写入编码。
+### 2. 把传播机会和实际转化分开
 
-### 第四步：为角色生成估计，而不是泄露真值
+村庄有两条 `SocialInfluenceEdge` 指向它：来自集市 cohort 的 `market-contact`，以及来自
+组织 `local-network` 的 `network-contact`。每条边为村庄的影响信号贡献
+`来源强度 × reach × trust / 1,000,000`：集市中有 200‰ 的人支持这一观念，
+`200 × 800 × 800` 得 128；组织没有与其他组织的关联，强度就是基础覆盖 300‰，
+`300 × 700 × 800` 得 168。两者合计，影响信号为 296‰。
 
-`projection_for_viewer()` 要求参伍签发的 `ViewerContext`，并且只返回在
-`PerspectiveAndReportMaterialization`（角色视角与报告物化）结算阶段已经为该
-actor 生成的 `SocietyProjection`。检测率、遮蔽和 false positive 会让估计与真实
-aggregate 不同；没有 observer profile 的角色会得到错误，不会自动获得社会根记录。
+真正决定谁改变倾向组合的是三条 `TransitionRule`，第一条负责“知晓”：
 
-示例通过 `from_society_snapshot_json()` 恢复存档。这个模块入口会在参伍的通用
-存档检查之后，重新核对社会 payload 使用的核心实体引用和所有已物化派生值，然后
-示例再验证 fork 与 journal replay 得到完全相同的权威状态。
+```rust
+insert_rule(
+    &mut state,
+    "01-awareness",
+    neutral,
+    aware,
+    TransitionWeights {
+        influence: 200_000,
+        ..TransitionWeights::default()
+    },
+);
+```
 
-### 第五步：只输出动员候选，把冲突判断留给下游
+[`solver.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/src/solver.rs)
+中的 `settle_transitions` 把这个权重换算成速率 `296 × 200,000 / 1,000 = 59,200`
+（单位为百万分之一）。`2,000 × 59,200 / 1,000,000 = 118.4`，所以第一天有 118 人变为
+知晓，剩下的 0.4 人作为 `TransitionRemainder` 保存，第二天再计入。
 
-`MobilizationBand::Active` 可以产生带人口、组织能力和政策压力证据的
-`MobilizationCandidate`，但它不是冲突事件。抗议、镇压、迁移、暴乱、结盟或
-战争仍应由独立的政治与安全扩展判断。
+`02-assent` 把知晓者转为同情者，由影响和制度支持推动，受政策强制抑制。`03-public`
+把同情者转为公开顺从，只由制度执行力度和政策强制推动，而这两项初始都为 0。规则按规则 ID
+顺序执行，每条规则再按 cohort ID 顺序处理各个 cohort，并且能看到前面规则已经完成的迁移。
+所以第一天 `02-assent` 就作用在刚变为知晓的 118 名村民身上，并迁移了其中 5 人。
 
-### 按外部存量校准 cohort 人口
+### 3. 让议事会选择政策
 
-自 0.13.0 起，cohort 人口可以跟随其他领域拥有的人口，例如户籍记录，或吸收了新兵的
-驻军。发送公开的 `cohort_headcount_rebase_v1` 输入，携带 cohort 人口校准
-（`CohortHeadcountRebaseV1`）：cohort、新人口数、外部存量记录的精确版本，以及
-`RebaseReason`（`ExternalStockChange` 或 `Correction`）。输入准入时，所引用的版本
-必须是 `canwu.society` 以外某条记录的当前版本，否则校准会以 `stale_external_stock`
-被拒绝。
+`register_policy_decision` 把控制者 `council-controller` 绑定到指挥官的权限上，命令对象
+是政府。随后用 `institutional_policy_ticket` 开启票据；这个函数把每个 `PolicyChoice`
+转成一个携带 `set_institutional_policy` 命令的决策选项：
 
-由于 society 写入系统只在每日边界运行，事件驱动的第 12 阶段系统会先把输入排入
-队列。下一次每日结算在 cohort 转移之后、制度决策之前应用它，并以整数最大余数法
-重新分配该 cohort 的每个分布：每个分布的合计等于新人口数，每个 bucket 与其精确
-份额的差距不超过一个单位。结果记录在 cohort 交换账本中。从发送校准到看到完成校准的
-cohort，最多可能相差两个边界。0.13.0 同时修复了 0.12.0 的一个缺陷：任何 cohort 转移
-应用之后，下一个每日边界都会失败。
+```rust
+PolicyChoice {
+    id: "public-conformity".to_owned(),
+    label: "Require public conformity".to_owned(),
+    decision: PolicyDecision {
+        alignment_id: "council-alignment".to_owned(),
+        decision_version: 1,
+        support_per_mille: 300,
+        enforcement_per_mille: 800,
+        access_grant_per_mille: 700,
+    },
+    utility_inputs: BTreeMap::from([("control".to_owned(), 100)]),
+},
+```
 
-## 模拟领域扩展边界
+另一个选项 `limited-access` 的 `enforcement_per_mille` 为 0，`control` 输入为 10。
+`main` 用一个把 `control` 权重设为 1 的 `WeightedUtilityPolicy` 为票据打分，
+`public-conformity` 以 100 比 10 胜出。票据与控制者的机制和
+[军阀请求邻军援助](/tutorials/cases/warlord-aid-decision/)相同。
 
-这个模拟领域扩展中的可复用引擎部分是 cohort、稀疏多维分布、确定性迁移、影响边、组织拓扑、
-制度输入、政策压力、候选输出和角色估计。历史教义、礼仪、人物、文化兼容性、政策
-名称、具体冲突判定与叙事都属于下游领域包。
+[`plugin.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/src/plugin.rs)
+中的 `set_institutional_policy` 处理函数只接受满足以下条件的命令：来自票据的控制者，
+针对拥有该制度立场（`InstitutionalAlignment`）的机构，代表该立场的 `authorized_actor`，
+并且 `decision_version` 比已应用和待应用的版本都新。它把决策存成一个待应用的插件组件，
+`main` 随即确认分布没有变化：
 
-`canwu-society` 当前已发布，但没有被 `canwu-api` 重新导出。它是可选的
-模拟领域扩展，使用公开插件契约；当前公开范围覆盖通用传播机制，历史内容与具体领域 API
-由下游包定义。
+```rust
+let immediately_after_decision = load_society_state(&canwu)?;
+assert_eq!(
+    immediately_after_decision.distributions, before_policy.distributions,
+    "the policy choice must not instantly rewrite population dispositions"
+);
+```
 
-面向更大规模文化系统时，已正式发布的 `canwu-culture` SDK 会把这些定义编译成有界的文化执行计划，
-并提供可恢复的待处理关系集合与热目标索引。当前社会聚合仍使用全状态路径，完整增量刷新属于后续工作。
-没有参与人口的目标可以进入 `Dormant` 并离开文化热索引；下一次同步 society 后会停用文化计划编译出的转移规则。
-随后进入 `Retired` 时，同步操作会释放目标相关动态状态，并由墓碑保留历史。显式重新激活会创建新一代目标。
-使用 `CulturePlugin` 时，由上层应用驱动这一同步。自 0.13.0 起，也可以改为在 society 插件旁注册文化结算插件
-（`CultureBoundaryPlugin`）：它的每月系统结算生命周期，并把每项变化作为排队的生命周期变化交给 society 插件，
-因此 society 插件仍是 society 状态的唯一写入者。
-生命周期概览见[文化和法律制度系统](/architecture/culture-law/)，
-完整性能基准（benchmark）契约见[设计提案](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md)。
+### 4. 在下一个每日边界应用政策
 
-## 3. 代码在哪里
+`settle_day` 结算一个带 `SystemCadence::Daily` 的边界，society 插件的每日系统随之运行：
 
-先阅读可运行示例，理解两天的结算顺序和制度政策如何进入插件；再查看框架测试，
-确认稀疏分布、存档恢复、角色投影和确定性重放的约束。
+- 阶段 7，`settle-social-transitions`：`apply_pending_policies` 先把待应用的决策写到
+  `council-alignment` 上，再执行转化规则。
+- 阶段 10，`evaluate-mobilization-candidates`：本次运行没有候选。
+- 阶段 12，`aggregate-social-state`：得到 `main` 打印的计数。
+- 阶段 13，`materialize-society-projections`：为每个观察者生成一份估计。
+
+制度执行力度为 800‰ 时，`03-public` 的速率为 `800 × 300,000 / 1,000 = 240,000`
+（单位为百万分之一），23 名同情者中有 5 人转为公开顺从。
+
+### 5. 读取观察者的估计
+
+```rust
+let viewer = canwu.viewer_context(ids.observer)?;
+let projection = projection_for_viewer(&canwu, &viewer)?;
+```
+
+`projection_for_viewer` 先确认传入的 `ViewerContext` 与参伍为该角色签发的一致，再返回
+阶段 13 为该角色物化的 `SocietyProjection`。它只读取已物化的投影；没有投影的角色会得到
+`InvalidAuthority` 错误。
+
+观察者的 `ObserverProfile` 对公开表态的识别率为 800‰，误报率为 10‰。每项估计按
+`(真实人数 × 识别率 + 其余人数 × 误报率) / 1,000` 计算，向下取整：
+
+- public：`(5 × 800 + 1,995 × 10) / 1,000 = 23`
+- tied：组织的隐蔽度 500‰ 把私下识别率 200 减半为 100，因此
+  `(0 × 100 + 2,000 × 10) / 1,000 = 20`
+
+1,995 名村民中的误报压过了 5 名真实的公开顺从者，所以观察者高估了人数。
+
+### 6. 恢复、派生分支与重放
+
+```rust
+let saved = canwu.snapshot_json()?;
+let restored = from_society_snapshot_json(&saved)?;
+assert_eq!(restored.snapshot(), canwu.snapshot());
+let forked = canwu.fork();
+assert_eq!(forked.snapshot(), canwu.snapshot());
+let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())?;
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+```
+
+在引擎的通用快照检查之后，`from_society_snapshot_json` 会调用 `validate_society_runtime`：
+核对 society 记录的核心引用是否与 payload 中提到的实体一致，重新计算已保存的汇总、动员
+候选和投影并逐一比较，再根据输入日志重新推导所有排队中的 society 输入。零头是记录的一部分，
+所以恢复后的运行会带着同样的零头继续推进。
+
+## 值得注意的地方
+
+- 政策决策在下一个每日边界改变制度立场的信号；人口随后只通过转化规则迁移，因此制度执行
+  力度对公开顺从和私下认同各有多大影响，由你写的规则权重决定。
+- 不足一人的零头保存在 `TransitionRemainder` 中，随状态一起存档，并在下一个边界继续累计。
+- 观察者读到的投影既有漏报，也有误报。客户端展示给玩家的就是这个估计。
+
+## 动手改一改
+
+- **政策选择。** 在 `register_policy_decision` 中把 `limited-access` 的 `control` 输入
+  提高到 200。效用策略会改选 `limited-access`，它的执行力度为 0，于是 `03-public` 的速率
+  为 0，第二天输出 `public=0`。
+- **观察精度。** 把观察者的 `false_positive_per_mille` 设为 0。估计变为
+  `public=4 tied=0`，因为 `5 × 800 / 1,000` 向下取整为 4。
+- **影响来源。** 把 `network-contact` 边的 `active` 设为 `false`。只剩集市的 128‰ 影响，
+  第一天输出 `aware=51`。
+- **多模拟一天。** 在读取投影之前调用 `settle_day(&mut canwu, 3)`，观察第三天各项计数和
+  估计如何变化。
+
+## 示例之外
+
+### 动员候选
+
+当某个 bucket 达到 `mobilization: MobilizationBand::Active` 时，阶段 10 的系统会为该
+分布记录一个 `MobilizationCandidate`，其中包括动员人数、该目标的组织能力，以及作用于该
+cohort 的政策强制。候选最终算作抗议、暴乱、迁徙还是别的情况，由你的政治或安全扩展判断。
+
+### 其他功能
+
+- **政策来源。** `PolicyPressure` 可以记录签发者 `issuer` 和产生这项压力的决策版本
+  `decision_version`，见[人口校准与政策来源测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs)中的 `gap_g31_society_policy_pressure_provenance`。
+- **cohort 人口校准。** 这种输入（`cohort_headcount_rebase_v1`）按所引用的、由另一个插件
+  拥有的人口记录重置某个 cohort 的人数，并在下一个每日边界按比例重算它的分布，见
+  [同一组测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs)中的 `gap_g32_society_cohort_rebase`。
+- **文化生命周期。** `canwu-culture` 把文化目标装入 society 状态，并让目标在 `Active`、
+  `Dormant`、`Retired` 之间转换，详见[社会、文化与法律](/architecture/culture-law/)。
+
+## 源码
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs" icon="external">
   打开可运行示例
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/framework.rs" variant="secondary" icon="external">
-  查看社会框架测试
+  阅读社会框架测试
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs" variant="secondary" icon="external">
+  阅读人口校准与政策来源测试
 </LinkButton>

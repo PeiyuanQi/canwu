@@ -1,12 +1,15 @@
 ---
 title: Command plugin
-description: Register a plugin command with schema validation, authority checks, and declared state access.
+description: Write a simulation plugin that adds a set_stance command, and see how Canwu checks its payload, issuer, and declared state access.
 sidebar:
   order: 4
   label: Command plugin
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+In this tutorial you add a new command, `set_stance`, that lets an army's commander set the army's stance. You will learn how a [command plugin](/en/reference/terminology/) declares its payload schema and the state it reads and writes, how its handler checks authority, and how Canwu applies the change.
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/plugin.rs" icon="external">
   Open plugin.rs
@@ -15,29 +18,160 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   Browse the example folder
 </LinkButton>
 
-This example registers a `set_stance` domain command while preserving Canwu's validation, authority, and audit boundaries.
-
 ## Run it
+
+From the repository root:
 
 ```shell
 cargo run -p canwu-api --example plugin
 ```
 
-## Flow
+The example prints nothing. It exits with status 0 when `submit` accepts the command. [Try next](#try-next) shows how to print the result and the rejections.
 
-<Steps>
-1. Implement `SimulationPlugin` with a stable name, version, and semantic hash.
-2. Use `PluginActionDescriptor` to declare the payload schema and the `StateKey` values the command reads and writes.
-3. Query the army through the read-only `SimulationView` and verify that the issuer is its commander.
-4. Return `SystemDirective::SetComponent`; the plugin never receives a mutable world reference.
-5. Submit the action through public `Command::Plugin` and `CommandEnvelope` values.
-</Steps>
+## How a plugin command runs
 
-## What to notice
+<MermaidDiagram
+  label="A plugin command passes schema validation, the handler's authority check, and the write check before Canwu applies it"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same path."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same path."
+  definition={`flowchart LR
+    Env["CommandEnvelope<br/>Command::Plugin"] --> Schema["Validate payload<br/>against the schema"]
+    Schema --> Handler["Handler set_stance<br/>reads SimulationView"]
+    Handler --> Auth{"Issuer commands<br/>the army?"}
+    Auth -- "no" --> Reject["InvalidAuthority"]
+    Auth -- "yes" --> Directive["SystemDirective::SetComponent"]
+    Directive --> Writes["Check declared writes"]
+    Writes --> Apply["Canwu applies the change<br/>and records an event"]
+`}
+/>
 
-- The payload is schema-validated before the handler runs.
-- Authority is checked from command context, not assumed from the UI.
-- Declared reads and writes are part of the plugin contract and can be audited.
-- The handler describes an intended change; Canwu remains responsible for applying it.
+## How it works
 
-For systems that coordinate at a shared simulation boundary, continue with [phased boundary and allocation](/en/tutorials/phased-boundary/).
+### 1. Give the plugin an identity
+
+```rust
+impl SimulationPlugin for StancePlugin {
+    fn name(&self) -> &'static str {
+        "example-stance"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26"
+    }
+    // register() follows
+}
+```
+
+Canwu saves the name, version, and semantic hash with the run. When you load a snapshot, the plugin registers again and must produce the same identity and registrations; otherwise loading fails with `PluginManifestMismatch`. Change the semantic hash whenever the plugin's behavior changes.
+
+### 2. Declare the command
+
+`register` describes the command with a `PluginActionDescriptor`:
+
+```rust
+registrar.register_command(
+    PluginActionDescriptor {
+        name: "set_stance".to_owned(),
+        description: "Set an army stance through an issuer-aware command".to_owned(),
+        payload_schema: PayloadSchema::Object {
+            properties: BTreeMap::from([
+                ("army".to_owned(), PayloadProperty { value_type: PayloadValueType::Integer, required: true }),
+                ("stance".to_owned(), PayloadProperty { value_type: PayloadValueType::String, required: true }),
+            ]),
+            allow_additional: false,
+        },
+        reads: vec![StateKey::core_armies()],
+        writes: vec![StateKey::new("military", "stance")],
+    },
+    set_stance,
+)
+```
+
+(The properties are condensed here; the source spells each one out.)
+
+- `payload_schema` requires an integer `army` and a string `stance`. With `allow_additional: false`, any other field is rejected. Canwu validates the payload before the handler runs.
+- `reads` lists the state the handler may read. `StateKey::core_armies()` is the built-in army table.
+- `writes` lists the state the handler's directives may change.
+
+### 3. Check authority in the handler
+
+```rust
+let Some(army_state) = view.army(army)? else {
+    return Err(CanwuError::new(
+        ErrorCode::ArmyNotFound,
+        format!("army {army} was not found"),
+    ));
+};
+if context.issuer != Issuer::Actor(army_state.commander) {
+    return Err(CanwuError::new(
+        ErrorCode::InvalidAuthority,
+        "only the army commander may set its stance",
+    ));
+}
+```
+
+`view` is a read-only `SimulationView` limited to the declared `reads`; `view.army` returns an error if `core_armies` is missing from them. `context` is the `CommandContext`, which carries the issuer and the rest of the command's metadata. The rule "only the commander may set the stance" lives in the handler, so every client that sends the command goes through the same check.
+
+### 4. Return the change as a directive
+
+```rust
+Ok(vec![SystemDirective::SetComponent {
+    state: StateKey::new("military", "stance"),
+    entity: EntityRef::Army(army),
+    component: "stance".to_owned(),
+    value: payload["stance"].clone(),
+    summary: format!("Army {army} changed stance"),
+}])
+```
+
+The handler has read access only, and it describes the change it wants. Canwu checks every directive against the declared `writes`, applies it, and records a `stance_changed` event.
+
+### 5. Register the plugin and submit the command
+
+```rust
+let mut canwu = Canwu::demo(35)?;
+let ids = Canwu::demo_ids();
+canwu.register_plugin(&StancePlugin)?;
+canwu.submit(CommandEnvelope::new(
+    Issuer::Actor(ids.commander),
+    Command::Plugin {
+        plugin: "example-stance".to_owned(),
+        command: "set_stance".to_owned(),
+        payload: json!({ "army": ids.army, "stance": "hold" }),
+    },
+))?;
+```
+
+`Canwu::demo` builds the built-in demo world, whose army is commanded by `ids.commander`. Register plugins before the first command runs.
+
+`submit` applies the command immediately at the current time. It is the shortest path for a demo. A game that records its inputs for replay uses `enqueue_command` on canonical ingress, as in [Move an army](/en/tutorials/move-army/). A run uses one path or the other; mixing them returns `MixedCommandIngress`.
+
+## Try next
+
+Print the event log after `submit`:
+
+```rust
+for event in canwu.events() {
+    println!("{} {} {}", event.timestamp, event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+Day 0, 00:00 example-stance.stance_changed Army 1 changed stance
+```
+
+Then submit a command that breaks each rule. `submit` returns an error with these codes and messages:
+
+| Change to the command | Error code | Message |
+| --- | --- | --- |
+| Issuer `Issuer::Actor(ids.observer)` | `InvalidAuthority` | only the army commander may set its stance |
+| Payload `"stance": 3` | `InvalidPayload` | payload field stance has the wrong type |
+| Extra field `"extra": 1` | `InvalidPayload` | plugin command payload contains an undeclared field |
+
+When several systems must act at the same simulation time in a set order, continue with [phased boundary and allocation](/en/tutorials/phased-boundary/).

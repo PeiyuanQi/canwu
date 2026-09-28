@@ -1,0 +1,270 @@
+---
+title: 资源与生产系统
+description: 资源与生产扩展如何记清每一单位存量、如何把已消费的投入变成已入账的产出，适用于存量会耗尽或需要加工产品的游戏。
+sidebar:
+  order: 9
+  label: 资源与生产
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="资源与生产系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/developer/production-economy/">生产、资源与运输的职责划分</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/resources-production/">English version</a>
+</nav>
+
+`canwu-resource` 即[资源模拟扩展](/reference/terminology/)，把粮食、布匹、弹药这类守恒存量记在账户里，只通过有记录的操作改变它们。`canwu-production` 即[生产模拟扩展](/reference/terminology/)，用已消费的投入和设施产能完成生产，再把产出交回 `canwu-resource` 入账。游戏里有会耗尽的存量、多方争用同一批存量，或者要把投入加工成产品时，请读这一页。各项操作的具体规则见[生产、资源与运输的职责划分](/developer/production-economy/)。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-resource` | `canwu.resource` 命名空间：资源与单位版本、账户、受保护存量底线、需求、资源预留、分配腿、转移及其托管量、消费、损耗、履约、操作结果、动用授权、完成租约和持有人报告 | 已发布到 crates.io |
+| `canwu-production` | `canwu.production` 命名空间：工艺版本、生产地点、设施、产能分配、工单、生产执行、在制品、设施项目、事故凭证和持有人报告。它不保存任何存量。 | 已发布到 crates.io |
+| `canwu-economy-reference-content` | 附出处的模型卡、覆盖单元和三个 fixture：`synthetic_grain_fixture`、`ming_workshop_fixture` 和 `china_industrialization_fixture`。其中没有求解器，也没有命令处理器。 | 已发布到 crates.io |
+| `canwu-force-supply-reference` | 可替换的军事消费者：军队需求、消费意图、战备与短缺后果，以及征发 saga | 仅在仓库中 |
+| `canwu-economy-reference` | 可替换的组合示例：十四个月的粮食循环（`GrainHarness`），以及本地稀缺度投影和价格压力投影 | 仅在仓库中 |
+
+<MermaidDiagram
+  label="crate 依赖：canwu-resource 依赖 canwu-api；canwu-production 依赖 canwu-resource 和 canwu-technology；canwu-force-supply-reference 依赖 canwu-resource 和参考内容；canwu-economy-reference 组合 canwu-force-supply-reference 和 canwu-production；上层应用向两个扩展提供输入"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    Host["上层应用<br/>（参考实现中为 GrainHarness）"]
+    Economy["canwu-economy-reference<br/>粮食循环与投影"]
+    Force["canwu-force-supply-reference<br/>军队需求与后果"]
+    Content["canwu-economy-reference-content<br/>模型卡与 fixture"]
+    Production["canwu-production<br/>工艺、设施、工单"]
+    Technology["canwu-technology<br/>技术证据"]
+    Resource["canwu-resource<br/>守恒存量"]
+    Api["canwu-api"]
+    Host -- "场景记录、命令、<br/>分配请求" --> Resource
+    Host -- "工艺、生产地点、<br/>工单" --> Production
+    Economy -- "组合" --> Force
+    Economy -- "组合" --> Production
+    Force -- "依赖" --> Content
+    Force -- "依赖" --> Resource
+    Production -- "依赖" --> Resource
+    Production -- "依赖" --> Technology
+    Resource -- "依赖" --> Api
+    Technology -- "依赖" --> Api
+`}
+/>
+
+`canwu-resource` 只依赖 `canwu-api`。`canwu-production` 另外依赖 `canwu-resource` 和 `canwu-technology`。每个生产执行和设施项目都带一个 `TechnologyEvidenceBinding`：一个精确的 `TechniqueRevision`，一个 `CapabilityQualification` 或 `ImplementationRecord`，工艺设置了 `adoption_required` 时还要有一个 `AdoptionRecord`。`canwu-api` 没有重新导出这两个扩展，请自行加入 `Cargo.toml`。
+
+`canwu-resource` 是库存余额的唯一写入者。生产、军事补给和你自己的领域提交资源操作，再读取结果。`canwu-transport` 和 `canwu-movement` 负责运送货物，并提供途中的证据。转移通过 `TransportExecutionLink` 关联这些证据，货物的余额、损耗和验收仍由 `canwu-resource` 记录。
+
+两个参考 crate 的用途，是证明两个互相独立的消费者可以共用同一套资源生命周期。[机制决策](/proposals/production-economy-mechanism/)记录了为什么这些证据足以让 `canwu-resource` 和 `canwu-production` 作为模拟内核之外的可选扩展发布。实际项目中，请用你自己的领域替换它们。
+
+## 守恒不变量
+
+每个 `ResourceAccount` 只保存一个数量 `balance`。可用量、预留量和受保护量都由 `ResourceState::account_quantities` 从它推导。已经离开来源账户、尚未到达的存量记在对应 `ResourceTransfer` 的 `escrow` 字段里，仍然计入总量。`ConservationTotalsV1` 累计期初总量和每一笔已准入的来源与去向，`ResourceState::validate_conservation` 用 128 位整数求和，检查下面这个等式：
+
+```text
+账户余额 + 转移托管量
+  + 已准入消费 + 已准入损耗 + 外部流出
+= 期初余额 + 期初托管量
+  + 已准入产出 + 外部流入
+```
+
+每一项都只有一条入口：
+
+| 项 | 改变它的操作 |
+| --- | --- |
+| 期初余额 | 构建场景时的 `ResourceState::install_opening_account`。运行中用 `CreateAccount` 创建的账户必须从零开始。 |
+| 已准入产出 | 来源为 `ResourceCreditSourceV1::Production` 的 `Credit`，只能通过生产产出批次结算 |
+| 外部流入 | 来源为 `ResourceCreditSourceV1::ExternalInflow` 的 `Credit`，须引用证据 |
+| 已准入消费 | 对某条分配腿的 `Consume` |
+| 已准入损耗 | 账户上的 `RecordLoss`，或转移的 `Lose` 处置 |
+| 外部流出 | `ExternalOutflow`，可以是针对账户的请求，也可以是转移的处置方式，须引用权限证据 |
+
+另有三条规则保证这个等式可信。单位从不隐式换算，因为每个账户、需求和转移都指定一个确切的资源版本和一个确切的单位版本。每个操作都带一个 `ResourceOperationKey`：重发同一请求会得到原来的 `ResourceOperationOutcome`，同一个键配上不同的请求则以幂等冲突失败。违反领域规则的操作会结算为 `Rejected` 结果，所有数量保持原样。如果候选状态仍然不满足等式，第 8 阶段的检查失败，整个结算边界回滚。
+
+## 核心模型
+
+资源类型，都在 `canwu-resource` 中：
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `ResourceDefinitionRevision`、`ResourceUnitRevision` | 带品质和范围的不可变资源定义，以及带比例系数的单位 |
+| `ResourceAccount` | 某一确切资源与单位的一份余额，由保管人（一个 `KnowledgeHolderRef`）持有，可带容量上限、受保护存量底线策略和 `place_scope` |
+| `ProtectedFloorPolicyRevision` | 不参与普通分配的保留量，例如种粮，以及允许动用底线以下存量的需求类别 |
+| `ResourceDemand` | 申请者提出的需求：数量、最低有用量、`PartialFulfillmentPolicy`、到期与失效时间、优先级、平局决胜键和 `source_policy` |
+| `ResourceReservation`、`ResourceAllocationLeg` | 某个账户为某项需求分出的一份数量；消费者引用分配腿作为精确证据 |
+| `ResourceTransfer` | 两个账户之间处于托管中的存量，带 `ResourceTransferState` 和可选的 `TransportExecutionLink` |
+| `ResourceConsumption`、`ResourceLoss`、`ResourceFulfillment` | 终态证据：用掉了多少、损失了多少、需求满足了多少 |
+| `ResourceOperationOutcome` | 每个操作的不可变凭证，状态为 `Applied`、`Rejected` 或 `Duplicate` |
+| `ResourceAccessGrantV1` | 授权方保管人记录在案的同意：被授权方可以在额度和时间窗口内动用它的存量 |
+| `CompletionLeaseActivationCertificateV1` | 某个持有人可以执行某项不可逆操作的凭证，锁定该操作依赖的精确记录 |
+| `ResourceState` | 整个资源根状态，保存为一条领域记录 |
+
+生产类型，都在 `canwu-production` 中：
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `ProcessRevision` | 不可变的工艺：要求组（十二种 `ProductionRequirementKind`，从 `Material` 到 `FinanceOrganization`）、投入、产出、产能需求、工作量和实际产出的上下限 |
+| `ProductionSite` | 某个持有人的生产地点，带 `ProductionSiteForm`，从 `Household` 到 `MultiSiteEnterprise`。形态只是数据，没有建筑等级。 |
+| `FacilityAsset` | 生产地点上的设施：代际、`FacilityLifecycle`、以千分比表示的状况、各项能力的产能，以及事故风险 |
+| `ProductionCapacityAllocation` | 某个生产执行占用的一段设施产能，时间区间左闭右开 |
+| `WorkOrder`、`ProductionExecution` | 在某地点运行某工艺的工单，以及它的一次执行，带证据、已消费的投入和待结算的产出 |
+| `WorkInProgress` | 生产执行的进度，以及所消费投入的证据。存量本身留在 `canwu-resource`。 |
+| `FacilityProject` | 某一代设施的建设或维修 |
+| `ProductionOperationOutcome` | 每条生产命令的凭证，处置结果为 `Applied`、`Duplicate` 或 `Rejected` |
+
+## 运行过程
+
+<MermaidDiagram
+  label="生命周期：需求得到分配，完成租约授权扣减，存量被消费或转移，生产引用已消费的投入，产出回到 canwu-resource 入账，再把确认返回给生产"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一生命周期。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一生命周期。"
+  definition={`flowchart TB
+    Demand["SubmitDemand<br/>申请者的带请求标识命令"] --> Alloc["一次分配<br/>enqueue_resource_allocation"]
+    Alloc --> Leg["资源预留与<br/>分配腿"]
+    Leg --> Lease["完成租约<br/>激活凭证"]
+    Lease --> Consume["Consume<br/>消费与履约"]
+    Lease --> Transfer["BeginTransfer<br/>存量进入托管"]
+    Transfer --> Arrive["CompleteTransfer<br/>Accept、AcceptLocal、Lose、Return"]
+    Consume --> Start["StartExecution<br/>引用已消费的投入"]
+    Start --> Complete["CompleteExecution<br/>在制品完工"]
+    Complete --> Batch["产出批次<br/>在 canwu-resource 入账"]
+    Batch --> Ack["产出确认<br/>生产执行转为 Settled"]
+`}
+/>
+
+资源操作有三条入口。带请求标识的命令是通过 `CommandRequest` 提交、带请求 ID 和预期修订版本的命令。每条入口只接受一部分操作：
+
+| 入口 | 由谁发送 | 操作 |
+| --- | --- | --- |
+| 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
+| 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
+| 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`）和生产产出批次（`resource_production_output_batch_v1`） |
+
+<Steps>
+1. 准备。上层应用在 `ResourceState` 中安装资源定义、单位、期初账户、底线策略和报告授权，用 `ResourceState::into_record` 转成场景中的领域记录，再注册 `ResourcePlugin::new(adapter_evidence_kinds)`。这个列表写明哪些记录种类可以为适配器操作提供证明。生产状态以同样的方式通过 `ProductionState::into_initial_record` 和 `ProductionPlugin` 进入。
+2. 需求。申请者发送带请求标识的[领域命令](/reference/terminology/) `apply_resource_operation_v1`，命令用 `resource_command` 构建。命令处理器检查签发者能否代表命令的 `subject`、`subject` 是否掌控每个目标，然后排入一条 `resource_command_v1` 输入。
+3. 分配。上层应用用 `enqueue_resource_allocation` 为一个申请者排入一次分配。边界准入这条输入后，第 7 阶段的写入系统先让过期的需求失效，再收集该申请者已到期或有变化的需求；需求数超过请求中的 `candidate_limit` 时，这次分配失败。随后按优先级从高到低依次满足这些需求，优先级相同时再依次比较到期时间、平局决胜键、准入序号和需求 ID。每分出一份，就写入一条资源预留和一条分配腿。
+4. 租约。执行任何不可逆步骤之前，行动的持有人先通过 `enqueue_resource_completion_operation` 激活一份完成租约。对于生产执行，由 `canwu-production` 协调租约，`canwu-resource` 作为参与方加入。凭证锁定该步骤依赖的精确账户、分配腿和记录。每次消费、转移发起、转移处置、入账、损耗和流出都必须携带这份凭证。
+5. 扣减。消费者插件用 `enqueue_resource_adapter_operation` 经适配器输入发送 `Consume`，并引用授权这次扣减的自有记录的精确版本。另一种方式是来源保管人用 `BeginTransfer` 发起转移，相应数量移入托管。转移进度和 `Accept` 以适配器操作的形式到达，并引用运输证据。`AcceptLocal`、`Lose` 和 `Return` 以其他方式结束转移。转移的每一步都写明预期的转移修订号，所以同一次到货不会入账两次。
+6. 生产。生产命令（`apply_production_operation_v1`）创建并批准工单。`StartExecution` 引用 `canwu-resource` 已经消费的投入：每个 `ResourceInputBinding` 写明分配腿、消费记录和对应结果。它还带上产能分配，由第 7 阶段标为 `Consumed`。`AdvanceExecution` 推进在制品，`CompleteExecution` 让生产执行进入 `CompletedPendingOutputSettlement`，其产出数量可以按实际产出比例缩放。
+7. 产出。在第 12 阶段，生产插件把当前的生产记录版本固定为该执行的 `output_source`，并安排一条 `resource_production_output_batch_v1` 输入。在之后的某个边界，资源写入系统要么为批次中的全部产出入账，要么一项也不入账，然后安排一条 `production_output_ack_v1`。生产插件的第 7 阶段保存这些结果，释放产能，并把生产执行标为 `Settled`。
+8. 检查与发布。第 8 阶段校验每个扩展的候选状态；守恒或产能规则被破坏时，边界失败。第 13 阶段发布持有人报告。
+</Steps>
+
+分配在资源插件的第 7 阶段写入系统中进行，面对的是持久化的账户和需求。[阶段边界与资源分配教程](/tutorials/phased-boundary/)中内核第 6 阶段的资源预留原语（`ReservationRequest`）是另一套机制，处理在单个边界内声明的供给和请求，`canwu-resource` 没有使用它。
+
+各个边界系统都由事件驱动，并声明 `SameBoundary` 可见性：
+
+| crate | 阶段 | 系统 | 做什么 |
+| --- | --- | --- | --- |
+| `canwu-resource` | 7 `DomainDeltaProposal` | `settle-resource-lifecycle-v1` | 资源根状态的唯一写入者。应用命令、适配器操作、分配请求、租约状态转移和产出批次，并向受影响的角色发出 `canwu.resource.operation_settled.v1`。 |
+| `canwu-resource` | 8 `InvariantValidation` | `validate-resource-invariants-v1` | 运行 `ResourceState::validate`，其中包括守恒检查 |
+| `canwu-resource` | 12 `StrategicAggregation` | `maintain-resource-summary-v1` | 再运行一次同样的校验 |
+| `canwu-resource` | 13 `PerspectiveAndReportMaterialization` | `materialize-resource-reports-v1` | 以 `resource_report` 知识发布持有人报告 |
+| `canwu-production` | 7 `DomainDeltaProposal` | `production_lifecycle_apply_v1` | 生产根状态的唯一写入者。应用命令、租约状态转移和产出确认。 |
+| `canwu-production` | 8 `InvariantValidation` | `production_capacity_and_lifecycle_validate_v1` | 检查记录闭合、在制品总量，以及重叠的产能分配之和不超过设施按状况折算后的产能 |
+| `canwu-production` | 10 `HistoricalCandidateEvaluation` | `production_incident_candidate_evaluation_v1` | 抽样判定设施事故，并暂存对应的状态转移 |
+| `canwu-production` | 11 `ConditionalTransitionCommit` | `production_incident_commit_audit_v1` | 在事故提交后校验状态 |
+| `canwu-production` | 12 `StrategicAggregation` | `production_output_dispatch_v1` | 固定 `output_source`，并安排产出批次 |
+| `canwu-production` | 13 `PerspectiveAndReportMaterialization` | `production_holder_report_publish_v1` | 发布持有人报告 |
+
+生产插件没有为事件注册受众，所以它的事件不会出现在角色相对视图中；持有人通过报告了解生产情况。阶段顺序见[结算系统](/architecture/settlement/)。
+
+### 参考消费者如何接入
+
+[军事补给参考消费者](/reference/terminology/)（`canwu-force-supply-reference`）是同一生命周期的第二个独立使用者：军队的消费意图经适配器输入变成一条 `Consume`，资源结果结算之后，短缺后果只应用一次。经济参考插件批准民间消费意图，并完成每个月的月结；[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)逐步讲解了这两个消费者。
+
+## 知识与可见性
+
+受信任的上层应用可以用 `resource_state` 读取整个资源根状态，并用精确查询核验证据，例如 `exact_resource_allocation_leg`、`exact_resource_operation_outcome` 和 `exact_resource_fulfillment`。玩家和游戏内智能体读取的是持有人报告：
+
+- `ResourceReportGrantV1` 是针对一个持有人的显式白名单：一个范围、若干账户、若干需求、是否包含转移细节、置信度、报告周期和延迟。第 13 阶段为每份授权记录一个观察头，`resource_report` 由这个观察头生成 `ResourceReportDtoV1`。有延迟的持有人看到的是它观察时刻记录下的余额。报告从不回退到真值，也不会透露需求的来源账户列表。
+- 每条库存观察都带有账户所属资源版本的 `ResourceScopeId`，消费者无法把远处的存量改标成本地存量。
+- `resource_access_grant_status` 只向授权方或被授权方展示授权及其额度核算。
+- `ProductionObserverGrant` 让一个持有人以某种角色观察一组生产地点：`Operator`、`LocalOwner` 或 `RemoteOwner`，并可设延迟。`production_report` 需要一份精确的授权，未获授权的持有人会得到权限错误。
+- 军事补给参考消费者的报告只由持有人观察时点之前可用的类型化知识发布组成。
+
+经济参考实现还提供两个供决策使用的独立读取模型：[本地稀缺度投影](/reference/terminology/)和[价格压力投影](/reference/terminology/)。生成它们不会改变任何状态；粮食案例的[稀缺度与价格](/tutorials/cases/production-economy/#稀缺度与价格)一节介绍了这两个投影。
+
+## 随机性、持久化与重放
+
+`canwu-resource`、`canwu-force-supply-reference` 和 `canwu-economy-reference` 不抽取随机数。分配顺序来自数据：优先级、到期时间、平局决胜键、准入序号和 ID。
+
+`canwu-production` 声明了一条[随机流](/architecture/randomness/) `production_incident_random_stream()`，即该插件名下版本为 1 的 `facility-incident` 流。只有准入了生产输入的边界才会检查事故，每次抽样都引用那条输入。第 10 阶段对每个到期的设施这样处理：
+
+- 做一次 0 到 999 的[操作定址随机抽样](/architecture/randomness/#操作定址随机抽样)，与设施的 `incident_risk_per_mille` 比较，小于它即为命中。
+- 命中后，再以 `incident_max_severity_per_mille` 为上界抽一次，决定状况损失。
+- 状况降到 250 或以下时设施变为 `Damaged`，否则变为 `Degraded`。
+
+这两个概率都由场景数据写在 `FacilityAsset` 上，命令永远不能提供抽样结果。`ProductionIncidentTransitionV1` 凭证保存抽样结果和来源记录版本，所以恢复和重放时，改动过的抽样会被拒绝。
+
+设施降级后如何处理，由一张[决策票据](/architecture/decisions/)决定：`degraded_facility_decision_ticket` 构建带 `ContinueDegraded`、`StopForRepair` 和 `DeferOrder` 三个选项的票据。
+
+每个扩展只保存一条领域记录：`canwu.resource` 中的 `ResourceRuntimeRecord` 和 `canwu.production` 中的 `ProductionRuntimeRecord`。快照把它们和内核状态存放在一起。恢复和重放请使用包装函数，它们会拒绝伪造的摘要、守恒失败、修订号不符和缺失的精确证据：
+
+- 资源：`from_resource_snapshot_json`、`from_resource_checkpoint_journal`、`replay_resource_from_journal`，用其他方式加载后调用 `validate_resource_runtime`；
+- 生产：存在归档状态时，使用 `from_production_snapshot_json_with_archives`、`from_production_checkpoint_journal_with_archives`、`replay_production_from_journal_with_archives` 和 `validate_production_runtime_with_archives`。
+
+终态记录分批移入扩展自有的归档，每批都有上限，流程为 `prepare_resource_archive`、`store_and_verify`、`enqueue_resource_archive` 和 `finalize_resource_archive_retention`，生产扩展有对应的函数。普通结算从不扫描冷历史。精确重放读取已记录的命令和输入，所以排入它们的上层应用代码和决策控制者都不会再次运行。详见[存档、重放与派生分支](/developer/persistence/)。
+
+## 上层应用需要提供什么
+
+- 内容：资源与单位版本；期初账户及其保管人、容量和 `place_scope`；底线策略；工艺版本；生产地点；设施及其事故风险。`canwu-economy-reference-content` 展示了一个内容包，其中的 `ResourceCapabilityRevision` 把矿点放在从 `Potential` 到 `DeliveredAccepted` 的某个 `ResourceCapabilityStage` 上。
+- 权限：谁可以创建账户，谁可以以哪个申请者的名义提交需求，谁可以签发动用授权。`Pooled` 或 `ExactAccounts` 来源策略只负责选择账户；要动用其他保管人的存量，需要动用授权和 `Granted` 策略。
+- 时机与顺序：何时为每个申请者排入一次分配，以及每项需求的优先级和平局决胜键。粮食循环示例从决策票据中取得优先级。
+- 证据种类：传给 `ResourcePlugin::new` 的记录种类、每个工艺版本的 `realization_evidence_kinds`，以及动用授权和流出所引用的权限记录。
+- 消费者：你的插件在 `resource_consumption_intents` 映射中批准消费意图，并对结果作出反应。
+- 运输：通过 `canwu-transport` 和 `canwu-movement` 管理行程与执行，由它们的证据验收到货。
+- 降级设施票据的控制者，以及货币、市场、价格、工资、战斗公式和客户端界面。
+
+## 限制与预算
+
+| 限制 | 取值 |
+| --- | --- |
+| `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144）；每次分配 2,048 个候选；2,048 个待处理需求；每个边界 4,096 次变更、256 份报告；8,192 条热操作结果；状态 256 MiB |
+| `MAX_DEMAND_SOURCE_ACCOUNTS` | `ExactAccounts` 或 `Granted` 列表最多 256 个账户 |
+| `MAX_RESOURCE_ACCESS_GRANTS` | 每个资源状态最多 4,096 份动用授权，已撤销的也计入 |
+| 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`） |
+| 生产产出批次 | 同一份凭证下 1 到 64 笔入账 |
+| `ProductionLimitsV1::canonical()` | 工艺版本和生产地点各 2,048 个；设施、工单、生产执行、产能分配和设施项目各 4,096 个；每个边界 512 次事故检查、64 份报告；状态 256 MiB |
+| 工艺与报告规模 | 64 个要求组（`MAX_REQUIREMENT_GROUPS`），每组 16 个备选（`MAX_REQUIREMENT_ALTERNATIVES`），每份报告 256 条事实和阻塞项（`MAX_REPORT_FACTS`） |
+| 投影 | 8 个来源适配器（`MAX_TYPED_SOURCE_ADAPTERS`），256 条观察事实（`MAX_OBSERVATION_FACTS`），32 个价格因素（`MAX_PRICE_FACTORS`） |
+
+触及上限时返回错误或被拒绝的结果，存量不会改变。热归档已满时，下一次租约申请会在任何扣减发生前被拒绝，因此已被接受的工作仍能完成。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-economy-reference --example grain_loop
+cargo run -p canwu-resource --example resource_lifecycle
+cargo run -p canwu-resource --example completion_lease
+cargo run -p canwu-production --example process_constraints
+cargo test -p canwu-resource --test resource_contract
+cargo test -p canwu-production --test g3_contract
+cargo test -p canwu-force-supply-reference --test g4_contract
+cargo test -p canwu-economy-reference --test grain_harness
+```
+
+`grain_loop` 以 JSON 输出 `GrainLoopSummary`；由于没有转移还停留在托管中，其中的 `conservation_closing` 等于 `final_stock`（2,860）。[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)逐月讲解了这个示例。`resource_lifecycle` 不启动引擎，直接构建一个 `ResourceState` 并为一项需求分配；`completion_lease` 最后输出 `lease state: Activated`；`process_constraints` 输出一个机器工艺的三个阻塞项（`ToolsMachines`、`Energy` 和 `Maintenance`）。
+
+`resource_contract` 测试覆盖守恒、受保护存量底线、转移托管和租约。`g3_contract` 测试覆盖产能重叠、只在确认之后才结算的产出、在第 10 阶段暂存并在第 11 阶段提交的事故，以及降级设施票据。`g4_contract` 中的 `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` 完整走一遍征发 saga，`grain_harness` 中的 `snapshot_checkpoint_journal_and_fork_continue_identically` 检查快照、检查点日志和派生分支得到相同的检查点哈希。
+
+## 延伸阅读
+
+- [生产、资源与运输的职责划分](/developer/production-economy/)：需求来源策略、动用授权、损耗、交换、本地验收、实际产出和自定义消费者
+- [粮食、生产与军事补给](/tutorials/cases/production-economy/)：可运行的十四个月案例和历史 fixture
+- [生产经济机制](/proposals/production-economy-mechanism/)：这些能力为什么放在可选扩展中
+- [阶段边界与资源分配](/tutorials/phased-boundary/)：内核第 6 阶段的资源预留原语
+- [结算系统](/architecture/settlement/)、[随机性](/architecture/randomness/)、[技术系统](/architecture/technology/)、[路线、运输与移动系统](/architecture/routing-movement/)和[军事系统](/architecture/military/)
+- 仓库中的 [`canwu-resource` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/README.md) 和 [`canwu-production` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-production/README.md)

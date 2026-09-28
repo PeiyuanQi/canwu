@@ -1,170 +1,312 @@
 ---
 title: Ming fiscal case
-description: Use runnable Hongwu, Wanli, and Hongguang starts to explore fiscal change from the early Ming through the Southern Ming and its game-integration boundaries.
+description: Three source-cited Ming fiscal starts run an assessment, an authorized collection, and an evidence-backed receipt through the generic fiscal extension.
 sidebar:
-  order: 7
+  order: 9
   label: Ming fiscal case
 ---
 
-Ming public finance was not a fixed table of tax rates. Registration, silver
-commutation, regional consolidation, wartime surcharges, divided courts, and
-merchant credit changed the relationships that made an assessment collectible.
-Canwu delivers that change as four replaceable layers without putting
-Ming-specific content in the simulation core.
+import { LinkButton } from "@astrojs/starlight/components";
 
-## Four delivery layers
+## The scenario
 
-| Layer | Crate | Owns | Does not own |
-| --- | --- | --- | --- |
-| Generic fiscal procedure | `canwu-fiscal` | Rule versions, regional adoption, assessment, remission, execution authorization, audits, reform candidates, and holder-relative knowledge reports | Real silver, grain, inventory, prices, or transport balances |
-| Ming reference content | `canwu-ming-fiscal` | Periods, regions, institutional definitions, transitions, coverage, provenance, and three historical starts | Runtime mutation or automatic reform |
-| Runnable integration | `canwu-ming-fiscal-reference` | Scenario composition, plugin registration, restore, and exact replay | Privileged engine access |
-| Host adapter | Your game or research tool | Real operations in the owning resource, market, production, or logistics domain, followed by exact evidence submission | Fiscal-state rewrites outside canonical ingress |
+A Ming revenue office assesses 100 units of tax, authorizes a collection of
+70, and waits for proof that the 70 arrived. When a resource adapter reports
+the collection, the fiscal extension records a receipt, and the revenue
+minister receives an estimate of what is assessed, collected, and still owed.
+Three starts run this cycle in different settings: Hongwu 1391 (registered
+land, labor service, and grain obligations in the Lower Yangzi), Wanli 1581
+(Single Whip reform at different stages across four regions), and Hongguang
+1644 (five separate fiscal authorities of the Southern Ming).
 
-These layers are orthogonal to the `aggregate`, `group`, and `actor`
-[simulation granularities](/en/reference/terminology/). A software layer says
-who owns code and data. Granularity says whether a fiscal scope describes a
-provincial total, an institutional group, or an individual officeholder.
+The question the example answers: how does a game model a tax system whose
+rules change by period and region, while the bookkeeping stays separate from
+the grain and silver that actually move?
 
-## From the founding to the Southern Ming
+Rules, regions, periods, and adoption stages come from a source-cited content
+pack. The quantities, people, and institutions are illustrative values from a
+small synthetic reference world.
 
-Compilation retains the complete time range for the selected regions and
-mechanisms. The scenario year selects active period labels; it does not discard
-rules and transitions from other years.
+## What this example shows
 
-| Period | Years | Main game pressure |
-| --- | ---: | --- |
-| Founding reconstruction | 1368-1392 | Registered land and households, grain tax, service labor, military farms, and frontier provisioning |
-| Registration-centered early Ming | 1393-1429 | Growing distance between statutory registers and actual population or collectible capacity |
-| Silver commutation and treasury consolidation | 1430-1499 | Commuted grain and service, central silver flows, salt-certificate redemption, and merchant claims |
-| Regional levy consolidation | 1500-1579 | Different regions consolidate liabilities at different speeds, often before a uniform narrative |
-| Spread of Single Whip practices | 1580-1617 | Lower Yangzi, southeast, north, and southwest remain at different adoption stages |
-| Wartime surcharges | 1618-1643 | Liaodong, suppression, and training surcharges stack while statutory dues and fulfillment diverge |
-| Southern Ming fiscal crisis | 1644-1662 | Courts, commanders, regional treasuries, salt administrations, and merchant credit coexist |
-| Optional Zheng continuation | 1663-1683 | Maritime customs and merchant military credit, explicitly not an uninterrupted central Ming tax administration |
+- The [fiscal simulation extension](/en/reference/terminology/) `canwu-fiscal`
+  (`FiscalPlugin`): fiscal rules, their regional adoption, assessments,
+  execution authorizations, and receipts. Resource balances and transfers stay
+  with the resource or logistics domain.
+- A [reference content pack](/en/reference/terminology/), `canwu-ming-fiscal`:
+  periods, regions, rules, reform transitions, and cited sources in
+  `data/pack.json`, plus the three starts as fixture files.
+- A [reference integration](/en/reference/terminology/),
+  `canwu-ming-fiscal-reference`: builds each start on `canwu-reference-world`,
+  registers the plugins, runs the sample cycle, and writes a trace.
+- Fiscal actions sent as [domain commands](/en/tutorials/command-plugin/)
+  (`Command::Plugin`) and checked against a `FiscalAuthorityBinding`.
+- A [fiscal execution receipt](/en/reference/terminology/)
+  (`FiscalExecutionReceiptPacket`) settled from an exact
+  [domain record](/en/developer/extensions/) version written by an adapter.
+- The minister's report, published as
+  [holder-relative knowledge](/en/developer/reading-state/) with each total as
+  a range.
 
-`FiscalHistoricalContextPacket` changes the historical year and research mode
-through canonical ingress. A year may make a transition eligible, but it never
-changes a region by itself. An authority-validated `ApplyTransition` action
-installs every target rule and suspends superseded rules atomically;
-`ChangeAdoption` handles stage administration outside a declared transition.
-In this model, 1581 is a regional comparison point rather than an empire-wide
-switch.
+## Run it
 
-This is a longitudinal content catalog, not one mandatory live ledger for the
-entire 1368-1683 range. Each fixture selects a bounded year slice. A long campaign may advance
-the explicit context within the compiled scope, while its host checkpoints or
-shards the resource and logistics ledgers that it owns.
-
-Runtime fiscal state is bounded to 4,096 assessments, 8,192 execution requests,
-8,192 receipts, 32 evidence versions per receipt, and a 32 MiB serialized-state
-budget. Aggregate rebuilds use single-pass indexes. For campaigns beyond these
-experimental limits, the host must create separate simulation runs or shards;
-the fiscal extension has no in-place partition or archive API, and the host is
-responsible for cross-shard operation-ID deduplication.
-
-## 704 explicit coverage cells
-
-The pack crosses eight periods, eight regions, and eleven fiscal mechanisms,
-for 704 period-region-mechanism cells. Every cell must resolve to one status:
-
-| Status | Use |
-| --- | --- |
-| `supported` | Cited definitions are available for direct simulation |
-| `archetype_fallback` | A bounded comparative archetype is available, but not a proven local fact |
-| `explicit_unknown` | The pack intentionally supplies no behavior; preserve the unknown or provide downstream content |
-| `not_applicable` | The mechanism does not apply to the cell |
-
-Numeric priority combines broad defaults with specific regional declarations.
-Equal-priority overlap fails compilation, so source order cannot silently choose
-an interpretation. Every source entry also records its claim scope and
-forbidden inferences: registered households are not actual population,
-statutory quotas are not actual receipts, and claimed territory is not stable
-control.
-
-## From liability to fulfillment
-
-Fiscal procedure settles separately from resource truth:
-
-1. `OpenAssessment` records a due quantity for one scope, rule, and host-defined accounting cycle. The historical content period remains separate.
-2. `GrantRemission` records authorized relief and cannot exceed the assessment.
-3. `AuthorizeExecution` permits collection, remittance, disbursement, reserve, or return without changing a resource.
-4. A host resource or logistics adapter performs the real operation and publishes a typed result.
-5. `enqueue_execution_receipt` submits the exact typed result versions. During the runtime transaction, admission decodes every result and matches its request, execution kind, payment form, resource, source, target, and unit. The persisted quantity and disposition are derived from those results, not declared by the caller.
-6. The result is fulfilled, partial, rejected, or excused. Within one fiscal runtime state, neither one exact evidence version nor one `(evidence kind, external_operation_id)` pair can settle two receipts.
-7. Aggregates partition by institution, mechanism, scope, accounting cycle, unit, and payment form. They separate assessment and remission from collected, remitted, disbursed, reserved, and returned quantities; only remission and collection reduce outstanding assessment.
-8. Reports are holder-relative knowledge with non-invertible quantized ranges, confidence, and evidence, not exact truth stored in `FiscalState`.
-
-This prevents the fiscal plugin from inventing silver or grain and prevents a
-resource plugin from deciding whether an assessment is lawful. Currency
-conversion stores an exact quote version; Canwu never assumes that one unit of
-silver has equal purchasing power in different places or years.
-
-### Acting actors
-
-Since 0.12.0, a `FiscalAuthorityBinding` may name an acting actor next to its
-standing `authorized_actor`, together with an exact `authority_basis` record
-version, such as a host grant record whose kind is declared with
-`FiscalPlugin::with_authority_basis_kinds`. Actions from the acting actor,
-directly or as a decision-ticket origin, are admitted only while that basis is
-the current version of its record, and settlement checks it again. Once the
-record advances or retires, the acting actor is rejected with
-`FISCAL_ACTING_BASIS_NOT_CURRENT`, while the authorized actor is still
-admitted. Who may appoint an acting actor, and for how long, is host content
-recorded in that basis record.
-
-## Three runnable starts
-
-| Fixture | Game question it is designed to test |
-| --- | --- |
-| `hongwu-1391` | How registered land, labor service, and grain obligations combine without treating registration as real capacity |
-| `wanli-1581` | How a player coordinates regions when Lower Yangzi practice is entrenched, the southeast is implemented, the north retains older commutation, and the southwest has only accepted reform |
-| `hongguang-1644` | How court, commander, salt, regional-treasury, and merchant-credit authority domains remain separate while territorial control changes quickly |
-
-Hongguang models military levy, merchant credit, and regional treasury as
-three independent transitions, so each authority domain can act through its
-own binding.
-
-```text
+```shell
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-1581
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
 ```
 
-Pass `--days <N>` to continue the deterministic simulation after the one-off
-sample cycle. `--cadence daily|monthly|annual` chooses the calendar-boundary
-marker, and `--step-days <N>` overrides its fixed simulation-day quantum. The
-monthly and annual defaults use 30 and 365 simulation days because `SimTime` is
-minute-based and does not claim a Gregorian calendar. A partial final period is
-captured by a cadence-free boundary, so monthly or annual systems do not run
-early. For example:
+The fixture ID is the first argument; without it the starter runs
+`hongwu-1391`. Each run prints one line (trace paths trimmed):
 
 ```text
-cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
+fixture=hongwu-1391 checkpoint=02fa72339b855af10464430523413b67d9d748be200eb0375d57b919d69aa72c frames=6 trace_manifest=... trace_steps=...
+fixture=wanli-1581 checkpoint=d1d6ebabd9b8b38f8fe1a73d4708dbee999b596990942299ae7b4ea2229d7d2d frames=6 trace_manifest=... trace_steps=...
+fixture=hongguang-1644 checkpoint=4c93454351280141b4709717b8cad275ceb853b89459115ef9d73392a4cff7b1 frames=6 trace_manifest=... trace_steps=...
 ```
 
-Add `--open-viewer` to start a localhost-only trace viewer when the simulation
-finishes. It opens the default browser and loads the generated `manifest.json`
-and `steps.jsonl`. Use `--viewer-port <N>` to request a port; `0` (the default)
-selects an available port. Keep the terminal open while viewing and press
-`Ctrl+C` to stop the viewer.
+The seed is fixed (`DEFAULT_SEED`), so each fixture prints the same checkpoint
+hash on every run. `frames=6` counts settled boundaries: two for each fiscal
+action, one for the adapter's evidence record, and one for the receipt. The
+trace goes to `artifacts/traces/ming-fiscal-reference/<fixture>/` in the
+workspace: `manifest.json`, plus one JSON line per boundary in `steps.jsonl`.
+In the last Hongwu line, `fiscal.state.aggregates` and `fiscal.projections`
+hold the result (trimmed):
 
-Each command runs the full assessment-to-report slice. The integration
-registers `ReferenceWorldPlugin`, `MingFiscalExecutionAdapterPlugin`, and a
-configured `FiscalPlugin`. Its restore and replay helpers supply that same set
-and run semantic validation. The starts are replaceable references, not a claim
-that their sample values are the only valid game balance.
+```text
+"aggregate.0000":{...,"assessed":100,"remission_granted":0,"collected":70,...,"outstanding":30}
+"fact.0000":{...,"assessed":{"minimum":100,"maximum":109},"collected":{"minimum":70,"maximum":71},"outstanding":{"minimum":30,"maximum":31}}
+```
 
-## Source boundary
+Each start assesses a different adoption:
 
-The pack's main fiscal interpretation follows Ray Huang; monetary,
-salt-certificate, and credit relationships draw on Richard von Glahn. Regional
-commercialization uses Timothy Brook, the Southern Ming sequence uses Lynn
-Struve, and the optional Zheng maritime network uses Xing Hang. The data file
-stores a URL, confidence, claim scope, and forbidden inferences for every
-source. Inspect
-[`pack.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/pack.json)
-for the full record.
+| Fixture | Historical mode | Assessed rule and scope | Unit |
+| --- | --- | --- | --- |
+| `hongwu-1391` | `recorded_baseline` | `canal_grain_tribute` on `scope.lower-yangzi.grain` | `shi_grain_equivalent` |
+| `wanli-1581` | `recorded_baseline` | `single_whip_lower_yangzi` on `scope.lower-yangzi.land` | `liang_silver` |
+| `hongguang-1644` | `research_replay` | `southern_ming_salt_finance` on `scope.southeast.salt` | `liang_silver` |
 
-Continue with the [bilingual terminology reference](/en/reference/terminology/)
-or [plugin extension guide](/en/developer/extensions/). [中文版](/tutorials/cases/ming-fiscal/).
+Options go after the fixture ID:
+
+| Option | Effect |
+| --- | --- |
+| `--days <N>` | Continues for N simulation days after the sample cycle, settling one calendar boundary per step. |
+| `--cadence <marker>` | Marks each step `daily`, `monthly`, or `annual`. Monthly and annual steps are 30 and 365 simulation days, because `SimTime` counts minutes and has no calendar. |
+| `--step-days <N>` | Sets another step length. A shorter final step settles without a cadence marker. |
+| `--trace-dir <path>` / `CANWU_TRACE_DIR` | Changes the trace root. |
+| `--open-viewer` / `--viewer-port <N>` | Starts a trace viewer on `127.0.0.1` before the sample cycle and opens the default browser. The viewer loads `steps.jsonl` as it grows, and the process keeps serving until you press `Ctrl+C`. The port defaults to `0`, which takes a free one. |
+
+See [Continuous-time game loop](/en/tutorials/continuous-game-loop/) for the
+stepping model. The viewer needs the workspace's `tools/trace-viewer/`; outside
+the workspace, set `CANWU_WORKSPACE_ROOT`.
+
+## Walkthrough
+
+The starter,
+[`ming_fiscal_starter.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/examples/ming_fiscal_starter.rs),
+calls `new_ming_fiscal_reference` and `run_ming_fiscal_sample_cycle_with_trace`
+from the integration's
+[`lib.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/src/lib.rs)
+and writes a trace frame for every boundary receipt.
+
+### 1. Compile the catalog for one fixture
+
+`ming_fiscal_reference_scenario` loads the fixture JSON, such as
+[`wanli-1581.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/fixtures/wanli-1581.json),
+which names a year, a historical mode, regions, and each rule's adoption
+stage. It compiles the pack for those regions:
+
+```rust
+let catalog = compile_ming_fiscal(FiscalContentSelection {
+    historical_year: fixture.historical_year,
+    region_ids: fixture.region_ids.clone(),
+    ..FiscalContentSelection::default()
+})?;
+```
+
+The default selection leaves the mechanism set empty, which selects all eleven
+mechanisms. The catalog keeps every
+period and every rule for those regions; the year chooses the active period,
+such as `founding_reconstruction` for 1391.
+
+### 2. Build the starting fiscal state
+
+The same function creates a `FiscalState`. `reference_institutions` gives
+every start a court institution (the reference world's government) under
+`authority.revenue-minister`; `hongguang-1644` adds a field commander, a
+regional treasury, a salt administration, and a merchant-credit office. Each
+gets a binding with one standing actor:
+
+```rust
+FiscalAuthorityBinding {
+    id: institution.authority_id.to_owned(),
+    institution: institution.entity.clone(),
+    authorized_actor: Some(institution.actor),
+    acting_actor: None,
+    authority_basis: None,
+},
+```
+
+Each fixture adoption becomes a `FiscalScopeBinding` (one jurisdiction and
+mechanism assigned to an institution at `SimulationGranularity::Aggregate`)
+and an adoption record with the fixture's stage. The observer binding
+`observer.revenue-minister` lets the minister see those totals with
+`confidence_per_mille: 850`.
+
+### 3. Register the plugins
+
+```rust
+let canwu = Canwu::new_with_plugins(seed, reference.scenario, &[&world, &adapter, &fiscal])?;
+validate_ming_fiscal_reference(&canwu)?;
+```
+
+`new_ming_fiscal_reference` registers the reference world, the execution
+adapter, and `ming_fiscal_plugin()`, a `FiscalPlugin` that accepts one
+evidence kind: the adapter's `fiscal_execution_evidence` record.
+`validate_ming_fiscal_reference` is the integration's semantic check; it
+recomputes aggregates and reform candidates and re-matches every receipt
+against its evidence.
+
+### 4. Open an assessment and authorize a collection
+
+`sample_cycle_plan` takes the first adoption, by ID, whose stage is
+operational (`implemented`, `audited`, or `entrenched`) and whose rule's legal
+window contains the year. In `hongguang-1644` the Taicang treasury rule ends
+in 1643, so the cycle uses the salt administration. The first action:
+
+```rust
+action: FiscalAction::OpenAssessment {
+    assessment_id: assessment_id.clone(),
+    rule_id,
+    scope_binding_id: scope_id,
+    accounting_cycle_id: format!("{period_id}.{id_prefix}"),
+    quantity: 100,
+    unit: sample_unit(payment_form).to_owned(),
+    payment_form,
+    commutation_quote: None,
+},
+```
+
+`submit_reference_action_with_trace` wraps the `FiscalActionRequest` with
+`fiscal_action_command` and issues it as the binding's actor. At the first
+boundary, admission checks the actor against the binding, the binding's
+institution against the scope, and `expected_procedure_revision` against the
+state. The next boundary settles the action into `action_outcomes`. The
+accounting cycle ID belongs to the host and is separate from the historical
+period. The second action, `AuthorizeExecution`, permits collecting 70 of
+resource `ResourceId::new(1)` from the actor to the institution; resource
+balances stay as they are.
+
+### 5. Record the collection and settle the receipt
+
+`settle_sample_execution_with_trace` plays the resource side. It sends a
+`FiscalExecutionEvidence` value (70 units, `Fulfilled`, with an
+`external_operation_id`) through `enqueue_reference_execution_result`. At
+boundary 5 the adapter checks it against the authorized request and writes a
+create-only domain record. The function then submits that record's exact
+version:
+
+```rust
+enqueue_execution_receipt(
+    canwu,
+    now,
+    &canwu_fiscal::FiscalExecutionReceiptPacket {
+        receipt_id: format!("{id_prefix}.receipt"),
+        request_id,
+        external_evidence: [evidence_version].into_iter().collect(),
+    },
+)?;
+```
+
+At boundary 6 `FiscalPlugin` decodes each cited record, checks its kind and
+that its request, execution kind, payment form, resource, source, target, and
+unit match the authorization, then derives the receipt's quantity (70) and
+disposition (`fulfilled`) from it.
+
+### 6. Read the aggregate and the report
+
+The aggregate now shows 100 assessed, 70 collected, and 30 outstanding. At
+each boundary that writes a new fiscal state version, `FiscalPlugin` publishes
+one report per observer binding as a knowledge record held by that observer.
+`estimate` in
+[`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs)
+rounds each total into a bucket sized by the observer's confidence:
+
+```rust
+let precision_divisor = match confidence_per_mille {
+    900..=1_000 => 100,
+    750..=899 => 10,
+    500..=749 => 2,
+    _ => 1,
+};
+let bucket_width = (magnitude / precision_divisor).max(2);
+let minimum = value / bucket_width * bucket_width;
+```
+
+`magnitude` is the largest power of ten at or below the value. At 850 per
+mille, 100 gets width 10 (100-109) and 70 gets the minimum width 2 (70-71).
+The trace reads the report back through `canwu.viewer_for_actor` with a
+`KnowledgeQuery` for `fiscal_report_knowledge_schema_id()`
+(`collect_projections` in `trace.rs`).
+
+## What to notice
+
+- The collected amount enters fiscal state only from the adapter's evidence
+  record, two boundaries after the authorization.
+- The receipt's quantity and disposition come from the cited evidence. Within
+  one fiscal state, each exact evidence version and each pair of evidence kind
+  and `external_operation_id` settles at most one receipt.
+- One code path runs all three starts; the fixture JSON picks the rule, scope,
+  and institution.
+- The minister reads 100-109 while the authoritative state holds 100.
+- In `wanli-1581` the trace lists `adopt_single_whip_north` and
+  `adopt_single_whip_southwest` as transition candidates. They stay
+  candidates until an `ApplyTransition` action settles.
+
+## Try changing
+
+- **Report precision.** In `ming_fiscal_reference_scenario`, set the
+  observer's `confidence_per_mille` to 600. The divisor becomes 2, so the
+  assessed range becomes 100-149 and the collected range 70-74.
+- **Partial collection.** In `settle_sample_execution_with_trace`, set the
+  evidence to `quantity: 40` and
+  `disposition: FiscalReceiptDisposition::Partial`. The aggregate then shows
+  40 collected and 60 outstanding.
+- **Apply a reform.** In `wanli-1581`, submit `ApplyTransition` for
+  `adopt_single_whip_north` with `single_whip_north` bound to
+  `scope.north.land`, as the test
+  `single_whip_transition_atomically_suspends_the_superseded_rule` does. The
+  north's silver-commutation adoption becomes `suspended`, a
+  `single_whip_north` adoption becomes `implemented`, and the north candidate
+  disappears.
+
+## Beyond the example
+
+A game adds one more layer: a host adapter that performs the real operation in
+its resource, market, production, or logistics domain and then submits the
+evidence, as step 5 does.
+
+[Fiscal institutions](/en/architecture/fiscal/) covers the rest of the model: coverage cells and the Ming pack's 704-cell breakdown, historical context and reform candidates, acting actors, and state limits.
+
+### Periods and sources
+
+The pack covers eight periods from 1368 to 1683 and cites ten sources, Ray
+Huang (1974) most often; each source lists inferences it does not support, such
+as reading registered households as actual population. The
+[case note](https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md) lists the periods, and
+[`data/pack.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/pack.json) lists every rule and source.
+
+## Source
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/examples/ming_fiscal_starter.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/tests/reference.rs" variant="secondary" icon="external">
+  Read the integration tests
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/pack.json" variant="secondary" icon="external">
+  Browse the content pack
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md" variant="secondary" icon="external">
+  Read the case note
+</LinkButton>

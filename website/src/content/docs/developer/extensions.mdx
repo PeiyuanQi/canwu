@@ -1,104 +1,197 @@
 ---
 title: 通过插件扩展
-description: 使用公开插件合同添加命令、领域状态和边界系统，而不绕过参伍的安全边界。
+description: 通过模拟插件为参伍添加自己的命令、插件自有状态和边界系统。
 sidebar:
   order: 5
-  label: 插件扩展
+  label: 通过插件扩展
 ---
 
-参伍的模拟内核保持领域中立。上层应用通过模拟插件、领域 schema、命令处理器和边界系统
-添加军事、经济、政治或社会规则，而不是修改实时世界对象。
+当你的游戏或模型需要参伍自带之外的规则时，就读这一页：比如一条新的玩家命令、由你的代码管理的状态，或者每个日结、月结结算边界都要运行的逻辑。这些都以**模拟插件**的形式加入：模拟插件是实现了 `SimulationPlugin` 的 Rust 类型，在模拟运行开始时注册自己的命令、schema 和系统。模拟内核保持领域中立，军事、经济、政治和社会规则都放在插件里。
+
+下文用到的术语：
+
+- **语义哈希**：你为插件每个发布版本指定的一串 64 个字符的小写十六进制值。处理逻辑的行为一变就要换新值；参伍据此拒绝用规则不同的插件加载或重放存档。
+- **边界系统**：在结算边界内、按固定阶段运行的函数，读写范围都要事先声明。
+- **领域记录**：归某个插件所有、类型化并持久化的状态，由**领域 schema**（`DomainRecordType`）描述结构。
+
+其他术语见[术语表](/reference/terminology/)。
 
 ## 选择扩展方式
 
-| 需求 | 使用 |
+| 需求 | 注册什么 |
 | --- | --- |
-| 一个用户动作或服务请求产生局部变化 | 用 `register_command()` 注册领域命令 |
-| 多个系统在同一日结、回合或时间点协调 | 用 `register_boundary_system()` 注册边界系统 |
-| 插件拥有类型化领域数据 | 注册领域 schema，并通过领域记录 API 读写 |
-| 结果需要稳定随机性 | 声明插件随机流，让每次抽样进入证据记录 |
-| 多个插件必须共同写入一次转移，并且要发现沉默的参与者 | 登记转移清单，并在第 10 阶段暂存各参与者的写入；见[转移清单](/architecture/settlement/#转移清单) |
-| 玩家或智能体需要知道某条规则为什么得出某个值 | 由算出该值的第 7 或第 12 阶段系统记录评估轨迹；见[评估轨迹](/architecture/settlement/#评估轨迹) |
+| 一个用户操作或服务请求带来局部变化 | 领域命令：`register_command()` |
+| 多个系统要在同一个日结、回合或时间点共同处理 | 边界系统：`register_boundary_system()` |
+| 插件需要自己的类型化数据 | 记录 schema：`register_record_schema()`，再通过领域记录 API 读写 |
+| 结果需要可精确重放的随机性 | 在边界系统的 `random_streams` 中列出随机流，每次抽样都会记为证据 |
+| 多个插件要共同写入一次转移，并且要发现没有响应的参与者 | 转移清单，由各参与者在第 10 阶段暂存写入；见[转移清单](/architecture/settlement/#转移清单) |
+| 玩家或智能体需要知道某条规则为什么算出某个值 | 由算出该值的第 7 或第 12 阶段系统记录评估轨迹；见[评估轨迹](/architecture/settlement/#评估轨迹) |
 
-## 最小模拟插件结构（节选）
+## 编写命令插件
 
-下面的代码只展示注册结构；载荷 schema、处理器和完整导入见可运行示例。
+下面节选自[插件示例](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/plugin.rs)，它添加一条只有军队指挥官能用的 `set_stance` 命令。完整文件里还有导入语句，以及注册插件并提交命令的 `main`。
 
 ```rust
 struct StancePlugin;
 
+fn set_stance(
+    view: &SimulationView<'_>,
+    context: &CommandContext,
+    payload: &Value,
+) -> Result<Vec<SystemDirective>, CanwuError> {
+    let army = ArmyId::new(
+        payload
+            .get("army")
+            .and_then(Value::as_u64)
+            .expect("payload was validated before the handler ran"),
+    );
+    let Some(army_state) = view.army(army)? else {
+        return Err(CanwuError::new(
+            ErrorCode::ArmyNotFound,
+            format!("army {army} was not found"),
+        ));
+    };
+    if context.issuer != Issuer::Actor(army_state.commander) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "only the army commander may set its stance",
+        ));
+    }
+    Ok(vec![SystemDirective::SetComponent {
+        state: StateKey::new("military", "stance"),
+        entity: EntityRef::Army(army),
+        component: "stance".to_owned(),
+        value: payload["stance"].clone(),
+        summary: format!("Army {army} changed stance"),
+    }])
+}
+
 impl SimulationPlugin for StancePlugin {
-    fn name(&self) -> &'static str { "example-stance" }
-    fn version(&self) -> &'static str { "1.0.0" }
-    fn semantic_hash(&self) -> &'static str { "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26" }
+    fn name(&self) -> &'static str {
+        "example-stance"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26"
+    }
 
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
-        registrar.register_command(stance_descriptor(), set_stance)
+        registrar.register_command(
+            PluginActionDescriptor {
+                name: "set_stance".to_owned(),
+                description: "Set an army stance through an issuer-aware command".to_owned(),
+                payload_schema: PayloadSchema::Object {
+                    properties: BTreeMap::from([
+                        (
+                            "army".to_owned(),
+                            PayloadProperty {
+                                value_type: PayloadValueType::Integer,
+                                required: true,
+                            },
+                        ),
+                        (
+                            "stance".to_owned(),
+                            PayloadProperty {
+                                value_type: PayloadValueType::String,
+                                required: true,
+                            },
+                        ),
+                    ]),
+                    allow_additional: false,
+                },
+                reads: vec![StateKey::core_armies()],
+                writes: vec![StateKey::new("military", "stance")],
+            },
+            set_stance,
+        )
     }
 }
 ```
 
-`stance_descriptor()` 声明载荷结构与读写 `StateKey`；`set_stance()` 通过只读
-`SimulationView` 查询军队，使用 `CommandContext` 检查发令者，并返回
-`SystemDirective` 描述变化。它不取得可变世界引用。
+指挥官提交 `set_stance` 后的处理过程：
 
-运行完整示例：
+1. 参伍按声明的 `payload_schema` 检查载荷。
+2. 处理器通过只读的 `SimulationView` 读取军队，并把 `context.issuer` 与军队指挥官比对。
+3. 处理器返回描述变化的 `SystemDirective`，由参伍在下一步应用。
+4. 参伍按声明的 `writes` 检查每条指令，然后提交姿态组件。
+
+其他签发者会得到 `InvalidAuthority`，状态不发生任何变化。运行示例：
 
 ```shell
 cargo run -p canwu-api --example plugin
 ```
 
-合法指挥官提交 `set_stance` 后，参伍验证载荷与权限并提交姿态组件；未经授权的发令者会得到
-`InvalidAuthority`，且状态不会发生部分修改。
+逐步讲解见[命令插件教程](/tutorials/command-plugin/)。
 
-## 何时使用边界系统
+## 添加边界系统
 
-当供给、需求、资源分配和后果必须在同一个结算边界协调时，使用边界系统。合同应声明：
+当供给、需求、资源分配和后果必须在同一个结算边界内一起结算时，使用边界系统。边界系统用 `BoundarySystemContract` 描述。下面这个取自参考世界，负责应用排队中的军队移动：
 
-- 结算阶段与运行频率；
-- 读取、写入和同边界可见性；
-- 资源供给、预留请求和分配依赖；
-- 可能发出的领域事件；
-- 所需随机流和领域 schema。
+```rust
+let state = schema.state_key(); // 插件自有记录 schema 的 StateKey
+let mut system = BoundarySystemContract::new(
+    "apply_movement_transition_v1",
+    BoundaryPhase::DomainDeltaProposal, // 第 7 阶段
+    SystemCadence::EventDriven,
+);
+system.reads = vec![StateKey::core_ingress(), state.clone()];
+system.writes = vec![state];
+system.visibility = StateVisibility::SameBoundary;
+registrar.register_boundary_system(system, apply_movement_transitions)?;
+```
 
-参伍按固定阶段运行系统、验证声明式访问、完成确定性分配，并原子提交结果。
-完整例子见[阶段边界与资源分配](/tutorials/phased-boundary/)。
+契约字段：
 
-## 从需求到可重放扩展
+| 字段 | 声明内容 |
+| --- | --- |
+| `phase`、`cadence` | 系统在 14 个阶段中的位置，以及运行频率（事件驱动、每日、每月等） |
+| `reads`、`writes` | 系统可以读取和修改的 `StateKey` |
+| `visibility` | 写入结果在同一结算边界的后续阶段可见，还是从下一个结算边界起可见 |
+| `emits` | 系统可能发出的领域事件种类 |
+| `reservation_offers`、`reservation_requests`、`reservation_reads` | 系统提供供给、提出请求或读取分配结果的资源池 |
+| `random_streams` | 系统可以抽样的随机流 |
+| `knowledge_writes`、`plugin_ingress_targets` | 系统可以发布的知识，以及可以安排的插件输入 |
 
-1. 为插件选择稳定名称、版本和语义哈希。
+参伍按固定阶段顺序运行系统，拒绝未声明的访问，确定性地完成资源分配，并原子提交整个结算边界：要么全部变化生效，要么整个结算边界回滚。完整例子见[阶段边界与资源分配教程](/tutorials/phased-boundary/)（`cargo run -p canwu-api --example phased_boundary`）。
+
+## 从需求到可重放的扩展
+
+1. 为插件选定稳定的名称、版本和语义哈希。
 2. 注册插件拥有的领域 schema、命令和边界系统。
-3. 让处理器只读取 `SimulationView`，并返回声明式变化。
-4. 通过公开入口提交领域命令或规范化输入，不保留实时运行时引用。
-5. 验证保存、加载、精确重放、权限失败和原子回滚。
+3. 处理器和系统只通过 `SimulationView` 读取，并返回已声明的变化。
+4. 领域命令和插件输入都从公开入口提交，不保留运行时的实时引用。
+5. 测试保存与加载、精确重放、权限校验失败和原子回滚。
 
-## 常用领域扩展
+## 可复用的领域扩展
 
-这些包是建立在对外 API 上的可选能力，不是模拟内核中的硬编码子系统。完整 crate 列表见 [crates/README.md](https://github.com/PeiyuanQi/canwu/blob/main/crates/README.md)。
+这些 crate 是建立在对外 API 之上的可选扩展。应用代码直接依赖它们，`canwu-api` 不会再导出它们。完整 crate 列表见 [crates/README.md](https://github.com/PeiyuanQi/canwu/blob/main/crates/README.md)。
 
-| 包 | 状态与用途 | 继续阅读 |
+| crate | 提供的能力 | 设计页面 |
 | --- | --- | --- |
-| `canwu-society` | 已发布的社会扩散模拟模块 | [地方共同体扩散案例](/tutorials/cases/local-community-diffusion/) |
-| `canwu-culture` | 已发布的文化编写、编译和生命周期扩展，提供由上层应用驱动（`CulturePlugin`）和在引擎内（`CultureBoundaryPlugin`）两种结算方式 | [文化与法律制度](/architecture/culture-law/) |
-| `canwu-law` | 实验性的法律制度化扩展，支持加权、表决单元与征询程序阶段 | [文化与法律制度](/architecture/culture-law/) |
-| `canwu-technology` | 已发布的技术证据、地方能力和传播扩展 | [技术传播教程](/tutorials/technology-diffusion/) |
-| `canwu-fiscal` | 通用财政程序扩展；不拥有资源余额或运输 | [明代财政案例](/tutorials/cases/ming-fiscal/) |
-| `canwu-resource` | 已发布的守恒资源账户、需求、分配、转移、动用授权与履约扩展 | [生产、资源与运输边界](/developer/production-economy/) |
-| `canwu-production` | 已发布的生产工艺、设施、工单与产出结算扩展 | [生产、资源与运输边界](/developer/production-economy/) |
-| `canwu-military` | 可选的军事模拟扩展；不是通用战斗模型 | [军事模拟扩展](/tutorials/military-domain/) |
-| `canwu-movement` | 已发布的移动生命周期扩展：移动命令、路段结算、运力池和持有人相对的移动报告 | [路线规划与送信执行](/tutorials/routing-transport/#移动生命周期与运力池) |
-| `canwu-information` | 已发布的信息生命周期扩展，包括解读中的真伪判定 | [编码传递与中途截取](/tutorials/cases/encoded-interception/) |
-| `canwu-correspondence` | 已发布的通信扩展，支持持有人相对规划、受托承运人与承运人扣押 | [经路线规划的通信](/tutorials/cases/routed-correspondence/) |
+| `canwu-society` | cohort 之间的社会扩散 | [社会、文化与法律](/architecture/culture-law/) |
+| `canwu-culture` | 文化的编写、编译和生命周期，可由上层应用结算（`CulturePlugin`），也可在引擎内结算（`CultureBoundaryPlugin`） | [社会、文化与法律](/architecture/culture-law/) |
+| `canwu-law` | 实验性的法律制度化，支持加权、表决单元和征询程序阶段 | [社会、文化与法律](/architecture/culture-law/) |
+| `canwu-technology` | 技术证据、地方能力和传播 | [技术系统](/architecture/technology/) |
+| `canwu-fiscal` | 财政程序：法令、核定、授权、凭证和审计。资源余额和运输由其他 crate 负责。 | [财政制度](/architecture/fiscal/) |
+| `canwu-resource` | 守恒的资源账户、需求、分配、转移、动用授权和履约 | [资源与生产系统](/architecture/resources-production/) |
+| `canwu-production` | 生产工艺、设施、工单和产出结算 | [资源与生产系统](/architecture/resources-production/) |
+| `canwu-military` | 部队、作战、战斗、占领和军事知识，作为一种可选的军事模型 | [军事系统](/architecture/military/) |
+| `canwu-movement` | 移动生命周期：移动命令、路段结算、运力池和持有人相对的移动报告 | [路线、运输与移动系统](/architecture/routing-movement/) |
+| `canwu-information` | 信息生命周期，包括解读时的真伪判定 | [知识与信息系统](/architecture/knowledge-information/) |
+| `canwu-correspondence` | 通信，支持持有人相对规划、受托承运人和承运人扣押 | [知识与信息系统](/architecture/knowledge-information/) |
 
-选择这些扩展时，先确认它们的公开版本、依赖关系和存档合同。历史内容、场景参数和上层应用规则
-仍由内容包或上层应用拥有。
+采用某个扩展前，先确认它的版本、依赖关系和存档契约。历史内容、场景参数和游戏自身的规则放在内容包或你的应用里。
 
 ## 生命周期规则
 
-- 在依赖插件的命令、场景验证或加载发生前注册插件。
-- 从存档恢复或重放时提供相同的插件集合与语义哈希。
-- 不要让插件持有实时运行时引用或绕过规范化输入修改状态。
-- 把语义哈希变化视为可执行行为变化，并配套迁移或新版本。
-- 应用代码只通过 `canwu-api` 使用扩展合同。
+- 在依赖插件的命令、场景验证或加载之前注册插件。
+- 从存档恢复或重放日志时，提供同一组插件和相同的语义哈希。
+- 状态只通过命令和输入改变；插件不持有运行时的实时引用。
+- 语义哈希变化即行为变化：发布新的插件版本，并预期用旧哈希写出的存档将无法加载。
+- 依赖 `canwu-api` 和实际用到的扩展 crate，不要依赖 `canwu-sim`。
 
-在实现前，先阅读[架构总览](/architecture/)中的公开边界，再从最接近需求的公开示例开始。
+动手之前，先读[架构总览](/architecture/)中的公开边界，再从最接近你需求的公开示例改起。

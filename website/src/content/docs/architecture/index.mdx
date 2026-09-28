@@ -1,50 +1,74 @@
 ---
 title: 架构总览
-description: 了解参伍如何用公开边界、确定性结算和可检查证据组织历史模拟运行时。
+description: 参伍的分层结构、一条命令在引擎内部经历的过程，以及每个 crate 的职责。
 template: doc
 sidebar:
   order: 1
   label: 架构总览
 hero:
-  tagline: "从客户端到权威运行时的完整路径：公开 API 保持窄而稳定，结算、事件和随机性在可重放的边界内协作。"
+  tagline: "引擎如何分层、一条命令会经历什么、每个 crate 负责什么。"
 ---
 
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 
 <nav class="architecture-links" aria-label="架构总览导航">
   <span class="architecture-links-label">继续阅读：</span>
-  <a href="/architecture/settlement/">阅读结算系统</a>
+  <a href="/architecture/settlement/">结算系统</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/architecture/events/">浏览事件系统</a>
+  <a href="/architecture/events/">事件系统</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/architecture/model-ownership/">查看模型归属</a>
+  <a href="/architecture/randomness/">随机性</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/architecture/culture-law/">文化和法律制度系统</a>
+  <a href="/architecture/model-ownership/">模型归属</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/systems/">领域系统</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
-参伍是一个无界面历史模拟引擎。客户端可以是游戏、研究工具、调试界面或智能体，但它们都通过同一组公开边界访问模拟，而不是取得实时可变世界的引用。
+参伍是一个无界面历史模拟引擎，自身不带渲染器和界面。上层应用（游戏、研究工具、
+调试客户端或 AI 智能体）把它当作 Rust 库链接进来，通过提交命令改变世界，通过快照、
+事件和角色相对视图读取世界。实时世界状态只由引擎的运行时持有，也只在结算命令和调度
+工作时发生变化。
 
-## crate 直接依赖 DAG
+## 分层一览
 
-下图只展示第一方 workspace crate 在 Cargo manifest 中声明的普通直接依赖。
-`A → B` 表示 **A 依赖 B**；外部依赖和开发依赖未列入。依赖图默认放大到 200%；可以使用按钮、在图内滚动鼠标滚轮或拖动画布查看细节，最高放大到 400%。
+选择某一层可以查看其中的 crate；切换到“跟随一条命令”，可以一步步看到一条命令从提交到
+重放的全过程。
+
+<ArchitectureMap locale="zh-CN" />
+
+- **上层应用**依赖 `canwu-api`，并注册自己需要的插件。
+- **领域插件**是建立在 `canwu-api` 之上的可选 crate。第一方扩展能调用的接口与你自己编写的
+  插件完全相同，因此任何一个都可以替换。
+- **`canwu-api`** 是受支持的对外 API，下层 crate 中需要用到的类型都由它重新导出。
+- **`canwu-sim`** 是 `canwu-api` 背后的私有运行时，负责实时状态、输入队列、调度、
+  结算、持久化与重放。
+- **模型与机制**（`canwu-event`、`canwu-knowledge`、`canwu-decision`、
+  `canwu-routing`、`canwu-transport`）定义共用的数据类型，由 `canwu-api` 重新导出。
+- **基础层**（`canwu-core`、`canwu-time`）提供 ID、确定性随机数和模拟时间。
+
+### 全部 crate 的依赖关系
+
+下图展示各 crate 在 `Cargo.toml` 中声明的直接依赖：`A → B` 表示 A 依赖 B，外部依赖和
+开发依赖未列出。依赖图默认放大到 250%；可以用按钮或在图内滚动鼠标滚轮，在 50% 到 600%
+之间缩放，拖动画布即可平移。
 
 <div class="crate-dependency-dag">
 <MermaidDiagram
-  label="参伍 workspace crate 直接依赖有向无环图；箭头从使用者指向它依赖的 crate"
+  label="参伍全部 workspace crate 之间的直接依赖；箭头从使用者指向它依赖的 crate"
   zoomable
-  initialZoom={2}
-  maximumZoom={4}
+  initialZoom={2.5}
+  minimumZoom={0.5}
+  maximumZoom={6}
   zoomControlsLabel="依赖图缩放"
   zoomInLabel="放大依赖图"
   zoomOutLabel="缩小依赖图"
   resetZoomLabel="重置依赖图缩放"
   diagramLoading="正在渲染 crate 依赖图……"
   sourceSummary="查看依赖图源码"
-  sourceLoading="依赖图源码将在预览加载时显示。"
-  noScriptMessage="依赖图预览需要 JavaScript；上方仍提供文字说明。"
+  noScriptMessage="依赖图预览需要 JavaScript；下方的 crate 表格列出了全部 crate。"
   definition={`flowchart TB
     subgraph Tools["工具"]
         Debug["canwu-debug"]
@@ -177,139 +201,121 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 />
 </div>
 
-## 工作区 crate
+## 四条设计规则
 
-| crate | 核心职责 |
-| --- | --- |
-| `canwu-core` | 类型化 ID、确定性随机工具和模式元数据 |
-| `canwu-time` | 历史时间戳与经过检查的时长运算 |
-| `canwu-decision` | 决策票据、确定性求值、控制者与决策策略 SDK |
-| `canwu-event` | 通用事件信封、因果来源、受众和结构化事件记录 |
-| `canwu-reference-world` | 可替换的示例实体、移动插件、脱离式投影、路由适配器与入门示例 |
-| `canwu-knowledge` | 角色知识、来源、可信度与信息时效 |
-| `canwu-routing` | 确定性时变路由原语 |
-| `canwu-transport` | 运输执行、行程修订、交接、预订、运力池分配与 saga 记录原语 |
-| `canwu-sim` | 私有运行时、调度、插件、结算、转移清单与评估轨迹证据 |
-| `canwu-api` | 通用程序对外 API、规范命令、领域记录、证据与重放 |
-| `canwu-information` | 已正式发布的权威信息生命周期扩展，包括解读中的真伪判定 |
-| `canwu-correspondence` | 已正式发布的通信模拟领域扩展与模拟插件，支持受托承运人与承运人扣押 |
-| `canwu-society` | 已正式发布的社会传播模拟模块 |
-| `canwu-culture` | 已正式发布的文化编写、编译与生命周期扩展，提供由上层应用驱动和在引擎内结算两种插件 |
-| `canwu-law` | 已实现的实验性法律编写、制度程序（包括加权、表决单元与征询阶段）、版本化法律与适用扩展 |
-| `canwu-technology` | 已正式发布的证据驱动通用技术模拟扩展 |
-| `canwu-history-research` | 可选的下游历史研究评估插件 |
-| `canwu-fiscal` | 通用财政程序、地区采纳、核算、执行凭证与持有人相对知识报告扩展 |
-| `canwu-resource` | 守恒资源账户、受保护底线、需求、预留、分配、转移、消费、损耗、动用授权与履约扩展 |
-| `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、生产执行、项目与产出结算扩展 |
-| `canwu-military` | 可选的军事模拟扩展，负责军队、行动、战斗、占领、军事知识和跨领域凭证；不是通用战斗模型 |
-| `canwu-movement` | 移动生命周期扩展：在 `canwu-transport` 记录之上处理移动命令、路段结算、运力池分配和持有人相对的移动报告 |
-| `canwu-ming-fiscal` | 从明初到南明、带出处和完整覆盖矩阵的参考内容包 |
-| `canwu-economy-reference-content` | 带模型卡、出处、覆盖声明和明确未知/不适用状态的经济参考内容包 |
-| `canwu-military-reference-content` | 版本化、明确为合成数据的军事规则集，供军事扩展使用；不是历史数据集 |
-| `canwu-ming-fiscal-reference` | 洪武、万历和弘光可运行财政参考整合 |
-| `canwu-force-supply-reference` | 使用公共资源 API 的可替换军事补给消费者与征发 saga 参考整合 |
-| `canwu-economy-reference` | 组合资源、生产、运输、军事补给、粮食循环、稀缺度和价格证据的可运行参考整合 |
-| `canwu-military-reference` | 组合军事扩展、其合成内容与参考世界的可运行对外 API 军事参考整合 |
-| `canwu-debug` | 使用公开 API 与参考世界整合包的参考客户端 |
+1. **状态只通过命令改变。** 客户端提交命令，插件在边界系统中提交变更提议。运行时
+   验证两者，并在[结算边界](/architecture/settlement/)中统一提交。
+2. **每次运行都可复现。** 时间、调度工作、系统顺序和[随机抽样](/architecture/randomness/)
+   都遵循固定规则，所以按日志重放会得到相同的检查点哈希。
+3. **知识属于角色。** 运行时把真值与每个角色所知分开保存。玩家和智能体通过
+   [角色相对视图](/developer/reading-state/)读取。
+4. **历史连同原因一起记录。** 每个[事件](/architecture/events/)都保存起因、受众和
+   相关标识，因此可以向引擎查询某件事为什么发生。
 
-已正式发布的 `canwu-culture` 文化系统 SDK 建立在 `canwu-society` 之上，不会进入模拟内核。
-它把版本化内容编译成外部不可变、绑定内容哈希的执行计划，校验数量与展开后的扇出预算，并提供待处理关系集合
-和热目标索引。完整状态记录可以恢复生命周期调度、热/脏索引和效果节奏。休眠目标离开文化热索引；
-显式同步 society 后，其由文化计划编译的转移规则也会停用。退休目标还会释放目标相关的动态社会状态并保留历史证据。
-自 0.13.0 起，文化结算插件（`CultureBoundaryPlugin`）以每月边界系统运行这一生命周期，并通过规范化输入准入接触信号批次；society 的增量聚合仍是后续工作。
-详见独立的[文化和法律制度系统](/architecture/culture-law/)，其中合并说明文化编写、生命周期和法律制度化设计。
+## 规则写在哪里
 
-## 从领域扩展到可运行套件
+特定时代的规则不写进引擎内核，而是放在 `canwu-api` 之上，分为四种形式：
 
-参伍不仅提供内核契约。通用模拟领域扩展提供可复用机制，参考内容包提供可
-替换的领域数据，参考整合包把这些能力接入一个小型世界，入门套件则把
-它们组合成开发者可以直接运行和改造的纵向切片。这些层都在内核之上，
-不会把某个历史世界写入 `canwu-core`。
-
-`canwu-correspondence` 在所有权上是模拟领域扩展：它负责通信需求、地址解析、
-接受的路径、遇灾与截取政策，以及跨机制证据；在执行形式上，它同时是一个
-`SimulationPlugin`，通过权威命令、规范化输入（canonical ingress）和边界系统接入运行时。
-它依赖 `canwu-api` 与 `canwu-information`，反向依赖不存在，因此不会形成依赖环。
-
-`canwu-movement` 以同样的方式处理移动。`canwu-transport` 仍是记录库，包含移动命令、
-运输执行、行程修订、交接、预订和运力池。它不能承载插件：插件建立在 `canwu-api` 之上，
-而 `canwu-api` 依赖 `canwu-transport`，在其中放置插件会形成依赖环。
-`canwu-movement` 只依赖 `canwu-api`，负责这些记录的生命周期：把所有已准入的移动命令和
-运输执行保存在一条领域记录中，在到期时结算路段，分配运力池，并发布持有人相对的移动报告。
-事故、危险、敌对行为以及与之相关的所有随机抽样仍由应用系统负责。
-
-资源与生产沿用同一边界：`canwu-resource` 只拥有守恒数量和履约；
-`canwu-production` 消费资源结果与精确技术证据，拥有生产资产和工单生命周期；
-`canwu-force-supply-reference` 是另一个独立资源消费者；`canwu-economy-reference`
-把它们与路线、运输和季节性粮食循环组合起来。稀缺度和价格压力只是脱离式、
-持有人绑定的读取投影；没有成交、报价、官价或合同价证据时，不会虚构价格。
+| 类型 | 提供什么 | 例子 |
+| --- | --- | --- |
+| 模拟领域扩展 | 以模拟插件形式提供的可复用机制 | `canwu-resource`、`canwu-movement` |
+| 参考内容包 | 供扩展使用、带出处的版本化数据 | `canwu-ming-fiscal` |
+| 参考整合包 | 组合扩展与内容的小型可运行世界 | `canwu-economy-reference` |
+| 入门套件 | 可以复制后修改的可运行示例 | `canwu-reference-world` 中的 `starter` 示例 |
 
 <MermaidDiagram
-  label="从参伍内核到参考内容、参考整合和上层游戏的架构分层"
+  label="从参伍引擎到模拟领域扩展、参考内容包、参考整合包和上层应用"
   diagramLoading="正在渲染图表……"
   sourceSummary="查看图表源码"
-  sourceLoading="图表源码将在预览加载时显示。"
-  noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
+  noScriptMessage="图表预览需要 JavaScript；上方表格包含相同信息。"
   definition={`flowchart TB
-    Core["模拟内核"] --> Api["canwu-api"]
-    Api --> Domain["通用模拟领域扩展"]
+    Engine["canwu-api + canwu-sim"] --> Domain["模拟领域扩展"]
     Domain --> Pack["参考内容包"]
     Domain --> Integration["参考整合包"]
     Pack --> Integration
     Integration --> Starter["入门套件"]
-    Starter -. "可复制或替换" .-> Game["Celestial Mandate、用户游戏、研究工具"]
-    Pack -. "可直接复用" .-> Game
-    Integration -. "可直接复用" .-> Game
+    Starter -. "复制后修改" .-> App["你的游戏或研究工具"]
+    Domain -. "直接注册" .-> App
+    Pack -. "直接复用" .-> App
 `}
 />
 
-参考内容包是数据，不是新的求解器；参考整合包必须使用公开 API，并且
-可以被另一种世界或经济模型替换；入门套件必须展示场景创建、命令、结算、
-角色相对读取、保存、分支和精确重放。内容包和整合包会持续增加，不能被
-设计成只有一个固定 Demo 的特殊路径。
+下面几个例子说明职责如何划分：
+
+- **移动。** `canwu-transport` 只保存记录：命令、运输执行、行程修订、交接、预订和运力池。
+  `canwu-movement` 是运行这些记录的插件：它准入移动命令，在每个路段到期时结算，分配运力池，
+  并把移动报告发给应当收到的角色。事故、危险和敌对行为，以及决定它们的随机抽样，都留在你自己
+  的系统中。
+- **通信。** `canwu-correspondence` 负责信件从需求到投递的全过程：地址查询、路线、承运人、
+  遇灾与截取。它建立在 `canwu-information` 之上，后者负责文书、副本与解读。
+- **经济。** `canwu-resource` 负责守恒数量及其履约。`canwu-production` 消耗资源和技术证据，
+  驱动设施与工单。`canwu-economy-reference` 把两者与运输、军事补给组合成季节性粮食循环。
+  其中的稀缺度和价格压力只是只读投影；只有成交、报价、官价或合同价提供了价格时，它才会报告价格。
+
+跨插件合同（转移清单、动用授权、受托承运人等）各由谁负责，见
+[模型归属](/architecture/model-ownership/#领域归属)。
+
+## crate 一览
+
+### 基础层、模型与运行时
+
+| crate | 职责 |
+| --- | --- |
+| `canwu-core` | 类型化 ID、确定性随机数与 schema 元数据 |
+| `canwu-time` | 模拟时间与带溢出检查的时长运算 |
+| `canwu-event` | 带起因、受众和结构化字段的事件信封 |
+| `canwu-knowledge` | 角色知识，包括来源、可信度与信息时效 |
+| `canwu-decision` | 决策票据、控制者、确定性求值与决策策略 SDK |
+| `canwu-routing` | 通行时间随时间变化的路线规划 |
+| `canwu-transport` | 运输执行、行程修订、交接、预订与运力池的记录类型 |
+| `canwu-sim` | 私有运行时：状态、调度、插件、结算、持久化、哈希与重放 |
+| `canwu-api` | 对外 API：命令、领域记录、视图、快照、证据与重放 |
+
+### 模拟领域扩展（已发布，可选）
+
+| crate | 职责 |
+| --- | --- |
+| `canwu-resource` | 资源账户及受保护底线、需求、预留、分配、转移、消费、损耗、动用授权与履约 |
+| `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、项目与产出 |
+| `canwu-movement` | 基于 `canwu-transport` 记录的移动命令、路段结算、运力池分配与移动报告 |
+| `canwu-military` | 部队、行动、战斗、占领，以及由其他领域结算并确认的待处理效果；游戏需要不同的战斗规则时可以替换 |
+| `canwu-society` | 人群之间的社会传播 |
+| `canwu-culture` | 文化编写与编译，以及运行在 `canwu-society` 之上的文化生命周期 |
+| `canwu-law` | 法律编写、制度程序（包括加权、表决单元与征询阶段）、版本化法律与适用；实验性 |
+| `canwu-technology` | 从证据出发的技术模拟：能力、实施、采用与传播 |
+| `canwu-fiscal` | 财政程序、地区采纳、核算、执行凭证与按持有人区分的知识报告 |
+| `canwu-information` | 文书、副本、访问、发布、解读与真伪判定 |
+| `canwu-correspondence` | 按地址投递的信件：需求、地址查询、路线、承运人、遇灾与截取 |
+| `canwu-history-research` | 技术模拟的可选历史研究评估插件 |
+
+### 参考内容包（已发布）
+
+| crate | 职责 |
+| --- | --- |
+| `canwu-ming-fiscal` | 从明初到南明、带出处和覆盖声明的财政内容 |
+| `canwu-economy-reference-content` | 经济模型卡、出处与覆盖声明，并明确标出未知和不适用状态 |
+| `canwu-military-reference-content` | 供军事扩展使用的版本化合成军事规则集 |
+
+### 参考整合包与工具（仅在仓库中）
+
+| crate | 职责 | 另外依赖 |
+| --- | --- | --- |
+| `canwu-reference-world` | 小型示例世界（军队、人物、地区、信件）及其移动插件、投影、路由适配器和 `starter` 示例 | 仅 `canwu-api` |
+| `canwu-ming-fiscal-reference` | 可运行的洪武、万历、弘光财政场景 | `canwu-fiscal`、`canwu-ming-fiscal`、`canwu-reference-world` |
+| `canwu-force-supply-reference` | 作为可替换资源消费者的军事补给，包含征发 saga | `canwu-resource`、`canwu-economy-reference-content` |
+| `canwu-economy-reference` | 组合资源、生产、运输、军事补给、稀缺度与价格证据的可运行粮食循环 | `canwu-resource`、`canwu-production`、`canwu-technology`、`canwu-economy-reference-content`、`canwu-force-supply-reference`、`canwu-reference-world` |
+| `canwu-military-reference` | 在参考世界中运行的军事扩展及其合成内容 | `canwu-military`、`canwu-military-reference-content`、`canwu-reference-world` |
+| `canwu-debug` | 基于对外 API 与参考整合包的桌面调试客户端 | `canwu-reference-world`、`canwu-ming-fiscal-reference` |
+
+## 领域系统
+
+知识、决策、资源、军事、财政等方面的具体规则由领域系统提供，每个系统都有单独的设计页面。
+[领域系统](/architecture/systems/)页面列出全部八个系统及提供它们的 crate。
 
 ## 延伸阅读
 
-- [开发者指南](/developer/)
-- [通过插件扩展](/developer/extensions/)
-- [存档、重放与分支](/developer/persistence/)
-- [使用教程](/tutorials/)
-
-## 自定义资源消费者
-
-自 0.10.1 起，自定义消费者使用提供方拥有的有效记录，其中包含有界的
-`resource_consumption_intents` 映射，值为已封存的 `ResourceConsumptionIntentV1`。
-规范适配器输入绑定精确当前来源、分配与完成租约；消费者不能写入资源余额。
-军事补给参考消费者保留其专用适配器。参见[开发合同](/developer/production-economy/)。
-
-## 需求来源策略
-
-自 0.11.0 起，`ResourceDemand::source_policy` 明确记录 `Pooled` 或 `ExactAccounts`。后者列出 1–256 个严格排序、不重复、由需求申请者保管的账户，资源和单位版本必须精确匹配。来源检查先于稀缺资源分配，不会回退到资源池。一旦有资源预留或履约，策略便固定，包括已消费、但仍对应在途托管余额的预留。快照、重放和终止归档均保留策略。资源池选择不授予转移权限；资源池需求的使用权限由上层应用负责。自 0.13.0 起，跨保管人的委托只能通过动用授权和第三种策略 `Granted` 表达（见[动用授权](/developer/production-economy/#动用授权)）。参见[完整合同](/developer/production-economy/#需求来源策略)。
-
-## 人物可用性与排队输入
-
-自 0.12.0 起，内核以 `PersonAvailability` 保存每个人物的生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物签发的命令和作出的决策会被拒绝；依赖该人物的未关闭决策票据会在使其不可用的边界结束时取消。边界系统还可以创建由引擎分配 ID 的人物；排队插件输入的签发者可以在到期前撤回它。参见[接入与驱动](/developer/integration/#已无法行事的人物)和[结算系统](/architecture/settlement/#人物与输入指令)。
-
-## 损耗、交换与本地验收
-
-自 0.12.0 起，`canwu-resource` 可以不经转移记录账户损耗，以原子交换同时发起两项转移（每条腿的租约都绑定约定条款），并在两个账户共享上层应用声明的地点范围时，不经运输结算同地转移。这些操作都不授予跨保管人的权限。参见[完整合同](/developer/production-economy/#账户损耗)。
-
-## 0.13.0 合同的归属
-
-0.13.0 交付了下游大战略缺口集里除延后系列项之外的全部合同。所有合同都是增量能力，快照格式仍为 8；每项合同只有一个所有者，引擎不应替应用作出的决定仍留在应用中。
-
-| 合同 | 所有者 | 所有者负责 | 仍由应用负责 |
-| --- | --- | --- | --- |
-| 转移清单与转移审计 | `canwu-sim` | 记录一次多所有者转移中哪些参与者必须写入，在第 10 阶段暂存其写入，并在转移提交前于第 11 阶段审计 | 参与者、预期版本和转移的含义 |
-| 评估轨迹 | `canwu-core` 记录、`canwu-sim` 证据、`canwu-api` 视图读取 | 把规则结果的逐项说明作为有界的边界证据保存，只向可以看到该对象的持有人展示 | 规则 ID、各项内容及其含义 |
-| 席位继任 | `canwu-decision` | 允许新票据指定其控制者曾占据同一席位的终态票据 | 谁占据该席位 |
-| 动用授权 | `canwu-resource` | 记录授权方带上限和期限的同意，并在被授权方自己的租约下对每个单位只扣减一次 | 谁可以授权给谁，以及权限证据 |
-| 移动生命周期与运力池 | `canwu-movement`，基于 `canwu-transport` 记录 | 准入移动命令、结算路段、分配运力池并发布移动报告 | 事故、危险、敌对行为及其随机抽样，以及权限依据记录 |
-| 受托承运人与承运人扣押 | `canwu-correspondence` | 只凭承运人自己的委托接受承运，按其账本规划路线，并在扣押时结束投递尝试 | 把扣押消息转告发送者 |
-| 真伪判定 | `canwu-information` | 把持有人对声称来源的判断绑定到所解读 representation 的精确版本 | 伪造被识破的概率 |
-| 加权、表决单元与征询阶段 | `canwu-law` | 按整数表决权重和表决单元计票，并运行仅供咨询的征询阶段 | 席位权重、表决单元和平局规则的选择 |
-| 引擎内文化结算 | `canwu-culture`（`CultureBoundaryPlugin`）；`canwu-society` 仍是唯一的 society 写入者 | 在引擎内结算文化生命周期，并把 society 变化交给 society 插件 | 接触信号和文化定义 |
-| 政策压力来源与 cohort 人口校准 | `canwu-society` | 记录政策压力由谁发出，并把 cohort 校准到所引用的外部存量 | 外部存量记录 |
-| 外部传播来源 | `canwu-technology` | 在实践传播中接受有引用的地图外来源，代替实时能力记录 | 内容记录及其声明的可靠度 |
-
-各合同在边界中的运行时机见[结算系统](/architecture/settlement/#转移清单)；[模型归属](/architecture/model-ownership/#0130-之后的领域归属)把这些边界与 0.12.0 合同汇总在一起。
+- [结算系统](/architecture/settlement/)：边界的 14 个阶段、资源分配、提交与回滚
+- [事件系统](/architecture/events/)：起因、受众与解释
+- [随机性](/architecture/randomness/)：随机抽样如何保持可重放
+- [开发指南](/developer/)：接入、读取、存档与扩展
+- [快速开始](/tutorials/)：可运行示例

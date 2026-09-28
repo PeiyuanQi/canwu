@@ -1,100 +1,109 @@
 ---
-title: Random generation
-description: Understand Canwu's named random streams, SplitMix64, draw evidence, and exact replay.
+title: Randomness
+description: How Canwu draws random numbers from named streams, records every draw as evidence, and reproduces the same results on replay.
 sidebar:
   order: 4
-  label: Random generation
+  label: Randomness
 ---
 
-Canwu does not treat randomness as one global, untraceable black box. Randomness belongs to named, versioned streams with explicit owners; every draw leaves enough evidence for the same run environment to produce the same result again.
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+Canwu draws random numbers from named, versioned **random streams**. Each stream belongs to the mechanic that declared it, and every draw is recorded. The same run inputs therefore always produce the same results, and a reload cannot reroll an outcome. Read this page before you add randomness to a plugin.
+
+## A draw, from request to replay
+
+<MermaidDiagram
+  label="A boundary system draws from a declared stream; the draw is recorded, kept or rolled back with the boundary, and recomputed on replay"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the sections below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the sections below describe the same flow."
+  definition={`flowchart LR
+    System["Boundary system<br/>declares the stream"] --> Draw["random_range or<br/>random_sample_for_operation"]
+    Draw --> Record["RandomDrawRecord<br/>stream, address, bound,<br/>value, purpose"]
+    Record --> Commit{"Boundary<br/>commits?"}
+    Commit -- "yes" --> Saved["Snapshot and<br/>boundary evidence"]
+    Commit -- "no" --> Undo["Draws and stream<br/>positions roll back"]
+    Saved --> Replay["Replay recomputes<br/>each draw and compares"]
+`}
+/>
 
 ## Stream identity
 
-A `RandomStreamKey` contains a `namespace`, `name`, and `version`, for example:
+A `RandomStreamKey` has a `namespace`, a `name`, and a `version`, for example:
 
 ```text
 canwu.core / knowledge-report-delay / 1
 ```
 
-The kernel derives an independent seed from the run root seed and stream identity. Separate domains use separate streams, so adding a report-delay draw cannot shift an unrelated system's sequence. Stream state stores the algorithm, initial seed, position, and generator state.
+The kernel derives each stream's seed from the run's root seed and the stream key. Each mechanic draws from its own stream, so adding a draw to one system leaves every other system's numbers unchanged. The stream state stores the algorithm, the derived seed, the position, and the generator state.
 
-New streams use `SplitMix64V2` with unbiased rejection sampling. Historical
-`SplitMix64V1` streams retain their modulo semantics so old journals replay with
-their original meaning. Algorithm name and version are part of the persistence
-contract; changing an algorithm requires a new version rather than silently
-changing an existing stream.
+New streams use `SplitMix64V2`, which reduces a raw value to the requested range with unbiased rejection sampling. Streams that recorded `SplitMix64V1` keep its modulo reduction, so old journals replay with their original values. The algorithm is part of the saved format: to change how a stream draws, publish a new stream version.
 
 ## Declare before drawing
 
-A boundary system may use only streams declared and owned in `BoundarySystemContract.random_streams`. When a random session starts, the kernel copies the allowed stream states; undeclared streams are rejected.
+A boundary system may draw only from streams it lists in `BoundarySystemContract::random_streams`. When the system runs, the kernel gives it a random session holding copies of those streams. A draw from any other stream fails with `UndeclaredRandomStream`.
 
-Every range draw requires:
+Every draw needs:
 
-- a positive upper bound;
-- a non-empty, canonical `purpose` string;
-- a stream position that can be incremented safely.
+- an upper bound greater than zero;
+- a `purpose` string that is non-empty and has no leading or trailing whitespace;
+- for a sequential draw, room to advance the stream position.
 
-A plugin receives a bounded integer, not the global generator state.
+The system receives a bounded integer; the generator state stays inside the kernel.
 
 ## Operation-keyed random draws
 
-Mechanics that may retry, roll back, or continue across phases should use
-`random_sample_for_operation`. In addition to stream and range, it binds the
-draw to stable cause, operation ID, target, occurrence, and purpose. The same
-authoritative operation therefore cannot consume a different sample merely
-because retry order changed.
+A sequential draw, `SimulationView::random_range`, takes the next value from the stream. That is enough when a system draws in a fixed order. A mechanic that may retry, roll back, or continue across phases should use `random_sample_for_operation` (or `random_range_for_operation`, which returns only the value) instead.
 
-Random decision policy uses this path too:
-`RandomOperationTarget::DecisionTicket` binds an exact ticket version,
-`DecisionOptionWeight` maps the draw interval to existing ticket options, and
-`ResolveDecisionRandomly` lets the kernel generate ordinary decision ingress
-for the next boundary. Since 0.12.0, a guarded utility policy's random tie-break
-uses the same path, drawing only among the near-equivalent top options. Another run configuration selected before ticket opening
-may use LLM, Human, or External selection, but a registered controller policy
-cannot be replaced at runtime. These selectors also do not replace stochastic
-world events such as weather, failure, or epidemic incidents.
+An operation-keyed draw is addressed by the operation it serves. Its address combines the producing plugin, an operation kind, the application's operation ID, a target, and a draw slot. The target is a `RandomOperationTarget`: an entity, an exact decision ticket version, an exact domain record version, a knowledge holder, or a canonical key. The draw also cites the evidence that caused it. The kernel computes the value from the root seed, the stream, the address, the bound, and the purpose, so the result is the same however many draws came before. Asking again with the same address, evidence, bound, and purpose returns the same value. Reusing an address with different evidence, bound, or purpose fails with `RandomOperationConflict`.
+
+Random decision policy uses this path. `RandomOperationTarget::DecisionTicket` binds the draw to an exact ticket version, `DecisionOptionWeight` maps the drawn value to one of the ticket's existing options, and the `ResolveDecisionRandomly` directive makes the kernel generate an ordinary decision for the next boundary. A guarded utility policy's random tie-break uses the same path and draws only among the near-equal top options.
+
+A controller's policy kind (`Utility`, `Rule`, `Random`, `Human`, `External`, or `Llm`) is fixed when the controller is registered; registering the same controller ID again fails. Random decision policy only chooses among a ticket's options. Weather, breakdowns, epidemics, and similar world events belong in domain systems that draw from their own streams.
 
 ## Draw evidence
 
-Every draw records:
+Every draw records a `RandomDrawRecord`:
 
 | Field | Meaning |
 | --- | --- |
-| Stream and address | Which versioned stream, plus a sequential position or operation-keyed address |
-| Bound and value | Requested range and returned value |
-| `purpose` | Semantic reason for the draw |
-| `producer` | Boundary system or core system |
-| `outcome` | For example a boundary decision or report delivery |
-| cause / correlation | Causal source and processing-chain correlation |
+| `stream` and `address` | The versioned stream, plus a sequential position or an operation address |
+| `upper_exclusive` and `value` | The requested bound and the returned value |
+| `purpose` | Why the mechanic drew |
+| `producer` | The boundary system or core system that drew |
+| `outcome` | What the draw decided, for example a decision selection or a report delivery |
+| `cause` and `correlation_id` | The causal source and the processing chain |
 
-Draw records and stream state enter snapshots, boundary evidence, and hashes. On rollback, stream positions and draw records roll back together, so a failed attempt cannot consume randomness and alter later results.
+Draw records and stream state are saved in snapshots and boundary evidence, and are included in hashes. When a boundary fails, its stream positions and draw records roll back with it, so a failed attempt consumes no randomness.
 
 ## Reloading, alternative realities, and repeated trials
 
-Deterministic replay is not by itself an anti-save-scumming policy, but it removes the easy reroll: the same authoritative state, command or decision input, plugin semantic environment, and simulation time must produce the same draw result; reloading a snapshot from before an event does not automatically roll the same event again with a different outcome.
+Deterministic replay removes the easy reroll. The same authoritative state, command or decision input, plugin semantic environment, and simulation time produce the same draw. Reloading a snapshot from before an event and replaying the same inputs therefore gives the event the same outcome.
 
-If a caller issues a different command from the same snapshot, `fork()` or an equivalent fork entry can produce a valid alternative reality. That is a new alternative reality, not an exact replay of the original run. Whether to expose manual saves, single-writer saves, or research forks to players belongs to the application's save policy, not to a changed random seed.
+To try a different command from the same snapshot, `fork()` the run and submit it there. The result is an **alternative reality**: a new causal history, distinct from an exact replay of the original run. The host application's save policy decides whether players get manual saves, single-writer saves, or research forks.
 
-## Mechanics that do not draw
+## Randomness in first-party extensions
 
-Several 0.13.0 contracts are deliberately deterministic, so their randomness stays with the application that owns the uncertainty:
+Where first-party crates use randomness, and where they deliberately don't:
 
-- `canwu-movement` never draws. An application system decides that a leg failed, a route closed, or someone seized custody, usually with its own operation-keyed draw, and reports it through the `movement_incident_v1` ingress with an exact evidence record.
-- A carrier seizure, and whether a forgery is detected behind an authenticity finding, are application draws; the correspondence and information extensions record only the outcome.
-- Booking allocation orders requests by priority, window start, tie-break key, admission sequence, and booking identity, never by chance.
-- The tie-breaks of unit-block law stages are rules, not draws: when as many blocks are `For` as `Against`, `status-quo` adds no block, and `casting-seat:<seat>` adds one `For` block if that seat's own ballot is `For`.
+- `canwu-movement` makes no draws. An application system decides that a leg failed, a route closed, or someone seized custody, usually with its own operation-keyed draw. It reports the result through the `movement_incident_v1` ingress, citing an exact evidence record.
+- `canwu-correspondence` draws on its own stream, `canwu-correspondence / operation-resolution / 1`. For an incident request such as an interception, a disaster, or a carrier seizure, the application supplies a `probability_per_mille`, and the plugin makes one operation-keyed draw to decide whether the incident happens. The same stream selects communication opportunities and their recipients.
+- Whether a forgery is detected, behind an authenticity finding, is decided by the application; `canwu-information` records the finding.
+- Capacity booking allocation follows a fixed order: priority, window start, tie-break key, admission sequence, and booking identity.
+- Tie-breaks in unit-block law stages are rules. When as many blocks vote `For` as `Against`, `status-quo` adds no block, and `casting-seat:<seat>` adds one `For` block if that seat itself voted `For`.
 
 ## Guidance for plugin authors
 
-1. Give each independent domain mechanic a stable named stream; do not reuse an unscoped shared stream.
-2. Put the semantic reason in `purpose` so debug and replay output can explain the result.
-3. Review stream declarations with the plugin version and semantic hash.
-4. Never use wall time, thread order, or container iteration order as a seed or tie-break.
-5. Do not randomize missing facts; model unknown knowledge, actor choices, discrete incidents, and aggregate-rate settlement separately.
+1. Give each independent mechanic its own stable, named stream.
+2. Write the reason for the draw in `purpose`, so debug and replay output can explain the result.
+3. Review stream declarations together with the plugin version and semantic hash.
+4. Do not use wall time, thread order, or container iteration order as a seed or a tie-break.
+5. Model unknown facts, actor choices, discrete incidents, and aggregate rates as separate mechanisms; do not fill in missing facts with random draws.
 
 ## Replay contract
 
-Exact replay requires stream identity, algorithm version, root seed, sequential positions, operation addresses, every draw, and final outcomes to match. When loading a snapshot, the kernel verifies sequential stream state against the initial seed advanced by the recorded draw count and recomputes operation-keyed samples; boundary replay also compares producer, purpose, cause, and correlation for each draw.
+Exact replay requires the stream identities, algorithm versions, root seed, sequential positions, operation addresses, every draw, and every final outcome to match. When loading a snapshot, the kernel checks each sequential stream's state against its seed advanced by the recorded number of draws, and recomputes every operation-keyed value. Boundary replay also compares each draw's producer, purpose, cause, and correlation.
 
 ## Continue reading
 

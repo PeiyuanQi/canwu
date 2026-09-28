@@ -1,22 +1,42 @@
 ---
 title: Encoded transfer and in-path interception
-description: Use synthetic symbol codes to separate copying, access, and interpretation, with different capabilities producing different outcomes.
+description: A relay copies an encoded message in transit and fails to decode it; the recipient has a delegate decode it and shares the result with a reviewer.
 sidebar:
-  order: 5
+  order: 7
   label: Encoded interception
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../../components/MermaidDiagram.astro";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs" icon="external">
-  Open the runnable example
-</LinkButton>
+## The scenario
 
-This case uses five synthetic holders. `H-601` is the source holder, `H-602`
-the intended and commissioning holder, `H-603` the relay holder, `H-604` the
-distinct interpretation performer, and `H-605` a restricted reviewer. The
-source code `SYN-E8-42` and result code `SYN-E8-42-R` carry no real-world
-meaning.
+A sender posts an encoded message to one recipient. The relay carrying it
+copies the message on the way, reads the whole copy, and fails to decode it
+with the key it has. The recipient receives the original, has a delegate with
+the right key decode it, and shares the decoded result with one reviewer.
+
+The question the example answers: how do you keep "holds a copy", "read it",
+and "understood it" apart, and record a decode done on someone else's behalf
+so that replay reuses the recorded result?
+
+All holders, times, and content codes are synthetic test values.
+
+## What this example shows
+
+- `canwu-information`, the information
+  [domain extension](/en/developer/extensions/), and its planner
+  `InformationLifecycle::plan`.
+- A same-content copy: a second `Representation` with
+  `ContentRelation::SameContent` and a parent edge to the original.
+- `Interpretation` records with `InterpretationStatus::Failed` and
+  `Succeeded`, each bound to the access and representation it read.
+- Delegated interpretation: `InterpretationAuthority::Delegated` cites a
+  persisted command that carries a `DelegationClaimV1`.
+- Knowledge publications, each addressed to one holder
+  ([holder-relative knowledge](/en/reference/terminology/)), plus snapshot
+  restore, [exact replay](/en/developer/persistence/), and compact checkpoint
+  restore through `InformationPlugin`.
 
 ## Run it
 
@@ -24,46 +44,271 @@ meaning.
 cargo run -p canwu-information --example encoded_interception
 ```
 
-The example keeps the full lifecycle readable in a detached ledger, then runs
-the distinct-performer delegated interpretation through the authoritative
-`InformationPlugin`. A persisted neutral authority command supplies the exact
-claim. The example verifies snapshot restore, exact replay without re-running
-an external decoder, compact evidence reconstruction, and compact checkpoint
-restore.
+The program prints one line once every check has passed; a failed check stops
+it earlier:
 
-## Relative timeline
+```text
+encoded_interception: in-transit copy, failed access interpretation, delegated decode, restricted review release, authoritative save/load, exact replay without external decoding, and compact reconstruction verified
+```
 
-| Minute | Model action |
-| ---: | --- |
-| `0–1` | Create content and a `grouped_symbols_v1` representation requiring `decode_k2`. |
-| `2–4` | Begin an addressed dispatch and move its delivery attempt to `InTransit`. |
-| `5` | Create a same-content representation copy at the relay with fidelity `1000`. |
-| `6` | `H-603` gains access through the captured instance. |
-| `7` | `H-603` uses `decode_k1`; interpretation is `Failed` and has no result content. |
-| `12–13` | Complete delivery and record the addressed recipient's access to the original representation. |
-| `14–15` | `H-604` uses `decode_k2` for `H-602`, creating derived result content and a `Succeeded` interpretation. |
-| `16` | Complete the dispatch after its delivery attempt has a terminal disposition. |
-| `17–19` | `H-602` activates a restricted review release for `H-602` and `H-605`. |
+Each phrase names a group of checks in the source; the last three come from
+`verify_authoritative_operation_roundtrip` in `examples/support/mod.rs`, run
+for the delegated interpretation and for the review release.
 
-## Model assertions
+## How the message moves
 
-<Steps>
-1. Interception first creates a representation copy. `SameContent` and its parent edge retain the relationship to the original representation.
-2. Access is not interpretation. `H-603` can encounter the complete symbol copy while the wrong capability produces only a failed interpretation record.
-3. A `Failed` interpretation cannot bind `result_content`; a `Succeeded` interpretation must bind one.
-4. Every interpretation binds `input_access`, `input_representation`, `performed_by`, and `performed_for`.
-5. Addressed delivery advances through its own attempt states. The captured copy cannot replace the recipient's delivery evidence.
-6. Knowledge drafts remain holder-scoped: `H-603` receives its access and failed-interpretation facts, `H-602` receives its access, commissioned interpretation, and release-availability facts, and `H-605` receives only review-release availability. Performing the interpretation does not itself give `H-604` holder knowledge.
-</Steps>
+<MermaidDiagram
+  label="Sequence of the encoded message from sender to reviewer"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the walkthrough below describes the same steps."
+  renderFailureMessage="Diagram preview unavailable; the walkthrough below describes the same steps."
+  definition={`sequenceDiagram
+    participant S as Sender H-601
+    participant R as Relay H-603
+    participant P as Recipient H-602
+    participant D as Delegate H-604
+    participant V as Reviewer H-605
+    S->>R: dispatch to H-602, attempt InTransit (minutes 2-4)
+    Note over R: SameContent copy (minute 5)
+    R->>R: read the copy, decode_k1 fails (minutes 6-7)
+    R->>P: attempt Delivered, recipient reads (minutes 12-13)
+    Note over P,D: delegation claim for decode_k2
+    D-->>P: Succeeded, result content (minutes 14-15)
+    P->>V: review release Active (minutes 17-19)
+`}
+/>
 
-## Judging a claimed source
+## Walkthrough
 
-Since 0.13.0, an interpretation can also judge provenance. `InterpretationPayload::authenticity` may carry an authenticity finding (`AuthenticityFinding`): the exact version of one interpreted representation, whether its claimed source is accepted (`claimed_source_accepted`), a short basis of at most 256 bytes, and a per-mille confidence. The representation must be one of the interpretation's inputs at its current version and must carry a claimed source; otherwise the operation is rejected as `invalid_lifecycle`. A forged order can therefore be recorded as read but not accepted as coming from its claimed sender. Whether the interpreting holder notices a forgery, and how likely that is, remains an application draw; the extension records only the finding. The example in this case does not use it.
+The scenario is in
+[`encoded_interception.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs);
+shared helpers are in
+[`support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs).
+Records are planned one request at a time against a detached ledger, as in
+[Confidential copy and targeted release](/en/tutorials/cases/confidential-copy-release/).
 
-## Replaceable application details
+| Holder | Role |
+| --- | --- |
+| `H-601` | sender |
+| `H-602` | addressed recipient; commissions the decode and publishes the review release |
+| `H-603` | relay; copies the message and tries to decode it |
+| `H-604` | delegate who decodes for `H-602` |
+| `H-605` | reviewer |
 
-`grouped_symbols_v1`, `decode_k1`, `decode_k2`, node identifiers, and relative
-delays are application configuration. The engine needs only neutral contracts
-for representation lineage, delivery, access, interpretation, and
-holder-relative publication. Channel performance, encoding semantics,
-consequences, and narration remain downstream plugin concerns.
+### 1. Encode and send (minutes 0–4)
+
+The original representation names the capability needed to read it:
+
+```rust
+payload: RepresentationPayload {
+    format: "grouped_symbols_v1".to_owned(),
+    created_at: minute(1),
+    operation: "encode_k2".to_owned(),
+    content_relation: ContentRelation::SameContent,
+    sources: Vec::new(),
+    claimed_source: None,
+    interpretation_capability: Some("decode_k2".to_owned()),
+},
+```
+
+An addressed `Dispatch` to `H-602` becomes `Active`. Its `DeliveryAttempt`
+names `H-603` under the `relay` role and moves to `InTransit`.
+
+### 2. The relay copies the message (minute 5)
+
+The relay creates a second representation of the same content:
+
+```rust
+content_relation: ContentRelation::SameContent,
+sources: vec![RepresentationSourceEdge {
+    parent: encoded.clone(),
+    completeness_per_mille: 1_000,
+    fidelity_per_mille: 1_000,
+}],
+```
+
+`SameContent` requires the copy to reference the same `Content` record as its
+parent (`validate_representation_lineage`). The relay also gets its own
+`Instance` of the copy.
+
+### 3. The relay reads the copy and fails to decode it (minutes 6–7)
+
+The relay's access cites the captured instance and reads the whole copy
+(`extent_per_mille: 1_000`). Its interpretation:
+
+```rust
+payload: InterpretationPayload {
+    interpreted_at: minute(7),
+    status: InterpretationStatus::Failed,
+    capability: "decode_k1".to_owned(),
+    confidence_per_mille: 0,
+    authenticity: None,
+},
+authority: InterpretationAuthority::HolderSelf,
+```
+
+The `Failed` outcome comes from the example. The extension stores `capability`
+and `interpretation_capability` as labels, and your application decides
+whether a decode works. What the extension checks is how the outcome is
+recorded (`validate_interpretation` in
+[`lifecycle.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/src/lifecycle.rs)):
+
+- every interpretation has `input_access`, `input_representation`,
+  `performed_by`, and `performed_for` references, and each input
+  representation is one that an input access read;
+- a `Failed` interpretation has no `result_content`, and a `Partial` or
+  `Succeeded` one must have it;
+- with `HolderSelf`, the performer and the holder it serves are the same.
+
+The example checks the second rule directly: a `Succeeded` request without
+`result_content` must fail.
+
+```rust
+assert!(ledger.plan(&invalid_success_without_result).is_err());
+```
+
+### 4. The original arrives (minutes 12–13)
+
+The delivery attempt moves to `Delivered`, which publishes
+`RepresentationAvailable` to `H-602`. The recipient's access cites the
+`delivery_attempt`, the `dispatch`, and the original representation. The
+relay's access cites the captured instance, so the two reads rest on separate
+evidence.
+
+### 5. A delegate decodes for the recipient (minutes 14–15)
+
+The decoded result is new content derived from the original, with code
+`SYN-E8-42-R`. The successful interpretation names `H-604` as performer,
+`H-602` as the holder it serves, and binds the result:
+
+```rust
+holder_reference("performed_by", &performer_holder),
+holder_reference("performed_for", &destination_holder),
+DomainReference::from_typed("result_content", decoded_content.clone()),
+```
+
+Its authority is delegated:
+
+```rust
+authority: InterpretationAuthority::Delegated {
+    evidence: EvidenceRef::Command(CommandId::new(1)),
+    authority_grant: DELEGATED_AUTHORITY_GRANT.to_owned(),
+},
+```
+
+The grant `DELEGATED_AUTHORITY_GRANT` (`interpret_for_holder`) tells
+`InformationPlugin` to read the claim from the `claim` key of a
+`delegate_interpretation_v1` plugin command addressed to `canwu-authority`. In
+the example, `CaseAuthorityPlugin` in `support/mod.rs` registers that command,
+and the first command of the authoritative run carries this claim:
+
+```rust
+Some(DelegationClaimV1 {
+    format_version: 1,
+    performed_by: EntityRef::Person(PersonId::new(604)),
+    performed_for: destination_holder.clone(),
+    capabilities: vec!["decode_k2".to_owned()],
+    not_before: Some(SimTime::EPOCH),
+    expires_at: None,
+}),
+```
+
+When it applies the interpretation, the plugin checks that the claim names
+this performer, this holder, and this capability, and that the interpretation
+time falls in `[not_before, expires_at)`. A claim that fails the check gets
+the operation rejected with `invalid_authority`.
+
+After the authoritative run, only the recipient holds a new fact:
+
+```rust
+assert_authoritative_knowledge(
+    canwu,
+    &destination_holder,
+    &["interpretation_recorded"],
+)?;
+assert_authoritative_knowledge(canwu, &review_holder, &[])?;
+assert_authoritative_knowledge(canwu, &source_holder, &[])?;
+assert_authoritative_knowledge(canwu, &performer_holder, &[])
+```
+
+For replay, the helper registers `PersistedResultReplayPlugin` in place of
+`CaseAuthorityPlugin`. Its handler for the same command fails with
+`ReplayMismatch` unless the payload already carries the recorded result, so a
+passing replay shows the result came from the journal.
+
+### 6. Share the result with a reviewer (minutes 16–19)
+
+The delegate renders the result as a `review_text_v1` representation. `H-602`
+then creates an explicit audience of `H-602` and `H-605` and an audience
+release of that representation. Activation also runs in `Canwu`:
+
+```rust
+assert_authoritative_knowledge(canwu, &destination_holder, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &review_holder, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &source_holder, &[])?;
+assert_authoritative_knowledge(canwu, &performer_holder, &[])
+```
+
+## What to notice
+
+- Copy, access, and interpretation are three separate records. The relay holds
+  a full copy and a full read, and still has no decoded content.
+- The decode outcome is application input. The extension decides how an
+  outcome must be recorded, including the result binding.
+- A delegated decode publishes to the holder it serves. The delegate receives
+  no fact from it.
+- The delegation claim lives in a persisted command, so replay checks
+  authority from the journal.
+
+## Try changing
+
+- Add `DomainReference::from_typed("result_content", content.clone())` to the
+  relay's failed interpretation. Planning fails with
+  `failed interpretation cannot have result content`.
+- In the relay's interpretation, set `performed_for` to `destination_holder`
+  and keep `HolderSelf`. Planning fails with
+  `self interpretation authority requires performer and holder equality`.
+- In the `DelegationClaimV1`, change `capabilities` to
+  `vec!["decode_k1".to_owned()]`. The detached plan still succeeds, but
+  `InformationPlugin` rejects the operation with `invalid_authority`, and the
+  example stops with `authoritative case operation did not complete: Rejected`.
+
+## Beyond the example
+
+### Judging a claimed source
+
+A representation can name the source it claims in
+`RepresentationPayload::claimed_source`, and an interpretation of it can record
+an [authenticity finding](/en/reference/terminology/) (`AuthenticityFinding`)
+in `InterpretationPayload::authenticity`: whether the claimed source is
+accepted, a short `basis` such as `"seal_mismatch"`, and a confidence. The
+finding must cite the current version of a representation that the
+interpretation reads and that carries a `claimed_source`; otherwise
+`InformationPlugin` rejects the operation with `invalid_lifecycle`. A forged
+letter can therefore be recorded as decoded while its claimed sender is
+rejected. How likely a holder is to spot a forgery is an application draw (see
+[Model ownership](/en/architecture/model-ownership/)); this example leaves
+`authenticity` as `None`, and the
+[authenticity finding test](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/gap_g27_information_authenticity_finding.rs) builds one.
+
+### Authority from an assigned role
+
+`InterpretationAuthority::InstitutionalRole` works like the delegated form,
+but reads the claim from an exact version of an `AuthorityAssignment` record
+under the grant `interpret_as_assigned_role`.
+
+## Source
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs" variant="secondary" icon="external">
+  Read the shared example helpers
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/runtime_adapter.rs" variant="secondary" icon="external">
+  Read the interpretation authority tests
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/gap_g27_information_authenticity_finding.rs" variant="secondary" icon="external">
+  Read the authenticity finding test
+</LinkButton>

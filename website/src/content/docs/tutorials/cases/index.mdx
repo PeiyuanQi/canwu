@@ -1,6 +1,6 @@
 ---
 title: 案例
-description: 从完整、情境驱动的案例出发，学习如何组合参伍的公开引擎能力。
+description: 可运行的场景案例，每个案例组合多个参伍引擎部件，并附有运行命令和代码走读。
 sidebar:
   order: 1
   label: 案例总览
@@ -8,64 +8,72 @@ sidebar:
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
-这里收录情境驱动的完整案例。案例会把多个基础契约组合起来，展示领域包、
-controller、policy、权威命令与持久化证据如何协作。
-
-每篇案例都会说明使用情境、所验证的通用机制，以及可运行源码与验证证据的位置。
+每个案例都是一个小场景，用一条 `cargo run` 命令就能运行。案例页面会介绍场景、列出用到的
+引擎部件、给出程序的输出，并逐步讲解代码。其中的历史背景仅作示意，数据为合成数据，
+或来自参考内容中注明出处的资料。
 
 <CardGrid>
   <LinkCard
+    title="军阀请求邻军援助"
+    href="/tutorials/cases/warlord-aid-decision/"
+    description="军阀的 AI 决定是否出兵支援。了解决策票据怎样把打分后的选择变成经过校验、可以重放的命令。"
+  />
+  <LinkCard
     title="随机决策、LLM 选择与确定性重放"
     href="/tutorials/cases/uncertainty-resolution/"
-    description="区分未知事实、随机世界事件、有边界的角色选择和群体比例结算，并展示同一票据契约如何在不同运行配置中使用 Random、Human、External 或 LLM selector。"
-  />
-  <LinkCard
-    title="明代财政案例"
-    href="/tutorials/cases/ming-fiscal/"
-    description="用洪武、万历和弘光三个可运行起点，比较登记、折银、地区改革、战争加派与南明财政分裂。"
-  />
-  <LinkCard
-    title="生产、资源与军事补给"
-    href="/tutorials/cases/production-economy/"
-    description="用十四个月粮食循环、松江棉业原型和汉阳—大冶—萍乡工业链理解守恒资源、生产工单、后勤征发、地理约束和价格证据。"
+    description="一项法案先按权重抽样决定是否通过，再交给 LLM 回答。了解随机性和模型怎样进入模拟，同时保证可以精确重放。"
   />
   <LinkCard
     title="中央赈粮令与多机构原子执行"
     href="/tutorials/cases/governance-transition/"
-    description="用 manifest、跨插件规范化输入、同边界原子提交和只读审计模拟一次中央赈粮令。"
-  />
-  <LinkCard
-    title="军阀请求邻军援助"
-    href="/tutorials/cases/warlord-aid-decision/"
-    description="用决策票据、动态选项、决策策略、按权限生成的命令、决策轨迹、存档与精确重放完成一次北洋时期风格的援军决策。"
+    description="中央机构下达赈粮令，由国库和县级机构分别执行。了解多个插件怎样让同一步一起提交或一起回滚。"
   />
   <LinkCard
     title="本地社区传播与制度回应"
     href="/tutorials/cases/local-community-diffusion/"
-    description="使用已正式发布的社会传播模拟模块组合稀疏人口分布、社会影响、DecisionTicket 制度政策、角色估计、存档与精确重放。"
+    description="一种新观念从集市传到村庄，地方机构随之回应。了解社会扩展怎样表示人口、影响和观察者估计。"
   />
   <LinkCard
     title="机密副本与定向发布"
     href="/tutorials/cases/confidential-copy-release/"
-    description="使用 canwu-information 验证访问、副本衍生、冻结受众、定向发布、撤回和已获知识保留。"
+    description="一份机密文书被复制、发给指定受众，随后撤回。了解 canwu-information 怎样追踪副本和访问，以及撤回后哪些此前的阅读仍留有记录。"
   />
   <LinkCard
     title="编码传递与中途截取"
     href="/tutorials/cases/encoded-interception/"
-    description="使用 canwu-information 区分信息副本、访问权限与解读过程，并比较失败和成功的解读结果。"
+    description="一份编码信息在途中被截取，由另一方解码。了解 canwu-information 怎样区分持有副本和读懂内容。"
   />
   <LinkCard
-    title="从无锡出发的经路线规划通信"
+    title="从无锡发出、按路线投递的通信"
     href="/tutorials/cases/routed-correspondence/"
-    description="使用 canwu-correspondence 组合随机通信需求、持有人相对路径知识、运输交接、定向投递、遇灾改道与不中断投递的截取。"
+    description="信件从无锡寄往本地收件人和北京。了解 canwu-correspondence 怎样根据寄件人所知规划路线，并在承运人之间交接信件。"
+  />
+  <LinkCard
+    title="明代财政案例"
+    href="/tutorials/cases/ming-fiscal/"
+    description="从洪武 1391、万历 1581、弘光 1644 三个起点各运行一次财政流程。了解财政扩展怎样依据有出处的资料表示税法、地区改革和执行凭证。"
+  />
+  <LinkCard
+    title="粮食、生产与军事补给"
+    href="/tutorials/cases/production-economy/"
+    description="十四个月里，粮仓供应平民、向驻军调粮，并在秋收时入账。了解守恒资源、生产和军事补给怎样配合。"
   />
 </CardGrid>
 
-生产经济案例组合 `canwu-resource`、`canwu-production`、经济参考内容、军事补给消费者与可运行经济整合；
-明代财政案例组合 `canwu-fiscal`、带出处的 `canwu-ming-fiscal` 参考内容包和
-`canwu-ming-fiscal-reference` 可运行整合。基础示例只使用公开 `canwu-api`；
-社会传播示例使用已正式发布的 `canwu-society`
-社会传播模拟模块，在架构上属于建立在对外 API 之上的模拟领域扩展；两个信息流案例
-使用已正式发布的 `canwu-information` 中立模型；经路线规划的通信案例使用已正式发布的
-`canwu-correspondence` 编排扩展。具体历史规则、
-人物性格、情报投影和选项生成仍由应用或模拟规则插件定义。
+## 运行命令与 crate
+
+| 案例 | 命令 | 主要 crate |
+| --- | --- | --- |
+| 军阀援军决策 | `cargo run -p canwu-api --example decision_ticket` | `canwu-api` |
+| 随机决策与 LLM 选择 | `cargo run -p canwu-api --example uncertainty_resolution` | `canwu-api` |
+| 中央赈粮令 | `cargo run -p canwu-api --example governance_transition` | `canwu-api` |
+| 社区传播 | `cargo run -p canwu-society --example local_community_diffusion` | `canwu-society` |
+| 机密副本 | `cargo run -p canwu-information --example confidential_copy_release` | `canwu-information` |
+| 编码截取 | `cargo run -p canwu-information --example encoded_interception` | `canwu-information` |
+| 按路线投递的通信 | `cargo run -p canwu-correspondence --example routed_correspondence` | `canwu-correspondence`、`canwu-information` |
+| 明代财政 | `cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter` | `canwu-fiscal`、`canwu-ming-fiscal`、`canwu-ming-fiscal-reference` |
+| 生产经济 | `cargo run -p canwu-economy-reference --example grain_loop` | `canwu-resource`、`canwu-production`、`canwu-economy-reference-content`、`canwu-economy-reference` |
+
+前三个案例只使用[对外 API](/developer/integration/)（`canwu-api`）。其余案例在此基础上
+加入一个可选的[模拟领域扩展](/developer/extensions/)，最后两个还用到参考内容包和参考
+整合包。具体的历史规则、人物性格和选项生成由应用或其插件定义。

@@ -1,149 +1,355 @@
 ---
-title: 生产、资源与军事补给
-description: 用十四个月粮食循环、明代松江棉业原型和汉冶萍工业链理解参伍的生产经济边界。
+title: 粮食、生产与军事补给
+description: 十四个月的粮食循环：民食、赈济和驻军共用一座守恒的粮仓；另附两个带出处的生产原型。
 sidebar:
-  order: 3
+  order: 10
   label: 生产、资源与军事补给
 ---
 
-import { LinkButton, Aside } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+## 场景
+
+河谷里的一座粮仓开局存粮 4,300 筐。每个月，管粮人在四种优先顺序中选一种（优先赈济、
+优先军粮、平衡分配、为军队征发），粮仓要应付三项需求：民食 320 筐、赈济 120 筐、
+驻军调粮 1,200 筐。前两个月河道不通，不发军粮。唯一一次运粮在第 3 个月：渡口中断，
+粮船改走陆路送到驻军手里。从第 4 个月起，调粮需求每月仍要求预留粮食，但不再发运，
+缺粮的月份里它会挤占民食。第 10 个月月末秋收入仓。
+
+这个示例回答的问题是：几个领域共用同一份存量时，怎样让每一筐粮都有账可查、
+相互竞争的需求按记录下来的顺序结算，并且整个运行可以精确重放？
+
+所有数量都是为示例选定的合成值，不代表历史上的人口、亩产、军粮或粮价。
+
+## 示例涉及的引擎部件
+
+- [资源模拟扩展](/developer/production-economy/)（`canwu-resource`）：账户与需求、
+  按优先级进行的一次分配，以及在验收前一直处于托管中的转移。
+- [决策票据](/tutorials/cases/warlord-aid-decision/)（`DecisionTicket`）：每个月的
+  优先顺序是票据中的一个选项，选项携带一条普通命令。
+- [运输执行](/tutorials/routing-transport/)（`TransportExecution`）：河运一程失败后，
+  同一批货通过[改道](/reference/terminology/)（`ItineraryRevision`）继续运送。
+- [军事补给参考消费者](/reference/terminology/)（`canwu-force-supply-reference`）：
+  驻军提交消费意图，从自己的账户里取粮。
+- [参考内容包](/reference/terminology/)（`canwu-economy-reference-content`）：
+  `synthetic_grain_fixture()` 提供驻军的口粮需求和征发策略，每项都关联一张模型卡。
+  民食、赈济和收成的数值是 `grain.rs` 中的常量。
+
+## 运行
+
+```shell
+cargo run -p canwu-economy-reference --example grain_loop
+```
+
+程序以 JSON 打印一个 `GrainLoopSummary`：每月一帧（共 836 行），最后是汇总。
+下面的输出做了删减，只保留第 3 个月那一帧的部分字段和汇总：
+
+```text
+{
+  "frames": [
+    ...
+    {
+      "economy": "canwu.economy-reference:economy:river-valley",
+      "month": 3,
+      ...
+      "force_requested": 1200,
+      "force_fulfilled": 1200,
+      ...
+        "force_operation": "canwu.force-supply-reference:operation:283:89280",
+      ...
+    },
+    ...
+  ],
+  "final_stock": 2860,
+  "final_population_wellbeing_per_mille": 940,
+  "final_force_readiness_per_mille": 800,
+  "final_cooperation_per_mille": 939,
+  "total_harvest": 4620,
+  "transport_executions": 1,
+  "closed_route_months": [
+    1,
+    2
+  ],
+  "rerouted_months": [
+    3
+  ],
+  "conservation_closing": 2860,
+  "checkpoint_hash": "72c4c8d3231be522d8cd3bb401e29b22b718e24fdfa852d95642d600e0fed99e"
+}
+```
+
+同一次运行中十四帧的关键字段：
+
+| 月份 | 本月选定（下月生效） | 月初存粮 | 民食（需 320） | 赈济（需 120） | 驻军调粮（需 1,200） | 收成 | 民生 ‰ | 合作度 ‰ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `balanced` | 4300 | 320 | 120 | 0 | 0 | 1000 | 903 |
+| 2 | `relief_first` | 3860 | 320 | 120 | 0 | 0 | 1000 | 906 |
+| 3 | `balanced` | 3420 | 320 | 120 | 1200 | 0 | 1000 | 909 |
+| 4 | `force_first` | 1780 | 280 | 120 | 0 | 0 | 1000 | 912 |
+| 5 | `requisition_for_force` | 1380 | 180 | 0 | 0 | 0 | 860 | 912 |
+| 6 | `balanced` | 1200 | 0 | 0 | 0 | 0 | 540 | 915 |
+| 7 | `relief_first` | 1200 | 320 | 120 | 0 | 0 | 660 | 918 |
+| 8 | `balanced` | 760 | 320 | 120 | 0 | 0 | 780 | 921 |
+| 9 | `force_first` | 320 | 320 | 0 | 0 | 0 | 780 | 924 |
+| 10 | `balanced` | 0 | 0 | 0 | 0 | 4620 | 460 | 927 |
+| 11 | `relief_first` | 4620 | 320 | 120 | 0 | 0 | 580 | 930 |
+| 12 | `balanced` | 4180 | 320 | 120 | 0 | 0 | 700 | 933 |
+| 13 | `force_first` | 3740 | 320 | 120 | 0 | 0 | 820 | 936 |
+| 14 | `balanced` | 3300 | 320 | 120 | 0 | 0 | 940 | 939 |
+
+月初存粮是本月分配之前粮仓的余额。民食每缺一筐，民生值减 1；赈济每发一筐，民生值加 1，
+上限 1000。合作度每月加 3，征发的那个月除外。
+
+## 粮食流向
+
+<MermaidDiagram
+  label="粮食循环：票据确定优先级，一次分配切分粮仓存量，第 3 个月运粮给驻军，第 10 个月收成入账"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的代码走读描述了同样的步骤。"
+  renderFailureMessage="图表预览不可用；下文的代码走读描述了同样的步骤。"
+  definition={`flowchart TD
+    Ticket["每月决策票据"] -->|优先级| Alloc["一次资源分配"]
+    Demands["需求：民食、赈济、驻军调粮"] --> Alloc
+    Granary["粮仓账户"] --> Alloc
+    Alloc --> Consume["消费：民食与赈济"]
+    Alloc -->|"仅第 3 个月"| Transfer["转移进入托管"]
+    Transfer --> Route["河运一程失败，改走陆路"]
+    Route -->|验收| Garrison["驻军账户"]
+    Garrison --> Force["军事补给消费意图"]
+    Harvest["第 10 个月收成入账"] --> Granary
+    Consume --> Close["CloseMonth 月度帧"]
+    Force --> Close
+`}
+/>
+
+## 代码走读
+
+示例本身只有 23 行：把十四个 `GrainDecision` 传给
+`GrainHarness::run_fourteen_months`，再打印汇总。具体工作都在
+[`grain.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/src/grain.rs)
+里完成。
+
+### 1. 组装三个插件
+
+`GrainHarness::new` 先用 `compile_content_pack` 编译 `synthetic_grain_fixture()`，
+再建立粮仓账户（4,300 筐，由管粮人保管）和一个空的驻军账户（由军队保管），
+然后把资源、经济和军事补给三份状态作为 `Scenario` 的初始
+[领域记录](/developer/extensions/)。`new_canwu` 接着注册插件：
+
+```rust
+let resource = ResourcePlugin::new([economy_kind, force_kind]);
+let economy = EconomyReferencePlugin;
+let force = ForceSupplyReferencePlugin;
+let plugins: [&dyn SimulationPlugin; 3] = [&resource, &economy, &force];
+Canwu::new_with_plugins(seed, scenario, &plugins)
+```
+
+`ResourcePlugin::new` 的参数是资源插件核验适配器证据时要读取的领域记录类型，
+这里就是经济和军事补给两个插件的运行时记录。
+
+### 2. 选定本月的优先顺序
+
+`advance_month` 用三张决策票据记录本月的选择。`record_decision` 开启一张有四个选项的
+票据，每个选项携带一条 `EconomyOperationV1::SelectDecision` 命令，并按你传入的选项结算；
+输出中的决策就是它，合作度也随它变化。`record_g5_decision` 把同一选择记为粮仓的应对姿态，
+第 3 个月起 `record_force_decision` 再把它记为驻军的补给姿态。应对姿态决定每个需求的
+优先级：
+
+```rust
+fn decision_priority(decision: GrainDecision, label: &str) -> i32 {
+    match (decision, label) {
+        (GrainDecision::ReliefFirst, "relief")
+        | (GrainDecision::ForceFirst | GrainDecision::RequisitionForForce, "force") => 120,
+        (_, "civilian") => 100,
+        (_, "relief") => 90,
+        _ => 80,
+    }
+}
+```
+
+优先顺序在选定后的下一个月才生效。应对姿态和驻军姿态的票据在 `advance_month` 中结算，
+但票据携带的命令要晚一个边界才结算，此时 `advance_month` 已经读过姿态。所以每个月的分配
+沿用上个月的选择；第 1 个月沿用初始姿态 `keep_buffer`（即 `balanced`）。第 6 个月这一行
+写的是 `balanced`，分配时却仍把驻军调粮排在最前，和第 5 个月选定的 `requisition_for_force`
+一样。
+
+### 3. 提交三项需求，只做一次分配
+
+```rust
+// All three uses are manager-owned demands for the same exact grain
+// revision and become due at the same simulation instant. One
+// canonical allocation ingress therefore decides scarcity by persisted
+// priority/tie-break data rather than by Rust control flow.
+let manager = holder(1);
+let civilian = self.submit_demand(
+    month,
+    "civilian",
+    manager.clone(),
+    CIVILIAN_NEED,
+    decision_priority(resilience_decision, "civilian"),
+    None,
+)?;
+```
+
+赈济（`RELIEF_TARGET`，120）和驻军调粮（`SHIPMENT_QUANTITY`，1,200）也照此提交。
+`allocate_competing` 排入一次 `enqueue_resource_allocation`，`canwu-resource` 为能满足的
+需求记录[资源预留](/reference/terminology/)。每项需求在到期一个月后过期，届时释放它
+仍占着的预留。
+
+第 4 个月民食少了 40 筐，原因在默认的来源策略 `ResourceDemandSourcePolicyV1::Pooled`：
+它允许需求按账户 ID 顺序动用所有粮食账户，于是民食需求先预留了驻军账户 `a-field-force`
+里剩下的 40 筐，再从 `z-granary` 预留 280 筐，而 `reserved_allocation` 只把粮仓那 280 筐
+交给消费。
+
+### 4. 第 3 个月运粮给驻军
+
+`record_route_availability(month, month >= 3, true)` 把前两个月的河道标记为不通，
+这两个月的驻军调粮需求随之取消（`"force-before-readiness"`）。第 3 个月，
+`deliver_to_force` 用 `BeginTransfer` 把已预留的粮食扣入转移托管，开始河运一程，
+然后让这一程失败：
+
+```rust
+execution
+    .fail_current_leg("river crossing closed".to_owned(), self.canwu.time())
+    .map_err(transport_error)?;
+let alternate = route_plan(self.canwu.time(), month, true)?;
+```
+
+同一个运输执行以 `ItineraryRevisionReason::Disaster` 改道，经 `ridge-post` 走陆路。
+承运人在中转点交接，转移先后进入 `InTransit` 和 `ArrivalPending`。只有
+`CompleteTransfer` 以 `ResourceTransferDispositionV1::Accept` 结算之后，驻军账户才会入账。
+每个不可逆步骤（发起、验收、消费、入账）都带有完成租约凭证（证明持有人已激活执行该操作的
+一次性权利），详见[生产、资源与运输的职责划分](/developer/production-economy/)。
+
+### 5. 供应民食、赈济和驻军
+
+民食和赈济走 `consume_local`：先由经济插件批准一项消费意图，再经适配器输入发送
+`ResourceOperationRequestV1::Consume`。驻军走 `service_force_if_due` 这条独立路径：
+军事补给插件针对自己的账户提交消费意图，资源结果再经插件输入回传给它。
+
+```rust
+let operation = self.submit_force(ForceOperationV1::SubmitConsumptionIntent { intent })?;
+```
+
+第 4 到第 14 个月，驻军调粮需求照样参加分配，但 `deliver_to_force` 只在第 3 个月运行，
+所以 `force_fulfilled` 一直是 0。到第 5 个月，驻军账户只剩 40 筐，缺粮让驻军战备值
+下降 100‰（从 900 到 800）。此后账户见底，`service_force_if_due` 在没有粮可发时直接
+返回，战备值停在 800。
+
+### 6. 收成入账，结束本月
+
+第 10 个月，`credit_harvest` 这样计算收成：
+
+```rust
+let quantity = HARVEST_BASE
+    .saturating_mul(u64::from(local.cooperation_per_mille))
+    .saturating_mul(u64::from(
+        1_000_u16.saturating_sub(local.pending_harvest_penalty_per_mille),
+    ))
+    / 1_000_000;
+```
+
+然后以 `ResourceCreditSourceV1::ExternalInflow` 计入粮仓。第 9 个月末合作度为 924，
+没有待扣减的收成惩罚，因此收成是 `5000 × 924 / 1000 = 4620`。每个月都以
+`EconomyOperationV1::CloseMonth` 结束：它核对所引用的需求和结果记录，再追加一帧，
+也就是输出里看到的那些帧。`summary` 在生成汇总之前调用
+`ResourceState::validate_conservation`。
+
+## 值得注意的地方
+
+- 只有 `canwu-resource` 能改动余额。驻军提交的是消费意图，收成则作为带证据的入账到达。
+- 到达和验收是两个步骤。只有 `CompleteTransfer` 验收之后，驻军账户才有变化。
+- 相互竞争的需求在一次分配中按保存下来的优先级和平局决胜键结算。第 6 个月，调粮需求
+  因滞后生效的 `requisition_for_force` 姿态排在最前，预留了粮仓全部 1,200 筐；这批粮不会
+  发运，要等需求过期才释放，所以当月民食一筐也没分到。第 10 个月则是粮仓已经见底，收成
+  要到月末才入账。
+- `conservation_closing` 等于 `final_stock`（2,860），因为没有转移还停留在托管中。
+  运行结束时，2,860 筐全在粮仓，其中 1,200 筐预留给第 14 个月的调粮需求。
+- 第 5 个月的 `requisition_for_force` 让当月合作度少加 3。由于一个月的滞后，它的姿态在
+  第 6 个月才生效：调粮排在最前，但那时驻军账户已经没有存粮，所以
+  `canwu-force-supply-reference` 的征发 saga 没有启动。军事补给测试
+  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` 完整运行了这一流程。
+
+## 动手改一改
+
+- **决策序列。** 修改 `grain_loop.rs` 里的 `decisions` 数组，观察 `civilian_fulfilled`
+  和 `population_wellbeing_per_mille` 怎样变化。注意第 2 步提到的一个月滞后。
+- **收成。** 把 `grain.rs` 中的 `HARVEST_BASE` 改为 `6_000`。第 10 个月的
+  `harvest_output` 会变成 `6000 × 924 / 1000 = 5544`。
+- **种子底线。** 经济配置中记录了 `seed_floor: 180`，但没有代码读取它；两个粮食账户
+  也都没有受保护底线（`protected_floor_policy: None`），所以第 9 个月末粮仓被取空。
+  在这里加一个[受保护存量底线](/reference/terminology/)（`ProtectedFloorPolicyRevision`）
+  并不只是让粮仓账户指向它：只要需求的 `protected_floor_policy` 与它所动用账户的不一致，
+  分配就会以 `VersionConflict` 失败。这个循环里的需求都使用默认的 `Pooled` 来源策略
+  （见第 3 步），会同时动用两个粮食账户，而 `grain.rs` 中的 `submit_demand` 创建需求时
+  总是设为 `None`。因此两个账户和每项需求都需要使用同一个策略修订。`canwu-resource` 中的
+  `conservation_partial_minimum_and_protected_floor_are_enforced` 给出了一个可以运行的单账户
+  设置：底线会留住存量，而 `protection_override_class` 在该策略 `override_classes` 中的需求
+  仍可以动用底线以下的存量。
+- **存档与重放。** 运行 `cargo test -p canwu-economy-reference`。
+  `snapshot_checkpoint_journal_and_fork_continue_identically` 在第四个月后给循环做快照，
+  分别从快照恢复、从检查点日志重放、派生分支，再各推进两个月，检查四份副本的
+  `checkpoint_hash` 一致。
+
+## 示例之外
+
+完整的 API 规则见[生产、资源与运输的职责划分](/developer/production-economy/)。
+
+### 生产
+
+[生产模拟扩展](/reference/terminology/)（`canwu-production`）负责工艺、生产地点、工单和
+产出结算，`ProductionState::blockers_for` 会指出每个仍缺少证据的需求组
+（`cargo run -p canwu-production --example process_constraints`）。
+[在制品](/reference/terminology/)（`WorkInProgress`）记录一次执行的进度和已消耗的投入，
+存量本身仍在 `canwu-resource` 中；粮食循环没有运行生产工艺。
+
+### 资源能力阶段
+
+参考内容用 `ResourceCapabilityRevision` 描述一处资源，其
+[资源能力阶段](/reference/terminology/)（`ResourceCapabilityStage`）从 `Potential`
+经 `RouteAccessible` 到 `DeliveredAccepted`。即使到了 `RouteAccessible`，存量也要经过
+运行时的路线观察和目的地验收才能进入账户。
+
+### 稀缺度与价格
+
+`record_g5_decision` 每个月把管粮人的投影放进应对姿态票据的上下文。
+`ProjectionProviderRegistryV1::project(canwu, holder, scope)` 汇总该持有人的资源、经济、
+生产和军队见证，生成这份投影：成功时返回带 `EconomyProjectionV1` 的
+`ProjectionQueryResultV1::Available`，否则返回带阻塞代码（例如 `scope_unconfigured` 或
+`provider_unavailable`）的 `Unavailable`。投影的两部分都是只读模型，生成它们不会改动任何
+状态，也不会结算任何交易。
+
+- [本地稀缺度投影](/reference/terminology/)（`LocalScarcityProjection`）涵盖该持有人能
+  观察到的存量、未满足需求和缓冲。只有持有人也能到达的存量才计入供给；路线未观察到或
+  无法通行的远处存量记入 `excluded_unreachable_*` 字段。`scarcity_per_mille` 是已知供给
+  相对已知需求余量的缺口，以该余量的千分比表示，再加上路线和安全惩罚，上限为 2,000。
+  投影会列出成因。
+- [价格压力投影](/reference/terminology/)（`PricePressureProjection`）只有在经济配置接受
+  价格证据、并且存在生效中的价格证据时，才带有 `pressure_per_mille`。价格证据包括已成交的
+  交换、报价、官定价格或合同价格，每条都带解释规则和来源版本。只有一个因素时状态为
+  `Observed`，有多个因素时为 `InferredPressure`；没有证据时为 `ExplicitUnknown`；经济配置
+  排除价格时为 `NotApplicable`。本例的经济配置设为 `price_applicability: NotApplicable`，
+  所以这里是 `NotApplicable`。
+
+### 历史原型
+
+`canwu-economy-reference-content` 还带有两个有出处、但没有示例运行的 fixture：1450–1644 年
+松江与长江下游的明代棉纺织原型，以及 1896–1911 年汉阳铁厂、大冶铁矿和萍乡煤矿的原型；
+它们连同出处都在 [`fixtures.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-economy-reference-content/src/fixtures.rs) 中。
+
+## 源码
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/examples/grain_loop.rs" icon="external">
-  查看可运行粮食循环
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/tests/grain_harness.rs" variant="secondary" icon="external">
+  阅读粮食循环测试
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-force-supply-reference/tests/g4_contract.rs" variant="secondary" icon="external">
+  阅读军事补给测试
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/reference-content/canwu-economy-reference-content" variant="secondary" icon="external">
-  查看模型卡与出处
+  浏览模型卡与出处
 </LinkButton>
-
-这个案例不是把《Victoria 3》的市场模型搬进参伍。可借鉴的是“投入、产出、
-生产方式、资源条件和物流约束”这组策划语言；参伍实现的是更底层、可替换的
-确定性契约，让上层应用（例如 Celestial Mandate）自己决定市场、货币、工资、建筑界面和战斗公式。
-
-## 五个交付门槛
-
-| 门槛 | 可运行结果 | 引擎边界 |
-| --- | --- | --- |
-| G1b | 十四个月合成粮食循环 | 季节收成、种子底线、民食、赈济、军粮、路线关闭、征发后果和下一季反馈 |
-| G2 | `canwu-resource` | 守恒账户、需求、预留、精确分配腿、运输交接、验收、消费、损耗和履约 |
-| G3 | `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、执行、项目与产出结算 |
-| G4 | `canwu-force-supply-reference` | 独立的军事补给消费者、战备/短缺后果和跨领域征发 saga |
-| G5 | 稀缺度与价格压力读取 | 有界、持有人相对、可解释；没有价格证据就返回明确未知 |
-
-## 生产究竟怎样发生
-
-生产不是“科技已解锁，所以建筑每周自动产出商品”。一次生产必须通过如下证据链：
-
-```text
-修订后的工艺
-  + 可用生产地点与设施
-  + 材料、劳力/能力、工具/机器、能源
-  + 当地技术资格或已安装实现
-  + 授权、季节/环境、安全与通行条件
-  -> 工单获准并预留产能
-  -> 投入进入在制品
-  -> 生产执行
-  -> 产出经资源扩展结算到账
-```
-
-家庭副业、分散作坊、官营作坊、集中工厂和多地点企业都是版本化数据形态，
-不是同一条“建筑等级”阶梯。一个游戏可以在上层把它们显示成建筑；引擎只要求
-所有投入、能力、设施、时间和产出都有精确版本与可重放结果。
-
-当情景需要表达技术传播和采用较慢时，关键限制不是人为给“时代”加一个低速倍率，
-而是把以下环节分开：知道某项技法、具备当地操作资格、把工具/设施安装到某个
-地点、为特定用途采用，以及持续获得原料和通行。任何一环缺失，工单都会给出
-结构化 blocker，而不会靠年份自动获得能力。
-
-## 地理资源怎样影响生产
-
-参伍不使用一个永恒的 `has_coal = true`。资源内容采用带生效期和出处的能力阶段：
-
-```text
-潜在存在 -> 已观察/勘探 -> 已证实 -> 技术可采
-         -> 在产地点 -> 路线可达 -> 已运输并验收
-```
-
-地质存在不等于可生产。采掘工艺、授权、劳力、设备、能源、治安、道路/水运/铁路
-和目的地验收都会改变可用供给。路线规划只给出方案；运输记录行程、容量、执行、
-保管权与交接；只有目的地接受以后，资源才可进入当地账户或生产工单。
-
-## 可运行的十四个月粮食循环
-
-第一个 profile 明确标记为 **synthetic**，所有数量都是玩法校准，不是明代人口、
-亩产、军粮或价格估计。每月可选择优先赈济、优先军粮、平衡分配或征发军粮。
-冬季路线会关闭；秋季收成要保留种子底线；征发会降低合作度，并削弱下一季收成。
-
-```bash
-cargo run -p canwu-economy-reference --example grain_loop
-cargo test -p canwu-economy-reference
-```
-
-资源扩展始终是余额唯一写入者。军队提交需求与消费意图，不能直接扣粮；运输到达
-也不等于交付，必须完成交接和验收。这样可以检查每月守恒、失败重试、存档恢复和
-精确重放。
-
-## 明代案例：松江棉业原型
-
-历史内容把范围限定为 1450–1644 年松江与长江下游的家庭棉纺织生产。模型支持
-“家庭纺纱织布、部分家庭专门承担某一道准备或生产工序，以及商人与经纪组织
-流通”这一原型。部分专业作坊生产高档或花式棉布；与此分开，大型城市作坊承担
-最后的染色和轧光工序。不能据此推导全明统一工场规模、工资、生产率、现代工厂
-系数或全国性组织。
-
-主要模型卡依据 Harriet T. Zurndorfer 对帝制晚期中国棉纺织制造与市场的研究，
-并在内容中记录 PDF 页码定位。该研究把松江的棉业与农户家庭生产、商业化和
-分配网络联系起来；参伍据此保留家庭生产与按工序分工的家庭，而不把它改写成一
-座时代错置的集中工厂。
-
-## 中国工业化案例：汉阳—大冶—萍乡
-
-第二个历史原型严格标为 **长江中游湖北—江西工业链**，不是“华北工业走廊”：
-
-- 汉阳铁厂位于湖北；
-- 大冶铁矿位于湖北；
-- 萍乡煤矿位于江西；1896 年的史料能够支持矿务局开始购置矿区和铁路用地，
-  但不能据此把当年的线路写成已经投运；
-- 1896–1907 年只建模汉阳、大冶和萍乡之间相互关联但尚未合并的前身企业；
-  资源能力按有日期的证据节点表达：1896 年为勘察/购地观察，1904 年已有机械化
-  平巷投运；铁路 1903 年通至醴陵，1905 年内继续延伸至株洲。由于 fixture 以
-  整年为粒度，1906 年才作为“铁路运至株洲、再换装河船运往湖北”的首个完整
-  年度代理；各证据节点之间的能力状态不作推断；
-- 1908–1911 年才使用合并后的汉冶萍公司组织类别，实际路线可达性仍需独立证据。
-
-内容模型卡引用 Yun Liu 对汉冶萍公司形成的研究、Jeff Hornibrook 对江西萍乡
-机械化采煤、地方精英和矿务用地的研究、Elizabeth Perry 对现代矿井及铁路—
-水运供应链的梳理，以及 Shellen Xiao Wu 对铁路前水运和 1905 年矿山运行的
-材料。这个案例用于测试“矿产能力、采掘
-工艺、跨地区路线、能源投入、设施和企业组织如何同时成为约束”，不能外推为
-全国代表性、必然的工业化路径、自动技术扩散或统一生产率。
-
-<Aside type="caution" title="历史事实不等于玩法参数">
-  两个历史 profile 都是带出处的 archetype，不是完整校准。每个数值和因果规则都
-  必须关联模型卡；缺少证据的覆盖单元必须声明为“明确未知”或“不适用”，不能靠
-  默认值悄悄补齐。
-</Aside>
-
-## 军事与地方经济怎样相互作用
-
-军粮、草料、实物货币、弹药、备件和燃料保持为不同资源，不能压缩成万能“补给分”。
-补给不足产生军队本地的战备、疲劳、凝聚、疾病或逃亡后果。征发造成的民生、
-合作度和未来生产影响则通过类型化意图交给经济整合包；经济侧按预期版本应用或
-拒绝，再由军队确认，保证双方都不会越权写入对方状态。
-
-## 稀缺与价格
-
-`LocalScarcityProjection` 解释某个持有人实际观察到的库存、需求、缓冲、路线、
-治安和政策。它不声称存在价格。只有同一范围和时间段具有成交价、报价、官价或
-合同价证据，并有版本化解释规则时，才生成 `PricePressureProjection`。两个投影
-都不会创造货币、移动商品、转移所有权或结算交易。
-
-## 史料入口
-
-- [Zurndorfer：Cotton Textile Manufacture and Marketing in Late Imperial China and the “Great Divergence”](https://doi.org/10.1163/156852011X614028)
-- [Zurndorfer：The Resistant Fibre（开放 PDF）](https://www.lse.ac.uk/Economic-History/Assets/Documents/Research/GEHN/Padua/PADUAZurndorfer.pdf)
-- [Yun Liu：Revisiting Hanyeping Company (1889–1908)](https://doi.org/10.1080/00076790903469612)
-- [Jeff Hornibrook：Local Elites and Mechanized Mining in China](https://doi.org/10.1177/009770040102700202)
-- [Jeff Hornibrook：Don’t Tread on Me（1896 年萍乡矿务用地材料）](https://ihss.hku.hk/wp-content/uploads/2020/09/cbh-15-1.pdf)
-- [Elizabeth J. Perry：Anyuan: Mining China’s Revolutionary Tradition](https://doi.org/10.1525/9780520954038)
-- [朱力：《株洲为何是“火车拉来的城市”？》（1903 年醴陵终点、1905 年延伸株洲及铁路转水运）](https://m.voc.com.cn/xhn/news/202007/14436245.html)
-- [Shellen Xiao Wu：Empires of Coal](https://doi.org/10.1515/9780804794732)

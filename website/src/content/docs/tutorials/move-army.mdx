@@ -1,12 +1,15 @@
 ---
 title: 移动军队：参考整合起步示例
-description: 用可运行示例了解模拟插件、领域命令、确定性时间与精确重放。
+description: 运行参伍最小的完整程序，跟踪一道行军命令从下达到抵达，再保存、派生分支并重放。
 sidebar:
   order: 2
   label: 移动军队
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+本教程中，一位将领命令军队开往相邻领地。你会运行示例，看到军队在哪个边界上移动，并确认保存后加载、派生分支和重放得到的副本都停在同一个状态。这是同时用到[模拟插件](/reference/terminology/)、领域命令和精确重放的最短程序。
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs" icon="external">
   查看 starter.rs
@@ -15,9 +18,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览参考整合 crate
 </LinkButton>
 
-这是理解引擎与领域整合边界的最短路径：引擎提供通用运行时，世界模型和移动命令属于可选的 `canwu-reference-world` 整合。
-
-## 从新环境运行
+## 运行
 
 先安装 Git 和 Rust 1.88 或更新版本，再运行：
 
@@ -27,23 +28,121 @@ cd canwu
 cargo run -p canwu-reference-world --example starter
 ```
 
-## 执行流程
+首次编译需要几分钟。程序只输出一行：
 
-<Steps>
-1. 用 `demo_scenario()` 创建场景、通用实体注册表与参考领域记录。
-2. 通过 `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])` 注册领域逻辑。
-3. 把 `MovementCommand` 包装成领域命令，再经 `enqueue_command()` 进入规范化输入。
-4. 用 `advance_canonical()` 推进时间，再通过参考整合的 `snapshot()` 读取军队位置。
-5. 保存快照、加载、创建派生分支并从日志重放，然后比较四个检查点。
-</Steps>
+```text
+army_location=3 checkpoint=dd9796a606983d02eafd3495df11b20bb8423cec33f96c0eaddc24e44e4e2de1
+```
 
-## 应该观察什么
+领地 `3` 是军队的目的地东望城（Eastwatch）。checkpoint 是整个模拟状态的哈希。运行过程是确定性的，再运行一次会得到同样的哈希。
 
-- 军队在时间推进后到达目标领地。
-- 世界具体类型不是 `canwu-api` 的基础依赖；应用可替换整个领域整合。
-- 加载、派生分支和精确重放都与原运行产生相同检查点。
-- Format 8 快照自带规范实体注册与初始场景；Format 8 以前的存档由模拟内核拒绝，不在运行时隐式迁移。
+## 工作原理
+
+<MermaidDiagram
+  label="起步示例流程：构建世界、提交命令、推进时间，再加载、派生分支和重放"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
+  definition={`flowchart LR
+    World["demo_scenario()"] --> New["Canwu::new_with_plugins"]
+    New --> Queue["enqueue_command()"]
+    Queue --> Advance["advance_canonical(19 小时)"]
+    Advance --> Save["snapshot_json()"]
+    Save --> Load["加载"]
+    Load --> Fork["fork()"]
+    Advance --> Replay["replay_from_journal()"]
+    Load --> Compare["检查点哈希相同"]
+    Fork --> Compare
+    Replay --> Compare
+`}
+/>
+
+### 1. 构建世界
+
+```rust
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+```
+
+`demo_scenario()` 返回起始世界 `Scenario`，以及后面要用到的各个 ID。沈将军（General Shen）指挥驻在云都（Yun Capital，领地 2）的第一野战军；从云都经东河道（Eastern River Road）到东望城需要 18 小时。`35` 是随机种子。
+
+世界模型来自 `canwu-reference-world` crate 中的 `ReferenceWorldPlugin`。这个插件把世界存为一条领域记录，并注册 `order_movement_v1` 命令和负责移动军队的边界系统。它只依赖公开的 `canwu-api` crate，你可以换成自己的世界模型。
+
+### 2. 提交命令
+
+```rust
+let envelope = order_movement(
+    Issuer::Actor(ids.commander),
+    &MovementCommand {
+        subject: EntityRef::Army(ids.army),
+        destination: ids.eastern_territory,
+        cargo: Vec::new(),
+    },
+)?
+.at_time(canwu.time());
+canwu.enqueue_command(
+    canwu.time(),
+    0,
+    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), envelope),
+)?;
+```
+
+`order_movement` 把 `MovementCommand` 包装成由沈将军签发的领域命令（`Command::Plugin`），放进 `CommandEnvelope`。`at_time(canwu.time())` 和 `canwu.revision()` 用来拦截过期输入：参伍准入这条请求时，模拟时间和状态版本必须与之一致。
+
+`enqueue_command` 接收到期时间、优先级和请求，把请求放入规范化输入（canonical ingress）。这是一条有记录、有固定顺序的输入路径，重放时会原样读取。
+
+### 3. 推进时间
+
+```rust
+canwu.advance_canonical(SimDuration::hours(19))?;
+```
+
+`advance_canonical` 结算未来 19 小时内到期的所有边界。边界是一次原子结算，详见[结算系统](/architecture/settlement/)。本次运行共结算三个边界：
+
+| 边界 | 时间 | 发生了什么 |
+| --- | --- | --- |
+| 1 | Day 0, 00:00 | 命令处理器检查命令、预留这支军队，并安排两个移动数据包：立即出发，18 小时后抵达。 |
+| 2 | Day 0, 00:00 | 出发数据包让军队进入行军状态。 |
+| 3 | Day 0, 18:00 | 抵达数据包把军队移到东望城。 |
+
+### 4. 保存、加载、派生分支和重放
+
+```rust
+let saved = canwu.snapshot_json()?;
+let loaded = Canwu::from_snapshot_json_with_plugins(&saved, &[&plugin])?;
+let fork = loaded.fork();
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
+```
+
+- `snapshot_json` 序列化状态。加载时需要注册同样的插件。
+- `fork` 复制一份模拟，副本可以接收不同的输入继续运行。
+- `replay_from_journal` 从初始场景和已记录的输入重建整个运行。
+
+示例断言三个副本的检查点哈希都与原运行相同，然后从重放副本中读出军队位置并打印。
+
+## 继续尝试
+
+在 `advance_canonical` 之后打印事件日志：
+
+```rust
+for event in canwu.events() {
+    println!("{} {} {}", event.timestamp, event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+Day 0, 00:00 canwu.reference-world.pending_changed Reserve a reference-world movement subject
+Day 0, 00:00 canwu.reference-world.domain_record_updated Apply reference-world movement transitions
+Day 0, 00:00 canwu.reference-world.canwu.reference-world.movement_started.v1 Reference-world movement started
+Day 0, 18:00 canwu.reference-world.domain_record_updated Apply reference-world movement transitions
+Day 0, 18:00 canwu.reference-world.canwu.reference-world.movement_arrived.v1 Reference-world movement arrived
+```
+
+把 `SimDuration::hours(19)` 改成 `SimDuration::hours(17)`，示例会输出 `army_location=2`：军队还在路上，抵达边界之前它的位置一直记在云都。
 
 ## 下一步
 
-实时或连续运行的应用应继续阅读[连续时间游戏循环](/tutorials/continuous-game-loop/)。
+如果你的游戏实时运行，请继续阅读[连续时间游戏循环](/tutorials/continuous-game-loop/)。

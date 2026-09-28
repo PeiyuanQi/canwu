@@ -1,28 +1,36 @@
 ---
 title: 编码传递与中途截取
-description: 用合成符号代码说明复制、访问和解读的区别，以及不同能力如何产生不同结果。
+description: 经手人在途中复制了一份编码消息，却没能解读；收件人委托他人解读，再把结果开放给一名复核者。
 sidebar:
-  order: 5
+  order: 7
   label: 编码传递与中途截取
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs" icon="external">
-  打开可运行示例
-</LinkButton>
+## 场景
 
-## 先看故事
+发件人把一份编码消息寄给一位收件人。中继经手人在途中复制了这份消息，完整读过副本，但手里的
+密钥解不开它。收件人收到原件后，委托一位持有正确密钥的人代为解读，再把解读结果开放给一名复核者。
 
-本案例使用五个合成持有人和没有现实含义的内容代码。初始持有人向指定收件人发送
-一份需要特定能力才能解读的符号表现；中继经手人在传递途中截获并复制它。
+这个示例回答的问题是：“拿到副本”“读过”“读懂”这三件事怎样分开记录？替别人完成的解读又怎样记录，
+才能让重放直接复用已记录的结果？
 
-经手人可以看到完整的符号副本，却没有对应的解法。他知道“拿到了一份东西”，却不能
-把它还原成有意义的话。指定收件人收到原件后，请一名有权限的持有人代为解读，得到
-一份结果内容，再把结果只开放给收件人和一名复核者查看。
+所有持有人、时间和内容代码都是合成的测试值。
 
-这件事最容易混淆的地方，可以用一句话概括：**看见了，不等于看懂了；替别人看懂了，
-也不等于自己知道了。**
+## 示例涉及的引擎部件
+
+- `canwu-information`，负责信息流转的[模拟领域扩展](/developer/extensions/)，以及它的规划入口
+  `InformationLifecycle::plan`。
+- 同内容副本：第二个 `Representation`（表现形式），使用 `ContentRelation::SameContent`，并有一条
+  指向原件的父边。
+- 状态为 `InterpretationStatus::Failed` 和 `Succeeded` 的 `Interpretation`（解读）记录，每条都绑定
+  它所读的访问记录和表现形式。
+- 委托解读：`InterpretationAuthority::Delegated` 引用一条已持久化的命令，命令中带有
+  `DelegationClaimV1`。
+- 每条只面向一个持有人的知识发布（[持有人相对知识](/reference/terminology/)），以及通过
+  `InformationPlugin` 完成的快照恢复、[精确重放](/developer/persistence/)和紧凑检查点恢复。
 
 ## 运行
 
@@ -30,59 +38,240 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 cargo run -p canwu-information --example encoded_interception
 ```
 
-示例用 detached ledger 保持完整生命周期清晰可读，再通过权威 `InformationPlugin`
-执行“解读者替收件人完成解读”的授权操作。一个持久化的中立权限命令提供精确 claim；
-示例随后验证快照恢复、不会重新运行外部解码器的精确重放、压缩证据重建与压缩
-checkpoint 恢复。
+所有检查通过后，程序打印一行结果；任何一项检查失败，程序都会提前停止：
 
-故事角色对应如下：
+```text
+encoded_interception: in-transit copy, failed access interpretation, delegated decode, restricted review release, authoritative save/load, exact replay without external decoding, and compact reconstruction verified
+```
 
-| 代码标签 | 故事角色 | 所在地或关系 |
-| --- | --- | --- |
-| `H-601` | 符号内容的初始持有人 | `NODE-0` |
-| `H-602` | 指定收件人和委托方 | `NODE-2` |
-| `H-603` | 中继经手人 | `NODE-1` |
-| `H-604` | 受托解读者 | 受收件人委托 |
-| `H-605` | 受限复核者 | 收件人指定的查看者 |
+每个短语对应源码中的一组检查；最后三项来自 `examples/support/mod.rs` 中的
+`verify_authoritative_operation_roundtrip`，委托解读和复核发布各运行一次。
 
-## 相对时间线
+## 消息流程
 
-| 分钟 | 故事动作 | 系统记录 |
-| ---: | --- | --- |
-| `0–1` | 创建需要 `decode_k2` 的 `grouped_symbols_v1` 表现。 | 创建原始 content 和 representation |
-| `2–4` | 向指定收件人发起传递，仍在传递途中。 | 创建 addressed dispatch，delivery attempt 进入 `InTransit` |
-| `5` | 中继经手人截获符号表现并复制一份。 | 创建 same-content representation copy 和 parent edge |
-| `6` | 经手人完整看过副本。 | 记录 access |
-| `7` | 经手人用错误的解法尝试解读。 | `decode_k1` 失败，不产生 result content |
-| `12–13` | 指定收件人收到原件并接触符号表现。 | 完成 delivery attempt，记录原件 access |
-| `14–15` | 受托解读者用正确能力代收件人解读。 | `decode_k2` 成功，生成结果 content 和成功 interpretation |
-| `16` | 原始传递在 delivery attempt 终止后完成。 | dispatch 进入完成状态 |
-| `17–19` | 收件人把结果只开放给自己和复核者。 | 创建并激活受限 review release |
+<MermaidDiagram
+  label="编码消息从发件人到复核者的时序"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的代码走读描述了同样的步骤。"
+  renderFailureMessage="图表预览不可用；下文的代码走读描述了同样的步骤。"
+  definition={`sequenceDiagram
+    participant S as 发件人 H-601
+    participant R as 经手人 H-603
+    participant P as 收件人 H-602
+    participant D as 受托解读者 H-604
+    participant V as 复核者 H-605
+    S->>R: 发往 H-602，投递尝试 InTransit（第 2–4 分钟）
+    Note over R: 复制出 SameContent 副本（第 5 分钟）
+    R->>R: 阅读副本，decode_k1 解读失败（第 6–7 分钟）
+    R->>P: 投递尝试 Delivered，收件人阅读（第 12–13 分钟）
+    Note over P,D: 委托声明，能力 decode_k2
+    D-->>P: 解读成功，生成结果内容（第 14–15 分钟）
+    P->>V: 复核发布转为 Active（第 17–19 分钟）
+`}
+/>
 
-## 模型验证点
+## 代码走读
 
-<Steps>
-1. 截取首先生成 representation copy；`SameContent` 和 parent edge 说明“这是同一份内容的复制件”，不会把它伪装成指定收件人已经收到的原件。
-2. 取得 access 不等于取得 interpretation。`H-603` 可以完整看到符号副本，但因为只有 `decode_k1`，只能得到一次失败记录。
-3. `Failed` interpretation 不允许绑定 `result_content`；`Succeeded` interpretation 必须绑定解读结果。
-4. 每次 interpretation 都同时记录输入 access、输入 representation、实际执行者 `performed_by` 和服务对象 `performed_for`，因此能看出“谁看了、谁解了、替谁解”。
-5. 定向 delivery 仍按自己的 attempt 状态推进；中途截取不会替换指定收件人的交付证据。
-6. Knowledge draft 按持有人隔离：截取者只知道自己的 access 和失败解读，收件人知道自己的 access、受托解读和复核发布，复核者只知道 release 可用；执行解读的人不会因为代办一次操作，就自动得到收件人的全部 knowledge。
-</Steps>
+场景代码在
+[`encoded_interception.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs)，
+共用的辅助函数在
+[`support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs)。
+和[机密副本与定向发布](/tutorials/cases/confidential-copy-release/)一样，记录是逐条请求在脱离
+运行时的账本上规划出来的。
 
-## 读完后只记住三句话
+| 持有人 | 角色 |
+| --- | --- |
+| `H-601` | 发件人 |
+| `H-602` | 指定收件人，委托解读并发布复核结果 |
+| `H-603` | 中继经手人，复制消息并尝试解读 |
+| `H-604` | 替 `H-602` 解读的受托人 |
+| `H-605` | 复核者 |
 
-- 截到副本，不等于截到对方已经理解的内容。
-- 能看到符号副本，不等于有能力解读。
-- 替别人解读，不会让解读者自动获得对方的知识。
+### 1. 编码并发送（第 0–4 分钟）
 
-## 判断声称的来源
+原始表现形式写明了读懂它需要的能力：
 
-自 0.13.0 起，interpretation 还可以判断来源。`InterpretationPayload::authenticity` 可以携带真伪判定（`AuthenticityFinding`）：所解读的某个 representation 的精确版本、是否接受其声称的来源（`claimed_source_accepted`）、不超过 256 字节的简短依据，以及以千分比表示的置信度。该 representation 必须是本次 interpretation 的输入且为当前版本，并且必须带有声称的来源，否则操作会以 `invalid_lifecycle` 被拒绝。因此，一份伪造的命令可以被记录为“已经读懂，但不接受其声称的发送者”。解读者能否识破伪造、概率多大，仍由应用抽样决定；扩展只记录判定结果。本案例的示例没有使用真伪判定。
+```rust
+payload: RepresentationPayload {
+    format: "grouped_symbols_v1".to_owned(),
+    created_at: minute(1),
+    operation: "encode_k2".to_owned(),
+    content_relation: ContentRelation::SameContent,
+    sources: Vec::new(),
+    claimed_source: None,
+    interpretation_capability: Some("decode_k2".to_owned()),
+},
+```
 
-## 可替换的应用层部分
+发往 `H-602` 的定向 `Dispatch` 转为 `Active`。它的 `DeliveryAttempt`（投递尝试）以 `relay`
+角色记下 `H-603`，并转为 `InTransit`。
 
-`grouped_symbols_v1`、`decode_k1`、`decode_k2`、节点编号和相对时延都是应用配置。
-引擎只需要中立的 representation lineage、delivery、access、interpretation 和
-holder-relative publication 契约。真实的暗号规则、传递方式、解读能力和故事后果，
-都留给下游插件。
+### 2. 经手人复制消息（第 5 分钟）
+
+经手人为同一份内容创建第二个表现形式：
+
+```rust
+content_relation: ContentRelation::SameContent,
+sources: vec![RepresentationSourceEdge {
+    parent: encoded.clone(),
+    completeness_per_mille: 1_000,
+    fidelity_per_mille: 1_000,
+}],
+```
+
+`SameContent` 要求副本与父表现形式引用同一条 `Content` 记录（`validate_representation_lineage`）。
+经手人还为副本创建了自己保管的 `Instance`。
+
+### 3. 经手人读了副本，却没能解读（第 6–7 分钟）
+
+经手人的访问引用截取得到的载体实例，并完整读过副本（`extent_per_mille: 1_000`）。他的解读记录：
+
+```rust
+payload: InterpretationPayload {
+    interpreted_at: minute(7),
+    status: InterpretationStatus::Failed,
+    capability: "decode_k1".to_owned(),
+    confidence_per_mille: 0,
+    authenticity: None,
+},
+authority: InterpretationAuthority::HolderSelf,
+```
+
+`Failed` 这个结果由示例给出。扩展把 `capability` 和 `interpretation_capability` 当作标签保存，
+解读能否成功由你的应用判断。扩展检查的是结果的记录方式（见
+[`lifecycle.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/src/lifecycle.rs)
+中的 `validate_interpretation`）：
+
+- 每条解读都要有 `input_access`、`input_representation`、`performed_by` 和 `performed_for`
+  引用，且每个输入表现形式都必须是某条输入访问读过的；
+- `Failed` 的解读不带 `result_content`，`Partial` 或 `Succeeded` 的解读必须带；
+- 使用 `HolderSelf` 时，执行者与服务对象必须是同一个持有人。
+
+示例直接验证了第二条规则：缺少 `result_content` 的 `Succeeded` 请求必须失败。
+
+```rust
+assert!(ledger.plan(&invalid_success_without_result).is_err());
+```
+
+### 4. 原件送达（第 12–13 分钟）
+
+投递尝试转为 `Delivered`，并向 `H-602` 发布 `RepresentationAvailable`。收件人的访问引用
+`delivery_attempt`、`dispatch` 和原始表现形式；经手人的访问引用的是截取得到的载体实例，两次阅读
+各有各的证据。
+
+### 5. 受托人替收件人解读（第 14–15 分钟）
+
+解读结果是从原件衍生出的新内容，代码为 `SYN-E8-42-R`。成功的解读把 `H-604` 记为执行者、`H-602`
+记为服务对象，并绑定结果：
+
+```rust
+holder_reference("performed_by", &performer_holder),
+holder_reference("performed_for", &destination_holder),
+DomainReference::from_typed("result_content", decoded_content.clone()),
+```
+
+它的权限来自委托：
+
+```rust
+authority: InterpretationAuthority::Delegated {
+    evidence: EvidenceRef::Command(CommandId::new(1)),
+    authority_grant: DELEGATED_AUTHORITY_GRANT.to_owned(),
+},
+```
+
+授权代码 `DELEGATED_AUTHORITY_GRANT`（`interpret_for_holder`）告诉 `InformationPlugin`：到发给
+`canwu-authority` 的 `delegate_interpretation_v1` 插件命令中，按 `claim` 键读取委托声明。示例里，
+`support/mod.rs` 中的 `CaseAuthorityPlugin` 注册了这条命令，权威运行中的第一条命令携带如下声明：
+
+```rust
+Some(DelegationClaimV1 {
+    format_version: 1,
+    performed_by: EntityRef::Person(PersonId::new(604)),
+    performed_for: destination_holder.clone(),
+    capabilities: vec!["decode_k2".to_owned()],
+    not_before: Some(SimTime::EPOCH),
+    expires_at: None,
+}),
+```
+
+应用这条解读时，插件检查声明是否写明了这个执行者、这个服务对象和这项能力，以及解读时间是否落在
+`[not_before, expires_at)` 之内。检查不通过，操作就以 `invalid_authority` 被拒绝。
+
+权威运行结束后，只有收件人得到新的知识：
+
+```rust
+assert_authoritative_knowledge(
+    canwu,
+    &destination_holder,
+    &["interpretation_recorded"],
+)?;
+assert_authoritative_knowledge(canwu, &review_holder, &[])?;
+assert_authoritative_knowledge(canwu, &source_holder, &[])?;
+assert_authoritative_knowledge(canwu, &performer_holder, &[])
+```
+
+重放时，辅助函数用 `PersistedResultReplayPlugin` 代替 `CaseAuthorityPlugin`。它对同一条命令的
+处理函数只接受已经带有记录结果的载荷，否则以 `ReplayMismatch` 失败；因此重放通过，就说明结果来自
+日志。
+
+### 6. 把结果开放给复核者（第 16–19 分钟）
+
+受托人把结果渲染成 `review_text_v1` 表现形式。接着，`H-602` 创建由 `H-602` 和 `H-605` 组成的
+显式受众，并为这个表现形式创建面向受众的发布。激活同样在 `Canwu` 中执行一遍：
+
+```rust
+assert_authoritative_knowledge(canwu, &destination_holder, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &review_holder, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &source_holder, &[])?;
+assert_authoritative_knowledge(canwu, &performer_holder, &[])
+```
+
+## 值得注意的地方
+
+- 副本、访问和解读是三条独立的记录。经手人手里有完整副本，也完整读过，却仍然没有解读结果。
+- 解读成败是应用输入。扩展规定的是结果怎样记录，包括结果内容的绑定。
+- 委托解读只向服务对象发布知识，受托人不会因此得到任何知识。
+- 委托声明保存在已持久化的命令里，重放时直接从日志核验权限。
+
+## 动手改一改
+
+- 在经手人那条失败的解读中加入 `DomainReference::from_typed("result_content", content.clone())`。
+  规划会失败，报错 `failed interpretation cannot have result content`。
+- 把经手人那条解读的 `performed_for` 改成 `destination_holder`，权限仍用 `HolderSelf`。规划会失败，
+  报错 `self interpretation authority requires performer and holder equality`。
+- 把 `DelegationClaimV1` 的 `capabilities` 改成 `vec!["decode_k1".to_owned()]`。脱离运行时的
+  规划仍会成功，但 `InformationPlugin` 以 `invalid_authority` 拒绝该操作，示例停止并报错
+  `authoritative case operation did not complete: Rejected`。
+
+## 示例之外
+
+### 判断声称的来源
+
+表现形式可以在 `RepresentationPayload::claimed_source` 中写明它声称的来源；对它的解读随后可以在
+`InterpretationPayload::authenticity` 中记录一条[真伪判定](/reference/terminology/)
+（`AuthenticityFinding`）：是否接受声称的来源、一个简短的 `basis`（例如 `"seal_mismatch"`），以及
+置信度。判定必须引用这次解读所读、并且带有 `claimed_source` 的表现形式的当前版本，否则
+`InformationPlugin` 以 `invalid_lifecycle` 拒绝该操作。这样，一份伪造的文书可以记为“已经解读”，
+同时不接受它声称的发送者。持有人识破伪造的概率由应用抽样决定（见[模型归属](/architecture/model-ownership/)），
+本示例中 `authenticity` 为 `None`，[真伪判定测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/gap_g27_information_authenticity_finding.rs)构造了一条这样的判定。
+
+### 来自指派角色的权限
+
+`InterpretationAuthority::InstitutionalRole` 与委托形式类似，但它按授权代码
+`interpret_as_assigned_role`，从某条 `AuthorityAssignment` 记录的确切版本中读取声明。
+
+## 源码
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/encoded_interception.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs" variant="secondary" icon="external">
+  阅读示例共用的辅助函数
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/runtime_adapter.rs" variant="secondary" icon="external">
+  阅读解读权限测试
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/gap_g27_information_authenticity_finding.rs" variant="secondary" icon="external">
+  阅读真伪判定测试
+</LinkButton>

@@ -8,24 +8,24 @@ const isEnglish = locale === "en";
 
 const copy = isEnglish
   ? {
-      summary: "Optional: use a coding agent for implementation",
-      intro: "Before it writes code, have your coding agent read and use the two official skills:",
+      summary: "Using a coding agent? Start here",
+      intro: "Canwu ships two skills for coding agents. Ask your agent to load them before it writes code:",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",
-      tutorials: "tutorials",
-      developer: "developer guide",
+      tutorials: "Get started",
+      developer: "guides",
       promptLabel: "Starter prompt",
-      prompt: "Read canwu-engine-docs and canwu-engine-usage first. Then read the relevant Canwu tutorial, developer guide section, and public example. Implement through canwu-api, explain the invariant before editing, and run the example or focused check when done.",
+      prompt: "Load the canwu-engine-docs and canwu-engine-usage skills. Read the Canwu tutorial, guide page, and example that match this task. Use only canwu-api, state the rule you must preserve before you edit, and run the example or a focused check when you are done.",
     }
   : {
-      summary: "可选：使用 Coding Agent 开发",
-      intro: "开始写代码前，先让你的 coding agent 读取并使用以下两个官方 skill：",
+      summary: "在用编程智能体？从这里开始",
+      intro: "参伍为编程智能体提供了两个 skill。请让智能体在写代码前先加载它们：",
       docsSkill: "canwu-engine-docs",
       usageSkill: "canwu-engine-usage",
       tutorials: "快速开始",
-      developer: "开发者指南",
-      promptLabel: "可直接发送的提示",
-      prompt: "请先读取并使用 canwu-engine-docs 和 canwu-engine-usage，再阅读相关 Canwu 教程、开发者指南章节和公开示例。通过 canwu-api 实现，编辑前先说明要维护的约束，完成后运行示例或针对性检查。",
+      developer: "开发指南",
+      promptLabel: "可以直接发送的提示",
+      prompt: "请先加载 canwu-engine-docs 和 canwu-engine-usage 两个 skill，再阅读与本任务对应的参伍教程、开发指南页面和示例。只通过 canwu-api 实现；动手修改前先说明需要保持的约束；完成后运行示例或针对性检查。",
     };
 
 const skillUrl = "https://github.com/PeiyuanQi/canwu/tree/main/agent-interface/plugins/canwu-engine/skills";

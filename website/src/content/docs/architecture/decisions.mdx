@@ -1,0 +1,236 @@
+---
+title: 决策系统
+description: 决策票据、控制者和决策策略怎样让玩家、AI 或模型从已有选项中选出一个，并把选择变成经过校验、可以精确重放的命令。
+sidebar:
+  order: 8
+  label: 决策系统
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="决策系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/randomness/">随机性</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/decisions/">English version</a>
+</nav>
+
+决策系统回答三个问题：某个角色或机构要在哪些选项之间选择，由谁来选，选中之后怎样生效。`canwu-decision` 定义[决策票据](/reference/terminology/)（`DecisionTicket`）、[控制者](/reference/terminology/)（controller，`DecisionControllerBinding`）和决策策略 SDK；`canwu-sim` 负责决策输入的准入、持久化、校验、取消和重放；上层应用通过 `canwu-api` 使用这两部分。让玩家、AI、外部服务或 LLM 替角色做决定时，就要用到它。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-decision` | 票据、选项、控制者绑定、决策尝试和决策轨迹的数据类型；`DecisionState` 的状态转移、截止时间和历史归档；`DecisionController::evaluate`；决策策略 SDK | crates.io |
+| `canwu-sim` | 决策输入的入队与准入、嵌套命令、`ResolveDecisionRandomly` 指令、人物不可用时的票据取消、快照校验和精确重放 | crates.io，应用经由 `canwu-api` 使用 |
+| `canwu-api` | `Canwu` 上的决策方法（`enqueue_decision`、`prepare_decision`、`drive_decision`、`decision_ticket`、`decision_attempt`、`decision_trace` 等），以及决策相关类型的再导出 | crates.io |
+| `canwu-core` | `DecisionTicketId`、`DecisionRequestId`、`DecisionTraceId`、`RandomDrawId` 等 ID 类型 | crates.io |
+
+<MermaidDiagram
+  label="上层应用和领域扩展通过 canwu-api 使用决策系统；canwu-sim 和 canwu-api 依赖 canwu-decision，后者只依赖 canwu-core 和 canwu-time"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；上表和下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；上表和下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    App["上层应用<br/>票据内容、策略对象、<br/>玩家与模型的答复"] --> Api["canwu-api<br/>Canwu 上的决策方法"]
+    Ext["领域扩展<br/>canwu-law、canwu-society 等"] --> Api
+    Api --> Sim["canwu-sim<br/>准入、持久化、校验、重放"]
+    Api --> Decision["canwu-decision<br/>票据、控制者、策略 SDK"]
+    Sim --> Decision
+    Decision --> Core["canwu-core<br/>决策相关 ID"]
+    Decision --> Time["canwu-time<br/>SimTime"]
+`}
+/>
+
+依赖是单向的。`canwu-decision` 只依赖 `canwu-core` 和 `canwu-time`，选项里的命令对它来说只是一段 JSON。`canwu-sim` 把决策状态当作权威状态的一部分保存和校验。领域扩展通过 `canwu-api` 使用决策类型，并提供构造票据草案的函数，例如 `canwu-society` 的 `institutional_policy_ticket` 和 `canwu-correspondence` 的 `correspondence_decision_ticket`。`canwu-law` 为每个席位持有人生成票据草案，交接过程见[社会、文化与法律](/architecture/culture-law/)。
+
+## 核心模型
+
+决策策略只拿到票据，只能返回票据上已有的一个选项 ID，或者推迟、等待。签发者、权限和命令内容都来自持久化的控制者绑定和选项，策略碰不到它们。
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `DecisionControllerBinding` | 控制者：控制者 ID、策略身份、权限来源，可选的席位与权限配置（`with_seat`）、命令主体（`with_command_subject`）和随机平局决胜许可（`with_random_tie_break`）。注册后不可修改。 |
+| `DecisionPolicyIdentity`、`DecisionPolicyKind` | 策略身份：种类（`Utility`、`Rule`、`Random`、`Human`、`External`、`Llm`）、ID、版本，以及可选的配置哈希 `semantic_hash`。 |
+| `DecisionAuthority` | 控制者以谁的名义行事：`Actor`、`Institution`（可指定责任角色）、`Council` 或 `NoResponsibleActor`。 |
+| `DecisionTicketDraft`、`DecisionTicket` | 决策票据：定义名、决策者（`decision_maker`）、指派的控制者、摘要、上下文、选项、可选的截止时间和前序票据。保存后还带有版本号、开启与更新时间和状态。 |
+| `DecisionTicketState` | `Open`、`Resolved`（记下选中的选项和决策轨迹 ID）、`Cancelled`（带原因）或 `Expired`。 |
+| `DecisionOption` | [决策选项](/reference/terminology/)：ID、标签、说明、动作（`DecisionAction::None` 或一条序列化的 `Command`）、效用输入、阻碍项 `blockers` 和元数据。阻碍项非空的选项不可选。 |
+| `DecisionContext` | 票据上下文：一个 schema 名加一段 JSON 载荷，内容由应用定义。 |
+| `DecisionMutation` | 五种决策变更：`RegisterController`、`Open`、`ReplaceOptions`、`Resolve` 和 `Cancel`。 |
+| `DecisionIngressRequest` | 一条决策输入：请求 ID、预期修订版本、一项变更，以及可选的嵌套命令请求。 |
+| `PolicyDecision`、`DecisionOutcome` | 策略的答复：`Selected`、`Deferred`、`Pending` 或 `PendingRandom`，附带逐项评估、外部证据、抽样证据、决策阶段和触发的前置规则。 |
+| `DecisionAttemptRecord` | [决策尝试](/reference/terminology/)：每条被准入的决策输入都留下一条，结果为 `Accepted`，或带 `DecisionAttemptErrorCode` 的 `Rejected`。 |
+| `DecisionTrace` | [决策轨迹](/reference/terminology/)：一次 `Resolve` 的证据，包括票据版本、控制者、策略身份、结果、逐项评分、外部或抽样证据、嵌套命令的请求 ID 和前序票据。 |
+| `DecisionRandomEvidence`、`DecisionOptionWeight` | 抽样证据与决策选项权重：抽样 ID、抽到的值、上界，以及把值映射到选项的整数权重。 |
+
+### 决策策略 SDK
+
+`DecisionPolicy` trait 只有两个方法：`identity` 返回策略身份，`decide` 读取 `&DecisionTicket` 并返回 `PolicyDecision`。SDK 自带下面这些实现：
+
+| 种类 | SDK 类型 | 怎样作答 |
+| --- | --- | --- |
+| `Utility` | `WeightedUtilityPolicy` | 用 `UtilityProfile` 的权重乘以各选项的 `utility_inputs` 并求和，最高分胜出，同分取选项 ID 最小的选项；所有选项都被阻碍时推迟。 |
+| `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。 |
+| `Rule` | `OrderedRulePolicy` | 按顺序运行规则，遇到第一条 `Select` 或 `Defer` 即结束；没有规则命中时推迟。 |
+| `Random` | 无宿主侧实现 | 由边界系统抽样结算，见下文。 |
+| `Human` | `QueuedHumanPolicy` | 提交 `HumanDecisionResponse` 之前返回 `Pending`。 |
+| `External` | `QueuedExternalPolicy` | 提交 `ExternalDecisionResponse` 之前返回 `Pending`。 |
+| `Llm` | `QueuedLlmPolicy` | 同上；回答中的 `provider` 还必须与 `LlmModelIdentity` 一致。 |
+
+人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
+
+`Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
+
+## 一个决策的生命周期
+
+<MermaidDiagram
+  label="决策从注册控制者、开启票据，经过策略求值或边界抽样，到准入、写入决策轨迹并执行嵌套命令"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
+  definition={`flowchart TB
+    Host["上层应用或领域扩展<br/>RegisterController、Open"] --> Queue["规范化输入<br/>DecisionIngressRequest"]
+    Queue --> Admit["边界第 1 阶段准入<br/>写入 DecisionAttemptRecord"]
+    Admit --> Ticket["DecisionTicket<br/>Open，带版本号"]
+    Ticket --> Policy{"控制者的策略<br/>只读票据"}
+    Policy -- "Pending" --> Wait["等待玩家、服务<br/>或模型答复"]
+    Wait --> Policy
+    Policy -- "Selected 或 Deferred" --> Drive["drive_decision<br/>排入 Resolve 请求"]
+    Policy -- "PendingRandom，或 Random 控制者" --> Draw["边界系统抽样<br/>ResolveDecisionRandomly"]
+    Drive --> Queue
+    Draw -- "内核生成 Resolve 输入" --> Queue
+    Admit -- "Resolve 通过" --> Trace["DecisionTrace<br/>嵌套命令进入常规命令准入"]
+`}
+/>
+
+<Steps>
+1. 注册控制者。 上层应用用 `enqueue_decision` 排入 `RegisterController`。决策输入属于规范化输入的 `Decision` 类，到期时间相同时排在命令、通信、确认和信息之后，调度工作之前。控制者 ID 只能注册一次；权限和命令主体引用的实体必须存在。
+2. 开启票据。 `Open` 携带一份 `DecisionTicketDraft`。准入时，票据 ID 必须非零且未被使用，至少有一个选项且选项 ID 互不相同，指派的控制者已经注册，截止时间不早于准入时间，决策者存在且可用，控制者的权限人物也可用，前序票据（如有）符合接续规则。票据以版本 1、`Open` 状态保存，选项按 ID 排序。
+3. 更新票据。 局势变化时排入 `ReplaceOptions`，带上 `expected_version`，替换上下文和选项。版本号加一，为旧版本准备的答复随之作废。`Cancel` 带一个原因关闭票据。
+4. 求值。 上层应用调用 `prepare_decision`，把策略对象交给引擎。引擎确认票据开启、未过截止时间、决策者和权限人物可用、策略身份与绑定一致，然后调用 `DecisionController::evaluate`。结果为 `Pending` 时不入队任何内容；结果为权威答复时，返回一条 `Resolve` 请求。选中的选项带命令时，调用方必须给出 `CommandRequestId`，引擎用控制者绑定生成嵌套命令。`drive_decision` 把求值和入队合成一步。
+5. 准入。 下一个边界的第 1 阶段 `EventIngress` 准入到期的决策输入。引擎依次检查预期修订版本、嵌套命令的请求 ID 是否唯一、引用的实体是否存在、人物是否可用，再交给 `DecisionState::apply` 检查票据版本、票据是否关闭、提交者是否为指派的控制者、策略身份和选项。预期内的失败都记为 `Rejected` 决策尝试，队列接着处理后面的输入。
+6. 写入。 `Resolve` 通过后，引擎分配 `DecisionTraceId` 并写入决策轨迹。`Selected` 把票据改为 `Resolved`；`Deferred` 只提升版本。决策尝试记为 `Accepted`。
+7. 执行命令。 嵌套命令紧接着走常规命令准入，`CommandContext::decision_controller_id` 带上控制者 ID。命令处理器可以要求这个字段，以确认命令来自一张票据。预期内的命令拒绝记为命令尝试，票据仍是 `Resolved`。
+8. 到期。 准入完成后、各阶段运行之前，截止时间早于本边界时间的开启票据变为 `Expired`。
+</Steps>
+
+决策输入带着预期修订版本。入队时它必须等于当前修订版本；如果准入之前修订版本已经变化，例如又有别的边界提交，请求会以 `SimulationRevisionConflict` 记为被拒绝的尝试。同一请求 ID 再次入队时，内容、到期时间和优先级都相同就返回原来的回执，否则返回 `IdempotencyConflict`。声明为只读交互的运行拒绝新的决策输入（`InteractionReadOnly`）。
+
+决策系统本身不注册边界系统，也不发出事件。插件的边界系统在读取中声明 `StateKey::core_decisions()` 后，可以用 `SimulationView::decision_ticket`、`decision_controller` 和 `decision_attempt` 读取决策状态。只有第 7、10、12、13 阶段接受普通指令（第 4 阶段只接受知识发布），所以提出 `ResolveDecisionRandomly` 的系统必须位于其中之一，仓库示例放在第 12 阶段 `StrategicAggregation`。名字里带“决策”的第 5 阶段 `DecisionAndAcceptedEffectIntake` 不处理决策输入。
+
+边界记录（`BoundaryRecord`）列出本边界准入和生成的输入、随机抽样，以及人物可用性变化导致取消的票据；嵌套命令照常产生自己的事件。阶段顺序见[结算系统](/architecture/settlement/#十四个阶段)。
+
+## 谁可以结算票据
+
+- 每张票据指派给一个控制者（`assigned_controller`），之后不能改派。只接受这个控制者的 `Resolve`，其他控制者的请求记为 `InvalidController`。
+- `Resolve` 带的策略身份必须与控制者注册时的绑定完全一致，包括 `semantic_hash`，否则记为 `PolicyMismatch`。
+- 选中的选项必须存在于当前票据版本，并且没有阻碍项。
+- 抽样证据只能来自边界的 `ResolveDecisionRandomly`，而且只有 `Random` 控制者和用 `with_random_tie_break` 开启许可的 `Utility` 控制者接受它。因此 `Random` 票据只能由边界系统结算。
+- 嵌套命令的签发者和权限都从绑定推导：`Human` 策略对应 `Issuer::Human`，其他策略对应 `Issuer::Ai`，两者都带控制者 ID。`CommandAuthority` 的 `decision_origin` 取自绑定中的权限，席位、权限配置和命令主体也取自绑定。在声明了运行配置的运行中，`Issuer::Human` 还必须与运行的席位绑定（`SeatBinding`）和 `ControllerPolicy::HumanRoleBound` 一致，`Issuer::Ai` 的权限不能是 `NoResponsibleActor`。
+
+[人物可用性](/reference/terminology/)也会限制结算。人物死亡、失踪、被拘押或被俘时即为不可用。决策者不可用时，票据不能开启，也不能交给 `prepare_decision` 求值（`DecisionMakerUnavailable`）；控制者的权限人物不可用时，票据不能开启，不能交给 `prepare_decision` 求值，也不能结算（`IssuerUnavailable`）。人物在某个边界中变为不可用，该边界结束时（在本边界的随机决策生成之后）引擎取消相关的开启票据，原因记为 `decision_maker_unavailable` 或 `controller_authority_unavailable`，票据 ID 写入 `BoundaryPersonAvailabilityChange` 的 `cancelled_tickets` 和 `cancelled_controller_tickets`。
+
+被取消的票据不会恢复。要继续这项决策，就开启新票据，并把 `parent_ticket` 设为被取消的票据。前序票据必须已经终止且尚未归档（见[决策历史归档](#决策历史归档)），而且要么与新票据的决策者相同，要么两张票据的控制者绑定了同一个 `seat_id`，即[席位继任](/reference/terminology/)。完整规则和两种接续方式见[已无法行事的人物](/developer/integration/#已无法行事的人物)。
+
+## 策略能看到什么
+
+- 策略只看到 `&DecisionTicket`，看不到可变的模拟状态，也拿不到权限。票据上下文就是它掌握的全部信息，因此上下文应当取自决策者的[持有人相对知识](/architecture/knowledge-information/)。
+- 外部服务和 LLM 收到的 `ExternalDecisionRequest` 更窄：票据 ID 与版本、定义名、摘要、上下文，以及可用选项的 ID、标签、说明和元数据。命令载荷、效用输入和阻碍项都不在其中。
+- 上层应用通过 `Canwu::decision_ticket`、`decision_controller`、`decision_attempt`、`decision_trace` 和 `decision_hot_state` 读取决策状态。这些是受信任读取，能读到全部内容；`CanwuViewer` 不提供决策读取，给玩家展示哪些票据和多少细节由上层应用决定。
+- 边界系统只能读取已声明的内容：决策状态需要 `StateKey::core_decisions()`，人物可用性需要 `StateKey::core_person_availability()`。
+
+## 随机性、持久化与重放
+
+### 随机选择
+
+决策系统不拥有随机流。结算票据的边界系统在 `random_streams` 中声明自己的[随机流](/architecture/randomness/)，例如示例中的 `example-uncertainty / decision-selection / 1`，然后用 `random_sample_for_operation` 以 `RandomOperationTarget::DecisionTicket` 为目标抽样，目标绑定票据 ID 和当前版本。选项权重由应用给出：`Random` 控制者的权重必须按选项 ID 顺序覆盖所有可用选项，平局决胜的权重必须等于 `PendingRandom` 中的候选。权重之和必须等于抽样上界。
+
+内核在抽样提交前检查：
+
+- 控制者种类和随机流声明；
+- 抽样地址由本插件产生并绑定当前票据版本，样本来自本次提案；
+- 权重；
+- 选中选项带命令时必须有命令请求 ID，不带命令时不能有；
+- 人物可用性，按本边界开始前已提交的状态检查。
+
+随后内核记下 `RandomDrawRecord`，其结果为 `RandomDrawOutcome::DecisionSelection`，并生成一条到期时间相同的 `Resolve` 决策输入，由下一个边界准入。决策轨迹的 `random` 字段（`DecisionRandomEvidence`）与抽样记录互相引用。来源边界失败时，抽样和生成的输入一起回滚。上层应用自己排入的、带抽样证据的决策输入，入队时和加载快照时都会被拒绝。完整示例见[随机决策与 LLM 选择](/tutorials/cases/uncertainty-resolution/)。
+
+### LLM、外部服务和人类
+
+这三类答复都在模拟之外产生。上层应用把票据或请求交给玩家、服务或模型，收到答复后提交给对应的 `Queued*Policy`，再调用 `drive_decision`。排入队列的 `Resolve` 请求保存整个 `PolicyDecision`，其中的 `DecisionExternalEvidence` 记录 provider、模型、提示契约、请求 ID 和元数据。之后的重放只使用这条记录，模型不会被再次调用。
+
+### 快照与精确重放
+
+快照的 `decisions` 字段保存整个 `DecisionState`：控制者、票据（含截止时间、版本和状态）、决策尝试、决策轨迹和归档回执。决策状态在 `CommitmentRoots` 中有自己的 `decisions` 承诺根。加载快照时，引擎检查引用的实体，用已准入的决策输入重建决策状态并与保存的状态比对，还会针对每个边界重新检查它生成的随机决策。
+
+[精确重放](/developer/persistence/)（`Canwu::replay_from_journal`）重新排入记录下来的决策输入，并重新运行边界系统。边界生成的输入必须在重放中原样生成出来，否则报 `ReplayMismatch`。任何策略都不会重新运行，包括确定性的效用策略。想让同一局面换一个选择，就调用 `fork()` 派生分支并提交新的决策输入，得到的是[平行现实](/reference/terminology/)。
+
+### 决策历史归档
+
+已终止的票据、决策尝试，以及所属票据已终止的决策轨迹，可以移入按内容寻址的决策归档；开启的票据始终留在热状态中。归档提交作为维护输入在普通边界准入，因此重放会得到同样的归档转换。`Canwu::decision_history_location` 对一个 `DecisionHistoryKey` 返回 `Hot`、`Archived`、`Unresolved` 或 `Absent`；`Unresolved` 表示需要归档提供方（`DecisionArchiveProvider`）才能确认，不能当作不存在。
+
+## 上层应用需要提供什么
+
+- 决策何时出现：票据定义名、决策者、摘要、上下文和选项，以及选项对应的命令、效用输入和阻碍项。
+- 控制者绑定：策略身份、权限来源、席位与权限配置、命令主体。
+- 策略对象本身：效用权重、规则、前置规则和容差。身份必须与绑定一致。
+- 与玩家、外部服务或模型之间的通道：展示票据、解析答复，并确认提交答复的一方有权操作这个控制者。
+- 随机选择所需的边界系统、随机流声明和各选项的权重，也就是概率。
+- 非零且全局唯一的 `DecisionRequestId` 和 `CommandRequestId`，以及到期时间和优先级。
+- 人物死亡、被俘或获释的时机，由边界系统写入人物可用性；继任者的控制者和接续用的新票据。
+- 如果要归档决策历史，还要提供归档存储（`DecisionArchiveStore`、`DecisionArchiveProvider`）。
+- 所有界面与呈现。
+
+## 限制与预算
+
+| 常量 | 值 | 限制什么 |
+| --- | --- | --- |
+| `MAX_DECISION_ARCHIVE_BATCH_ENTRIES` | 4,096 | 一个归档批次的键数 |
+| `MAX_DECISION_HISTORY_PAGE_SIZE` | 512 | 一页归档历史查询的结果数上限 |
+| `MAX_DECISION_HISTORY_PAGE_BYTES` | 16 MiB | 一页归档历史查询可解码的字节数上限 |
+| `DecisionHistoryQueryBudget` 默认值 | 128 条结果、128 次提供方调用、4 MiB | 一次历史查询的默认预算 |
+
+归档定位页的布局常量见 `canwu-decision` 的 rustdoc。
+
+另有几条固定规则：
+
+- 一个边界最多生成一条随机决策结算；互相独立的随机决策要放在不同的来源边界里。
+- 随机平局决胜至少需要两个候选，每个候选的权重为正。
+- 每张票据至少有一个选项；票据 ID、请求 ID 和抽样 ID 都必须非零。
+- 效用得分用带溢出检查的 `i64` 计算，选项权重用 `u64` 且总和必须为正，溢出时报错。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-api --example decision_ticket
+cargo run -p canwu-api --example uncertainty_resolution
+```
+
+第一个示例用效用策略结算一张军阀援助票据，打印决策轨迹，再验证快照恢复和精确重放，走读见[军阀请求邻军援助](/tutorials/cases/warlord-aid-decision/)。第二个示例先用 `Random` 控制者抽样结算一张法案票据，再为一张由 LLM 控制者负责的票据打印 `ExternalDecisionRequest`，并通过 `QueuedLlmPolicy` 提交一份预先写好的答复，走读见[随机决策与 LLM 选择](/tutorials/cases/uncertainty-resolution/)。人物不可用和票据接续见[接入并驱动模拟运行](/developer/integration/#已无法行事的人物)。
+
+这些测试覆盖决策契约：
+
+```shell
+cargo test -p canwu-api --test decision_framework
+cargo test -p canwu-api --test gap_g08_decision_guarded_utility_policy
+cargo test -p canwu-api --test gap_g09_decision_ticket_lineage
+cargo test -p canwu-api --test gap_g02_sim_person_availability
+cargo test -p canwu-decision --test policy_contracts
+```
+
+## 延伸阅读
+
+- 仓库中的[决策框架架构说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#decision-framework)和[不确定性处理设计](https://github.com/PeiyuanQi/canwu/blob/main/docs/uncertainty-resolution.md)
+- [结算系统](/architecture/settlement/)：边界阶段、指令和人物可用性指令
+- [随机性](/architecture/randomness/)：随机流、操作定址随机抽样和抽样证据
+- [存档、重放与派生分支](/developer/persistence/)
+- [社会、文化与法律](/architecture/culture-law/)：`canwu-law` 怎样为席位持有人开启票据
+- [术语表](/reference/terminology/)

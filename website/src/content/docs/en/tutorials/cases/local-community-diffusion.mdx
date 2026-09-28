@@ -1,234 +1,323 @@
 ---
 title: Local community diffusion and institutional response
-description: Explore the published social diffusion simulation module through sparse population distributions, influence, an institutional decision, and actor-relative estimates.
+description: A new idea spreads from a market into a village as integer headcounts, a council picks a policy through a decision ticket, and an observer reads only a noisy estimate.
 sidebar:
-  order: 3
+  order: 5
   label: Community diffusion
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
 
-## 1. What problem are we solving?
+## The scenario
 
-`canwu-society` is a published **social diffusion simulation module** and,
-architecturally, a **domain extension** for Canwu. This example uses an abstract
-“new idea” to show how it composes group contact, private assent, public
-expression, organizational influence, institutional response, and actor-relative
-estimates. It focuses on diffusion mechanics and engine contracts so the same
-model can support different historical or fictional settings.
+A market of 1,000 people lies next to a village of 2,000. In the market, 200
+people already support a new idea, and a small local network promotes it. Over
+two days, contact spreads awareness into the village. Between the two days,
+the local council chooses a public policy, which takes effect on day two. An
+observer then estimates how many villagers publicly align with the idea.
 
-A single “acceptance” score cannot distinguish awareness, private assent,
-public expression, participation, and organized mobilization. The model is
-also hard to trust if an institutional policy can instantly rewrite what
-people privately believe.
+The question the example answers: how do you model shifting beliefs as integer
+headcounts that save, restore, and replay exactly, while the policy decision
+and the observer's view go through Canwu's authority and visibility checks?
 
-This example needs to:
+The idea, cohorts, and numbers are synthetic and do not depict a real doctrine
+or event.
 
-- store population distributions only for groups and targets that actually
-  participate in the simulation, rather than allocate a huge dense matrix;
-- track awareness, private assent, practice, public alignment, organization
-  ties, mobilization, and visibility separately;
-- treat social contact and organization networks as opportunities for
-  diffusion, while explicit transition rules determine actual movement;
-- let a local institution choose a policy through a `DecisionTicket`, then
-  apply its effect at the next society boundary;
-- return fallible estimates only to authorized actors instead of exposing the
-  authoritative aggregate as player-visible truth;
-- persist remainders, policies, projections, and evidence so restoration,
-  forks, and exact replay reproduce the same result.
+## What this example shows
 
-The “new idea” is deliberately abstract. Historical doctrines, rituals,
-people, policy labels, cultural compatibility, conflict conditions, and
-narrative remain downstream domain concerns. `canwu-society` is a published
-optional extension and is not re-exported by `canwu-api`. This
-tutorial demonstrates an extension pattern, not a frozen
-universal social or religion API.
+- `canwu-society`, an optional [domain extension](/en/developer/extensions/)
+  crate that you add next to `canwu-api`. It brings its own types, record
+  schemas, commands, and ingress, and is informally called the social diffusion
+  [simulation module](/en/reference/terminology/).
+- Sparse population state: each cohort (`SocietyCohort`, a population group
+  in one territory) has an integer headcount. Each pair of a cohort and a
+  target (`AffiliationTarget`, the idea or group people take a stance on) has a
+  `DispositionDistribution` that splits the headcount into
+  `DispositionBucket`s.
+- Diffusion: `SocialInfluenceEdge` and `OrganizationNode` produce signals,
+  `TransitionRule` moves whole people between profiles, and
+  `TransitionRemainder` keeps the fractions.
+- A [decision ticket](/en/tutorials/cases/warlord-aid-decision/) built by
+  `institutional_policy_ticket`, whose chosen option runs the
+  [domain command](/en/reference/terminology/) `set_institutional_policy`.
+- Daily boundary systems, each in a fixed
+  [settlement phase](/en/architecture/settlement/), that apply the policy,
+  settle transitions, aggregate, and materialize projections.
+- An [actor-relative](/en/developer/reading-state/) estimate from
+  `projection_for_viewer`.
+- Snapshot restore with `from_society_snapshot_json`, `fork`, and
+  [exact replay](/en/developer/persistence/).
 
-## 2. How does the example work?
-
-The example composes these systems:
-
-| System | Role in this example | Related documentation |
-| --- | --- | --- |
-| The `canwu-society` extension | Define cohorts, distributions, influence edges, institutional inputs, and actor projections | [Extend with plugins](/en/developer/extensions/) |
-| Settlement | Execute population transfers in stable order and delay institutional effects until the next boundary | [Settlement system](/en/architecture/settlement/) |
-| Decisions and authoritative commands | Select an existing policy option and record it through an ordinary plugin command | [Architecture overview](/en/architecture/), [Integrate and drive the simulation](/en/developer/integration/) |
-| Actor-relative reads | Materialize estimates for observers without a ground-truth fallback | [Read and present state safely](/en/developer/reading-state/) |
-| Persistence and exact replay | Retain transfer remainders, plugin state, projections, and journal evidence | [Save, replay, and fork](/en/developer/persistence/) |
-
-Start by running the example:
+## Run it
 
 ```shell
 cargo run -p canwu-society --example local_community_diffusion
 ```
 
-The program creates market and village cohorts. A small group in the market
-already supports the target, while market contact and a local organization
-create opportunities for diffusion into the village. Day one produces
-awareness and a little private assent. A local institution then selects a
-public policy through a `DecisionTicket`; the society boundary applies that
-institutional input on day two.
-
-### Implementation path
+The full output:
 
 ```text
-cohort + affiliation target
-  -> sparse disposition distribution
-  -> influence / organization / institution signals
-  -> deterministic integer transitions + persisted remainder
-  -> aggregate truth
-  -> authorized observer estimate
+day 1: local diffusion: aware=118 assenting=5 public=0 hidden=2000 of 2000
+policy selected; population dispositions remain unchanged until the next daily boundary
+day 2: institutional response applied: aware=229 assenting=23 public=5 hidden=1995 of 2000
+observer estimate: public=23 tied=20 (ground truth public=5 tied=0)
+snapshot restore, fork, and exact replay reproduced the same authoritative state
 ```
 
-<Steps>
-1. Create two integer-headcount cohorts and store distributions only for active `(cohort, target)` pairs.
-2. Keep awareness, private assent, practice, public alignment, organization ties, mobilization, and visibility distinct.
-3. Calculate diffusion pressure from bounded influence edges and organization topology.
-4. Let a named controller select an existing policy option and record it through an ordinary plugin command.
-5. Apply the institutional input at the next daily boundary, then settle integer transfers in stable rule-ID and cohort-ID order.
-6. Materialize a fallible estimate for an authorized observer; an actor without a projection receives an error, never a ground-truth fallback.
-7. Save, restore, fork, and exactly replay the same result from the journal.
-</Steps>
+The counts are villagers for the target `new-idea`. `aware` have heard of it,
+`assenting` privately sympathize or more, `public` conform or advocate in
+public, `hidden` have `Private` or `Hidden` visibility, and `tied` have a tie
+to an organization.
 
-### Step one: represent population state with sparse distributions
+## Walkthrough
 
-Each active `(cohort, target)` pair stores several `DispositionBucket` values.
-A profile keeps the dimensions separate:
+All code is in
+[`local_community_diffusion.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs).
+`main` reuses the entities, world, and knowledge of the deprecated
+compatibility scenario `Canwu::demo(42)`, adds one society record built by
+`tutorial_state()`, registers `SocietyPlugin`, and settles four boundaries:
+
+| Boundary | Called from | What happens |
+| --- | --- | --- |
+| 1 | `settle_day(&mut canwu, 1)` | Daily: day-1 diffusion |
+| 2 | `step_canonical()` in `register_policy_decision` | The controller is registered and the policy ticket opens |
+| 3 | `step_canonical()` after `drive_decision` | The trace is recorded and `set_institutional_policy` runs |
+| 4 | `settle_day(&mut canwu, 2)` | Daily: the policy applies, then day-2 diffusion |
+
+### 1. Describe people as distributions
+
+A `DispositionProfile` keeps seven dimensions apart. The market's supporters
+use this profile:
 
 ```rust
-DispositionProfile {
-    awareness,
-    assent,
-    practice,
-    public_alignment,
-    organizational_tie,
-    mobilization,
-    visibility,
-}
+let source = DispositionProfile {
+    awareness: AwarenessBand::Aware,
+    assent: AssentBand::Sympathetic,
+    practice: PracticeBand::Occasional,
+    public_alignment: PublicAlignmentBand::Advocating,
+    organizational_tie: OrganizationalTieBand::Member,
+    mobilization: MobilizationBand::Latent,
+    visibility: VisibilityBand::Public,
+};
 ```
 
-The bucket `headcount` values must sum exactly to the cohort population.
-Different targets have independent distributions, so the extension does not
-assume that every social identity is mutually exclusive. An absent pair also
-does not consume a dense
-`territory * cohort * target * channel` allocation.
+`tutorial_state` gives each cohort one distribution for `new-idea`:
 
-### Step two: separate opportunities for diffusion from actual conversion
-
-A `SocialInfluenceEdge` supplies reach and trust only. Its source may be a
-cohort, organization, or institutional alignment. Downstream
-`TransitionRule` configuration decides how those signals move people from one
-profile to another.
-
-Transfers use integer headcounts. An expected amount below one person remains
-in a stable `TransitionRemainder` and accumulates at later boundaries. This
-avoids silently losing population and gives snapshot restoration and replay the
-same inputs.
-
-### Step three: apply institutional policy at the next boundary
-
-The example binds a controller to an authorized person and supplies two
-existing options. The utility policy can select only an option ID. The selected
-option then passes through the `set_institutional_policy` command into a
-pending component:
-
-```text
-DecisionTicket -> controller-derived authority -> plugin command
-    -> pending policy component -> next daily society boundary
+```rust
+insert_distribution(
+    &mut state,
+    "market",
+    1_000,
+    vec![(neutral, 800), (source, 200)],
+);
+insert_distribution(&mut state, "village", 2_000, vec![(neutral, 2_000)]);
 ```
 
-Immediately after command admission, the example asserts that every population
-distribution is unchanged. On day two, institutional enforcement may move
-public alignment faster than private assent, but it still cannot assign a
-percentage of sincere belief directly.
+`SocietyState::validate` requires the buckets of a distribution to add up to
+the cohort headcount. Only the pairs you insert get a distribution, and a
+transition rule creates a neutral one on demand for a cohort it affects. Each
+target has its own distribution, so one cohort can hold independent stances
+toward several targets.
 
-Since 0.13.0, a `PolicyPressure` can also record where it came from: an
-optional `issuer` (a government, organization, or person, bound into the
-record's core references) and the `decision_version` of the decision that set
-it. A non-zero version requires an issuer, and both fields are omitted when
-unused.
+### 2. Separate opportunity from conversion
 
-### Step four: generate actor estimates instead of leaking truth
+Two `SocialInfluenceEdge`s point at the village: `market-contact` from the
+market cohort and `network-contact` from the organization `local-network`.
+Each adds `source strength × reach × trust / 1,000,000` to the village's
+influence signal. In the market, 200 per mille of people support the idea, so
+`200 × 800 × 800` gives 128. The network has no links to other organizations,
+so its strength is its base reach of 300 per mille, and `300 × 700 × 800`
+gives 168. Together the influence signal is 296 per mille.
 
-`projection_for_viewer()` requires a Canwu-issued `ViewerContext` and returns
-only the `SocietyProjection` created for that actor during the
-`PerspectiveAndReportMaterialization` settlement phase. Detection, concealment,
-and false positives make the estimate differ from the true aggregate. An actor
-without an observer profile receives an error instead of the society root record.
+Three `TransitionRule`s decide who actually changes profile, starting with
+awareness:
 
-The example restores through `from_society_snapshot_json()`. After Canwu's
-generic snapshot checks, this module boundary rechecks the core references
-named by the society payload and every materialized derived value. The example
-then verifies that a fork and journal replay rebuild the same authoritative
-state.
+```rust
+insert_rule(
+    &mut state,
+    "01-awareness",
+    neutral,
+    aware,
+    TransitionWeights {
+        influence: 200_000,
+        ..TransitionWeights::default()
+    },
+);
+```
 
-### Step five: emit mobilization candidates and leave conflict to the domain
+`settle_transitions` in
+[`solver.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/src/solver.rs)
+turns that weight into `296 × 200,000 / 1,000 = 59,200` per million.
+`2,000 × 59,200 / 1,000,000 = 118.4`, so 118 people become aware on day 1, and
+the 0.4 person is stored as a `TransitionRemainder` and added in on day 2.
 
-`MobilizationBand::Active` may produce a `MobilizationCandidate` containing
-population, organization capacity, and policy-pressure evidence. It is not a
-conflict event. Separate political and security extensions must decide whether
-the result qualifies as protest, repression, migration, riot, coalition, or
-war.
+`02-assent` moves aware people to sympathetic, driven by influence and
+institutional support and slowed by policy coercion. `03-public` moves
+sympathetic people to public conformity, driven only by institutional
+enforcement and policy coercion, and both start at 0. Rules run in rule-ID
+order, each rule visits its cohorts in cohort-ID order, and each rule sees the
+moves of the rules before it. On day 1, `02-assent` therefore acts on the 118
+newly aware villagers and moves 5 of them.
 
-### Rebase a cohort to an external stock
+### 3. Let the council choose a policy
 
-Since 0.13.0, a cohort's headcount can follow a population that another domain
-owns, such as a census record or a garrison that absorbed recruits. Send public
-`cohort_headcount_rebase_v1` ingress carrying a cohort headcount rebase
-(`CohortHeadcountRebaseV1`): the cohort, the new headcount, the exact version of
-the external stock record, and a `RebaseReason` (`ExternalStockChange` or
-`Correction`). The cited version must be the current version of a record
-outside `canwu.society` when the packet is admitted, or the rebase is rejected
-as `stale_external_stock`.
+`register_policy_decision` binds the controller `council-controller` to the
+commander's authority, with the government as command subject. It opens a
+ticket with `institutional_policy_ticket`, which turns each `PolicyChoice` into
+a decision option that carries a `set_institutional_policy` command:
 
-An event-driven phase-12 intake queues the packet, because the society writer
-runs only on Daily boundaries. The next Daily settlement applies it after
-cohort transfers and before institutional decisions, re-proportioning every
-distribution of the cohort with integer largest-remainder allocation: each
-distribution totals the new headcount, and every bucket stays within one unit
-of its exact share. The outcome is recorded in the cohort exchange ledger.
-Expect up to two boundaries between sending a rebase and seeing the rebased
-cohort. Version 0.13.0 also fixes a 0.12.0 defect in which the Daily boundary
-after any applied cohort transfer failed.
+```rust
+PolicyChoice {
+    id: "public-conformity".to_owned(),
+    label: "Require public conformity".to_owned(),
+    decision: PolicyDecision {
+        alignment_id: "council-alignment".to_owned(),
+        decision_version: 1,
+        support_per_mille: 300,
+        enforcement_per_mille: 800,
+        access_grant_per_mille: 700,
+    },
+    utility_inputs: BTreeMap::from([("control".to_owned(), 100)]),
+},
+```
 
-## Domain-extension boundary
+The other choice, `limited-access`, has `enforcement_per_mille: 0` and a
+`control` input of 10. `main` scores the ticket with a `WeightedUtilityPolicy`
+that weights `control` by 1, so `public-conformity` wins 100 to 10. The ticket
+and controller mechanics are the same as in
+[A warlord asks a neighbor for military aid](/en/tutorials/cases/warlord-aid-decision/).
 
-Reusable mechanics in this domain extension are cohorts, sparse multidimensional
-distributions, deterministic transfers, influence edges, organization
-topology, institutional inputs, policy pressures, candidate outputs, and actor
-estimates. Historical doctrine, ritual, people, cultural compatibility, policy
-labels, conflict qualification, and narration remain downstream domain data.
+The `set_institutional_policy` handler in
+[`plugin.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/src/plugin.rs)
+accepts the command only from the ticket's controller, for the institution
+that owns the alignment (`InstitutionalAlignment`), on behalf of the
+alignment's `authorized_actor`, and with a `decision_version` newer than the
+applied and pending ones. It stores
+the decision as a pending plugin component, and `main` confirms that the
+distributions have not moved:
 
-`canwu-society` is published but is not re-exported by `canwu-api`. It is an
-optional domain extension that uses the public
-plugin contracts. Its current documented scope covers generic diffusion
-mechanics; historical content and domain-specific APIs remain downstream.
+```rust
+let immediately_after_decision = load_society_state(&canwu)?;
+assert_eq!(
+    immediately_after_decision.distributions, before_policy.distributions,
+    "the policy choice must not instantly rewrite population dispositions"
+);
+```
 
-For larger culture systems, the published `canwu-culture` SDK compiles these
-definitions into a bounded execution plan and exposes restorable dirty-relationship
-and hot-target indexes. Society aggregation still uses the full-state path;
-incremental refresh remains follow-up work. A target with no engaged population
-can become `Dormant` and leave the culture hot index; the next society
-synchronization then stops its compiled culture transition rules. If it later becomes `Retired`, synchronization
-releases target-scoped dynamic state while a tombstone preserves its history.
-Explicit reactivation creates a new generation. With `CulturePlugin`, the host
-drives that synchronization. Since 0.13.0, a run can instead register the
-culture boundary plugin (`CultureBoundaryPlugin`) beside the society plugin:
-its Monthly system settles the lifecycle and hands each change to the society
-plugin as a queued lifecycle delta, so the society plugin remains the only
-writer of society state. See the [culture and legal institutional systems](/en/architecture/culture-law/)
-and the [complete benchmark contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/culture-authoring-sdk-and-lifecycle.md).
+### 4. Apply the policy at the next Daily boundary
 
-## 3. Where is the code?
+`settle_day` settles a boundary with `SystemCadence::Daily`, which runs the
+society plugin's Daily systems:
 
-Read the runnable example first to follow the two-day settlement sequence and
-see how institutional policy enters the plugin. Then inspect the framework
-tests for the sparse-distribution, restoration, projection, and deterministic
-replay contracts.
+- Phase 7, `settle-social-transitions`: `apply_pending_policies` copies the
+  pending decision onto `council-alignment`, then the transition rules run.
+- Phase 10, `evaluate-mobilization-candidates`: none in this run.
+- Phase 12, `aggregate-social-state`: the counts that `main` prints.
+- Phase 13, `materialize-society-projections`: one estimate per observer.
+
+With enforcement at 800 per mille, `03-public` runs at
+`800 × 300,000 / 1,000 = 240,000` per million, and 5 of the 23 sympathetic
+villagers become publicly conforming.
+
+### 5. Read the observer's estimate
+
+```rust
+let viewer = canwu.viewer_context(ids.observer)?;
+let projection = projection_for_viewer(&canwu, &viewer)?;
+```
+
+`projection_for_viewer` checks that the `ViewerContext` equals the one Canwu
+issues for that actor, then returns the `SocietyProjection` materialized for
+the actor in phase 13. It reads only materialized projections, and an actor
+without one gets an `InvalidAuthority` error.
+
+The observer's `ObserverProfile` detects public alignment at 800 per mille and
+reports false positives at 10 per mille. Each estimate is
+`(true count × detection + everyone else × false positive rate) / 1,000`,
+rounded down:
+
+- public: `(5 × 800 + 1,995 × 10) / 1,000 = 23`
+- tied: the network's concealment of 500 per mille halves the private
+  detection rate of 200 to 100, so `(0 × 100 + 2,000 × 10) / 1,000 = 20`
+
+False positives across 1,995 villagers outweigh the 5 real conformers, so the
+observer overestimates.
+
+### 6. Restore, fork, and replay
+
+```rust
+let saved = canwu.snapshot_json()?;
+let restored = from_society_snapshot_json(&saved)?;
+assert_eq!(restored.snapshot(), canwu.snapshot());
+let forked = canwu.fork();
+assert_eq!(forked.snapshot(), canwu.snapshot());
+let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())?;
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+```
+
+After the engine's snapshot checks, `from_society_snapshot_json` runs
+`validate_society_runtime`. It checks that the society record's core
+references match the entities its payload names, recomputes the stored
+aggregates, mobilization candidates, and projections to compare them, and
+re-derives any queued society ingress from the ingress journal. Remainders are
+part of the record, so a restored run carries the same fractions forward.
+
+## What to notice
+
+- A policy decision changes an alignment's signals at the next Daily boundary.
+  People then move only through transition rules, so your rule weights decide
+  how enforcement affects public conformity and private assent.
+- Fractions of a person are kept in `TransitionRemainder`, saved with the
+  state, and added in at the next boundary.
+- The observer reads a projection with both missed and false detections.
+  That estimate is what a client shows the player.
+
+## Try changing
+
+- **Policy choice.** In `register_policy_decision`, raise the `control` input
+  of `limited-access` to 200. The utility policy selects `limited-access`,
+  whose enforcement is 0, so `03-public` has a rate of 0 and day 2 prints
+  `public=0`.
+- **Observer accuracy.** Set `false_positive_per_mille: 0` in the observer
+  profile. The estimate becomes `public=4 tied=0`, because `5 × 800 / 1,000`
+  rounds down to 4.
+- **Influence.** Set `active: false` on the `network-contact` edge. Only the
+  market's 128 per mille of influence remains, and day 1 prints `aware=51`.
+- **More days.** Call `settle_day(&mut canwu, 3)` before reading the
+  projection and watch how the counts and the estimate change on a third day.
+
+## Beyond the example
+
+### Mobilization candidates
+
+When a bucket reaches `mobilization: MobilizationBand::Active`, the phase-10
+system records a `MobilizationCandidate` for that distribution with the
+mobilized headcount, the target's organization capacity, and the policy
+coercion on the cohort. Your political or security extension decides whether a
+candidate becomes a protest, a riot, a migration, or something else.
+
+### Other features
+
+- **Policy provenance.** A `PolicyPressure` can record its `issuer` and the
+  `decision_version` of the decision that produced it, as
+  `gap_g31_society_policy_pressure_provenance` in the
+  [rebase and policy provenance tests](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs) shows.
+- **Cohort headcount rebase.** This ingress (`cohort_headcount_rebase_v1`)
+  resets a cohort's headcount to a cited population record owned by another
+  plugin and rescales its distributions at the next Daily boundary, as `gap_g32_society_cohort_rebase` in the
+  [same tests](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs) shows.
+- **Culture lifecycle.** `canwu-culture` installs culture targets into society
+  state and moves them between `Active`, `Dormant`, and `Retired`; see
+  [Society, culture, and law](/en/architecture/culture-law/).
+
+## Source
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs" icon="external">
   Open the runnable example
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/framework.rs" variant="secondary" icon="external">
-  Inspect the society framework tests
+  Read the society framework tests
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs" variant="secondary" icon="external">
+  Read the rebase and policy provenance tests
 </LinkButton>

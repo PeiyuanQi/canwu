@@ -1,12 +1,15 @@
 ---
 title: 命令插件
-description: 注册带载荷结构校验、权限检查与声明式状态边界的插件命令。
+description: 编写一个添加 set_stance 命令的模拟插件，看参伍如何检查载荷、签发者和声明的状态读写范围。
 sidebar:
   order: 4
   label: 命令插件
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+本教程添加一个新命令 `set_stance`，让军队指挥官设置军队的姿态。你会了解[命令插件](/reference/terminology/)如何声明载荷 schema 和读写的状态，处理器如何检查权限，以及参伍如何应用状态变化。
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/plugin.rs" icon="external">
   打开 plugin.rs
@@ -15,29 +18,160 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个示例注册一个 `set_stance` 领域命令，并继续遵守参伍的验证、权限和审计边界。
-
 ## 运行
+
+在仓库根目录运行：
 
 ```shell
 cargo run -p canwu-api --example plugin
 ```
 
-## 流程
+示例没有任何输出。`submit` 接受命令后，程序以状态码 0 退出。[继续尝试](#继续尝试)一节介绍如何打印结果和各种拒绝情况。
 
-<Steps>
-1. 实现 `SimulationPlugin`，提供稳定的名称、版本和语义哈希。
-2. 用 `PluginActionDescriptor` 声明载荷结构，以及命令会读取和写入哪些 `StateKey`。
-3. 在处理器中通过只读 `SimulationView` 查询军队，并验证发令者是军队指挥官。
-4. 返回 `SystemDirective::SetComponent`，由参伍应用变化；插件不直接取得可变世界引用。
-5. 通过公开 `Command::Plugin` 和 `CommandEnvelope` 提交命令。
-</Steps>
+## 插件命令的执行路径
 
-## 值得注意
+<MermaidDiagram
+  label="插件命令依次经过 schema 校验、处理器的权限检查和写入检查，然后由参伍应用"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一路径。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一路径。"
+  definition={`flowchart LR
+    Env["CommandEnvelope<br/>Command::Plugin"] --> Schema["按 schema<br/>校验载荷"]
+    Schema --> Handler["处理器 set_stance<br/>读取 SimulationView"]
+    Handler --> Auth{"签发者是<br/>该军指挥官？"}
+    Auth -- "否" --> Reject["InvalidAuthority"]
+    Auth -- "是" --> Directive["SystemDirective::SetComponent"]
+    Directive --> Writes["检查声明的写入范围"]
+    Writes --> Apply["参伍应用变化<br/>并记录事件"]
+`}
+/>
 
-- `payload` 在处理器执行前经过结构验证。
-- 权限检查依赖命令上下文，而不是 UI 假设。
-- 读写集合是插件契约的一部分，便于验证和审计。
-- 处理器描述意图，最终状态变化仍由参伍统一执行。
+## 工作原理
 
-如果你需要在固定模拟边界上协调多个系统，继续阅读[阶段边界与资源分配](/tutorials/phased-boundary/)。
+### 1. 为插件确定身份
+
+```rust
+impl SimulationPlugin for StancePlugin {
+    fn name(&self) -> &'static str {
+        "example-stance"
+    }
+
+    fn version(&self) -> &'static str {
+        "1.0.0"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "a33fb7c59ae5a17685bd94f99154c5423dc7bf70d3dbde6ef4daf73670a37d26"
+    }
+    // 后面是 register()
+}
+```
+
+参伍会把名称、版本和语义哈希随运行一起保存。加载快照时插件会重新注册，得到的身份和注册内容必须与保存时一致，否则加载失败并返回 `PluginManifestMismatch`。插件行为有变化时，要同时更新语义哈希。
+
+### 2. 声明命令
+
+`register` 用 `PluginActionDescriptor` 描述命令：
+
+```rust
+registrar.register_command(
+    PluginActionDescriptor {
+        name: "set_stance".to_owned(),
+        description: "Set an army stance through an issuer-aware command".to_owned(),
+        payload_schema: PayloadSchema::Object {
+            properties: BTreeMap::from([
+                ("army".to_owned(), PayloadProperty { value_type: PayloadValueType::Integer, required: true }),
+                ("stance".to_owned(), PayloadProperty { value_type: PayloadValueType::String, required: true }),
+            ]),
+            allow_additional: false,
+        },
+        reads: vec![StateKey::core_armies()],
+        writes: vec![StateKey::new("military", "stance")],
+    },
+    set_stance,
+)
+```
+
+（这里把属性定义压缩成了单行，源码中逐项展开。）
+
+- `payload_schema` 要求一个整数字段 `army` 和一个字符串字段 `stance`。设置 `allow_additional: false` 后，其他字段一律拒绝。参伍在调用处理器之前校验载荷。
+- `reads` 列出处理器可以读取的状态。`StateKey::core_armies()` 是内置的军队表。
+- `writes` 列出处理器返回的指令可以修改的状态。
+
+### 3. 在处理器中检查权限
+
+```rust
+let Some(army_state) = view.army(army)? else {
+    return Err(CanwuError::new(
+        ErrorCode::ArmyNotFound,
+        format!("army {army} was not found"),
+    ));
+};
+if context.issuer != Issuer::Actor(army_state.commander) {
+    return Err(CanwuError::new(
+        ErrorCode::InvalidAuthority,
+        "only the army commander may set its stance",
+    ));
+}
+```
+
+`view` 是只读的 `SimulationView`，只能访问声明过的 `reads`；如果 `reads` 里没有 `core_armies`，`view.army` 会返回错误。`context` 是 `CommandContext`，包含签发者和命令的其他元数据。“只有指挥官能设置姿态”这条规则写在处理器里，所以任何客户端发来的命令都要经过同样的检查。
+
+### 4. 以指令形式返回变化
+
+```rust
+Ok(vec![SystemDirective::SetComponent {
+    state: StateKey::new("military", "stance"),
+    entity: EntityRef::Army(army),
+    component: "stance".to_owned(),
+    value: payload["stance"].clone(),
+    summary: format!("Army {army} changed stance"),
+}])
+```
+
+处理器只有读权限，它返回的是想要的变化。参伍逐条对照声明的 `writes` 检查这些指令，应用变化，并记录一个 `stance_changed` 事件。
+
+### 5. 注册插件并提交命令
+
+```rust
+let mut canwu = Canwu::demo(35)?;
+let ids = Canwu::demo_ids();
+canwu.register_plugin(&StancePlugin)?;
+canwu.submit(CommandEnvelope::new(
+    Issuer::Actor(ids.commander),
+    Command::Plugin {
+        plugin: "example-stance".to_owned(),
+        command: "set_stance".to_owned(),
+        payload: json!({ "army": ids.army, "stance": "hold" }),
+    },
+))?;
+```
+
+`Canwu::demo` 构建内置的演示世界，其中的军队由 `ids.commander` 指挥。插件要在第一条命令执行前注册。
+
+`submit` 在当前时间立即应用命令，是演示用的最短路径。需要记录输入以便重放的游戏应使用 `enqueue_command`，把命令放入规范化输入（canonical ingress），做法见[移动军队](/tutorials/move-army/)。一次运行只能使用其中一种路径，混用会返回 `MixedCommandIngress`。
+
+## 继续尝试
+
+在 `submit` 之后打印事件日志：
+
+```rust
+for event in canwu.events() {
+    println!("{} {} {}", event.timestamp, event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+Day 0, 00:00 example-stance.stance_changed Army 1 changed stance
+```
+
+再分别提交违反各条规则的命令，`submit` 会返回如下错误码和消息：
+
+| 对命令的改动 | 错误码 | 消息 |
+| --- | --- | --- |
+| 签发者改为 `Issuer::Actor(ids.observer)` | `InvalidAuthority` | only the army commander may set its stance |
+| 载荷改为 `"stance": 3` | `InvalidPayload` | payload field stance has the wrong type |
+| 增加字段 `"extra": 1` | `InvalidPayload` | plugin command payload contains an undeclared field |
+
+如果多个系统需要在同一模拟时间按固定顺序协作，请继续阅读[阶段边界与资源分配](/tutorials/phased-boundary/)。

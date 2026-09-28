@@ -1,0 +1,70 @@
+---
+title: 领域系统
+description: 为参伍提供知识、决策、资源、移动、战争、技术、财政制度与社会等具体规则的领域系统，以及提供各系统的 crate。
+template: doc
+sidebar:
+  label: 领域系统
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+引擎负责结算命令、调度工作和记录证据，但本身没有贸易、战争或赋税方面的规则。
+这些规则由领域系统提供。大多数领域系统是模拟领域扩展：建立在 `canwu-api` 之上的可选 crate，
+添加依赖后作为插件注册。只注册应用需要的系统即可，其余系统不会参与模拟运行。
+第一方扩展使用的插件接口与你自己编写的插件相同，因此任何一个都可以替换。
+
+有几个系统还提供由 `canwu-api` 重新导出的共享类型：知识记录、决策票据、路线规划和运输记录。
+
+每个系统都有一个设计页面，说明它负责什么、如何在结算边界中运行，以及需要上层应用提供什么。
+路线、军事和技术还有实践教程：[路线规划与送信](/tutorials/routing-transport/)、
+[军事模拟扩展](/tutorials/military-domain/)和[技术传播](/tutorials/technology-diffusion/)。
+
+## 系统一览
+
+<CardGrid>
+  <LinkCard
+    title="知识与信息"
+    href="/architecture/knowledge-information/"
+    description="每个角色知道什么，以及文书和信件如何写成、送出、读取和理解。crate：<code>canwu-knowledge</code>、<code>canwu-information</code>、<code>canwu-correspondence</code>。"
+  />
+  <LinkCard
+    title="决策"
+    href="/architecture/decisions/"
+    description="用决策票据让玩家、AI 或决策策略选定一个选项，再把选择变成经过校验、可以精确重放的命令。crate：<code>canwu-decision</code>。"
+  />
+  <LinkCard
+    title="资源与生产"
+    href="/architecture/resources-production/"
+    description="库存、预留、转移、消耗与损耗，以及设施、工单和产出。crate：<code>canwu-resource</code>、<code>canwu-production</code>。"
+  />
+  <LinkCard
+    title="路线、运输与移动"
+    href="/architecture/routing-movement/"
+    description="根据某个观察者所知规划路线，记录每个路段和交接，并逐段结算移动命令。crate：<code>canwu-routing</code>、<code>canwu-transport</code>、<code>canwu-movement</code>。"
+  />
+  <LinkCard
+    title="军事"
+    href="/architecture/military/"
+    description="部队、行军、战斗与占领，以及请其他系统为占领地结算的效果。crate：<code>canwu-military</code>。"
+  />
+  <LinkCard
+    title="技术"
+    href="/architecture/technology/"
+    description="一项技术从工坊试验到形成本地能力、完成安装、为某种用途采用，再传授到其他地点。crate：<code>canwu-technology</code>、<code>canwu-history-research</code>。"
+  />
+  <LinkCard
+    title="财政制度"
+    href="/architecture/fiscal/"
+    description="按地区采纳的财政规则、核算、经授权的征收、审计，以及由证据支持的执行凭证。crate：<code>canwu-fiscal</code>。"
+  />
+  <LinkCard
+    title="社会、文化与法律"
+    href="/architecture/culture-law/"
+    description="观念在人群之间传播，文化内容有自己的生命周期，制度程序把文化信号转化为带版本的法律。crate：<code>canwu-society</code>、<code>canwu-culture</code>、<code>canwu-law</code>。"
+  />
+</CardGrid>
+
+## 组合多个系统的场景
+
+多数游戏会同时使用几个系统。[案例](/tutorials/cases/)运行完整的场景，
+例如为军队供应粮食，或从无锡寄往北京、按路线投递的信件，并展示各系统之间如何传递记录。

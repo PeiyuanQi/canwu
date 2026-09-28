@@ -1,12 +1,12 @@
 ---
-title: Developer guide
-description: Developer documentation for embedding Canwu in games, research tools, agents, and other host applications.
+title: Guides
+description: How to embed Canwu in a game, research tool, or agent system — integrate it, read state, save and replay runs, and write plugins.
 template: doc
 sidebar:
   order: 1
-  label: Developer guide
+  label: Guides
 hero:
-  tagline: Integrate, drive, read, persist, and extend Canwu through the supported public API.
+  tagline: How to embed Canwu in your application, from the first dependency to your own plugins.
   actions:
     - text: Run the first example
       link: /en/tutorials/move-army/
@@ -26,57 +26,63 @@ import AgentDevelopmentNote from "../../../../components/AgentDevelopmentNote.as
 
 <AgentDevelopmentNote locale="en" />
 
-This section is for **developers building products with Canwu**. It does not publish project roadmaps,
-maintainer procedures, branding rules, or internal design proposals. It explains how a host application
-should use `canwu-api`.
+These guides are for developers building a game, research tool, or agent system
+on Canwu. Each page covers one task and shows the `canwu-api` calls it needs.
 
-## First-time path
+## If this is your first time
 
-1. Run the [move-army example](/en/tutorials/move-army/) to verify your local toolchain and the public API.
-2. Continue with [integration and driving](/en/developer/integration/) to place the same flow inside your host application.
-3. After integration works, choose the reading, persistence, or extension guide that matches your next task.
+1. Run the [move-army tutorial](/en/tutorials/move-army/) to check that your Rust toolchain builds and runs Canwu.
+2. Read [Integrate and drive the simulation](/en/developer/integration/) to put the same flow into your own application.
+3. Pick the guide below that matches your next task.
 
-## What is covered
+## Guides by task
 
 <CardGrid>
   <LinkCard
     title="Integrate and drive the simulation"
     href="/en/developer/integration/"
-    description="Add the dependency, create a simulation, choose an ingress path, and convert wall time into simulation time."
+    description="Add the dependency, create a run, submit commands, and turn real time into simulation time."
   />
   <LinkCard
     title="Read and present state safely"
     href="/en/developer/reading-state/"
-    description="Separate read-only snapshots from actor-relative views so players, agents, and remote clients do not receive ground truth."
+    description="Show players and agents only what their actor knows, and keep full snapshots for trusted code."
   />
   <LinkCard
     title="Save, replay, and fork"
     href="/en/developer/persistence/"
-    description="Choose snapshots or checkpoint journals, restore plugin semantic environments, and build exact replay or alternative realities."
+    description="Choose between snapshots and checkpoint journals, reload with the same plugins, and replay or branch a run."
   />
   <LinkCard
     title="Extend with plugins"
     href="/en/developer/extensions/"
-    description="Add domain rules with domain commands and boundary systems while preserving authority, determinism, and auditability."
-  />
-  <LinkCard
-    title="Production and resource boundary"
-    href="/en/developer/production-economy/"
-    description="Separate Canwu settlement capabilities from host-owned production, stock, transport, consumption, and military supply authority."
+    description="Add your own rules as domain commands and boundary systems."
   />
 </CardGrid>
 
-## How this fits with the rest of the site
+Guides that belong to one domain system, such as
+[production, resources, and transport: who owns what](/en/developer/production-economy/),
+are listed with that system under [Domain systems](/en/architecture/systems/).
 
-- Start with the [tutorials](/en/tutorials/) when you want runnable code.
-- Stay in the developer guide when you need to decide what the host should call and when.
-- Read [architecture](/en/architecture/) when you need to understand why settlement, events, and randomness work this way.
-- Use the `canwu-api` source and public examples for complete type and function signatures.
+## Rules every integration follows
 
-## Core developer constraints
+1. **Build on `canwu-api` and published extensions.** Get concrete rules from
+   domain extensions such as `canwu-military`, from reference integrations, or
+   from your own plugins. Do not depend on internal crates such as `canwu-sim`;
+   they carry no compatibility promise.
+2. **Change the world through commands.** Use engine commands, domain commands,
+   or plugin ingress.
+3. **Give players and agents actor-relative views.** Keep full snapshots in
+   trusted host code and debugging tools.
+4. **Own the clock in your application.** Rendering, input, and wall-clock time
+   stay in the host; convert elapsed real time into a simulation duration before
+   you call the engine.
+5. **Pin versions for saved runs.** Pin the engine version, and load or replay
+   with the same plugins. The engine compares them with the plugin descriptors
+   stored in the save.
 
-1. Application code enters through `canwu-api`; choose a domain extension or reference integration for concrete rules, and do not use internal crates as compatibility surfaces.
-2. External mutations enter through engine commands, domain commands, or canonical ingress rather than direct state edits.
-3. Players and agents read actor-relative views by default; read-only snapshots stay inside trusted host logic and debugging tools.
-4. Wall time, rendering, and input belong to the host; Canwu receives representable simulation durations.
-5. Persisted applications pin the engine version and restore the same plugin semantic environment during load and replay.
+## Where else to look
+
+- Runnable code: [Get started](/en/tutorials/) and the [case studies](/en/tutorials/cases/).
+- Why settlement, events, and randomness work the way they do: [Engine architecture](/en/architecture/).
+- Exact types and signatures: the [`canwu-api` source](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/src/lib.rs) and its [examples](https://github.com/PeiyuanQi/canwu/tree/main/crates/api/canwu-api/examples).

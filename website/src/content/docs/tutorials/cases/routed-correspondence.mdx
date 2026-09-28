@@ -1,20 +1,30 @@
 ---
-title: 从无锡出发的经路线规划通信
-description: 通过持有人相对路径知识、运输交接、信息投递、灾害、存档和精确重放，运行无锡本地与无锡到北京的通信。
+title: 从无锡发出、按路线投递的通信
+description: 无锡的发送者把同一封信分别寄往本地地址和北京地址；插件只按发送者自己掌握的路线知识规划路线，逐段运送信件，并记录投递结果。
 sidebar:
-  order: 6
-  label: 经路线规划的通信
+  order: 8
+  label: 按路线投递的通信
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
-  打开可运行示例
-</LinkButton>
+## 场景
 
-本案例把通信需求连接到物理投递。信息账本仍然与运输方式无关：
-`canwu-correspondence` 模拟领域扩展负责解析地址、根据承运人（通常就是发送者本人）
-的持有人账本规划路线、持久化运输执行，并通过规范化输入（canonical ingress）推进定向投递。
+无锡的一位指挥官亲自携带一封密封信件，收件人只有一位。程序把这次投递运行两次：第一次，指挥官知道的收件地址在无锡的投递区；第二次，地址在北京的投递区。每条路线都按指挥官自己知道的站点、时刻表和地址规划。
+
+这个示例回答的问题是：信件怎样只凭承运人所知的信息穿过交通网络，同时把路线和每一步投递都记录下来？
+
+网络是合成数据，站名、时刻表和行程时长都是演示用的。
+
+## 示例涉及的引擎部件
+
+- `canwu-correspondence` [模拟领域扩展](/developer/extensions/)。其中的
+  `CorrespondencePlugin` 与 `canwu-information` 的 `InformationPlugin` 一起运行。一次[通信](/reference/terminology/)（`CorrespondenceOperation`）就是一条定向消息，连同它的投递和运输过程。
+- [持有人相对知识](/reference/terminology/)：站点、连接和地址记在某个持有人（`KnowledgeHolderRef`）的账本里，规划时在一个有记录的读取切面（`KnowledgeReadCut`）上读取这份账本。参见[读取持有人知识](/developer/reading-state/)。
+- `canwu-routing` 的 `plan_route` 与 `canwu-transport` 的 `TransportExecution`：后者逐段执行，并在路段之间记录保管权交接 `Handoff`。参见[路线规划与运输](/tutorials/routing-transport/)。
+- `canwu-information` 的信息生命周期：发送记录（`Dispatch`）及其投递尝试（`DeliveryAttempt`）。参见[编码传递与中途截取](/tutorials/cases/encoded-interception/)。
+- 由[操作定址随机抽样](/architecture/randomness/)决定的自动通信机会。
 
 ## 运行
 
@@ -22,90 +32,237 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
 cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
-示例让两个请求使用同一套契约：
+输出：
 
-| 请求 | 接受的行程 | 到达时间 |
-| --- | --- | ---: |
-| 无锡本地投递 | 一段马匹运输 | 第 `30` 分钟 |
-| 无锡到北京 | 演示用定时铁路到北京站，再以马匹完成最后一程 | 第 `3060` 分钟 |
+```text
+Wuxi local delivery: 1 leg(s), arrival minute 30
+  wuxi/hub -> wuxi/delivery/recipient via Horse
+Wuxi to Beijing: 2 leg(s), arrival minute 3060
+  wuxi/hub -> beijing/station via Rail
+  beijing/station -> beijing/delivery/recipient via Horse
+```
 
-这是一个带 1940 年风格的合成网络；时长和连接关系是演示数据，不是历史时刻表复原。示例夹具通过分支选择本地或长途输入数据；通信插件本身没有“北京专用”的规划
-路径，接受的路线由收件人地址和网络知识决定。
+`arrival minute` 是计划中的 `estimated_arrival_at`，从运行开始按分钟计。北京方案在第 1 小时搭上直达列车，两天后、即第 2940 分钟到达北京站，再骑马两小时：
+2940 + 120 = 3060。经南京的路线到北京站要晚一天。
 
-## 生命周期
+## 信件的流转
 
-<Steps>
-1. 应用或渠道适配器准备一个仅含单一收件人的定向 `Dispatch`，并确定逻辑截止时间 `due_at`。
-2. 由决策票据支撑的命令，或确定性选中的自动 `CommunicationOpportunity`，准入通信意图。
-3. 插件读取承运持有人的地址、端点和连接知识，然后持久化接受的 `RoutePlan` 与精确知识读取切面。承运人通常就是发送者；由其他持有人承运时，需要该承运人自己的委托（见下文）。
-4. 一个原子信息操作激活 dispatch，并创建第一次 `DeliveryAttempt`。
-5. `TransportExecution` 推进各路段，并在承运人或方式变化处记录显式保管权交接 `Handoff`。
-6. 按时最终到达会通过幂等的信息操作依次完成 attempt 和 dispatch，并保留精确记录版本证据；attempt 失败或迟到时，dispatch 保持 `Active`，等待显式恢复。
-</Steps>
+<MermaidDiagram
+  label="一次通信从承运人知识到送达的流程，以及事故与恢复的接入点"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的代码走读描述了同样的步骤。"
+  renderFailureMessage="图表预览不可用；下文的代码走读描述了同样的步骤。"
+  definition={`flowchart TD
+    K["承运人账本（本例即发送者）：站点、时刻表、地址"]
+    O["通信机会或决策票据"]
+    C["initiate_correspondence_v1"]
+    P["在读取切面上按账本规划 RoutePlan"]
+    A["发送记录激活，创建 DeliveryAttempt"]
+    L["逐段运输，每个中转站记录 Handoff"]
+    D["投递尝试送达，发送记录完成"]
+    X["灾害：同一投递尝试的新 ItineraryRevision"]
+    I["截取：写入 Access 记录，投递继续"]
+    F["承运人被扣押或迟到：投递尝试失败"]
+    R["发送者提交 resolve_correspondence_v1"]
+    O --> C --> P
+    K --> P
+    P --> A --> L --> D
+    L -. 灾害 .-> X
+    X -. 改道 .-> L
+    L -. 截取 .-> I
+    L -. 扣押或超期 .-> F
+    F -.-> R
+    R -. 重试，新建投递尝试 .-> P
+`}
+/>
 
-`RoutePlan.estimated_arrival_at` 是估计到达时间；`DeliveryAttempt.due_at`
-是不可变的信息投递截止时间。迟到会把 `DeliveryAttempt` 标为 `Failed`，并把
-`CorrespondenceOperation` 标为 `DeadlineMissed`，不能反向修改原始截止时间。
+实线是示例实际走过的路径；虚线是事故与恢复，由本页末尾介绍的测试覆盖。
 
-## 灾害、截取与随机需求
+## 代码走读
 
-灾害使用操作定址随机抽样，使当前路段失败，并从当前位置重新规划。路段历史
-保持只追加并按行程修订区分；每个接受的修订都保留精确知识读取切面和规划证据。
-同一个投递尝试在后继行程修订下继续；新修订的首段会记录从失败路段转入新路段的保管权交接，并携带失败时间和投递尝试证据。不适用于当前运输尝试的事故会保留为已抑制（suppressed）证据，不会改写操作状态。
+代码在
+[`routed_correspondence.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs)
+及其夹具
+[`examples/support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/support/mod.rs)
+中。`run(long_distance)` 为每个请求新建一个模拟。传给 `Canwu::new_with_plugins` 的
+`1940` 是随机种子。
 
-当前 attempt 处于 `WaitingForRoute` 且运输为 `ReplanPending` 时，发送者授权的
-`resolve_correspondence_v1` 命令可以在知识变化后重新规划同一个 attempt。attempt
-进入终态失败后，同一命令可以创建连续编号的后继 `DeliveryAttempt`，并使用新的
-`TransportExecution` 和截止时间，或显式结束失败的 dispatch。单纯失败会让
-dispatch 保持 `Active`，也不会改写上一次 attempt 的截止时间。
+### 1. 准备信件
 
-中途截取会为截取者创建 `Access` 记录，但不会自动终止投递。销毁、解码、改送或
-政治后果都需要独立领域规则和证据。
+`scenario_with_prepared_dispatch` 从已弃用的兼容场景 `Canwu::demo(1)` 中取出指挥官（发送者）和观察者（observer，收件人），再添加 `sealed-letter` 渠道、信件内容、表现形式（representation）和一条发送记录：
 
-自动通信需求是有界且确定的：一次基于 operation key 的抽取判断机会是否发生，
-另一次选择一个收件人。通信开始时机会被消费，因此恢复存档不会改选另一个人。
+```rust
+&DispatchPayload {
+    status: DispatchStatus::Prepared,
+    target: DispatchTarget::Addressed(vec![recipient.clone()]),
+    prepared_at: snapshot.initial_time,
+    dispatched_at: None,
+    completed_at: None,
+},
+```
 
-## 受托承运人与承运人扣押
+插件只接受处于 `Prepared`、收件人正好是这一位，且发送者和渠道配置（channel
+profile）都与请求一致的发送记录。
 
-自 0.13.0 起，发送者可以把信件交给其他持有人承运，例如使者、商人或驿递机构。
-承运人必须先接受委托：它以自己的命令权限签发 `delegate_carrier_v1`，其中的委托
-声明（`DelegationClaimV1`）把自己写为 `performed_by`、把发送者写为 `performed_for`，
-并列出 `carry_correspondence` 能力。发送者的请求随后在
-`InitiateCorrespondenceRequest::carrier_delegation` 中引用这条已准入的命令。
+### 2. 给承运人一张地图
 
-- 声明的有效期必须覆盖每次派发。通信准入时检查一次，首次派发或重试结算时还会再
-  检查；为同一次尝试重新规划时不会再检查。同一承运人为同一发送者签发的新委托会取代旧委托，承运人借此收回委托；
-  否则，若承运需在某时结束，请为声明设置 `expires_at`。
-- 规划和地址解析读取承运人的账本，因为亲自上路的是承运人。引擎不会把承运人的任何
-  知识发布给发送者；发送者只能观察到结果，例如信件是否送达。
-- 插件把每条已接受的委托记为该承运人对该发送者的当前委托，自下一个边界起可被引用。
-  准入时读取这条记录而非命令本身，因此证据封存后的运行与其重放的判定完全一致。被取代的
-  委托不能再被引用，正在进行的通信重试也不例外。
+`network_seed` 返回一份 `NetworkKnowledgeSeed`。北京版本知道一趟直达列车、一条经南京的路线和两条最后一程的道路。直达列车用 `TraversalModel::Departures`，在第 0、5、10 天的第 1 小时发车：
 
-`CarrierSeized { seized_by, custody_handoff }` 事故表示承运人连同信件被夺走。与截取
-不同，它会结束投递尝试：当前路段失败，终态扣押交接记在 `custody_handoff` 下，拥有该运输执行记录的插件
-把运输执行和该次尝试都以失败关闭。dispatch 仍保持 `Active`，等待发送者显式重试或结束。
-等待路线的承运人也可能被扣押。只有承运持有人会收到 `attempt_report`，其中只说明
-尝试因扣押而结束，不写明扣押者。引擎不会通知委托他人承运的发送者；消息何时
-传到发送者，由应用转告。扣押是否发生，由应用抽样决定。
+```rust
+connection_departure(
+    "wuxi-beijing-direct",
+    "wuxi/hub",
+    "beijing/station",
+    TransferMode::Rail,
+    departure,
+    SimDuration::days(2),
+),
+```
 
-## 古代与现代渠道
+种子里还有一条 `KnownAddress`，把收件人对应到 `beijing/delivery/recipient`（本地运行时为 `wuxi/delivery/recipient`）。`run` 以 `KNOWLEDGE_INGRESS` 为
+`KnowledgeHolderRef::Person(sender)` 提交这份种子，插件把每个端点、连接和地址作为知识记录写入发送者的账本。
 
-古代驿路、1900/1940 年铁路、现代铁路、航空、电报和其他信号网络都可以复用
-时变路径规划。各自适配器仍负责时代特有的换乘、营业时间、预订、安全、编码和
-最后一程规则。例如，电报可以由办公室收件、信号传输和物理送达组成，而不必把
-信号路段错误地当作火车旅程。
+### 3. 提供通信机会
 
-路径搜索不会预留稀缺容量。当前请求契约只有
-`CorrespondenceCapacityAdmission::Unconstrained`；插件不会检查或持久化 booking。
-铁路、航空、驿递或信号容量需要未来的准入变体携带精确 `CapacityBooking` 或模拟
-资源预留证据。由 `canwu-movement` 管理的移动执行可以预订运力池，但通信目前还不使用
-它们。因此，本案例只证明不受容量约束的投递。
+在同一个边界里，`run` 还提交了 `OPPORTUNITY_INGRESS`：
 
-测试会恢复存档并精确重放完整操作，也覆盖交接后遇灾改道仍保留既有路段与交接证据、知识更新后的
-无路恢复、后继投递重试、显式结束、拒绝外部伪造推进，以及持有人读取权限。
-持久化证据包括需求决策、每个修订的知识读取切面、路线、交接、灾害、恢复命令、
-信息操作，以及 dispatch/attempt 的精确记录版本。
+```rust
+CommunicationOpportunityRequest {
+    operation_key: operation_key.to_owned(),
+    sender: EntityRef::Person(sender),
+    candidates: vec![recipient.clone()],
+    reason: "routine correspondence".to_owned(),
+    probability_per_mille: 1_000,
+    automatic: true,
+}
+```
 
-底层规划与执行契约见[寻路与运输](/tutorials/routing-transport/)，crate 所有权见
-[架构页](/architecture/)。
+插件先做一次操作定址随机抽样，判断机会是否出现，再抽一次，从 `candidates` 中选出收件人，所以重放时结果相同。这里 `probability_per_mille` 为 `1_000`（必然发生），候选人又只有一位，因此每次都选中观察者，机会记录的状态为 `SelectedAutomatic`。
+
+### 4. 发出通信命令
+
+```rust
+let request = InitiateCorrespondenceRequest {
+    operation_key: operation_key.to_owned(),
+    sender: EntityRef::Person(sender),
+    recipient,
+    carrier: KnowledgeHolderRef::Person(sender),
+    channel_profile: "sealed-letter".to_owned(),
+    origin: RoutingNodeRef::new("wuxi/hub"),
+    due_at: canwu.time() + SimDuration::days(10),
+    prepared_dispatch,
+    delivery_attempt_operation: InformationOperationId::new(
+        "example.correspondence",
+        format!("{operation_key}-attempt"),
+    ),
+    routing_policy: canwu_api::RoutingPolicy::default(),
+    capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
+    execution_id: canwu_api::TransportExecutionId(if long_distance { 2 } else { 1 }),
+    automatic_opportunity: Some(opportunity_ref(operation_key)),
+    carrier_delegation: None,
+};
+```
+
+`correspondence_command` 把它包装成插件命令 `initiate_correspondence_v1`，由
+`Issuer::System` 以 `CommandAuthority::no_responsible_actor(...)` 签发。只有存在 key、发送者和收件人都相同的 `SelectedAutomatic` 机会时，插件才接受这种权限。承运人就是发送者，所以 `carrier_delegation` 为 `None`。
+
+### 5. 规划并激活
+
+[`plugin.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/src/plugin.rs)
+中的 `settle_start` 读取承运人的账本，解析地址，然后规划路线：
+
+```rust
+let (snapshot, address) = carrier_planning_snapshot(
+    view,
+    &admitted.request.carrier,
+    &admitted.request.recipient,
+    context.at,
+)?;
+let route_plan = plan_route(
+    &snapshot,
+    &RoutingRequest {
+        origin: admitted.request.origin.clone(),
+        destination: address.destination.clone(),
+        departure_at: context.at,
+        policy: admitted.request.routing_policy.clone(),
+    },
+)
+.map_err(|error| invalid_record(error.to_string()))?;
+```
+
+默认的 `RoutingPolicy` 选最早到达的路线。插件把计划、地址、读取切面和规划证据存入
+`CorrespondenceOperation`，把通信机会标为 `Consumed`，再请信息插件激活发送记录。激活时创建第 1 次投递尝试，截止时间取请求中的 `due_at`。
+
+### 6. 逐段运送
+
+插件按各段的计划时间自己调度 `ProgressAction::StartLeg` 和 `CompleteLeg` 输入，并拒绝上层应用提交的进度。非最后一段完成时，`complete_leg` 在该站记录一次计划内的
+`Handoff`；北京那次运行在 `beijing/station` 记录一次。最后一段到达时：
+
+```rust
+let status = if context.at <= operation.current_due_at {
+    DeliveryAttemptStatus::Delivered
+} else {
+    DeliveryAttemptStatus::Failed
+};
+```
+
+投递尝试送达后，插件完成发送记录，操作变为 `CorrespondenceStatus::Settled`。`run`
+最多推进 80 个边界，直到
+`typed_domain_record(&correspondence_operation_ref(operation_key))` 显示 `Settled`，再由 `print_plan` 打印 `route_plan`。
+
+## 值得注意的地方
+
+- 两个请求走的是同一套插件代码，区别只在种子数据和地址。
+- 计划只用承运人账本里的连接。
+- `RoutePlan.estimated_arrival_at` 是估计值，`DeliveryAttempt.due_at` 是截止时间。迟到会让投递尝试失败，操作标为 `DeadlineMissed`，`due_at` 保持原值。
+- 每一步都有记录：带读取切面的规划历史、运输路段与交接，以及带版本的发送记录和投递尝试。
+
+## 动手改一改
+
+- **去掉直达列车。** 在 `network_seed` 中删除 `wuxi-beijing-direct`。北京方案会变成经 `nanjing/station` 的三段路线，在第 4500 分钟到达：第 25 小时到南京，第 73 小时到北京站，再骑马两小时。
+- **错过截止时间。** 把 `due_at` 改成 `canwu.time() + SimDuration::days(1)`，让循环在
+  `operation.status.is_terminal()` 时返回，并打印 `operation.status`。本地信件照常结算；北京信件在第 3060 分钟到达，晚于第 1440 分钟的截止时间，以 `DeadlineMissed`
+  结束。
+- **压制通信机会。** 把 `probability_per_mille` 设为 `0`。机会记为 `Suppressed`，插件拒绝命令，`run` 等不到操作出现，最终 panic。
+
+## 示例之外
+
+示例在两封信都结算后就结束了。生命周期的其余部分在 crate 中实现，并由测试覆盖：
+[`routed_delivery.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/routed_delivery.rs)
+覆盖通过决策发信、事故和恢复；
+[`gap_g25_correspondence_delegated_carrier.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g25_correspondence_delegated_carrier.rs)
+覆盖受托承运人；
+[`gap_g26_correspondence_carrier_seized.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g26_correspondence_carrier_seized.rs)
+覆盖承运人扣押。这些测试大多最后会恢复快照，并用 `Canwu::replay_from_journal` 重建运行（[精确重放](/developer/persistence/)）。
+
+- **通过决策发信。** `correspondence_decision_ticket` 构造一张[决策票据](/reference/terminology/)，其中的 `send` 选项携带通信命令。决策来源是发送者本人时，插件接受这条命令；`routed_delivery.rs` 走的就是这条路径。
+- **事故。** 应用通过 `INCIDENT_INGRESS` 提交带 `probability_per_mille` 的
+  `CorrespondenceIncidentRequest`。插件用操作定址随机抽样判定是否发生，并把事故记在操作上；在不适用的状态下到达的事故作为已抑制的证据保留。
+  - `Disaster` 让当前路段失败，去掉被阻断的连接后从当前站点重新规划，结果是[改道](/reference/terminology/)：同一次投递尝试的后继 `ItineraryRevision`。没有已知路线时，操作以 `WaitingForRoute` 等待。
+  - `Interception` 为截取者写入一条 `Access` 记录，投递继续。
+  - `CarrierSeized { seized_by, custody_handoff }` 即[承运人扣押](/reference/terminology/)。当前路段失败，记录一次终态的
+    `HandoffKind::Seizure` 交接，投递尝试及其运输执行都以失败关闭。只有承运人会收到一条 `attempt_report` 知识记录，其中不写扣押者。
+- **恢复。** 发送者的决策命令 `resolve_correspondence_v1` 带一个
+  `CorrespondenceRecoveryAction`。`ReplanCurrentAttempt` 在承运人得知新连接后，让处于
+  `WaitingForRoute` 的投递尝试继续。`RetryDelivery` 发起[投递重试](/reference/terminology/)：新建一次投递尝试，以 `DomainReference` 角色
+  `"previous_attempt"` 指向旧尝试，并使用新的截止时间和 `TransportExecution`。
+  `FinalizeDispatch` 完成发送记录，操作以 `Failed` 或 `DeadlineMissed` 结束。在此之前，投递尝试失败后发送记录保持 `Active`。
+- **受托承运人。** [受托承运人](/reference/terminology/)先以自己的命令权限签发
+  `delegate_carrier_v1`，其中的 `DelegationClaimV1` 把承运人写为 `performed_by`、发送者写为 `performed_for`，并列出 `carry_correspondence` 能力。从下一个边界起，发送者在 `InitiateCorrespondenceRequest::carrier_delegation` 中引用这条命令。此后规划读取承运人的账本，引擎不向发送者发布其中任何内容。声明必须覆盖每次发送，包括重试；同一承运人为同一发送者签发的新委托会取代旧委托。
+- **运力。** `CorrespondenceCapacityAdmission` 只有 `Unconstrained` 一个变体，规划和投递都忽略运力。运力池属于 `canwu-movement`，参见[路线规划与运输](/tutorials/routing-transport/)。
+
+## 源码
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
+  打开可运行示例
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/routed_delivery.rs" variant="secondary" icon="external">
+  阅读投递、改道与重试测试
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g25_correspondence_delegated_carrier.rs" variant="secondary" icon="external">
+  阅读受托承运人测试
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g26_correspondence_carrier_seized.rs" variant="secondary" icon="external">
+  阅读承运人扣押测试
+</LinkButton>

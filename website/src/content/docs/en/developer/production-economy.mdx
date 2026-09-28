@@ -1,145 +1,220 @@
 ---
-title: Production, resource, and transport boundary
-description: Ownership and settlement boundaries for production, consumption, construction, and military supply on Canwu.
+title: "Production, resources, and transport: who owns what"
+description: Which crate owns each step when you build production, consumption, construction, or military supply on Canwu, and the rules for each resource operation.
 template: doc
 sidebar:
   order: 6
-  label: Production and resource boundary
+  label: Production and resources
 ---
 
-Canwu 0.13.0 provides optional resource and production extensions, but it does not put grain, factories, prices, historical resource deposits, or armies into the simulation core.
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-## Recommended boundary
+Use this page when your game or model has stock that can run out, such as grain, cloth, ammunition, or building materials. It shows which crate owns each step, the order the steps happen in, and the rules for demand sources, access grants, loss, exchange, local handover, production output, and custom consumers.
 
-- The simulation core owns command admission, deterministic time, phase ordering, atomic commit, rollback, visibility, persistence, and replay.
-- `canwu-resource` owns resource/unit revisions, `ResourceAccount`, protected floors, `ResourceDemand`, `ResourceReservation`, exact allocation legs, transfer, consumption, loss, and fulfillment. It is the sole physical-balance writer.
-- `canwu-production` owns processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement. It consumes exact resource outcomes and technology evidence without keeping a second inventory.
-- `canwu-transport` owns itinerary, capacity, legs, execution, custody handoffs, and delivery completion records, and since 0.13.0 `canwu-movement` owns the lifecycle of movement executions and their capacity pools. The resource extension owns cargo escrow balance, loss, acceptance, return, and destination credit.
-- Population and military domains form demand and consequences separately. They cannot directly rewrite resource balances or production state.
+The optional `canwu-resource` and `canwu-production` extensions handle this. The simulation core stays generic: grain, factories, prices, historical deposits, and armies live in extensions, content, and your application.
 
-These optional extensions sit above the public `canwu-api`; they do not become reverse dependencies of the simulation core. Host games still own money, markets, wages, building UI, combat formulas, and historical content.
+## Who owns what
 
-## Three terms to understand first
+| Owner | Owns |
+| --- | --- |
+| Simulation core | Command admission, deterministic time, phase order, atomic commit, rollback, visibility, persistence, and replay |
+| `canwu-resource` | Resource and unit revisions, accounts (`ResourceAccount`), protected floors, demands (`ResourceDemand`), reservations (`ResourceReservation`), allocation legs, transfers, consumption, loss, and fulfillment |
+| `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement. It uses resource outcomes and technology evidence and keeps no inventory of its own. |
+| `canwu-transport` and `canwu-movement` | Itineraries, legs, custody handoffs, and delivery completion; `canwu-movement` runs movement executions and capacity pools. Cargo balance, loss, acceptance, return, and destination credit stay in `canwu-resource`. |
+| Your population, military, and other domains | Forming demand and reacting to fulfillment results |
+| Your application | Money, markets, wages, building UI, combat formulas, and historical content |
+
+`canwu-resource` is the only writer of stock balances. Other domains submit resource operations and read the outcomes; they must not write balances or another domain's records. All of these crates sit on top of the public `canwu-api`.
+
+## Key terms
 
 | Term | Meaning |
 | --- | --- |
-| Protected floor | The minimum amount an account must retain instead of offering it to the current allocation |
-| Resource reservation | A `ResourceReservation` bound to an exact demand, account, resource/unit revision, and lifecycle; failure or rollback cannot leave a hidden hold |
-| Custody predecessor | The exact prior record that authorizes the next cargo-state transition and prevents duplicate credit or material creation |
+| Account | One stock balance (`balance`) of one exact resource and unit revision, held by a **custodian**: the holder responsible for that stock. |
+| Protected floor | An amount an account holds back from ordinary allocation, such as seed grain (`ProtectedFloorPolicyRevision`). A demand whose `protection_override_class` the policy lists may draw below it. |
+| Demand | A requester's request for a quantity, with a minimum useful amount, a partial-fulfillment policy, due and expiry times, a priority, and a source policy. |
+| Reservation and allocation leg | The result of allocation: a quantity set aside for one demand in one account. A released or expired reservation frees the quantity again. |
+| Transfer escrow | Stock that has left its source account and is in transit. It stays counted until it is accepted, lost, or returned. |
+| Completion lease | A holder's right to perform one irreversible operation, named by its operation key. Activating the lease yields a `CompletionLeaseActivationCertificateV1`, which pins the operation key, the time, and the exact records the operation depends on. Irreversible requests carry this certificate. |
+| Adapter ingress | The path provider plugins use (`enqueue_resource_adapter_operation`). Each operation cites the exact provider record version that justifies it. |
 
-## Minimal lifecycle
+A **tracked command** is a command sent with a `CommandRequest` (request ID and expected revision). Build the resource command with `resource_command(&ResourceCommandV1 { subject, request })`; the issuer must control `subject`.
+
+## Lifecycle
+
+<MermaidDiagram
+  label="Resource lifecycle and owners: demand, allocation by canwu-resource, then consumption or a transfer into escrow, transport, acceptance and destination credit, and later consumption"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the numbered steps below describe the same lifecycle."
+  definition={`flowchart TB
+    Demand["Demand: requester sends SubmitDemand command"] --> Alloc["Allocation: host queues enqueue_resource_allocation, canwu-resource reserves stock"]
+    Alloc --> Consume["Consume: consumer plugin via adapter ingress"]
+    Alloc --> Begin["BeginTransfer: source custodian or grantee command, stock moves to escrow"]
+    Begin --> Move["Transport: canwu-transport and canwu-movement"]
+    Move --> Accept["Accept via adapter ingress"]
+    Begin -. "same place_scope" .-> Local["AcceptLocal: destination custodian"]
+    Move --> LoseReturn["Lose or Return: transfer controller"]
+    Accept --> Credit["Destination account credited"]
+    Local --> Credit
+    Credit --> Later["Later boundary: consumers use the stock"]
+`}
+/>
+
+1. **Demand.** The requester submits `SubmitDemand` (and later `AmendDemand` or `CancelDemand`) as a tracked resource command. Adapter ingress cannot submit or amend demands.
+2. **Allocation.** The host queues an allocation pass for one requester with `enqueue_resource_allocation`. `canwu-resource` allocates deterministically, using protected floors, minimum useful amounts, partial-fulfillment policies, due times, priorities, and stable tie-break keys, and records reservations and allocation legs.
+3. **Debit.** A consumer plugin consumes an allocation through adapter ingress (`Consume`), or the source custodian (the grantee, for a granted allocation) starts a transfer (`BeginTransfer`) that moves the quantity into escrow.
+4. **Transport.** `canwu-transport` and `canwu-movement` carry the cargo. Transfer progress (`AdvanceTransfer`) arrives through adapter ingress and cites transport evidence.
+5. **Arrival.** `CompleteTransfer` settles the transfer: `Accept` through adapter ingress credits the destination; `AcceptLocal` handles a same-place handover; `Lose` and `Return` end it otherwise.
+6. **Use.** Production, force supply, and other consumers use the credited stock in a later boundary. They cite exact allocation and fulfillment evidence and write only their own records.
+
+Every transfer step names the transfer's `expected_transfer_revision`, so a stale or repeated step is rejected and one arrival cannot be credited twice. If a conservation, revision, or authority check fails, the operation's changes roll back together.
+
+`canwu-resource` checks conservation with `ResourceState::validate_conservation` over `ConservationTotalsV1`:
 
 ```text
-Demand -> resource reservation/allocation -> source debit -> in-transit custody
-       -> arrival acceptance -> destination credit -> next-boundary consumption
+closing balances + closing transfer escrow
+  = opening balances + opening escrow + admitted production + external inflow
+    - admitted consumption - admitted loss - external outflow
 ```
 
-1. Live demands are submitted and amended through holder-authorized resource commands. Typed adapter ingress supports only its declared provider operations, not demand submission or amendment; consumers never write stock directly.
-2. `canwu-resource` deterministically allocates against protected floors, minimum useful amounts, partial-fulfillment policies, due times, and stable tie-break keys.
-3. Production, force, and other consumers cite exact allocation and fulfillment evidence and write only their own work-order or consequence records.
-4. Conservation, version, custody-predecessor, or authority failure rolls back the whole proposal group.
-5. A destination is credited only after the cargo disposition is accepted; military consumption becomes eligible at the next appropriate boundary.
+Only `balance` is stored. Available, reserved, and protected amounts are derived (`ResourceState::account_quantities`). A route estimate, an accepted arrival, and a consumption are three separate facts, and each needs its own step.
 
-The account amount is the only writable quantity. Reserved, available, and protected views are derived; reach is not delivery and arrival is not consumption.
-
-## Authorize a custom consumer
-
-Since 0.10.1, Canwu supports custom consumption providers using the existing
-`ResourceConsumptionIntentV1` contract. Keep a top-level
-`resource_consumption_intents` map in your plugin's owned, active domain record;
-each key is the sealed intent's `id`. No callback or reference-provider name is
-needed. Register that record kind in `ResourcePlugin::new` so the adapter may
-read the exact source.
-
-Before submission, complete the existing allocation and completion-lease
-lifecycle. Submit `ResourceOperationRequestV1::Consume` through canonical adapter
-ingress. Its `consumer_evidence` must equal the exact **current** provider source;
-the completion certificate must bind that source and the same operation key.
-The holder, participant, time, revision and lease checks still apply.
-
-Exactly one `Authorized` intent must match the complete allocation leg, demand
-and account revisions, consumption identity and operation key. Partial-leg
-consumption is outside this contract. The map may contain at most the resource
-state's `max_operation_outcomes` entries; excessive maps fail before decoding.
-Missing or malformed maps and identity/digest mismatches are rejected, as are
-retired, ambiguous or mismatched authorizations. A sealed digest proves content
-consistency, not permission by itself. Rejection does not authorize a debit.
-
-Your provider owns authorization and retirement of the intent and any local
-consequences after the resource receipt. `canwu-resource` owns the conserved
-balance and duplicate-operation behavior. The force-supply reference retains
-its specialized adapter, including its different retained-source policy; custom
-consumers must use the current-source contract above.
-
-## Versioning and saves
-
-Hosts pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and plugin semantic hashes from the same release line. Loading restores the same Canwu snapshot and revalidates extension records; it must not rebuild an old campaign from its current timestamp or treat an unpublished local engine version as a compatible API.
-
-Continue with the [production, resources, and military supply case](/en/tutorials/cases/production-economy/) and the [delivered mechanism decision](/en/proposals/production-economy-mechanism/).
+For a runnable fourteen-month grain loop, run `cargo run -p canwu-economy-reference --example grain_loop` and read the [production, resources, and military supply case](/en/tutorials/cases/production-economy/).
 
 ## Demand source policy
 
-Since 0.11.0, every `ResourceDemand` persists a `source_policy`:
+Every `ResourceDemand` stores a `source_policy` (`ResourceDemandSourcePolicyV1`) that picks which accounts may supply it:
 
-- `ResourceDemandSourcePolicyV1::Pooled` preserves allocation across all open accounts with matching resource and unit revisions, in deterministic account-ID order.
-- `ExactAccounts(Vec<ResourceAccountId>)` lists 1–256 accounts in strictly increasing ID order, with no duplicates. Each must exist, be open, match both exact revisions, and have the demand requester as its custodian. Invalid lists reject the command before resources change; allocation validates them again.
-- Since 0.13.0, `Granted { grant_id, accounts }` lists 1–256 accounts the same way, but each must be custodied by the grantor of the named access grant, whose grantee must be the requester (see [delegated access grants](#delegated-access-grants)).
+| Policy | Eligible accounts |
+| --- | --- |
+| `Pooled` (default) | Every open account with the matching resource and unit revisions, visited in account-ID order |
+| `ExactAccounts(accounts)` | The listed accounts only. Each must exist, be open, match both revisions, and have the requester as custodian. |
+| `Granted { grant_id, accounts }` | The listed accounts only. Each must be custodied by the grantor of the named access grant, and the requester must be its grantee (see [delegated access grants](#delegated-access-grants)). |
 
-The allocator computes available supply, minimum useful quantity and partial fulfillment from the selected accounts only. An insufficient exact list never falls back to the pool. Existing protected floors and later transfer/consumption authority checks still apply. The exact path visits only the listed accounts, bounded by `MAX_DEMAND_SOURCE_ACCOUNTS`; pooled selection retains its existing account scan.
+Rules:
 
-A demand may change its policy before its first allocation, with the expected revision. Once it has any reservation, including a consumed reservation backing in-flight transfer escrow, or any fulfillment, its policy is fixed. Cancel the demand and submit a new one for a new policy; cancellation does not cancel a separate transfer. Reservation history remains indexed until the demand is terminal and its archive closure is eligible; terminal demands cannot be amended. Since 0.13.0, an amendment also cannot change a demand's lifecycle status, rejection reason, or requester; such an amendment settles as a recorded rejection instead of a change that blocked later boundaries.
+- `ExactAccounts` and `Granted` lists hold 1 to 256 accounts (`MAX_DEMAND_SOURCE_ACCOUNTS`), in strictly increasing ID order with no duplicates. An invalid list rejects the command before any stock changes, and allocation checks the list again.
+- Allocation computes available supply, minimum useful quantity, and partial fulfillment from the selected accounts alone. If the listed accounts cannot cover the demand, the demand gets only what they hold. Protected floors and later transfer and consumption checks still apply.
+- You can change the policy with the expected demand revision until the demand's first allocation. After it has any reservation (including a consumed one that backs an in-flight transfer) or any fulfillment, the policy is fixed; cancel the demand and submit a new one. Cancelling a demand leaves transfers it already started in place.
+- `AmendDemand` cannot change a demand's status, rejection reason, or requester; such an amendment is recorded as a rejection. Terminal demands cannot be amended.
 
-`Pooled` is a selection policy, not permission to spend another custodian's stock. A host application must control who may submit pooled demands and which requester it uses, and an `ExactAccounts` list proves no delegation either. Cross-custodian delegation with a cap and a window is expressed only by an access grant and a `Granted` policy; appointments, purposes, and who may grant whom remain application or domain responsibilities. Transfer custody and completion-lease checks remain separate requirements.
+Authority: `Pooled` and `ExactAccounts` choose where supply comes from; they give no right to spend another custodian's stock. Your application controls who may submit pooled demands and under which requester. To let one custodian draw on another's stock, with a cap and a time window, use an access grant and a `Granted` policy. Appointments, purposes, and who may grant to whom stay with your application.
 
-The policy is included in request digests, runtime snapshots, exact replay and terminal demand archive payloads. Restore validates live source references and retained reservation membership; archive validation preserves the policy and its digest. Holder-relative reports retain their existing visibility contract and do not expose the authoritative source list automatically. Missing `source_policy` fields deserialize as `Pooled` in a standalone DTO, but this does not migrate old snapshots: exact engine-version and plugin-identity checks still apply. Rust struct literals must add the field; this is a 0.11.0 source break.
-
-## Account-level loss
-
-Since 0.12.0, `ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` records spoilage, theft, or another loss directly on one account without inventing a transfer. The request carries its own `loss_id`, the exact account revision, a quantity, a cause, and a completion certificate. It settles a `ResourceLoss` with `account: Some(..)` and `transfer: None`, which the conservation totals count as admitted loss.
-
-The debit never touches reserved stock and respects the protected floor unless `allow_protected` is set; a stale revision is rejected. A tracked command must come from the account custodian, and canonical adapter ingress may cite the cause record as its provider source. Holder reports carry `ResourceLossObservationV1` entries, gated like transfer details.
-
-## Atomic exchange
-
-`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` starts two transfer legs together: both transfers are created or neither is, and the single `BeginExchange` outcome lists both transfer IDs in `cited_transfers`, whether it applied or rejected.
-
-1. The parties agree on `ResourceExchangeTermsV1`: the exchange key and, for each leg, its transfer ID, exact allocation, and destination.
-2. `ResourceExchangeTermsV1::leg_operation_keys` derives each leg's operation key from the digest of those terms.
-3. Each leg's source custodian acquires the completion lease for that leg's derived key, so each lease consents to the whole exchange and cannot authorize other terms.
-4. The `leg_a` source custodian submits the exchange as a tracked command.
-
-There is no exchange-level certificate. After the start, the two transfers settle independently, so one may be accepted while the other is lost or returned. An exchange is not delegated access: each side still spends only stock it holds in custody.
-
-## Local acceptance
-
-`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` settles a transfer without a transport execution, such as a handover inside one warehouse or town. It applies only while the transfer is `PendingDispatch` with no transport link, and only when both accounts declare the same `ResourceAccount::place_scope`.
-
-The scenario declares that scope when it installs an account. It is immutable, never inferred, and `None` by default, and a tracked `CreateAccount` command cannot set it. A missing or mismatched scope rejects as `invalid_definition` and an attached transport as `invalid_lifecycle`. The terminal certificate locks the exact handover record, and a tracked command must come from the destination custodian.
-
-## Realized output
-
-`ProductionOperation::CompleteExecution` may carry `realized_output_per_mille` and `realization_evidence`. The ratio is in thousandths of the nominal process output, and `None` means 1,000. Phase 7 floor-scales every output settlement quantity by it and stores both values on the execution; the resource credit and output acknowledgement then settle exactly the scaled quantities.
-
-- Any ratio other than 1,000 needs an exact evidence record version whose kind the process revision lists in `realization_evidence_kinds`, and evidence is rejected for the nominal ratio. The list is empty by default, so a default process admits only nominal output.
-- The ratio must be positive and must not scale any output leg to zero. Record a total loss by cancelling the work order.
-- The ratio may not exceed the process revision's `max_realized_per_mille`, which defaults to 1,000; a larger bound admits evidenced yields above nominal.
-- Holder, lifecycle, ratio, and kind rules run before the evidence record is resolved, so a rejection does not reveal whether another record exists.
+Persistence: the policy is part of request digests, runtime snapshots, exact replay, and terminal demand archives. Holder-relative reports do not reveal the source list. A JSON demand without `source_policy` deserializes as `Pooled`.
 
 ## Delegated access grants
 
-Since 0.13.0, one custodian can let another draw on its stock without transferring the stock first. An access grant (`ResourceAccessGrantV1`) records the grantor custodian, the grantee, the exact resource and unit revisions, a `cap_quantity`, the half-open window `valid_from..valid_until`, and the exact `authority_evidence` record version that justifies it, such as the application's accepted requisition record.
+An **access grant** (`ResourceAccessGrantV1`) lets a grantee draw on a grantor custodian's stock without a prior transfer. It records:
 
-1. The grantor custodian submits `ResourceOperationRequestV1::IssueAccessGrant` as a tracked command, and the authority evidence must be an available exact record version. Adapter ingress cannot issue or revoke grants.
-2. The grantee submits a demand whose source policy is `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. The grant must be active with the requester as grantee, the resource and unit must match, the demand's window must lie inside the grant window, every listed account must be open and custodied by the grantor, and the quantity must fit the remaining cap.
-3. Allocation checks the grant before scarcity arbitration. A revoked or out-of-window grant supplies nothing, no allocation exceeds the remaining cap, and nothing falls back to pooled or other accounts.
-4. The grantee debits the allocation, by consumption or by starting a transfer or exchange leg, under its own completion lease. A granted debit settles only in a boundary whose time equals the debit's certified time, and the grant window must contain that time, so a debit certified inside the window cannot settle after it. A lease held by anyone else, including the grantor, cannot debit a granted allocation.
+- `grantor_custodian` and `grantee`;
+- the exact `resource_revision` and `unit_revision`;
+- `cap_quantity`, the most the grant can ever supply;
+- the window `valid_from..valid_until` (end exclusive);
+- `authority_evidence`, the exact record version that justifies the grant, such as your application's accepted requisition record.
 
-`ResourceAccessGrantRecordV1` keeps `cap_quantity = remaining + reserved + debited`: allocation moves quantity to reserved and the debit moves it to debited, so each unit is charged once, while released or expired reservations return to remaining. A transfer started from a granted allocation records its `access_grant`, and the grantee, not the source custodian, controls its cancellation, return, and loss; local acceptance still belongs to the destination custodian. `RevokeAccessGrant` also comes from the grantor with the expected grant revision, and it is refused once anything is reserved or debited, so size the cap and window to the delegation. Expired reservations of a granted demand are released by the next allocation pass for the grantee, which the host runs with `enqueue_resource_allocation`.
+The grantor issues it as a tracked command:
 
-Grants stay in hot state, bounded by `MAX_RESOURCE_ACCESS_GRANTS` (4,096), and are not archived, so control who may issue them as you control account creation. `resource_access_grant_status` is the holder-bound read of a grant and its accounting for the grantor or the grantee. Who may grant whom, and the record behind a grant, remain application authority.
+```rust
+use canwu_api::{CommandEnvelope, CommandRequest, CommandRequestId, Issuer};
+use canwu_resource::{
+    ResourceCommandV1, ResourceIssueAccessGrantRequestV1, ResourceOperationRequestV1,
+    resource_command,
+};
 
-For example, an application's requisition saga first records the population owner's acceptance. The owner then issues a grant citing that acceptance record, the army submits a `Granted` demand, and the army's own lease debits the allocation.
+let command = resource_command(&ResourceCommandV1 {
+    subject: grant.grantor_custodian.clone(),
+    request: ResourceOperationRequestV1::IssueAccessGrant(ResourceIssueAccessGrantRequestV1 {
+        operation_key,
+        grant, // a ResourceAccessGrantV1
+    }),
+})?;
+canwu.enqueue_command(
+    now,
+    0,
+    CommandRequest::new(
+        CommandRequestId::new(41),
+        canwu.revision(),
+        CommandEnvelope::new(Issuer::Actor(grantor_person), command).at_time(now),
+    ),
+)?;
+```
 
-## Live production output settlement
+How a grant is used:
 
-Before 0.13.0, an execution completed through a live command could not settle its output. The resource side of the execution's completion lease locked the production runtime record at the version current when the lease was granted, before the execution existed, and every later production transition advances that record. The output credit now cites the exact production version the coordinator pinned on the execution as its `output_source`. The resource runtime accepts that version as the locked record at or after its locked version, and the production output batch ingress requires it to equal the pinned source; the generic resource adapter ingress rejects production credits. Completing an execution through a live command, at its start time or later, now settles its output.
+1. **Issue.** The grantor custodian submits `IssueAccessGrant` as a tracked command. The authority evidence must be an available exact record version. Adapter ingress cannot issue or revoke grants.
+2. **Demand.** The grantee submits a demand with `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. The grant must be active and name the requester as grantee; the resource and unit must match; the demand's due and expiry times must fall inside the grant window; every listed account must be open and custodied by the grantor.
+3. **Allocate.** Allocation checks the grant before it divides scarce supply among demands. A revoked or out-of-window grant supplies nothing, and no allocation exceeds the remaining cap. Supply comes only from the listed accounts.
+4. **Debit.** The grantee debits the allocation, by consumption or by starting a transfer or exchange leg, under its own completion lease. A lease held by anyone else, including the grantor, cannot debit a granted allocation. The debit settles only in a boundary whose time equals the lease's certified time, and the grant window must contain that time.
+
+Accounting: `ResourceAccessGrantRecordV1` keeps `cap_quantity = remaining + reserved + debited`. Allocation moves quantity from remaining to reserved, and the debit moves it to debited, so each unit is charged once. A released or expired reservation returns its quantity to remaining. Expired reservations of a granted demand are released by the next allocation pass for the grantee, which the host queues with `enqueue_resource_allocation`.
+
+Transfers: a transfer started from a granted allocation records its `access_grant`, and the grantee then controls its cancellation, return, and loss. Local acceptance still belongs to the destination custodian.
+
+Revocation: the grantor submits `RevokeAccessGrant` with the expected grant revision. Once anything has been reserved or debited under the grant, revocation is refused, so choose the cap and window to fit the delegation.
+
+Limits and reads: grants, including revoked ones, stay in hot state, up to 4,096 per resource state (`MAX_RESOURCE_ACCESS_GRANTS`). Control who may issue them as you control account creation. `resource_access_grant_status(canwu, holder, grant_id)` returns a grant and its accounting to its grantor or grantee.
+
+For example, a requisition flow in your application could first record the population owner's acceptance. The owner then issues a grant citing that record, the army submits a `Granted` demand, and the army's own lease debits the allocation. The [access-grant test](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/tests/gap_g05_resource_access_grant.rs) issues grants, allocates under them, debits by transfer, and revokes them through the public API.
+
+## Account-level loss
+
+`ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` records spoilage, theft, or any other loss directly on one account. The request carries a `loss_id`, the account's expected revision, a quantity, a `cause`, `allow_protected`, a time, and a completion certificate.
+
+- It settles as a `ResourceLoss` with `account: Some(..)` and `transfer: None`, counted as admitted loss in the conservation totals.
+- The debit leaves reserved stock untouched and respects the protected floor unless `allow_protected` is set. A stale account revision is rejected.
+- As a tracked command it must come from the account's custodian. Through adapter ingress, the cause must be the provider's exact source record.
+- Holder reports include `ResourceLossObservationV1` entries, visible under the same rules as transfer details.
+
+## Atomic exchange
+
+`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` starts two transfers together: both are created, or neither is. The single outcome lists both transfer IDs in `cited_transfers`, whether it applied or was rejected.
+
+1. The parties agree on `ResourceExchangeTermsV1`: the exchange operation key and, for each leg, its transfer ID, exact allocation, and destination.
+2. `ResourceExchangeTermsV1::leg_operation_keys` derives each leg's operation key from the digest of those terms.
+3. Each leg's source custodian (or grantee, for a granted leg) acquires a completion lease for that leg's derived key. The lease therefore consents to the whole exchange and fits no other terms.
+4. The debit holder of `leg_a` submits the exchange as a tracked command.
+
+The exchange has no certificate of its own. After the start, the two transfers settle independently, so one may be accepted while the other is lost or returned. Each side spends only stock it holds or may draw under a grant.
+
+## Local acceptance
+
+`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` settles a transfer without a transport execution, for example a handover inside one warehouse or town. It applies only while the transfer is `PendingDispatch` with no transport link, and only when both accounts declare the same `ResourceAccount::place_scope`.
+
+- The scenario declares `place_scope` when it installs an account, and the value stays fixed. Canwu does not infer it. The default is `None`, which leaves local acceptance unavailable for that account. A tracked `CreateAccount` command cannot set it.
+- A missing or mismatched scope is rejected as `invalid_definition`; a transfer with a transport link, as `invalid_lifecycle`.
+- The terminal certificate locks the exact handover record. As a tracked command, `AcceptLocal` must come from the destination custodian; through adapter ingress, the handover record must be the provider's source.
+
+## Production output
+
+### Realized output
+
+`ProductionOperation::CompleteExecution` may carry `realized_output_per_mille` and `realization_evidence`. The ratio is in thousandths of the process's nominal output; `None` means 1,000. At completion, every output settlement quantity is scaled by the ratio and rounded down, and both values are stored on the execution. The resource credit and the output acknowledgement then settle exactly the scaled quantities.
+
+- A ratio other than 1,000 needs an exact evidence record version of a kind listed in the process revision's `realization_evidence_kinds`. The list is empty by default, so a default process accepts only nominal output. Evidence sent with the nominal ratio is rejected.
+- The ratio must be positive and must not scale any output leg to zero. To record a total loss, cancel the work order.
+- The ratio may not exceed the process revision's `max_realized_per_mille`, which defaults to 1,000; set it higher to accept evidenced yields above nominal.
+- Holder, lifecycle, ratio, and kind rules run before the evidence record is looked up, so a rejection reveals nothing about whether another record exists.
+
+### How output settles
+
+After an execution completes, a phase-12 system in `canwu-production` pins the current production runtime record version on the execution as its `output_source` and schedules one output batch to `canwu-resource`. The resource plugin credits each output account through its production output batch ingress, which requires the credit to cite exactly that pinned source. The generic adapter ingress rejects production credits.
+
+## Authorize a custom consumer
+
+A consumer plugin of your own can consume allocations through the `ResourceConsumptionIntentV1` contract:
+
+1. In your plugin's own active domain record, keep a top-level `resource_consumption_intents` map. Each key is the sealed intent's `id`. No callback or reference-provider name is needed.
+2. Pass that record kind to `ResourcePlugin::new` so the resource adapter may read the exact source.
+3. Before submitting, complete the allocation and completion-lease steps.
+4. Submit `ResourceOperationRequestV1::Consume` through adapter ingress (`enqueue_resource_adapter_operation`). Its `consumer_evidence` must equal the provider's exact current source record, and the completion certificate must lock that source and use the same operation key. The usual holder, participant, time, revision, and lease checks apply.
+
+The resource plugin accepts the consumption only when exactly one `Authorized` intent in the map matches the whole allocation leg, the demand and account revisions, the consumption ID, and the operation key. Consuming part of a leg is outside this contract. The map may hold at most `max_operation_outcomes` entries (from the resource state's `ResourceLimitsV1`); a larger map is rejected before any entry is decoded. Missing or malformed maps, identity or digest mismatches, and retired, ambiguous, or mismatched intents are rejected, and nothing is debited. A sealed digest proves the intent's content is consistent; the permission comes from your plugin authorizing it.
+
+Your plugin owns authorizing and retiring intents and any local consequences after the resource receipt. `canwu-resource` owns the conserved balance and duplicate-operation handling. The force-supply reference consumer (`canwu-force-supply-reference`) keeps its own adapter, which also accepts an earlier version of its source record; custom consumers use the current-source contract above.
+
+## Versions and saves
+
+Pin exact versions of `canwu-api`, `canwu-resource`, `canwu-production`, and the plugin semantic hashes from one release line. Loading restores the saved Canwu snapshot and revalidates extension records against the plugins you pass. See [save compatibility](/en/developer/persistence/#version-and-save-compatibility).
+
+Continue with the [production, resources, and military supply case](/en/tutorials/cases/production-economy/) and the [mechanism decision](/en/proposals/production-economy-mechanism/).

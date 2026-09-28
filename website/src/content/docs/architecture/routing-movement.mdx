@@ -1,0 +1,257 @@
+---
+title: 路线、运输与移动系统
+description: 参伍如何根据某个观察者掌握的信息规划路线，把行程记录为运输数据，并由移动插件逐段结算移动命令。
+sidebar:
+  order: 10
+  label: 路线、运输与移动
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="路线、运输与移动系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/tutorials/routing-transport/">路线规划与送信教程</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/routing-movement/">English version</a>
+</nav>
+
+参伍用三个 crate 模拟出行。`canwu-routing` 根据某个观察者掌握的信息规划路线，`canwu-transport` 记录途中实际发生的事，`canwu-movement` 则是在结算边界中推进这些记录的[模拟插件](/reference/terminology/)。游戏里的军队、信使、货物或信件要走多段路线，途中可能失败、交接或等待紧缺运力时，就会用到它们。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-routing` | 基于 `PlanningSnapshot` 做确定性的、随时间变化的路线规划。它只做计算：不读取模拟状态，不抽随机数，也不安排后续工作。 | 已发布到 crates.io，类型由 `canwu-api` 重新导出 |
+| `canwu-transport` | 普通记录及其状态转移规则：移动命令、运输执行、行程修订、路段、交接（含扣押）、运力预订、运力池、纯函数形式的预订分配 `allocate_capacity_bookings`，以及投递 saga 记录 | 已发布到 crates.io，类型由 `canwu-api` 重新导出 |
+| `canwu-movement` | 移动生命周期扩展 `MovementPlugin`：准入移动命令，在各路段到期时结算，分配运力池，发布持有人相对的移动报告 | 已发布到 crates.io，需要单独添加依赖 |
+
+<MermaidDiagram
+  label="crate 依赖关系：canwu-movement 和 canwu-correspondence 建立在 canwu-api 之上，canwu-api 重新导出 canwu-transport 和 canwu-routing"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    App["你的应用<br/>网络数据、事故、<br/>权限记录"] -- "注册" --> Movement["canwu-movement<br/>MovementPlugin"]
+    App --> Api["canwu-api<br/>对外 API"]
+    Movement --> Api
+    Corr["canwu-correspondence<br/>自行维护运输执行"] --> Api
+    Api --> Sim["canwu-sim<br/>私有运行时"]
+    Api --> Transport["canwu-transport<br/>记录库"]
+    Api --> Routing["canwu-routing<br/>路线规划器"]
+    Transport --> Routing
+    Transport --> Found["canwu-core、canwu-time"]
+    Routing --> Found
+`}
+/>
+
+### 为什么运输层只是记录库
+
+所有模拟插件都建立在 `canwu-api` 之上，而 `canwu-api` 为了重新导出运输类型，依赖 `canwu-transport`。如果把插件放进 `canwu-transport`，它就得反过来依赖 `canwu-api`，Cargo 会因为依赖成环而拒绝构建。所以 `canwu-transport` 只做普通的库：它的值通过 `TransportExecution::reroute`、`TransportExecution::record_handoff`、`CapacityBooking::transition` 等方法自行检查状态转移，从不接触模拟状态。负责生命周期的插件放在上一层的 `canwu-movement` 中。
+
+这样拆分还有一个好处：同一套记录可以由不同的所有者推进。`canwu-movement` 是通用的生命周期实现；`canwu-correspondence` 把信件的运输执行保存在自己的插件状态里；自己管理生命周期的上层应用也可以直接调用 `allocate_capacity_bookings`，得到相同的分配顺序。
+
+### 参考世界的移动插件是另一回事
+
+[移动军队](/tutorials/move-army/)教程使用参考世界的 `order_movement_v1` 命令。这是一个可替换的小示例：它在示例世界中查找一条直达路线，预留要移动的军队或人物，再安排出发和到达两条调度输入（`movement_transition_v1`）。`canwu-movement` 则是面向 `canwu-transport` 记录的通用生命周期，支持多段行程、改道、运力池和报告，与参考世界没有任何关联。
+
+## 核心模型
+
+参伍把一次行程拆成规划和执行两部分。规划回答“这个观察者根据自己知道的信息会选哪条路线”。`plan_route(&snapshot, &request)` 只读取这两个参数，返回一个 `RoutePlan` 值，因此相同的快照和请求总是得到相同的计划或相同的错误。执行记录从一份计划出发，之后只通过各自的状态转移方法改变。
+
+`canwu-movement` 从不规划路线。`Order` 操作在 `MovementOrder` 中携带 `RoutePlan`，`Reroute` 操作携带一个新的 `ItineraryRevision`，其中的计划由你的代码算出。
+
+规划类型（`canwu-routing`）：
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `PlanningSnapshot` | 某个观察者在某一时刻所知的网络：`observer`、`observed_at`、可选的 `valid_until`、`knowledge_cut`、`topology_version`、可选的 `timetable_version`，以及 `RoutingNetwork` |
+| `RoutingNetwork` | 带版本的 `RoutingEndpoint` 与 `RoutingConnection` 列表。`RoutingNetwork::new` 会排序，并拒绝重复项和无效连接。 |
+| `RoutingConnection` | 一条有向连接，带 `TransferMode`、`TraversalModel`（`Fixed`、`Departures` 或 `Piecewise`）、可选的可用时间窗口、`risk_per_mille` 和 `resource_cost` |
+| `RoutingRequest`、`RoutingPolicy` | 起点、终点和出发时间。策略选择 `FifoDijkstraV1` 或 `BoundedLabelCorrectingV1`，并规定允许的交通方式和搜索上限。 |
+| `RoutePlan` | 选中的 `RouteLeg` 列表及其计划时间、`RouteCost`、预计到达时间、算法与策略版本、快照摘要，以及计划自身的摘要 |
+| `RoutingCache` | 可选的上层应用缓存，以快照摘要和请求为键保存计划 |
+
+执行记录（`canwu-transport`）：
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `MovementOrder` | 已准入的移动意图：按实体排序的 `MovementSubject`（各带一个 `MovementSubjectRole`）、起点和终点、`RoutePlan`、`MovementInitiative`、下令时间，以及预期的位置修订号 |
+| `TransportExecution` | 一次进行中的行程：`TransportExecutionState`、各次行程修订、路段、交接、预订，以及可选的投递 saga |
+| `ItineraryRevision` | 一份不可变的行程，带计划、前驱修订、`ItineraryRevisionReason` 和被取代的时间。改道会追加一份新修订。 |
+| `LegExecution` | 某个计划路段的实际情况：`LegExecutionStatus`，以及实际出发、到达或失败的时间 |
+| `Handoff` | 路段之间的保管权交接，类型为 `HandoffKind::Planned` 或 `HandoffKind::Seizure { by }` |
+| `CapacityBooking` | 在某个时间窗口内占用运力的预订，带 `CapacityBookingStatus` |
+| `TransportCapacityPoolV1` | 一个时间窗口内一定数量的可互换运力，带 `booked`、`consumed` 两个计数器，以及每次变化都会递增的 `revision` |
+| `DeliverySaga`、`DeliveryCompletionRequest` | 把到达结果连回信息投递尝试的记录，带稳定的操作键 |
+
+移动插件（`canwu-movement`）：
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `MovementPlugin` | 模拟插件本身。`MovementPlugin::new(evidence_kinds)` 声明它可以读取哪些应用记录种类，这份列表就是它读取证据的全部范围。 |
+| `MovementState` | 整个移动运行时，保存为一条领域记录：运输执行、移动命令、运力池、预订绑定、操作结果和报告头 |
+| `MovementCommandV1`、`MovementOperation` | 来自某个持有人的命令载荷，带操作键和一个操作：`Order`、`StartLeg`、`CompleteLeg`、`FailLeg`、`Reroute`、`RecordHandoff`、`RequestBooking`、`Cancel` 或 `OfferPool` |
+| `MovementIncidentV1` | 应用报告的 `FailLeg`、`Reroute`、`RecordHandoff` 或 `Reconcile`，引用一条精确的证据记录 |
+| `MovementOperationOutcomeV1` | 某个操作键的持久结果：`Applied`，或带 `MovementErrorCode` 的 `Rejected` |
+| `MovementReportV1` | 某个持有人看到的一次运输执行，以知识形式发布 |
+
+## 运行过程
+
+<MermaidDiagram
+  label="移动生命周期：命令和事故以输入形式进入，第 7 阶段应用它们并安排路段到期输入，第 8 阶段校验，第 13 阶段发布报告"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一生命周期。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一生命周期。"
+  definition={`flowchart TB
+    Plan["上层应用或应用插件<br/>用 plan_route 得到 RoutePlan"] --> Cmd["命令<br/>apply_movement_operation_v1"]
+    Cmd --> Admit["命令处理器检查<br/>持有人、操作键、大小、配额"]
+    Admit --> OpQ["内部输入<br/>movement_operation_v1"]
+    AppSys["应用系统<br/>判定发生事故"] --> Inc["公开输入<br/>movement_incident_v1"]
+    OpQ --> P7["第 7 阶段<br/>movement_lifecycle_apply_v1"]
+    Inc --> P7
+    Due["内部输入<br/>movement_leg_due_v1"] --> P7
+    P7 -- "安排下一个到期路段" --> Due
+    P7 --> P8["第 8 阶段<br/>movement_lifecycle_validate_v1"]
+    P8 --> P13["第 13 阶段<br/>movement_report_publish_v1"]
+    P13 --> Know["持有人知识<br/>movement_report"]
+`}
+/>
+
+<Steps>
+1. 规划。上层应用或应用插件构建 `PlanningSnapshot`，调用 `plan_route`，把得到的 `RoutePlan` 放进 `MovementOrder`。
+2. 提交。用 `movement_command(&MovementCommandV1)` 构建领域命令 `apply_movement_operation_v1`，作为 `CommandRequest` 通过 `enqueue_command` 提交。用 `submit` 直接应用的命令会被插件以 `MixedCommandIngress` 拒绝。`MovementCommandV1::holder` 必须是签发者本人对应的持有人：签发者是角色时就是该角色，否则是命令主体。命令处理器检查载荷大小、操作键、持有人和配额，然后把内部输入 `movement_operation_v1` 排入队列。只有这个处理器能生成这种输入。
+3. 报告事故。应用系统判定某个路段失败、某条路线封闭、有人夺走保管权或某次投递已经结束时，发送公开输入 `movement_incident_v1`。上层应用用 `movement_incident_ingress` 构建它；边界系统先在 `plugin_ingress_targets` 中列出 `movement_incident_target()`，再用 `BoundaryDirective::SchedulePluginIngress` 安排它。
+4. 第 7 阶段 `DomainDeltaProposal`，事件驱动。`movement_lifecycle_apply_v1` 按准入顺序应用已准入的操作和事故。随后它让窗口已结束的已确认预订过期，对每个运力池运行一次分配，处理到期路段，退休已关闭的运输执行，并清理过期的操作结果。它写入运行时记录，并为需要的移动命令安排下一条 `movement_leg_due_v1`。
+5. 第 8 阶段 `InvariantValidation`。`movement_lifecycle_validate_v1` 检查暂存的运行时：移动命令与运输执行一一对应、路段连续、每个运输执行只有一份生效行程、预订与运力池计数一致、到期工作有效、各集合没有超限。检查失败时整个边界回滚。
+6. 第 13 阶段 `PerspectiveAndReportMaterialization`。本边界准入过任何移动输入时，`movement_report_publish_v1` 把有变化的报告发布给对应持有人，并为延迟观察者安排 `movement_report_wake_v1`。
+</Steps>
+
+[结算系统](/architecture/settlement/#扩展系统的运行位置)页面列出了这些系统与其他扩展系统的相对位置。
+
+### 路段计时
+
+路段靠内部调度输入推进。移动命令在计划出发时间安排第一次出发；准入时如果已经过了这个时间，就在准入时出发。出发后，按路段的计划时长安排到达；到达后，再安排下一段出发。每条移动命令在 `pending_due` 中只记下自己等待的那一条输入，其他到期输入都已过时，不起作用。所以显式的 `StartLeg`、`FailLeg` 或 `Reroute` 会取代旧的计时，无需撤回已排队的输入。
+
+到期工作从不让边界失败。到期的出发或到达无法应用时，当前路段以 `due_settlement_failed` 为原因失败，所有者或操作者可以改道或取消。最后一段到达时，没有投递尝试的运输执行直接结算；带有 `delivery_attempt` 的运输执行进入 `ArrivalPending`，等待一条引用该投递尝试记录的 `Reconcile` 事故。
+
+### 运力池
+
+插件在第 7 阶段用 `allocate_capacity_bookings` 分配运力池，与内核第 6 阶段的[资源分配](/architecture/settlement/#资源分配)相互独立。`OfferPool` 操作提供运力池，`RequestBooking` 为一个尚未出发的路段申请运力，预订窗口必须落在该路段的计划窗口内。本边界申请的每项预订要么全额确认，要么失败，结果记录为 `CapacityBookingAllocationEvidenceV1`。分配时依次按优先级（从高到低）、窗口开始时间、平局决胜键、准入序号和预订标识排序。已经确认的运力始终归属原预订，后来的申请拿不走。
+
+出发的路段消耗自己已确认的预订。预订失败或过期的路段以 `capacity_unavailable` 失败，等待改道。已确认但窗口尚未开始的预订会把出发推迟到窗口开始。
+
+### 操作键
+
+每个操作键都有一个持久结果，可以用 `MovementState::operation_outcome` 查询。命令的操作键按持有人区分，事故的操作键按证据记录种类区分，所以任何来源都占用不了别人的键。完全相同的重试不产生变化。命令用同一个键提交不同内容时，会在准入时以 `IdempotencyConflict` 被拒绝；其他冲突的复用（例如来自事故的）会另记一条 `Conflict` 拒绝结果。
+
+## 知识与可见性
+
+规划只读取快照。`PlanningSnapshot` 写明观察者和 `knowledge_cut`，`RoutePlan.planning_snapshot_digest` 则把每份计划绑定到它所依据的快照。有两个辅助函数可以构建快照：
+
+- `canwu_correspondence::planning_snapshot_from_holder_knowledge` 构建持有人规划快照，只收录某个持有人[知识账本](/architecture/knowledge-information/)中断言的端点和连接，同时返回一个 `KnowledgeReadCutDigest`，作为规划读取了哪些事实的证据。见[按持有人知识规划路线](/developer/reading-state/#按持有人知识规划路线)。
+- `canwu_reference_world::planning_snapshot_from_world` 根据参考世界完整的路线表构建快照，输入是受信任的 `WorldSnapshot`。它适合示例和工具；为某个角色规划时，应当从该角色自己的知识出发。
+
+移动报告是持有人相对的。每份报告都是一条 `canwu.movement/movement_report` 知识记录，载荷为 `MovementReportV1`：
+
+| 持有人 | 角色 | 报告内容 |
+| --- | --- | --- |
+| 下令的持有人（须为人物） | `Owner` | 当前阶段和各路段，外加详情：运输执行状态、修订原因、失败、交接和预订 |
+| 移动命令中的 `operator` | `Operator` | 与所有者相同 |
+| `remote_observers` 中的每一项 | `DelayedRemote` | 按授权延迟回溯后的阶段、路段和最后已知端点，不含详情 |
+| 其他人 | 无 | 收不到任何报告 |
+
+插件只在报告摘要变化时发布，而且只发给在世的人物持有人，所以作为所有者的机构收不到报告。`observed_as_of` 是报告所反映的最新事实的时间。所有者和操作者的报告置信度按千分制记为 1,000，并引用运行时记录的版本；延迟报告的置信度记为 700，不引用任何证据，因此发布时间不会透露运行时最近何时变化。
+
+客户端通过 `viewer_for_actor` 得到持有人的角色相对视图，再用 `query_knowledge` 读取报告，schema 取自 `movement_report_knowledge_schema_id()`。`movement_state(&canwu)` 返回整个运行时，只应在受信任的上层应用代码中使用。
+
+## 随机性、持久化与重放
+
+这三个 crate 都不抽随机数。连接上的 `risk_per_mille` 是规划成本：路由器沿路线把它累加，再用 `max_risk_per_mille` 限制总和，没有任何代码据此掷骰。渡口是否遭洪水、盗匪是否出现、驻军是否扣押信使，都由你的系统决定，通常是在自己声明的随机流上做一次[操作定址随机抽样](/architecture/randomness/#操作定址随机抽样)，再把结果作为事故报告。`canwu-correspondence` 的做法不同：它在自己的随机流 `canwu-correspondence / operation-resolution / 1` 上抽取事故，概率 `probability_per_mille` 由你的应用提供。
+
+持久化的内容：
+
+- `MovementState` 是一条领域记录，种类为 `canwu.movement/runtime`，ID 为 `canwu.movement:runtime`。`MovementState::into_initial_record` 可以为场景生成这条记录，例如在运行开始前装好运力池。激活时，插件最多接受一个规范编码的运行时根记录。
+- 待处理的路段到期输入和报告唤醒都是排队中的规范化输入，所以快照会带上它们，载入后的运行可以从行程中途继续。
+- 已关闭的运输执行会从运行时退休。它的移动命令和运输执行标识仍然保留、不会复用，已消耗的运力也仍计入运力池。已发布的报告留在持有人的知识中，领域记录历史保留运行时的旧版本。
+- 运输值是 serde 数据，保存在其所有者的记录中。`TRANSPORT_SEMANTIC_VERSION` 为 `canwu-transport.v5`。`HandoffKind::Planned` 类型的交接在 JSON 中省略类型字段，所以旧的交接记录保持原有编码。
+- `RoutePlan` 记录 `ROUTING_ALGORITHM_VERSION`（`canwu-routing.v1`）、策略版本和快照摘要。`RoutingCache` 是派生数据，随时可以丢弃重建，重放也用不到它。
+
+精确重放把记录下来的命令、事故和到期输入重新送入同样的系统，得到同样的运行时。恢复和重放都要求插件名称、版本和语义哈希（`MOVEMENT_SEMANTIC_HASH`）一致。
+
+## 上层应用需要提供什么
+
+- 网络和时刻表数据，以及每次规划所用的规划快照。
+- 每条移动命令中的 `RoutePlan`，以及每次改道中新的 `ItineraryRevision`。
+- 传给 `MovementPlugin::new` 的记录种类：权限记录、投递尝试、外部条件记录和事故证据。
+- [权限依据](/reference/terminology/)记录。所有者要移动自己以外的对象时，须在 `authority_basis` 中引用一条已声明种类记录的当前版本，该记录的引用以 `movement_grantee`（`MOVEMENT_GRANTEE_ROLE`）指明所有者，以 `movement_subject`（`MOVEMENT_SUBJECT_ROLE`）指明其他每个对象。
+- 事故、危险、敌对行为及其背后的随机抽样，通过 `movement_incident_v1` 报告。扣押交接和投递核对只接受这条路径。
+- 运力：谁用 `OfferPool` 提供哪个运力池，以及每项预订的优先级和平局决胜键。
+- 位置真值和保管权的含义。到达后更新军队位置或信件持有人，是你的世界模型的职责。
+- 展示：把报告变成通知、地图或预计到达时间。
+
+## 限制与预算
+
+`RoutingPolicy::default()` 把 `max_expanded_nodes` 设为 10,000，`max_transfers` 设为 64，路线累计风险上限 `max_risk_per_mille` 设为 1,000。单条连接的 `risk_per_mille` 不能超过 1,000。`NoKnownRoute`、`ExpansionBudgetExceeded`、`SearchHorizonExceeded` 等搜索失败都是确定性结果，重放会得到相同的失败。
+
+`MovementLimitsV1::CURRENT` 限定移动运行时：
+
+| 限额 | 值 |
+| --- | --- |
+| 命令或事故载荷（`operation_bytes`） | 8,192 字节 |
+| 操作键、标签和原因（`text_bytes`） | 256 字节 |
+| 每条移动命令的对象数 | 32 |
+| 每条移动命令的报告授权数（含所有者和操作者） | 16，因此最多 14 个远方观察者 |
+| 每个运输执行的路段、行程修订、交接和预订数 | 64、8、16、16 |
+| 每个运行时、每个所有者的移动命令数 | 1,024、256 |
+| 每个运行时的运力池数 | 256 |
+| 每个边界的报告数和报告持有人数 | 1,024、64 |
+| 远方观察者的延迟上限（`max_report_delay_minutes`） | 365 天 |
+| 每个运行时、每个持有人的操作结果数 | 16,384、1,024 |
+| 为事故保留的结果余量（`incident_outcome_headroom`） | 1,024 |
+| 不再被活跃运输执行需要的操作结果的保留时长 | 7 天 |
+
+超出移动命令、运输执行或运力池限额的操作会以 `LimitExceeded` 被拒绝。操作结果预算用完后，命令处理器在准入时拒绝新命令，仍然进入结算的操作会发出 `canwu.movement.operation_dropped.v1`。超过知识载荷上限的报告不会发布，插件改为发出 `canwu.movement.report_withheld.v1`。超出单个边界预算的报告等待同一模拟时间的报告唤醒。已关闭的运输执行在每个在世观察者都收到最终报告后退休，最迟不超过关闭后 365 天。
+
+## 动手试试
+
+从同一个寄信人的知识出发，规划一封本地信和一封寄往北京的信：
+
+```shell
+cargo run -p canwu-correspondence --example routed_correspondence
+```
+
+在一条带快车连接的 512 节点铁路线上测量路由器耗时。程序打印节点数、连接数、十次规划的耗时（毫秒）和选中的路线：256 个路段，第 766 分钟到达。
+
+```shell
+cargo run -p canwu-routing --example routing_scale
+```
+
+通过对外 API 驱动移动插件。这个测试覆盖按优先级分配运力池、因缺少运力而失败的路段、伏击事故、引用外部条件绕开洪水的改道、扣押、投递核对、持有人相对的报告、退休、行程中途的保存与载入，以及精确重放：
+
+```shell
+cargo test -p canwu-movement --test gap_g19_movement_lifecycle_plugin
+```
+
+单独检查运输记录：纯函数运力分配、人员群体、扣押交接和外部条件：
+
+```shell
+cargo test -p canwu-transport --test gap_g20_transport_capacity_pool_allocation --test gap_g21_g23_transport_records
+```
+
+完整讲解见[路线规划与送信执行](/tutorials/routing-transport/)（规划与记录契约）和[从无锡发出、按路线投递的通信](/tutorials/cases/routed-correspondence/)（逐步讲解信件示例）。[移动军队](/tutorials/move-army/)运行的是参考世界的移动插件。
+
+## 延伸阅读
+
+- [结算系统](/architecture/settlement/)：阶段、资源分配与回滚
+- [随机性](/architecture/randomness/)：第一方扩展在哪里抽样，哪些抽样留给你
+- [模型归属](/architecture/model-ownership/)：与移动相关的各项职责归哪一层
+- 仓库架构文档中的 [Routing and transport execution](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#routing-and-transport-execution) 一节
+- [`canwu-movement` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-movement/README.md)：操作规则与错误码
+- [路线与运输提案](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md)：所有权边界与里程碑

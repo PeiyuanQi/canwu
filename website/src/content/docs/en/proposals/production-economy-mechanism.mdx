@@ -1,41 +1,54 @@
 ---
-title: Production, resource, and facility mechanism proposal
-description: When production-economy capability belongs in a host, an optional extension, or the simulation core.
+title: "Production economy mechanism: design decision record"
+description: Where production-economy capability lives in Canwu, the evidence behind that decision, and what would have to happen before anything moves into the simulation core.
 template: doc
 sidebar:
   order: 8
   label: Production economy mechanism
 ---
 
+This page records where production, consumption, and military supply belong in Canwu and why. Read it if you are deciding whether a new economic rule belongs in your application, in an optional extension, or in the simulation core.
+
 ## Decision
 
-**Status: delivered in 0.10.0;** 0.11.0 added demand source policies, 0.12.0 added account-level loss, atomic exchange, local acceptance, and realized output, and 0.13.0 added delegated access grants and made live production completions settle their output. Production, consumption, and military supply remain optional extensions above the public `canwu-api`. Grain, factories, prices, armies, and historical resource maps do not enter the simulation core.
+:::note[Status: delivered]
+`canwu-resource` and `canwu-production` ship as optional extensions on top of the public `canwu-api`, first released in 0.10.0. Their current API is covered in [Production, resources, and transport: who owns what](/en/developer/production-economy/).
+:::
 
-A historical Celestial Mandate fixture first validated the boundary against the Canwu 0.6 public API. The 0.10.0 G1b slice now runs a fourteen-month grain loop with real `canwu-routing` and `canwu-transport` types. The G3 production extension and G4 independent force-supply consumer prove that two different downstream lifecycle owners reuse the same resource boundary.
+Production, consumption, and military supply are built as optional extensions above `canwu-api`. Grain, factories, prices, armies, and historical resource maps stay in extensions, content packs, and host applications; the simulation core keeps only generic settlement.
 
-The extraction gate is therefore satisfied: `canwu-resource` and `canwu-production` are publishable optional extensions, while `canwu-force-supply-reference` and `canwu-economy-reference` remain replaceable integrations. G5 supplies evidence-qualified local scarcity and price-pressure reads, not a full market simulation.
+## Evidence behind the decision
+
+1. **A host fixture.** Celestial Mandate, a downstream strategy game built on Canwu, first checked the boundary with a synthetic fixture against the Canwu 0.6 public API, using only host-owned plugins and no core change.
+2. **A running loop.** The replaceable `canwu-economy-reference` integration runs a fourteen-month grain loop that uses real routing and transport types (`cargo run -p canwu-economy-reference --example grain_loop`).
+3. **Two independent consumers.** `canwu-production` and the force-supply reference consumer (`canwu-force-supply-reference`) own different lifecycles yet use the same accounts, reservations, allocation, transfers, and fulfillment. Two independent users of one lifecycle were the condition for extracting a shared extension.
+4. **Scarcity and price-pressure reads.** The reference integration adds evidence-based local scarcity and price-pressure projections. They are read models; a full market simulation is outside this delivery.
+
+With that condition met, `canwu-resource` and `canwu-production` became publishable optional extensions. `canwu-force-supply-reference` and `canwu-economy-reference` remain unpublished, replaceable integrations.
 
 ## Ownership
 
-- The simulation core owns admission, time and phase ordering, reservation allocation, declared reads and writes, atomic commit, rollback, evidence, visibility, persistence, and replay.
-- `canwu-resource` owns resource definitions, units, accounts, protected floors, demands, reservations, allocation, transfers, consumption, loss, and fulfillment.
-- `canwu-production` owns processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement.
-- `canwu-transport` supplies movement execution, itinerary legs, capacity, custody handoff, and the delivery-completion bridge. The resource extension remains the authority for in-transit cargo balance, loss, acceptance, return, and destination credit.
-- Population, production, and military domains form demands and consume exact fulfillment outcomes. They do not rewrite another domain's state.
-- Historical content owns places, deposits, processes, facilities, institutions, parameters, and provenance. It receives no privileged mutation path.
+| Owner | Owns |
+| --- | --- |
+| Simulation core | Admission, time and phase order, reservation allocation, declared reads and writes, atomic commit, rollback, evidence, visibility, persistence, and replay |
+| `canwu-resource` | Resource definitions, units, accounts, protected floors, demands, reservations, allocation, transfers, consumption, loss, and fulfillment |
+| `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement |
+| `canwu-transport` and `canwu-movement` | Itinerary, leg, custody-handoff, and capacity records (`canwu-transport`) and their lifecycle: movement orders, leg settlement, and capacity pools (`canwu-movement`). In-transit cargo balance, loss, acceptance, return, and destination credit stay in `canwu-resource`. |
+| Population, production, and military domains | Forming demands and using exact fulfillment outcomes; each writes only its own state |
+| Historical content | Places, deposits, processes, facilities, institutions, parameters, and provenance, with no special write path |
 
-## Satisfied extraction gate
+Production sits above the conserved-resource layer. It owns versioned processes, work orders, work in progress, maintenance, and facilities, and hands output back to `canwu-resource` for crediting.
 
-G3 production and G4 force supply are independent lifecycle owners that consume the same account, reservation, allocation, transfer, and fulfillment semantics. Production sits above the conserved layer, owns versioned processes, work orders, work in progress, maintenance, and facilities, and returns output to the resource extension for credit.
+## What it would take to move something into the core
 
-This delivery adds no simulation-core query API and moves no domain semantics into the core. A future full market, money, property, universal construction, or combat system still needs independent-consumer evidence and a failing public-API fixture; a diagram alone cannot grant it a core position.
+This delivery adds no simulation-core query API and moves no domain rules into the core. A future full market, money, property, universal construction, or combat system would need the same kind of proof: independent consumers that share its lifecycle, plus a public-API fixture that fails without a core change. An architecture diagram alone is not enough.
 
-## Content that stays out of the simulation core
+## What stays out of the simulation core
 
 - Historical goods, deposits, agricultural calendars, and era parameters.
-- A national price used as physical stock truth.
-- Building levels, production methods, or technology unlocks that automatically create local capability.
-- Treating route reach as booking, departure, arrival, or consumable delivery.
-- Treating transport execution records as the authority for host cargo balance and loss.
+- A national price used as the truth about physical stock.
+- Automatic local capability from building levels, production methods, or technology unlocks.
+- A reachable route treated as a booking, departure, arrival, or usable delivery.
+- Transport execution records treated as the source of truth for cargo balance and loss.
 
-See the [production, resource, and transport boundary](/en/developer/production-economy/) and the [production, resources, and military supply case](/en/tutorials/cases/production-economy/).
+See [Production, resources, and transport: who owns what](/en/developer/production-economy/) and the [production, resources, and military supply case](/en/tutorials/cases/production-economy/).

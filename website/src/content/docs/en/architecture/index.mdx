@@ -1,50 +1,81 @@
 ---
 title: Architecture overview
-description: Understand how Canwu organizes historical simulation with public boundaries, deterministic settlement, and inspectable evidence.
+description: How Canwu is layered, what happens to a command inside the engine, and which crate does what.
 template: doc
 sidebar:
   order: 1
   label: Architecture overview
 hero:
-  tagline: "The complete path from client to authoritative runtime: a narrow public API, deterministic settlement, causal events, and replayable randomness."
+  tagline: "How the engine is layered, what happens to a command, and which crate does what."
 ---
 
 import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+import ArchitectureMap from "../../../../components/ArchitectureMap.astro";
 
 <nav class="architecture-links" aria-label="Architecture overview navigation">
   <span class="architecture-links-label">Continue exploring:</span>
-  <a href="/en/architecture/settlement/">Read settlement</a>
+  <a href="/en/architecture/settlement/">Settlement</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/en/architecture/events/">Explore the event system</a>
+  <a href="/en/architecture/events/">Events</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/en/architecture/model-ownership/">Review model ownership</a>
+  <a href="/en/architecture/randomness/">Randomness</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
-  <a href="/en/architecture/culture-law/">Culture and legal systems</a>
+  <a href="/en/architecture/model-ownership/">Model ownership</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
   <span class="architecture-links-separator" aria-hidden="true">·</span>
   <a href="/architecture/">中文架构</a>
 </nav>
 
-Canwu is a headless historical simulation engine. A client may be a game, research tool, debug UI, or agent, but every client reaches the simulation through the same public boundaries instead of receiving a mutable reference to the live world.
+Canwu is a headless simulation engine: it has no renderer or UI of its own. Your
+application, whether a game, a research tool, a debug client, or an AI agent,
+links it as a Rust library. The application changes the world by submitting
+commands and reads it through snapshots, events, and actor-relative views. Only
+the engine's runtime holds the live world, and it changes that state only while
+settling commands and scheduled work.
 
-## Direct crate dependency DAG
+## The layers at a glance
 
-This graph shows normal, direct dependencies declared between first-party
-workspace crates in their Cargo manifests. `A → B` means **A depends on B**;
-external and development dependencies are omitted. The graph opens at 200%; use the buttons, mouse wheel inside the graph, or drag-to-pan to inspect details, up to 400%.
+Select a layer to see its crates, or switch to **Follow a command** to step
+through one command from submission to replay.
+
+<ArchitectureMap locale="en" />
+
+- **Your application** depends on `canwu-api` and registers the plugins it needs.
+- **Domain plugins** are optional crates built on `canwu-api`. First-party
+  extensions get the same access as a plugin you write yourself, so you can
+  replace any of them.
+- **`canwu-api`** is the supported public API. It re-exports the types you need
+  from the crates below it.
+- **`canwu-sim`** is the private runtime behind `canwu-api`. It owns the live
+  state, the ingress queue, scheduling, settlement, persistence, and replay.
+- **Models and mechanisms** (`canwu-event`, `canwu-knowledge`,
+  `canwu-decision`, `canwu-routing`, `canwu-transport`) define shared data
+  types; `canwu-api` re-exports them.
+- **Foundation** (`canwu-core`, `canwu-time`) provides IDs, deterministic random
+  numbers, and simulation time.
+
+### All crates and their dependencies
+
+This graph shows the direct dependencies declared in each crate's `Cargo.toml`:
+`A → B` means A depends on B, and external and dev dependencies are left out.
+It opens at 250%; zoom between 50% and 600% with the buttons or the mouse wheel
+inside the graph, and drag to pan.
 
 <div class="crate-dependency-dag">
 <MermaidDiagram
-  label="Directed acyclic graph of direct Canwu workspace crate dependencies; arrows point from dependents to their dependencies"
+  label="Direct dependencies between all Canwu workspace crates; arrows point from each crate to the crates it depends on"
   zoomable
-  initialZoom={2}
-  maximumZoom={4}
+  initialZoom={2.5}
+  minimumZoom={0.5}
+  maximumZoom={6}
   zoomControlsLabel="Dependency graph zoom"
   zoomInLabel="Zoom in on dependency graph"
   zoomOutLabel="Zoom out of dependency graph"
   resetZoomLabel="Reset dependency graph zoom"
   diagramLoading="Rendering crate dependency graph…"
   sourceSummary="View dependency graph source"
-  noScriptMessage="JavaScript is required for the dependency graph preview; the text explanation remains available above."
+  noScriptMessage="JavaScript is required for the dependency graph preview; the crate tables below list every crate."
   definition={`flowchart TB
     subgraph Tools["Tools"]
         Debug["canwu-debug"]
@@ -177,159 +208,136 @@ external and development dependencies are omitted. The graph opens at 200%; use 
 />
 </div>
 
-## Workspace crates
+## Four rules the design follows
 
-| Crate | Core responsibility |
-| --- | --- |
-| `canwu-core` | Typed IDs, deterministic random utilities, and schema metadata |
-| `canwu-time` | Historical timestamps and checked duration arithmetic |
-| `canwu-decision` | Decision tickets, deterministic evaluation, controllers, and policy SDK |
-| `canwu-event` | Generic event envelopes, provenance, audiences, and structured event records |
-| `canwu-reference-world` | Replaceable example entities, movement plugin, detached projection, routing adapter, and starter |
-| `canwu-knowledge` | Actor knowledge, source, confidence, and information age |
-| `canwu-routing` | Deterministic time-dependent routing primitives |
-| `canwu-transport` | Transport execution, itinerary revision, handoff, booking, capacity-pool allocation, and saga record primitives |
-| `canwu-sim` | Private runtime, scheduling, plugins, settlement, transition manifests, and evaluation-trace evidence |
-| `canwu-api` | Generic programmatic API, canonical commands, domain records, evidence, and replay |
-| `canwu-information` | Published authoritative information lifecycle extension, including authenticity findings on interpretation |
-| `canwu-correspondence` | Published correspondence domain extension and simulation plugin, with delegated carriers and carrier seizure |
-| `canwu-society` | Published social diffusion simulation module |
-| `canwu-culture` | Published culture authoring, compilation, and lifecycle extension, with host-driven and in-engine settlement plugins |
-| `canwu-law` | Implemented experimental legal authoring, institutional procedure (including weighted, unit-block, and consultation stages), versioned law, and applicability extension |
-| `canwu-technology` | Published evidence-based generic technology simulation extension |
-| `canwu-history-research` | Optional downstream historical research assessment plugins |
-| `canwu-fiscal` | Generic fiscal procedure, regional adoption, assessment, execution receipt, and holder-relative knowledge-report extension |
-| `canwu-resource` | Conserved resource accounts, protected floors, demand, reservation, allocation, transfer, consumption, loss, delegated access grants, and fulfillment extension |
-| `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, production execution, projects, and output settlement extension |
-| `canwu-military` | Optional military domain extension for forces, operations, combat, occupation, military knowledge, and cross-domain receipts; not a universal combat model |
-| `canwu-movement` | Movement lifecycle extension: movement orders, leg settlement, capacity-pool allocation, and holder-relative movement reports over `canwu-transport` records |
-| `canwu-ming-fiscal` | Source-cited reference content from the early Ming through the Southern Ming with complete coverage declarations |
-| `canwu-economy-reference-content` | Economy reference content with model cards, citations, coverage declarations, and explicit unknown/not-applicable states |
-| `canwu-military-reference-content` | Versioned, explicitly synthetic military rulesets for the military extension; not a historical dataset |
-| `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal reference integration |
-| `canwu-force-supply-reference` | Replaceable military-supply consumer and requisition-saga reference integration using the public resource API |
-| `canwu-economy-reference` | Runnable integration composing resources, production, transport, force supply, a grain loop, scarcity, and price evidence |
-| `canwu-military-reference` | Runnable public-API military integration composing the military extension, its synthetic content, and the reference world |
-| `canwu-debug` | Reference client using the public API and reference-world integration |
+1. **State changes through commands.** Clients submit commands; plugins submit
+   proposals from their boundary systems. The runtime validates both and commits
+   them at a [boundary](/en/architecture/settlement/).
+2. **Every run is reproducible.** Time, scheduled work, system order, and
+   [random draws](/en/architecture/randomness/) follow fixed rules, so a replay
+   of the journal produces the same checkpoint hash.
+3. **Knowledge belongs to characters.** The runtime keeps the true state apart
+   from what each character knows. Players and agents read through
+   [actor-relative views](/en/developer/reading-state/).
+4. **History is recorded with its causes.** Every
+   [event](/en/architecture/events/) keeps its cause, audience, and correlation
+   ID, so you can ask the engine why something happened.
 
-The published `canwu-culture` culture system SDK sits above
-`canwu-society`, not in the simulation core. It compiles versioned content into
-an externally immutable, content-hash-bound execution plan, enforces cardinality and
-expanded fan-out budgets, and provides dirty-set and hot-target indexes. Its
-complete state restores lifecycle schedules, hot/dirty indexes, and effect
-cadence. Dormant targets leave the culture hot index and stop compiled culture transition rules
-after explicit society synchronization; retired targets additionally release
-target-scoped dynamic society state while historical evidence remains available.
-Since 0.13.0, the culture boundary plugin (`CultureBoundaryPlugin`) runs that
-lifecycle as a Monthly boundary system and admits exposure signal batches
-through canonical ingress; incremental society aggregation remains follow-up
-work. See the standalone [culture and legal institutional systems](/en/architecture/culture-law/),
-which combines culture authoring, lifecycle, and legal institutionalization design.
+## Where the rules live
 
-## From domain extensions to runnable kits
+The engine keeps period-specific rules out of its core. They live above
+`canwu-api`, in four forms:
 
-Canwu provides more than kernel contracts. Generic domain extensions provide
-reusable mechanics, reference content packs provide replaceable domain data,
-reference integrations connect those capabilities to a small world, and
-starter kits compose them into vertical slices developers can run and extend.
-All of these layers remain above the kernel; no historical world is embedded in
-`canwu-core`.
-
-`canwu-correspondence` is a domain extension by ownership: it owns
-communication demand, address resolution, accepted routes, disaster and
-interception policy, and cross-mechanism evidence. It is also a
-`SimulationPlugin` by execution form, registering authoritative commands,
-canonical ingress, and boundary systems. It depends on `canwu-api` and
-`canwu-information`, with no reverse dependency, so the crate DAG stays acyclic.
-
-`canwu-movement` follows the same pattern for movement. `canwu-transport` stays
-a record library of orders, executions, itinerary revisions, handoffs,
-bookings, and capacity pools. It cannot host a plugin: plugins are built on
-`canwu-api`, which depends on `canwu-transport`, so a plugin there would create
-a dependency cycle.
-`canwu-movement` depends only on `canwu-api` and owns the
-lifecycle of those records: it keeps every admitted order and execution in one
-domain record, settles legs at their due times, allocates capacity pools, and
-publishes holder-relative movement reports. Incidents, hazards, hostility, and
-every random draw about them stay in application systems.
-
-Resources and production follow the same ownership boundary:
-`canwu-resource` owns conserved quantities and fulfillment only;
-`canwu-production` consumes resource outcomes and exact technology evidence
-while owning production assets and work-order lifecycles;
-`canwu-force-supply-reference` is a second independent resource consumer; and
-`canwu-economy-reference` composes them with routing, transport, and a seasonal
-grain loop. Scarcity and price pressure remain detached, holder-bound read
-projections. Without executed, quoted, administered, or contracted price
-evidence, the integration does not invent a price.
+| Kind | What it provides | Example |
+| --- | --- | --- |
+| Domain extension | Reusable mechanics as simulation plugins | `canwu-resource`, `canwu-movement` |
+| Reference content pack | Versioned data for an extension, with sources | `canwu-ming-fiscal` |
+| Reference integration | A small runnable world that combines extensions and content | `canwu-economy-reference` |
+| Starter kit | A runnable example you copy and modify | the `starter` example in `canwu-reference-world` |
 
 <MermaidDiagram
-  label="Architecture layers from the Canwu kernel to reference content, integrations, and host games"
+  label="From the Canwu engine to extensions, content, integrations, and your application"
   diagramLoading="Rendering diagram…"
   sourceSummary="View diagram source"
-  noScriptMessage="JavaScript is required for the diagram preview; the text-source fallback remains available above."
+  noScriptMessage="JavaScript is required for the diagram preview; the table above has the same information."
   definition={`flowchart TB
-    Core["Simulation core"] --> Api["canwu-api"]
-    Api --> Domain["Generic domain extensions"]
+    Engine["canwu-api + canwu-sim"] --> Domain["Domain extensions"]
     Domain --> Pack["Reference content packs"]
     Domain --> Integration["Reference integrations"]
     Pack --> Integration
     Integration --> Starter["Starter kits"]
-    Starter -. "copy or replace" .-> Game["Celestial Mandate, user games, research tools"]
-    Pack -. "reuse directly" .-> Game
-    Integration -. "reuse directly" .-> Game
+    Starter -. "copy and modify" .-> App["Your game or research tool"]
+    Domain -. "register directly" .-> App
+    Pack -. "reuse directly" .-> App
 `}
 />
 
-Reference content packs are data, not new solvers. Reference integrations must
-use the public API and be replaceable by another world or economy model. Starter
-kits must demonstrate scenario creation, commands, settlement, actor-relative
-reads, save/load, forks, and exact replay. The collection is expected to grow;
-it is not a privileged path for one fixed demo.
+A few examples show how ownership is split:
+
+- **Movement.** `canwu-transport` holds plain records: orders, runs, itinerary
+  changes, handoffs, bookings, and capacity pools. `canwu-movement` is the plugin
+  that runs them: it admits movement orders, settles each leg when it falls due,
+  allocates capacity pools, and publishes movement reports to the characters who
+  should receive them. Incidents, hazards, and hostility stay in your own
+  systems, together with the random draws that decide them.
+- **Correspondence.** `canwu-correspondence` owns letters from demand to
+  delivery: address lookup, routes, carriers, disasters, and interception. It
+  builds on `canwu-information`, which owns documents, copies, and
+  interpretation.
+- **Economy.** `canwu-resource` owns conserved quantities and their fulfillment.
+  `canwu-production` consumes resources and technology evidence to run
+  facilities and work orders. `canwu-economy-reference` combines both with
+  transport and military supply in a seasonal grain loop. Its scarcity and
+  price-pressure numbers are read-only projections, and it reports a price only
+  when a trade, quote, official rate, or contract supplies one.
+
+For the owner of every cross-plugin contract (transition manifests, access
+grants, delegated carriers, and so on), see
+[model ownership](/en/architecture/model-ownership/#domain-ownership).
+
+## Crates
+
+### Foundation, models, and runtime
+
+| Crate | Responsibility |
+| --- | --- |
+| `canwu-core` | Typed IDs, deterministic random numbers, and schema metadata |
+| `canwu-time` | Simulation time and checked duration arithmetic |
+| `canwu-event` | Event envelopes with cause, audience, and structured fields |
+| `canwu-knowledge` | What each actor knows, with source, confidence, and age |
+| `canwu-decision` | Decision tickets, controllers, deterministic evaluation, and the policy SDK |
+| `canwu-routing` | Route planning where travel times change over time |
+| `canwu-transport` | Records for transport runs, itinerary changes, handoffs, bookings, and capacity pools |
+| `canwu-sim` | Private runtime: state, scheduling, plugins, settlement, persistence, hashing, and replay |
+| `canwu-api` | Public API: commands, domain records, views, snapshots, evidence, and replay |
+
+### Domain extensions (published, optional)
+
+| Crate | Responsibility |
+| --- | --- |
+| `canwu-resource` | Resource accounts with protected floors, demand, reservation, allocation, transfer, consumption, loss, access grants, and fulfillment |
+| `canwu-production` | Processes, production sites, facilities, capacity, work orders, work in progress, projects, and output |
+| `canwu-movement` | Movement orders, leg settlement, capacity-pool allocation, and movement reports, built on `canwu-transport` records |
+| `canwu-military` | Forces, operations, combat, occupation, and pending effects that other domains settle and acknowledge; replace it if your game needs different combat rules |
+| `canwu-society` | Social diffusion between population groups |
+| `canwu-culture` | Culture authoring and compilation, plus a culture lifecycle that runs on `canwu-society` |
+| `canwu-law` | Legal authoring, institutional procedures (including weighted, unit-block, and consultation stages), versioned law, and applicability; experimental |
+| `canwu-technology` | Technology built from evidence: capability, implementation, adoption, and diffusion |
+| `canwu-fiscal` | Fiscal procedures, regional adoption, assessment, execution receipts, and per-holder knowledge reports |
+| `canwu-information` | Documents, copies, access, release, interpretation, and authenticity findings |
+| `canwu-correspondence` | Addressed letters: demand, address lookup, routes, carriers, disasters, and interception |
+| `canwu-history-research` | Optional research assessment plugins for technology runs |
+
+### Reference content packs (published)
+
+| Crate | Responsibility |
+| --- | --- |
+| `canwu-ming-fiscal` | Source-cited fiscal content from the early Ming to the Southern Ming, with coverage declarations |
+| `canwu-economy-reference-content` | Economy model cards, citations, and coverage declarations, with explicit unknown and not-applicable states |
+| `canwu-military-reference-content` | Versioned synthetic military rulesets for the military extension |
+
+### Reference integrations and tools (repository only)
+
+| Crate | Responsibility | Also depends on |
+| --- | --- | --- |
+| `canwu-reference-world` | A small example world (armies, people, territories, letters), its movement plugin, projection, routing adapter, and the `starter` example | only `canwu-api` |
+| `canwu-ming-fiscal-reference` | Runnable Hongwu, Wanli, and Hongguang fiscal scenarios | `canwu-fiscal`, `canwu-ming-fiscal`, `canwu-reference-world` |
+| `canwu-force-supply-reference` | Military supply as a replaceable resource consumer, with a requisition saga | `canwu-resource`, `canwu-economy-reference-content` |
+| `canwu-economy-reference` | A runnable grain loop combining resources, production, transport, force supply, scarcity, and price evidence | `canwu-resource`, `canwu-production`, `canwu-technology`, `canwu-economy-reference-content`, `canwu-force-supply-reference`, `canwu-reference-world` |
+| `canwu-military-reference` | The military extension and its synthetic content running in the reference world | `canwu-military`, `canwu-military-reference-content`, `canwu-reference-world` |
+| `canwu-debug` | Desktop debug client built on the public API and the reference integrations | `canwu-reference-world`, `canwu-ming-fiscal-reference` |
+
+## Domain systems
+
+Domain systems supply the concrete rules for knowledge, decisions, resources,
+war, taxes, and more, and each one has its own design page. The
+[domain systems](/en/architecture/systems/) page lists all eight and the crates
+that provide them.
 
 ## Further reading
 
-- [Developer guide](/en/developer/)
-- [Extend with plugins](/en/developer/extensions/)
-- [Save, replay, and fork](/en/developer/persistence/)
-- [Tutorials](/en/tutorials/)
-
-## Custom resource consumers
-
-Since 0.10.1, custom consumers use an active provider-owned record containing a bounded
-`resource_consumption_intents` map of sealed `ResourceConsumptionIntentV1` values.
-Canonical adapter ingress binds the exact current source, allocation and completion
-lease; consumers never write resource balances. The force-supply reference retains
-its specialized adapter. See [the developer contract](/en/developer/production-economy/).
-
-## Demand source policy
-
-Since 0.11.0, `ResourceDemand::source_policy` records either `Pooled` or `ExactAccounts`. The latter lists 1–256 sorted unique requester-custodied accounts with exact matching resource/unit revisions. Source checks precede scarcity arbitration, with no fallback to pooled accounts. The policy is fixed after any reservation or fulfillment, including consumed reservations supporting in-flight escrow. Snapshots, replay and terminal archives preserve it. Pooled selection does not grant transfer authority; the host application controls pooled demand use. Since 0.13.0, cross-custodian delegation is expressed only by an access grant and a third policy, `Granted` (see [delegated access grants](/en/developer/production-economy/#delegated-access-grants)). See the [full contract](/en/developer/production-economy/#demand-source-policy).
-
-## Person availability and queued input
-
-Since 0.12.0, the kernel keeps each person's life and custody state as `PersonAvailability`, changed only by declared boundary systems. Commands and decisions from a person who is not alive, or who is detained or captive, are rejected, and the open decision tickets that depend on that person are cancelled at the end of the boundary that makes them unavailable. Boundary systems can also create persons with engine-allocated IDs, and the issuer of queued plugin input can withdraw it before it is due. See [integration and driving](/en/developer/integration/#people-who-can-no-longer-act) and [the settlement system](/en/architecture/settlement/#person-and-ingress-directives).
-
-## Loss, exchange, and local acceptance
-
-Since 0.12.0, `canwu-resource` records account-level loss without a transfer, starts two transfers as one atomic exchange whose per-leg leases bind the agreed terms, and settles a same-place transfer without transport when both accounts share a host-declared place scope. None of these grants cross-custodian authority. See the [full contract](/en/developer/production-economy/#account-level-loss).
-
-## What the 0.13.0 contracts own
-
-Version 0.13.0 completes the downstream grand-strategy gap set except for its deferred series items. Every contract is additive and keeps snapshot format 8; each has one owner, and the application keeps the decisions the engine should not make.
-
-| Contract | Owner | What the owner does | What stays with the application |
-| --- | --- | --- | --- |
-| Transition manifest and audit | `canwu-sim` | Records who must write in one multi-owner transition, stages their writes in phase 10, and audits them in phase 11 before the transition commits | The participants, expected versions, and meaning of the transition |
-| Evaluation trace | `canwu-core` record, `canwu-sim` evidence, `canwu-api` viewer read | Keeps a bounded, term-by-term explanation of a rule's result as boundary evidence and shows it only to holders that may see the subject | Rule IDs, terms, and what they mean |
-| Seat succession | `canwu-decision` | Lets a new ticket name a terminal ticket whose controller held the same seat | Who holds the seat |
-| Access grant | `canwu-resource` | Records a grantor's capped, windowed consent and charges each unit once under the grantee's own lease | Who may grant whom, and the authority evidence |
-| Movement lifecycle and capacity pools | `canwu-movement` over `canwu-transport` records | Admits orders, settles legs, allocates pools, and publishes movement reports | Incidents, hazards, hostility, their random draws, and authority-basis records |
-| Delegated carrier and carrier seizure | `canwu-correspondence` | Admits a carrier only on its own delegation, plans from its ledger, and ends an attempt on seizure | Relaying the news of a seizure to the sender |
-| Authenticity finding | `canwu-information` | Binds a holder's judgment of a claimed source to the exact interpreted representation | How likely a forgery is to be detected |
-| Weighted, unit-block, and consultation stages | `canwu-law` | Tallies integer vote weights and unit blocks, and runs advisory consultation stages | Seat weights, blocks, and the tie-break choice |
-| Culture boundary settlement | `canwu-culture` (`CultureBoundaryPlugin`); `canwu-society` stays the only society writer | Settles the culture lifecycle inside the engine and hands society deltas to the society plugin | The exposure signals and the culture definition |
-| Policy-pressure provenance and cohort headcount rebase | `canwu-society` | Records who issued a policy pressure and rebases a cohort to a cited external stock | The external stock record |
-| External transmission source | `canwu-technology` | Admits a cited off-map source instead of a live capability for practice transmission | The content record and its declared reliability |
-
-The [settlement system](/en/architecture/settlement/#transition-manifests) describes when each contract runs, and [model ownership](/en/architecture/model-ownership/#domain-ownership-after-0130) lists the boundaries together with the 0.12.0 contracts.
+- [Settlement](/en/architecture/settlement/): the 14 phases of a boundary, allocation, commit, and rollback
+- [Events](/en/architecture/events/): causes, audiences, and explanations
+- [Randomness](/en/architecture/randomness/): how random draws stay replayable
+- [Guides](/en/developer/): integrating, reading, saving, and extending
+- [Get started](/en/tutorials/): runnable examples

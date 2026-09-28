@@ -1,61 +1,101 @@
 ---
 title: 发明、使用与技术传播
-description: 用证据、能力、实施和按用途采用构建技术系统，并按需组合独立的历史研究插件。
+description: 运行技术示例：一间工坊验证一项技术，完成安装，为一种用途采用它，并开放一次师徒传授；需要时再加入历史研究插件。
 sidebar:
   order: 6
   label: 发明、使用与技术传播
 ---
 
-import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
+import { Aside, LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-## 1. 不要从“解锁科技”开始
+本教程借助[技术模拟扩展](/reference/terminology/) `canwu-technology`，跟踪一项技术从工坊试验到本地采用和传授的全过程。你会了解它用哪些记录取代全局科技树，通用评估器如何依据数据判定试验和用途，以及可选的历史研究插件放在哪里。完整的记录模型和校验规则见[技术系统](/architecture/technology/)。
 
-`canwu-technology` 是已正式发布的**技术模拟扩展**（technology simulation
-extension）。它不提供全局科技树、时代等级或研究点数，而是把技术变化拆成可以保存、
-质疑和重放的证据关系：
-
-```text
-技术主张 != 观察结果
-一次成功 != 可重复实践
-具备操作能力 != 已经安装
-安装完成 != 按某种用途采用
-一处采用 != 自动传播到所有地点
-```
-
-这种拆分让上层游戏能够建模问题、试验、工匠、设备安装、用途比较，并主动建立
-示范或师徒关系。游戏仍然决定资源、人物、经济、信息载体和叙事；参伍扩展只负责
-有界、确定、可验证的技术状态。
-
-<Aside type="note" title="已正式发布的扩展">
-  `canwu-technology` 和 `canwu-history-research` 当前都是正式发布的 crate，
-  也不会由 `canwu-api` 重新导出。它们仍是可选领域包，并遵循参伍 1.0 之前的
-  兼容性策略。
+<Aside type="note" title="依赖">
+  `canwu-technology` 和 `canwu-history-research` 都是已发布的 crate，`canwu-api` 没有重新导出它们，请自行加入 `Cargo.toml`。两者都遵循参伍 1.0 之前的兼容性策略。
 </Aside>
 
-## 2. 用正交记录构建玩法
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" icon="external">
+  打开 technology_diffusion.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" variant="secondary" icon="external">
+  浏览技术扩展
+</LinkButton>
 
-<Steps>
-1. 用 `MetricSchema` 定义单位、整数尺度与范围，再用 `TechniqueSpec` 描述功能和可替代条件组。
-2. 每个配方、工艺或设计使用不可变 `TechniqueRevision`；变化创建新修订并记录祖先关系。
-3. 玩家通过带签发者、权限、时间与状态版本保护的命令启动 `TechnicalProgram`。
-4. 先授权一个有界的 `TechnologyExecutionIntent`，再由指定提供方通过独立的结果输入返回绑定精确执行意图的 `ExperimentAttempt` 或 `ProductionRun`；被动 `AttemptObservation` 仍须引用精确试验。项目的提供方要求在结果提交时校验，因此不合要求的提供方可能先有待处理的执行意图，结果随后被拒绝。
-5. 只有满足配置证据规则的命令才能创建 `CapabilityQualification`；成功试验不会自动授予能力。
-6. 用 `ImplementationRecord` 表示当地安装，用 `ApplicationSpec` 和 `AdoptionRecord` 单独评估、批准某一用途。新安装必须引用当前有效的资格与资产；试用、正式采用或重新提交采用时，也必须引用当前有效的实施。旧精确版本只保留历史含义，不能充当新的授权。
-7. `TransmissionOpportunity` 只表示文献访问、示范、师徒、器物检查、人员转移或独立研究的机会；资格与实施分别记录有效起点和安装时间，新建实践传播须引用该边界重放状态中仍为当前且已经有效的精确资格或实施版本。后来停用会阻止新传播，但不会推翻旧机会；旧机会只能单向关闭，恢复关系须基于当时有效来源新建机会。它可连接目的地的学习项目，但不会自动复制知识或能力。
-8. 自 0.13.0 起，存在于模拟世界之外的师傅可以作为外部传播来源（`ExternalTransmissionSourceV1`）被引用，代替实时能力记录：它是初始场景中一条归属 `canwu.technology` 以外的内容记录，并附有声明的可靠度。示范、师徒和人员转移机会必须在 `source_capability` 与 `external_source` 中恰好引用一项。外部来源在模拟中没有持有人或地点，因此由目的地开启机会，其关闭方式与其他机会相同。文献与器物模式保持原有规则。
-</Steps>
+## 运行
 
-创建新的 `TechniqueRevision` 也不会自动把它写入任何行动者的可读知识；游戏应通过观察、
-技术主张或传播流程建立持有人相对的信息。劳动力、资本、燃料、制度阻力和政治支持同样
-属于内容与游戏规则，而不是通用评估器暗含的历史因果。
+在仓库根目录运行：
 
-会长期影响含义的关系使用**精确领域记录版本**（exact domain-record version）：
-`DomainRecordVersionRef` 同时固定记录、版本和建立该版本的证据。当前实施后来停用时，
-既有采用记录仍按它当时引用的安装版本解释。
+```shell
+cargo run -p canwu-technology --example technology_diffusion
+```
 
-### 同一评估器，不同内容
+```text
+adoption=Committed, scale=10, learner_knowledge=0 (opportunity is not automatic learning)
+snapshot restore and exact replay match
+```
 
-参考评估器只读取数据中的指标和阈值，不检查“造纸”“火药”或“蒸汽机”等名称：
+工坊的采用记录以规模 10 正式提交。学徒的知识数为 0：开放师徒传授只是创造了学习机会，学习本身需要另外的记录。第二行确认恢复的快照和精确重放都与实际运行一致。
+
+## 每一步一种记录
+
+`canwu-technology` 把技术变化的每个阶段存为独立的记录，这些记录可以保存、质疑和重放：
+
+| 阶段 | 记录 | 确立的事实 |
+| --- | --- | --- |
+| 设计 | `TechniqueSpec`、`TechniqueRevision` | 技术的功能、条件组，以及一份不可变的配方或设计。修改会产生新修订，并写明其前序修订。 |
+| 工作 | `TechnicalProgram` | 某个持有人在某地进行的研究、改良或培训。 |
+| 试验 | `ExperimentAttempt`、`ProductionRun`、`AttemptObservation` | 由获授权的提供方返回的、在给定条件下的一次结果。 |
+| 技能 | `CapabilityQualification` | 某个持有人能在某地执行某项操作，并有满足该技术资格规则的证据支持。 |
+| 安装 | `ImplementationRecord` | 某地已安装的设备，含产能和可靠度。 |
+| 用途 | `ApplicationSpec`、`AdoptionRecord` | 某地经过可行性检查后，为一种用途采用该技术。 |
+| 传播 | `TransmissionOpportunity` | 通过文献、示范、师徒、器物检查、人员转移或独立研究获得的学习机会。 |
+
+资源、人物、经济、信息载体和叙事由你的游戏负责；扩展负责有界、确定、经过校验的技术状态。劳动力、资本、燃料、制度阻力和政治支持都属于你的内容和游戏规则。
+
+## 示例如何运行
+
+<MermaidDiagram
+  label="技术示例：研究项目、获授权的试验、资格、安装、采用和师徒传授"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
+  definition={`flowchart LR
+    Program["TechnicalProgram"] --> Intent["TechnologyExecutionIntent<br/>授权试验"]
+    Intent --> Attempt["ExperimentAttempt<br/>提供方结果"]
+    Attempt --> Qual["CapabilityQualification"]
+    Qual --> Impl["ImplementationRecord"]
+    Impl --> Adopt["AdoptionRecord<br/>一种用途"]
+    Impl --> Teach["TransmissionOpportunity<br/>师徒传授"]
+    Teach --> Learner["学徒的<br/>TechnicalProgram"]
+`}
+/>
+
+[technology_diffusion.rs](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs) 中的 `main` 按顺序线性展开，每一步都清晰可见。
+
+1. **目录。** `scenario()` 把目录作为初始场景记录载入：两个 `MetricSchema`（以千分比计的可靠度，以及燃料成本）；一个要求可靠度至少 700 的 `TechniqueSpec`；一个由 `REFERENCE_EVALUATOR_V1` 评估的 `TechniqueRevision`；以及一个 `ApplicationSpec`“为深井排水”（drain a deep working），燃料成本不超过 500 时可行。
+2. **项目。** 操作者通过带请求标识的命令 `apply_technology_operation_v1` 启动 `TechnicalProgram`。辅助函数 `apply_command` 提交命令后结算两个边界：第一个准入命令，第二个应用变化。
+3. **试验。** 操作者为提供方 `reference-lab` 授权一个 `TechnologyExecutionIntent`。提供方通过 `technology_result_v1` 输入返回针对这个执行意图的 `ExperimentAttempt`，可靠度为 820。另一个提供方 `meter-reader` 为同一次试验记录一条 `AttemptObservation`，燃料成本为 400。
+4. **资格与安装。** 一条命令引用这次试验创建 `CapabilityQualification`，下一条命令引用该资格创建 `ImplementationRecord`。
+5. **采用。** `evaluate_application` 用该用途的可行性规则检查燃料成本。随后创建 `AdoptionRecord`，状态为 `Committed`、规模为 10，并引用安装记录和燃料观察。
+6. **传授。** 学徒在另一处地点开启培训项目；操作者开放一个师徒类 `TransmissionOpportunity`，以安装记录作为 `source_capability`，并关联学徒的项目。
+7. **恢复与重放。** `from_technology_snapshot_json` 和 `replay_technology_from_journal` 重建运行时，示例断言两者都与实际运行一致。
+
+## 记录执行的规则
+
+- 试验必须先获授权。项目对提供方的要求在结果到达时检查，因此不合要求的提供方可能先持有一个待处理的执行意图，随后结果被拒绝。
+- 每项资格都必须引用互不重复的试验，这些试验要与它的技术修订、操作和地点一致，且持有人参与过其中至少一次。资格记录的可靠度必须等于这些试验中通过的比例。处于有效状态的资格还必须达到所配置 `QualificationRule` 的最低要求；已停用的资格则不必。
+- 新安装必须引用当前有效的资格及其资产；试用、正式采用或重新提交采用必须引用当前有效的安装。旧的精确版本只作为历史保留，不再授予新的权利。
+- 新的实践传播必须引用在该边界中已经生效且为当前版本的精确资格或安装。之后停用来源会阻止新的传播，已有的机会保持原样。已有机会只能关闭；要恢复传授，需基于当时有效的来源新开一个机会。
+- 模拟世界之外的师傅可以作为[外部传播来源](/reference/terminology/)（`ExternalTransmissionSourceV1`）被引用：它是初始场景中一条归属 `canwu.technology` 以外的内容记录，并附有声明的可靠度。示范、师徒和人员转移机会必须在 `source_capability` 与 `external_source` 中恰好引用一项。外部来源在模拟中没有持有人和地点，所以由目的地开启机会。
+- 行动者通过观察、技术主张或传播了解新的 `TechniqueRevision`；创建修订本身不改变任何人的知识。
+
+需要在记录变化后保持原意的关系使用[精确领域记录版本](/reference/terminology/)。`DomainRecordVersionRef` 同时固定记录、版本和确立该版本的证据。某项安装后来停用时，既有的采用记录仍按它当初引用的安装版本解释。
+
+## 一个评估器适用所有技术
+
+参考评估器从数据中读取指标和阈值。“造纸”“火药”“蒸汽机”等技术名称只出现在内容里。
 
 ```rust
 let result = evaluate_attempt(
@@ -68,77 +108,53 @@ let result = evaluate_attempt(
 )?;
 
 if result.passed {
-    // 这只是本次试验的判据证据；资格、安装和采用仍需各自的授权操作。
+    // 这只是本次试验的证据；资格、安装和采用各自还需要获授权的操作。
 }
 ```
 
-条件组之间是 AND；一个组内的候选阈值是 OR。全部数值使用明确单位和整数尺度，
-因此存档、派生分支和精确重放不会因浮点或遍历顺序改变结果。
+一项技术的所有条件组都必须满足（AND）；组内任一阈值满足即可（OR）。每个数值都带单位和整数尺度，因此快照、派生分支和精确重放每次都得到相同结果。
 
-## 3. 五项技术如何交叉验证
+### 五项技术，一份契约
 
-| 案例 | 同一通用契约必须得到的反事实 |
+仓库测试验证同一份契约能得出以下反事实：
+
+| 案例 | 反事实 |
 | --- | --- |
-| 造纸术 | 本地纤维与操作者证据各自都能反转同一工艺的试验结果。 |
-| 雕版印刷 | 稳定长版次通过用途判据，频繁修改的短版次不通过。 |
-| 活字印刷 | 字符库存、排版劳动力、版次规模和文本改动频率可反转它与雕版的技术及用途适配。 |
-| 火药 | 同一批弱火药可满足可见火焰用途，却不满足推进用途。 |
-| 蒸汽机 | 廉价燃料的抽水用途通过；高成本抽水和低扭矩旋转用途失败。 |
+| 造纸术 | 本地纤维和操作者证据各自都能反转同一工艺的结果。 |
+| 雕版印刷 | 稳定的长版次通过用途判据，频繁修改的短版次不通过。 |
+| 活字印刷 | 字符库存、排版人工、版次规模和文本改动频率能反转它相对雕版的适用性。 |
+| 火药 | 同一批弱火药满足可见火焰用途，不满足推进用途。 |
+| 蒸汽机 | 燃料便宜时的抽水用途通过；高成本抽水和低扭矩旋转用途不通过。 |
 
-仓库测试先让五项技术逐一经过目录、授权项目命令、结果 ingress、边界结算和权威状态
-查询，再使用同一个 `evaluate_attempt()` / `evaluate_application()` 合同证明反事实：
-评估器判定稳定长版次适用雕版、频繁修改的短版次适用活字；弱火药能产生可见火焰但
-不满足推进；廉煤矿井的抽水用途被判为适用，而高成本地点被判为不适用。真正采用仍
-须经过完整流程测试覆盖的授权资格、实施和采用操作。案例名只存在于测试数据和文档中。
+`five_technology_profiles_use_one_evaluator_contract` 让每项技术依次经过目录载入、授权项目命令、结果输入、边界结算和状态查询；`historical_profiles_reverse_outcomes_without_case_specific_solver_code` 用 `evaluate_attempt()` 和 `evaluate_application()` 验证上述反事实。运行这两个测试：
 
-## 4. 把历史研究留在可选插件
+```shell
+cargo test -p canwu-technology --test framework
+```
 
-高精度历史研究不进入模拟内核，也不改变基础技术真值。`canwu-history-research` 提供三个可
-独立选择的**历史研究插件**（historical research plugin）：
+## 可选的历史研究插件
 
-| 插件 | 只拥有的内容 | 不拥有的内容 |
-| --- | --- | --- |
-| `HistoricalSourcesPlugin` | 研究者对年代、真实性、可靠性和来源链的评估 | 文献本体、技术真值 |
-| `HistoricalPracticePlugin` | 对工匠、工场、实践关系、笔记摘要和负结果的评估 | 基础试验、资格或知识传递 |
-| `ProductionArchaeologyPlugin` | 对遗存、样品、年代和生产过程假说的评估 | 运行时资产、库存、工单或生产记录 |
+细致的历史解读放在模拟内核之外的 `canwu-history-research` 中，基础技术记录保持不变。它提供三个可以单独启用的[历史研究插件](/reference/terminology/)：
 
-每条评估都保存评估者、方法与版本、截至时间（as-of）、不确定度、摘要哈希，以及经模拟内核验证
-身份与时间均不晚于 as-of 截面的持久引用；反驳和取代只能指向研究同一精确对象的既有评估。
-引用存在本身不证明其相关性或历史真实性。评估命令属于可信上层应用的输入：评估者权限不等同于玩家可见的信息访问证明，需要这种证明的游戏应在自己的研究工作流中先行校验。`HistoricalAnalysis` 是上层应用的只读查询；游戏可以完全关闭历史插件，
-只启用一种研究方法，或用 `HistoricalResearchSuite` 同时启用三种。
+| 插件 | 记录的评估对象 |
+| --- | --- |
+| `HistoricalSourcesPlugin` | 文献的年代、真伪、可靠性和来源链 |
+| `HistoricalPracticePlugin` | 工匠、工坊、实践关系、笔记摘要和负结果 |
+| `ProductionArchaeologyPlugin` | 遗存、样品、年代和生产过程假说 |
 
-## 5. 选择家用硬件规模
+每个插件只保存评估；评估所讨论的文献本体、基础试验和运行时资产仍由各自的记录保存。每条评估都记录评估者、方法及其版本、截至时间（as-of）、不确定度、摘要哈希，以及在截至时间之前已经存在的引用。反驳和取代只能指向针对同一精确对象的更早评估。引用只能证明来源存在，它是否相关、是否属实仍是评估者的判断。
 
-以下数据于 2026-08-22 在引擎 0.5.1 上记录，尚未在 0.13.0 上重新测量；此后 Format 8 已去掉边界中对领域状态的整体复制，
-因此只能作为历史参考，不代表当前性能。20 年工作负载在 Ryzen 7 7800X3D、32 GB RAM、Windows release build 上的结果如下：
+评估命令属于可信上层应用的输入。如果玩家需要先取得相关信息，请在自己的研究流程插件中校验后再提交命令。`HistoricalAnalysis` 是上层应用的只读查询。你可以通过 `HistoricalResearchSuite` 一个都不启用、只启用一个，或同时启用三个。
 
-| 档位 | 站点 / 项目 / 传播关系 | 技术操作 p95 | 月边界 p95 | 深校验加载 | 峰值内存 |
-| --- | --- | ---: | ---: | ---: | ---: |
-| 节奏式交互组件档 | 100 / 200 / 400 | 72 ms | 169 ms | 3.942 s | 648 MiB |
-| 压力档 | 500 / 1,000 / 2,000 | 403 ms | 616 ms | 14.915 s | 1.158 GiB |
+## 容量上限
 
-固定的节奏式交互组件档适合回合制或有意放慢节奏的家用电脑游戏；它不是整机认证，
-也不应被外推为更大规模或低于 100 ms 的即时操作承诺。
-500 站点压力档适合战役回合或离线研究，不能作为即时交互承诺。技术记录总数最多
-5,000 条，每个历史插件最多 1,000 条，合计最多 8,000 条；技术知识记录最多 5,000 条。
-单载荷最多 16 KiB、32 个引用、64 个集合项；单边界合计最多 127 次扩展记录变化。容量溢出会留下明确拒绝事件，不会让已准入输入永久阻塞后续边界。
-这些数据来自 8 核、32 GiB 的组件进程，不代表 4 核、8 GiB 整机游戏认证。节奏式档的月边界 p95
-在 500 ms 组件预算内留出约 331 ms 余量，但整机游戏仍须在渲染、资源和其他月度系统同时存在时复测。
+技术扩展和每个历史研究插件各自有每个边界和总量上限；超出预算的边界会拒绝其中的新操作，后续边界照常运行。全部上限见[技术系统](/architecture/technology/#限制与预算)。
 
-## 6. 代码与证据
+家用硬件基准记录了该工作负载在较早引擎版本上的表现；请在渲染、资源和其他月度系统同时运行时重新测量。
 
-框架测试包含完整的命令、试验结果、资格、安装、采用、教学机会、存档、派生分支和精确重放
-流程；历史插件测试覆盖插件独立选择、跨评估反驳和恢复时深校验。性能报告同时保留原始样本。
-
-<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" icon="external">
-  查看技术扩展
-</LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" variant="secondary" icon="external">
-  打开可运行示例
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" icon="external">
+  查看家用硬件基准
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-history-research" variant="secondary" icon="external">
-  查看历史研究插件
-</LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" variant="secondary" icon="external">
-  查看家用硬件基准
+  浏览历史研究插件
 </LinkButton>

@@ -1,0 +1,246 @@
+---
+title: Knowledge and information
+description: How holder knowledge ledgers, the information lifecycle, and routed correspondence turn a fact in the world into something one actor knows, for simulations where each actor acts only on what has reached it.
+sidebar:
+  order: 7
+  label: Knowledge and information
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Knowledge and information navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/events/">Event system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/developer/reading-state/">Reading state safely</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/knowledge-information/">中文版</a>
+</nav>
+
+Canwu keeps what is true in the world apart from what each actor knows. `canwu-knowledge` holds one append-only knowledge ledger per holder, the person or institution whose knowledge it records; `canwu-information` records how a piece of information is written, sent, read, understood, and released; and `canwu-correspondence` carries addressed letters along routes planned from what the carrier knows. Use them when players, agents, or institutions should act on reports and letters as they arrive, each seeing only what has reached it.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-knowledge` | Holder ledgers (`KnowledgeRecord`), holder queries, read cuts (the ledger position a read saw), and cursors, plus each actor's older army observations, kept for compatibility (`ActorKnowledge`) | Published on crates.io |
+| `canwu-information` | The information lifecycle as domain records in the `canwu.information` namespace: channels, content, representations, instances, dispatches, delivery attempts, access, interpretation, audiences, releases, and operations; the simulation plugin `InformationPlugin` | Published on crates.io |
+| `canwu-correspondence` | Addressed correspondence in the `canwu.correspondence` namespace: operations, communication opportunities, knowledge seeds, and carrier delegations; the simulation plugin `CorrespondencePlugin`; the holder planning snapshot builders | Published on crates.io |
+
+<MermaidDiagram
+  label="Crate dependencies: the host application uses the two extensions and the public API; the extensions depend on canwu-api; the simulation core stores canwu-knowledge ledgers"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same dependencies."
+  definition={`flowchart TB
+    Host["Host application<br/>scenario, commands, ingress, seeds"]
+    Corr["canwu-correspondence<br/>letters, routes, carriers"]
+    Info["canwu-information<br/>information lifecycle"]
+    Api["canwu-api<br/>public API, CanwuViewer"]
+    Route["canwu-routing, canwu-transport<br/>route planning, transport records"]
+    Sim["canwu-sim<br/>validates and commits publications"]
+    Know["canwu-knowledge<br/>holder ledgers and queries"]
+    Host --> Corr
+    Host --> Info
+    Host --> Api
+    Corr --> Info
+    Corr --> Api
+    Info --> Api
+    Api --> Route
+    Api --> Sim
+    Api --> Know
+    Sim --> Know
+`}
+/>
+
+Arrows point from a crate to what it depends on. `canwu-knowledge` is a model crate: the simulation core (`canwu-sim`) stores its ledgers and validates every publication, and `canwu-api` re-exports its types. The two extensions depend only on `canwu-api`, and `canwu-correspondence` also depends on `canwu-information`. The host application registers the plugins, supplies content and probabilities, and reads results through the public API.
+
+Publishing knowledge is a separate capability from owning state. A plugin that owns a record still needs a registered knowledge schema and a `KnowledgeWriteGrant` on one of its [boundary systems](/en/architecture/settlement/) (the per-phase functions a plugin registers) before it can tell any holder about that record.
+
+## Core model
+
+### Knowledge ledger
+
+| Type | What it represents |
+| --- | --- |
+| `KnowledgeHolderRef` | Who knows: `Person(PersonId)` or `Entity(EntityRef)`. Defined in `canwu-core` and re-exported by `canwu-api`. |
+| `KnowledgeRecord` | One fact in one holder's ledger: its `schema`, typed `subjects`, a JSON `payload`, `as_of` (when the fact held, if known), `learned_at` (when the holder learned it), `confidence_per_mille`, `origin` (method and evidence), and the earlier records it `supersedes` or `contradicts`. The gap between `as_of` and `learned_at` is the age of the news. |
+| `KnowledgeRecordDraft` | What a boundary system proposes. The kernel assigns the record ID and sets `learned_at` to the boundary time. |
+| `KnowledgeRecordView` | The holder-facing copy of a record: it carries a holder-local ID (`HolderKnowledgeRecordId`) and omits `origin`. |
+| `KnowledgeQuery`, `KnowledgeQueryResult`, `KnowledgeCursor` | One page of one holder's ledger, filtered by schema, subject, and learned time, with a cursor for the next page. |
+| `KnowledgeReadCut` | The ledger position a read saw: the boundary and a hash of that holder's records. |
+| `KnowledgeSnapshot` | Every holder ledger, as stored in a snapshot or a scenario. It also carries `ActorKnowledge`: each actor's original observations of armies, each with a `KnowledgeSource` (direct observation, command responsibility, report, or scenario record). |
+| `PluginKnowledgeSchema`, `KnowledgeWriteGrant` | A versioned knowledge schema that one plugin registers and owns, and one boundary system's permission to publish that schema with a given visibility. |
+
+### Information and correspondence
+
+Each information record type below has a matching payload type, such as `ContentPayload` for `Content`.
+
+| Type | Crate | What it represents |
+| --- | --- | --- |
+| `Content` | information | What is said: an inline JSON body or the digest of an external resource, optionally derived from other content, with each source's role, such as quotation or correction |
+| `Representation` | information | One encoding of content in a format, with its lineage, an optional `ClaimedSourceRef` (the source it claims), and the capability needed to interpret it |
+| `Instance` | information | A physical copy, with its custodian and location |
+| `Channel` | information | A path profile and its capabilities, such as `AddressedDelivery`, `AudienceDelivery`, or `OpenReception` |
+| `Dispatch`, `DeliveryAttempt` | information | One send to addressed holders, an audience, or open reception; one try to reach one recipient |
+| `Access` | information | A holder read a representation, with a method and an extent in thousandths |
+| `Interpretation`, `AuthenticityFinding` | information | A holder's attempt to understand what it accessed, with status `Failed`, `Partial`, or `Succeeded`; the optional finding records whether it accepts the claimed source |
+| `Audience`, `Release` | information | A frozen member list bound to a membership root; a release to that audience or to open availability, which ends as `Withdrawn` or `Expired` |
+| `InformationOperationEnvelope` | information | One idempotent operation that wraps one `LifecycleRequest` under an `InformationOperationId` |
+| `CorrespondenceOperation` | correspondence | One addressed letter: its intent, the resolved address and read cut, the `RoutePlan`, the `TransportExecution`, planning history, incidents, and a `CorrespondenceStatus` that ends as `Settled`, `DeadlineMissed`, `CompensationPending`, or `Failed` |
+| `NetworkKnowledgeSeed` | correspondence | Routing endpoints, connections, and recipient addresses to install in one holder's ledger |
+| `CommunicationOpportunity` | correspondence | A drawn chance for a sender to write to one of its candidate recipients |
+| `CorrespondenceIncidentKind` | correspondence | `Disaster`, `Interception`, or `CarrierSeized` |
+| `CarrierAuthority` | correspondence | A carrier's accepted delegation to carry for a sender, kept as its current `CarrierDelegationRecord` |
+
+## How it runs
+
+<MermaidDiagram
+  label="Path from a command or ingress through phase-7 lifecycle systems and phase-13 publication to the holder ledger, the KnowledgePublished event, and CanwuViewer"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same path."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same path."
+  definition={`flowchart TB
+    Input["Host commands and ingress<br/>apply_information_operation_v1,<br/>initiate_correspondence_v1, seeds"]
+    Corr["Phase 7: correspondence-lifecycle-v1<br/>reads carrier ledger, plans route"]
+    Info7["Phase 7: information_lifecycle_v1<br/>validates and writes records"]
+    Info13["Phase 13: information_publication_v1<br/>PublishKnowledge per holder"]
+    Seed["Phase 13: correspondence-knowledge-ingress-v1<br/>seeds and attempt reports"]
+    Kernel["Simulation core<br/>checks schema, grant, holder<br/>commits at boundary end"]
+    Ledger["Holder knowledge ledger<br/>KnowledgeRecord"]
+    Event["KnowledgePublished event<br/>audience: that holder"]
+    Viewer["CanwuViewer<br/>query_knowledge, visible_changes_since"]
+    Input --> Corr
+    Input --> Info7
+    Input --> Seed
+    Corr -- "information_operation_v1<br/>admitted at a later boundary" --> Info7
+    Info7 --> Info13
+    Info13 --> Kernel
+    Seed --> Kernel
+    Kernel --> Ledger
+    Kernel --> Event
+    Ledger --> Viewer
+    Event --> Viewer
+    Ledger -. "next planning read" .-> Corr
+`}
+/>
+
+<Steps>
+1. Input arrives. Your host submits `apply_information_operation_v1` commands, each carrying an `InformationOperationEnvelope`. The command handler checks idempotency and queues `information_operation_v1` [canonical ingress](/en/reference/terminology/); the command itself writes no records. An information provider may queue that ingress directly. Correspondence enters through the `initiate_correspondence_v1`, `delegate_carrier_v1`, and `resolve_correspondence_v1` commands and the `install_correspondence_knowledge_v1`, `communication_opportunity_v1`, and `correspondence_incident_v1` ingress.
+2. Phase 7 runs the information lifecycle. The event-driven system `information_lifecycle_v1` moves each admitted operation through `Accepted` and `ApplyingDomainChanges` and then applies it, one state per boundary. Before applying, it checks the interpretation authority and that any authenticity finding cites the current version of a representation that carries a claimed source. A failed check stores the operation as `Rejected` with the code `invalid_authority` or `invalid_lifecycle`. `InformationLifecycle::plan` returns the record mutations and the knowledge publications the change implies.
+3. Phase 7 also runs correspondence. `correspondence-lifecycle-v1` settles starts, progress, incidents, opportunities, recoveries, and delegations. A start reads the carrier's current planning knowledge, resolves the recipient's address from it, calls `plan_route`, stores the `CorrespondenceOperation`, and schedules information operations for `canwu-information`. Later `progress_correspondence_v1` ingress waits for those operations and starts and completes legs.
+4. Phase 13 publishes. `information_publication_v1` turns an operation's publications into `PublishKnowledge` directives, one batch per holder and at most 64 publications per operation in a boundary. An `information_operation_finalize_v1` ingress records the published IDs at the next boundary and releases the next chunk. `correspondence-knowledge-ingress-v1` publishes knowledge seeds and carrier attempt reports.
+5. The simulation core checks and commits. It accepts `PublishKnowledge` only when:
+   - it comes from a phase-4 or phase-13 system that lists the schema in `knowledge_writes` with that visibility;
+   - the schema is writable and registered by the same plugin;
+   - the holder is eligible and the evidence references are valid.
+
+   It then assigns global record IDs, sets `learned_at`, lets later systems in the same boundary read `SameBoundary` records, and commits every batch to the ledger at the end of the boundary.
+6. Results come out. Each batch becomes a `BoundaryKnowledgeChange` in `BoundaryRecord::knowledge_changes` and one `KnowledgePublished` event whose audience is that holder. The holder can read the new records from the next read of its ledger.
+</Steps>
+
+The [settlement system](/en/architecture/settlement/) page lists all fourteen phases. The [routed correspondence case](/en/tutorials/cases/routed-correspondence/) walks through incidents and recovery: a disaster reroutes the same attempt, an interception gives the interceptor an `Access` record while delivery continues, and a carrier seizure ends the attempt.
+
+## Knowledge and visibility
+
+A ledger belongs to one holder: a person who is not dead (`KnowledgeHolderRef::Person`), an army, a government, or a domain-record entity whose schema sets `holder_policy` to `KnowledgeHolderPolicy::Allowed`. Publishing to any other holder fails with `InvalidKnowledgeHolder`. Ledgers have no inheritance: a successor office starts with an empty ledger until a plugin publishes to it.
+
+| Reader | API | What it gets |
+| --- | --- | --- |
+| Player or agent bound to a person or institution | `CanwuViewer::query_knowledge` | Its own ledger as `KnowledgeRecordView` values, with no origin evidence |
+| Research or developer principal | `CanwuViewer::query_holder_knowledge`, `CanwuViewer::audit_knowledge_record` | Any existing holder's ledger; the audit call returns one full `KnowledgeRecord` with its origin |
+| Public principal | none | `query_knowledge` fails with `InvalidKnowledgeAuthority` |
+| Trusted host code | `Canwu::admin_query_knowledge`, `Canwu::knowledge` | Any holder's ledger, or the whole `KnowledgeSnapshot` |
+| Boundary system or command handler | `SimulationView::knowledge_records` | Any holder's ledger at the view's read cut; the contract must declare the `StateKey::core_knowledge()` read |
+
+Open a viewer with `Canwu::viewer()`, which follows the run's observation policy, or with `viewer_for_actor` for a character seat. The [reading state](/en/developer/reading-state/) page shows both and explains how to build a client payload.
+
+A query returns records in `learned_at` order. `KnowledgeHistoryView::CurrentHeads`, the default, hides records that a later record supersedes; `FullHistory` returns all of them. Holder-local IDs number a holder's records from 1, so a reader cannot infer how many facts other holders have. A cursor binds the holder, the query, and the read cut. When the holder learns something new, its read cut changes and an old cursor fails with `KnowledgeReadCutUnavailable`; another holder's news leaves the cursor valid.
+
+`CanwuViewer::visible_changes_since(since)` returns a `VisibleChange` (time, summary, and source event) for each later event whose audience includes the viewer. Every knowledge publication emits `KnowledgePublished` with the receiving holder as its audience, so a client can use this call to notice new knowledge and then query the ledger. Research and developer principals see every event. The [event system](/en/architecture/events/) page describes the other audiences.
+
+The two extensions publish these schemas:
+
+| Schema | Published to | When |
+| --- | --- | --- |
+| `canwu.information` `representation_available` | The recipient of a delivery attempt | The attempt becomes `Delivered` |
+| `canwu.information` `access_recorded` | The holder who read | An access is recorded |
+| `canwu.information` `interpretation_recorded` | The holder the interpretation was performed for | An interpretation is recorded |
+| `canwu.information` `release_available` | Each audience member | An audience release becomes `Active` |
+| `canwu.correspondence` `routing_endpoint`, `routing_connection`, `address` | The holder named in the seed | A `NetworkKnowledgeSeed` is admitted |
+| `canwu.correspondence` `attempt_report` | The carrier | A carrier seizure ends a delivery attempt |
+
+The information schemas carry only `record_version` in the payload; the subjects name the records. Your host decides which content to show once a holder knows a record exists. Each fact goes to one holder, so a relay's secret read reaches no one else, a delegated carrier's route knowledge stays out of the sender's ledger, and a seizure report names no seizer.
+
+## Randomness, persistence, and replay
+
+`canwu-knowledge` and `canwu-information` draw no random numbers. `canwu-correspondence` declares one [random stream](/en/architecture/randomness/), `operation-resolution` version 1, on `correspondence-lifecycle-v1`. It makes these operation-keyed draws:
+
+| Operation kind | Decides |
+| --- | --- |
+| `communication_opportunity` | Whether an opportunity is selected: a draw from 0 to 999 below your `probability_per_mille` selects it |
+| `communication_recipient` | Which candidate a selected opportunity names: a uniform draw over the candidate list |
+| `correspondence_incident` | Whether an incident triggers: a draw from 0 to 999 below your `probability_per_mille` triggers it |
+
+The 0–999 roll is stored on the opportunity or incident record as `roll_per_mille`. Whether a holder detects a forged claimed source is your application's own draw; the information extension records only the resulting `AuthenticityFinding`.
+
+Holder ledgers are saved in `SimulationSnapshot::knowledge`, one entry per holder in record-ID order. Loading rejects a record filed under the wrong holder or a duplicated global ID. Holder-local IDs, read-cut hashes, and cursor bindings are derived at read time and never stored. Information and correspondence state are ordinary domain records.
+
+Each boundary record keeps its `knowledge_changes`, and [exact replay](/en/developer/persistence/) recomputes and compares them. Information operations are idempotent by ID and canonical input hash: an exact retry changes nothing, and different input under the same ID fails with `IdempotencyConflict`. Decoding and other judgments happen in your code, and their results enter as recorded content and interpretation records, so replay reuses them without running your decoder again.
+
+## What your application supplies
+
+- Holders and their starting knowledge, through `Scenario::knowledge` or, for correspondence planning, a `NetworkKnowledgeSeed`.
+- Your own knowledge schemas and the phase-4 or phase-13 systems that decide who learns what from your mechanics.
+- Information content: bodies, formats, claimed sources, channel profiles, and audience member lists.
+- Interpretation results, including any `AuthenticityFinding`.
+- Authority: controllers and [decision tickets](/en/architecture/decisions/) for sending and recovery (`correspondence_decision_ticket` and `correspondence_recovery_decision_ticket` build them), carrier delegation commands, and, for delegated interpretation, a plugin named `canwu-authority` that accepts `delegate_interpretation_v1` commands.
+- Probabilities for opportunities, incidents, and forgery detection.
+- The client DTOs built from `query_knowledge` and `visible_changes_since` results.
+
+## Limits and budgets
+
+The knowledge ledger (`DEFAULT_KNOWLEDGE_PAGE_SIZE`, `MAX_KNOWLEDGE_PAGE_SIZE`, and `KnowledgeLimitsV1::CURRENT`):
+
+| Limit | Value |
+| --- | ---: |
+| Default and maximum query page size | 100 and 1,000 records |
+| Knowledge schemas per plugin (`schemas_per_plugin`) | 256 |
+| Records per publication batch (`records_per_batch`) | 1,000 |
+| Publication batches per system in one boundary (`batches_per_system_boundary`) | 64 |
+| Records per boundary (`records_per_boundary`) | 10,000 |
+| Payload bytes per record (`payload_bytes_per_record`) | 65,536 |
+| Subjects, evidence references, supersedes links, and contradicts links per record (`relations_per_record`) | 64 each |
+| Summary and origin-method text (`text_bytes`) | 1,024 bytes |
+
+`InformationLimitsV1::canonical()` caps addressed recipients per dispatch and explicit audience members at 10,000 each, delivery attempts per recipient at 256, and an inline body at 65,536 bytes; the rustdoc lists the rest.
+
+A communication opportunity lists 1 to 64 candidate recipients.
+
+## Try it
+
+```shell
+cargo run -p canwu-information --example confidential_copy_release
+cargo run -p canwu-information --example encoded_interception
+cargo run -p canwu-correspondence --example routed_correspondence
+cargo test -p canwu-knowledge -p canwu-information -p canwu-correspondence
+```
+
+- [Confidential copy and targeted release](/en/tutorials/cases/confidential-copy-release/): a relay copies a document, releases the copy to two readers, and withdraws it.
+- [Encoded transfer and in-path interception](/en/tutorials/cases/encoded-interception/): a failed decode, a delegated decode, and a claimed-source judgment.
+- [Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/): route planning from the sender's ledger, incidents, recovery, delegated carriers, and seizure.
+- [Route planning and delivery execution](/en/tutorials/routing-transport/): how `canwu-routing` and `canwu-transport` plan and record the journey.
+- [Read and present state safely](/en/developer/reading-state/): viewers, client payloads, and holder planning snapshots.
+
+## Further reading
+
+- [Event system](/en/architecture/events/) for event audiences and causal records.
+- [Settlement system](/en/architecture/settlement/) for phases, visibility, and boundary records.
+- [Routing, transport, and movement](/en/architecture/routing-movement/) for route planning from a holder's knowledge and the movement lifecycle.
+- [Canwu terminology](/en/reference/terminology/) for holder-relative knowledge, correspondence, delegated carrier, carrier seizure, and authenticity finding.
+- The repository's [knowledge model](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#knowledge-model) section in `docs/architecture.md`.

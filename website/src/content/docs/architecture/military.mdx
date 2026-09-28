@@ -1,0 +1,278 @@
+---
+title: 军事系统
+description: 军事扩展如何建模部队、行动、战斗和占领，它拥有哪些状态，以及你的游戏需要在它之外补充什么。
+sidebar:
+  order: 11
+  label: 军事系统
+---
+
+import { Aside, Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="军事系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/tutorials/military-domain/">实践：军事扩展</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/military/">English version</a>
+</nav>
+
+[军事模拟扩展](/reference/terminology/) `canwu-military` 把部队、行动、战斗和占领保存为插件自有的领域记录，只通过校验过的 `MilitaryCommand` 输入修改它们。另外两个配套 crate 提供合成规则集，以及一个与参考世界组合、可以直接运行的示例。决定是直接使用这个扩展、在自己的整合层里包装它，还是整体替换它之前，请先读这一页。
+
+简要来说：行军在下令一分钟后抵达，战斗使用内置的固定公式，补给是每支部队上只减不增的一个数值，占领阶段只是标签。特种行动一旦成功，当前会让运行卡住（见“[已知问题](#行军与战斗)”）。
+
+## crate 与所有权
+
+| crate | 拥有什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-military` | `MilitaryPlugin`、`canwu.military` 命名空间下的八种记录、`MilitaryCommand` 领域命令、提供方确认输入，以及 `military_report` 知识 schema | 发布到 crates.io |
+| `canwu-military-reference-content` | 两套合成的 `MilitaryRulesetV1`：`riverine_preindustrial()` 和 `industrial_front()`，均标记为 `synthetic_reference` | 发布到 crates.io |
+| `canwu-military-reference` | `demo_military_scenario()`（为参考世界场景加入军事目录）和 `military_starter` 示例 | 仅在仓库中 |
+
+<MermaidDiagram
+  label="军事相关 crate 及其对 canwu-api 的依赖、旁边独立的军事补给消费者，以及上层应用提供的内容"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    Host["上层应用<br/>场景、时钟、命令、<br/>提供方结果"]
+    Ref["canwu-military-reference<br/>示例场景、起步示例"]
+    Content["canwu-military-reference-content<br/>合成规则集"]
+    World["canwu-reference-world"]
+    Military["canwu-military<br/>记录、命令、系统"]
+    Supply["canwu-force-supply-reference<br/>独立的补给消费者"]
+    Resource["canwu-resource"]
+    Api["canwu-api"]
+    Host --> Ref
+    Host -- "MilitaryCommand、<br/>ProviderOutcome" --> Military
+    Ref --> Content
+    Ref --> World
+    Ref --> Military
+    Content --> Military
+    Military --> Api
+    World --> Api
+    Supply --> Resource
+    Resource --> Api
+`}
+/>
+
+箭头从 crate 指向它依赖的对象。`canwu-military` 只构建在 `canwu-api` 之上。军事补给参考消费者建立在 `canwu-resource` 上，与它并列；两者互不依赖。
+
+注册记录 schema 的插件拥有对应状态，所以 `canwu.military` 记录只有 `canwu-military` 能写。其余状态归各自的所有者：
+
+| 状态 | 所有者 | `canwu-military` 如何对待它 |
+| --- | --- | --- |
+| 时间、[规范化输入](/reference/terminology/)、提交与回滚、随机抽样、快照、重放 | 模拟内核 | 通过 `canwu-api` 使用 |
+| 角色知识账本 | 模拟内核 | 向部队指挥官发布 `military_report` 记录 |
+| 路线、行程时间、保管权、运输运力 | `canwu-routing`、`canwu-transport`、`canwu-movement` | 无。行军只保存 `route_digest`（部队和目的地的哈希），下令一分钟后抵达。 |
+| 资源存量、预留、消耗 | `canwu-resource` | 无。部队的 `supply_per_mille` 只是本地数值。 |
+| 人口与兵源 | `canwu-society` 或你的应用 | 无。`Recruit` 里可选的 `society_operation` 字符串只作为命令输入的一部分保存。 |
+| 占领带来的行政、法律和财政影响 | 你指定的提供方插件 | 登记一项待处理效果，等待 `ProviderOutcome` |
+
+补给是每支部队上的一个数值 `supply_per_mille`，初始为 1,000。行军或特种行动抵达时扣 100；不足 100 的部队行动失败并溃散。没有任何军事命令能提高这个值。游戏如果需要以资源为基础的补给，就用 `canwu-resource` 建模（[生产经济案例](/tutorials/cases/production-economy/)里的军事补给消费者就是这样做的），再扩展或替换 `canwu-military`，把结果写回部队记录。
+
+## 核心模型
+
+每条记录的载荷都带一个 `MilitaryRecordMeta`，其中有 schema 版本、修订号、语义摘要和建立时间。`force_reference`、`ledger_reference` 等类型化辅助函数用来构造记录引用。
+
+| 类型 | 记录名 | 表示什么 |
+| --- | --- | --- |
+| `MilitaryCatalog` | `catalog`（ID 为 `root`） | 场景内容：一套 `MilitaryRulesetV1`、若干 `MilitaryNodeProfile`，以及按人物索引的 `CommanderProfile` |
+| `ForceState` | `force` | 一支部队：所属实体、所在节点、指挥官、子单位（`SubunitState`）、编制与实有兵力，千分比表示的训练、装备、疲劳、补给、士气、纪律、凝聚力和忠诚，各类损失计数、当前行动、已布置的伏击，以及 `ForceStatus` |
+| `OperationState` | `operation` | 一次 `march`、`special` 或 `strategic` 行动：唯一参与的部队、可选的对手部队、`OperationPhase`、出发与目的节点、到期时间 |
+| `CombatState` | `combat` | 接敌时建立的一场战斗：进攻方、防守方、`CombatStage`、轮次、准备度、伤亡、`CombatResult`，以及每轮抽样的 `RandomEnvelope` 副本 |
+| `OccupationState` | `occupation` | 对一个节点的控制：占领部队、驻军，千分比表示的安全、行政覆盖、正当性、合作、抵抗和征敛负担，`IntegrationStage` 以及政策版本 |
+| `MilitaryLedger` | `ledger`（ID 为 `root`） | 每个行动键一条 `MilitaryOutcome`，用于幂等判断；另有等待其他领域处理的 `PendingMilitaryEffect` |
+| `ProviderOutcome` | `provider_outcome` | 其他领域一次已确认结果的留存副本，带 `ProviderDisposition` |
+| `MilitaryKnowledge` | `knowledge` | 已注册的军事估计 schema（`KnowledgeFact`）；当前没有系统读写它 |
+
+每个 `MilitaryCommand` 变体都带一个 `MilitaryOperationKey`。只有当命令指向一支已经存在的部队时，准入才检查签发者和 `expected_force_revision`；签发者必须是指挥这支部队的角色。
+
+| 变体 | 准入时的其他检查 | 第 7 阶段系统写入什么 |
+| --- | --- | --- |
+| `CreateForce` | 兵种在规则集中 | 一支部队，带一个 ID 以 `:initial` 结尾的子单位，状态 `Forming`，补给 1,000，士气 500 |
+| `AssignCommander` | 签发者、修订号 | 替换指挥官 |
+| `Recruit` | 签发者、修订号、兵种 | 新子单位，人数以剩余编制为上限 |
+| `TrainAndEquip` | 签发者、修订号 | 提高部队训练和装备，上限 1,000 |
+| `PlanOperation` | 签发者、战术 | 一条处于 `Planned` 的 `strategic` 行动；之后不会被推进 |
+| `OrderMarch` | 签发者、修订号、战术 | 部队转为 `Moving`，建立 `march` 行动，一分钟后推进 |
+| `PrepareAmbush` | 签发者、修订号、战术 | 在某节点布置 `prepared_ambush`，有效七天 |
+| `Recon` | 签发者、修订号 | 一次抽样和事件 `canwu.military.transition_applied.v1` |
+| `ExecuteSpecialOperation` | 签发者 | 部队转为 `Moving`，建立 `special` 行动，一天后推进 |
+| `EstablishOccupation` | 签发者、修订号 | 部队位于该节点且不处于 `Routing` 时建立占领，并每天推进 |
+| `SetOccupationPolicy` | 数值不超过 1,000 | `policy_revision` 匹配时写入安全、合作和征敛负担 |
+| `MilitaryAdministrationAction` | 无 | 账本中的一条 `PendingMilitaryEffect` |
+| `AdvanceTick` | 无 | 推进一次行动或占领；由插件自己安排 |
+
+兵种和战术检查只在场景装入了军事目录时进行。
+
+## 运行过程
+
+<MermaidDiagram
+  label="军事命令通过准入，成为 military_command_v1 数据包，在第 7 阶段应用并安排自己的推进，最后在第 13 阶段生成指挥官报告"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
+  definition={`flowchart TB
+    Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command<br/>规范化输入"]
+    Queue --> Admit["admit_command<br/>摘要、签发者、修订号、<br/>兵种、战术"]
+    Admit -- "拒绝" --> Rejected["命令被拒绝，<br/>不入队"]
+    Admit -- "接受" --> Packet["military_command_v1<br/>零延迟"]
+    Ack["enqueue_provider_outcome<br/>military_provider_ack_v1"] --> Apply
+    Packet --> Apply["第 7 阶段<br/>apply-military-ingress-v1"]
+    Apply -- "SchedulePluginIngress" --> Tick["AdvanceTick 数据包<br/>一分钟或一天后"]
+    Tick --> Apply
+    Apply --> Commit["第 9 阶段<br/>原子提交"]
+    Commit --> Report["第 13 阶段<br/>materialize-military-reports-v1"]
+`}
+/>
+
+<Steps>
+1. `military_command(command)` 把命令装进 `MilitaryCommandEnvelope`，附上命令的 `input_digest`，返回一个 `Command::Plugin`。上层应用用 `enqueue_command` 把它入队，再推进时钟，例如调用 `advance_canonical`。直接调用 `submit` 会以 `MixedCommandIngress` 被拒绝。
+2. [结算边界](/reference/terminology/)准入这条命令时，处理函数 `admit_command` 重新计算摘要，并执行上表中的检查。检查通过后，它以零延迟排入一个 `military_command_v1` 数据包（输入类别 `Decision`），由下一个边界准入。
+3. 第 7 阶段（`DomainDeltaProposal`）的事件驱动系统 `apply-military-ingress-v1` 逐个读取已准入的军事数据包。
+4. 对 `AdvanceTick` 以外的命令，它先在账本中查找行动键。键和摘要都相同时不做任何事；键相同而摘要不同时以 `IdempotencyConflict` 失败。
+5. 随后它以 `SameBoundary` 可见性暂存记录的创建和更新，从军事随机流抽样，并用 `SchedulePluginIngress` 安排后续的 `AdvanceTick` 数据包。除 `MilitaryAdministrationAction` 和 `AdvanceTick` 外，每条命令还会在自己的键下记录一条 `MilitaryOutcome`。
+6. 同一系统也处理 `military_provider_ack_v1` 数据包，详见[其他领域中的效果](#其他领域中的效果)。
+7. 内核在第 8 阶段校验暂存的写入，在第 9 阶段一并提交。任何错误都会让整个边界回滚。
+8. 第 13 阶段（`PerspectiveAndReportMaterialization`）的事件驱动系统 `materialize-military-reports-v1` 向每支部队的指挥官发布 `military_report`。
+9. 安排好的推进包在到期时作为 `military_command_v1` 数据包回来，再走一遍第 7 阶段。
+</Steps>
+
+### 行军与战斗
+
+<MermaidDiagram
+  label="一次行军的生命周期：抵达检查、完成、失败，或者经过若干战斗轮后以胜利或撤出结束"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同一生命周期。"
+  renderFailureMessage="图表预览不可用；下文描述了同一生命周期。"
+  definition={`flowchart TB
+    Order["OrderMarch<br/>行动 Moving"] --> Arrive{"抵达推进：<br/>补给不低于 100？"}
+    Arrive -- "否" --> Failed["Failed<br/>部队 Routing"]
+    Arrive -- "是，无对手" --> Done["Completed<br/>部队在目的地 Ready"]
+    Arrive -- "是，指定了对手" --> Contact["Engaged<br/>战斗记录处于 Contact"]
+    Contact --> Round["每日一轮<br/>抽样一次"]
+    Round -- "双方仍有兵力，<br/>未满四轮" --> Round
+    Round -- "防守方归零" --> Win["Completed<br/>AttackerVictory，<br/>建立占领"]
+    Round -- "进攻方归零<br/>或第四轮" --> Withdraw["Withdrawing<br/>DefenderVictory 或<br/>MutualDisengagement"]
+`}
+/>
+
+- 抵达时，补给不低于 100 的部队扣 100 补给、疲劳加 20、士气减 10，然后移到目的地。
+- 接敌时建立战斗记录，ID 为 `canwu.military:combat:` 加行动 ID。防守方如果在该节点布置了未过期的伏击，准备度按 850 计，否则为 500，该伏击随即清除。记录中的战术固定写为 `screen-and-advance` 和 `hold`；命令里指定的战术只在准入时检查，之后不再使用。
+- 战斗每天结算一轮，最多四轮。每轮抽取一个小于 1,000 的值 `s`。进攻方损失防守方兵力的二十分之一（至少 1）再加 `s` 除以 8 的余数；防守方损失进攻方兵力的十八分之一（至少 1）再加 999 减 `s` 后除以 8 的余数。双方士气各减去本方损失的一半，疲劳各加 35。准备度只保存在记录里；每轮的计算只读取双方兵力和这次抽样。
+- 战斗结束时，兵力归零的一方转为 `Routing`，仍有兵力的一方转为 `Ready`。`AttackerVictory` 会在目的地建立占领，ID 为 `canwu.military:occupation:` 加行动 ID。`Withdrawing` 是最终标签：之后不再推进，也没有部队移动。
+
+特种行动在下令一天后结算。先执行同样的补给扣减，然后抽取一个小于 1,000 的值。低于 650 时，部队留在目标地并处于 `Routing`，行动为 `Failed`。650 及以上按设计应让部队返回出发地、行动为 `Completed`，但当前代码有下面的问题。
+
+<Aside type="caution" title="已知问题：特种行动成功会让运行卡住">
+抽到 650 及以上时，`advance_operation` 会对对手部队调用 `expect`，而特种行动从不带对手部队。边界以 `PluginPanicked` 失败并回滚。推进包仍留在队列里，每次重试都会得到相同的抽样，所以之后每次调用 `advance_canonical` 都会在这里失败。修复之前，需要持续推进的运行请不要发送 `ExecuteSpecialOperation`；如果要发送，先保存快照，以便出错后恢复。
+</Aside>
+
+撤退移动、追击、补给预留、路线行程时间，以及把伤亡转入人口，都在当前插件的范围之外。[`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-military/src/model.rs) 中声明的 `ForceStatus`、`OperationPhase`、`CombatStage` 和 `CombatResult` 有一部分变体，当前系统从不设置。
+
+### 占领
+
+`EstablishOccupation` 或进攻方胜利都会建立占领：军事控制 700，驻军为部队兵力的三分之一，安全 500，抵抗 500，阶段 `MilitaryControl`。占领每天更新一次，直到阶段达到 `Intergenerational`。每次更新时安全加 25、行政覆盖加 20、合作加 10、抵抗减 10，均限制在 0 到 1,000 之间。之后阶段最多前进一级：
+
+| 从 | 到 | 所需行政覆盖 | 所需安全 |
+| --- | --- | ---: | ---: |
+| `MilitaryControl` | `AdministrativeTakeover` | 300 | 600 |
+| `AdministrativeTakeover` | `LegalRecognition` | 500 | 650 |
+| `LegalRecognition` | `FiscalIntegration` | 650 | 700 |
+| `FiscalIntegration` | `SocialIntegration` | 800 | 750 |
+| `SocialIntegration` | `CulturalPractice` | 900 | 800 |
+| `CulturalPractice` | `Intergenerational` | 1,000 | 850 |
+
+阶段名只是占领记录上的标签，阶段前进时不会写入任何法律、财政或社会记录。`SetOccupationPolicy` 覆盖安全、合作和征敛负担，并把 `policy_revision` 加一；之后的每日更新从新值继续。
+
+### 其他领域中的效果
+
+`MilitaryAdministrationAction` 请求另一个领域为某项占领采取行动。第 7 阶段系统在账本里加一条 `PendingMilitaryEffect`，记下行动键、提供方插件名、预期的提供方记录版本和占领。账本必须已经存在；第一条记录下来的命令结果会创建它。
+
+提供方在自己的记录里结算这项效果。之后由你的整合层调用 `enqueue_provider_outcome(canwu, due_at, outcome)` 报告结果，它会排入一个 `military_provider_ack_v1` 数据包（输入类别 `Acknowledgement`）。军事插件在第 7 阶段：
+
+1. 查找 `outcome.operation` 对应的待处理效果，找不到时以 `InvalidAuthority` 失败；
+2. 要求提供方名称和版本与待处理效果一致，否则以 `InvalidAuthority` 失败；
+3. 要求 `digest` 和 `provider_record` 非空，否则以 `InvalidPayload` 失败；
+4. 移除待处理效果，在账本中记录结果，并保存一份 `provider_outcome` 记录；
+5. 更新占领。`Accepted` 或 `Committed` 把 `MilitaryControl` 推进到 `AdministrativeTakeover`，或把 `AdministrativeTakeover` 推进到 `LegalRecognition`。`Rejected` 或 `Compensating` 把阶段退回 `MilitaryControl`，正当性减 50。
+
+这项检查比对的是账本里保存的名称和版本。军事插件从不读取提供方的记录，所以要由你的整合层保证传来的是真实结果。
+
+### 命令失败时
+
+- 签发者不对（`InvalidAuthority`）、摘要不符或兵种、战术不存在（`InvalidPayload`），以及直接提交（`MixedCommandIngress`），都会在准入时被拒绝，什么也不入队。
+- `expected_force_revision` 过期时，准入以 `DomainRecordVersionConflict` 失败。引擎把这个错误码当作边界失败处理：`advance_canonical` 返回错误，边界回滚。
+- 第 7 阶段系统中的任何错误同样会让边界失败，例如行动键相同而输入不同、部队已无剩余编制时补充兵员、部队不存在，或者提供方确认找不到对应的待处理效果。
+
+边界失败后，出错的输入仍留在队列里，之后每次调用 `advance_canonical` 都会以同样的方式失败。要继续运行，请恢复该输入入队之前保存的快照或检查点。入队前请先核对部队修订号，以及提供方确认中的名称和版本。重复发送键和输入都相同的命令，只有在准入通过时才是空操作；带 `expected_force_revision` 的命令在第一次执行提高了部队修订号之后，再发一次就会因版本过期而失败。
+
+## 知识与可见性
+
+第 13 阶段系统为每支有指挥官的部队发布一条 `military_report` 知识记录（schema 为 `canwu.military` / `military_report`，版本 1）。持有人是指挥官，主体是这支部队的记录。载荷包括部队 ID、位置、以正负十分之一表示的兵力范围、以正负 100（千分比）表示的补给范围，以及观察时间。置信度为 900（千分比），来源引用部队记录的精确版本。
+
+面向玩家的客户端通过 `viewer_for_actor(person)` 和 `CanwuViewer::query_knowledge` 读取这些报告。其他角色，包括对方指挥官，从军事插件得不到任何信息：`Recon` 只记录一次抽样和一个事件，不发布知识。起步示例用 `Canwu::typed_domain_record` 读取战斗和占领记录，它返回的是真值，只应在受信任的上层应用代码中使用。
+
+## 随机性、持久化与重放
+
+所有抽样都来自同一条[随机流](/architecture/randomness/) `canwu-military / military-operation / 1`（`military_random_stream()`），由第 7 阶段系统声明。每次抽样都是上界为 1,000 的操作定址随机抽样：
+
+| 抽样 | 操作类别 | 目标与槽位 | 用途 | 值的用法 |
+| --- | --- | --- | --- | --- |
+| `Recon` 命令 | `military_command` | 行动键作为规范键，槽位 0 | `resolve military operation uncertainty` | 只做记录 |
+| 特种行动 | `special-operation` | 行动 ID 作为规范键，槽位 0 | `special-operation-success` | 650 及以上为成功 |
+| 战斗轮 | `combat-round` | 战斗记录的精确版本，槽位为轮次 | `combat-round-remainder` | 除以 8 的余数计入额外损失 |
+
+应用不提供任何概率。650 这个门槛和损失公式都是 `canwu-military` 中的常量。插件从军事目录中只读取兵种名和战术名；规则集里的各项数值、节点配置和指挥官配置都不会被读取。
+
+军事状态全部保存在领域记录中，所以快照会把它和知识账本、抽样证据以及待执行的推进包一起保存。插件身份由名称 `canwu-military`、插件版本 `0.1.0` 和一个固定的语义哈希组成；恢复快照或重放日志都要求身份一致。生命周期测试 `complete_military_lifecycle_is_persisted_and_replayed` 验证：恢复出的运行和用 `replay_from_journal` 重放的运行，检查点哈希都与原运行相同。
+
+## 上层应用需要提供什么
+
+- 场景内容。构造 `MilitaryCatalog`，用 `record_from(catalog_reference(), ...)` 放进 `scenario.domain_records`，并自行调用 `MilitaryRulesetV1::validate`。规则集哈希覆盖规则集 ID、配置名，以及兵种、战术和地形修正的数量。
+- 节点标识。插件只比较 `MilitaryNodeId` 字符串是否相等，从不对照军事目录中的节点。行程、路线和相邻关系由你的整合层负责。
+- 权限。建立部队时就指定指挥官：没有指挥官的部队不再接受任何部队命令，`AssignCommander` 也不例外。`CreateForce`、`SetOccupationPolicy`、`MilitaryAdministrationAction` 和 `AdvanceTick` 在准入时不检查签发者，由你的上层应用决定谁能发送。
+- 唯一的行动键和最新的修订号。每个意图使用新的 `MilitaryOperationKey`，入队前再读一次部队修订号。
+- 负责行政效果的提供方插件，以及调用 `enqueue_provider_outcome` 的代码。
+- 补给、伤亡流向和更丰富的战斗规则。这些需要你自己的插件，或者替换 `canwu-military`。
+- 呈现：地图、给非指挥官的报告和情报估计。
+
+## 限制与预算
+
+| 常量或规则 | 值 | 如何执行 |
+| --- | --- | --- |
+| `MAX_SUBUNITS` | 64 | `ForceState::validate` 拒绝子单位更多的部队 |
+| `SCHEMA_VERSION` | 1 | 规则集和部队记录必须使用 |
+| 军事 ID | 1 到 192 字节，含 `:` | ASCII 字母、数字和 `. _ - : /` |
+| 千分比数值 | 不超过 1,000 | 部队指标、占领指标和占领政策 |
+| 报告扫描 | 每个边界 256 条部队记录 | 第 13 阶段系统按规范顺序读取前 256 条部队记录 |
+
+`ForceState::validate` 还要求各子单位兵力之和等于实有兵力，各类损失之和不超过编制兵力。
+
+`MAX_RECORDS`（4,096）、`MAX_COMPOSITION_ENTRIES`（64）和 `MAX_OPERATION_PARTICIPANTS`（128）已声明，但当前没有检查。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-military-reference --example military_starter
+cargo test -p canwu-military
+cargo test -p canwu-military-reference-content
+```
+
+起步示例建立一支野战部队，补充兵员，制定一项行动，向有守军的节点行军并赢得战斗，最后检查快照和重放。它会打印 `military_gameplan=complete`、两套规则集的名称和检查点哈希。教程[运行军事扩展：从接敌到占领](/tutorials/military-domain/)逐步讲解了这个示例。
+
+想了解以资源为基础的补给，可以运行 `cargo run -p canwu-economy-reference --example grain_loop`，并阅读[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)。随机流的声明和抽样证据见[随机性](/architecture/randomness/)。
+
+## 延伸阅读
+
+- [结算系统](/architecture/settlement/)：十四个阶段、暂存写入和回滚
+- [事件系统](/architecture/events/)：准入顺序和零延迟数据包
+- [通过插件扩展](/developer/extensions/)：编写插件来替换或扩展这个插件
+- [军事领域设计说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/military-domain-design.md)：它描述的设计比当前代码实现的范围更大；行为以 `crates/extensions/canwu-military` 中的代码为准

@@ -1,12 +1,15 @@
 ---
 title: "Move an army: reference integration starter"
-description: Learn simulation plugins, domain commands, deterministic time, and exact replay from a runnable example.
+description: Run the smallest complete Canwu program, then follow one army order from command to arrival, save, fork, and replay.
 sidebar:
   order: 2
   label: Move an army
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+In this tutorial a general orders an army to march to a neighboring territory. You will run the example, see which boundary moves the army, and check that a saved, forked, and replayed copy of the run all end in the same state. It is the shortest program that uses a [simulation plugin](/en/reference/terminology/), a domain command, and exact replay together.
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs" icon="external">
   Open starter.rs
@@ -15,9 +18,7 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   Browse the reference integration crate
 </LinkButton>
 
-This is the shortest path through the engine and domain-integration boundary: the engine supplies the generic runtime, while the world model and movement command belong to the optional `canwu-reference-world` integration.
-
-## Run from a fresh machine
+## Run it
 
 Install Git and Rust 1.88 or newer, then run:
 
@@ -27,23 +28,121 @@ cd canwu
 cargo run -p canwu-reference-world --example starter
 ```
 
-## Flow
+The first build takes a few minutes. The program prints one line:
 
-<Steps>
-1. Call `demo_scenario()` to create a scenario, generic entity registry, and reference-domain records.
-2. Register domain logic with `Canwu::new_with_plugins(..., &[&ReferenceWorldPlugin])`.
-3. Wrap a `MovementCommand` as a domain command and pass it through canonical `enqueue_command()` ingress.
-4. Advance time with `advance_canonical()`, then read the army location through the integration's `snapshot()` projection.
-5. Save, load, fork, and replay from the journal, then compare all four checkpoints.
-</Steps>
+```text
+army_location=3 checkpoint=dd9796a606983d02eafd3495df11b20bb8423cec33f96c0eaddc24e44e4e2de1
+```
 
-## What to notice
+Territory `3` is Eastwatch, the army's destination. The checkpoint is a hash of the whole simulation state. The run is deterministic, so running it again prints the same hash.
 
-- The army reaches the destination after time advances.
-- Concrete world types are not a foundation dependency of `canwu-api`; an application can replace the entire domain integration.
-- Load, fork, and exact replay all produce the same checkpoint as the original run.
-- Format 8 snapshots carry their canonical entity registry and initial scenario; the simulation core rejects pre-8 saves instead of migrating them implicitly.
+## How it works
+
+<MermaidDiagram
+  label="Starter example flow: build the world, queue an order, advance time, then load, fork, and replay"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same flow."
+  definition={`flowchart LR
+    World["demo_scenario()"] --> New["Canwu::new_with_plugins"]
+    New --> Queue["enqueue_command()"]
+    Queue --> Advance["advance_canonical(19 h)"]
+    Advance --> Save["snapshot_json()"]
+    Save --> Load["load"]
+    Load --> Fork["fork()"]
+    Advance --> Replay["replay_from_journal()"]
+    Load --> Compare["Same checkpoint hash"]
+    Fork --> Compare
+    Replay --> Compare
+`}
+/>
+
+### 1. Build the world
+
+```rust
+let (scenario, ids) = demo_scenario()?;
+let plugin = ReferenceWorldPlugin;
+let mut canwu = Canwu::new_with_plugins(35, scenario, &[&plugin])?;
+```
+
+`demo_scenario()` returns a `Scenario`, the starting world, together with the IDs you need later. General Shen commands the First Field Army at Yun Capital (territory 2). The Eastern River Road takes 18 hours from Yun Capital to Eastwatch. `35` is the random seed.
+
+The world model comes from `ReferenceWorldPlugin` in the `canwu-reference-world` crate. The plugin stores the world as a domain record and registers the `order_movement_v1` command and the boundary system that moves armies. It uses only the public `canwu-api` crate, so you can replace it with your own world model.
+
+### 2. Queue the order
+
+```rust
+let envelope = order_movement(
+    Issuer::Actor(ids.commander),
+    &MovementCommand {
+        subject: EntityRef::Army(ids.army),
+        destination: ids.eastern_territory,
+        cargo: Vec::new(),
+    },
+)?
+.at_time(canwu.time());
+canwu.enqueue_command(
+    canwu.time(),
+    0,
+    CommandRequest::new(CommandRequestId::new(1), canwu.revision(), envelope),
+)?;
+```
+
+`order_movement` wraps the `MovementCommand` in a `CommandEnvelope` as a domain command (`Command::Plugin`) issued by General Shen. `at_time(canwu.time())` and `canwu.revision()` guard against stale input: the request must match the simulation time and state revision when Canwu admits it.
+
+`enqueue_command` takes a due time, a priority, and the request, and puts the request on canonical ingress: the recorded, ordered input path that replay reads later.
+
+### 3. Advance time
+
+```rust
+canwu.advance_canonical(SimDuration::hours(19))?;
+```
+
+`advance_canonical` settles every boundary due in the next 19 hours. A boundary is one atomic settlement step; see [Settlement system](/en/architecture/settlement/). This run settles three:
+
+| Boundary | Time | What happens |
+| --- | --- | --- |
+| 1 | Day 0, 00:00 | The command handler checks the order, reserves the army, and schedules two movement packets: departure now and arrival 18 hours later. |
+| 2 | Day 0, 00:00 | The departure packet puts the army in transit. |
+| 3 | Day 0, 18:00 | The arrival packet moves the army to Eastwatch. |
+
+### 4. Save, load, fork, and replay
+
+```rust
+let saved = canwu.snapshot_json()?;
+let loaded = Canwu::from_snapshot_json_with_plugins(&saved, &[&plugin])?;
+let fork = loaded.fork();
+let journal = canwu.replay_journal();
+let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
+```
+
+- `snapshot_json` serializes the state. Loading it requires the same plugins.
+- `fork` copies a simulation so the copy can continue with different inputs.
+- `replay_from_journal` rebuilds the run from its initial scenario and recorded inputs.
+
+The example asserts that all three copies have the original checkpoint hash, then prints the army's location from the replayed copy.
+
+## Try next
+
+Print the event log after `advance_canonical`:
+
+```rust
+for event in canwu.events() {
+    println!("{} {} {}", event.timestamp, event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+Day 0, 00:00 canwu.reference-world.pending_changed Reserve a reference-world movement subject
+Day 0, 00:00 canwu.reference-world.domain_record_updated Apply reference-world movement transitions
+Day 0, 00:00 canwu.reference-world.canwu.reference-world.movement_started.v1 Reference-world movement started
+Day 0, 18:00 canwu.reference-world.domain_record_updated Apply reference-world movement transitions
+Day 0, 18:00 canwu.reference-world.canwu.reference-world.movement_arrived.v1 Reference-world movement arrived
+```
+
+Change `SimDuration::hours(19)` to `SimDuration::hours(17)`. The example now prints `army_location=2`: the army is still on the road, and its location stays at Yun Capital until the arrival boundary.
 
 ## Next
 
-Hosts that run continuously should continue with the [continuous-time game loop](/en/tutorials/continuous-game-loop/).
+If your game runs in real time, continue with the [continuous-time game loop](/en/tutorials/continuous-game-loop/).

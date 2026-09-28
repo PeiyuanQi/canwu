@@ -1,0 +1,257 @@
+---
+title: Routing, transport, and movement
+description: How Canwu plans a route from what one observer knows, records the journey as transport data, and settles movement orders leg by leg in the movement plugin.
+sidebar:
+  order: 10
+  label: Routing, transport, and movement
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Routing, transport, and movement navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/tutorials/routing-transport/">Routing and transport tutorial</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/routing-movement/">中文版</a>
+</nav>
+
+Canwu models travel with three crates. `canwu-routing` plans a route from what one observer knows, `canwu-transport` records what actually happens on the way, and `canwu-movement` is the [simulation plugin](/en/reference/terminology/) that advances those records at settlement boundaries. You need them when armies, couriers, cargo, or letters follow multi-leg routes that can fail, change hands, or wait for scarce capacity.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-routing` | Deterministic, time-dependent route planning over a `PlanningSnapshot`. It only computes: it reads no simulation state, draws no random numbers, and schedules no work. | Published on crates.io; its types are re-exported from `canwu-api` |
+| `canwu-transport` | Plain records and their transition rules: movement orders, transport executions, itinerary revisions, legs, handoffs (including seizures), capacity bookings, capacity pools, the pure booking allocation function `allocate_capacity_bookings`, and delivery saga records | Published on crates.io; its types are re-exported from `canwu-api` |
+| `canwu-movement` | `MovementPlugin`, the movement lifecycle extension: it admits movement orders, settles legs at their due times, allocates capacity pools, and publishes holder-relative movement reports | Published on crates.io; add it as its own dependency |
+
+<MermaidDiagram
+  label="Crate dependencies: canwu-movement and canwu-correspondence build on canwu-api, which re-exports canwu-transport and canwu-routing"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same dependencies."
+  definition={`flowchart TB
+    App["Your application<br/>network data, incidents,<br/>authority records"] -- "registers" --> Movement["canwu-movement<br/>MovementPlugin"]
+    App --> Api["canwu-api<br/>public API"]
+    Movement --> Api
+    Corr["canwu-correspondence<br/>keeps its own executions"] --> Api
+    Api --> Sim["canwu-sim<br/>private runtime"]
+    Api --> Transport["canwu-transport<br/>record library"]
+    Api --> Routing["canwu-routing<br/>route planner"]
+    Transport --> Routing
+    Transport --> Found["canwu-core, canwu-time"]
+    Routing --> Found
+`}
+/>
+
+### Why transport is a record library
+
+Every simulation plugin builds on `canwu-api`, and `canwu-api` depends on `canwu-transport` so that it can re-export the transport types. A plugin inside `canwu-transport` would need `canwu-api` in turn, and Cargo would reject the dependency cycle. `canwu-transport` therefore stays a plain library. Its values check their own transitions, through methods such as `TransportExecution::reroute`, `TransportExecution::record_handoff`, and `CapacityBooking::transition`, and they never touch simulation state. The plugin that owns their lifecycle sits one layer up, in `canwu-movement`.
+
+The split also lets several owners drive the same records. `canwu-movement` is the general-purpose lifecycle. `canwu-correspondence` keeps the transport executions for its letters in its own plugin state. A host that runs its own lifecycle can call `allocate_capacity_bookings` and get the same allocation order.
+
+### Reference-world movement is a different plugin
+
+The [Move an army](/en/tutorials/move-army/) tutorial uses the reference world's `order_movement_v1` command. That small, replaceable example looks up one direct route in the example world, reserves the army or person, and schedules a departure packet and an arrival packet (`movement_transition_v1`). `canwu-movement` is the general lifecycle for `canwu-transport` records, with multi-leg itineraries, reroutes, capacity pools, and reports, and it has no knowledge of the reference world.
+
+## Core model
+
+Canwu splits a journey into planning and execution. Planning answers which route this observer would choose from what it knows. `plan_route(&snapshot, &request)` reads only its two arguments and returns a `RoutePlan` value, so the same snapshot and request always produce the same plan or the same error. Execution records start from a plan and then change only through their transition methods.
+
+`canwu-movement` never plans. An `Order` operation carries its `RoutePlan` inside the `MovementOrder`, and a `Reroute` operation carries a new `ItineraryRevision` whose plan your code computed.
+
+Planning types, in `canwu-routing`:
+
+| Type | What it represents |
+| --- | --- |
+| `PlanningSnapshot` | The network as one observer knows it at one moment: `observer`, `observed_at`, optional `valid_until`, `knowledge_cut`, `topology_version`, optional `timetable_version`, and the `RoutingNetwork` |
+| `RoutingNetwork` | A versioned list of `RoutingEndpoint` and `RoutingConnection` values. `RoutingNetwork::new` sorts them and rejects duplicates and invalid connections. |
+| `RoutingConnection` | One directed link with a `TransferMode`, a `TraversalModel` (`Fixed`, `Departures`, or `Piecewise`), an optional availability window, `risk_per_mille`, and `resource_cost` |
+| `RoutingRequest`, `RoutingPolicy` | Origin, destination, and departure time. The policy chooses `FifoDijkstraV1` or `BoundedLabelCorrectingV1`, the allowed modes, and the search limits. |
+| `RoutePlan` | The chosen `RouteLeg` list with planned times, a `RouteCost`, the estimated arrival, the algorithm and policy versions, the snapshot digest, and the plan's own digest |
+| `RoutingCache` | An optional host-side cache of plans keyed by snapshot digest and request |
+
+Execution records, in `canwu-transport`:
+
+| Type | What it represents |
+| --- | --- |
+| `MovementOrder` | An admitted intent to move: sorted `MovementSubject` values, each with a `MovementSubjectRole`; origin and destination; the `RoutePlan`; a `MovementInitiative`; the order time; and the expected position revision |
+| `TransportExecution` | One journey in progress: a `TransportExecutionState`, its itinerary revisions, legs, handoffs, bookings, and an optional delivery saga |
+| `ItineraryRevision` | One immutable itinerary with its plan, predecessor, `ItineraryRevisionReason`, and supersession time. A reroute appends a new revision. |
+| `LegExecution` | What happened on one planned leg: a `LegExecutionStatus` and the actual departure, arrival, or failure time |
+| `Handoff` | A custody change between legs, of kind `HandoffKind::Planned` or `HandoffKind::Seizure { by }` |
+| `CapacityBooking` | A windowed claim on capacity with a `CapacityBookingStatus` |
+| `TransportCapacityPoolV1` | A windowed quantity of interchangeable capacity, with `booked` and `consumed` counters and a `revision` that advances on every change |
+| `DeliverySaga`, `DeliveryCompletionRequest` | The link from an arrival back to an information delivery attempt, with a stable operation key |
+
+The movement plugin, in `canwu-movement`:
+
+| Type | What it represents |
+| --- | --- |
+| `MovementPlugin` | The simulation plugin. `MovementPlugin::new(evidence_kinds)` declares which application record kinds it may read; that list is its whole read set for evidence. |
+| `MovementState` | The whole movement runtime, stored as one domain record: executions, orders, pools, booking bindings, operation outcomes, and report heads |
+| `MovementCommandV1`, `MovementOperation` | A command payload from one holder, with an operation key and one operation: `Order`, `StartLeg`, `CompleteLeg`, `FailLeg`, `Reroute`, `RecordHandoff`, `RequestBooking`, `Cancel`, or `OfferPool` |
+| `MovementIncidentV1` | An application-reported `FailLeg`, `Reroute`, `RecordHandoff`, or `Reconcile` that cites an exact evidence record |
+| `MovementOperationOutcomeV1` | The durable result of one operation key: `Applied`, or `Rejected` with a `MovementErrorCode` |
+| `MovementReportV1` | One holder's view of one execution, published as knowledge |
+
+## How it runs
+
+<MermaidDiagram
+  label="Movement lifecycle: commands and incidents enter as ingress, phase 7 applies them and schedules leg-due packets, phase 8 validates, and phase 13 publishes reports"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same lifecycle."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same lifecycle."
+  definition={`flowchart TB
+    Plan["Host or application plugin<br/>plan_route gives a RoutePlan"] --> Cmd["Command<br/>apply_movement_operation_v1"]
+    Cmd --> Admit["Command handler checks<br/>holder, key, size, quotas"]
+    Admit --> OpQ["Internal ingress<br/>movement_operation_v1"]
+    AppSys["Application system<br/>decides an incident"] --> Inc["Public ingress<br/>movement_incident_v1"]
+    OpQ --> P7["Phase 7<br/>movement_lifecycle_apply_v1"]
+    Inc --> P7
+    Due["Internal ingress<br/>movement_leg_due_v1"] --> P7
+    P7 -- "schedules the next due leg" --> Due
+    P7 --> P8["Phase 8<br/>movement_lifecycle_validate_v1"]
+    P8 --> P13["Phase 13<br/>movement_report_publish_v1"]
+    P13 --> Know["Holder knowledge<br/>movement_report"]
+`}
+/>
+
+<Steps>
+1. Plan. Your host or application plugin builds a `PlanningSnapshot`, calls `plan_route`, and puts the resulting `RoutePlan` into a `MovementOrder`.
+2. Submit. Build the domain command `apply_movement_operation_v1` with `movement_command(&MovementCommandV1)` and send it as a `CommandRequest` with `enqueue_command`. The plugin refuses a command applied directly with `submit` (`MixedCommandIngress`). `MovementCommandV1::holder` must be the issuer's own holder: the actor for an actor issuer, and the command subject otherwise. The command handler checks the payload size, the operation key, the holder, and the quotas, then queues the internal ingress `movement_operation_v1`. Only this handler can create that packet.
+3. Report incidents. When an application system decides that a leg failed, a route closed, someone seized custody, or a delivery finished, it sends the public ingress `movement_incident_v1`. The host builds the packet with `movement_incident_ingress`. A boundary system schedules it with `BoundaryDirective::SchedulePluginIngress` after listing `movement_incident_target()` in its `plugin_ingress_targets`.
+4. Phase 7, `DomainDeltaProposal`, event-driven. `movement_lifecycle_apply_v1` applies admitted operations and incidents in admission order. It then expires confirmed bookings whose window has ended, runs one allocation pass per pool, applies due legs, retires closed executions, and prunes old outcomes. It writes the runtime record and schedules the next `movement_leg_due_v1` packet where an order needs one.
+5. Phase 8, `InvariantValidation`. `movement_lifecycle_validate_v1` checks the staged runtime: order and execution pairing, leg continuity, one active itinerary per execution, booking and pool counters, pending due work, and collection limits. If the check fails, the whole boundary rolls back.
+6. Phase 13, `PerspectiveAndReportMaterialization`. When the boundary admitted any movement ingress, `movement_report_publish_v1` publishes changed reports to their holders and schedules `movement_report_wake_v1` for delayed observers.
+</Steps>
+
+The [settlement system](/en/architecture/settlement/#where-extension-systems-run) page shows where these systems sit among the other extensions.
+
+### Leg timing
+
+Legs advance on internal scheduled ingress. An order schedules its first departure at the planned departure time, or at admission if that is later. A departure schedules the arrival after the leg's planned duration, and an arrival schedules the next departure. Each order stores the one packet it expects in `pending_due`. Any other due packet is stale and does nothing, so an explicit `StartLeg`, `FailLeg`, or `Reroute` replaces older timing without withdrawing queued ingress.
+
+Due work never fails a boundary. When a due departure or arrival cannot apply, the current leg fails with the reason `due_settlement_failed`, and the owner or operator can reroute or cancel. When the final leg arrives, an execution without a delivery attempt settles. An execution with a `delivery_attempt` enters `ArrivalPending` and waits for a `Reconcile` incident that cites that delivery-attempt record.
+
+### Capacity pools
+
+The plugin allocates pools inside phase 7 with `allocate_capacity_bookings`, apart from the kernel's phase-6 [resource allocation](/en/architecture/settlement/#resource-allocation). An `OfferPool` operation offers a pool, and `RequestBooking` asks for capacity for one unstarted leg, inside that leg's planned window. Each booking requested in the boundary is confirmed in full or failed, and the result is recorded as `CapacityBookingAllocationEvidenceV1`. The pass orders requests by priority (highest first), window start, tie-break key, admission sequence, and booking identity. Capacity already confirmed stays with its booking when later requests arrive.
+
+A departing leg consumes its confirmed bookings. A leg whose booking failed or expired fails with `capacity_unavailable` and waits for a reroute. A confirmed booking whose window has not opened holds the departure until the window opens.
+
+### Operation keys
+
+Every operation key has one durable outcome, which `MovementState::operation_outcome` returns. Keys are scoped per holder for commands and per evidence record kind for incidents, so no source can claim another's keys. An exact retry changes nothing. A command that reuses a key with different input is refused at admission with `IdempotencyConflict`. Other conflicting reuse, such as an incident's, is recorded as a separate `Conflict` rejection.
+
+## Knowledge and visibility
+
+Planning reads only a snapshot. A `PlanningSnapshot` names its observer and `knowledge_cut`, and `RoutePlan.planning_snapshot_digest` binds each plan to the snapshot it came from. Two helpers build snapshots:
+
+- `canwu_correspondence::planning_snapshot_from_holder_knowledge` builds a holder planning snapshot from exactly the endpoints and connections one holder's [knowledge ledger](/en/architecture/knowledge-information/) asserts. It also returns a `KnowledgeReadCutDigest` as evidence of what the planner read. See [Plan from a holder's knowledge](/en/developer/reading-state/#plan-from-a-holders-knowledge).
+- `canwu_reference_world::planning_snapshot_from_world` builds a snapshot from the reference world's full route table, a trusted `WorldSnapshot`. It suits examples and tools; a character's own plan should come from that character's knowledge.
+
+Movement reports are holder-relative. Each is a `canwu.movement/movement_report` knowledge record carrying a `MovementReportV1`:
+
+| Holder | Role | What the report shows |
+| --- | --- | --- |
+| The ordering holder, when it is a person | `Owner` | Current phase and legs, plus detail: execution state, revision reasons, failures, handoffs, and bookings |
+| The order's `operator` | `Operator` | The same as the owner |
+| Each entry in `remote_observers` | `DelayedRemote` | Phase, legs, and last known endpoint as they stood one grant delay earlier, without detail |
+| Anyone else | none | Nothing |
+
+The plugin publishes a report only when its digest changes, and only to living person holders, so an institution that owns an order receives none. `observed_as_of` is the time of the latest fact the report reflects. Owner and operator reports carry confidence 1,000 per mille and cite the runtime record version. Delayed reports carry 700 and cite no evidence, so their publication reveals nothing about how recently the runtime changed.
+
+A client reads reports through the holder's actor-relative view from `viewer_for_actor`, calling `query_knowledge` with the schema from `movement_report_knowledge_schema_id()`. `movement_state(&canwu)` returns the whole runtime and belongs in trusted host code only.
+
+## Randomness, persistence, and replay
+
+None of the three crates draws random numbers. A connection's `risk_per_mille` is a planning cost: the router adds it up along a route and bounds the total with `max_risk_per_mille`, and nothing rolls it. Your systems decide whether a ford floods, bandits strike, or a garrison seizes a courier, usually with an [operation-keyed random draw](/en/architecture/randomness/#operation-keyed-random-draws) on a stream they declare, and report the result as an incident. `canwu-correspondence` works differently: it draws its own incidents on the stream `canwu-correspondence / operation-resolution / 1`, using a `probability_per_mille` that your application supplies.
+
+What persists:
+
+- `MovementState` is one domain record of kind `canwu.movement/runtime` with ID `canwu.movement:runtime`. `MovementState::into_initial_record` builds it for a scenario, for example to install capacity pools before the run starts. On activation the plugin accepts at most one canonically encoded runtime root.
+- Pending leg-due packets and report wakes are queued canonical ingress, so a snapshot carries them and a loaded run continues mid-journey.
+- A closed execution retires from the runtime. Its order and execution identities stay reserved, and its consumed pool capacity stays counted. Published reports remain in holders' knowledge, and the domain-record history keeps earlier runtime versions.
+- Transport values are serde data saved inside their owner's records. `TRANSPORT_SEMANTIC_VERSION` is `canwu-transport.v5`. A `HandoffKind::Planned` handoff omits its kind from JSON, so older handoffs keep their exact encoding.
+- A `RoutePlan` records `ROUTING_ALGORITHM_VERSION` (`canwu-routing.v1`), the policy version, and the snapshot digest. `RoutingCache` is derived data: you can drop and rebuild it at any time, and replay works without it.
+
+Exact replay feeds the recorded commands, incidents, and due packets through the same systems and reaches the same runtime. Restore and replay require the same plugin name, version, and semantic hash (`MOVEMENT_SEMANTIC_HASH`).
+
+## What your application supplies
+
+- Network and timetable data, and a planning snapshot for each plan.
+- The `RoutePlan` in every order and the new `ItineraryRevision` in every reroute.
+- The record kinds passed to `MovementPlugin::new`: authority records, delivery attempts, external-condition records, and incident evidence.
+- [Authority basis](/en/reference/terminology/) records. To move any subject other than itself, an owner cites in `authority_basis` the current version of a declared record whose references name the owner under `movement_grantee` (`MOVEMENT_GRANTEE_ROLE`) and every other subject under `movement_subject` (`MOVEMENT_SUBJECT_ROLE`).
+- Incidents, hazards, hostility, and the random draws behind them, reported through `movement_incident_v1`. Seizure handoffs and delivery reconciliation are accepted only on this path.
+- Capacity: who offers which pool with `OfferPool`, and each booking's priority and tie-break key.
+- Location truth and custody meaning. Moving an army's position or a letter's holder on arrival is your world model's job.
+- Presentation: turning reports into notifications, maps, or arrival estimates.
+
+## Limits and budgets
+
+`RoutingPolicy::default()` sets `max_expanded_nodes` to 10,000, `max_transfers` to 64, and `max_risk_per_mille` to 1,000 for the summed risk of a route. A single connection's `risk_per_mille` cannot exceed 1,000. Search failures such as `NoKnownRoute`, `ExpansionBudgetExceeded`, and `SearchHorizonExceeded` are deterministic results, so replay reproduces them.
+
+`MovementLimitsV1::CURRENT` bounds the movement runtime:
+
+| Limit | Value |
+| --- | --- |
+| Command or incident payload (`operation_bytes`) | 8,192 bytes |
+| Operation keys, labels, and reasons (`text_bytes`) | 256 bytes |
+| Subjects per order | 32 |
+| Report grants per order, owner and operator included | 16, so at most 14 remote observers |
+| Legs, itinerary revisions, handoffs, and bookings per execution | 64, 8, 16, and 16 |
+| Orders per runtime and per owner | 1,024 and 256 |
+| Capacity pools per runtime | 256 |
+| Reports and report holders per boundary | 1,024 and 64 |
+| Remote observer delay (`max_report_delay_minutes`) | 365 days |
+| Operation outcomes per runtime and per holder | 16,384 and 1,024 |
+| Outcome room kept for incidents (`incident_outcome_headroom`) | 1,024 |
+| Retention of outcomes no live execution needs | 7 days |
+
+An operation that would exceed an order, execution, or pool limit is rejected with `LimitExceeded`. When the outcome budget is spent, the command handler refuses new commands at admission, and an operation that still reaches settlement emits `canwu.movement.operation_dropped.v1`. A report larger than the knowledge payload limit is withheld with `canwu.movement.report_withheld.v1`. Reports beyond the per-boundary budget wait for a report wake at the same simulation time. A closed execution retires once every living observer has its final report, and at the latest 365 days after it closed.
+
+## Try it
+
+Plan two deliveries from one sender's knowledge, a local letter and one to Beijing:
+
+```shell
+cargo run -p canwu-correspondence --example routed_correspondence
+```
+
+Time the router on a 512-node rail line with express links. The program prints the node and connection counts, the elapsed milliseconds for ten plans, and the chosen route: 256 legs arriving at minute 766.
+
+```shell
+cargo run -p canwu-routing --example routing_scale
+```
+
+Drive the movement plugin through the public API. The test covers pool allocation by priority, a leg that fails for lack of capacity, an ambush incident, a reroute around a flood that cites an external condition, a seizure, a delivery reconciliation, holder-relative reports, retirement, save and load mid-journey, and exact replay:
+
+```shell
+cargo test -p canwu-movement --test gap_g19_movement_lifecycle_plugin
+```
+
+Check the transport records alone: pure pool allocation, persons groups, seizure handoffs, and external conditions:
+
+```shell
+cargo test -p canwu-transport --test gap_g20_transport_capacity_pool_allocation --test gap_g21_g23_transport_records
+```
+
+For walkthroughs, read [Route planning and delivery execution](/en/tutorials/routing-transport/) for the planning and record contracts, and [Routed correspondence from Wuxi](/en/tutorials/cases/routed-correspondence/) for the letter example step by step. [Move an army](/en/tutorials/move-army/) runs the reference-world movement plugin.
+
+## Further reading
+
+- [Settlement system](/en/architecture/settlement/): phases, resource allocation, and rollback
+- [Randomness](/en/architecture/randomness/): where first-party extensions draw and where they leave draws to you
+- [Model ownership](/en/architecture/model-ownership/): which layer owns each movement concern
+- [Routing and transport execution](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#routing-and-transport-execution) in the repository architecture document
+- The [`canwu-movement` README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-movement/README.md), with the operation rules and error codes
+- The [routing and transport proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/routing-transport-mechanism.md), with the ownership boundary and milestones

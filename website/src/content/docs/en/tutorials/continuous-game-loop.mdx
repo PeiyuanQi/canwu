@@ -1,12 +1,15 @@
 ---
 title: Continuous-time game loop
-description: Separate wall, simulation, and presentation clocks in a continuously rendered strategy game.
+description: Drive Canwu from a real-time render loop with pause and speed controls, and get the same result at any frame rate.
 sidebar:
   order: 3
   label: Continuous-time game loop
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+This example is a host application: the main loop of a real-time strategy game with pause and 1x, 5x, and 20x speed. You will see how to turn frame time into whole simulation minutes, how to keep the leftover fraction for smooth animation, and how to check that a 60 FPS player and a 30 FPS player get identical simulation results.
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/continuous_game_loop.rs" icon="external">
   Open continuous_game_loop.rs
@@ -15,42 +18,121 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   Browse the example folder
 </LinkButton>
 
-This reference implementation targets continuously running strategy games with pause and speed controls. The host owns wall time, game speed, the sub-minute accumulator, and presentation state; Canwu receives only representable deterministic simulation time.
-
 ## Run it
+
+From the repository root:
 
 ```shell
 cargo run -p canwu-api --example continuous_game_loop
 ```
 
+The example runs the same scripted session twice, first at about 60 FPS with frame logging and then at about 30 FPS without it. Key lines of the output:
+
+```text
+1x host policy: 60 simulation seconds per wall second
+Frames are predefined; this example never sleeps or reads the real clock.
+
+60 FPS-ish render loop
+frame=   31 speed=1x     wall=  0.500s visual_time=Day 0, 00:00 + 0.500m canwu_time=Day 0, 00:00 army stationary at 2
+INPUT: queued commander move as IngressId(1), captured_at=Day 0, 00:00 + 0.500m, quantized_due_at=Day 0, 00:01
+EVENT: at=Day 0, 00:01 type=move_ordered Army 1 was ordered from 2 to 3
+frame= 3329 speed=5x     wall= 54.900s visual_time=Day 0, 04:30 + 0.500m canwu_time=Day 0, 04:30 army visual progress=25.0% (2 -> 3, authoritative_location=2)
+frame= 3390 speed=Paused wall= 55.900s visual_time=Day 0, 04:30 + 0.500m canwu_time=Day 0, 04:30 army visual progress=25.0% (2 -> 3, authoritative_location=2)
+frame= 5847 speed=20x    wall= 96.440s visual_time=Day 0, 18:01 + 0.300m canwu_time=Day 0, 18:01 army visual progress=100.0% (2 -> 3, authoritative_location=3)
+EVENT: at=Day 0, 18:01 type=army_arrived Army 1 arrived in territory 3
+
+FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=5fb68955f5b2..., checkpoint=826b0e164797...
+```
+
+`visual_time` is what the renderer draws; `canwu_time` is Canwu's time. The last line shows that the two runs rendered different numbers of frames and ended with the same state hash and checkpoint.
+
 ## Three clocks
 
-- **Wall clock:** frame durations from the renderer or game framework. The example uses predefined sequences that approximate 60 FPS and 30 FPS, never the real clock or `sleep()`.
-- **Simulation clock:** Canwu's authoritative integer-minute time. The host calls `advance_canonical()` only after at least one minute has accumulated.
-- **Presentation clock:** Canwu time plus the host's retained sub-minute remainder, used only for visual interpolation.
+The host keeps three kinds of time apart. The terms are defined in the [terminology](/en/reference/terminology/).
 
-<Steps>
-1. Scale each frame duration by the host's base calendar rate and `Paused`, `1x`, `5x`, or `20x` game speed.
-2. Accumulate the result as high-precision integer nanoseconds, retaining any fraction smaller than one `SimDuration` minute.
-3. For every completed simulation quantum, call `advance_canonical(SimDuration::minutes(1))`.
-4. Copy transit data from the public `WorldSnapshot` into presentation state and calculate read-only movement progress.
-</Steps>
+- **Wall time**: frame durations from the renderer. The example uses fixed lists of 16/17 ms and 33/34 ms frames.
+- **Simulation time**: Canwu's time, in whole minutes (`SimTime`, `SimDuration`).
+- **Presentation time**: simulation time plus the host's leftover fraction of a minute. It is used only to animate.
 
-## FPS-independent command ordering
+<MermaidDiagram
+  label="Wall time feeds an accumulator; whole minutes advance Canwu; the leftover drives presentation time"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the list above describes the same clocks."
+  renderFailureMessage="Diagram preview unavailable; the list above describes the same clocks."
+  definition={`flowchart TB
+    Wall["Wall time<br/>frame duration"] -->|"× base rate × game speed"| Acc["Host accumulator<br/>integer nanoseconds"]
+    Acc -->|"each whole minute"| Sim["Simulation time<br/>advance_canonical(1 min)"]
+    Sim --> Snap["WorldSnapshot"]
+    Snap --> Pres["Presentation time<br/>interpolated drawing"]
+    Acc -->|"leftover under 1 min"| Pres
+`}
+/>
 
-The player order enters through `enqueue_command()`. The example defines one frame-independent ceiling policy for between-minute input: a command captured at half a minute is due at the next representable Canwu minute. That timestamp policy belongs to the host and must not depend on which render frame happened to poll input.
+## How it works
 
-At the end, the two render profiles compare Canwu time, world state, commands, events, authoritative state hash, checkpoint hash, and canonical boundary count. Their frame counts differ; their authoritative results are identical.
+### Convert frame time into simulation minutes
 
-## Smooth presentation stays outside simulation
+`GameHost::render_frame` runs once per frame:
 
-The public snapshot exposes transit `from`, `to`, `departed_at`, and `arrives_at`. The presentation layer computes:
+```rust
+let converted_wall_nanos = wall_dt.as_nanos() * BASE_SIM_SECONDS_PER_WALL_SECOND;
+self.accumulated_sim_nanos += converted_wall_nanos * speed.multiplier();
+
+let mut authority_changed = false;
+while self.accumulated_sim_nanos >= SIMULATION_MINUTE_NANOS {
+    let receipts = self.authority.advance_canonical(SIMULATION_QUANTUM)?;
+    self.canonical_boundaries += receipts.len();
+    authority_changed |= !receipts.is_empty();
+    self.accumulated_sim_nanos -= SIMULATION_MINUTE_NANOS;
+}
+```
+
+The example's own rate is one simulation minute per wall second at 1x (`BASE_SIM_SECONDS_PER_WALL_SECOND = 60`); choose whatever rate your game needs. The speed multiplier is 0, 1, 5, or 20. The accumulator is an integer count of nanoseconds, so no fraction is lost. Each time it holds a whole minute, the host calls `advance_canonical(SimDuration::minutes(1))` and subtracts the minute.
+
+### Queue player input at a frame-independent time
+
+`GameHost::submit_player_command` runs when the player clicks, half a minute into the game:
+
+```rust
+let due_at = if self.accumulated_sim_nanos == 0 {
+    self.authority.time()
+} else {
+    self.authority
+        .time()
+        .checked_add(SIMULATION_QUANTUM)
+        .expect("the scripted command time must remain representable")
+};
+```
+
+The click falls between minute 0 and minute 1, so the order is due at minute 1 (`quantized_due_at=Day 0, 00:01` in the output). The host then enqueues it with `enqueue_command(due_at, 0, request)`. Rounding up is this host's policy. Any policy works if it gives the same due time at every frame rate; a policy based on which frame polled the input would give 60 FPS and 30 FPS players different games.
+
+### Interpolate the army for display
+
+The army's `TransitState` in the public `WorldSnapshot` carries `from`, `to`, `departed_at`, and `arrives_at`. `PresentationState::render` computes
 
 ```text
 visual_progress =
   (presentation_time - departed_at) / (arrives_at - departed_at)
 ```
 
-This floating-point value never feeds back into Canwu. During pause, render frames continue while simulation time, the retained remainder, and visual progress all remain unchanged.
+as an `f64` clamped to 0–1. The value stays in the renderer. In the output, progress reaches 25.0% at the end of the 5x phase and stays at 25.0% through the pause, because paused frames add nothing to the accumulator. It reaches 100.0% at Day 0, 18:01, the minute Canwu records `army_arrived`.
 
-See [Integrate and drive the simulation](/en/developer/integration/) for the host-side integration rules.
+### Compare the two runs
+
+`assert_fps_independent` compares the 60 FPS and 30 FPS runs. Their frame counts differ (5,850 and 2,881). Their Canwu time, world, events, command log, authoritative state hash, checkpoint hash, and boundary count (2) must be equal, or the example panics.
+
+## Try next
+
+Change the 30 FPS profile to about 24 FPS:
+
+```rust
+const THIRTY_FPS_ISH: FrameProfile = FrameProfile {
+    name: "30 FPS-ish",
+    frame_millis: &[40, 41],
+};
+```
+
+The last line now reports `30 FPS-ish frames=2384` with the same `state_hash=5fb68955f5b2...` and `checkpoint=826b0e164797...`.
+
+For the host-side rules this loop follows, see [Integrate and drive the simulation](/en/developer/integration/).

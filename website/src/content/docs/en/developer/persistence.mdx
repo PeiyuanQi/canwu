@@ -1,34 +1,46 @@
 ---
 title: Save, replay, and fork
-description: Save and restore Canwu state, validate the plugin semantic environment, and build exact replay or alternative realities.
+description: Save and load a Canwu run, keep compact history for long runs, replay a run exactly, and branch into alternative realities.
 sidebar:
   order: 4
-  label: Persistence and replay
+  label: Save, replay, and fork
 ---
 
-A Canwu save is more than one serialized world object. Recoverable state also includes commands, events,
-transactions, random evidence, the plugin semantic environment, and state commitments.
-Choose the recovery goal first, then use the matching interface.
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+Use this page to save and load a run, keep compact history for a long-running simulation, replay a run exactly, or branch from a saved point to try different inputs.
+
+A Canwu save holds more than world data. It also carries the commands, events, boundary records, random draws, plugin semantic environment, and state commitments that let a load verify the state. The **plugin semantic environment** is the name, version, and semantic hash of every plugin in the run; loading and replay need a plugin set that matches it.
+
+<MermaidDiagram
+  label="Persistence paths: a live run can be saved as a snapshot or checkpoint journal and restored with the same plugins, replayed exactly from its replay journal, or forked into an alternative reality"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the table below describes the same paths."
+  definition={`flowchart LR
+    Run["Live run"] -->|"snapshot_json()"| Snap["Snapshot"]
+    Run -->|"checkpoint_journal_json()"| CJ["Checkpoint + later journal"]
+    Run -->|"replay_journal()"| Journal["ReplayJournal"]
+    Run -->|"fork()"| Fork["Fork: new inputs, alternative reality"]
+    Snap -->|"from_snapshot_json_with_plugins()"| Restored["Restored run"]
+    CJ -->|"from_checkpoint_journal_json_with_plugins()"| Restored
+    Journal -->|"replay_from_journal()"| Replayed["Replayed run"]
+    Plugins["Matching plugin set"] -.-> Restored
+    Plugins -.-> Replayed
+`}
+/>
+
+A restored or replayed run has the same `checkpoint_hash()` as the original. A fork starts from the same state and then diverges.
 
 ## Choose the recovery goal
 
-| Goal | Use | Host responsibility |
-| --- | --- | --- |
-| Normal save or service restart | `snapshot_json()` and `from_snapshot_json_with_plugins()` | Store the complete snapshot and provide the same plugin set when loading |
-| Compact storage for a long-running simulation | `checkpoint_journal_json()` | Store the validated checkpoint and its contiguous later journal |
-| Audit or exact reconstruction | `replay_journal()` and `replay_from_journal()` | Store the complete journal and matching plugin semantic environment |
-| Deliver external side effects | `outbox_entries()` | Deliver at least once, deduplicate by `delivery_id`, and persist acknowledgement state |
-| Try different inputs from the same point | `fork()` | Treat the result as a new alternative reality, not exact replay |
-
-## Version and format contract
-
-As of September 27, 2026, the workspace version is `0.13.0` and the snapshot format is 8.
-The exact `engine_version` remains part of the persistence contract, so snapshots from 0.12.0 or earlier cannot be loaded into a 0.13.0 run.
-Version 0.13.0 adds transition manifests, evaluation traces, seat succession, access grants, the `canwu-movement` extension with capacity pools, delegated carriers and carrier seizure, authenticity findings, weighted, unit-block, and consultation law stages, the culture boundary plugin, cohort headcount rebases, policy-pressure provenance, and external transmission sources. The resource, correspondence, information, society, technology, and law plugin semantic identities change, `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v5`, and the snapshot format remains 8; see [Version 0.13.0](#version-0130) below. A local engine checkout does not update a downstream application's pinned registry dependency.
-The simulation core does not silently migrate an old snapshot, and changing only its format number does not make it compatible.
-
-Applications that retain state should pin an exact published release or Git revision. To carry history across an engine boundary,
-run an explicit host-owned export/import process or retain the older engine that can read the data.
+| Goal | Save with | Load with | Your application's job |
+| --- | --- | --- | --- |
+| Normal save or service restart | `snapshot_json()` | `Canwu::from_snapshot_json_with_plugins()` | Store the whole snapshot; pass the same plugin set when loading |
+| Compact storage for a long run | `checkpoint_journal_json()` | `Canwu::from_checkpoint_journal_json_with_plugins()` | Store the checkpoint and the unbroken journal after it |
+| Audit or exact reconstruction | `replay_journal()` | `Canwu::replay_from_journal()` or `replay_from_journal_json()` | Store the whole journal and keep a matching plugin set |
+| Send effects to outside systems | `outbox_entries()` | — | Deliver at least once, deduplicate by `delivery_id`, and store acknowledgement state |
+| Try different inputs from one point | `fork()` | — | Treat the fork as a new alternative reality |
 
 ## Save and restore a snapshot (excerpt)
 
@@ -45,94 +57,80 @@ let restored = Canwu::from_snapshot_json_with_plugins(&json, &[&plugin])?;
 assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 ```
 
-This is an integration excerpt. Run the complete example to verify snapshot loading, forking, and exact replay:
+Loading validates the snapshot, including its format, engine version, and plugin descriptors, and fails if anything does not match. Once a save contains plugin domain records, pass the same plugins to load it.
+
+The [`starter` example](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs) runs this together with forking and exact replay:
 
 ```shell
 cargo run -p canwu-reference-world --example starter
 ```
 
-Plugin names, versions, and semantic hashes belong to the plugin semantic environment.
-Once a save contains plugin domain records, loading and replay must provide a compatible plugin set.
-
 ## Checkpoint journals and exact replay
 
-A checkpoint journal combines a validated checkpoint with the contiguous evidence that follows it, which is useful for long-running simulations.
-Exact replay reconstructs the same simulation run from the journal's initial scenario, inputs, and evidence:
+A **checkpoint journal** (`CheckpointJournal`) bundles a validated checkpoint with the unbroken evidence that follows it. It suits long runs because it starts from the checkpoint and carries only the evidence recorded after it.
+
+**Exact replay** rebuilds the same run from the journal's initial scenario, inputs, and recorded evidence:
 
 ```rust
 let checkpoint_journal = canwu.checkpoint_journal_json()?;
+let from_checkpoint =
+    Canwu::from_checkpoint_journal_json_with_plugins(&checkpoint_journal, &[&plugin])?;
+assert_eq!(from_checkpoint.checkpoint_hash(), canwu.checkpoint_hash());
+
 let journal = canwu.replay_journal();
 let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
-
-assert!(!checkpoint_journal.is_empty());
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 ```
 
-`replay_from_journal()` does not accept a second caller-supplied scenario. Run identity, engine version,
-plugin semantic environment, and recorded evidence must match. Replay consumes recorded outcomes; it does not
-ask external services again or re-deliver side effects.
+Rules for exact replay:
 
-## Four outbox rules
-
-1. Persist each `delivery_id` together with delivery and acknowledgement state in host-owned storage.
-2. Deliver with at-least-once semantics so a timeout or restart can be retried safely.
-3. Deduplicate by `delivery_id`; never assume the network call occurs only once.
-4. Exact replay regenerates the same outbox identity but does not deliver it again for the host.
-
-After evidence is sealed, the caller must also retain the returned `EvidenceJournalSegment` with its outbox acknowledgement state.
-Compaction or sealing does not mean an external effect was delivered or acknowledged.
-
-## Advanced storage and archives
-
-Paged checkpoints, `StatePageProvider`, decision-history archives, and plugin archive participants are needed only after
-snapshot size or hot-history growth becomes a real constraint. At that point the host must:
-
-- store and return the exact page bytes addressed by each content identifier; a missing page must fail explicitly rather than appear empty;
-- retain the contiguous journal prefix and archive-retention roots required by the checkpoint;
-- restore the same archive contracts and semantic hashes for every plugin; and
-- verify reachability from committed roots before deleting cold data.
-
-See the repository's [versioning and persistence contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)
-for format numbers, paged-storage contracts, and archive invariants.
+- The scenario comes from the journal; `replay_from_journal()` takes only the plugins and the journal.
+- Run identity, engine version, plugin semantic environment, and recorded evidence must all match.
+- Replay reuses recorded outcomes. Decisions, random draws, and external answers are read from the journal, and side effects are not sent again.
 
 ## Alternative realities
 
-`fork()` creates an independent simulation from the current point. Use it to compare another command sequence, policy,
-or research assumption. Each fork still advances through normal command and time ingress. It is not exact replay because later inputs may differ.
+`fork()` copies the run at its current point into an independent simulation. Use it to compare another command sequence, policy, or research assumption. The fork advances through the normal command and time APIs, and once its inputs differ it is a new *alternative reality*, separate from exact replay of the original.
+
+## Deliver outside effects: the outbox
+
+Boundary emissions meant for outside systems appear in `outbox_entries()`. Each `OutboxEntry` has a stable `delivery_id` derived from the run, boundary, event, and emission index.
+
+1. Store each `delivery_id` with its delivery and acknowledgement state in your own storage.
+2. Deliver at least once, so a timeout or restart can retry safely.
+3. Deduplicate by `delivery_id` on the receiving side; a network call may happen more than once.
+4. Exact replay regenerates the same `delivery_id` values and leaves delivery to you.
+
+In compact mode (`CompactedCanwu`), `seal_evidence()` returns the sealed `EvidenceJournalSegment`. Keep that segment with your delivery and acknowledgement state. Sealing or compacting evidence does not mark an effect as delivered or acknowledged.
+
+## Advanced storage and archives
+
+Paged checkpoints, `StatePageProvider`, decision-history archives, and plugin archive participants matter only once snapshot size or hot-history growth becomes a real problem. At that point your application must:
+
+- store each state page under its content identifier and return the same bytes; a missing page must fail with an error, never read as empty;
+- keep the unbroken journal prefix and the archive-retention roots that each checkpoint needs;
+- restore the same archive contracts and semantic hashes for every plugin; and
+- check reachability from committed roots before deleting cold data.
+
+The repository's [versioning and persistence contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md) lists format numbers, paged-storage contracts, and archive invariants.
+
+## Version and save compatibility
+
+:::note
+Canwu 0.13.0 writes snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4. A save also records the exact `engine_version`, so a 0.13.0 run loads only 0.13.0 saves. A save from 0.12.0 or earlier cannot be relabeled or loaded; keep the older engine to read it, or export the data with your own tool.
+:::
+
+- Pin an exact release or Git revision for any application that keeps saves.
+- Treat a plugin semantic-hash change as a behavior change. A minor release (for example, 0.12 → 0.13) can change the semantic hashes of several extensions at once, and older saves that use those extensions then fail to load.
+- Canwu does not migrate old saves. To carry history across an engine upgrade, run your own export and import, or keep the engine that wrote the data.
+- New releases add enum variants and struct fields, so exhaustive `match` statements and struct literals may need updates.
+
+For what each release changed, see the [versioning and persistence contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md).
 
 ## Production checklist
 
 - Pin the engine version and plugin semantic environment.
-- Complete one save, process restart, load, and checkpoint-hash comparison.
-- Complete one exact replay and compare the final checkpoint hash.
-- Simulate an outbox timeout and verify that retrying by `delivery_id` does not duplicate an external effect.
-- Document whether an upgrade exports, migrates, or deliberately abandons old saves.
-
-
-## Version 0.13.0
-
-Canwu 0.13.0 is a minor release. Its new contracts are additive capabilities, but new enum variants and struct fields break exhaustive matches and struct literals, so it is not source-compatible for code that uses them. Snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4 are unchanged, and fields for contracts a run does not use are not serialized.
-
-- Snapshots gain `pending_transition_manifests`. Boundary records gain `evaluation_traces`, `transition_manifests`, and `transition_audits`, and boundary receipts gain `transition_audits`. A run that registers no manifest and records no trace hashes exactly as before.
-- Evaluation traces are sealed and archived with their boundary records and count toward journal size. The run configuration's `evaluation_limits` is omitted at its default, so the configuration hash changes only if you set it.
-- `canwu-movement` keeps its runtime in one `canwu.movement:runtime` domain record. The culture boundary plugin adds the `canwu.culture:definition` and `canwu.culture:exposure-queue` records, and the society plugin adds `canwu.society:ingress-queue`.
-- The resource, correspondence, information, society, technology, and law plugin semantic hashes change. `MovementPlugin` and `CultureBoundaryPlugin` are new plugin identities, while `CulturePlugin`, production, and fiscal keep theirs, and existing law plans keep their encoding and content hash. `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v5`.
-- Several fixes change results for existing runs: live production completions now settle their output; `AmendDemand` can no longer change a demand's status, rejection reason, or requester; law seat work expires when a stage stops accepting ballots, and a late seat response is recorded as a rejection; the society Daily boundary after a cohort transfer no longer fails; and snapshot restore accepts initial records that reference entities listed only in `Scenario::entities`.
-
-A 0.12.0 snapshot must not be relabeled or loaded into 0.13.0. Keep the previous engine or run an explicit export.
-
-## Version 0.12.0
-
-Canwu 0.12.0 is a minor release. Its new contracts are additive capabilities, but new enum variants and struct fields break exhaustive matches and struct literals, so it is not source-compatible for code that uses them. Snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4 are unchanged. Fields for contracts a run does not use are not serialized, so those records keep their previous encoding and hashes.
-
-- Snapshots gain `person_availability`, the `created_persons` registry, and a person counter; boundary records gain person availability changes (with the tickets they cancelled) and created persons.
-- Plugin input withdrawn with `cancel_plugin_ingress`, `cancel_permitted_plugin_ingress`, or `CancelPluginIngress` stays in the ingress journal as a `PluginCancellation` record. Restore leaves the withdrawn item out of the pending queue, and exact replay reapplies the withdrawal.
-- Decision tickets and traces can carry `parent_ticket`, the decision stage, and the guards that fired; controllers can carry the random tie-break opt-in.
-- Host-authored decision ingress that carries random draw evidence is rejected, both live and when a snapshot loads.
-- The resource, production, and fiscal plugin semantic hashes change, as does the resource holder-report knowledge schema; `TRANSPORT_SEMANTIC_VERSION` becomes `canwu-transport.v4`; the correspondence plugin semantic hash is unchanged.
-
-A 0.11.1 snapshot must not be relabeled or loaded into 0.12.0. Keep the previous engine or run an explicit export.
-
-## Version 0.11.1
-
-Canwu 0.11.1 is a patch release. Completion lease abort and release cleanup now remove grants released from the Held or Prepared state from the bounded expiry index before validation; snapshot format and public type shapes remain unchanged.
+- Do one full save, process restart, and load, then compare checkpoint hashes.
+- Run one exact replay and compare the final checkpoint hash.
+- Simulate an outbox timeout and confirm that retrying by `delivery_id` does not repeat the outside effect.
+- Write down what an upgrade does with old saves: export and re-import them, keep the old engine to read them, or drop them.

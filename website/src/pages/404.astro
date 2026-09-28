@@ -3,16 +3,16 @@ import BaseLayout from "../layouts/BaseLayout.astro";
 ---
 
 <BaseLayout
-  title="探索参伍 — 参伍引擎"
-  description="请从首页、文档或 GitHub 继续探索参伍。"
+  title="页面不存在 — 参伍引擎"
+  description="这个页面不存在。可以从首页、开发指南或 GitHub 继续浏览。"
   locale="auto"
   zhPath="/"
   enPath="/en/"
 >
   <script is:inline>
     if (document.documentElement.dataset.locale === "en") {
-      const title = "Choose a Canwu destination";
-      const description = "Continue exploring Canwu from the home page, documentation, or GitHub.";
+      const title = "Page not found — Canwu Engine";
+      const description = "This page does not exist. Continue from the home page, the guides, or GitHub.";
       document.title = title;
       document.querySelector('meta[name="description"]')?.setAttribute("content", description);
       document.querySelector('meta[property="og:title"]')?.setAttribute("content", title);
@@ -23,24 +23,24 @@ import BaseLayout from "../layouts/BaseLayout.astro";
   </script>
 
   <section class="not-found page-width" data-locale-content="zh-CN">
-    <p class="eyebrow">404 · 探索参伍</p>
-    <h1>请选择下一站。</h1>
-    <p>请从首页、文档或 GitHub 继续浏览，也欢迎在 GitHub 提交链接更新。</p>
+    <p class="eyebrow">404 · 页面不存在</p>
+    <h1>找不到这个页面</h1>
+    <p>链接可能已过期或有拼写错误。可以回到首页或开发指南继续浏览；如果是站内链接失效，欢迎在 GitHub 上报告。</p>
     <div class="action-row">
       <a class="button primary" href="/">返回首页</a>
-      <a class="button" href="/developer/">查看开发者指南 →</a>
-      <a class="text-action" href="https://github.com/PeiyuanQi/canwu/issues">报告问题 ↗</a>
+      <a class="button" href="/developer/">查看开发指南 →</a>
+      <a class="text-action" href="https://github.com/PeiyuanQi/canwu/issues">报告失效链接 ↗</a>
     </div>
   </section>
 
   <section class="not-found page-width" data-locale-content="en">
-    <p class="eyebrow">404 · Explore Canwu</p>
-    <h1>Choose your next destination.</h1>
-    <p>Continue from the home page, browse the documentation, or share a link update on GitHub.</p>
+    <p class="eyebrow">404 · Page not found</p>
+    <h1>This page doesn&apos;t exist</h1>
+    <p>The link may be outdated or mistyped. Go back to the home page or the guides, or report a broken link on GitHub.</p>
     <div class="action-row">
       <a class="button primary" href="/en/">Return home</a>
-      <a class="button" href="/en/developer/">Read the developer guide →</a>
-      <a class="text-action" href="https://github.com/PeiyuanQi/canwu/issues">Report an issue ↗</a>
+      <a class="button" href="/en/developer/">Read the guides →</a>
+      <a class="text-action" href="https://github.com/PeiyuanQi/canwu/issues">Report a broken link ↗</a>
     </div>
   </section>
 </BaseLayout>

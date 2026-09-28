@@ -1,31 +1,35 @@
 ---
 title: Integrate and drive the simulation
-description: Combine canwu-api with a domain integration, then advance the simulation through supported ingress paths.
+description: Add Canwu to a Rust host application, send commands, and advance simulation time from your own loop.
 sidebar:
   order: 2
-  label: Integration and driving
+  label: Integrate and drive
 ---
 
 import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-Canwu is a headless historical simulation engine. The host owns windows, maps, networking, input, AI scheduling, and the frame loop.
-Canwu owns generic authoritative state, validation, deterministic time, events, and evidence; concrete world models and commands belong to the domain integration selected by the application.
+This page shows how to embed Canwu in a Rust application: add the crates, create a simulation, send a command, and advance time from your own loop. Start here before the reading, persistence, and extension guides.
+
+Your host application owns windows, maps, input, networking, AI scheduling, and the frame loop. Canwu owns authoritative state, validation, deterministic time, events, and evidence. A domain integration supplies the concrete world model and its commands; this page uses the example integration `canwu-reference-world`. For unfamiliar terms, see the [terminology reference](/en/reference/terminology/).
 
 ## Add dependencies
 
-The current `main` branch requires Rust 1.88 or newer. The following dependencies are appropriate for evaluating the current development version:
+Canwu needs Rust 1.88 or newer. Add the published [`canwu-api`](https://crates.io/crates/canwu-api) crate from crates.io to your host application's `Cargo.toml`:
 
 ```toml
 [dependencies]
-canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
-canwu-reference-world = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
+canwu-api = "=0.13.0"
 ```
 
-`canwu-reference-world` is a replaceable starter integration, not an engine foundation crate. The old `canwu-world` crate is retired. Do not depend on `canwu-sim` or another runtime implementation crate.
+- `canwu-api` is the supported public API; its API docs are on [docs.rs](https://docs.rs/canwu-api). Application code depends on it and on any extension crates it uses, such as [`canwu-resource`](https://crates.io/crates/canwu-resource). Extension crates are also published on crates.io; use the same version number as `canwu-api`. Do not depend on `canwu-sim` or other runtime crates directly.
+- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.13.0` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
 
-Before production, pin an exact published release or Git revision and pair every engine upgrade with an explicit save migration.
+`=0.13.0` pins the engine to exactly this release. If your application keeps saves, upgrade only once a save migration is ready (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
 
 ## Minimal host flow
+
+This program creates the reference world, orders an army east, advances 19 hours, and prints where the army ended up:
 
 ```rust
 use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
@@ -66,29 +70,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Run the complete example from the repository root:
+What each step does:
+
+1. `demo_scenario()` builds a three-territory world and returns the IDs of its people, army, and territories. `ReferenceWorldPlugin` registers the movement command and the boundary system that moves armies.
+2. `Canwu::new_with_plugins(35, …)` creates the run. `35` is the random seed; the same seed and inputs always give the same result.
+3. `order_movement` builds a typed domain command. `.at_time(canwu.time())` sets the simulation time at which the command must be admitted; admission at any other time rejects it with `SimulationTimeConflict`.
+4. `CommandRequest::new(id, canwu.revision(), command)` adds a request ID and the state revision the command was written against.
+5. `enqueue_command(time, 0, request)` queues the command at the current time with priority `0`.
+6. `advance_canonical(SimDuration::hours(19))` settles a *boundary* (one atomic settlement step) whenever queued work falls due. The road east takes 18 hours, so 19 hours covers the arrival.
+7. `reference_snapshot(&canwu)` reads the reference world's trusted projection.
+
+Run the full example from the repository root:
 
 ```shell
 cargo run -p canwu-reference-world --example starter
 ```
 
-The value `35` is a deterministic demo seed, `0` is the command priority, and the 19-hour advance crosses the reference movement system's settlement time.
-The program prints the army's final location; the complete `starter` example also verifies saving, forking, and exact replay.
-Production applications normally construct their own `Scenario` and plugins. The reference integration's `demo_scenario()` is only a runnable template.
+The [full example](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs) also saves, loads, forks, and replays the run and checks that every checkpoint hash matches. A real application builds its own `Scenario` and plugins; use `demo_scenario()` as a template.
 
 ## Choose an ingress path
 
-| Entry point | Use it when |
-| --- | --- |
-| `submit(CommandEnvelope)` | The host already owns a typed domain command and issuer identity |
-| `process_command(CommandRequest)` | An external service needs request identity, revision validation, and recorded outcomes |
-| `enqueue_command(...)` | A command must enter at an explicit simulation time and priority |
+*Ingress* is how outside input enters the simulation. Canwu records every input in order, which is what makes saves and exact replay possible. Your integration turns UI or agent intent into a typed command, then sends it through one of these methods:
 
-The domain integration translates UI or agent intent into a typed domain command. Every ingress path preserves the same rule: the host never receives a mutable world reference.
+| Method | Returns | Use it when |
+| --- | --- | --- |
+| `submit(CommandEnvelope)` | `CommandReceipt` | Quick tools and tests. The command applies at once, with no request ID. Runs created with a declared `RunConfiguration` reject it. |
+| `process_command(CommandRequest)` | `CommandOutcome` | A player or service sends a command that should apply now. Expected rejections, such as `InvalidAuthority`, `IssuerUnavailable`, or a stale `expected_revision` (`SimulationRevisionConflict`), are recorded and returned as `CommandOutcome::Rejected`. |
+| `enqueue_command(due_at, priority, CommandRequest)` | `IngressReceipt` | The command should take effect at a set simulation time. It is admitted at the boundary for `due_at`; among commands due at the same time, higher priority goes first. |
+
+All three validate the command and its authority before anything changes; the host has no mutable reference to the world.
+
+Use one style per run. Once a run has queued ingress, `process_command` returns `MixedCommandIngress`, and queued ingress cannot start after commands were applied directly. `submit` cannot share a run with tracked requests (commands sent as a `CommandRequest`) either. If the run also uses plugin ingress or queued decisions, send commands with `enqueue_command`.
+
+## Drive time
+
+<MermaidDiagram
+  label="Host loop: the host converts wall time into simulation minutes, advance_canonical settles due boundaries, and the host refreshes presentation from receipts, events, and projections"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same loop."
+  definition={`flowchart LR
+    Wall["Wall clock or turn input"] --> Convert["Host speed policy: whole SimDuration minutes"]
+    Input["Player or agent input"] --> Queue["enqueue_command: queued input"]
+    Convert --> Advance["advance_canonical(duration)"]
+    Queue --> Advance
+    Advance --> Out["BoundaryReceipt list and new events"]
+    Out --> Render["Host refreshes UI from projections"]
+`}
+/>
+
+<Steps>
+1. Read wall time, turn input, or research-workflow progress.
+2. Convert it to a `SimDuration` with your own speed policy. Simulation time counts whole minutes, so keep any sub-minute remainder in the host.
+3. Call `advance_canonical(duration)`. It settles a boundary at each due time of queued work inside the window, moves the clock to the end, and returns one `BoundaryReceipt` per boundary. Call `step_canonical()` to settle only the next due boundary, or `settle_boundary(BoundaryRequest)` to settle one at a time you choose.
+4. Refresh presentation from the new events, the receipts, or a read-only projection from your domain integration.
+</Steps>
+
+`advance(duration)` is the older, event-only path. It runs scheduled actions but returns `InvalidBoundary` if queued ingress falls due inside the window, so prefer `advance_canonical`.
+
+Pass only whole `SimDuration` values to Canwu; keep floating-point frame deltas and interpolation in the host. The [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/) and its [example](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/continuous_game_loop.rs) show the full pattern, including game speed, pause, and an accumulator for partial minutes.
 
 ## Withdraw queued plugin input
 
-Plugin input queued with `enqueue_plugin_ingress` can be withdrawn while it is still queued and strictly before its due time:
+`enqueue_plugin_ingress` queues a plugin packet (`PluginIngressRequest`) for a later simulation time. While the packet is still queued and its due time has not arrived, its issuer can withdraw it:
 
 ```rust
 let queued = canwu.enqueue_plugin_ingress(request)?;
@@ -96,33 +140,77 @@ let queued = canwu.enqueue_plugin_ingress(request)?;
 canwu.cancel_plugin_ingress(queued.ingress_id, "withdrawn by player")?;
 ```
 
-Only the issuer may withdraw an item. The host withdraws public packets it enqueued with `cancel_plugin_ingress`. Internal packet types need `cancel_permitted_plugin_ingress` with the owning plugin's registration permit, which also covers items that plugin scheduled itself. A plugin's boundary system withdraws items its plugin scheduled with `BoundaryDirective::CancelPluginIngress`. The withdrawal is journaled as its own `IngressPayload::PluginCancellation` record naming the item, the `IngressCancellationAuthority`, and a reason of at most 1,024 bytes. The withdrawn item is never admitted and nothing is rolled back. Items that are already due, admitted, archived, or withdrawn fail with `LateIngress`; another issuer's item fails with `InvalidAuthority`; an unknown ID fails with `EvidenceUnavailable`. Snapshots, checkpoint journals, and exact replay keep the withdrawal.
+Only the issuer can withdraw an item. Pick the call that matches who queued it:
+
+| Who queued the item | How to withdraw it |
+| --- | --- |
+| The host, for a public packet type | `canwu.cancel_plugin_ingress(ingress_id, reason)` |
+| The host, for an internal packet type, or the owning plugin inside the engine | `canwu.cancel_permitted_plugin_ingress(ingress_id, &permit, reason)` with the owning plugin's `PluginIngressPermit` |
+| A plugin's boundary system | Return `BoundaryDirective::CancelPluginIngress` from a boundary system of the same plugin. `SimulationView::cancellable_plugin_ingress` lists the items it may withdraw. |
+
+The reason must be non-empty, have no leading or trailing spaces, and be at most 1,024 bytes (`MAX_INGRESS_CANCELLATION_REASON_BYTES`).
+
+A withdrawal is written to the ingress journal as its own `IngressPayload::PluginCancellation` record. The record names the withdrawn item, the `IngressCancellationAuthority` (`Host`, `PluginPermit`, or `BoundarySystem`), and the reason. The withdrawn item never reaches a boundary, and nothing else changes. Snapshots, checkpoint journals, and exact replay keep the withdrawal.
+
+Errors from the host methods:
+
+| Error | Cause |
+| --- | --- |
+| `LateIngress` | The item is already due, admitted, archived, or withdrawn. |
+| `InvalidAuthority` | The caller did not issue the item, for example the host trying to withdraw an item a plugin scheduled. |
+| `EvidenceUnavailable` | No item has that ID. |
+| `InvalidPayload` | The reason is invalid, or the ID names something other than plugin ingress. |
+
+A `CancelPluginIngress` directive with an invalid target fails the whole boundary.
 
 ## People who can no longer act
 
-Since 0.12.0 the runtime keeps each person's availability (`PersonAvailability`): a life state (`Alive`, `Dead`, `Missing`) and a custody state (`Free`, `Detained`, `Hostage`, `Captive`, `Hiding`, `Exile`). Your application decides when a person dies, is captured, or is released, and records it from a phase-7 or phase-10 boundary system that declares `StateKey::core_person_availability()` and returns `BoundaryDirective::SetPersonAvailability`. Read it with `canwu.person_availability(person)`; `None` means alive and free.
+Canwu stores one `PersonAvailability` value per person. It has a life state (`LifeState`: `Alive`, `Dead`, `Missing`), a custody state (`CustodyState`: `Free`, `Detained`, `Hostage`, `Captive`, `Hiding`, `Exile`), an optional custodian, and the time it took effect. A person with no stored value is alive and free.
 
-A person who is not alive, or who is detained or captive, is unavailable:
+Your application decides when someone dies, is captured, or is released. Record the change from a phase-7 or phase-10 boundary system that declares `StateKey::core_person_availability()` as a write:
 
-- command admission rejects a command whose issuer, decision actor, or responsible institutional actor is unavailable with `IssuerUnavailable`, recorded as a persisted rejection for tracked requests;
-- a decision ticket cannot be opened, prepared, or resolved while its person decision maker (`DecisionMakerUnavailable`) or its controller's authority person (`IssuerUnavailable`) is unavailable;
-- at the end of the boundary that makes the person unavailable, open tickets where they are the decision maker are cancelled with `decision_maker_unavailable`, and open tickets whose controller acts for them are cancelled with `controller_authority_unavailable`.
+```rust
+BoundaryDirective::SetPersonAvailability {
+    person,
+    availability: PersonAvailability::new(LifeState::Alive, CustodyState::Captive, at)
+        .with_custodian(EntityRef::Army(captor)),
+    summary: "Captured at the river crossing".to_owned(),
+}
+```
 
-Hostage, hiding, and exile stay admissible by default; add stricter rules in your own systems. A cancelled ticket is not reassigned. When only the controller's authority person became unavailable, continue the decision by opening a new ticket for an available controller with `parent_ticket` set to the cancelled one. No new ticket can be opened for a decision maker who is still unavailable.
+Two changes for the same person in one boundary fail that boundary. The host reads the value with `canwu.person_availability(person)`; a boundary system reads it with `SimulationView::person_availability` after declaring the same key as a read.
 
-Since 0.13.0, a successor can also continue the decision of a decision maker who died or was captured. Open the new ticket with the successor as decision maker, assigned to a controller bound to the same non-empty `seat_id` as the cancelled ticket's controller, and set `parent_ticket` to the cancelled ticket. This seat succession keeps the lineage on the new ticket's trace; a parent of a different decision maker in a different seat is still rejected.
+### What an unavailable person cannot do
 
-## Limit rule explanations
+A person is **unavailable** when they are not `Alive`, or when they are `Detained` or `Captive` (`PersonAvailability::is_available` returns `false`). Hostage, hiding, and exile still allow action; add stricter rules in your own systems if your setting needs them.
 
-Boundary systems may record [evaluation traces](/en/architecture/settlement/#evaluation-traces) to explain rule results. The run configuration bounds them for all systems together: by default 4,096 traces per boundary and 32 terms per trace, at most 65,536 and 256. Declare other bounds before the run starts with `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })`; a trace limit of zero forbids traces. A boundary whose systems exceed a bound fails with `EvaluationTraceLimitExceeded` and commits nothing, so size the limits for all systems and seats in one boundary together, not per seat. Traces also count toward journal size.
+A controller's *authority person* is the actor of `DecisionAuthority::Actor`, or the named responsible actor of `DecisionAuthority::Institution`. `Council` and `NoResponsibleActor` authorities have none. For decision tickets, controllers, and seats in context, see the [warlord aid decision](/en/tutorials/cases/warlord-aid-decision/).
 
-## Drive time
+| Situation | Result |
+| --- | --- |
+| A command's issuer, decision-origin actor, or institution's responsible actor is unavailable | Admission rejects it with `IssuerUnavailable`. A tracked request records the rejection. |
+| A ticket's person decision maker is unavailable | The ticket cannot be opened or prepared (`DecisionMakerUnavailable`). |
+| A ticket's controller acts for an unavailable authority person | The ticket cannot be opened, prepared, or resolved (`IssuerUnavailable`). |
+| A person becomes unavailable during a boundary | At the end of that boundary, their open tickets are cancelled: `decision_maker_unavailable` where they are the decision maker, `controller_authority_unavailable` where the controller acts for them. |
 
-<Steps>
-1. The host reads wall time, turn input, or research workflow progress.
-2. The host converts that input into `SimDuration` according to its own speed policy.
-3. Event-driven hosts call `advance()`; hosts with daily, turn, or other boundary systems call `advance_canonical()` or explicit `settle_boundary()`.
-4. The host refreshes presentation from events, boundary receipts, or a read-only projection produced by its domain integration.
-</Steps>
+### Continue a cancelled decision
 
-Do not feed floating-point frame deltas directly into authoritative state. See the [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/) for the complete pattern.
+A cancelled ticket stays cancelled. To continue the decision, open a new ticket whose `parent_ticket` names the cancelled one:
+
+- **Only the controller's authority person is unavailable.** Open a new ticket for the same decision maker, assigned to a controller whose authority person is available.
+- **The decision maker died or was captured.** Use *seat succession*: make the successor the decision maker, and assign the ticket to a controller bound to the same `seat_id` as the cancelled ticket's controller.
+
+The parent must be a terminal ticket that is still in hot decision history, meaning it has not been moved to the decision archive; an archived parent is rejected with `TicketNotFound`. A parent with a different decision maker and a different seat is rejected. You cannot open a ticket for a decision maker who is still unavailable.
+
+## Limit evaluation traces
+
+Boundary systems in phases 7 and 12 can record [evaluation traces](/en/architecture/settlement/#evaluation-traces): term-by-term breakdowns of how a rule produced a number. Players read them through the [actor-relative view](/en/developer/reading-state/#explain-a-rule-result). The run configuration limits traces for all systems in one boundary together:
+
+| Limit | Default | Maximum |
+| --- | --- | --- |
+| `traces_per_boundary` | 4,096 | 65,536 |
+| `terms_per_trace` | 32 | 256 |
+
+To use other limits, call `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })` on the configuration you pass to `Canwu::new_with_run_configuration_and_plugins`. A `traces_per_boundary` of `0` turns traces off for the run.
+
+If the systems in one boundary exceed either limit, the boundary fails with `EvaluationTraceLimitExceeded` and commits nothing. Size the limits for every system and seat in a boundary combined. Traces also add to journal size.

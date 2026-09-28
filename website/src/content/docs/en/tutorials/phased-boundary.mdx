@@ -1,12 +1,17 @@
 ---
 title: Phased boundary and allocation
-description: Declare supply, demand, allocation, and resulting state changes within one deterministic boundary.
+description: Two plugins share a grain pool. One offers supply, one requests it, and a later phase of the same boundary writes the settled grant.
 sidebar:
   order: 5
   label: Phased boundary and allocation
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+In this example a supply plugin offers 10 grain and a demand plugin asks for 6 in the same daily boundary. Canwu settles the allocation, and a later phase of that boundary records how much grain the garrison received. You will learn how boundary phases order work between plugins and how a system reads the settled allocation.
+
+A boundary is one atomic settlement step: Canwu runs the registered systems in 14 fixed phases, then commits all of their changes or rolls all of them back. [Settlement system](/en/architecture/settlement/) lists the phases.
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/phased_boundary.rs" icon="external">
   Open phased_boundary.rs
@@ -15,28 +20,125 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   Browse the example folder
 </LinkButton>
 
-This example shows two plugins coordinating at a daily boundary while preserving inspectable reservation and allocation evidence for a shared grain pool.
-
 ## Run it
+
+From the repository root:
 
 ```shell
 cargo run -p canwu-api --example phased_boundary
 ```
 
+The example prints nothing. It exits with status 0 when both of its assertions pass: the request was granted 6 grain, and the boundary emitted two events.
+
 ## How the plugins collaborate
 
-<Steps>
-1. `SupplyPlugin` declares a grain pool and its capacity in `ReservationAndAllocation`.
-2. `DemandPlugin` declares quantity, priority, and a deterministic tie-break in the same phase.
-3. After Canwu settles allocation, `DomainDeltaProposal` reads the grant through `SimulationView::reservation()`.
-4. The plugin returns a component update and domain event; Canwu applies both and records boundary evidence.
-</Steps>
+<MermaidDiagram
+  label="Supply and demand are declared in phase 6, Canwu allocates, and phase 7 writes the grant before commit"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same order."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same order."
+  definition={`flowchart LR
+    Offer["example-supply / offer<br/>phase 6: offer 10 grain"] --> Allocate["Canwu allocates<br/>end of phase 6"]
+    Request["example-demand / request<br/>phase 6: request 6 grain"] --> Allocate
+    Allocate --> Apply["example-demand / apply<br/>phase 7: read grant, write component"]
+    Apply --> Commit["Validate and commit<br/>phases 8 and 9"]
+`}
+/>
 
-## Why use a phased boundary
+### 1. Offer supply in phase 6
 
-- Supply and competing demand are declared before deterministic settlement.
-- Later phases read settled allocation evidence instead of relying on implicit plugin execution order.
-- Contracts make cadence, state access, emissions, and reservation dependencies explicit.
-- The example verifies a grant of 6 grain and the expected boundary emissions.
+`SupplyPlugin` registers a boundary system named `offer` in `BoundaryPhase::ReservationAndAllocation` (phase 6) with a daily cadence:
 
-This pattern fits daily settlement, turn resolution, and other cases where several systems must coordinate at one time boundary. A single player action can continue to use the ordinary command/action API.
+```rust
+let mut contract = BoundarySystemContract::new(
+    "offer",
+    BoundaryPhase::ReservationAndAllocation,
+    SystemCadence::Daily,
+);
+contract.reservation_offers = vec![StateKey::new("logistics", "grain")];
+registrar.register_boundary_system(contract, offer_grain)
+```
+
+`offer_grain` returns a `ReservationOffer` of 10 units for the pool `grain_pool()`: resource `grain` at territory 1 under the `logistics/grain` state key. The contract's `reservation_offers` must name that state key.
+
+### 2. Request grain in the same phase
+
+`DemandPlugin` registers `request` in the same phase. `request_grain` returns:
+
+```rust
+ReservationRequest {
+    request: "daily-grain".to_owned(),
+    pool: grain_pool(),
+    quantity: 6,
+    priority: 10,
+    tie_break: "western-garrison".to_owned(),
+}
+```
+
+At the end of phase 6 Canwu allocates each pool. Requests with higher `priority` go first; equal priorities are ordered by `tie_break`, then by request identity. Each request gets as much as remains, up to its `quantity`. The result is the same regardless of the order in which plugins registered.
+
+### 3. Read the grant in phase 7
+
+`DemandPlugin` also registers `apply` in `BoundaryPhase::DomainDeltaProposal` (phase 7). Its contract declares the reservation it reads, the state it writes, and the event it emits:
+
+```rust
+apply.writes = vec![StateKey::new("garrison", "grain")];
+apply.emits = vec!["grain_allocated".to_owned()];
+apply.reservation_reads = vec![ReservationRef::new(
+    "example-demand",
+    "request",
+    "daily-grain",
+)];
+```
+
+`apply_grain` reads the settled result with `view.reservation(&reservation)` and returns two directives: `SetComponent`, which stores `allocation.granted` on territory 1, and `Emit`, which records a `grain_allocated` event.
+
+### 4. Settle the boundary
+
+```rust
+let mut canwu = Canwu::demo(35)?;
+canwu.register_plugin(&SupplyPlugin)?;
+canwu.register_plugin(&DemandPlugin)?;
+
+let receipt = canwu
+    .settle_boundary(BoundaryRequest::at(canwu.time()).with_cadence(SystemCadence::Daily))?;
+assert_eq!(receipt.allocations[0].granted, 6);
+assert_eq!(canwu.boundaries()[0].emissions.len(), 2);
+```
+
+`settle_boundary` runs every system whose cadence matches the request. The receipt and the stored `BoundaryRecord` keep the offers, requests, and allocations as evidence. The two emissions are the `daily_grant_changed` event from `SetComponent` and the `grain_allocated` event from `Emit`.
+
+## When to use a boundary
+
+Use boundary systems when several systems must act at the same simulation time in a set order, such as daily settlement or turn resolution. A single player action fits a command; see [Command plugin](/en/tutorials/command-plugin/).
+
+## Try next
+
+Replace the first assertion with a loop that prints each allocation and the event log:
+
+```rust
+for allocation in &receipt.allocations {
+    println!(
+        "requested={} granted={} remaining={} {:?}",
+        allocation.requested, allocation.granted, allocation.remaining_after, allocation.disposition
+    );
+}
+for event in canwu.events() {
+    println!("{} {}", event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+requested=6 granted=6 remaining=4 Fulfilled
+example-demand.daily_grant_changed Granted 6 grain to the western garrison
+example-demand.grain_allocated The daily grain allocation settled
+```
+
+Now change `quantity: 6` to `quantity: 12` in `request_grain`. The pool holds 10, so the request is partly filled:
+
+```text
+requested=12 granted=10 remaining=0 Partial
+example-demand.daily_grant_changed Granted 10 grain to the western garrison
+example-demand.grain_allocated The daily grain allocation settled
+```

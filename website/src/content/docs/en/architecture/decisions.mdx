@@ -1,0 +1,236 @@
+---
+title: Decisions
+description: How decision tickets, controllers, and policies let a player, an AI, or a model pick one existing option and turn that choice into a checked, exactly replayable command.
+sidebar:
+  order: 8
+  label: Decisions
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Decisions navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/randomness/">Randomness</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/decisions/">中文版</a>
+</nav>
+
+The decision system answers three questions: which options an actor or institution must choose between, who makes the choice, and how the choice takes effect. `canwu-decision` defines the [decision ticket](/en/reference/terminology/) (`DecisionTicket`), the [controller](/en/reference/terminology/) (`DecisionControllerBinding`), and the policy SDK; `canwu-sim` admits, persists, validates, cancels, and replays decisions; your host application uses both through `canwu-api`. You need it whenever a player, an AI, an external service, or an LLM decides on behalf of an actor.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-decision` | Data types for tickets, options, controller bindings, decision attempts, and decision traces; `DecisionState` transitions, deadlines, and history archiving; `DecisionController::evaluate`; the policy SDK | crates.io |
+| `canwu-sim` | Queuing and admission of decision ingress, nested commands, the `ResolveDecisionRandomly` directive, ticket cancellation when a person becomes unavailable, snapshot validation, and exact replay | crates.io, used through `canwu-api` |
+| `canwu-api` | Decision methods on `Canwu` (`enqueue_decision`, `prepare_decision`, `drive_decision`, `decision_ticket`, `decision_attempt`, `decision_trace`, and others) and re-exports of the decision types | crates.io |
+| `canwu-core` | ID types such as `DecisionTicketId`, `DecisionRequestId`, `DecisionTraceId`, and `RandomDrawId` | crates.io |
+
+<MermaidDiagram
+  label="Host applications and domain extensions use the decision system through canwu-api; canwu-sim and canwu-api depend on canwu-decision, which depends only on canwu-core and canwu-time"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the table above and the text below describe the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the table above and the text below describe the same dependencies."
+  definition={`flowchart TB
+    App["Host application<br/>ticket content, policy objects,<br/>player and model answers"] --> Api["canwu-api<br/>decision methods on Canwu"]
+    Ext["Domain extensions<br/>canwu-law, canwu-society, ..."] --> Api
+    Api --> Sim["canwu-sim<br/>admission, persistence, validation, replay"]
+    Api --> Decision["canwu-decision<br/>tickets, controllers, policy SDK"]
+    Sim --> Decision
+    Decision --> Core["canwu-core<br/>decision IDs"]
+    Decision --> Time["canwu-time<br/>SimTime"]
+`}
+/>
+
+Dependencies point one way. `canwu-decision` depends only on `canwu-core` and `canwu-time`; to it, the command inside an option is just JSON. `canwu-sim` stores and validates decision state as part of authoritative state. Domain extensions use the decision types through `canwu-api` and provide functions that build ticket drafts, such as `institutional_policy_ticket` in `canwu-society` and `correspondence_decision_ticket` in `canwu-correspondence`. `canwu-law` builds a ticket draft for each seat holder; the hand-off is described in [Society, culture, and law](/en/architecture/culture-law/).
+
+## Core model
+
+A policy receives only the ticket and can only return an option ID already on it, or defer, or wait. The issuer, the authority, and the command all come from the persisted controller binding and options, out of the policy's reach.
+
+| Type | What it represents |
+| --- | --- |
+| `DecisionControllerBinding` | A controller: controller ID, policy identity, authority, and optionally a seat with a permission profile (`with_seat`), a command subject (`with_command_subject`), and permission for random tie-breaks (`with_random_tie_break`). It cannot change after registration. |
+| `DecisionPolicyIdentity`, `DecisionPolicyKind` | A policy identity: kind (`Utility`, `Rule`, `Random`, `Human`, `External`, `Llm`), ID, version, and an optional configuration hash, `semantic_hash`. |
+| `DecisionAuthority` | On whose behalf the controller acts: `Actor`, `Institution` (optionally with a responsible actor), `Council`, or `NoResponsibleActor`. |
+| `DecisionTicketDraft`, `DecisionTicket` | A decision ticket: definition name, decision maker (`decision_maker`), assigned controller, summary, context, options, optional deadline, and optional parent ticket. Once stored it also has a version, opened and updated times, and a state. |
+| `DecisionTicketState` | `Open`, `Resolved` (with the selected option and the decision trace ID), `Cancelled` (with a reason), or `Expired`. |
+| `DecisionOption` | A [decision option](/en/reference/terminology/): ID, label, description, action (`DecisionAction::None` or a serialized `Command`), utility inputs, `blockers`, and metadata. An option with any blocker cannot be selected. |
+| `DecisionContext` | The ticket context: a schema name plus a JSON payload that your application defines. |
+| `DecisionMutation` | The five decision changes: `RegisterController`, `Open`, `ReplaceOptions`, `Resolve`, and `Cancel`. |
+| `DecisionIngressRequest` | One piece of decision ingress: a request ID, an expected revision, one mutation, and an optional nested command request. |
+| `PolicyDecision`, `DecisionOutcome` | A policy's answer: `Selected`, `Deferred`, `Pending`, or `PendingRandom`, with per-option evaluations, external evidence, draw evidence, the decision stage, and the guards that fired. |
+| `DecisionAttemptRecord` | A [decision attempt](/en/reference/terminology/): one per admitted piece of decision ingress, either `Accepted` or `Rejected` with a `DecisionAttemptErrorCode`. |
+| `DecisionTrace` | A [decision trace](/en/reference/terminology/): the evidence for one `Resolve`, including the ticket version, controller, policy identity, outcome, per-option scores, external or draw evidence, the nested command's request ID, and the parent ticket. |
+| `DecisionRandomEvidence`, `DecisionOptionWeight` | Draw evidence and decision option weights: the draw ID, the drawn value, its bound, and the integer weights that map the value to an option. |
+
+### Policy SDK
+
+The `DecisionPolicy` trait has two methods: `identity` returns the policy identity, and `decide` reads a `&DecisionTicket` and returns a `PolicyDecision`. The SDK ships these implementations:
+
+| Kind | SDK type | How it answers |
+| --- | --- | --- |
+| `Utility` | `WeightedUtilityPolicy` | Multiplies each option's `utility_inputs` by the `UtilityProfile` weights and sums them. The highest score wins, and equal scores go to the lowest option ID. It defers when every option is blocked. |
+| `Utility` | `GuardedUtilityPolicy` ([guarded utility policy](/en/reference/terminology/)) | Runs ordered guard rules first (a `DecisionRule` returns a `RuleChoice`: `Select`, `Defer`, `Exclude`, or `NoMatch`), then scores the remaining options. With `random_tie_break` set and at least two options within `near_equivalence_margin` of the best score, it returns `PendingRandom`. |
+| `Rule` | `OrderedRulePolicy` | Runs rules in order and stops at the first `Select` or `Defer`. It defers when no rule matches. |
+| `Random` | No host-side type | A boundary system resolves the ticket with a draw; see below. |
+| `Human` | `QueuedHumanPolicy` | Returns `Pending` until a `HumanDecisionResponse` is submitted. |
+| `External` | `QueuedExternalPolicy` | Returns `Pending` until an `ExternalDecisionResponse` is submitted. |
+| `Llm` | `QueuedLlmPolicy` | Same as External; the answer's `provider` must also match the `LlmModelIdentity`. |
+
+Human, external, and LLM answers each name the ticket version they answer. An answer for an older version returns `VersionConflict`, a second answer for the same version returns `DuplicateResponse`, and an answer for a newer version replaces the old one. The `semantic_hash` of a `GuardedUtilityPolicy` covers the guard policy identity, the guard IDs, the utility weights, the margin, and the tie-break flag. Guard behavior is application code; when it changes, change the guard ID or the policy version.
+
+`Deferred` also writes a decision trace and bumps the ticket version; the ticket stays open. `Pending` and `PendingRandom` are intermediate results and cannot be submitted as a `Resolve`.
+
+## The life of one decision
+
+<MermaidDiagram
+  label="A decision goes from controller registration and ticket opening, through policy evaluation or a boundary draw, to admission, a decision trace, and the nested command"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same flow."
+  definition={`flowchart TB
+    Host["Host application or domain extension<br/>RegisterController, Open"] --> Queue["Canonical ingress<br/>DecisionIngressRequest"]
+    Queue --> Admit["Boundary phase 1 admission<br/>writes DecisionAttemptRecord"]
+    Admit --> Ticket["DecisionTicket<br/>Open, versioned"]
+    Ticket --> Policy{"Controller's policy<br/>reads the ticket only"}
+    Policy -- "Pending" --> Wait["Wait for a player,<br/>service, or model"]
+    Wait --> Policy
+    Policy -- "Selected or Deferred" --> Drive["drive_decision<br/>queues a Resolve request"]
+    Policy -- "PendingRandom, or a Random controller" --> Draw["Boundary system draws<br/>ResolveDecisionRandomly"]
+    Drive --> Queue
+    Draw -- "kernel generates Resolve ingress" --> Queue
+    Admit -- "Resolve accepted" --> Trace["DecisionTrace<br/>nested command enters command admission"]
+`}
+/>
+
+<Steps>
+1. Register the controller. The host application queues `RegisterController` with `enqueue_decision`. Decision ingress is the `Decision` class of canonical ingress: at the same due time it comes after command, communication, acknowledgement, and information input, and before scheduled system work. A controller ID can be registered once; entities named by the authority and the command subject must exist.
+2. Open the ticket. `Open` carries a `DecisionTicketDraft`. At admission the ticket ID must be nonzero and unused, the ticket needs at least one option with unique option IDs, the assigned controller must be registered, the deadline must not precede the admission time, the decision maker must exist and be available, the controller's authority person must be available, and any parent ticket must satisfy the continuation rules. The ticket is stored at version 1 in the `Open` state, with its options sorted by ID.
+3. Update the ticket. When the situation changes, queue `ReplaceOptions` with the `expected_version` and a new context and option list. The version goes up by one, and answers prepared for the old version become invalid. `Cancel` closes the ticket with a reason.
+4. Evaluate. The host application calls `prepare_decision` and passes the policy object to the engine. The engine checks that the ticket is open and before its deadline, that the decision maker and the authority person are available, and that the policy identity matches the binding, then calls `DecisionController::evaluate`. A `Pending` result queues nothing; an authoritative result comes back as a `Resolve` request. When the selected option carries a command, the caller must supply a `CommandRequestId`, and the engine builds the nested command from the controller binding. `drive_decision` evaluates and queues in one step.
+5. Admit. Phase 1 of the next boundary, `EventIngress`, admits the due decision ingress. The engine checks, in order, the expected revision, the uniqueness of the nested command's request ID, that referenced entities exist, and person availability. It then hands the mutation to `DecisionState::apply`, which checks the ticket version, whether the ticket is closed, whether the submitter is the assigned controller, the policy identity, and the option. Every expected failure becomes a `Rejected` decision attempt, and the queue moves on to the next item.
+6. Write. When a `Resolve` passes, the engine allocates a `DecisionTraceId` and writes the decision trace. `Selected` moves the ticket to `Resolved`; `Deferred` only bumps the version. The decision attempt is recorded as `Accepted`.
+7. Run the command. The nested command goes straight into ordinary command admission, with the controller ID in `CommandContext::decision_controller_id`. A command handler can require that field to confirm the command came from a ticket. An expected command rejection is recorded as a command attempt, and the ticket stays `Resolved`.
+8. Expire. After admission and before the phases run, open tickets whose deadline is earlier than the boundary time become `Expired`.
+</Steps>
+
+Decision ingress carries an expected revision. At enqueue time it must equal the current revision; if the revision moves before admission, for example because another boundary commits, the request is recorded as a rejected attempt with `SimulationRevisionConflict`. Queuing the same request ID again with the same content, due time, and priority returns the original receipt; anything else returns `IdempotencyConflict`. A run declared read-only rejects new decision ingress (`InteractionReadOnly`).
+
+The decision system registers no boundary systems of its own and emits no events. A plugin boundary system that declares `StateKey::core_decisions()` as a read can use `SimulationView::decision_ticket`, `decision_controller`, and `decision_attempt`. Only phases 7, 10, 12, and 13 accept ordinary directives (phase 4 accepts only knowledge publications), so a system that proposes `ResolveDecisionRandomly` must run in one of them; the repository examples use phase 12, `StrategicAggregation`. Phase 5, `DecisionAndAcceptedEffectIntake`, does not process decision ingress despite its name.
+
+The boundary record (`BoundaryRecord`) lists the ingress the boundary admitted and generated, its random draws, and the tickets cancelled by person availability changes. The nested command produces its own events as usual. For phase order, see [settlement system](/en/architecture/settlement/#the-fourteen-phases).
+
+## Who may resolve a ticket
+
+- Each ticket is assigned to one controller (`assigned_controller`) and cannot be reassigned. Only that controller's `Resolve` is accepted; a request from another controller is recorded as `InvalidController`.
+- The policy identity on a `Resolve` must equal the controller's registered binding exactly, including `semantic_hash`, or the request is recorded as `PolicyMismatch`.
+- The selected option must exist in the current ticket version and have no blockers.
+- Draw evidence can come only from a boundary's `ResolveDecisionRandomly`, and only `Random` controllers and `Utility` controllers opted in with `with_random_tie_break` accept it. A `Random` ticket can therefore be resolved only by a boundary system.
+- The nested command's issuer and authority come from the binding. A `Human` policy maps to `Issuer::Human` and every other kind to `Issuer::Ai`, both carrying the controller ID. `CommandAuthority` takes its `decision_origin` from the binding's authority, and its seat, permission profile, and command subject from the binding. In a run with a declared run configuration, an `Issuer::Human` must also match the run's seat binding (`SeatBinding`) under `ControllerPolicy::HumanRoleBound`, and an `Issuer::Ai` needs an authority other than `NoResponsibleActor`.
+
+[Person availability](/en/reference/terminology/) also limits resolution. A person who is dead, missing, detained, or captive is unavailable. When the decision maker is unavailable, the ticket cannot be opened or passed to `prepare_decision` (`DecisionMakerUnavailable`); when the controller's authority person is unavailable, the ticket cannot be opened, passed to `prepare_decision`, or resolved (`IssuerUnavailable`). When a person becomes unavailable during a boundary, the engine cancels the affected open tickets at the end of that boundary, after the boundary's random decisions are generated. The reason is `decision_maker_unavailable` or `controller_authority_unavailable`, and the ticket IDs go into the `cancelled_tickets` and `cancelled_controller_tickets` of the `BoundaryPersonAvailabilityChange`.
+
+A cancelled ticket stays cancelled. To continue the decision, open a new ticket whose `parent_ticket` names the cancelled one. The parent must be terminal and not yet archived (see [Decision history archive](#decision-history-archive)), and it must either share the new ticket's decision maker or have a controller bound to the same `seat_id` as the new ticket's controller, which is [seat succession](/en/reference/terminology/). For the full rules and both ways to continue, see [people who can no longer act](/en/developer/integration/#people-who-can-no-longer-act).
+
+## What a policy can see
+
+- A policy sees only the `&DecisionTicket`: no mutable simulation state and no authority. The ticket context is everything it knows, so build that context from the decision maker's [holder-relative knowledge](/en/architecture/knowledge-information/).
+- External services and LLMs get an even narrower `ExternalDecisionRequest`: the ticket ID and version, definition name, summary, context, and the ID, label, description, and metadata of each available option. Command payloads, utility inputs, and blockers are left out.
+- The host application reads decision state with `Canwu::decision_ticket`, `decision_controller`, `decision_attempt`, `decision_trace`, and `decision_hot_state`. These are trusted reads that return everything; `CanwuViewer` has no decision reads, so your application decides which tickets a player sees and in how much detail.
+- Boundary systems read only what they declare: decision state needs `StateKey::core_decisions()`, and person availability needs `StateKey::core_person_availability()`.
+
+## Randomness, persistence, and replay
+
+### Random choices
+
+The decision system owns no random stream. The boundary system that resolves a ticket declares its own [random stream](/en/architecture/randomness/) in `random_streams`, for example `example-uncertainty / decision-selection / 1` in the example, and calls `random_sample_for_operation` with a `RandomOperationTarget::DecisionTicket` target bound to the ticket ID and its current version. Your application supplies the option weights: for a `Random` controller they must cover every available option once, in option-ID order; for a tie-break they must equal the candidates in `PendingRandom`. The weights must sum to the draw's upper bound.
+
+Before the draw commits, the kernel checks:
+
+- the controller kind and the stream declaration;
+- that this plugin produced the draw address, bound to the current ticket version, and that the sample came from this proposal;
+- the weights;
+- that a command request ID is present exactly when the selected option carries a command;
+- person availability, against the state committed before the boundary.
+
+The kernel then records a `RandomDrawRecord` with the outcome `RandomDrawOutcome::DecisionSelection` and generates a `Resolve` decision ingress item due at the same time, which the next boundary admits. The trace's `random` field (`DecisionRandomEvidence`) and the draw record point at each other. If the source boundary fails, the draw and the generated ingress roll back together. Decision ingress that the host queues with draw evidence is rejected, both when it is queued and when a snapshot loads. For a full example, see [random decisions and LLM selection](/en/tutorials/cases/uncertainty-resolution/).
+
+### LLMs, external services, and people
+
+All three kinds of answer arise outside the simulation. Your application hands the ticket or request to a player, service, or model, submits the answer to the matching `Queued*Policy`, and calls `drive_decision`. The queued `Resolve` request stores the whole `PolicyDecision`, and its `DecisionExternalEvidence` records the provider, model, prompt contract, request ID, and metadata. Replay later uses only this record and never calls the model again.
+
+### Snapshots and exact replay
+
+A snapshot's `decisions` field holds the whole `DecisionState`: controllers, tickets (with deadlines, versions, and states), decision attempts, decision traces, and archive receipts. Decision state has its own `decisions` root in `CommitmentRoots`. On load, the engine checks referenced entities, rebuilds decision state from the admitted decision ingress and compares it with the saved state, and re-checks the random decisions each boundary generated.
+
+[Exact replay](/en/developer/persistence/) (`Canwu::replay_from_journal`) queues the recorded decision ingress again and reruns boundary systems. Boundary-generated ingress must come out identical during replay, or replay fails with `ReplayMismatch`. No policy runs again, including deterministic utility policies. To try a different choice from the same point, `fork()` the run and submit new decision ingress; the result is an [alternative reality](/en/reference/terminology/).
+
+### Decision history archive
+
+Terminal tickets, decision attempts, and traces whose ticket is terminal can move to a content-addressed decision archive; open tickets always stay hot. The archive commit is admitted as maintenance ingress at an ordinary boundary, so replay reproduces the same archive transition. `Canwu::decision_history_location` returns `Hot`, `Archived`, `Unresolved`, or `Absent` for a `DecisionHistoryKey`. `Unresolved` means the archive provider (`DecisionArchiveProvider`) is needed to decide, and it must not be read as absence.
+
+## What your application supplies
+
+- When a decision exists: the ticket definition name, decision maker, summary, context, and options, with each option's command, utility inputs, and blockers.
+- Controller bindings: policy identity, authority, seat and permission profile, and command subject.
+- The policy objects themselves: utility weights, rules, guards, and margins. Their identity must match the binding.
+- The channel to players, external services, or models: presenting tickets, parsing answers, and confirming that whoever submits an answer may act for that controller.
+- For random choices, the boundary system, its stream declaration, and the option weights, which are the probabilities.
+- Nonzero, globally unique `DecisionRequestId` and `CommandRequestId` values, plus due times and priorities.
+- When people die, are captured, or are released, written as person availability by a boundary system; successor controllers and the new tickets that continue a decision.
+- Archive storage (`DecisionArchiveStore`, `DecisionArchiveProvider`) if you archive decision history.
+- All UI and presentation.
+
+## Limits and budgets
+
+| Constant | Value | What it limits |
+| --- | --- | --- |
+| `MAX_DECISION_ARCHIVE_BATCH_ENTRIES` | 4,096 | Keys in one archive batch |
+| `MAX_DECISION_HISTORY_PAGE_SIZE` | 512 | Results in one page of archived history |
+| `MAX_DECISION_HISTORY_PAGE_BYTES` | 16 MiB | Bytes one page of archived history may decode |
+| `DecisionHistoryQueryBudget` default | 128 results, 128 provider calls, 4 MiB | Default budget for one history query |
+
+Archive locator layout constants are in the `canwu-decision` rustdoc.
+
+A few fixed rules also apply:
+
+- One boundary generates at most one random decision resolution; put independent random decisions in different source boundaries.
+- A random tie-break needs at least two candidates, each with a positive weight.
+- Every ticket has at least one option; ticket IDs, request IDs, and draw IDs must be nonzero.
+- Utility scores use overflow-checked `i64` arithmetic, and option weights use `u64` with a positive total; overflow is an error.
+
+## Try it
+
+```shell
+cargo run -p canwu-api --example decision_ticket
+cargo run -p canwu-api --example uncertainty_resolution
+```
+
+The first example resolves a warlord's aid ticket with a utility policy, prints the decision trace, and checks snapshot restore and exact replay; the walkthrough is [A warlord asks a neighbor for military aid](/en/tutorials/cases/warlord-aid-decision/). The second resolves a law ticket with a draw for a `Random` controller, then prints the `ExternalDecisionRequest` for a ticket owned by an LLM controller and submits a prewritten answer through `QueuedLlmPolicy`; the walkthrough is [random decisions and LLM selection](/en/tutorials/cases/uncertainty-resolution/). For unavailable people and continuing a ticket, see [Integrate and drive the simulation](/en/developer/integration/#people-who-can-no-longer-act).
+
+These tests cover the decision contracts:
+
+```shell
+cargo test -p canwu-api --test decision_framework
+cargo test -p canwu-api --test gap_g08_decision_guarded_utility_policy
+cargo test -p canwu-api --test gap_g09_decision_ticket_lineage
+cargo test -p canwu-api --test gap_g02_sim_person_availability
+cargo test -p canwu-decision --test policy_contracts
+```
+
+## Further reading
+
+- The repository's [decision framework architecture notes](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#decision-framework) and [uncertainty resolution design](https://github.com/PeiyuanQi/canwu/blob/main/docs/uncertainty-resolution.md)
+- [Settlement system](/en/architecture/settlement/): boundary phases, directives, and person availability directives
+- [Randomness](/en/architecture/randomness/): random streams, operation-keyed random draws, and draw evidence
+- [Save, replay, and fork](/en/developer/persistence/)
+- [Society, culture, and law](/en/architecture/culture-law/): how `canwu-law` opens tickets for seat holders
+- [Canwu terminology](/en/reference/terminology/)

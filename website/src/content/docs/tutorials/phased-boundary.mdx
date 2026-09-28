@@ -1,12 +1,17 @@
 ---
 title: 阶段边界与资源分配
-description: 在同一确定性边界中声明供给、需求、分配与最终状态变化。
+description: 两个插件共用一个粮食池：一个提供供给，一个提出需求，同一边界的后续阶段写入结算后的分配结果。
 sidebar:
   order: 5
   label: 阶段边界与分配
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+本示例中，供给插件提供 10 单位粮食，需求插件在同一个每日边界中申请 6 单位。参伍完成分配后，同一边界的后续阶段记录守军实际得到的粮食。你会了解边界阶段如何为不同插件的工作排序，以及系统如何读取已结算的分配结果。
+
+边界是一次原子结算：参伍按 14 个固定阶段运行已注册的系统，然后要么提交全部变化，要么全部回滚。各阶段见[结算系统](/architecture/settlement/)。
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/phased_boundary.rs" icon="external">
   打开 phased_boundary.rs
@@ -15,28 +20,125 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个示例展示两个插件如何在每日边界上围绕同一粮食池协作，同时留下可检查的预留与分配证据。
-
 ## 运行
+
+在仓库根目录运行：
 
 ```shell
 cargo run -p canwu-api --example phased_boundary
 ```
 
-## 协作流程
+示例没有任何输出。两条断言都通过时程序以状态码 0 退出：需求得到 6 单位粮食，边界产生两个事件。
 
-<Steps>
-1. `SupplyPlugin` 在 `ReservationAndAllocation` 阶段声明粮食池和容量。
-2. `DemandPlugin` 在同一阶段声明数量、优先级和确定性平局决胜键。
-3. 参伍完成分配后，`DomainDeltaProposal` 阶段通过 `SimulationView::reservation()` 读取授予结果。
-4. 插件返回组件更新与领域事件，参伍在边界中统一应用并记录证据。
-</Steps>
+## 插件如何协作
 
-## 为什么使用分阶段边界
+<MermaidDiagram
+  label="第 6 阶段声明供给和需求，参伍完成分配，第 7 阶段写入分配结果，然后提交"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同样的顺序。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同样的顺序。"
+  definition={`flowchart LR
+    Offer["example-supply / offer<br/>第 6 阶段：提供 10 单位粮食"] --> Allocate["参伍分配<br/>第 6 阶段末"]
+    Request["example-demand / request<br/>第 6 阶段：申请 6 单位粮食"] --> Allocate
+    Allocate --> Apply["example-demand / apply<br/>第 7 阶段：读取分配结果并写入组件"]
+    Apply --> Commit["校验并提交<br/>第 8、9 阶段"]
+`}
+/>
 
-- 供给和竞争需求先声明，再由引擎确定性结算。
-- 后续阶段读取的是已结算的分配证据，而不是隐含的插件执行顺序。
-- 契约明确执行频率、读写范围、事件和预留依赖。
-- 示例验证需求得到 6 单位粮食，并产生预期的边界产出。
+### 1. 在第 6 阶段提供供给
 
-这适合日结、回合结算或其他需要多个系统在同一时间边界协作的场景；普通单一玩家动作仍可直接使用命令/行动 API。
+`SupplyPlugin` 在 `BoundaryPhase::ReservationAndAllocation`（第 6 阶段）注册一个名为 `offer`、按日执行的边界系统：
+
+```rust
+let mut contract = BoundarySystemContract::new(
+    "offer",
+    BoundaryPhase::ReservationAndAllocation,
+    SystemCadence::Daily,
+);
+contract.reservation_offers = vec![StateKey::new("logistics", "grain")];
+registrar.register_boundary_system(contract, offer_grain)
+```
+
+`offer_grain` 为 `grain_pool()` 返回一个 10 单位的 `ReservationOffer`。这个池是领地 1 上、挂在 `logistics/grain` 状态键下的 `grain` 资源。契约的 `reservation_offers` 必须列出这个状态键。
+
+### 2. 在同一阶段申请粮食
+
+`DemandPlugin` 在同一阶段注册 `request`，`request_grain` 返回：
+
+```rust
+ReservationRequest {
+    request: "daily-grain".to_owned(),
+    pool: grain_pool(),
+    quantity: 6,
+    priority: 10,
+    tie_break: "western-garrison".to_owned(),
+}
+```
+
+第 6 阶段结束时，参伍逐个资源池进行分配：`priority` 高的申请先分；优先级相同时按 `tie_break` 排序，再按申请标识排序。每个申请最多拿到它的 `quantity`，池中剩多少就给多少。插件的注册顺序不影响分配结果。
+
+### 3. 在第 7 阶段读取分配结果
+
+`DemandPlugin` 还在 `BoundaryPhase::DomainDeltaProposal`（第 7 阶段）注册了 `apply`。它的契约声明要读取的预留、要写入的状态和要产生的事件：
+
+```rust
+apply.writes = vec![StateKey::new("garrison", "grain")];
+apply.emits = vec!["grain_allocated".to_owned()];
+apply.reservation_reads = vec![ReservationRef::new(
+    "example-demand",
+    "request",
+    "daily-grain",
+)];
+```
+
+`apply_grain` 通过 `view.reservation(&reservation)` 读取结算结果，返回两条指令：`SetComponent` 把 `allocation.granted` 存到领地 1 上，`Emit` 记录一个 `grain_allocated` 事件。
+
+### 4. 结算边界
+
+```rust
+let mut canwu = Canwu::demo(35)?;
+canwu.register_plugin(&SupplyPlugin)?;
+canwu.register_plugin(&DemandPlugin)?;
+
+let receipt = canwu
+    .settle_boundary(BoundaryRequest::at(canwu.time()).with_cadence(SystemCadence::Daily))?;
+assert_eq!(receipt.allocations[0].granted, 6);
+assert_eq!(canwu.boundaries()[0].emissions.len(), 2);
+```
+
+`settle_boundary` 运行执行频率与请求相符的所有系统。回执和保存下来的 `BoundaryRecord` 都记录了供给、申请和分配结果，作为证据。两个事件分别是 `SetComponent` 产生的 `daily_grant_changed` 和 `Emit` 产生的 `grain_allocated`。
+
+## 什么时候使用边界
+
+多个系统需要在同一模拟时间按固定顺序协作时，例如日结或回合结算，就使用边界系统。单个玩家动作用命令即可，见[命令插件](/tutorials/command-plugin/)。
+
+## 继续尝试
+
+把第一条断言换成下面的循环，打印每项分配结果和事件日志：
+
+```rust
+for allocation in &receipt.allocations {
+    println!(
+        "requested={} granted={} remaining={} {:?}",
+        allocation.requested, allocation.granted, allocation.remaining_after, allocation.disposition
+    );
+}
+for event in canwu.events() {
+    println!("{} {}", event.kind.qualified_event_type(), event.summary);
+}
+```
+
+```text
+requested=6 granted=6 remaining=4 Fulfilled
+example-demand.daily_grant_changed Granted 6 grain to the western garrison
+example-demand.grain_allocated The daily grain allocation settled
+```
+
+再把 `request_grain` 中的 `quantity: 6` 改为 `quantity: 12`。池中只有 10 单位，申请只能部分满足：
+
+```text
+requested=12 granted=10 remaining=0 Partial
+example-demand.daily_grant_changed Granted 10 grain to the western garrison
+example-demand.grain_allocated The daily grain allocation settled
+```

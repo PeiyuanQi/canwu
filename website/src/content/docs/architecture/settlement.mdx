@@ -1,6 +1,6 @@
 ---
 title: 结算系统
-description: 了解参伍的十四阶段边界、资源分配、可见性、原子提交和失败回滚。
+description: 一次参伍结算边界如何准入到期工作、按十四个阶段运行、分配稀缺资源，并整体提交或整体回滚。
 sidebar:
   order: 2
   label: 结算系统
@@ -9,118 +9,115 @@ sidebar:
 import { Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-**边界**是模拟中一次权威的结算过程。它可以代表一个时钟节拍、一批已调度工作，或上层应用请求的结算点。边界先收集工作，再按固定顺序运行；成功时提交结果，失败时回滚整个过程。
+结算系统决定权威状态何时、以何种方式变化。它的基本单位是**结算边界**（简称边界）：某个模拟时间点上的一次结算过程。边界先准入到期的工作，再按固定的十四个阶段运行各插件的系统，最后把所有变化一起提交，或者一起回滚。编写边界系统，或者需要弄清某次写入何时对其他系统可见时，可以参考本页。
 
-`settle_boundary(BoundaryRequest)` 是扩展领域机制的权威入口。下面的十四个阶段定义执行顺序，并不是十四个彼此独立的模拟引擎。
+上层应用用 `settle_boundary(BoundaryRequest)` 发起一次边界，也可以调用 `advance_canonical` 和 `step_canonical`，按模拟时钟结算队列中的输入。输入（ingress）、准入、持有人等术语的定义见[术语表](/reference/terminology/)。
 
-## 一次边界的全貌
+## 一次边界的完整流程
 
 <MermaidDiagram
-  label="一次参伍边界中的十四个有序阶段"
+  label="一条排队命令经过一次边界，最终提交或回滚的路径"
   diagramLoading="正在渲染图表……"
   sourceSummary="查看图表源码"
-  noScriptMessage="图表预览需要 JavaScript；下方阶段表格仍然可用。"
-  renderFailureMessage="图表预览不可用；下方阶段表格仍然可用。"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
   definition={`flowchart LR
-    Input["准入工作"] --> Read["固定读取基线"] --> Think["计算、感知、决策"] --> Supply["分配稀缺资源"] --> Propose["暂存领域变化"] --> Check["校验"] --> Commit["提交"] --> History["应用历史转移"] --> Reports["生成角色相对视图"] --> Evidence["保存证据与哈希"]
+    Host["上层应用<br/>提交命令入队"] --> Queue["规范化输入队列"]
+    Queue -- "到达边界时间" --> Admit["第 1 阶段<br/>准入到期工作"]
+    Admit --> Snapshot["第 2 阶段<br/>固定读取基线"]
+    Snapshot --> Systems["第 3–14 阶段<br/>读取、分配、暂存、<br/>校验、提交、计算哈希"]
+    Systems --> Check{"所有阶段<br/>都成功？"}
+    Check -- "是" --> Commit["边界提交，<br/>settle_boundary 返回回执"]
+    Check -- "否" --> Rollback["整个边界回滚，<br/>settle_boundary 返回错误"]
 `}
 />
 
-## 结算系统的四个底层构成
-
-十四个阶段构成固定的执行顺序，但不是十四种彼此独立的结算算法。最底层可以归纳为两种状态写入路径、一个确定性的资源仲裁与分配原语，以及附着在分阶段写入上的一项可见性策略：
-
-<MermaidDiagram
-  label="结算系统四个底层构成：两种写入路径、一种资源分配计算和一种可见性策略"
-  diagramLoading="正在渲染图表……"
-  sourceSummary="查看图表源码"
-  noScriptMessage="图表预览需要 JavaScript；上方仍提供文本源码回退。"
-  renderFailureMessage="图表预览不可用——下方仍可查看源码。"
-  definition={`flowchart TB
-    Inputs["命令 / 事件 / 调度工作"]
-    Claims["供给 + 竞争性申请"]
-    subgraph Writes["状态写入路径"]
-      Immediate["1. 立即事务写入"]
-      Boundary["3. 分阶段批量原子提交"]
-    end
-    Allocation["2. 确定性资源仲裁与分配"]
-    Visibility["4. 可见性策略（附加属性）"]
-    State["权威状态"]
-    Evidence["证据、重放与哈希"]
-    Inputs --> Immediate
-    Inputs --> Boundary
-    Claims --> Allocation
-    Allocation -. "分配结果" .-> Boundary
-    Visibility -. "SameBoundary / NextBoundary" .-> Boundary
-    Immediate --> State
-    Boundary --> State
-    Boundary --> Evidence`}
-/>
-
-1. **立即事务写入**处理命令或事件的直接效果；操作要么完整提交，要么完整回滚。
-2. **确定性资源仲裁与分配**只负责算出有限资源如何分给竞争者，不负责单独写入世界状态。
-3. **分阶段批量原子提交**收集多个系统的提案，统一校验后作为一个原子批次一次性写入；资源分配结果通常在这里落地，但没有资源竞争的变更也可以直接使用它。
-4. **可见性策略**不是第四种结算算法，而是附着在第 3 类写入上的横切属性：`SameBoundary` 让本边界后续阶段可读，`NextBoundary` 将结果隔离到下一边界才可读。
-
-因此，最实用的分类是：**1 和 3 负责写入，2 负责计算，4 负责控制何时可读**。
-
-## 一次边界的生命周期
-
 <Steps>
-1. 处理请求时间之前已经到期的内部计划工作，并按规范化顺序吸收入站输入。
-2. 建立本边界的准入集合：命令尝试、已接受命令、已准入的入站输入和事件，以及适用的日历节奏。
-3. 取得不可变边界快照，让早期阶段读取同一个基线，而不是读取插件执行顺序造成的中间状态。
-4. 依次执行十四个阶段；同一阶段内按 `(plugin name, system name)` 排序。
-5. 持久化边界证据、原子提交、条件转移及其审计、评估轨迹、视角/报告物化结果以及重放/诊断哈希。
-6. 若发生任何致命错误，则恢复时间、队列、状态、日志、随机流、计数器和边界记录。
+1. 引擎先执行请求时间之前到期的内部调度工作，再按队列顺序取出已到期的规范化输入。规范化输入（canonical ingress）是持久化、有确定顺序的输入队列，详见[事件系统](/architecture/events/#调度与准入)。
+2. 建立本边界的准入集合：命令尝试、已接受的命令、已准入的输入和事件，以及本次适用的日历节奏，例如 `Daily` 或 `Monthly`。
+3. 复制当前状态，作为边界快照。第 1 至第 8 阶段的系统都读这份快照，因此它们都从同一个基线出发。
+4. 依次执行十四个阶段。同一阶段内的系统按 `(plugin name, system name)` 排序执行。请求中列出了某个系统的节奏，该系统才会运行；`EventDriven` 系统则在本边界准入了任何事件或输入时运行。
+5. 记录边界证据：已准入的输入、资源分配、状态变化、随机抽样、转移审计、评估轨迹、知识发布和边界哈希。
+6. 任一步骤失败时，引擎把时间、队列、状态、日志、随机流、计数器和边界记录恢复到本边界之前的值，并返回错误。
 </Steps>
 
-## 十四个有序阶段
+## 十四个阶段
 
-| 顺序 | 阶段 | 作用 |
+阶段规定了工作的先后顺序。插件把每个边界系统注册到某一个阶段。只有第 7、10、12、13 阶段的系统可以声明状态写入；第 9 和第 11 阶段是内核提交暂存写入的地方。
+
+| 顺序 | 阶段 | 做什么 |
 | ---: | --- | --- |
-| 1 | `EventIngress` | 准入到期命令、事件和插件输入 |
+| 1 | `EventIngress` | 准入到期的命令、事件和插件输入 |
 | 2 | `BoundarySnapshot` | 固定本边界的读取基线 |
-| 3 | `DerivedFieldSolve` | 计算声明的派生字段 |
-| 4 | `PerceptionAndAttentionRefresh` | 更新角色注意力与感知输入 |
-| 5 | `DecisionAndAcceptedEffectIntake` | 接收决策与已接受效果 |
-| 6 | `ReservationAndAllocation` | 提供资源、提出需求并确定分配 |
-| 7 | `DomainDeltaProposal` | 提出组件、记录和事件变化 |
-| 8 | `InvariantValidation` | 检查候选变化是否满足不变量 |
-| 9 | `AtomicDomainCommit` | 原子提交普通领域变化 |
-| 10 | `HistoricalCandidateEvaluation` | 评估历史候选转移；转移清单的参与者暂存写入 |
-| 11 | `ConditionalTransitionCommit` | 审计已就绪的转移清单，再提交满足条件的历史转移 |
-| 12 | `StrategicAggregation` | 形成战略层聚合结果，并读取转移审计 |
-| 13 | `PerspectiveAndReportMaterialization` | 生成角色视角和报告物化结果 |
-| 14 | `SaveReplayAndDiagnosticHashing` | 保存证据并更新重放与诊断哈希 |
+| 3 | `DerivedFieldSolve` | 计算已声明的派生字段 |
+| 4 | `PerceptionAndAttentionRefresh` | 更新角色的感知与注意力 |
+| 5 | `DecisionAndAcceptedEffectIntake` | 供插件使用的只读决策与效果接收阶段；决策输入在第 1 阶段准入 |
+| 6 | `ReservationAndAllocation` | 提供资源、提出需求，由内核分配 |
+| 7 | `DomainDeltaProposal` | 暂存组件、记录和事件的变化 |
+| 8 | `InvariantValidation` | 用不变量检查暂存的变化 |
+| 9 | `AtomicDomainCommit` | 一次性提交第 7 阶段的变化 |
+| 10 | `HistoricalCandidateEvaluation` | 评估历史转移；转移清单的参与者暂存写入 |
+| 11 | `ConditionalTransitionCommit` | 审计已就绪的转移清单，再提交第 10 阶段的变化 |
+| 12 | `StrategicAggregation` | 生成战略层聚合结果；读取转移审计 |
+| 13 | `PerspectiveAndReportMaterialization` | 生成角色视角和报告 |
+| 14 | `SaveReplayAndDiagnosticHashing` | 记录证据，更新重放与诊断哈希 |
+
+## 四个基本构件
+
+阶段只是顺序。在阶段之下，结算由四个基本构件组成：
+
+| 构件 | 作用 | 是否写入状态 |
+| --- | --- | --- |
+| 立即写入 | 命令处理器或旧式事件响应器（reactor）立即生效，不经过边界的暂存与提交。旧的兼容代码（例如 `Command::OrderMovement` 路径）仍在使用它，少数插件命令（例如 `canwu-society` 的 `set_institutional_policy`）也是如此。 | 是 |
+| 资源预留与分配 | 第 6 阶段的系统提供供给、提出需求，由内核算出每个请求分到多少。 | 否，只产出分配结果 |
+| 分阶段批量提交 | 系统基于边界快照暂存变化，内核统一校验后作为一个批次提交。新的机制都走这条路径。 | 是 |
+| 可见性 | 每个边界系统为自己暂存的写入声明 `SameBoundary` 或 `NextBoundary`，以此决定其他系统何时能读到。 | 否，只控制时机 |
+
+一个状态键只能属于一条写入路径。立即处理器和边界系统声明写入同一个 `StateKey` 时，注册会失败。
 
 ## 资源分配
 
-第六阶段的系统先声明供给和竞争需求，再由内核统一分配。排序键为：资源池、降序优先级、显式平局决胜键（tie-break key），最后按资源预留标识（reservation identity）排序。结果会区分满足、部分满足和拒绝；只有在契约中声明 `reservation_reads` 的系统，才能读取分配结果。
+资源分配把“谁先运行”和“谁拿到资源”拆开。在第 6 阶段，系统声明自己提供什么、需要什么，然后内核一次性结算同一资源池的全部请求。请求依次按资源池、优先级（从高到低）、平局决胜键（tie-break key）和资源预留标识排序，结果只取决于这几个键。
 
-这种设计把“谁先运行”与“谁得到资源”分开。插件不能通过注册顺序、哈希表遍历顺序或隐藏的共享可变状态影响结果。
+例如，一个粮仓资源池提供 100 单位，三个请求争用它：
 
-并非所有分配都在第六阶段进行。自 0.13.0 起，移动生命周期扩展在第七阶段用纯函数 `allocate_capacity_bookings` 分配运输运力池。内核资源预留必须在注册时写明固定标识，并且可以部分满足；运力预订则要么全额确认、要么失败，并按优先级、窗口开始时间、平局决胜键、准入序号和预订标识排序。每项分配决定都记录为 `CapacityBookingAllocationEvidenceV1`，已经确认的运力不会被后来的请求抢占。
+| 请求 | 优先级 | 数量 | 结果 |
+| --- | ---: | ---: | --- |
+| A | 5 | 80 | `Fulfilled`：分到 80 |
+| B | 1 | 50 | `Partial`：分到 20 |
+| C | 1 | 10 | `Rejected`：分到 0 |
+
+B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在 C 前面。系统通过 `SimulationView::reservation` 读取分配结果，并且必须在 `reservation_reads` 中列出它。
+
+移动生命周期扩展 `canwu-movement` 用另一种方式分配运输运力：它在第 7 阶段对每个运力池调用一次 `canwu-transport` 提供的纯函数 `allocate_capacity_bookings`。一项运力预订要么全额确认，要么失败。预订依次按优先级（从高到低）、窗口开始时间、平局决胜键、准入序号和预订标识处理。每个结果都记录为 `CapacityBookingAllocationEvidenceV1`，已确认的运力始终归属原预订。
 
 ## 可见性与提交
 
-第七阶段的变化以边界快照为基线进行暂存。`SameBoundary` 变化可以进入本边界的只读覆盖层；`NextBoundary` 变化在结算完成前对当前状态读取保持不可见。不变量系统可以通过 `proposed_component` 或 `proposed_domain_record` 查看候选值，但仍受声明的读取集合限制。
+边界系统返回一个 `BoundaryProposal`，其中的指令暂存写入，之后由内核提交。暂存的写入何时可读，取决于所在阶段和系统声明的可见性：
 
-普通变化在第九阶段提交，历史候选在第十一阶段提交。边界产生的事件不会调用旧式即时 reactor，而是进入下一个边界的正常事件准入，因此不会回写已经完成的边界。
+| 暂存阶段 | `SameBoundary` 写入 | `NextBoundary` 写入 |
+| --- | --- | --- |
+| 7 | 从第 8 阶段起可通过边界的暂存值覆盖层读到；在第 9 阶段提交 | 在边界结束时提交；从下一个边界起可读 |
+| 10 | 在第 11 阶段提交；从第 11 阶段起可读 | 在边界结束时提交 |
+| 12 或 13 | 在该阶段结束时提交 | 在边界结束时提交 |
+
+第 8 阶段的不变量系统可以通过 `proposed_component` 和 `proposed_domain_record` 查看所有暂存值，包括 `NextBoundary` 写入，但仍须在读取声明中列出对应的键。
+
+边界运行期间产生的事件，由下一个边界按正常流程准入。
 
 ## 人物与输入指令
 
-大多数指令写入插件拥有的状态。以下三种指令修改内核拥有的状态，并遵循固定规则：
+大多数指令写入插件拥有的状态。下面三种指令修改内核拥有的状态，各有固定规则：
 
-- `SetPersonAvailability` 替换某个人物的生存状态与人身状态。只接受声明了 `StateKey::core_person_availability()` 的第 7 或第 10 阶段系统提交；同一边界内对同一人物写入两次会使边界失败。边界结束时，在随机决策物化之后，决策者或控制者权限人物已不可用的未关闭票据会被取消，并列入边界记录。
-- `CreatePerson` 由声明了 `StateKey::core_people()` 的第 7 阶段系统提交，用于创建人物。ID 由引擎分配，回执中的 `created_persons` 把它绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。
-- `CancelPluginIngress` 在到期之前撤回本系统所属插件安排、仍在等待的输入。请从 `SimulationView::cancellable_plugin_ingress` 选取目标；若目标属于其他插件、已经到期或已被撤回，或者已有另一提案撤回同一目标，整个边界都会失败。
+- `SetPersonAvailability` 替换一个人物的生存状态和人身状态。只有声明写入 `StateKey::core_person_availability()` 的第 7 或第 10 阶段系统可以提出。同一边界内对同一人物写入两次，边界失败。边界结束时，在随机决策落地之后，内核取消决策者或控制者权限人物已不可用的未关闭票据，并列入边界记录。
+- `CreatePerson` 创建人物。只有声明写入 `StateKey::core_people()` 的第 7 阶段系统可以提出。ID 由引擎分配，回执中的 `created_persons` 把这个 ID 绑定到提出创建的插件、系统和关联字符串（correlation）。新人物从下一个边界起对系统可见。
+- `CancelPluginIngress` 在输入到期之前撤回本系统所属插件安排的排队输入。撤回目标从 `SimulationView::cancellable_plugin_ingress` 获取，这个方法要求声明读取 `StateKey::core_ingress()`。如果目标属于其他插件，已经到期、已准入或已撤回，或者同一边界里另一个提案也在撤回它，整个边界都会失败。
 
-多个系统可以声明这两个人物核心键，因此冲突写入会在结算时按人物检测，而不是在注册时检测。
+多个系统可以同时声明这两个人物核心键，所以内核在结算时按人物检查冲突写入。
 
 ## 转移清单
 
-有些转移需要多个插件共同写入，而且不能让沉默的参与者被忽略。自 0.13.0 起，**转移清单**（transition manifest）声明哪些插件必须写入，内核会在第 11 阶段提交前审计结果。
+有些历史转移需要几个插件在同一个边界里一起写入。**转移清单**（transition manifest）让协调插件预先列出所有参与者，这样某个参与者没有写入时，内核就能发现。内核在第 11 阶段、第 10 阶段的写入提交之前审计每份清单。
 
 <MermaidDiagram
   label="转移清单从登记、暂存到第 11 阶段审计的生命周期"
@@ -131,74 +128,77 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   definition={`flowchart LR
     Register["第 7、10 或 12 阶段<br/>协调插件登记清单"] --> Stage["就绪边界的第 10 阶段<br/>清单所列参与者暂存写入"]
     Stage --> Audit{"第 11 阶段审计"}
-    Audit -- "全部暂存且版本相符" --> Committed["已提交<br/>暂存写入随之提交"]
-    Audit -- "无人暂存" --> Expired["已过期<br/>没有任何写入"]
+    Audit -- "全部暂存且版本相符" --> Committed["Committed<br/>暂存写入随之提交"]
+    Audit -- "无人暂存" --> Expired["Expired<br/>不写入任何内容"]
     Audit -- "部分暂存或版本不符" --> Failed["整个边界失败<br/>并回滚"]
-    Committed --> Read["第 12 阶段<br/>协调者与参与者读取审计"]
+    Committed --> Read["第 11 阶段起<br/>协调者与参与者读取审计"]
     Expired --> Read
 `}
 />
 
 <Steps>
-1. **登记。** 协调插件中声明 `StateKey::core_transitions()` 写入的第 7、10 或 12 阶段系统提出 `BoundaryDirective::RegisterTransitionManifest`。`TransitionManifest` 写明 `lineage_id`、`attempt`、就绪边界 `ready_at`，以及每个参与插件在转移前（`expected_pre`）和转移后（`expected_post`）应有的精确记录版本。清单身份为 `TransitionManifestId { coordinator, lineage_id, attempt }`，协调者由内核记录，而不是由内容自称。第 7 阶段登记的清单可以在同一边界就绪；第 10 或第 12 阶段登记的清单必须指定之后的边界，且就绪边界最多只能在 1,024 个边界之后。
-2. **暂存。** 在就绪边界的第 10 阶段，清单所列参与者中声明同一写入的第 10 阶段系统提出 `StageTransitionWrite { manifest_id, writes }`。暂存的写入是普通指令，因此该系统声明的写入、所有权、阶段规则和可见性全部适用；空列表表示到场但不写入。未列入清单的插件暂存写入时，边界会以 `InvalidAuthority` 失败。
-3. **审计。** 第 11 阶段提交前，内核结算本边界就绪的每份清单：所有参与者都已暂存且每个预期版本相符时，结果为 `Committed`；没有任何参与者暂存时，清单为 `Expired`，不会为它写入任何内容；只有部分参与者暂存时，整个边界以 `TransitionParticipantMissing` 失败；预期版本不符时，以 `TransitionVersionMismatch` 失败。
-4. **读取。** `TransitionAuditRecord` 记录结果以及每个参与者暂存的写入数量，保存在 `BoundaryRecord::transition_audits` 和 `BoundaryReceipt::transition_audits` 中。协调者与参与者的第 12 阶段系统通过 `SimulationView::transition_audits` 读取。
+1. **登记。** 协调插件在第 7、10 或 12 阶段的某个系统声明写入 `StateKey::core_transitions()`，并提出 `BoundaryDirective::RegisterTransitionManifest`。`TransitionManifest` 包含 `lineage_id`、尝试序号 `attempt`、就绪边界 `ready_at`，以及每个参与插件的一项条目。每项条目列出该参与者在转移前（`expected_pre`）和转移后（`expected_post`）预期的记录版本。清单身份是 `TransitionManifestId { coordinator, lineage_id, attempt }`，其中协调者由内核按登记插件填写。第 7 阶段登记的清单可以在同一边界就绪；第 10 或第 12 阶段登记的清单必须指定之后的边界。就绪边界最多只能在 1,024 个边界之后。
+2. **暂存。** 在就绪边界的第 10 阶段，清单所列的每个参与者用声明了同一写入的第 10 阶段系统提出 `StageTransitionWrite { manifest_id, writes }`。暂存的写入就是普通指令，所以该系统声明的写入、所有权、阶段规则和可见性照常适用。`writes` 为空表示参与者到场但不写入。未列入清单的插件尝试暂存时，边界以 `InvalidAuthority` 失败。
+3. **审计。** 第 11 阶段提交之前，内核检查本边界就绪的每份清单。所有参与者都已暂存、所有预期版本都相符时，结果为 `Committed`。没有任何参与者暂存时，结果为 `Expired`，不为这份清单写入任何内容。只有部分参与者暂存时，整个边界以 `TransitionParticipantMissing` 失败；预期版本不符时，以 `TransitionVersionMismatch` 失败。
+4. **读取。** 内核保存一条 `TransitionAuditRecord`，记录结果和每个参与者暂存的写入数量，出现在 `BoundaryRecord::transition_audits` 和 `BoundaryReceipt::transition_audits` 中。协调者和参与者在第 11 阶段及之后运行的系统，通过 `SimulationView::transition_audits` 读取它。
 </Steps>
 
-`expected_pre` 指第 10 阶段读取的已提交状态中的版本。`expected_post` 在第 11 阶段检查：此时本边界中同边界生效的第 10 阶段写入已经提交，排定于下一边界生效的第 7、第 10 阶段写入也已计入；同一边界中第 12 或第 13 阶段的写入之后仍可能改变该记录。
+`expected_pre` 指第 10 阶段读取的已提交状态中的版本。`expected_post` 在第 11 阶段检查：此时本边界 `SameBoundary` 的第 10 阶段写入已经提交，待处理的 `NextBoundary` 第 7、第 10 阶段写入也已计入。同一边界中第 12 或第 13 阶段的写入之后仍可能改变这条记录。
 
-这些规则默认拒绝，并让清单保持有界：
+清单有数量上限，违反任何规则都会让边界失败：
 
-- 每个协调者对同一 `lineage_id` 最多只有一份待处理清单，总计最多 32 份；所有协调者合计最多 128 份。一份清单最多列出 16 个参与者和 64 个预期版本。每个参与者都必须是已注册插件，并拥有声明 `core_transitions` 的第 10 阶段系统；每条预期记录都必须属于已注册的记录种类。
-- 只有协调者和参与者能从登记后的下一个阶段起，在声明 `canwu.core.transitions` 读取后通过 `SimulationView::transition_manifests` 看到清单。上层应用用 `Canwu::pending_transition_manifests` 读取待处理清单。
-- 没有撤回指令。由于无人暂存会使清单过期，若就绪边界每次重试都失败，可以用任何参与者都不运行的节奏结算该边界，让清单过期，再登记新的尝试。清单 ID 在结算后可以复用，因此审计由 `(manifest_id, ready_at)` 唯一标识。
-- 待处理清单保存在快照中，并随失败的边界一起回滚。快照验证会根据登记和审计证据重建它们；从未登记清单的运行，哈希与以前完全相同。
-- 不属于任何清单的第 10 阶段指令保持原有行为。需要发现遗漏参与者的清单至少要有两个参与者：只有一个参与者时，沉默只会让清单过期。
+- 每个协调者对同一 `lineage_id` 最多有一份待处理清单，总共最多 32 份；所有协调者合计最多 128 份。一份清单最多列出 16 个参与者，预期版本合计最多 64 个。每个参与者都必须是已注册插件，并拥有声明 `core_transitions` 的第 10 阶段系统；每条预期记录都必须属于已注册的记录种类。
+- 只有协调者和参与者能看到清单：它们在声明 `canwu.core.transitions` 读取后，从登记后的下一个阶段起通过 `SimulationView::transition_manifests` 读取。上层应用用 `Canwu::pending_transition_manifests` 读取待处理清单。
+- 没有撤回清单的指令。无人暂存时清单会过期，所以如果就绪边界每次重试都失败，可以用一个让所有参与者系统都不运行的节奏来结算这个边界，清单随之过期，协调者再登记一次新的尝试。清单 ID 在结算后可以复用，因此审计由 `(manifest_id, ready_at)` 唯一确定。
+- 待处理清单保存在快照中，并随失败的边界一起回滚。快照校验时，内核根据登记和审计证据重建它们。从未登记清单的运行，哈希与没有这项功能时相同。
+- 不属于任何清单的第 10 阶段指令不受影响。要发现缺席的参与者，清单至少需要两个参与者；只有一个参与者时，它不写入只会让清单过期。
 
 ## 评估轨迹
 
-第 7 或第 12 阶段系统可以提出 `BoundaryDirective::RecordEvaluationTrace { trace }`，解释它评估过的某条应用规则；这条指令无需在契约中声明。`EvaluationTraceRecord` 包含规则 ID 与版本、对象实体、一组 `EvaluationTerm`（项 ID、整数贡献值以及该项读取的证据）、规则算出的结果和当前边界。内核检查结构、对象是否存在，以及每条证据引用是否为该提案可见的已提交证据；它不检查各项之和是否等于结果。
+评估轨迹逐项说明一条应用规则如何为某个对象算出一个数值。第 7 或第 12 阶段的系统提出 `BoundaryDirective::RecordEvaluationTrace { trace }` 即可记录一条轨迹，系统契约无需额外声明。`EvaluationTraceRecord` 包含规则 ID 与版本、对象实体、一组 `EvaluationTerm`（项 ID、整数贡献值和该项读取的证据）、规则算出的结果，以及当前边界。内核检查结构、对象是否存在，以及每条证据引用是否为该提案可见的已提交证据；各项之和是否等于结果，内核不检查。
 
-- 评估轨迹是边界证据，不属于状态。它连同产生它的插件、系统和阶段记录在 `BoundaryRecord::evaluation_traces` 中，进入边界哈希链，并随边界记录一起封存和归档。任何系统、命令处理器或决策策略都不能读回轨迹来决定结果。
-- 运行配置用 `EvaluationLimitsV1`（`RunConfiguration::with_evaluation_limits`）限制轨迹。默认每个边界所有系统合计 4,096 条轨迹、每条 32 项；上限为 65,536 条与 256 项。每项最多引用 16 条证据，规则 ID、规则版本和项 ID 各自最多 256 字节。提案超过任一上限时，边界以 `EvaluationTraceLimitExceeded` 确定性地失败；引擎从不抽样或丢弃轨迹，上限设为零即禁止轨迹。
-- 第 13 阶段不能记录轨迹，因此应由算出该值的第 7 或第 12 阶段系统发出轨迹。轨迹计入日志大小。
-- 玩家和智能体通过 `CanwuViewer::evaluation_traces` 读取轨迹；该视图不含证据，并遵循持有人的知识范围。详见[读取状态](/developer/reading-state/#解释规则结果)。
+- 轨迹是边界证据，与状态分开保存。内核把它连同产生它的插件、系统和阶段记录在 `BoundaryRecord::evaluation_traces` 中，纳入边界哈希链，并随边界记录一起封存和归档。系统、命令处理器和决策策略都不能读回轨迹来决定结果。
+- 运行配置通过 `RunConfiguration::with_evaluation_limits` 设置 `EvaluationLimitsV1` 上限。默认每个边界所有系统合计 4,096 条轨迹、每条 32 项；最大可设为 65,536 条和 256 项。每项最多引用 16 条证据，规则 ID、规则版本和项 ID 各自最多 256 字节。提案超过任一上限时，边界以 `EvaluationTraceLimitExceeded` 失败；成功提交的边界保留它的全部轨迹。上限设为零即禁止本次运行记录轨迹。
+- 第 13 阶段不能记录轨迹，应由算出该值的第 7 或第 12 阶段系统记录。轨迹计入日志大小。
+- 玩家和智能体通过 `CanwuViewer::evaluation_traces` 读取轨迹。这个视图不含证据，并受持有人知识范围限制，详见[读取状态](/developer/reading-state/#解释规则结果)。
 
-## 0.13.0 扩展系统的运行位置
+## 扩展系统的运行位置
+
+下列第一方扩展也使用同样的阶段。对照这张表，可以判断它们的状态相对于你自己的系统何时变化。
 
 | 扩展 | 阶段与节奏 | 系统与工作 |
 | --- | --- | --- |
 | `canwu-movement` | 第 7 阶段，事件驱动 | `movement_lifecycle_apply_v1` 按准入顺序应用已准入的操作和事故，对每个运力池运行一次分配，处理到期路段，并退休已关闭的运输执行。 |
-| `canwu-movement` | 第 8 阶段，事件驱动 | `movement_lifecycle_validate_v1` 校验候选移动运行时。 |
-| `canwu-movement` | 第 13 阶段，事件驱动 | `movement_report_publish_v1` 发布有变化的持有人相对移动报告。 |
+| `canwu-movement` | 第 8 阶段，事件驱动 | `movement_lifecycle_validate_v1` 校验暂存的移动运行时状态。 |
+| `canwu-movement` | 第 13 阶段，事件驱动 | `movement_report_publish_v1` 发布有变化的移动报告，每份报告只发给有权看到它的持有人。 |
 | `canwu-culture`（`CultureBoundaryPlugin`） | 第 12 阶段，事件驱动 | `culture_exposure_intake_v1` 把已准入的 `culture_exposure_v1` 批次排入队列。 |
-| `canwu-culture`（`CultureBoundaryPlugin`） | 第 7 阶段，每月 | `culture_lifecycle_settle_v1` 消费队列与已接受的制度决策，基于 society 状态的边界快照结算生命周期，保存文化状态，并把 society 变化和信号批次安排为下一边界输入。 |
-| `canwu-society` | 第 12 阶段，事件驱动 | `intake-society-ingress` 把已准入的 `cohort_headcount_rebase_v1` 与 `society_lifecycle_delta_v1` 输入排入队列。 |
-| `canwu-society` | 第 7 阶段，每日 | society 写入系统在 cohort 转移之后、制度决策与转移规则之前应用队列。 |
+| `canwu-culture`（`CultureBoundaryPlugin`） | 第 7 阶段，每月 | `culture_lifecycle_settle_v1` 消费队列和已接受的制度决策，基于 `canwu-society` 状态的边界快照结算生命周期，保存文化状态，并把 `canwu-society` 变化和信号批次安排为下一边界的输入。 |
+| `canwu-society` | 第 12 阶段，事件驱动 | `intake-society-ingress` 把已准入的 `cohort_headcount_rebase_v1` 和 `society_lifecycle_delta_v1` 输入排入队列。 |
+| `canwu-society` | 第 7 阶段，每日 | `settle-social-transitions` 在 cohort 转移之后、制度决策与转移规则之前应用队列。 |
 
-移动路段的时序使用内部调度输入 `movement_leg_due_v1`：移动命令安排首次出发，出发按路段计划时长安排到达，到达再安排下一次出发。到期输入只有与移动命令保存的待处理到期记录一致时才生效，因此显式操作会让旧输入失效；到期工作也不会使边界失败。
+移动路段的时序由内部调度输入 `movement_leg_due_v1` 驱动：移动命令安排首次出发，出发按路段计划时长安排到达，到达再安排下一次出发。到期输入只有与移动命令上保存的到期时间一致时才生效，因此显式操作会让旧的到期输入失效。到期工作不会让边界失败。
 
-之所以需要这两个输入队列，是因为同一阶段只能有一个系统写入某项状态，而状态所有者的写入系统以更粗的节奏运行。所有第 7 阶段系统读取同一个边界快照，因此文化方面的每次交接都在下一边界生效：信号批次在下一边界准入，society 变化在准入后的第一次每日结算时应用。文化步骤与其 society 效果之间、校准输入与 cohort 完成校准之间，最多可能相差两个边界。society 插件仍是 `canwu.society:state` 的唯一写入者。
+文化和 `canwu-society` 之所以使用输入队列，是因为同一阶段里一个状态键只能有一个写入系统，而它们的写入系统按更粗的节奏运行。所有第 7 阶段系统读的是同一份边界快照，所以文化的每次交接都落在之后的边界：信号批次在下一个边界准入，`canwu-society` 变化在准入后的第一次每日结算时应用。从文化步骤到它影响 `canwu-society`，以及从人口校准输入到 cohort 完成校准，最多都相差两个边界。society 插件始终是 `canwu.society:state` 的唯一写入者。
 
 ## 插件契约
 
-一个 `BoundarySystemContract` 声明：
+每个边界系统注册一个 `BoundarySystemContract`，声明：
 
-- 所属阶段与执行节奏；
+- 名称、所属阶段和执行节奏；
 - 读取和写入的 `StateKey`；
-- 资源供给、需求与分配读取；
+- 提供和申请的资源池，以及要读取的分配结果（`reservation_reads`）；
 - 自己拥有的随机流；
-- 可发出的事件、领域记录和可见性。
+- 会发出的事件类型（`emits`）、可以发布的知识 schema（`knowledge_writes`），以及可以发送输入的其他插件（`plugin_ingress_targets`）；
+- 写入的可见性。
 
-内核拥有的键遵循同一规则：转移指令需要 `StateKey::core_transitions()`，人物指令需要两个人物核心键。评估轨迹不写入状态，因此无需声明。
+内核拥有的键遵循同样的规则：转移指令需要 `StateKey::core_transitions()`，人物指令需要 `StateKey::core_person_availability()` 或 `StateKey::core_people()`。评估轨迹不写入状态，所以无需声明。
 
-模拟内核拒绝未声明的读取、写入、资源读取和随机抽样。插件注册、快照恢复和精确重放都要求包标识、版本和语义哈希匹配。
+模拟内核拒绝未声明的读取、写入、分配读取和随机抽样。插件注册、快照恢复和精确重放都要求插件名称、版本和语义哈希一致。
 
 ## 继续阅读
 
 - [架构总览](/architecture/)
 - [事件系统](/architecture/events/)
-- [随机生成方法](/architecture/randomness/)
+- [随机性](/architecture/randomness/)
 - [阶段边界教程](/tutorials/phased-boundary/)
 - [通过插件扩展](/developer/extensions/)

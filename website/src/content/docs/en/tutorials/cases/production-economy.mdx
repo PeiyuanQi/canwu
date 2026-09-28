@@ -1,180 +1,419 @@
 ---
-title: Production, resources, and military supply
-description: Understand Canwu's production-economy boundary through a fourteen-month grain loop, a Ming Songjiang cotton archetype, and the Hanyeping industrial chain.
+title: Grain, production, and military supply
+description: A fourteen-month grain loop in which civilians, relief, and a garrison draw on one conserved granary, plus two source-cited production archetypes.
 sidebar:
-  order: 3
+  order: 10
   label: Production, resources, and supply
 ---
 
-import { LinkButton, Aside } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../../components/MermaidDiagram.astro";
+
+## The scenario
+
+A river-valley granary opens with 4,300 baskets of grain. Each month its
+manager picks one of four priorities (relief first, force first, balanced, or
+requisition for the force), and the granary must cover three demands:
+civilians (320 baskets), relief (120), and a garrison dispatch (1,200). The
+river route is closed in months 1 and 2, so nothing ships. The only shipment
+leaves in month 3; its river crossing is closed and it reaches the garrison by
+road. From month 4 the dispatch demand still claims grain each month but
+nothing ships, so in lean months it crowds out civilians. The harvest arrives
+at the end of month 10.
+
+The question the example answers: how can several domains draw on one stock so
+that every basket is accounted for, competing claims are settled in a recorded
+order, and the whole run replays exactly?
+
+All quantities are synthetic values chosen for the example, not estimates of
+historical population, yields, rations, or prices.
+
+## What this example shows
+
+- The [resource simulation extension](/en/developer/production-economy/)
+  (`canwu-resource`): accounts and demands, one allocation pass by priority,
+  and a transfer held in escrow until acceptance.
+- [Decision tickets](/en/tutorials/cases/warlord-aid-decision/)
+  (`DecisionTicket`): each month's priority is a ticket option that carries an
+  ordinary command.
+- A [transport execution](/en/tutorials/routing-transport/)
+  (`TransportExecution`) whose failed river leg is replaced by a
+  [reroute](/en/reference/terminology/) (`ItineraryRevision`) of the same
+  shipment.
+- The [force-supply reference consumer](/en/reference/terminology/)
+  (`canwu-force-supply-reference`): the garrison eats from its own account by
+  submitting a consumption intent.
+- A [reference content pack](/en/reference/terminology/)
+  (`canwu-economy-reference-content`): `synthetic_grain_fixture()` supplies
+  the garrison's food requirement and the requisition policy, each bound to a
+  model card. The civilian, relief, and harvest numbers are constants in
+  `grain.rs`.
+
+## Run it
+
+```shell
+cargo run -p canwu-economy-reference --example grain_loop
+```
+
+The program prints a `GrainLoopSummary` as JSON: one frame per month
+(836 lines in all), then the totals. The output below is trimmed to part of the
+month 3 frame and the totals:
+
+```text
+{
+  "frames": [
+    ...
+    {
+      "economy": "canwu.economy-reference:economy:river-valley",
+      "month": 3,
+      ...
+      "force_requested": 1200,
+      "force_fulfilled": 1200,
+      ...
+        "force_operation": "canwu.force-supply-reference:operation:283:89280",
+      ...
+    },
+    ...
+  ],
+  "final_stock": 2860,
+  "final_population_wellbeing_per_mille": 940,
+  "final_force_readiness_per_mille": 800,
+  "final_cooperation_per_mille": 939,
+  "total_harvest": 4620,
+  "transport_executions": 1,
+  "closed_route_months": [
+    1,
+    2
+  ],
+  "rerouted_months": [
+    3
+  ],
+  "conservation_closing": 2860,
+  "checkpoint_hash": "72c4c8d3231be522d8cd3bb401e29b22b718e24fdfa852d95642d600e0fed99e"
+}
+```
+
+The key fields of all fourteen frames from the same run:
+
+| Month | Chosen (applies next month) | Opening stock | Civilians (of 320) | Relief (of 120) | Garrison dispatch (of 1,200) | Harvest | Wellbeing ‰ | Cooperation ‰ |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `balanced` | 4300 | 320 | 120 | 0 | 0 | 1000 | 903 |
+| 2 | `relief_first` | 3860 | 320 | 120 | 0 | 0 | 1000 | 906 |
+| 3 | `balanced` | 3420 | 320 | 120 | 1200 | 0 | 1000 | 909 |
+| 4 | `force_first` | 1780 | 280 | 120 | 0 | 0 | 1000 | 912 |
+| 5 | `requisition_for_force` | 1380 | 180 | 0 | 0 | 0 | 860 | 912 |
+| 6 | `balanced` | 1200 | 0 | 0 | 0 | 0 | 540 | 915 |
+| 7 | `relief_first` | 1200 | 320 | 120 | 0 | 0 | 660 | 918 |
+| 8 | `balanced` | 760 | 320 | 120 | 0 | 0 | 780 | 921 |
+| 9 | `force_first` | 320 | 320 | 0 | 0 | 0 | 780 | 924 |
+| 10 | `balanced` | 0 | 0 | 0 | 0 | 4620 | 460 | 927 |
+| 11 | `relief_first` | 4620 | 320 | 120 | 0 | 0 | 580 | 930 |
+| 12 | `balanced` | 4180 | 320 | 120 | 0 | 0 | 700 | 933 |
+| 13 | `force_first` | 3740 | 320 | 120 | 0 | 0 | 820 | 936 |
+| 14 | `balanced` | 3300 | 320 | 120 | 0 | 0 | 940 | 939 |
+
+Opening stock is the granary's balance before the month's allocation.
+Wellbeing falls by one per basket of civilian shortfall and rises by one per
+basket of relief, capped at 1000. Cooperation rises by 3 each month except the
+requisition month.
+
+## How grain moves
+
+<MermaidDiagram
+  label="Grain loop: tickets set priorities, one allocation pass splits granary stock, month 3 ships to the garrison, month 10 credits the harvest"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the walkthrough below describes the same steps."
+  renderFailureMessage="Diagram preview unavailable; the walkthrough below describes the same steps."
+  definition={`flowchart TD
+    Ticket["Monthly decision tickets"] -->|priorities| Alloc["One allocation pass"]
+    Demands["Demands: civilians, relief, garrison dispatch"] --> Alloc
+    Granary["Granary account"] --> Alloc
+    Alloc --> Consume["Consume: civilians and relief"]
+    Alloc -->|"month 3 only"| Transfer["Transfer held in escrow"]
+    Transfer --> Route["River leg fails, reroute by road"]
+    Route -->|acceptance| Garrison["Garrison account"]
+    Garrison --> Force["Force-supply consumption intent"]
+    Harvest["Month 10 harvest credit"] --> Granary
+    Consume --> Close["CloseMonth frame"]
+    Force --> Close
+`}
+/>
+
+## Walkthrough
+
+The example is 23 lines: it passes fourteen `GrainDecision` values to
+`GrainHarness::run_fourteen_months` and prints the summary. The work happens in
+[`grain.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/src/grain.rs).
+
+### 1. Compose three plugins
+
+`GrainHarness::new` compiles `synthetic_grain_fixture()` with
+`compile_content_pack`, installs the granary account (4,300 baskets, held by
+the manager) and an empty garrison account (held by the force), and stores the
+resource, economy, and force-supply state as initial
+[domain records](/en/developer/extensions/) of the `Scenario`. `new_canwu` then
+registers the plugins:
+
+```rust
+let resource = ResourcePlugin::new([economy_kind, force_kind]);
+let economy = EconomyReferencePlugin;
+let force = ForceSupplyReferencePlugin;
+let plugins: [&dyn SimulationPlugin; 3] = [&resource, &economy, &force];
+Canwu::new_with_plugins(seed, scenario, &plugins)
+```
+
+`ResourcePlugin::new` takes the domain record kinds that the resource plugin
+reads to check adapter evidence: here, the economy and force-supply runtime
+records.
+
+### 2. Choose the month's priority
+
+`advance_month` records the month's choice in three decision tickets.
+`record_decision` opens a ticket with four options, each carrying an
+`EconomyOperationV1::SelectDecision` command, and resolves it with the option
+you passed in; this is the decision shown in the output, and it drives
+cooperation. `record_g5_decision` records the same choice as the granary's
+resilience posture, and from month 3 `record_force_decision` records it as the
+garrison's supply posture. The resilience posture sets each demand's priority:
+
+```rust
+fn decision_priority(decision: GrainDecision, label: &str) -> i32 {
+    match (decision, label) {
+        (GrainDecision::ReliefFirst, "relief")
+        | (GrainDecision::ForceFirst | GrainDecision::RequisitionForForce, "force") => 120,
+        (_, "civilian") => 100,
+        (_, "relief") => 90,
+        _ => 80,
+    }
+}
+```
+
+Priorities take effect the month after they are chosen. The resilience and
+garrison-posture tickets are resolved inside `advance_month`, but the commands
+they carry settle one boundary later, after `advance_month` has read the
+postures. Each month's allocation therefore uses the previous month's choice;
+month 1 uses the starting posture `keep_buffer` (`balanced`). Month 6's row
+says `balanced`, but the allocation still ranks the garrison dispatch first, as
+month 5's `requisition_for_force` does.
+
+### 3. Submit three demands and allocate once
+
+```rust
+// All three uses are manager-owned demands for the same exact grain
+// revision and become due at the same simulation instant. One
+// canonical allocation ingress therefore decides scarcity by persisted
+// priority/tie-break data rather than by Rust control flow.
+let manager = holder(1);
+let civilian = self.submit_demand(
+    month,
+    "civilian",
+    manager.clone(),
+    CIVILIAN_NEED,
+    decision_priority(resilience_decision, "civilian"),
+    None,
+)?;
+```
+
+Relief (`RELIEF_TARGET`, 120) and the garrison dispatch (`SHIPMENT_QUANTITY`,
+1,200) follow the same way. `allocate_competing` queues one
+`enqueue_resource_allocation` pass, and `canwu-resource` records a
+[reservation](/en/reference/terminology/) for each demand it can serve. Each
+demand expires one month after it is due, which releases whatever it still
+holds.
+
+Month 4's 40-basket shortfall comes from the default source policy,
+`ResourceDemandSourcePolicyV1::Pooled`, which lets a demand draw on every grain
+account in ID order: the civilian demand reserves the last 40 baskets in the
+garrison's `a-field-force` account before 280 from `z-granary`, and
+`reserved_allocation` passes only the granary's 280 on to consumption.
+
+### 4. Ship to the garrison in month 3
+
+`record_route_availability(month, month >= 3, true)` marks the river route
+closed in months 1 and 2, and those months cancel the dispatch demand
+(`"force-before-readiness"`). In month 3, `deliver_to_force` debits the
+reserved grain into transfer escrow with `BeginTransfer`, starts a river-boat
+leg, and fails it:
+
+```rust
+execution
+    .fail_current_leg("river crossing closed".to_owned(), self.canwu.time())
+    .map_err(transport_error)?;
+let alternate = route_plan(self.canwu.time(), month, true)?;
+```
+
+The same execution is rerouted through `ridge-post` by road with
+`ItineraryRevisionReason::Disaster`. The carriers hand off at the relay, and the
+transfer advances to `InTransit` and then `ArrivalPending`. The garrison
+account is credited only when `CompleteTransfer` settles it with
+`ResourceTransferDispositionV1::Accept`. Each irreversible step (begin, accept,
+consume, credit) carries a completion lease certificate (proof that the
+holder activated its one-time right to perform that operation); see
+[Production, resources, and transport: who owns what](/en/developer/production-economy/).
+
+### 5. Feed civilians, relief, and the garrison
+
+For civilians and relief, `consume_local` has the economy plugin authorize a
+consumption intent, then sends `ResourceOperationRequestV1::Consume` through
+adapter ingress. The garrison takes a separate path in `service_force_if_due`:
+the force-supply plugin submits a consumption intent against its own account,
+and the resource outcome is sent back to it through plugin ingress.
+
+```rust
+let operation = self.submit_force(ForceOperationV1::SubmitConsumptionIntent { intent })?;
+```
+
+The dispatch demand in months 4 to 14 still enters the allocation pass, but
+`deliver_to_force` runs only in month 3, so `force_fulfilled` stays 0. By month
+5 only 40 baskets remain in the garrison account; the shortage costs the
+garrison 100‰ readiness (900 to 800). After that the account is empty,
+`service_force_if_due` returns early when there is nothing to issue, and
+readiness stays at 800.
+
+### 6. Credit the harvest and close the month
+
+In month 10, `credit_harvest` computes
+
+```rust
+let quantity = HARVEST_BASE
+    .saturating_mul(u64::from(local.cooperation_per_mille))
+    .saturating_mul(u64::from(
+        1_000_u16.saturating_sub(local.pending_harvest_penalty_per_mille),
+    ))
+    / 1_000_000;
+```
+
+and credits it to the granary as `ResourceCreditSourceV1::ExternalInflow`. With
+cooperation at 924 after month 9 and no pending penalty, that is
+`5000 × 924 / 1000 = 4620`. Every month ends with
+`EconomyOperationV1::CloseMonth`, which checks the cited demand and outcome
+records and appends the frame you saw in the output.
+`summary` calls `ResourceState::validate_conservation` before it builds the
+totals.
+
+## What to notice
+
+- Only `canwu-resource` changes a balance. The garrison submits an intent, and
+  the harvest arrives as a credit with its evidence.
+- Arrival and acceptance are separate steps. The garrison account changes only
+  when `CompleteTransfer` accepts the transfer.
+- One allocation pass settles the competing claims from stored priorities and
+  tie-break keys. In month 6 the dispatch demand ranks first under the lagged
+  `requisition_for_force` posture and reserves all 1,200 baskets. Nothing
+  ships, so that grain stays out of reach until the demand expires, and
+  civilians get nothing that month. In month 10 the granary is empty until the
+  harvest is credited at the end of the month.
+- `conservation_closing` equals `final_stock` (2,860) because no transfer is
+  left in escrow. At the end, the granary holds all 2,860 baskets, 1,200 of them
+  reserved for the month 14 dispatch.
+- Month 5's `requisition_for_force` skips that month's +3 cooperation.
+  Because of the one-month lag, its postures apply in month 6: the dispatch
+  ranks first, but the garrison account is already empty, so the requisition
+  saga in `canwu-force-supply-reference` never starts. The force-supply test
+  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps`
+  runs it.
+
+## Try changing
+
+- **Decisions.** Edit the `decisions` array in `grain_loop.rs` and watch how
+  `civilian_fulfilled` and `population_wellbeing_per_mille` change. Remember the
+  one-month lag from step 2.
+- **Harvest.** Set `HARVEST_BASE` to `6_000` in `grain.rs`. Month 10's
+  `harvest_output` becomes `6000 × 924 / 1000 = 5544`.
+- **Seed floor.** The economy profile's `seed_floor: 180` is recorded, but no
+  code reads it, and neither grain account has a protected floor
+  (`protected_floor_policy: None`), so allocation empties the granary by the
+  end of month 9. Adding a
+  [protected stock floor](/en/reference/terminology/)
+  (`ProtectedFloorPolicyRevision`) here takes more than pointing the granary
+  at one. Allocation fails with `VersionConflict` whenever a demand's
+  `protected_floor_policy` differs from that of an account it draws on. The
+  demands in this loop use the default `Pooled` source policy (step 3), so
+  they draw on both grain accounts, and `submit_demand` in `grain.rs` always
+  creates them with `None`. Both accounts and every demand would need the same
+  policy revision.
+  `conservation_partial_minimum_and_protected_floor_are_enforced` in
+  `canwu-resource` shows a working single-account setup: the floor holds back
+  stock, and a demand whose `protection_override_class` is in the policy's
+  `override_classes` still draws below it.
+- **Persistence.** Run `cargo test -p canwu-economy-reference`.
+  `snapshot_checkpoint_journal_and_fork_continue_identically` snapshots the
+  harness after four months, restores it, replays its checkpoint journal, and
+  forks it, then checks that all four copies reach the same `checkpoint_hash`
+  two months later.
+
+## Beyond the example
+
+[Production, resources, and transport: who owns what](/en/developer/production-economy/)
+has the full API rules.
+
+### Production
+
+The [production simulation extension](/en/reference/terminology/)
+(`canwu-production`) owns processes, sites, work orders, and output
+settlement, and `ProductionState::blockers_for` names each requirement group
+that still lacks evidence (`cargo run -p canwu-production --example process_constraints`).
+[Work in progress](/en/reference/terminology/) (`WorkInProgress`) records an
+execution's progress and consumed inputs while the stock itself stays in
+`canwu-resource`; the grain loop runs no production process.
+
+### Resource capability stages
+
+Reference content describes a deposit with a `ResourceCapabilityRevision`,
+whose [resource capability stage](/en/reference/terminology/)
+(`ResourceCapabilityStage`) runs from `Potential` through `RouteAccessible` to
+`DeliveredAccepted`. Even at `RouteAccessible`, stock reaches an account only
+after a runtime route observation and destination acceptance.
+
+### Scarcity and price
+
+Each month `record_g5_decision` puts the manager's projection into the
+resilience ticket's context.
+`ProjectionProviderRegistryV1::project(canwu, holder, scope)` builds it from
+the holder's resource, economy, production, and force witnesses. It returns
+`ProjectionQueryResultV1::Available` with an `EconomyProjectionV1`, or
+`Unavailable` with a blocker code such as `scope_unconfigured` or
+`provider_unavailable`. Both parts of the projection are read models: building
+them changes no state and settles no trade.
+
+- The [local scarcity projection](/en/reference/terminology/)
+  (`LocalScarcityProjection`) covers the stock, open demand, and buffers the
+  holder can observe. Only stock the holder can also reach counts as supply;
+  remote stock with an unobserved or unreachable route goes into the
+  `excluded_unreachable_*` fields. `scarcity_per_mille` is the shortfall of
+  known supply against the known demand remainder, in thousandths of that
+  remainder, plus route and security penalties, capped at 2,000. The
+  projection lists its causes.
+- The [price-pressure projection](/en/reference/terminology/)
+  (`PricePressureProjection`) carries a `pressure_per_mille` only when the
+  economy profile accepts price evidence and in-effect evidence exists: an
+  executed exchange, a quote, an administered price, or a contract price, each
+  with its interpretation rule and source versions. Its status is `Observed`
+  for one factor and `InferredPressure` for several. Without evidence it is
+  `ExplicitUnknown`, and a profile that excludes prices gives `NotApplicable`.
+  Here it is `NotApplicable`, because the economy profile sets
+  `price_applicability: NotApplicable`.
+
+### Historical archetypes
+
+`canwu-economy-reference-content` also ships two source-cited fixtures that no
+example runs, a Ming-period cotton archetype for Songjiang and the Lower Yangzi
+(1450–1644) and an 1896–1911 archetype of the Hanyang ironworks, Daye iron
+mine, and Pingxiang coal mine; [`fixtures.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-economy-reference-content/src/fixtures.rs) holds them with their
+sources.
+
+## Source
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/examples/grain_loop.rs" icon="external">
-  View the runnable grain loop
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-economy-reference/tests/grain_harness.rs" variant="secondary" icon="external">
+  Read the grain harness tests
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-force-supply-reference/tests/g4_contract.rs" variant="secondary" icon="external">
+  Read the force-supply tests
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/reference-content/canwu-economy-reference-content" variant="secondary" icon="external">
-  View model cards and sources
+  Browse the model cards and sources
 </LinkButton>
-
-This case does not transplant Victoria 3's market model into Canwu. Its useful
-design vocabulary is inputs, outputs, production methods, resource conditions,
-and logistics constraints. Canwu supplies lower-level replaceable deterministic
-contracts; the host application, such as Celestial Mandate, remains responsible for markets, money, wages, building UI, and
-combat formulas.
-
-## Five delivery gates
-
-| Gate | Runnable result | Engine boundary |
-| --- | --- | --- |
-| G1b | Fourteen-month synthetic grain loop | Seasonal harvest, seed floor, civilian food, relief, force supply, route closure, requisition, and next-season feedback |
-| G2 | `canwu-resource` | Conserved accounts, demand, reservation, exact allocation legs, transport handoff, acceptance, consumption, loss, and fulfillment |
-| G3 | `canwu-production` | Processes, sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement |
-| G4 | `canwu-force-supply-reference` | Independent military-supply consumer, readiness/shortage consequences, and a cross-domain requisition saga |
-| G5 | Scarcity and price-pressure reads | Bounded, holder-relative, and explainable; price remains explicitly unknown without price evidence |
-
-## How production happens
-
-Production is not “the technology is unlocked, therefore a building emits goods
-each week.” A run must satisfy an evidence chain:
-
-```text
-revisioned process
-  + available production site and facility
-  + materials, labor/capability, tools/machines, and energy
-  + local qualification or installed technology implementation
-  + authorization, season/environment, security, and access
-  -> authorized work order and reserved capacity
-  -> inputs become work in progress
-  -> production execution
-  -> outputs settle through the resource extension
-```
-
-Supplementary household work, distributed workshops, government workshops,
-concentrated plants, and multi-site enterprises are revisioned data forms, not
-levels on one universal building ladder. A game may present them as buildings;
-the engine requires exact, replayable bindings for inputs, capability,
-facilities, time, and output.
-
-When a scenario needs slow diffusion or adoption, Canwu does not merely apply
-an “era speed” penalty. It separates knowing a technique, qualifying to perform
-it at a site, installing tools or facilities, adopting it for a particular use,
-and maintaining access to inputs and routes. Any missing link becomes a
-structured work-order blocker; a calendar year never grants capability.
-
-## How geography affects production
-
-Canwu does not use a timeless `has_coal = true` flag. Reference content uses
-effective-dated, source-cited capability stages:
-
-```text
-potential -> observed/surveyed -> proven -> technically extractable
-          -> operating site -> route accessible -> delivered and accepted
-```
-
-Geological presence is not usable production. Extraction process,
-authorization, labor, equipment, energy, security, road/water/rail access, and
-destination acceptance all constrain supply. Routing proposes a plan;
-transport records itinerary, capacity, execution, custody, and handoffs. A
-resource becomes local stock or a production input only after acceptance.
-
-## Runnable fourteen-month grain loop
-
-The first profile is explicitly **synthetic**. Every quantity is gameplay
-calibration, not an estimate of Ming population, yields, military rations, or
-prices. Each month selects relief first, force first, balanced allocation, or
-military requisition. Winter closes a route, autumn harvest requires a protected
-seed floor, and requisition reduces cooperation and the next harvest.
-
-```bash
-cargo run -p canwu-economy-reference --example grain_loop
-cargo test -p canwu-economy-reference
-```
-
-The resource extension remains the sole balance writer. A force submits demand
-and a consumption intent instead of debiting grain directly. Transport arrival
-is not delivery until custody handoff and acceptance complete. The fixture can
-therefore check monthly conservation, retries, restore, and exact replay.
-
-## Ming case: a Songjiang cotton archetype
-
-The historical content is scoped to household cotton-textile production in
-Songjiang and the Lower Yangzi, 1450–1644. It supports an organizational
-archetype of household spinning and weaving, including households specializing
-in particular preparation or production stages, with merchants and brokers
-mediating distribution. Some workshops produced higher-grade and fancy cloth.
-Separately, large urban workshops handled the final dyeing and calendering
-operations. The sources do not establish a universal Ming workshop size, wage,
-productivity level, modern factory coefficient, or empire-wide organization.
-
-The main model card uses Harriet T. Zurndorfer's research on late-imperial
-cotton textile manufacture and marketing, with page locators stored in the
-content. The source connects Songjiang cotton production with peasant-family
-production, commercialization, and distribution networks. The Canwu profile
-therefore preserves household and specialist-household organization instead of
-rewriting it as an anachronistic concentrated factory.
-
-## China industrialization case: Hanyang–Daye–Pingxiang
-
-The second historical archetype is explicitly a **Middle Yangzi Hubei–Jiangxi
-industrial chain**, not a “North China industrial corridor”:
-
-- Hanyang Iron Works was in Hubei;
-- the Daye iron mine was in Hubei;
-- Pingxiang coal was in Jiangxi; the 1896 evidence supports the mining bureau's
-  acquisition of mining and railway land, not an already operating route;
-- 1896–1907 is modeled as linked but unconsolidated Hanyang, Daye, and Pingxiang
-  precursor enterprises; capability evidence is represented as dated nodes—an
-  1896 survey/land observation, mechanized adits operating by 1904, and a route
-  that reached Liling in 1903 and extended to Zhuzhou during 1905. Because the
-  fixture uses whole years, 1906 is the first full-year proxy for rail movement
-  to Zhuzhou and onward riverboat movement toward Hubei; intervening capability
-  is not inferred;
-- only 1908–1911 uses the consolidated Hanyeping organizational class, while
-  actual route accessibility remains an independently evidenced condition.
-
-Its model cards cite Yun Liu's study of the Hanyeping company's formation,
-Jeff Hornibrook's research on mechanized mining, local elites, and mining land
-in Pingxiang, Jiangxi, Elizabeth Perry's chronology of the modern mine and the
-rail-to-river supply chain, and Shellen Xiao Wu's evidence for water transport
-before the railway and for an operating mine in 1905.
-The case tests how mineral capability, extraction
-processes, interregional routes, energy, facilities, and enterprise organization
-jointly constrain production. It cannot be generalized into national
-representativeness, inevitable industrialization, automatic technology
-diffusion, or a universal productivity coefficient.
-
-<Aside type="caution" title="Historical facts are not balance values">
-  Both historical profiles are source-cited archetypes, not complete
-  calibrations. Every numeric value and causal rule must bind to a model card.
-  Unsupported coverage must be explicit unknown or not applicable; default
-  values may not silently fill the gap.
-</Aside>
-
-## Military and civilian-economy interaction
-
-Food, fodder, physical currency, ammunition, spares, and fuel remain distinct
-resources rather than one universal “supply score.” Shortage produces
-force-local readiness, fatigue, cohesion, disease, or desertion consequences.
-Civilian welfare, cooperation, and future-production effects cross into the
-economy integration as typed requisition intents. The economy applies or
-rejects them at an expected revision, then the force acknowledges the outcome,
-so neither package writes the other's state.
-
-## Scarcity and price
-
-`LocalScarcityProjection` explains the stock, demand, buffers, route access,
-security, and policy actually observable to one holder. It does not claim a
-price. `PricePressureProjection` is materialized only when the same scope and
-interval has executed, quoted, administered, or contracted price evidence plus
-a revisioned interpretation rule. Neither projection creates money, moves
-goods, transfers ownership, or settles trade.
-
-## Historical sources
-
-- [Zurndorfer, Cotton Textile Manufacture and Marketing in Late Imperial China and the “Great Divergence”](https://doi.org/10.1163/156852011X614028)
-- [Zurndorfer, The Resistant Fibre (open PDF)](https://www.lse.ac.uk/Economic-History/Assets/Documents/Research/GEHN/Padua/PADUAZurndorfer.pdf)
-- [Yun Liu, Revisiting Hanyeping Company (1889–1908)](https://doi.org/10.1080/00076790903469612)
-- [Jeff Hornibrook, Local Elites and Mechanized Mining in China](https://doi.org/10.1177/009770040102700202)
-- [Jeff Hornibrook, Don’t Tread on Me (1896 Pingxiang mining-land evidence)](https://ihss.hku.hk/wp-content/uploads/2020/09/cbh-15-1.pdf)
-- [Elizabeth J. Perry, Anyuan: Mining China’s Revolutionary Tradition](https://doi.org/10.1525/9780520954038)
-- [Zhu Li, Why Is Zhuzhou a City Brought by Trains? (1903 Liling terminus, 1905 Zhuzhou extension, and rail-to-river transfer)](https://m.voc.com.cn/xhn/news/202007/14436245.html)
-- [Shellen Xiao Wu, Empires of Coal](https://doi.org/10.1515/9780804794732)

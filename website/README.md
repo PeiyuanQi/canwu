@@ -7,17 +7,29 @@ inside the same build rather than a separate documentation application.
 Chinese is the default language at `/`, `/showcase/`, and `/credits/`. English
 uses matching routes under `/en/`, including `/en/showcase/` and
 `/en/credits/`. Each page emits canonical and `hreflang` alternate metadata.
-Tutorial indexes are available at `/tutorials/` and `/en/tutorials/`.
-Developer guides live at `/developer/` and `/en/developer/`, and architecture
-overviews live at `/architecture/` and `/en/architecture/`. Their Markdown and
-MDX sources all live in `src/content/docs/`. Repository-level design,
-maintainer, community, release, and legal documents remain under `../docs/`
-and are deliberately not published as website documentation.
-The bilingual terminology reference is published at `/reference/terminology/`
-and `/en/reference/terminology/`.
-Scenario-driven tutorials live under `tutorials/cases/` in each locale. The
-Starlight sidebar keeps them in one collapsed, auto-generated Examples group so
-new examples do not expand the top-level tutorial navigation.
+Documentation sources live in `src/content/docs/` (Chinese at the root, English
+under `en/`). The Starlight sidebar in `astro.config.mjs` lists pages by slug in
+seven sections, so a page's section does not have to match its URL:
+
+- **Get started**: `/tutorials/` and the first-run tutorial `/tutorials/move-army/`.
+- **Tutorials**: engine tutorials under `/tutorials/`, such as the continuous
+  game loop, command plugin, and phased boundary.
+- **Guides**: application tasks under `/developer/`.
+- **Engine architecture**: `/architecture/` and its settlement, events,
+  randomness, and model-ownership pages.
+- **Domain systems**: the overview at `/architecture/systems/`, then one entry
+  per system. Each entry starts with its design page under `/architecture/` and
+  may add related walkthroughs from `/tutorials/`, guides from `/developer/`, or
+  design records from `/proposals/`.
+- **Case studies**: multi-system scenarios under `tutorials/cases/`, kept in one
+  collapsed, auto-generated group so new scenarios do not lengthen the sidebar.
+- **Reference**: the bilingual terminology page at `/reference/terminology/`
+  and a link to the example source on GitHub.
+
+English pages use the same paths under `/en/`. Adding a page outside
+`tutorials/cases/` means adding its slug to the sidebar. Repository-level
+design, maintainer, community, release, and legal documents remain under
+`../docs/` and are deliberately not published as website documentation.
 
 ## Local development
 

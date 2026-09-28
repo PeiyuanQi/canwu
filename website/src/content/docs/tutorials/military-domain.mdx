@@ -1,60 +1,127 @@
 ---
-title: 军事模拟扩展
-description: 用可重放、角色相对的军事领域扩展连接军队、行动、战斗、补给、占领与军政。
+title: 运行军事扩展：从接敌到占领
+description: 运行军事起步示例：建立部队、行军接敌、结算战斗并建立占领，全部通过可重放的模拟领域扩展完成。
 template: doc
 sidebar:
   label: 军事模拟扩展
 ---
 
-参伍的军事能力属于可选的**模拟领域扩展**（`domain extension`），不是模拟内核的新子系统。`canwu-military` 通过 `canwu-api` 提供军事领域记录、领域命令、边界系统、抽样证据和角色相对投影；`canwu-military-reference-content` 提供版本化规则与内容；`canwu-military-reference` 提供可替换的参考整合包。当前 starter 是有边界的参考实现，还不是完整的生产级行军、路由或战役系统。
+import { Aside } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-## 13 项能力
+本教程运行军事参考起步示例。它建立一支野战部队，补充兵员，向有守军的领地行军，结算战斗并占领该地，最后确认保存和重放得到的副本与原运行一致。你会了解 `canwu-military` 如何接收命令、随机性从哪里来，以及哪些状态交给其他扩展管理。
 
-扩展覆盖一条可持久化、可精确重放的因果链：
+[军事模拟扩展](/reference/terminology/)分为三个 crate：
 
-1. 建立军队：创建编制、编组、子单位和生命周期。
-2. 任命将领：维护指挥链、权限和命令延迟。
-3. 招募：连接社会候选人、入伍、训练和装备。
-4. 行军：接纳类型化行军命令，记录确定性的军事行动；上层应用可以在此边界上继续组合路由和运输适配器。
-5. 遭遇：记录接触、可见性和确定性仲裁。
-6. 伏击：记录隐蔽、准备、触发和反侦察。
-7. 战术与战略：通过 `DecisionTicket` 绑定行动计划和选择。
-8. 战斗结算：分阶段结算战斗轮、伤亡、俘虏、撤退和追击。
-9. 敌后行动：支持侦察、袭扰、破坏、渗透、撤离与返回。
-10. 补给：提交类型化需求，接收预留、运输和短缺结果。
-11. 占领控制：管理对象控制、驻军、安全、抵抗和治理前提。
-12. 同化：通过法律、社会和文化确认推进分阶段整合信号。
-13. 军政管理：记录军政府办公、政策以及财政和法律程序。
+- `canwu-military`：军事领域记录、`MilitaryCommand` 领域命令、边界系统、抽样证据和发给指挥官的报告，构建在 `canwu-api` 之上。
+- `canwu-military-reference-content`：两套带版本的规则集。
+- `canwu-military-reference`：可替换的参考整合包，为[参考世界](/tutorials/move-army/)加入军事目录。
 
-## 所有权边界
+## 运行
 
-军事扩展是军事力量、行动、战斗、占领和军事知识记录的唯一写入者。模拟内核负责时间、规范化输入、权限、调度、原子提交、持久化、精确重放和抽样证据。路线规划与可达性属于 `canwu-routing`；移动、保管权、容量与交接属于 `canwu-transport`；资源账户、预留、消费和履约属于 `canwu-resource`；人口、法律、财政、信息与知识分别由对应扩展拥有。军事扩展只提交类型化请求并绑定精确凭证，不直接修改其他领域状态。
-
-所有外部效果先成为提供方拥有的待处理意图、预留或 saga，随后由提供方在自己的规范化边界中结算，并通过确认输入返回军事扩展。查询、命令错误、事件和报告都不得泄露其他角色的军事真值。
-
-## 合成内容声明
-
-参考内容包中的 `riverine-preindustrial` 与 `industrial-front` 是明确标记的**合成**规则剖面。它们用于覆盖不同的组织、运输、通信和补给假设，不是历史事实、历史兵力估计或来源校准数据。
-
-## 示例命令
-
-上层应用通过公开 API 提交类型化领域命令，例如向军事扩展提交 `OrderMarch`，而不是直接修改军队记录：
-
-```text
-military.submit(OrderMarch {
-  force_id: force_17,
-  destination: node_42,
-  expected_revision: 8,
-  operation_key: "march-17-42"
-})
-```
-
-命令会经过权限、版本、幂等性和边界验证。当前参考插件记录确定性的路线摘要和行动结果；如果上层应用加入路由或运输，还必须在自己的整合边界中提供提供方凭证。
-
-在仓库根目录运行当前参考 starter：
+在仓库根目录运行：
 
 ```shell
 cargo run -p canwu-military-reference --example military_starter
 ```
 
-上面的命令流程是示意代码。完整的 `CommandEnvelope`、版本保护和规范化推进流程见[可运行 starter 源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs)。
+```text
+military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=3b647676eb58a48594665edc09d190b25eb7932e4d630496c3f57fc6ddc2b691
+```
+
+`military_gameplan=complete` 表示所有断言都已通过：战斗得出了结果，占领已经建立，恢复和重放得到的副本与原运行的检查点哈希相同。`riverine` 和 `industrial` 打印的是两套参考规则集的名称。
+
+## 军事命令的执行路径
+
+<MermaidDiagram
+  label="军事命令经规范化输入准入，在第 7 阶段应用，在第 13 阶段向指挥官报告"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一路径。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一路径。"
+  definition={`flowchart TB
+    Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command()<br/>规范化输入"]
+    Queue --> Admit["准入检查<br/>指挥官、版本、<br/>兵种、战术"]
+    Admit --> Packet["military_command_v1<br/>输入数据包"]
+    Packet --> Apply["第 7 阶段<br/>写入记录、抽样"]
+    Apply --> Report["第 13 阶段<br/>向指挥官报告"]
+`}
+/>
+
+起步示例通过同一个辅助函数发送所有命令：
+
+```rust
+fn submit(
+    canwu: &mut Canwu,
+    sequence: u64,
+    issuer: Issuer,
+    command: MilitaryCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let envelope = CommandEnvelope::new(issuer, military_command(command)?);
+    canwu.enqueue_command(
+        canwu.time(),
+        i32::try_from(sequence)?,
+        CommandRequest::new(CommandRequestId::new(sequence), canwu.revision(), envelope),
+    )?;
+    canwu.advance_canonical(SimDuration::minutes(1))?;
+    Ok(())
+}
+```
+
+军事命令必须走规范化输入（`enqueue_command`）；直接调用 `submit` 会返回 `MixedCommandIngress`。准入时，处理器检查签发者是否指挥这支部队、`expected_force_revision` 是否与部队记录一致，以及兵种或战术是否存在于当前规则集中。检查通过后，它排入一个 `military_command_v1` 数据包，由第 7 阶段的系统 `apply-military-ingress-v1` 应用。
+
+每条命令都带一个 `MilitaryOperationKey`。同一个键配上不同输入，会以 `IdempotencyConflict` 失败。用同一个键、同样的输入再次发送，只有在这次发送通过准入时才是空操作。带 `expected_force_revision` 的命令在第一次执行提高了部队修订号之后，再发一次就会在准入时因版本过期（`DomainRecordVersionConflict`）而失败，这会让边界失败，并把该输入留在队列里。
+
+## 起步示例做了什么
+
+`demo_military_scenario()` 以参考世界的演示场景为基础，加入使用 `riverine_preindustrial` 规则集的军事目录。示例注册 `ReferenceWorldPlugin` 和 `military_plugin()`，然后发送五条命令：
+
+| 步骤 | 命令 | 结果 |
+| --- | --- | --- |
+| 1 | `CreateForce` | 沈将军的野战部队驻在中部节点，编制 2,500 人，实有 2,000 人。 |
+| 2 | `Recruit` | 新增 400 人的 `reserve` 子单位，部队记录升到版本 2。 |
+| 3 | `PlanOperation` | 一条处于 `Planned` 阶段的战略行动记录。 |
+| 4 | `CreateForce` | 东部节点上一支 100 人的守军，由罗大臣（Minister Luo）指挥。 |
+| 5 | `OrderMarch` | 野战部队向东部节点行军，以守军为对手。 |
+
+起步示例中的行军命令如下：
+
+```rust
+MilitaryCommand::OrderMarch {
+    operation: canwu_military::MilitaryOperationKey::new("canwu.military:op:march-front")?,
+    force: force.clone(),
+    operation_id: OperationId::new("canwu.military:operation:march-front")?,
+    destination: MilitaryNodeId::new(format!(
+        "canwu.military:node:{}",
+        ids.eastern_territory
+    ))?,
+    objective: "secure the eastern route".to_owned(),
+    tactic: "crossing_assault".to_owned(),
+    opposing_force: Some(ForceId::new("canwu.military:force:defender")?),
+    expected_force_revision: 2,
+}
+```
+
+随后 `canwu.advance_canonical(SimDuration::days(5))` 推进五天：
+
+1. 下令一分钟后，部队抵达目的地，接敌产生一条战斗记录。参考插件把行军当作一分钟的一步，并记录路线摘要（部队和目的地的哈希），详见[组合移动](#组合移动)。
+2. 交战中的行动每天结算一个战斗轮，每轮从 `military_random_stream()` 抽样一次，并记录为抽样证据。本次运行中，2,400 人的进攻方损失 7 人，在第一轮就全歼 100 人的守军，战斗以 `AttackerVictory` 结束。
+3. 胜利后，目的地建立占领，阶段为 `MilitaryControl`。占领每天更新一次，安全度和行政覆盖逐步上升；运行结束时分别为 600 和 80（千分比）。
+
+## 命令与所有权
+
+`MilitaryCommand` 有 13 个变体（含内部使用的 `AdvanceTick`）。`canwu-military` 只写入自己的部队、行动、战斗、占领、账本和提供方结果记录；路线、资源、人口、法律和财政程序留给各自的扩展。每条命令检查和写入什么、战斗与占领规则，以及特种行动的已知问题，见[军事系统](/architecture/military/)。
+
+<Aside type="caution" title="已知问题">
+特种行动一旦抽样成功，当前会让所在边界每次重试都失败，运行无法越过这一步。详情和规避办法见[军事系统](/architecture/military/#行军与战斗)。
+</Aside>
+
+## 参考规则集是合成数据
+
+`canwu-military-reference-content` 提供 `riverine_preindustrial` 和 `industrial_front` 两套规则集，都标记为 `synthetic_reference`：它们用于覆盖不同的兵种、战术、地形、征募、战斗和占领假设，不代表任何历史结论。当前插件读取生效的规则集，用来校验兵种和战术名称；战斗和占领的计算写在 `canwu-military` 内部。
+
+## 组合移动
+
+当前的 `canwu-military` 插件在下令一分钟后完成行军，只记录路线摘要。需要路线和行军耗时的上层应用，应在自己的整合中围绕行军组合 `canwu-routing` 与 `canwu-transport` 或 `canwu-movement`，参见[路线规划与送信执行](/tutorials/routing-transport/)。
+
+完整的命令序列以及快照和重放检查，见[起步示例源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs)。

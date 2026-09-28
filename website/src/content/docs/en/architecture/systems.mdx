@@ -1,0 +1,78 @@
+---
+title: Domain systems
+description: The domain systems that give Canwu concrete rules for knowledge, decisions, resources, movement, war, technology, fiscal institutions, and society, and the crates that provide each one.
+template: doc
+sidebar:
+  label: Domain systems
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+The engine settles commands, schedules work, and records evidence, but it has no
+rules of its own for trade, war, or taxes. Domain systems supply those rules.
+Most of them are domain extensions: optional crates built on `canwu-api` that you
+add as dependencies and register as plugins. Register only the systems your
+application needs; the others take no part in the run. First-party extensions
+use the same plugin interface as the plugins you write, so you can replace any
+of them.
+
+A few systems also provide shared types that `canwu-api` re-exports: knowledge
+ledgers, decision tickets, route plans, and transport records.
+
+Each system has a design page that covers what it owns, how it runs inside a
+boundary, and what your application supplies. Routing, military, and
+technology also have walkthroughs:
+[route planning and delivery](/en/tutorials/routing-transport/),
+[military extension](/en/tutorials/military-domain/), and
+[technology diffusion](/en/tutorials/technology-diffusion/).
+
+## The systems
+
+<CardGrid>
+  <LinkCard
+    title="Knowledge and information"
+    href="/en/architecture/knowledge-information/"
+    description="What each actor knows, and how documents and letters are written, sent, read, and understood. Crates: <code>canwu-knowledge</code>, <code>canwu-information</code>, <code>canwu-correspondence</code>."
+  />
+  <LinkCard
+    title="Decisions"
+    href="/en/architecture/decisions/"
+    description="Decision tickets that let a player, an AI, or a policy choose one option, then turn the choice into a checked command that replays exactly. Crate: <code>canwu-decision</code>."
+  />
+  <LinkCard
+    title="Resources and production"
+    href="/en/architecture/resources-production/"
+    description="Stocks, reservations, transfers, consumption, and loss, plus facilities, work orders, and output. Crates: <code>canwu-resource</code>, <code>canwu-production</code>."
+  />
+  <LinkCard
+    title="Routing, transport, and movement"
+    href="/en/architecture/routing-movement/"
+    description="Plan a route from what one observer knows, record each leg and handoff, and settle movement orders leg by leg. Crates: <code>canwu-routing</code>, <code>canwu-transport</code>, <code>canwu-movement</code>."
+  />
+  <LinkCard
+    title="Military"
+    href="/en/architecture/military/"
+    description="Forces, marches, combat, and occupation, plus effects that other systems settle for an occupied place. Crate: <code>canwu-military</code>."
+  />
+  <LinkCard
+    title="Technology"
+    href="/en/architecture/technology/"
+    description="Techniques that move from a workshop trial to local capability, installation, adoption for one use, and teaching at other sites. Crates: <code>canwu-technology</code>, <code>canwu-history-research</code>."
+  />
+  <LinkCard
+    title="Fiscal institutions"
+    href="/en/architecture/fiscal/"
+    description="Fiscal rules adopted region by region, assessments, authorized collections, audits, and receipts backed by evidence. Crate: <code>canwu-fiscal</code>."
+  />
+  <LinkCard
+    title="Society, culture, and law"
+    href="/en/architecture/culture-law/"
+    description="Ideas that spread between population groups, culture content with a lifecycle, and procedures that turn cultural signals into versioned law. Crates: <code>canwu-society</code>, <code>canwu-culture</code>, <code>canwu-law</code>."
+  />
+</CardGrid>
+
+## Scenarios that combine systems
+
+Most games use several systems at once. The [case studies](/en/tutorials/cases/)
+run complete scenarios, such as grain supply for an army or a letter routed from
+Wuxi to Beijing, and show how the systems hand records to one another.

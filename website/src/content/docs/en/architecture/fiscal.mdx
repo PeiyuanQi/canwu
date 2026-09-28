@@ -1,0 +1,260 @@
+---
+title: Fiscal institutions
+description: How the fiscal extension turns source-cited fiscal content into authority-bound assessments, collections, and evidence-backed receipts; read it when your game needs tax and treasury rules that vary by period and region.
+sidebar:
+  order: 13
+  label: Fiscal institutions
+---
+
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Fiscal institutions navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/tutorials/cases/ming-fiscal/">Ming fiscal case</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/fiscal/">中文版</a>
+</nav>
+
+`canwu-fiscal`, the [fiscal simulation extension](/en/reference/terminology/), models fiscal institutions as procedure: versioned rules, their adoption region by region, assessments, remissions, authorized collections and transfers, audits, and receipts proven by evidence. Grain, silver, and other balances stay in your resource or logistics domain; the fiscal extension records what was owed, what was authorized, and what evidence proved. Read this page when your game needs tax and treasury rules that change by period and region; the Ming content in `canwu-ming-fiscal` and the runnable `canwu-ming-fiscal-reference` integration are the worked example.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-fiscal` | The period-neutral model: the pack schema and compiler (`compile_fiscal_content`), the catalog and state records, `FiscalPlugin`, authority checks, receipt validation, aggregates, and holder reports | Published on crates.io |
+| `canwu-ming-fiscal` | Ming content: the embedded `data/pack.json` (1368–1683), three start fixtures, and `compile_ming_fiscal` | Published on crates.io |
+| `canwu-ming-fiscal-reference` | A runnable host: scenario builder, execution adapter plugin, semantic validator, trace writer and viewer, and the `ming_fiscal_starter` example | Repository only |
+
+<MermaidDiagram
+  label="Crate dependencies: canwu-fiscal and the Ming pack build on canwu-api, and the reference integration combines them with the reference world"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the table above lists the same crates."
+  renderFailureMessage="Diagram preview unavailable; the table above lists the same crates."
+  definition={`flowchart TB
+    Host["Your host application<br/>scenario, adapter, commands"]
+    Ref["canwu-ming-fiscal-reference<br/>runnable Ming host"]
+    Ming["canwu-ming-fiscal<br/>Ming data pack"]
+    World["canwu-reference-world<br/>example world"]
+    Fiscal["canwu-fiscal<br/>period-neutral model"]
+    Api["canwu-api<br/>public API"]
+    Host -.->|"can start from"| Ref
+    Host --> Fiscal
+    Ref --> Ming
+    Ref --> World
+    Ref --> Fiscal
+    Ming --> Fiscal
+    Ming --> Api
+    Fiscal --> Api
+    World --> Api
+`}
+/>
+
+Arrows point from a crate to what it depends on. Among Canwu crates, `canwu-fiscal` depends only on `canwu-api`, and the engine core has no fiscal code. `canwu-ming-fiscal` holds data, a fixture loader, and a compile helper, with no runtime behavior. The reference integration borrows a government, an army, and people from `canwu-reference-world` to act as institutions and officials.
+
+## Core model
+
+### What is period-neutral and what the pack supplies
+
+| Layer | Supplies | Example |
+| --- | --- | --- |
+| `canwu-fiscal` (period-neutral) | Pack schema, validation, coverage resolution, closed vocabularies, fiscal state, actions, authority checks, receipt validation, aggregates, reports | `compile_fiscal_content`, `FiscalPlugin` |
+| Content pack (period-specific) | Periods, regions, institutions, rules with legal windows, reform transitions, coverage declarations, and provenance with forbidden inferences | `canwu-ming-fiscal` `data/pack.json` |
+| Host (run-specific) | Year and mode, bindings, starting adoption stages, institution entities, the execution adapter, and the commands | `canwu-ming-fiscal-reference` |
+
+The vocabularies are closed Rust enums in `canwu-fiscal`: 11 `FiscalMechanism` values (such as `LandTax`, `SaltMonopoly`, and `MerchantCredit`), 7 `FiscalPaymentForm` values (`Grain`, `Silver`, `Labor`, `SaltCertificate`, `Coin`, `Goods`, `Credit`), 10 `FiscalAssessmentBasis` values, and 4 `FiscalCommutationPolicy` values. A pack lists the mechanisms it uses in its manifest and maps its institutions onto these values.
+
+`compile_fiscal_content(&pack, selection)` validates the whole pack and returns a `CompiledFiscalCatalog`. It requires canonical unique IDs, resolved references, windows inside the pack's historical scope, a SemVer `pack_version`, the license `Apache-2.0`, provenance for every institution, rule, and transition, acyclic transition prerequisites, and a status for every coverage cell. In `FiscalContentSelection`, empty region and mechanism sets mean all of them. The catalog keeps every period, so one run can move through the years; `selected_period_ids` names the periods that cover the selection year, and `content_hash` hashes the whole pack.
+
+### Main types
+
+| Type | What it represents |
+| --- | --- |
+| `FiscalContentPack` | An authored pack: manifest, periods, regions, institutions, rules, transitions, coverage declarations, provenance |
+| `CompiledFiscalCatalog` | The immutable run catalog, stored as the create-only record `canwu.fiscal:catalog` |
+| `FiscalRuleDefinition` | One rule: mechanism, legal window, jurisdictions, assessment basis, payment forms, commutation policy, provenance, confidence |
+| `FiscalTransitionDefinition` | A reform: source and target rules, observed and eligibility windows, jurisdictions, rules it supersedes or suspends, prerequisites |
+| `FiscalState` | The runtime record `canwu.fiscal:state`: bindings, adoptions, assessments, remissions, requests, receipts, audits, outcomes, candidates, aggregates |
+| `FiscalHistoricalContext` | The current historical year and `FiscalHistoricalMode` |
+| `FiscalAuthorityBinding` | Who may act for one institution |
+| `FiscalScopeBinding` | One institution's responsibility for one jurisdiction, subject scope, and mechanism |
+| `FiscalObserverBinding` | Who receives reports, about which institutions, at what confidence |
+| `FiscalAdoptionState` | The stage of one rule in one scope, with a generation that counts changes |
+| `FiscalActionRequest`, `FiscalAction` | One procedure step, submitted as a domain command |
+| `FiscalExecutionRequest` | An authorization to collect, remit, disburse, reserve, or return a quantity |
+| `FiscalExecutionEvidence` | The typed result an adapter writes after the real operation |
+| `FiscalExecutionReceiptPacket`, `FiscalExecutionReceipt` | A receipt request citing exact evidence versions, and the settled receipt |
+| `FiscalStrategicAggregate` | Totals for one accounting partition |
+| `FiscalProjection`, `FiscalReportFact` | One holder's report, with each total as a range |
+
+`FiscalAdoptionStage` runs `Promulgated`, `Communicated`, `Accepted`, `Implemented`, `Audited`, `Entrenched`, `Suspended`, and `Repealed`. Only `Implemented`, `Audited`, and `Entrenched` are operational (`is_operational`), and an assessment can open only under an operational adoption. A rule can be promulgated for a province and still not be operational there.
+
+## Coverage cells and explicit unknowns
+
+A [fiscal coverage cell](/en/reference/terminology/) (`FiscalCoverageCell`) is one period, region, and mechanism combination. The compiler builds every combination and resolves each one from the pack's `FiscalCoverageDeclaration` entries: the matching declaration with the highest `priority` wins. A cell with no match fails compilation, and so does a tie at the top priority, so file order never picks a historical reading.
+
+| `FiscalCoverageStatus` | Meaning | Declaration rule |
+| --- | --- | --- |
+| `Supported` | Cited definitions support direct simulation | Needs provenance and a rule or transition for the cell's mechanism in that region |
+| `ArchetypeFallback` | A comparative archetype stands in, with stated limits | Needs provenance and a rule or transition for the mechanism, possibly from another region |
+| `ExplicitUnknown` | The pack says it has no behavior for this cell | Carries no definitions |
+| `NotApplicable` | The mechanism does not apply here | Carries no definitions |
+
+The Ming pack has 8 periods, 8 regions, and 11 mechanisms, so 704 cells: 160 supported, 101 archetype fallback, and 443 explicit unknown. Of the unknowns, 425 come from the priority-0 default and 18 from `zheng_other_mechanisms`, a priority-60 declaration covering nine mechanisms in two regions of the Zheng period. Each `FiscalProvenance` entry names a citation, URL, claim scope, confidence, and at least one forbidden inference, such as "Do not infer actual receipts directly from statutory quotas."
+
+Coverage, provenance, confidence, and commutation policy are catalog metadata for your host, tools, and reviewers. The plugin's admission checks read rules, legal windows, jurisdictions, mechanisms, payment forms, and adoption stages.
+
+## How it runs: from liability to receipt
+
+<MermaidDiagram
+  label="Fiscal flow from an operational rule through assessment, authorization, external evidence, and receipt to aggregates and holder reports"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same flow."
+  definition={`flowchart TB
+    Adopt["Rule operational in a scope<br/>FiscalAdoptionState"] --> Assess["OpenAssessment<br/>amount owed for one cycle"]
+    Assess --> Remit["GrantRemission<br/>lowers what is owed"]
+    Assess --> Auth["AuthorizeExecution<br/>FiscalExecutionRequest"]
+    Auth --> Adapter["Host adapter moves goods<br/>in its own domain"]
+    Adapter --> Evidence["Evidence record<br/>FiscalExecutionEvidence payload"]
+    Evidence --> Packet["FiscalExecutionReceiptPacket<br/>cites exact versions"]
+    Packet --> Receipt["FiscalExecutionReceipt<br/>quantity and disposition from evidence"]
+    Remit --> Agg["Phase 12<br/>FiscalStrategicAggregate"]
+    Receipt --> Agg
+    Agg --> Report["Phase 13<br/>holder report as knowledge"]
+`}
+/>
+
+A rule adopted in a scope is the liability; an assessment fixes how much is owed for one accounting cycle. The engine runs the flow like this:
+
+1. **Install.** The scenario carries the compiled catalog (`CompiledFiscalCatalog::into_record`) and the starting state (`FiscalState::into_record`). Register `FiscalPlugin::new(evidence_kinds)`, adding `.with_authority_basis_kinds(kinds)` when bindings use acting actors. Activation rejects a binding whose basis kind is undeclared.
+2. **Submit.** Wrap a `FiscalActionRequest` with `fiscal_action_command` to get a [domain command](/en/tutorials/command-plugin/) for `apply_fiscal_action_v1`, and queue it with `Canwu::enqueue_command`; the legacy direct command path fails with `MixedCommandIngress`. The request carries an action ID, an authority binding ID, and the `expected_procedure_revision` it was built against.
+3. **Admit.** At the [boundary](/en/architecture/settlement/) that admits the command, the handler rejects a reused action ID (`IdempotencyConflict`), a full outcome log (`ValueOutOfRange`), and an issuer or scope outside the binding (`InvalidAuthority`); the engine records these as rejected commands. A stale `expected_procedure_revision` is different: it returns `DomainRecordVersionConflict`, which fails the whole boundary, leaves the command in the queue, and makes every later boundary fail the same way. A cited commutation quote must be an existing exact record version; a missing one returns `InvalidDomainRecord`, which also fails the boundary. The handler then schedules one internal `fiscal_action_v1` item of [canonical ingress](/en/reference/terminology/) (class `Decision`).
+4. **Settle (phase 7).** At the next boundary, `settle-fiscal-ingress-v1` runs in `DomainDeltaProposal`. It confirms the ingress came from that exact admitted command, re-checks an acting actor's basis, applies the action to a copy of the state, and validates the copy against the catalog. It records a `FiscalActionOutcome`, `Applied` or `Rejected` with a reason, and emits `canwu.fiscal.action_settled.v1`. A rejected action is kept as an outcome and the boundary still commits.
+5. **Receipts and context.** The same system settles `fiscal_execution_receipt_v1` (sent with `enqueue_execution_receipt`, class `Acknowledgement`, event `canwu.fiscal.execution_receipt_recorded.v1`) and `fiscal_historical_context_v1` (built with `fiscal_historical_context_ingress` and queued with `enqueue_plugin_ingress`, event `canwu.fiscal.historical_context_changed.v1`). A receipt whose evidence fails validation, or an action ingress with no admitted command behind it, fails the whole boundary.
+6. **Derive.** In phase 10 (`HistoricalCandidateEvaluation`), `evaluate-fiscal-transition-candidates-v1` recomputes reform candidates. In phase 12 (`StrategicAggregation`), `aggregate-fiscal-state-v1` recomputes aggregates. Each writes the state only when its result changed.
+7. **Report (phase 13).** `materialize-fiscal-reports-v1` runs in `PerspectiveAndReportMaterialization` and publishes one report per observer at every boundary that writes a new state version.
+
+All four systems are event-driven. In the Ming starter, the assessment command is admitted at boundary 1 and settles at boundary 2, the authorization takes boundaries 3 and 4, the adapter writes its evidence at boundary 5, and the receipt settles at boundary 6.
+
+### Actions
+
+| `FiscalAction` | Effect | Main checks |
+| --- | --- | --- |
+| `ChangeAdoption` | Creates an adoption or changes its stage; the generation increases on each change | The rule's mechanism matches the scope and the rule covers its jurisdiction; a new adoption needs the year inside the rule's legal window and cannot start a transition target at an operational stage |
+| `ApplyTransition` | Sets the target rules to `Implemented` in one jurisdiction and suspends the rules the transition supersedes there, in one action | Each target rule is bound once; target scopes share one jurisdiction; the transition is a current candidate there; the binding owns every target scope |
+| `OpenAssessment` | Records a quantity, unit, payment form, accounting cycle, and optional commutation quote | The year is in the rule's legal window; the adoption is operational; the rule allows the payment form; one assessment per scope, cycle, unit, and payment form |
+| `GrantRemission` | Lowers what is owed | Total remission stays within the assessed quantity |
+| `AuthorizeExecution` | Creates a `FiscalExecutionRequest` of kind `Collect`, `Remit`, `Disburse`, `Reserve`, or `Return` | The unit matches the assessment; source and target differ; the institution is one of them; `Collect` requests stay within the assessed quantity minus remissions |
+| `RecordAudit` | Records a finding with a `FiscalAuditSeverity` and evidence | The target is an assessment, request, or receipt |
+
+### Receipts
+
+A `FiscalExecutionReceiptPacket` holds only a receipt ID, a request ID, and 1 to 32 exact evidence versions. For each version, the plugin checks that its kind is in `FiscalState::execution_evidence_kinds`, that the exact version exists, and that its payload decodes as `FiscalExecutionEvidence` whose request, unit, payment form, execution kind, resource, source, and target match the request. All cited records share one disposition, their total stays within the requested quantity, and each was established no earlier than the request. The receipt's quantity and `FiscalReceiptDisposition` come from that evidence. `Fulfilled` and `Partial` count toward the totals; `Rejected` and `Excused` carry zero. Within one fiscal state, each exact version and each `(evidence kind, external_operation_id)` pair settles at most one receipt. Resending the same receipt with the same content changes nothing.
+
+`FiscalStrategicAggregate` partitions totals by institution, mechanism, scope, accounting cycle, unit, and payment form. Accounting cycle IDs belong to your host and are separate from historical periods. It keeps `assessed`, `remission_granted`, `collected`, `remitted`, `disbursed`, `reserved`, and `returned` apart, and computes `outstanding` as assessed minus remission minus collected.
+
+### Procedure revision
+
+`FiscalState::procedure_revision` rises by one for every settled action (applied or rejected), every newly recorded receipt, and every context change. Candidate and aggregate refreshes leave it alone, so they never make a pending decision stale. Within one boundary, the first input that changes the revision consumes it, and any later fiscal action in that boundary settles as a stale rejection. Submit one fiscal action per boundary, and build the next request from the revision after it settles; a request built against an older revision fails its boundary at admission (see step 3).
+
+### Historical context and reform
+
+The [fiscal historical context](/en/reference/terminology/) holds `year` and `mode`. `RecordedBaseline` and `ResearchReplay` test a transition's `observed_window`; `Counterfactual` tests its `eligibility_window`. A transition becomes a `FiscalTransitionCandidate` for a jurisdiction when the year fits, the jurisdiction has scopes for the target mechanisms, one of the transition's source rules (if it names any) is adopted there and not repealed, the targets are not all operational yet, and prerequisite transitions have operational targets there. A candidate applies only through an authorized `ApplyTransition`. The packet's year must stay inside the pack's scope.
+
+## Authority
+
+`FiscalAuthorityBinding` names an `institution` (an `EntityRef`), a standing `authorized_actor`, and optionally an `acting_actor` with an `authority_basis`. Admission accepts two issuer shapes:
+
+| Issuer | Admitted when |
+| --- | --- |
+| `Issuer::Actor(actor)`, no decision controller | `actor` is the binding's authorized or acting actor |
+| `Issuer::Human` or `Issuer::Ai`, equal to the validated `decision_controller_id` | The command subject in `CommandAuthority` is the binding's institution, and the decision origin is `DecisionOrigin::Actor` naming a bound actor, or `DecisionOrigin::Institution` for that institution with a bound responsible actor |
+
+The binding's institution must also own the action's scope; for `ApplyTransition` it must own every target scope. An [acting actor](/en/reference/terminology/) needs an exact [authority basis](/en/reference/terminology/) version, of a kind declared with `with_authority_basis_kinds`, and must differ from the authorized actor. The acting actor is admitted while that version is still the current version of its record, and settlement checks it again in phase 7. Once the record advances or retires, the acting actor fails with `FISCAL_ACTING_BASIS_NOT_CURRENT` (`InvalidAuthority`) and the authorized actor is still admitted.
+
+Authority, scope, and observer bindings come from the starting scenario; no fiscal action edits them. For institutions that decide through seats, votes, and procedure stages, see [Society, culture, and law](/en/architecture/culture-law/).
+
+## Knowledge and visibility
+
+`FiscalState` is authoritative state. Your host can read it with trusted reads such as `typed_domain_record(&fiscal_state_reference())`. Players and agents should read the fiscal report, which is [holder-relative knowledge](/en/developer/reading-state/).
+
+A `FiscalObserverBinding` names an actor, its person holder (`KnowledgeHolderRef::Person` for the same actor), the institutions it can see, and a `confidence_per_mille` up to 1,000. For each observer, phase 13 publishes one knowledge record with schema `fiscal_report_knowledge_schema_id()` (kind `canwu-fiscal` / `fiscal_report`, version 1). The record's subject is the fiscal state record, its origin method is `fiscal_authority_report_v1` citing the exact new state version, and it supersedes that observer's previous report. Its payload is a `FiscalProjection` with one `FiscalReportFact` per visible aggregate, where assessed, collected, and outstanding are each a `FiscalAmountEstimate` range.
+
+| `confidence_per_mille` | Bucket width for a value whose magnitude is M |
+| --- | --- |
+| 900 to 1,000 | M / 100 |
+| 750 to 899 | M / 10 |
+| 500 to 749 | M / 2 |
+| below 500 | M |
+
+M is the largest power of ten at or below the value, and every width is at least 2, so each total reads as a range. At 850, an assessed 100 reads as 100–109 and a collected 70 as 70–71. An actor reads its report with `canwu.viewer_for_actor(actor)` and a `KnowledgeQuery` for `fiscal_report_knowledge_schema_id()`.
+
+## Randomness, persistence, and replay
+
+The fiscal extension draws no random numbers and declares no random streams. Report ranges come from integer bucketing, and outcomes such as partial collection arrive as evidence from your adapter.
+
+Fiscal state lives in two domain records, reached with `fiscal_catalog_reference()` and `fiscal_state_reference()`. The catalog record is create-only. The state record references the catalog and marks the exact evidence versions, created during the run, that its receipts and commutation quotes cite as payload-required, so the engine keeps those payloads loadable. Each read through `load_fiscal_catalog` or `load_fiscal_state` validates the catalog, the state, and the match between the stored record and its decoded payload.
+
+Snapshots and [exact replay](/en/developer/persistence/) need the same plugin identity: name `canwu-fiscal`, version `0.1.0-experimental`, and its semantic hash. Replay consumes the recorded commands and ingress, so it never reruns a player or AI choice. The reference integration's `restore_ming_fiscal_reference` and `replay_ming_fiscal_reference` register the same three plugins and then run `validate_ming_fiscal_reference`, which recomputes aggregates and candidates and re-matches every receipt against its evidence.
+
+## What your application supplies
+
+- A content pack: your own `FiscalContentPack` (serde JSON works) or the Ming pack, plus the `FiscalContentSelection`.
+- The starting `FiscalState`: year and mode, evidence kinds, authority, scope, and observer bindings, and the starting adoption stages.
+- Institution entities and actors in the scenario, such as a government, an army, or organizations.
+- An execution adapter that performs the real transfer in your resource, market, production, or logistics domain, writes a typed evidence record, and calls `enqueue_execution_receipt`.
+- Authority basis records and their kinds, if you use acting actors.
+- The decisions: which actions to submit and when, quantities, units, accounting cycle IDs, and when to change the historical context.
+- A semantic validator for restore, if you want the checks `validate_ming_fiscal_reference` performs, and the UI that shows reports.
+
+## Limits and budgets
+
+| Constant | Value | Caps |
+| --- | ---: | --- |
+| `MAX_FISCAL_ASSESSMENTS` | 4,096 | Assessments; also remissions, audits, and aggregates |
+| `MAX_FISCAL_EXECUTION_REQUESTS` | 8,192 | Execution requests; also adoptions |
+| `MAX_FISCAL_EXECUTION_RECEIPTS` | 8,192 | Receipts |
+| `MAX_FISCAL_ACTION_OUTCOMES` | 16,384 | Settled action outcomes; admission rejects new actions when full |
+| `MAX_FISCAL_RUNTIME_BINDINGS` | 4,096 | Authority bindings and scope bindings |
+| `MAX_FISCAL_OBSERVERS` | 64 | Observer bindings |
+| `MAX_FISCAL_EVIDENCE_KINDS` | 32 | Approved evidence kinds |
+| `MAX_FISCAL_EVIDENCE_PER_RECORD` | 32 | Evidence versions per receipt or audit |
+| `MAX_FISCAL_STATE_JSON_BYTES` | 32 MiB | Serialized fiscal state |
+
+Catalog caps (periods, regions, definitions, coverage cells, references per definition, pack size) are listed in [`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/model.rs).
+
+Aggregate rebuilds use single-pass indexes. A larger campaign needs separate runs or shards; the crate has no partition or archive API, and your host owns operation-ID deduplication across shards.
+
+## Try it
+
+```shell
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-1581
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence monthly
+```
+
+Each run prints its checkpoint hash and writes a trace under `artifacts/traces/ming-fiscal-reference/<fixture>/`. The last command continues for 365 simulation days after the sample cycle, one monthly boundary per 30 days. The [Ming fiscal case](/en/tutorials/cases/ming-fiscal/) walks through the sample cycle, the three starts, the trace, and the options. To see the contracts on this page hold, run the tests:
+
+```shell
+cargo test -p canwu-ming-fiscal-reference --test reference
+cargo test -p canwu-ming-fiscal --test pack
+cargo test -p canwu-fiscal --test gap_g13_fiscal_acting_actor
+```
+
+The `reference` tests cover stale rejection, the Single Whip transition, holder reports, forged ingress, receipt reuse, and snapshot and replay; `pack` covers coverage and compilation; `gap_g13_fiscal_acting_actor` covers acting actors.
+
+## Further reading
+
+- [Settlement system](/en/architecture/settlement/): the fourteen phases and when writes become visible
+- [Read and present state safely](/en/developer/reading-state/): viewers and holder knowledge queries
+- [Save, replay, and fork](/en/developer/persistence/): snapshots, journals, and exact replay
+- [Extend with plugins](/en/developer/extensions/): plugins, domain records, and boundary systems
+- [Grain, production, and military supply](/en/tutorials/cases/production-economy/): a resource domain where an execution adapter can perform the real transfer
+- Repository notes: [canwu-fiscal README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/README.md) and the [Ming fiscal case note](https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md)

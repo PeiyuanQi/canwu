@@ -1,195 +1,219 @@
 ---
 title: A warlord asks a neighbor for military aid
-description: Handle an aid request for an ongoing battle through a persistent, explainable, exactly replayable decision chain.
+description: A controller scores an aid request with a utility policy, the chosen option becomes an ordinary command, and the decision replays from its trace.
 sidebar:
   order: 2
   label: Warlord aid decision
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../../components/MermaidDiagram.astro";
 
-## 1. What problem are we solving?
+## The scenario
 
-Imagine that you are building a historical simulation set during a period of
-competing warlords. Warlord A is already fighting and asks neighboring Warlord B
-to send troops. At first, Warlord B knows that they share an enemy but cannot
-confirm that the supply route is safe. Only after new intelligence arrives
-should “send aid” become an actionable choice.
+Warlord A is fighting and asks neighboring Warlord B to send troops. At first
+Warlord B knows they share an enemy but has no confirmation that the supply
+route is safe, so the only option is to decline. When the route is confirmed,
+"send aid" becomes a second option. Warlord B's AI scores both options, picks
+one, and the choice moves Warlord B's army.
 
-The goal is not simply to make an AI return yes or no. You need a decision chain
-that can safely enter the live simulation:
+The question the example answers: how does an AI, player, or model choose an
+action in a way that is checked against the actor's authority, recorded, and
+replayed without asking the decision maker again?
 
-- update the available choices when the known facts change;
-- allow an AI, player, or external model to select only an existing option,
-  never invent an arbitrary command;
-- turn the selected aid option into a command under the controller's persisted
-  authority;
-- record attempts, scores, and outcomes so restoration and exact replay never
-  have to ask the decision maker again.
+The setting is a synthetic, Beiyang-era-style fixture. It does not depict
+named people or recorded events.
 
-This is a synthetic Beiyang-era-style fixture, not a reconstruction of named people, institutions, or documented events. Personality,
-intelligence sources, and the historical meaning of “worth aiding” remain
-domain concerns. Canwu provides the boundaries among decisions, authority,
-commands, and durable evidence.
+## What this example shows
 
-## 2. How does the example work?
+- A [decision ticket](/en/reference/terminology/) (`DecisionTicket`): one
+  persisted question with a versioned list of decision options
+  (`DecisionOption`).
+- A [controller](/en/reference/terminology/) (`DecisionControllerBinding`):
+  who decides, with which policy, and on whose authority.
+- A utility policy (`WeightedUtilityPolicy`) that scores options with integer
+  weights and records each factor in a decision trace (`DecisionTrace`).
+- The selected option turning into a [command](/en/developer/integration/)
+  that goes through the same validation as any other command.
+- Snapshot restore and [exact replay](/en/developer/persistence/) of the whole
+  decision.
 
-The example composes several systems:
-
-| System | Role in this example | Related documentation |
-| --- | --- | --- |
-| Decision tickets, controllers, and policies | Store the question, current options, decision identity, and scoring process | The walkthrough below |
-| Authority and command ingress | Turn the selected option into a validated command | [Architecture overview](/en/architecture/), [Integrate and drive the simulation](/en/developer/integration/) |
-| Transaction | Admit decision ingress, persist the trace, and execute the derived command | [Settlement system](/en/architecture/settlement/) |
-| Actor-relative information | Build context from facts visible to Warlord B instead of leaking omniscient state | [Read and present state safely](/en/developer/reading-state/) |
-| Persistence and exact replay | Retain tickets, attempts, traces, and command evidence | [Save, replay, and fork](/en/developer/persistence/) |
-
-Start by running the example:
+## Run it
 
 ```shell
 cargo run -p canwu-api --example decision_ticket
 ```
 
-The program prints a complete `DecisionTrace`. `WeightedUtilityPolicy`
-selects `send-aid`, and the trace records both the total score and each factor's
-contribution for every option. The example then restores a snapshot and runs an
-exact replay, proving that both paths produce the same final snapshot.
-
-### Implementation path
+The program prints the decision trace as JSON, then confirms persistence. The
+output below is trimmed; the factor lists are shown for `send-aid` only:
 
 ```text
-facts visible to Warlord B
-  -> open a DecisionTicket
-  -> new intelligence arrives; ReplaceOptions
-  -> utility policy selects an existing option ID
-  -> controller derives issuer and authority
-  -> ordinary Command validation and execution
-  -> persisted DecisionTrace
+{
+  "id": 1,
+  "ticket_id": 1,
+  "ticket_version": 2,
+  "controller_id": "warlord-b-ai",
+  "policy": { "kind": "utility", "id": "aid-utility", "version": "1" },
+  "outcome": { "type": "selected", "option_id": "send-aid" },
+  "summary": "utility policy selected send-aid",
+  "evaluations": [
+    { "option_id": "decline", "available": true, "score": -40, ... },
+    {
+      "option_id": "send-aid",
+      "available": true,
+      "score": 250,
+      "factors": [
+        { "factor": "alliance", "value": 90, "weight": 3, "contribution": 270 },
+        { "factor": "home_defense", "value": -20, "weight": 1, "contribution": -20 }
+      ]
+    }
+  ],
+  "command_request_id": 1
+}
+snapshot_restore=ok exact_replay=ok
 ```
 
-<Steps>
-1. Register the `warlord-b-ai` controller and bind it to a policy identity, responsible actor, and controllable army.
-2. Open the aid-request ticket. The supply route is not confirmed, so declining is the only initial option.
-3. Once the route is confirmed, use `DecisionMutation::ReplaceOptions` to update the context and add `send-aid`.
-4. Use `WeightedUtilityPolicy` to calculate deterministic integer scores for the current options.
-5. Call `drive_decision()` to enqueue a resolution. The next canonical boundary persists the trace and submits the selected command through ordinary command admission.
-6. Save, restore, and exactly replay the run without invoking the policy again.
-</Steps>
+`ticket_version` is 2 because the options were replaced once. `decline`
+scores `-40 × 3 + 80 × 1 = -40`; `send-aid` scores `90 × 3 − 20 × 1 = 250`.
 
-### Step one: bind decision identity to action authority
+## How the decision flows
+
+<MermaidDiagram
+  label="Sequence of the warlord aid decision across three boundaries"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the walkthrough below describes the same steps."
+  renderFailureMessage="Diagram preview unavailable; the walkthrough below describes the same steps."
+  definition={`sequenceDiagram
+    participant Host as Host application
+    participant Canwu
+    participant Policy as WeightedUtilityPolicy
+    Host->>Canwu: register controller, open ticket (decline only)
+    Note over Canwu: boundary 1: ticket version 1
+    Host->>Canwu: ReplaceOptions (route confirmed)
+    Note over Canwu: boundary 2: ticket version 2
+    Host->>Canwu: drive_decision(policy)
+    Canwu->>Policy: score ticket version 2
+    Policy-->>Canwu: select send-aid
+    Note over Canwu: boundary 3: record trace, run the move command
+`}
+/>
+
+## Walkthrough
+
+All code is in
+[`decision_ticket.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/decision_ticket.rs).
+It uses the deprecated compatibility scenario from `Canwu::demo(1918)`, which
+supplies a commander, an army, and territories through `Canwu::demo_ids()`.
+
+### 1. Register the controller
+
+`open_aid_request` binds the controller `warlord-b-ai` to a policy identity,
+the commander whose authority it uses, and the army it may command:
 
 ```rust
 let controller = DecisionControllerBinding::new(
     "warlord-b-ai",
-    DecisionPolicyIdentity::new(
-        DecisionPolicyKind::Utility,
-        "aid-utility",
-        "1",
-    ),
-    DecisionAuthority::Actor { actor: ids.commander },
+    DecisionPolicyIdentity::new(DecisionPolicyKind::Utility, "aid-utility", "1"),
+    DecisionAuthority::Actor {
+        actor: ids.commander,
+    },
 )
 .with_command_subject(EntityRef::Army(ids.army));
 ```
 
-The controller is not the domain AI's “brain.” It persists three things: who
-decides, which policy is used, and whose authority may control which subject
-after an option is selected. The policy receives no issuer, seat, permission
-profile, or mutable world reference.
+It queues the binding as `DecisionMutation::RegisterController`. The policy
+itself receives only the ticket. The issuer, authority, and command subject
+stay in the persisted binding.
 
-### Step two: store one explicit question in a ticket
+### 2. Open the ticket with one option
 
-`DecisionTicketDraft` contains a stable definition, decision maker,
-controller, deadline, explicit context, and current options. The example starts
-with only `decline`:
+The same function queues `DecisionMutation::Open` with a
+`DecisionTicketDraft`. The context records what Warlord B knows, and the only
+option is `decline`:
 
 ```rust
-DecisionMutation::Open {
-    ticket: DecisionTicketDraft {
-        id: DecisionTicketId::new(1),
-        definition: "beiyang.request-military-aid".to_owned(),
-        decision_maker: EntityRef::Person(ids.commander),
-        assigned_controller: "warlord-b-ai".to_owned(),
-        summary: "Neighboring warlord requests immediate military aid".to_owned(),
-        context: DecisionContext::new(
-            "beiyang.aid-request.v1",
-            json!({ "common_enemy": true }),
-        ),
-        options: vec![DecisionOption::new("decline", "Decline aid")],
-        deadline: Some(now + SimDuration::days(2)),
+context: DecisionContext::new(
+    "beiyang.aid-request.v1",
+    json!({
+        "requester": "warlord-a",
+        "battle": "ongoing-front",
+        "common_enemy": true
+    }),
+),
+options: vec![DecisionOption {
+    action: DecisionAction::None,
+    utility_inputs: BTreeMap::from([
+        ("home_defense".to_owned(), 80),
+        ("alliance".to_owned(), -40),
+    ]),
+    ..DecisionOption::new("decline", "Decline aid")
+}],
+deadline: Some(now + SimDuration::days(2)),
+```
+
+Both mutations go through `enqueue_decision`, and `step_canonical()` settles
+the boundary that opens the ticket at version 1. In a real application, build
+the context from Warlord B's [actor knowledge](/en/developer/reading-state/)
+so the policy sees only what Warlord B knows.
+
+### 3. Replace the options when the route is confirmed
+
+`refresh_aid_options` sends `DecisionMutation::ReplaceOptions` with
+`expected_version: 1`, a context that adds `"route_confirmed": true`, and two
+options. The new `send-aid` option carries a serialized command:
+
+```rust
+DecisionOption {
+    action: DecisionAction::Command {
+        command: serde_json::to_value(Command::OrderMovement {
+            subject: EntityRef::Army(ids.army),
+            destination: ids.eastern_territory,
+            cargo: Vec::new(),
+        })?,
     },
-}
+    utility_inputs: BTreeMap::from([
+        ("home_defense".to_owned(), -20),
+        ("alliance".to_owned(), 90),
+    ]),
+    ..DecisionOption::new("send-aid", "Send the neighboring army")
+},
 ```
 
-A production application should construct this context from Warlord B's
-knowledge or observations. It should not hand omniscient world state to the
-policy.
+The ticket moves to version 2. A Human, External, or LLM answer prepared for
+version 1 is rejected, so a stale answer cannot select from the new option
+set. In this fixture the route confirmation is authored scenario input; a
+research application would cite an evidence record for it.
 
-### Step three: change the options when new intelligence arrives
+`Command::OrderMovement` is a legacy command variant kept for this
+compatibility fixture. New applications encode `MovementCommand` from
+`canwu-reference-world` or their own plugin command; see
+[Move an army](/en/tutorials/move-army/). A ticket option can carry either,
+because it stores the command as JSON.
 
-The host supplies route confirmation as an authored scenario observation in this fixture; it is not linked to historical source evidence. A research application should attach an evidence record before treating it as authoritative. The application submits an option replacement guarded by `expected_version`:
+### 4. Score the options
 
-```rust
-DecisionMutation::ReplaceOptions {
-    ticket_id: DecisionTicketId::new(1),
-    expected_version: 1,
-    context: DecisionContext::new(
-        "beiyang.aid-request.v1",
-        json!({ "common_enemy": true, "route_confirmed": true }),
-    ),
-    options: vec![decline, send_aid],
-}
-```
-
-The ticket version increments. If a Human, External, or LLM policy submits a
-response for the previous version, Canwu rejects it instead of applying a stale
-answer to the new option set.
-
-The `send-aid` option may contain a serialized existing Canwu command, but the
-policy can return only the option ID. The runnable `canwu-api` example below is
-an intentional compatibility fixture, so it uses the retained legacy
-`Command::OrderMovement` variant while exercising the generic decision framework:
-
-```rust
-DecisionOption::new("send-aid", "Send the neighboring army").with_command(
-    serde_json::to_value(Command::OrderMovement {
-        subject: EntityRef::Army(ids.army),
-        destination: ids.eastern_territory,
-        cargo: Vec::new(),
-    })?,
-)
-```
-
-New applications should encode `MovementCommand` through
-`canwu-reference-world`, or define an equivalent plugin command in their own
-domain crate. See [Move an army](/en/tutorials/move-army/) for the current
-integration path. Decision tickets accept either form because they persist a
-serialized command selected under the controller's authority.
-
-### Step four: explain why the utility policy sends aid
+`resolve_aid_request` builds the policy:
 
 ```rust
 let policy = WeightedUtilityPolicy::new(
     "aid-utility",
     "1",
     UtilityProfile {
-        weights: BTreeMap::from([
-            ("alliance".to_owned(), 3),
-            ("home_defense".to_owned(), 1),
-        ]),
+        weights: BTreeMap::from([("alliance".to_owned(), 3), ("home_defense".to_owned(), 1)]),
     },
 );
 ```
 
-Each option supplies domain-defined integer inputs. The generic evaluator
-computes `value * weight`, resolves ties by stable option ID, and records each
-factor's contribution in the trace. The engine does not understand the
-historical meaning of alliance credibility or home defense; those meanings and
-weights belong to the domain or policy.
+For each available option, the score is the sum of `value * weight` over its
+`utility_inputs`. A factor without a weight counts as weight 0. The highest
+score wins, and equal scores go to the lowest option ID. What "alliance" and
+"home defense" mean, and how much they weigh, is up to your domain code.
 
-### Step five: let the policy choose and the controller act
+### 5. Resolve the ticket and run the command
 
 ```rust
-canwu.drive_decision(
+let evaluation = canwu.drive_decision(
     canwu.time(),
     0,
     DecisionRequestId::new(4),
@@ -197,76 +221,79 @@ canwu.drive_decision(
     DecisionTicketId::new(1),
     &policy,
 )?;
-canwu.step_canonical()?;
+assert!(matches!(evaluation, DecisionEvaluation::Prepared(_)));
+canwu.step_canonical()?.expect("decision resolution boundary");
 ```
 
-Two boundaries remain in place:
+`drive_decision` runs the policy against the current ticket and queues the
+result as decision ingress. At the next boundary, Canwu records the trace and
+submits the `send-aid` command with the controller's authority. That command
+still passes the normal authority, revision, time, and domain checks. The
+policy returns only an option ID, so swapping in a player, external service,
+or LLM does not let it write new commands or act as someone else.
 
-- The policy can select only an existing, unblocked ticket option.
-- The controller derives command authority from its persisted binding; the
-  command still passes Canwu's ordinary authority, revision, time, and domain
-  validation.
+### 6. Check persistence and replay
 
-Replacing the utility policy with a player, external service, or LLM therefore
-does not grant arbitrary command creation or a way to forge Warlord B's
-authority.
+`verify_persistence_and_replay` restores the snapshot from JSON and rebuilds
+the run with `Canwu::replay_from_journal`, asserting that both match the
+original snapshot. Replay uses the recorded decision ingress and attempts; it
+does not call the policy.
 
-### Step six: persist the trace and reuse it during replay
+To read results in your own code, use `Canwu::decision_trace(id)` for a trace
+and `Canwu::decision_attempt(request_id)` for the accepted or rejected result
+of one decision request. A request with a stale revision or ticket version, or
+for a closed ticket, is recorded as a rejected decision attempt
+(`DecisionAttemptRecord`), and the simulation keeps running.
 
-`decision_attempts()` returns the accepted or rejected result of every
-canonical admission. A stale revision, stale ticket version, or closed ticket
-becomes a persisted rejection instead of repeatedly rolling back and blocking
-the simulation. `decision_traces()` returns successful outcomes, ticket
-versions, policy identities, utility breakdowns, external evidence, and command
-request IDs.
+## What to notice
 
-Snapshots retain controllers, tickets, current options, deadlines, attempts,
-and traces. Exact replay consumes the recorded decision ingress, decision
-attempt, and command attempt; it never asks the player, external service, or
-model to decide again. To compare another policy, fork from a snapshot and
-create new decision ingress. That is an alternative reality, not exact replay.
+- The policy picks from options that already exist. It cannot add an option or
+  change a command.
+- Changing the options bumps the ticket version, which invalidates answers
+  prepared for the old version.
+- The trace explains the choice factor by factor, and replay reuses it.
+- To test a different policy on the same situation, [`fork`](/en/developer/persistence/)
+  from a snapshot and submit new decision ingress. The result is an
+  [alternative reality](/en/reference/terminology/), separate from exact
+  replay.
 
-You can substitute several decision styles:
+## Try changing
 
-- `WeightedUtilityPolicy` for deterministic strategic, personality, or doctrine scores;
-- `OrderedRulePolicy` for ordered selection or deferral rules;
-- `GuardedUtilityPolicy` for ordered guard rules that select, defer, or exclude options before utility scoring, with an optional random tie-break among near-equivalent top scores;
-- `QueuedHumanPolicy` for a UI or player response bound to the ticket version;
-- `QueuedExternalPolicy` for a host adapter that calls an external decision service;
-- `QueuedLlmPolicy` for model selection over context and option descriptions without exposing command actions.
+- **Weights.** Set `home_defense` to 5. `decline` then scores
+  `-120 + 400 = 280` and beats `send-aid` (`270 - 100 = 170`).
+- **Policy.** Replace `WeightedUtilityPolicy` with another policy type from
+  `canwu-api`:
+  - `OrderedRulePolicy` selects or defers by ordered rules.
+  - `GuardedUtilityPolicy` runs ordered guards that can select, defer, or
+    exclude options, then scores the rest, with an optional random tie-break
+    between near-equal top scores (see
+    [Random decisions and LLM selection](/en/tutorials/cases/uncertainty-resolution/)).
+    Its trace records the decision stage (`Guard`, `Utility`, or `Random`) and
+    the guards that fired.
+  - `QueuedHumanPolicy`, `QueuedExternalPolicy`, and `QueuedLlmPolicy` wait
+    for a player, an external service, or a model to answer with an option ID
+    for the current ticket version.
+- **Unavailable decision maker.** If Warlord B dies or is captured, Canwu
+  cancels the open tickets with Warlord B as decision maker at the end of that
+  boundary and refuses new ones while Warlord B stays unavailable. If only the
+  controller's authority person becomes unavailable, Canwu cancels that
+  controller's open tickets instead. To carry on, open a new ticket for an
+  available controller and set `parent_ticket` to the cancelled ticket; the
+  link is copied onto the new trace. See
+  [Integrate and drive the simulation](/en/developer/integration/).
+- **Seat succession.** Bind Warlord B's controller to a seat such as
+  `faction-b.leader` with `with_seat`. When Warlord B dies, bind the
+  successor's controller to the same seat and open a new ticket with the
+  successor as decision maker and `parent_ticket` pointing at the cancelled
+  ticket. Canwu accepts the link because both controllers hold the same seat. A
+  parent ticket from a different decision maker in a different seat is
+  rejected.
 
-Since 0.12.0, the trace records the decision stage (`Guard`, `Utility`, or
-`Random`) and the guards that fired. A ticket can also name a `parent_ticket`:
-a terminal ticket that it follows up, either of exactly the same decision
-maker or, since 0.13.0, one whose controller held the same seat as the new
-ticket's controller.
-
-If Warlord B dies or is captured, Canwu cancels the open tickets where Warlord B
-is the decision maker at the end of that boundary, and refuses new tickets for
-Warlord B while they remain unavailable. If only a controller's authority
-person, the person the controller acts for, becomes unavailable, Canwu cancels
-that controller's open tickets and refuses new ones for it. To continue such a
-decision, open a new ticket for an available controller and set
-`parent_ticket` to the cancelled ticket; the link is copied onto the new trace.
-
-Since 0.13.0, the decision can also pass to Warlord B's successor through seat
-succession. Suppose Warlord B's controller is bound to the seat
-`faction-b.leader`. When Warlord B dies, bind the successor's controller to that
-same seat, open a new ticket with the successor as decision maker, and set
-`parent_ticket` to the cancelled ticket. Canwu accepts the parent because both
-controllers are bound to the same non-empty seat, and the new trace keeps the
-lineage. A parent with a different decision maker whose controller sits in
-another seat is still rejected.
-
-## 3. Where is the code?
-
-Read the runnable example first to see the complete call order. Then inspect the
-framework tests to see how ticket versions, authority, persistence, replay, and
-failure paths are verified.
+## Source
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/decision_ticket.rs" icon="external">
   Open the runnable example
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/tests/decision_framework.rs" variant="secondary" icon="external">
-  Inspect the decision framework tests
+  Read the decision framework tests
 </LinkButton>

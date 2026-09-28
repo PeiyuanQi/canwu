@@ -1,125 +1,232 @@
 ---
 title: 中央赈粮令与多机构原子执行
-description: 用 manifest、跨插件规范化输入、同边界原子提交和只读审计模拟一次中央赈粮令。
+description: 中央机构签发赈粮令，国库和县级粮务机构各自登记执行结果，中央审计通过后两边一起提交，否则一起回滚。
 sidebar:
-  order: 2
+  order: 4
   label: 中央赈粮令
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-## 1. 要解决什么问题
+## 场景
 
-假设你正在制作一个南明时期的历史模拟。中央赈济机构签发一份赈粮令，国库
-负责拨粮，县级粮务机构负责在地方登记执行。中央不能直接替两个机构写状态，
-还必须知道：双方是否都执行了同一份命令、版本是否正确、结果是否完整。
+南明风格的场景里，中央赈济机构签发一份赈粮令：国库拨出 600 单位粮食，县级粮务机构
+登记地方执行情况。中央机构可以读取两个机构的记录，但只能写自己的状态；它需要确认
+两边执行的是同一份赈粮令，结果也符合预期。
 
-这个案例把问题缩小成一条可验证的权力链：
+这个示例回答的问题是：多个插件各自拥有状态，怎样共同执行一份赈粮令，做到要么全部
+提交、要么整步回滚？
 
-- 中央机构发布一份带有参与者契约的 manifest；
-- 国库和县级机构各自拥有自己的领域记录；
-- 两个机构在同一个 transaction 中完成原子提交；
-- 中央的只读审计在缺少任何一方时拒绝整个 transaction；
-- 保存、恢复和 exact replay 不依赖重新询问外部决策者。
+机构名称只是示例代码里的标签。参伍没有内置朝廷、部院或州县类型，上层应用自行建模
+自己的机构。
 
-历史名称只是上层应用的数据。参伍不内置“皇帝”“尚书”“知县”或固定官僚
-树；应用可以用人物、席位、机构和委托权限（delegated authority）组合出南明、清、法国
-封建制度或其他政治体系。
+## 示例涉及的引擎部件
 
-## 2. 案例如何运行
+- 三个[模拟插件](/developer/extensions/)（`SimulationPlugin`），各自拥有一种带类型的
+  [领域记录](/reference/terminology/)（`DomainRecordType`）。
+- 在同一边界的第 7、10、12 结算阶段运行的[边界系统](/architecture/settlement/)
+  （`BoundarySystemContract`）。
+- 插件之间通过[规范化输入](/architecture/events/)（canonical ingress）传递工作，
+  使用 `BoundaryDirective::SchedulePluginIngress`。
+- [原子提交](/architecture/settlement/)：任一系统出错，本边界的所有写入一起回滚。
+- 使用同一组插件完成快照恢复和[精确重放](/developer/persistence/)。
 
-| 模拟插件 | 拥有的状态 | 边界系统 |
-| --- | --- | --- |
-| `case-relief-central` | `ReliefOrder` manifest | `publish-order`、`audit-order` |
-| `case-relief-treasury` | 国库 `ReliefAction` | `prepare-treasury` |
-| `case-relief-county` | 县级粮务 `ReliefAction` | `prepare-county` |
-
-先运行示例：
+## 运行
 
 ```shell
 cargo run -p canwu-api --example governance_transition
 ```
 
-程序会先发布中央 manifest。它发出的两个零延迟插件输入不会在同一个
-系统调用中重入，而是在下一个结算边界（transaction）才被准入。随后国库和县级系统各自
-准备 600 单位粮食的执行记录，中央审计验证双方的 owner、版本、状态和
-post-state hash，程序最后确认精确重放与原始快照一致。
-
-### 实现流程
+输出：
 
 ```text
-中央 issue ingress
-  -> publish-order 写入 manifest
-  -> 生成国库 / 县级 execute ingress
-  -> 下一个结算边界准入双方输入
-  -> 两个 owner 在 phase 10 准备记录
-  -> 中央 phase 12 只读审计
-  -> 原子提交或完整回滚
+relief_order=relief-order-1646 treasury_grain=600 county_grain=600 exact_replay=ok
 ```
 
-<Steps>
-1. 为中央、国库和县级机构注册三个 simulation plugin，并分别注册它们拥有的 domain schema。
-2. 通过中央的 canonical ingress 提交 `relief-order-1646`。
-3. 让中央 `publish-order` 创建 manifest，并声明两个目标 plugin 的 `execute-relief-order` ingress。
-4. 让国库和县级 `prepare-*` 系统只消费各自的 ingress，验证 manifest 后以 `SameBoundary` 可见性提交自己的记录。
-5. 让中央 `audit-order` 读取双方记录和 manifest；任一记录缺失、owner 不符、版本错误或 hash 不符都会使 transaction 失败。
-6. 保存 snapshot，恢复并执行 exact replay，确认同一组输入得到同一份权威状态。
-</Steps>
+只有 `main` 中的断言全部通过后才会打印这一行：第一个边界生成两条输入，第二个边界
+提交两条记录，恢复的快照和重放的运行都与原运行一致。
 
-### Manifest 是权力链的契约
+## 赈粮令的流转
 
-`ReliefOrder` 不是参伍的固定政治对象，而是中央 plugin 注册的 typed domain
-record。它声明每个执行者的：
+<MermaidDiagram
+  label="中央赈粮令跨两个结算边界的时序"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的代码走读描述了同样的步骤。"
+  renderFailureMessage="图表预览不可用；下文的代码走读描述了同样的步骤。"
+  definition={`sequenceDiagram
+    participant Host as 上层应用
+    participant Central as case-relief-central
+    participant Treasury as case-relief-treasury
+    participant County as case-relief-county
+    Host->>Central: issue-relief-order
+    Note over Central: 边界 1 第 7 阶段：publish-order 写入 ReliefOrder 清单
+    Central->>Treasury: execute-relief-order
+    Central->>County: execute-relief-order
+    Note over Treasury,County: 边界 2 第 10 阶段：两个机构各自创建 ReliefAction
+    Note over Central: 边界 2 第 12 阶段：audit-order 核对两条记录
+    Note over Central,County: 全部通过则提交，任一出错则整个边界回滚
+`}
+/>
 
-- plugin owner；
-- boundary system 名称；
-- 预期版本；
-- disposition；
-- post-state hash。
+## 代码走读
 
-这样中央可以审计“谁应该做什么”，但不会越权写入国库或县级状态。每个执行者
-仍然通过自己的 plugin 写入自己的 domain record。
+代码都在
+[`governance_transition.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs)
+中，只依赖 `canwu-api`。
 
-### 为什么两个执行系统都需要模拟
+### 1. 三个插件，三种记录
 
-如果只有中央一个系统直接写完所有结果，游戏仍然可以显示结果，但无法表现：
+| 插件 | 拥有的记录 | 边界系统 |
+| --- | --- | --- |
+| `case-relief-central` | `ReliefOrder` 清单（`case.relief` / `order`） | `publish-order`、`audit-order` |
+| `case-relief-treasury` | 国库 `ReliefAction`（`case.relief.treasury` / `action`） | `prepare-treasury` |
+| `case-relief-county` | 县级 `ReliefAction`（`case.relief.county` / `action`） | `prepare-county` |
 
-- 地方机构尚未收到命令；
-- 国库已执行而县级阻塞；
-- 某个机构上报了错误版本；
-- 中央审计发现参与者遗漏并回滚整个 transaction。
+每个插件在 `register` 中调用 `registrar.register_record_schema` 注册自己的记录
+schema。清单为每个机构写明：应当执行的系统、应产生的记录版本、处置结果，以及预期
+载荷的哈希：
 
-因此这里模拟的是可验证的职责和延迟，而不是为了数量而创建官员对象。人物、
-机构内部层级、家族、关系和具体权限应由上层应用按场景需要增加。
+```rust
+struct ReliefOrder {
+    order_id: String,
+    issued_by: String,
+    treasury_system: String,
+    treasury_version: u64,
+    treasury_disposition: String,
+    treasury_hash: String,
+    county_system: String,
+    county_version: u64,
+    county_disposition: String,
+    county_hash: String,
+}
+```
 
-### 0.13.0 起的内置转移清单
+`action_hash` 用 `canonical_hash` 对预期的 `ReliefAction` 载荷
+（`status: "committed"`、`grain_units: 600`）计算哈希。
 
-本示例保留自己的 `ReliefOrder` manifest 和只读审计，这仍是有效的应用层做法。自 0.13.0 起，
-参伍以内置合同的形式提供这类保证，即[转移清单](/architecture/settlement/#转移清单)：
+### 2. 签发赈粮令
 
-- 中央插件的 `publish-order` 系统登记一份 `TransitionManifest`，把 `lineage_id` 设为赈粮令
-  ID，把国库和县级插件列为参与者，并用转移前后应有的记录版本（`expected_pre`、
-  `expected_post`）代替 post-state hash。
-- 在就绪边界的第 10 阶段，两个机构的系统各自通过 `StageTransitionWrite` 暂存自己的记录，
-  仍然只写自己拥有的状态。
-- 第 11 阶段提交前，模拟内核审计这份清单：若只有一个机构暂存、另一个没有，或者版本不符，
-  整个边界回滚；若两个机构都没有行动，清单过期，中央可以登记新的尝试。
-- 中央 `audit-order` 系统在第 12 阶段读取 `TransitionAuditRecord`，不必再自己检查双方记录。
+`main` 用三个插件创建模拟，把签发输入入队，然后结算第一个边界：
 
-需要发现缺席机构的清单至少要有两个参与者。如果赈粮令还需要议事机构批准，`canwu-law`
-的程序现在可以为席位加权、按表决单元（例如各地区代表团）计票，并在决定性表决之前加入
-仅供咨询的征询阶段。
+```rust
+canwu.enqueue_plugin_ingress(canwu_api::PluginIngressRequest::new(
+    CENTRAL_PLUGIN,
+    ISSUE_INGRESS,
+    SimTime::EPOCH,
+    json!({"order_id": ORDER_ID}),
+))?;
 
-## 3. 代码在哪里
+let first = canwu.settle_boundary(BoundaryRequest::at(SimTime::EPOCH))?;
+assert_eq!(first.generated_ingress.len(), 2);
+```
 
-这个案例完全使用公开 `canwu-api`，没有依赖模拟内核内部模块。
+### 3. 发布清单（边界 1，第 7 阶段）
+
+`publish_order` 运行在 `BoundaryPhase::DomainDeltaProposal`。它用
+`DomainRecordMutation::Create` 创建清单，并为每个机构安排一条
+`execute-relief-order` 输入：
+
+```rust
+BoundaryDirective::SchedulePluginIngress {
+    target_plugin: TREASURY_PLUGIN.to_owned(),
+    after: SimDuration::ZERO,
+    packet_type: EXECUTE_INGRESS.to_owned(),
+    priority: 0,
+    payload: json!({"order_id": ORDER_ID}),
+    affected: Vec::new(),
+},
+```
+
+系统契约在 `plugin_ingress_targets` 中声明了这两个目标。零延迟安排的输入在下一个
+边界准入，所以边界 1 结束时只有清单，两个机构的记录都还没有。
+
+### 4. 各机构写自己的记录（边界 2，第 10 阶段）
+
+`prepare_treasury` 和 `prepare_county` 都调用 `prepare_owner`，运行在
+`BoundaryPhase::HistoricalCandidateEvaluation`。它只读取发给本插件的输入
+（`owned_order_ingress`），用 `validate_order` 核对清单，其中包括即将写入的载荷
+哈希，然后创建自己的记录。系统契约声明了 `StateVisibility::SameBoundary`，同一边界
+第 12 阶段的审计因此能读到新记录。
+
+### 5. 中央审计（边界 2，第 12 阶段）
+
+`audit_order` 运行在 `BoundaryPhase::StrategicAggregation`，契约里只声明读取、没有
+写入。它逐个加载机构记录；记录缺失、版本不是 1、已失效、所属插件不对，或哈希与清单
+不一致时返回错误：
+
+```rust
+if record.version != 1
+    || !record.is_active()
+    || record.owner != expected_plugin
+    || actual_hash != expected_hash
+    || record.payload != json!({"status": "committed", "grain_units": 600})
+{
+    return Err(CanwuError::new(
+        ErrorCode::InvalidBoundary,
+        format!("central audit found an invalid {label} disposition"),
+    ));
+}
+```
+
+任一系统返回错误，整个边界失败，两个机构的记录随之回滚。边界 1 中审计看到签发输入
+就直接返回，因为此时两个机构还没有行动。
+
+### 6. 恢复与重放
+
+```rust
+let snapshot = canwu.snapshot_json()?;
+let restored = Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins)?;
+let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())?;
+assert_eq!(restored.snapshot(), canwu.snapshot());
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+```
+
+恢复和重放都要传入同一组插件，因为快照记录了产生该状态的插件版本。
+
+## 值得注意的地方
+
+- 每个机构只写自己插件拥有的记录。中央机构通过清单和输入协调，并读取结果。
+- 零延迟安排的工作落在下一个边界，所以这份赈粮令用了两个边界：先发布，再执行和审计。
+- 审计让这一步成为全有或全无：任何一个机构出错或缺席，两条记录都不会提交。
+
+## 动手改一改
+
+- **数量不对。** 在 `prepare_county` 中传入 `&action_payload(500)`。哈希与
+  `county_hash` 不一致，`validate_order` 返回错误，第二次 `settle_boundary` 失败，
+  `main` 以错误退出。
+- **机构缺席。** 让 `prepare_county` 直接返回 `Ok(BoundaryProposal::default())`。
+  审计报错 `central audit is missing the county relief disposition`，国库的记录
+  也一起回滚。
+- **换成自己的机构。** 把 `ReliefOrder` 换成自己的官署或政令 schema，并把签发输入
+  接到角色的[权限](/developer/integration/)和[角色知识](/developer/reading-state/)上。
+
+## 示例之外：转移清单
+
+示例中手写的清单与审计是普通的应用层做法。参伍也把同样的保证做成了内置的
+[转移清单](/architecture/settlement/)（`TransitionManifest`）：
+
+- 协调插件在第 7、10 或 12 阶段的系统中用
+  `BoundaryDirective::RegisterTransitionManifest` 登记清单。套用到本例，
+  `lineage_id` 是赈粮令 ID，参与者是国库和县级插件；每个参与者列出转移前
+  （`expected_pre`）和转移后（`expected_post`）应有的记录版本，取代载荷哈希。
+- 在就绪边界的第 10 阶段，每个参与者用 `BoundaryDirective::StageTransitionWrite`
+  暂存自己的写入。
+- 第 11 阶段，模拟内核先审计就绪的清单再提交：所有参与者都已暂存且版本相符则提交；只有部分
+  参与者暂存或版本不符，整个边界回滚；无人暂存则清单过期，协调者可以登记新的尝试。
+- 第 12 阶段的系统以 `TransitionAuditRecord` 读取审计结果。
+
+无人暂存的清单只会过期，边界照常提交；只有其他参与者已暂存时才能发现缺席的机构，所以清单至少要有两个参与者。
+
+## 源码
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs" icon="external">
   打开可运行示例
 </LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
-  查看 canonical 案例说明
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/tests/governance_transition_conformance.rs" variant="secondary" icon="external">
+  阅读一致性测试
 </LinkButton>
-
-下一步可以把 `ReliefOrder` 替换成自己的官职、机构或领域 schema，把人物的
-权限和角色相对知识（actor-relative knowledge）接到同一条 ingress 与 transaction 链上。
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
+  阅读仓库中的案例说明
+</LinkButton>

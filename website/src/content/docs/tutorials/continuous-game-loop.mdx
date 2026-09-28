@@ -1,12 +1,15 @@
 ---
 title: 连续时间游戏循环
-description: 在连续渲染的大战略游戏中分开处理现实时间、模拟时间与画面表现时间。
+description: 用实时渲染循环驱动参伍，支持暂停和倍速，并在任何帧率下得到相同结果。
 sidebar:
   order: 3
   label: 连续时间游戏循环
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+这个示例是一个上层应用：一款即时战略游戏的主循环，支持暂停和 1x、5x、20x 倍速。你会看到如何把帧时长换算成整分钟的模拟时间，如何保留不足一分钟的余量来做平滑动画，以及如何确认 60 FPS 和 30 FPS 的玩家得到相同的模拟结果。
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/continuous_game_loop.rs" icon="external">
   打开 continuous_game_loop.rs
@@ -15,42 +18,121 @@ import { LinkButton, Steps } from "@astrojs/starlight/components";
   浏览示例目录
 </LinkButton>
 
-这个参考实现面向持续运行、可以暂停和变速的策略游戏。上层应用（游戏）负责记录现实时间、处理倍速、累积不足一分钟的余量并维护画面状态；参伍只接收以整数分钟表示的确定性模拟时间。
-
 ## 运行
+
+在仓库根目录运行：
 
 ```shell
 cargo run -p canwu-api --example continuous_game_loop
 ```
 
-## 三个时钟
+示例把同一段脚本化的游戏过程跑两遍：第一遍约 60 FPS 并打印帧日志，第二遍约 30 FPS 且不打印。输出中的关键行：
 
-- **现实时钟（wall clock）**：来自渲染器或游戏框架的帧时长。示例预先准备了两组帧时长，分别接近 60 FPS 和 30 FPS，不读取系统时钟，也不会 `sleep()`。
-- **模拟时钟（simulation clock）**：参伍的权威整数分钟时间。只有累加器达到一分钟时，上层应用才调用 `advance_canonical()`。
-- **表现时钟（presentation clock）**：参伍时间加上上层应用保留的亚分钟余量，只用于视觉插值。
+```text
+1x host policy: 60 simulation seconds per wall second
+Frames are predefined; this example never sleeps or reads the real clock.
 
-<Steps>
-1. 将帧时长按上层应用选择的日历速率和 `Paused`、`1x`、`5x`、`20x` 倍速换算成期望模拟时间。
-2. 把结果累积为高精度整数纳秒，不丢弃不足一个 `SimDuration` 分钟的余量。
-3. 每达到一个模拟时间量子，就通过 `advance_canonical(SimDuration::minutes(1))` 推进参伍。
-4. 从公开 `WorldSnapshot` 中复制军队的在途信息到画面状态，并计算只读的移动进度。
-</Steps>
+60 FPS-ish render loop
+frame=   31 speed=1x     wall=  0.500s visual_time=Day 0, 00:00 + 0.500m canwu_time=Day 0, 00:00 army stationary at 2
+INPUT: queued commander move as IngressId(1), captured_at=Day 0, 00:00 + 0.500m, quantized_due_at=Day 0, 00:01
+EVENT: at=Day 0, 00:01 type=move_ordered Army 1 was ordered from 2 to 3
+frame= 3329 speed=5x     wall= 54.900s visual_time=Day 0, 04:30 + 0.500m canwu_time=Day 0, 04:30 army visual progress=25.0% (2 -> 3, authoritative_location=2)
+frame= 3390 speed=Paused wall= 55.900s visual_time=Day 0, 04:30 + 0.500m canwu_time=Day 0, 04:30 army visual progress=25.0% (2 -> 3, authoritative_location=2)
+frame= 5847 speed=20x    wall= 96.440s visual_time=Day 0, 18:01 + 0.300m canwu_time=Day 0, 18:01 army visual progress=100.0% (2 -> 3, authoritative_location=3)
+EVENT: at=Day 0, 18:01 type=army_arrived Army 1 arrived in territory 3
 
-## 命令排序与 FPS 无关
+FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=5fb68955f5b2..., checkpoint=826b0e164797...
+```
 
-玩家命令通过 `enqueue_command()` 进入对外 API。示例为帧间输入定义了统一的向上取整策略：半分钟捕获的输入排到下一个可表示的参伍分钟。这个时间戳策略由上层应用定义，并且必须独立于“哪一帧刚好轮询到输入”。
+`visual_time` 是渲染器绘制时使用的时间，`canwu_time` 是参伍的时间。最后一行说明：两遍运行渲染的帧数不同，最终的状态哈希和检查点却一样。
 
-最后，两个渲染帧序列比较参伍时间、`world`、`commands`、`events`、权威状态哈希、检查点哈希与规范边界数量。渲染帧数不同，权威结果完全相同。
+## 三种时间
 
-## 平滑表现不写回模拟
+上层应用把三种时间分开管理，术语定义见[术语表](/reference/terminology/)。
 
-公开快照提供军队在途状态的 `from`、`to`、`departed_at` 和 `arrives_at`。表现层使用：
+- **现实时间**（wall time）：渲染器给出的帧时长。示例使用固定的帧时长序列：16/17 ms 和 33/34 ms。
+- **模拟时间**（simulation time）：参伍的时间，以整分钟计（`SimTime`、`SimDuration`）。
+- **表现时间**（presentation time）：模拟时间加上上层应用保留的不足一分钟的余量，只用于动画。
+
+<MermaidDiagram
+  label="现实时间进入累加器，每满一分钟推进参伍，余量用于表现时间"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；上方列表描述了同样的三种时间。"
+  renderFailureMessage="图表预览不可用；上方列表描述了同样的三种时间。"
+  definition={`flowchart TB
+    Wall["现实时间<br/>帧时长"] -->|"× 基础速率 × 游戏倍速"| Acc["上层应用累加器<br/>整数纳秒"]
+    Acc -->|"每满一分钟"| Sim["模拟时间<br/>advance_canonical(1 分钟)"]
+    Sim --> Snap["WorldSnapshot"]
+    Snap --> Pres["表现时间<br/>插值绘制"]
+    Acc -->|"不足一分钟的余量"| Pres
+`}
+/>
+
+## 工作原理
+
+### 把帧时长换算成模拟分钟
+
+`GameHost::render_frame` 每帧执行一次：
+
+```rust
+let converted_wall_nanos = wall_dt.as_nanos() * BASE_SIM_SECONDS_PER_WALL_SECOND;
+self.accumulated_sim_nanos += converted_wall_nanos * speed.multiplier();
+
+let mut authority_changed = false;
+while self.accumulated_sim_nanos >= SIMULATION_MINUTE_NANOS {
+    let receipts = self.authority.advance_canonical(SIMULATION_QUANTUM)?;
+    self.canonical_boundaries += receipts.len();
+    authority_changed |= !receipts.is_empty();
+    self.accumulated_sim_nanos -= SIMULATION_MINUTE_NANOS;
+}
+```
+
+示例自己规定 1x 时每秒现实时间对应一分钟模拟时间（`BASE_SIM_SECONDS_PER_WALL_SECOND = 60`），你的游戏可以按需要设定。倍速系数为 0、1、5 或 20。累加器是以纳秒计的整数，任何零头都会保留下来。每攒满一分钟，上层应用就调用一次 `advance_canonical(SimDuration::minutes(1))`，再从累加器中减去这一分钟。
+
+### 按与帧率无关的时间提交玩家输入
+
+玩家在游戏开始半分钟时点击，`GameHost::submit_player_command` 随即执行：
+
+```rust
+let due_at = if self.accumulated_sim_nanos == 0 {
+    self.authority.time()
+} else {
+    self.authority
+        .time()
+        .checked_add(SIMULATION_QUANTUM)
+        .expect("the scripted command time must remain representable")
+};
+```
+
+点击落在第 0 分钟和第 1 分钟之间，所以命令在第 1 分钟到期（输出中的 `quantized_due_at=Day 0, 00:01`）。随后上层应用调用 `enqueue_command(due_at, 0, request)` 提交命令。向上取整是这个示例的策略。只要在所有帧率下得到同一个到期时间，任何策略都可以；如果按“哪一帧轮询到输入”来定时间，60 FPS 和 30 FPS 的玩家就会玩出两局不同的游戏。
+
+### 为显示插值计算军队位置
+
+公开的 `WorldSnapshot` 中，军队的 `TransitState` 带有 `from`、`to`、`departed_at` 和 `arrives_at`。`PresentationState::render` 计算：
 
 ```text
 visual_progress =
   (presentation_time - departed_at) / (arrives_at - departed_at)
 ```
 
-这个浮点进度不会写回参伍。暂停期间渲染帧继续运行，但模拟时间、亚分钟余量和视觉进度都保持不变。
+结果是限制在 0 到 1 之间的 `f64`，只留在渲染器内部。从输出可以看到：5x 阶段结束时进度到达 25.0%；暂停期间帧不向累加器添加时间，进度一直停在 25.0%；Day 0, 18:01 进度达到 100.0%，参伍也在同一分钟记录了 `army_arrived`。
 
-应用侧接入原则见[接入并驱动模拟运行](/developer/integration/)。
+### 比较两遍运行
+
+`assert_fps_independent` 比较 60 FPS 和 30 FPS 两遍运行。两者的帧数不同（5,850 和 2,881）；参伍时间、世界状态、事件、命令日志、权威状态哈希、检查点哈希和边界数量（2）必须全部相等，否则示例会 panic。
+
+## 继续尝试
+
+把 30 FPS 档改成约 24 FPS：
+
+```rust
+const THIRTY_FPS_ISH: FrameProfile = FrameProfile {
+    name: "30 FPS-ish",
+    frame_millis: &[40, 41],
+};
+```
+
+最后一行会变成 `30 FPS-ish frames=2384`，`state_hash=5fb68955f5b2...` 和 `checkpoint=826b0e164797...` 保持不变。
+
+这个循环遵循的上层应用接入规则见[接入并驱动模拟运行](/developer/integration/)。

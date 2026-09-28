@@ -1,142 +1,261 @@
 ---
 title: A central relief order with atomic multi-office execution
-description: Model a central relief order with a manifest, cross-plugin canonical ingress, same-boundary commit, and read-only audit.
+description: A central office issues a grain order, the treasury and a county office each record their part, and a central audit commits both or neither.
 sidebar:
-  order: 2
+  order: 4
   label: Central relief order
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../../components/MermaidDiagram.astro";
 
-## 1. What problem are we solving?
+## The scenario
 
-Imagine a Southern Ming historical simulation in which a central relief office
-issues a grain order. The treasury is responsible for releasing supplies, while
-a county grain office records local execution. The central office must not write
-both offices' state directly. It must also verify that both offices executed the
-same order, at the expected version, with complete results.
+A central relief office in a Southern Ming-style setting issues a grain relief
+order. The treasury releases 600 units of grain and a county grain office
+records the local execution. The central office may read both offices' records
+but may only write its own, and it needs to confirm that both offices carried
+out the same order with the expected result.
 
-This case reduces that problem to a verifiable authority chain:
+The question the example answers: how do several plugins, each owning its own
+state, execute one order together so that either every part commits or the
+whole step rolls back?
 
-- the central office publishes a manifest containing the participant contract;
-- the treasury and county each own their domain record;
-- both offices commit in one transaction;
-- a central read-only audit rejects the transaction if either participant is missing;
-- save, restore, and exact replay do not ask an external decision maker again.
+The office names are labels in the example code. Canwu has no built-in court,
+ministry, or county types; a host application models its own institutions.
 
-The historical labels belong to the host application. Canwu does not contain
-an emperor, minister, magistrate, or mandatory bureaucratic tree. An application
-can combine people, seats, institutions, and delegated authority to represent
-Southern Ming, Qing, medieval France, or another political system.
+## What this example shows
 
-## 2. How does the example work?
+- Three [simulation plugins](/en/developer/extensions/) (`SimulationPlugin`),
+  each owning one typed [domain record](/en/reference/terminology/)
+  (`DomainRecordType`).
+- [Boundary systems](/en/architecture/settlement/) (`BoundarySystemContract`)
+  running in settlement phases 7, 10, and 12 of one boundary.
+- Plugin-to-plugin work sent through
+  [canonical ingress](/en/architecture/events/) with
+  `BoundaryDirective::SchedulePluginIngress`.
+- [Atomic commit](/en/architecture/settlement/): a failing system rolls back
+  every write in its boundary.
+- Snapshot restore and [exact replay](/en/developer/persistence/) with the
+  same plugins.
 
-| Simulation plugin | Owned state | Boundary systems |
-| --- | --- | --- |
-| `case-relief-central` | `ReliefOrder` manifest | `publish-order`, `audit-order` |
-| `case-relief-treasury` | Treasury `ReliefAction` | `prepare-treasury` |
-| `case-relief-county` | County `ReliefAction` | `prepare-county` |
-
-Start the example:
+## Run it
 
 ```shell
 cargo run -p canwu-api --example governance_transition
 ```
 
-The program first publishes the central manifest. Its two zero-delay plugin
-ingresses do not re-enter the same system call; Canwu admits them at the next
-transaction. The treasury and county systems then prepare their own 600-unit
-grain dispositions. The central audit checks both owners, versions, statuses,
-and post-state hashes. Finally, the example confirms that exact replay produces
-the same snapshot.
-
-### Implementation path
+Output:
 
 ```text
-central issue ingress
-  -> publish-order writes the manifest
-  -> schedule treasury / county execute ingresses
-  -> admit both ingresses in the next transaction
-  -> both owners prepare records in phase 10
-  -> central read-only audit in phase 12
-  -> atomic commit or complete rollback
+relief_order=relief-order-1646 treasury_grain=600 county_grain=600 exact_replay=ok
 ```
 
-<Steps>
-1. Register three simulation plugins for the central office, treasury, and county, each with its own domain schema.
-2. Submit `relief-order-1646` through the central canonical ingress.
-3. Let `publish-order` create the manifest and declare one `execute-relief-order` ingress for each target plugin.
-4. Let each `prepare-*` system consume only its own ingress, validate the manifest, and stage its owner-scoped record with `SameBoundary` visibility.
-5. Let `audit-order` read the manifest and both records. A missing record, wrong owner, stale version, or mismatched hash fails the transaction.
-6. Save a snapshot, restore it, and run exact replay to prove that the same inputs produce the same authoritative state.
-</Steps>
+The line prints only after every assertion in `main` passes: two ingress items
+generated by the first boundary, two records committed by the second, and a
+restored snapshot and a replayed run that both equal the original.
 
-### The manifest is the authority-chain contract
+## How the order flows
 
-`ReliefOrder` is not a fixed Canwu political object. It is a typed domain record
-registered by the central plugin. It declares each participant's:
+<MermaidDiagram
+  label="Sequence of the central relief order across two boundaries"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the walkthrough below describes the same steps."
+  renderFailureMessage="Diagram preview unavailable; the walkthrough below describes the same steps."
+  definition={`sequenceDiagram
+    participant Host as Host application
+    participant Central as case-relief-central
+    participant Treasury as case-relief-treasury
+    participant County as case-relief-county
+    Host->>Central: issue-relief-order
+    Note over Central: boundary 1, phase 7: publish-order writes the ReliefOrder manifest
+    Central->>Treasury: execute-relief-order
+    Central->>County: execute-relief-order
+    Note over Treasury,County: boundary 2, phase 10: each office creates its own ReliefAction
+    Note over Central: boundary 2, phase 12: audit-order checks both records
+    Note over Central,County: all three pass: commit. Any error: the boundary rolls back.
+`}
+/>
 
-- plugin owner;
-- boundary system name;
-- expected version;
-- disposition;
-- post-state hash.
+## Walkthrough
 
-The central office can therefore audit who must do what without writing treasury
-or county state. Each participant still writes its own domain record through its
-own simulation plugin.
+All code is in
+[`governance_transition.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs)
+and uses only `canwu-api`.
 
-### Why simulate both execution systems?
+### 1. Three plugins, three record types
 
-If one central system writes every result directly, a game can still display a
-final number, but it cannot represent:
+| Plugin | Record it owns | Boundary systems |
+| --- | --- | --- |
+| `case-relief-central` | `ReliefOrder` manifest (`case.relief` / `order`) | `publish-order`, `audit-order` |
+| `case-relief-treasury` | Treasury `ReliefAction` (`case.relief.treasury` / `action`) | `prepare-treasury` |
+| `case-relief-county` | County `ReliefAction` (`case.relief.county` / `action`) | `prepare-county` |
 
-- a local office that has not received the order;
-- a treasury that has acted while the county is blocked;
-- an office reporting the wrong version;
-- a central audit that discovers an omitted participant and rolls back the transaction.
+Each plugin registers its record schema in `register` with
+`registrar.register_record_schema`. The manifest lists, for each office, the
+system that must act, the record version it must produce, a disposition, and
+the hash of the expected payload:
 
-The point is to simulate verifiable responsibility and delay, not to create
-official objects merely for quantity. The host application can add people,
-internal institutional hierarchy, families, relationships, and authority rules
-when the scenario needs them.
+```rust
+struct ReliefOrder {
+    order_id: String,
+    issued_by: String,
+    treasury_system: String,
+    treasury_version: u64,
+    treasury_disposition: String,
+    treasury_hash: String,
+    county_system: String,
+    county_version: u64,
+    county_disposition: String,
+    county_hash: String,
+}
+```
 
-### Built-in transition manifests since 0.13.0
+`action_hash` computes each hash with `canonical_hash` over the expected
+`ReliefAction` payload (`status: "committed"`, `grain_units: 600`).
 
-The example keeps its own `ReliefOrder` manifest and read-only audit, which
-remains a valid application pattern. Since 0.13.0, Canwu offers a built-in
-form of this guarantee, the [transition manifest](/en/architecture/settlement/#transition-manifests):
+### 2. Issue the order
 
-- The central plugin's `publish-order` system registers a `TransitionManifest`
-  with `lineage_id` set to the order ID, the treasury and county plugins as
-  participants, and the record versions each must hold before and after
-  (`expected_pre`, `expected_post`) in place of a post-state hash.
-- In phase 10 of the ready boundary, each office's system stages its own record
-  through `StageTransitionWrite`, still writing only the state it owns.
-- Before phase 11 commits, the simulation core audits the manifest. If one office staged
-  and the other did not, or a version differs, the whole boundary rolls back;
-  if neither office acted, the manifest expires and the center can register a
+`main` creates the simulation with all three plugins, queues the issue packet,
+and settles the first boundary:
+
+```rust
+canwu.enqueue_plugin_ingress(canwu_api::PluginIngressRequest::new(
+    CENTRAL_PLUGIN,
+    ISSUE_INGRESS,
+    SimTime::EPOCH,
+    json!({"order_id": ORDER_ID}),
+))?;
+
+let first = canwu.settle_boundary(BoundaryRequest::at(SimTime::EPOCH))?;
+assert_eq!(first.generated_ingress.len(), 2);
+```
+
+### 3. Publish the manifest (boundary 1, phase 7)
+
+`publish_order` runs in `BoundaryPhase::DomainDeltaProposal`. It creates the
+manifest with `DomainRecordMutation::Create` and schedules one
+`execute-relief-order` packet for each office:
+
+```rust
+BoundaryDirective::SchedulePluginIngress {
+    target_plugin: TREASURY_PLUGIN.to_owned(),
+    after: SimDuration::ZERO,
+    packet_type: EXECUTE_INGRESS.to_owned(),
+    priority: 0,
+    payload: json!({"order_id": ORDER_ID}),
+    affected: Vec::new(),
+},
+```
+
+The system contract lists both targets in `plugin_ingress_targets`. A packet
+scheduled with zero delay is admitted at the next boundary, so after boundary 1
+the manifest exists and neither office record does.
+
+### 4. Each office writes its own record (boundary 2, phase 10)
+
+`prepare_treasury` and `prepare_county` both call `prepare_owner`, which runs
+in `BoundaryPhase::HistoricalCandidateEvaluation`. It reads only the packet
+addressed to its own plugin (`owned_order_ingress`), checks the manifest with
+`validate_order`, including the hash of the payload it is about to write, and
+creates its record. Its contract declares `StateVisibility::SameBoundary`, so
+the phase-12 audit in the same boundary can read the new record.
+
+### 5. The center audits (boundary 2, phase 12)
+
+`audit_order` runs in `BoundaryPhase::StrategicAggregation`. Its contract
+declares reads and no writes. For each office it loads the record and returns
+an error if the record is missing, is not at version 1, is inactive, has the
+wrong owner, or hashes differently from the manifest:
+
+```rust
+if record.version != 1
+    || !record.is_active()
+    || record.owner != expected_plugin
+    || actual_hash != expected_hash
+    || record.payload != json!({"status": "committed", "grain_units": 600})
+{
+    return Err(CanwuError::new(
+        ErrorCode::InvalidBoundary,
+        format!("central audit found an invalid {label} disposition"),
+    ));
+}
+```
+
+An error from any system fails the boundary, and both office records roll back
+with it. In boundary 1 the audit sees the issue packet and returns early,
+because the offices have not acted yet.
+
+### 6. Restore and replay
+
+```rust
+let snapshot = canwu.snapshot_json()?;
+let restored = Canwu::from_snapshot_json_with_plugins(&snapshot, &plugins)?;
+let replayed = Canwu::replay_from_journal(&plugins, &canwu.replay_journal())?;
+assert_eq!(restored.snapshot(), canwu.snapshot());
+assert_eq!(replayed.snapshot(), canwu.snapshot());
+```
+
+Restore and replay both take the same plugin list, because the snapshot records
+which plugin versions produced the state.
+
+## What to notice
+
+- Each office writes only the record its plugin owns. The central office
+  coordinates through the manifest and packets, and reads the results.
+- Work scheduled with zero delay lands in the next boundary. The order takes
+  two boundaries: publish, then execute and audit.
+- The audit makes the step all-or-nothing: if one office fails or skips its
+  part, neither record commits.
+
+## Try changing
+
+- **A wrong amount.** In `prepare_county`, pass `&action_payload(500)`. The
+  hash no longer matches `county_hash`, `validate_order` returns an error, and
+  the second `settle_boundary` call fails, so `main` exits with an error.
+- **A silent office.** Make `prepare_county` return
+  `Ok(BoundaryProposal::default())`. The audit fails with `central audit is
+  missing the county relief disposition`, and the treasury record rolls back
+  too.
+- **Your own institutions.** Replace `ReliefOrder` with your own office or
+  decree schema, and connect the issue packet to an actor's
+  [authority](/en/developer/integration/) and
+  [actor knowledge](/en/developer/reading-state/).
+
+## Beyond the example: transition manifests
+
+The example's hand-written manifest and audit are an ordinary application
+pattern. Canwu also provides the same guarantee as a built-in
+[transition manifest](/en/architecture/settlement/) (`TransitionManifest`):
+
+- The coordinating plugin registers the manifest with
+  `BoundaryDirective::RegisterTransitionManifest` from a phase-7, phase-10, or
+  phase-12 system. Here `lineage_id` would be the order ID, the participants
+  the treasury and county plugins, and each participant lists the record
+  versions it expects before (`expected_pre`) and after (`expected_post`) in
+  place of a payload hash.
+- In phase 10 of the ready boundary, each participant stages its own writes
+  with `BoundaryDirective::StageTransitionWrite`.
+- In phase 11, the simulation core audits each ready manifest before
+  committing it. If every participant staged and the versions match, it
+  commits. If only some staged, or a version differs, the whole boundary rolls
+  back. If none staged, the manifest expires and the coordinator can register a
   new attempt.
-- The central `audit-order` system reads the `TransitionAuditRecord` in phase
-  12 instead of rechecking both records itself.
+- Phase-12 systems read the result as a `TransitionAuditRecord`.
 
-A manifest that must catch a missing office needs at least two participants.
-If the order also needs a council's approval, `canwu-law` procedures can now
-weigh seats, count unit blocks such as regional delegations, and hold an
-advisory consultation stage before the deciding vote.
+A manifest that no participant staged expires and the boundary still commits,
+so a missing office is caught only when another participant staged. Give the
+manifest at least two participants.
 
-## 3. Where is the code?
-
-This case uses only the public `canwu-api`; it does not depend on simulation-core
-internals.
+## Source
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs" icon="external">
   Open the runnable example
 </LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
-  Read the canonical case note
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/tests/governance_transition_conformance.rs" variant="secondary" icon="external">
+  Read the conformance tests
 </LinkButton>
-
-You can replace `ReliefOrder` with your own office, institution, or decree
-schema, then connect actor authority and actor-relative knowledge to the same
-ingress and transaction chain.
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/docs/governance-transition-case.md" variant="secondary" icon="external">
+  Read the repository case note
+</LinkButton>

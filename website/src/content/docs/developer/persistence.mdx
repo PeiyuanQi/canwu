@@ -1,35 +1,48 @@
 ---
 title: 存档、重放与派生分支
-description: 保存和恢复参伍状态，验证插件语义环境，并构建精确重放与平行现实。
+description: 保存和加载参伍模拟运行，为长期运行保存紧凑历史，精确重放一次运行，或派生出平行现实。
 sidebar:
   order: 4
-  label: 存档与重放
+  label: 存档、重放与派生分支
 ---
 
-参伍存档不只是一个序列化的世界对象。可恢复状态还包括命令、事件、结算边界、随机证据、
-插件语义环境和状态承诺。先确定恢复目标，再选择相应接口。
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-## 先选择恢复目标
+本页介绍如何保存和加载模拟运行、为长期运行的模拟保存紧凑历史、精确重放一次运行，以及从某个存档点派生分支去尝试另一组输入。
 
-| 目标 | 使用 | 上层应用责任 |
-| --- | --- | --- |
-| 普通存档或服务重启 | `snapshot_json()` 与 `from_snapshot_json_with_plugins()` | 保存完整快照，并在加载时提供相同插件集合 |
-| 长期运行的紧凑存储 | `checkpoint_journal_json()` | 保存经验证的检查点及其后连续日志 |
-| 审计或精确重建 | `replay_journal()` 与 `replay_from_journal()` | 保存完整日志和匹配的插件语义环境 |
-| 向外部系统发送副作用 | `outbox_entries()` | 至少投递一次，并按 `delivery_id` 去重和记录确认状态 |
-| 从同一起点尝试另一组输入 | `fork()` | 把结果当作新的平行现实，不与精确重放混淆 |
+参伍的存档不只是世界数据，还包括命令、事件、结算边界记录、随机抽样、插件语义环境和状态承诺，加载时据此验证状态。**插件语义环境**指本次运行中每个插件的名称、版本和语义哈希；加载和重放时提供的插件集合必须与之匹配。
 
-## 版本与格式合同
+<MermaidDiagram
+  label="持久化路径：运行中的模拟可以保存为快照或检查点日志并用相同插件恢复，可以从重放日志精确重放，也可以派生为平行现实"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方表格描述了同样的路径。"
+  definition={`flowchart LR
+    Run["运行中的模拟"] -->|"snapshot_json()"| Snap["快照"]
+    Run -->|"checkpoint_journal_json()"| CJ["检查点 + 后续日志"]
+    Run -->|"replay_journal()"| Journal["ReplayJournal"]
+    Run -->|"fork()"| Fork["派生分支：新输入，平行现实"]
+    Snap -->|"from_snapshot_json_with_plugins()"| Restored["恢复后的模拟"]
+    CJ -->|"from_checkpoint_journal_json_with_plugins()"| Restored
+    Journal -->|"replay_from_journal()"| Replayed["重放得到的模拟"]
+    Plugins["匹配的插件集合"] -.-> Restored
+    Plugins -.-> Replayed
+`}
+/>
 
-截至 2026 年 9 月 27 日，工作区版本为 `0.13.0`，快照格式为 8。精确的
-`engine_version` 仍属于存档合同，因此 0.12.0 及更早版本的快照不能直接用于 0.13.0 运行。
-0.13.0 新增转移清单、评估轨迹、席位继任、动用授权、带运力池的 `canwu-movement` 扩展、受托承运人与承运人扣押、真伪判定、法律程序的加权阶段、表决单元阶段与征询阶段、文化结算插件、cohort 人口校准、政策压力来源以及外部传播来源；资源、通信、信息、社会、技术和法律插件的语义标识随之变化，`TRANSPORT_SEMANTIC_VERSION` 变为 `canwu-transport.v5`，快照格式仍为 8。详见下方 [0.13.0](#0130) 一节。本地引擎代码的更新不会改变下游应用固定的注册表依赖版本。
-模拟内核不会静默迁移旧快照，也不能只修改格式号来伪装兼容。
+恢复或重放得到的模拟，`checkpoint_hash()` 与原运行相同。派生分支从相同状态出发，之后各自发展。
 
-需要长期保存状态的应用应固定已发布的精确版本或 Git 修订。跨版本保留历史时，
-由上层应用运行显式导出/导入流程，或保留能够读取旧数据的旧引擎。
+## 先确定恢复目标
 
-## 快照保存与恢复（节选）
+| 目标 | 保存 | 加载 | 上层应用要做的事 |
+| --- | --- | --- | --- |
+| 普通存档或服务重启 | `snapshot_json()` | `Canwu::from_snapshot_json_with_plugins()` | 保存完整快照，加载时提供相同的插件集合 |
+| 长期运行的紧凑存储 | `checkpoint_journal_json()` | `Canwu::from_checkpoint_journal_json_with_plugins()` | 保存检查点及其后连续不断的日志 |
+| 审计或精确重建 | `replay_journal()` | `Canwu::replay_from_journal()` 或 `replay_from_journal_json()` | 保存完整日志，并保留匹配的插件集合 |
+| 向外部系统发送效果 | `outbox_entries()` | — | 至少投递一次，按 `delivery_id` 去重，并保存确认状态 |
+| 从同一时点尝试另一组输入 | `fork()` | — | 把派生分支当作新的平行现实 |
+
+## 保存与恢复快照（节选）
 
 ```rust
 use canwu_api::Canwu;
@@ -44,93 +57,80 @@ let restored = Canwu::from_snapshot_json_with_plugins(&json, &[&plugin])?;
 assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
 ```
 
-这段代码是接入节选。可以运行完整示例验证快照、派生分支和精确重放：
+加载时会验证快照的格式、引擎版本和插件描述，任何一项不符都会失败。存档中一旦有插件领域记录，加载时就要传入同样的插件。
+
+[`starter` 示例](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs)把这段流程与派生分支、精确重放放在一起运行：
 
 ```shell
 cargo run -p canwu-reference-world --example starter
 ```
 
-插件名称、版本和语义哈希都是插件语义环境的一部分。只要存档包含插件领域记录，
-加载和重放就必须提供兼容的插件集合。
-
 ## 检查点日志与精确重放
 
-检查点日志把一个经验证的检查点与之后的连续证据组合起来，适合长期运行。
-精确重放则从日志内的初始场景、输入和证据重建同一模拟运行：
+**检查点日志**（`CheckpointJournal`）把一个经过验证的检查点，与其后连续不断的证据打包在一起。它从检查点出发，只携带之后记录的证据，适合长期运行。
+
+**精确重放**根据日志中的初始场景、输入和已记录证据，重建同一次模拟运行：
 
 ```rust
 let checkpoint_journal = canwu.checkpoint_journal_json()?;
+let from_checkpoint =
+    Canwu::from_checkpoint_journal_json_with_plugins(&checkpoint_journal, &[&plugin])?;
+assert_eq!(from_checkpoint.checkpoint_hash(), canwu.checkpoint_hash());
+
 let journal = canwu.replay_journal();
 let replayed = Canwu::replay_from_journal(&[&plugin], &journal)?;
-
-assert!(!checkpoint_journal.is_empty());
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 ```
 
-`replay_from_journal()` 不接受调用方另传的场景。运行身份、引擎版本、插件语义环境和
-已记录证据必须匹配；重放使用已记录结果，不重新询问外部服务或重新发送副作用。
+精确重放的规则：
 
-## 外发项的四条规则
-
-1. 把 `delivery_id`、投递状态和确认状态保存在上层应用自己的持久化存储中。
-2. 按至少一次语义投递；超时或重启后可以安全重试。
-3. 接收方按 `delivery_id` 去重，不能依赖网络调用只发生一次。
-4. 精确重放会生成相同外发项身份，但不会代表上层应用再次投递。
-
-封存证据后，调用方还必须保存返回的 `EvidenceJournalSegment` 及其外发确认状态。
-压缩或封存不等于已经投递或确认。
-
-## 高级存储与归档
-
-只有在快照大小或热历史成为实际问题后，才需要分页检查点、`StatePageProvider`、
-决策历史归档或插件归档参与者。此时上层应用必须：
-
-- 按内容标识保存并返回精确页面字节；缺页必须明确失败，不能伪装成空数据；
-- 保存检查点要求的连续日志前缀和归档保留根；
-- 让每个插件恢复相同的归档合同与语义哈希；
-- 在删除冷数据前，根据已提交根完成可达性验证。
-
-完整的格式号、分页合同与归档不变量见仓库中的
-[版本与持久化合同](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)。
+- 场景取自日志；`replay_from_journal()` 只接收插件集合和日志。
+- 运行身份、引擎版本、插件语义环境和已记录证据都必须匹配。
+- 重放直接使用已记录的结果：决策、随机抽样和外部答复都从日志读取，副作用也不会再发送一次。
 
 ## 平行现实
 
-`fork()` 从当前点创建独立模拟。它适合比较另一组命令、策略或研究假设；
-每个派生分支仍通过正常命令与时间入口推进。它不是精确重放，因为后续输入可以不同。
+`fork()` 把当前时点的模拟复制成一个独立的模拟，适合比较另一组命令、策略或研究假设。派生分支照常通过命令和时间接口推进；输入一旦不同，它就是新的平行现实，与原运行的精确重放是两回事。
+
+## 向外部发送效果：外发队列
+
+需要送达外部系统的边界输出会出现在 `outbox_entries()` 中。每个 `OutboxEntry` 都有稳定的 `delivery_id`，由运行、结算边界、事件和输出序号派生而来。
+
+1. 在自己的存储中保存每个 `delivery_id`，以及对应的投递状态和确认状态。
+2. 按“至少一次”投递，超时或重启后可以安全重试。
+3. 接收方按 `delivery_id` 去重，因为同一次网络调用可能发生不止一次。
+4. 精确重放会生成相同的 `delivery_id`，投递仍由上层应用负责。
+
+在紧凑模式（`CompactedCanwu`）下，`seal_evidence()` 返回封存后的 `EvidenceJournalSegment`。请把这个日志段与投递、确认状态一起保存。封存或压缩证据，并不表示效果已经投递或确认。
+
+## 高级存储与归档
+
+只有当快照体积或热历史增长真正成为问题时，才需要分页检查点、`StatePageProvider`、决策历史归档和插件归档参与者。到那时，上层应用必须：
+
+- 按内容标识保存每个状态页，并原样返回相同字节；缺页必须报错，不能当作空数据；
+- 保留每个检查点所需的连续日志前缀和归档保留根；
+- 为每个插件恢复相同的归档契约和语义哈希；
+- 删除冷数据前，先从已提交的根做可达性检查。
+
+格式编号、分页存储契约和归档不变量见仓库中的[版本与持久化契约](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)。
+
+## 版本与存档兼容
+
+:::note
+参伍 0.13.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4。存档还记录了精确的 `engine_version`，所以 0.13.0 的模拟运行只能加载 0.13.0 的存档。0.12.0 及更早版本的存档不能改标签，也不能加载；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+:::
+
+- 需要保存存档的应用，请固定到确切的发布版本或 Git 修订。
+- 插件语义哈希变化意味着行为变化。次版本发布（例如 0.12 → 0.13）可能同时改变多个扩展的语义哈希，使用这些扩展的旧存档随之无法加载。
+- 参伍不迁移旧存档。要跨引擎版本保留历史，请运行自己的导出与导入流程，或保留写出这些数据的旧引擎。
+- 新版本会增加枚举变体和结构体字段，穷举 `match` 和结构体字面量可能需要随之修改。
+
+各版本的具体变化见[版本与持久化契约](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)。
 
 ## 上线前检查
 
 - 固定引擎版本和插件语义环境。
-- 完成一次保存、进程重启、加载和哈希比较。
-- 完成一次精确重放，并比较最终检查点哈希。
-- 模拟外发投递超时，确认按 `delivery_id` 重试不会重复产生外部效果。
-- 为版本升级写明显式导出、迁移或放弃旧存档的政策。
-
-
-## 0.13.0
-
-Canwu 0.13.0 是次版本发布。新增合同都是增量能力，但新的枚举变体和结构体字段会破坏穷举匹配与结构体字面量，因此对使用它们的代码并非源码兼容。快照格式 8、承诺格式 4 和检查点/证据日志格式 4 保持不变；未使用新合同时，相关字段不会序列化。
-
-- 快照新增 `pending_transition_manifests`；边界记录新增 `evaluation_traces`、`transition_manifests` 与 `transition_audits`，边界回执新增 `transition_audits`。从未登记转移清单、也未记录评估轨迹的运行，哈希与以前完全相同。
-- 评估轨迹随边界记录一起封存和归档，并计入日志大小。运行配置的 `evaluation_limits` 取默认值时不会序列化，因此只有设置它时配置哈希才会变化。
-- `canwu-movement` 把运行时保存在 `canwu.movement:runtime` 这一条领域记录中；文化结算插件新增 `canwu.culture:definition` 与 `canwu.culture:exposure-queue` 记录，society 插件新增 `canwu.society:ingress-queue`。
-- 资源、通信、信息、社会、技术和法律插件的语义哈希变化；`MovementPlugin` 与 `CultureBoundaryPlugin` 是新的插件标识，`CulturePlugin`、生产和财政插件保持不变，现有法律计划的编码和内容哈希也不变。`TRANSPORT_SEMANTIC_VERSION` 变为 `canwu-transport.v5`。
-- 以下修复会改变现有运行的结果：实时生产完成现在可以结算产出；`AmendDemand` 不能再修改需求的状态、拒绝原因或申请者；程序阶段不再接受选票时，席位工作会过期，迟到的席位回应记为拒绝；cohort 转移之后的 society 每日边界不再失败；快照恢复接受引用仅列于 `Scenario::entities` 中实体的初始记录。
-
-0.12.0 的快照不能改标签，也不能直接加载到 0.13.0。请保留旧引擎，或运行显式导出流程。
-
-## 0.12.0
-
-Canwu 0.12.0 是次版本发布。新增合同都是增量能力，但新的枚举变体和结构体字段会破坏穷举匹配与结构体字面量，因此对使用它们的代码并非源码兼容。快照格式 8、承诺格式 4 和检查点/证据日志格式 4 保持不变；未使用新合同时，相关字段不会序列化，记录的编码和哈希与之前相同。
-
-- 快照新增 `person_availability`、`created_persons` 人物创建登记表和人物计数器；边界记录新增人物可用性变更（以及因此取消的票据）和人物创建记录。
-- 通过 `cancel_plugin_ingress`、`cancel_permitted_plugin_ingress` 或 `CancelPluginIngress` 撤回的插件输入，会以 `PluginCancellation` 记录保留在输入日志中。恢复时会在待处理队列中排除被撤回的输入，精确重放会重新应用该撤回。
-- 决策票据和决策轨迹可以携带 `parent_ticket`、决策阶段与触发的前置规则；控制者可以携带随机平局决胜的启用标志。
-- 上层应用自行提交、带随机抽样证据的决策输入会被拒绝，运行时和加载快照时都一样。
-- 资源、生产和财政插件的语义哈希以及资源持有人报告的知识 schema 随之变化；`TRANSPORT_SEMANTIC_VERSION` 变为 `canwu-transport.v4`；通信插件的语义哈希不变。
-
-0.11.1 的快照不能改标签，也不能直接加载到 0.12.0。请保留旧引擎，或运行显式导出流程。
-
-## 0.11.1
-
-Canwu 0.11.1 是补丁版本。完成租约由持有或准备状态释放时，会在验证前从有界到期索引移除相应授权；快照格式和公开类型形状保持不变。
+- 完整走一遍：保存、重启进程、加载，再比较检查点哈希。
+- 做一次精确重放，比较最终检查点哈希。
+- 模拟一次外发超时，确认按 `delivery_id` 重试不会重复产生外部效果。
+- 写明版本升级时旧存档如何处理：导出后重新导入、保留旧引擎读取，还是放弃。

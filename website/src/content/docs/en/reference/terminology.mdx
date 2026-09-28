@@ -6,21 +6,17 @@ sidebar:
   label: English-Chinese terminology
 ---
 
-This table defines the English and Chinese terms used in Canwu's public
-architecture, developer guides, and tutorials. Use the English term in English
-prose and the canonical Chinese term in Chinese prose. Keep code identifiers
-unchanged.
+Use this page to look up a Canwu term: its English and Chinese names, the
+matching code identifier, and what it means. Linked terms have their own page
+with more detail; the others are defined here and in the API documentation.
 
-Linked terms have a focused page that explains their behavior and where to use
-them. Unlinked terms are currently defined by this page and the API
-documentation. The agent-facing source of truth in the repository is
-[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md).
-
-Each concept has one preferred public term. The consolidated wording table below
-marks alternatives as deprecated or restricted: deprecated terms must not be
-introduced in new prose, while restricted terms remain valid only in the stated
-technical context. Existing code identifiers and historical records are not
-renamed by this policy.
+If you write Canwu documentation, use the listed term for each language, keep
+code identifiers unchanged, and avoid the alternatives marked as deprecated in
+the last table. In Chinese prose, you may add the English term or code name in
+parentheses at first use, for example 模拟插件 (`simulation plugin`). The source
+of truth is
+[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md);
+this page mirrors it.
 
 <div class="terminology-reference">
 
@@ -58,7 +54,7 @@ renamed by this policy.
 | [plugin ingress cancellation](/en/developer/integration/) | 插件输入撤回 | `cancel_plugin_ingress`, `IngressPayload::PluginCancellation` | Terminal withdrawal of one still-queued plugin ingress item strictly before its due time, journaled as its own record. The withdrawn item is never admitted; nothing is rolled back. |
 | [cancellation authority](/en/developer/integration/) | 撤回权限 | `IngressCancellationAuthority` | Who withdrew a queued plugin item: the host for public packets it enqueued, the owning plugin's registration permit for its internal packet type, or a boundary system of the plugin that scheduled the item. Only the issuer may withdraw. |
 | [scheduled work](/en/architecture/events/) | 调度工作 | — | Work assigned a deterministic simulation due time and insertion order. |
-| [transaction](/en/architecture/settlement/) | 结算边界 | `BoundaryRequest`, `BoundaryRecord` | One validated transaction that admits work, runs systems, records evidence, and commits or rolls back. |
+| [boundary](/en/architecture/settlement/) | 结算边界 | `BoundaryRequest`, `BoundaryRecord` | One validated, all-or-nothing settlement pass that admits work, runs systems in fixed phases, records evidence, and commits or rolls back. |
 | [settlement phase](/en/architecture/settlement/) | 结算阶段 | `BoundaryPhase` | One position in the fixed boundary execution order, not an independent settlement algorithm. |
 | [atomic commit](/en/architecture/settlement/) | 原子提交 | — | Applying all validated boundary changes together so observers never see partial state. |
 | [rollback](/en/architecture/settlement/) | 回滚 | — | Restoring state, evidence, counters, and random positions when a boundary fails. |
@@ -104,24 +100,24 @@ renamed by this policy.
 | reference integration | 参考整合包 | — | A replaceable public-API implementation that maps generic domain capabilities to a small world, production, information, or society model. It may contain runtime plugins and host-adapter code. |
 | starter kit | 入门套件 | — | A runnable host and composition example that combines compatible reference content and integrations into a complete vertical slice. It is reference code, not a privileged engine path. |
 | [fiscal simulation extension](/en/tutorials/cases/ming-fiscal/) | 财政模拟扩展 | `canwu-fiscal` | The generic fiscal-procedure domain extension. It owns law, regional adoption, assessment, authorization, remission, receipt, audit, aggregates, and holder-relative knowledge reports, but not resource balances or transfers. |
-| [fiscal historical context](/en/tutorials/cases/ming-fiscal/) | 历史财政语境 | `FiscalHistoricalContext` | The explicit historical year and mode used to evaluate active periods and reform candidates. It changes through canonical ingress and never applies reforms automatically. |
-| [fiscal coverage cell](/en/tutorials/cases/ming-fiscal/) | 财政覆盖单元 | `FiscalCoverageCell` | One period-region-mechanism cell resolved by deterministic priority to supported, archetype fallback, explicit unknown, or not applicable. |
+| [fiscal historical context](/en/architecture/fiscal/) | 历史财政语境 | `FiscalHistoricalContext` | The explicit historical year and mode used to evaluate active periods and reform candidates. It changes through canonical ingress and never applies reforms automatically. |
+| [fiscal coverage cell](/en/architecture/fiscal/) | 财政覆盖单元 | `FiscalCoverageCell` | One period-region-mechanism cell resolved by deterministic priority to supported, archetype fallback, explicit unknown, or not applicable. |
 | [fiscal execution receipt](/en/tutorials/cases/ming-fiscal/) | 财政执行凭证 | `FiscalExecutionReceiptPacket` | A settlement request citing exact typed adapter-result versions. The admitted receipt derives externally observed quantity and disposition from those results. Within one fiscal runtime state, each exact version and each `(evidence kind, external_operation_id)` pair can settle at most one receipt. It does not own resource truth. |
-| [acting actor](/en/tutorials/cases/ming-fiscal/) | 代理角色 | `FiscalAuthorityBinding::acting_actor` | A second actor admitted for one binding's fiscal actions only while its authority basis is the current version of its record. The standing authorized actor is unaffected. |
-| [authority basis](/en/tutorials/cases/ming-fiscal/) | 权限依据 | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | The exact application record version, of a kind the owning plugin declares, that grants authority: to a fiscal binding's acting actor, or to a movement order that moves subjects other than its owner. It must be the current version of its record when checked; a newer or retired version ends a fiscal grant. |
+| [acting actor](/en/architecture/fiscal/) | 代理角色 | `FiscalAuthorityBinding::acting_actor` | A second actor admitted for one binding's fiscal actions only while its authority basis is the current version of its record. The standing authorized actor is unaffected. |
+| [authority basis](/en/architecture/fiscal/) | 权限依据 | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | The exact application record version, of a kind the owning plugin declares, that grants authority: to a fiscal binding's acting actor, or to a movement order that moves subjects other than its owner. It must be the current version of its record when checked; a newer or retired version ends a fiscal grant. |
 | [resource simulation extension](/en/tutorials/cases/production-economy/) | 资源模拟扩展 | `canwu-resource` | The optional conserved-quantity extension for exact resource/unit revisions, accounts, protected floors, demand, reservation, allocation, transfer, accepted delivery, consumption, loss, fulfillment, and deterministic receipts. It does not own money or markets. |
 | [production simulation extension](/en/tutorials/cases/production-economy/) | 生产模拟扩展 | `canwu-production` | The optional production-asset extension for processes, sites, facilities, capacity, work orders, work in progress, execution, projects, and output settlement. Site form and requirements are revisioned data, not universal building levels. |
-| [resource capability stage](/en/tutorials/cases/production-economy/) | 资源能力阶段 | `ResourceCapabilityStageV1` | An effective-dated, source-cited statement about prospecting, characterized occurrence, permitted access, extraction readiness, operating production, depletion, or explicit unknown/not-applicable status. It is not a timeless deposit flag. |
-| [protected stock floor](/en/tutorials/cases/production-economy/) | 受保护存量底线 | `ProtectedFloorPolicyRevisionV1` | A revisioned policy reserving seed, subsistence, or emergency stock from ordinary allocation unless a separately authorized action overrides it. |
+| [resource capability stage](/en/tutorials/cases/production-economy/) | 资源能力阶段 | `ResourceCapabilityStage`, `ResourceCapabilityRevision` | An effective-dated revision that places a resource at one stage between potential and delivered supply: potential, observed or surveyed, proven, technically extractable, operating site, route-accessible, or delivered and accepted. Each revision cites its model cards. |
+| [protected stock floor](/en/tutorials/cases/production-economy/) | 受保护存量底线 | `ProtectedFloorPolicyRevision` | A revisioned policy reserving seed, subsistence, or emergency stock from ordinary allocation unless a separately authorized action overrides it. |
 | [account-level loss](/en/developer/production-economy/) | 账户损耗 | `ResourceOperationRequestV1::RecordLoss` | A loss debited in place from one account, without a transfer, citing its cause. It counts as admitted loss for conservation, never touches reserved stock, and respects the protected floor unless explicitly allowed. |
 | [atomic exchange](/en/developer/production-economy/) | 原子交换 | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | Two transfer starts admitted or rejected together under one outcome. Each leg's completion lease is held by its source custodian and bound to the digest of the agreed terms; the two transfers then settle independently. |
 | [local acceptance](/en/developer/production-economy/) | 本地验收 | `ResourceTransferDispositionV1::AcceptLocal` | Settling an undispatched transfer without a transport execution when both accounts declare the same place scope, citing the exact handover record. |
 | [place scope](/en/developer/production-economy/) | 地点范围 | `ResourceAccount::place_scope` | A host-declared, immutable place identity for an account's stock, set when the scenario installs the account. It is never inferred; without it, local acceptance is unavailable. |
 | [access grant](/en/developer/production-economy/) | 动用授权 | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | A grantor custodian's recorded consent, citing exact authority evidence, that a grantee may draw on its stock of one exact resource and unit revision up to a cap within a window. The grantee's own completion lease authorizes each debit, and nothing falls back to other accounts. |
-| [work in progress](/en/tutorials/cases/production-economy/) | 在制品 | `WorkInProgressVersionV1` | Inputs already admitted to an unfinished production execution, with exact process, facility, resource, and evidence bindings. It is neither available inventory nor settled output. |
+| [work in progress](/en/tutorials/cases/production-economy/) | 在制品 | `WorkInProgress` | Inputs already admitted to an unfinished production execution, with exact process, facility, resource, and evidence bindings. It is neither available inventory nor settled output. |
 | [realized output](/en/developer/production-economy/) | 实际产出 | `realized_output_per_mille`, `realization_evidence` | A completed execution's output in thousandths of the nominal process output, floor-scaled into output settlement. Any non-nominal ratio needs an exact evidence record of a kind the process revision declares. |
 | [movement lifecycle extension](/en/tutorials/routing-transport/) | 移动生命周期扩展 | `canwu-movement`, `MovementPlugin` | The optional extension that owns the lifecycle of transport records: it admits movement orders, settles legs at their due times, allocates capacity pools, and publishes holder-relative movement reports. Incidents, hazards, and their random draws stay in application systems. |
-| [military simulation extension](/en/tutorials/military-domain/) | 军事模拟扩展 | `canwu-military` | The optional military domain extension for forces, operations, combat, occupation, military knowledge, and cross-domain receipts; it is not a universal combat model. |
+| [military simulation extension](/en/tutorials/military-domain/) | 军事模拟扩展 | `canwu-military` | The optional military domain extension for forces, operations, combat, occupation, military knowledge, and pending effects that other domains settle and acknowledge; it is not a universal combat model. |
 | [force-supply reference consumer](/en/tutorials/cases/production-economy/) | 军事补给参考消费者 | `canwu-force-supply-reference` | A replaceable integration proving that military logistics can consume the shared resource API while owning force-local demand, readiness, shortage consequences, and requisition saga state. It is not a universal combat model. |
 | [local scarcity projection](/en/tutorials/cases/production-economy/) | 本地稀缺度投影 | `LocalScarcityProjection` | A detached, holder-bound read model explaining observed supply, demand, buffers, route access, security, and policy. It does not claim a price. |
 | [price-pressure projection](/en/tutorials/cases/production-economy/) | 价格压力投影 | `PricePressureProjection` | A detached read model materialized only from qualifying price-bearing evidence and a revisioned interpretation rule. It neither forms a market nor settles a trade. |
@@ -163,7 +159,7 @@ renamed by this policy.
 | [custody state](/en/developer/integration/) | 人身状态 | `CustodyState` | `Free`, `Detained`, `Hostage`, `Captive`, `Hiding`, or `Exile`; the other half of person availability. By default only detained and captive block admission. |
 | [person creation](/en/architecture/settlement/) | 人物创建 | `BoundaryDirective::CreatePerson`, `PersonDraft` | A phase-7 directive that creates a person from an application draft and provenance with an engine-allocated ID. The receipt binds that ID to the proposing plugin, system, and correlation; the person is visible from the next boundary. |
 | [actor knowledge](/en/developer/reading-state/) | 角色知识 | `ActorKnowledge` | What one actor knows, including source, confidence, and time, stored separately from ground truth. |
-| [report](/en/architecture/events/) | 报告 | `EventKind::ReportDispatched` | Information dispatched or delivered between actors before it can update their knowledge. |
+| [report](/en/architecture/events/) | 报告 | `EventKind` type `"report_dispatched"` | Information dispatched or delivered between actors before it can update their knowledge. |
 | [holder-relative knowledge](/en/tutorials/cases/routed-correspondence/) | 持有人相对知识 | `KnowledgeHolderRef`, `KnowledgeReadCut` | Facts read from one person, institution, office, or other holder ledger at an exact cut, never from omniscient state. |
 | [holder planning snapshot](/en/developer/reading-state/) | 持有人规划快照 | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | A routing `PlanningSnapshot` built only from the endpoints and connections one holder's ledger asserts at the read cut, returned with a read-set digest as evidence of what the planner read. |
 | [correspondence](/en/tutorials/cases/routed-correspondence/) | 通信 | `CorrespondenceOperation` | Addressed communication demand composed with information delivery and, when needed, physical or signal transport. |
@@ -190,7 +186,7 @@ renamed by this policy.
 | [parent ticket](/en/tutorials/cases/warlord-aid-decision/) | 前序票据 | `DecisionTicket::parent_ticket` | A terminal ticket that a new ticket follows up: one of the exact same decision maker, such as a cancelled ticket reopened for another controller, or one reached by seat succession. The link is copied onto the new ticket's trace. |
 | [seat succession](/en/tutorials/cases/warlord-aid-decision/) | 席位继任 | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | Lineage from a terminal ticket to a new ticket whose assigned controller is bound to the same non-empty seat, so a successor can continue a predecessor's decision without being the same decision maker. |
 | [decision option](/en/tutorials/cases/warlord-aid-decision/) | 决策选项 | `DecisionOption` | One candidate choice offered by a decision ticket. |
-| [decision attempt](/en/tutorials/cases/warlord-aid-decision/) | 决策尝试 | `DecisionAttemptRecord` | An authoritative admission, acceptance, or rejection record for an attempt to resolve a ticket. |
+| [decision attempt](/en/tutorials/cases/warlord-aid-decision/) | 决策尝试 | `DecisionAttemptRecord` | An authoritative record of one admitted decision request and whether it was accepted or rejected. The request may register a controller or open, replace the options of, resolve, or cancel a ticket. |
 | [decision trace](/en/tutorials/cases/warlord-aid-decision/) | 决策轨迹 | `DecisionTrace` | Persisted scores, evidence, policy identity, selected option, and outcome used for explanation and replay. |
 
 ## Consolidated wording
@@ -201,7 +197,7 @@ renamed by this policy.
 | [host application](/en/developer/integration/) / 上层应用 | host program / 主机程序 | Deprecated: use **host application** and **上层应用** for a game, service, client, research tool, or agent system that embeds Canwu. |
 | [public API](/en/developer/integration/) / 对外 API | public facade | Deprecated: use **public API** for the supported application boundary and the broader API surface. |
 | [simulation plugin](/en/developer/extensions/) / 模拟插件 | runtime simulation plugin / 运行时模拟插件; domain plugin / 模拟规则插件 | Restricted: use the longer forms only to contrast runtime plugins with agent tools or to describe a plugin's domain role. They are not separate plugin kinds. |
-| [transaction](/en/architecture/settlement/) / 结算边界 | settlement boundary | Deprecated: use **transaction** for the validated Canwu unit. |
+| [boundary](/en/architecture/settlement/) / 结算边界 | transaction, settlement boundary | Deprecated: use **boundary** for the validated Canwu unit, matching `settle_boundary` and `BoundaryPhase`. |
 | [alternative reality](/en/developer/persistence/) / 平行现实 | 反事实分支 / counterfactual branch; branch (when a different input creates a new causal run) | Deprecated: use **alternative reality** for a new causal reality created by divergent input; use **fork** only for the API operation and copied simulation. |
 | [authority](/en/developer/integration/) / 权限 | permission (when meaning `CommandAuthority`) | Restricted: use **authority** for the validated right to act; retain **permission profile** for the separate run-policy context. |
 

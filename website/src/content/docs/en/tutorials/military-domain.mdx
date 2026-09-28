@@ -1,60 +1,127 @@
 ---
-title: Military simulation extension
-description: Connect forces, operations, combat, supply, occupation, and military administration through a replayable, actor-relative domain extension.
+title: "Run the military extension: from contact to occupation"
+description: Run the military starter, which creates forces, marches into contact, resolves a battle, and establishes an occupation, all through a replayable domain extension.
 template: doc
 sidebar:
   label: Military simulation extension
 ---
 
-Canwu's military capability is an optional **domain extension**, not a new simulation-core subsystem. `canwu-military` provides military domain records, domain commands, boundary systems, draw evidence, and actor-relative projections through `canwu-api`; `canwu-military-reference-content` provides versioned rules and content; and `canwu-military-reference` provides a replaceable reference integration. The current starter is a bounded reference implementation; it does not yet provide a complete production movement, routing, or campaign stack.
+import { Aside } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-## 13 capabilities
+This tutorial runs the military reference starter. It creates a field force, recruits reinforcements, marches into a defended territory, resolves the battle, and occupies the territory, then checks that a saved and a replayed copy match. You will learn how `canwu-military` accepts commands, where its randomness comes from, and which state it leaves to other extensions.
 
-The extension supports one persisted, exactly replayable causal chain:
+The [military simulation extension](/en/reference/terminology/) is split into three crates:
 
-1. Establish army: create formations, subunits, and lifecycle state.
-2. Assign generals: maintain the command chain, authority, and command delay.
-3. Recruit: connect society candidates with enlistment, training, and equipment.
-4. March: admit a typed march order and record its deterministic military operation; a host may later compose routing and transport adapters around this boundary.
-5. Encounter: record contact, visibility, and deterministic arbitration.
-6. Ambush: record concealment, preparation, trigger, and counter-observation.
-7. Tactics and strategy: bind operational plans and choices to `DecisionTicket`.
-8. Battle settlement: settle rounds, casualties, prisoners, retreat, and pursuit in stages.
-9. Behind-enemy operations: support reconnaissance, raids, sabotage, infiltration, extraction, and return.
-10. Supply: submit typed demand and receive reservation, transport, and shortage results.
-11. Occupation control: manage object control, garrison, security, resistance, and governance prerequisites.
-12. Assimilation: advance staged legal, social, and cultural integration signals.
-13. Military administration: record military-government offices, policy, and fiscal/legal procedure.
+- `canwu-military`: military domain records, the `MilitaryCommand` domain command, boundary systems, draw evidence, and commander reports, built on `canwu-api`.
+- `canwu-military-reference-content`: two versioned rulesets.
+- `canwu-military-reference`: a replaceable reference integration that adds a military catalog to the [reference world](/en/tutorials/move-army/).
 
-## Ownership boundaries
+## Run it
 
-The military extension is the sole writer for military force, operation, combat, occupation, and military-knowledge records. The simulation core owns time, canonical ingress, authority, scheduling, atomic commit, persistence, exact replay, and draw evidence. Route planning and reachability belong to `canwu-routing`; movement, custody, capacity, and handoff belong to `canwu-transport`; resource accounts, reservations, consumption, and fulfillment belong to `canwu-resource`; population, law, fiscal procedure, information, and knowledge remain owned by their respective extensions. Military submits typed requests and binds exact receipts; it does not mutate another domain's state.
-
-External effects first become provider-owned pending intent, reservation, or saga state. The provider settles them in its own canonical boundary and returns a source-bound acknowledgement through ingress. Queries, command errors, events, and reports must not disclose another actor's military ground truth.
-
-## Synthetic-content disclaimer
-
-The reference content pack's `riverine-preindustrial` and `industrial-front` profiles are explicitly **synthetic**. They exercise different organization, transport, communication, and replenishment assumptions; they are not historical facts, historical force estimates, or source-calibrated data.
-
-## Example command
-
-The host application submits a typed domain command through the public API, such as `OrderMarch`, instead of mutating a force record directly:
-
-```text
-military.submit(OrderMarch {
-  force_id: force_17,
-  destination: node_42,
-  expected_revision: 8,
-  operation_key: "march-17-42"
-})
-```
-
-The command passes authority, revision, idempotency, and boundary validation. The current reference plugin records a deterministic route digest and operation outcome; a host that adds routing or transport must provide those provider receipts through its own integration boundary.
-
-Run the current reference starter from the repository root:
+From the repository root:
 
 ```shell
 cargo run -p canwu-military-reference --example military_starter
 ```
 
-The command flow above is schematic. See the [runnable starter source](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs) for the complete `CommandEnvelope`, revision guard, and canonical advancement path.
+```text
+military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=3b647676eb58a48594665edc09d190b25eb7932e4d630496c3f57fc6ddc2b691
+```
+
+`military_gameplan=complete` means every assertion passed: the battle reached a result, the occupation exists, and the restored and replayed copies have the same checkpoint hash as the live run. `riverine` and `industrial` print the names of the two reference rulesets.
+
+## How a military command runs
+
+<MermaidDiagram
+  label="A military command is admitted through canonical ingress, applied in phase 7, and reported to commanders in phase 13"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same path."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same path."
+  definition={`flowchart TB
+    Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command()<br/>canonical ingress"]
+    Queue --> Admit["Admission checks<br/>commander, revision,<br/>branch, tactic"]
+    Admit --> Packet["military_command_v1<br/>ingress packet"]
+    Packet --> Apply["Phase 7<br/>write records, draw"]
+    Apply --> Report["Phase 13<br/>report to commanders"]
+`}
+/>
+
+The starter sends every command through one helper:
+
+```rust
+fn submit(
+    canwu: &mut Canwu,
+    sequence: u64,
+    issuer: Issuer,
+    command: MilitaryCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let envelope = CommandEnvelope::new(issuer, military_command(command)?);
+    canwu.enqueue_command(
+        canwu.time(),
+        i32::try_from(sequence)?,
+        CommandRequest::new(CommandRequestId::new(sequence), canwu.revision(), envelope),
+    )?;
+    canwu.advance_canonical(SimDuration::minutes(1))?;
+    Ok(())
+}
+```
+
+Military commands must use canonical ingress (`enqueue_command`); the direct `submit` path returns `MixedCommandIngress`. At admission, the handler checks that the issuer commands the force, that `expected_force_revision` matches the force record, and that the branch or tactic exists in the active ruleset. It then queues a `military_command_v1` packet, which the phase-7 system `apply-military-ingress-v1` applies.
+
+Every command carries a `MilitaryOperationKey`. The same key with different input fails with `IdempotencyConflict`. Resending the same key with the same input is a no-op only when admission accepts the copy. Once the first copy of a command that carries `expected_force_revision` has raised the force revision, a resend fails admission as stale (`DomainRecordVersionConflict`). That fails the boundary and leaves the input in the queue.
+
+## What the starter does
+
+`demo_military_scenario()` starts from the reference world's demo scenario and adds a military catalog that uses the `riverine_preindustrial` ruleset. The example registers `ReferenceWorldPlugin` and `military_plugin()`, then sends five commands:
+
+| Step | Command | Result |
+| --- | --- | --- |
+| 1 | `CreateForce` | General Shen's field force, 2,000 of 2,500 authorized, at the central node. |
+| 2 | `Recruit` | A 400-soldier `reserve` subunit. The force record moves to revision 2. |
+| 3 | `PlanOperation` | A strategic operation record in the `Planned` phase. |
+| 4 | `CreateForce` | A 100-soldier defending force at the eastern node, commanded by Minister Luo. |
+| 5 | `OrderMarch` | The field force marches on the eastern node with the defender as its opponent. |
+
+The march order, as the starter writes it:
+
+```rust
+MilitaryCommand::OrderMarch {
+    operation: canwu_military::MilitaryOperationKey::new("canwu.military:op:march-front")?,
+    force: force.clone(),
+    operation_id: OperationId::new("canwu.military:operation:march-front")?,
+    destination: MilitaryNodeId::new(format!(
+        "canwu.military:node:{}",
+        ids.eastern_territory
+    ))?,
+    objective: "secure the eastern route".to_owned(),
+    tactic: "crossing_assault".to_owned(),
+    opposing_force: Some(ForceId::new("canwu.military:force:defender")?),
+    expected_force_revision: 2,
+}
+```
+
+Then `canwu.advance_canonical(SimDuration::days(5))` runs five days:
+
+1. One minute after the order, the force reaches the destination and contact creates a combat record. The reference plugin models the march as a one-minute step and records a route digest (a hash of force and destination); see [Compose movement](#compose-movement).
+2. Each day an engaged operation resolves one combat round, using one draw from `military_random_stream()` that is recorded as draw evidence. In this run the 2,400-strong attacker loses 7 soldiers and destroys the 100-strong defender in the first round, so the combat ends in `AttackerVictory`.
+3. A victory creates an occupation of the destination at stage `MilitaryControl`. Daily occupation ticks raise security and administrative reach; when the run ends they stand at 600 and 80 per mille.
+
+## Commands and ownership
+
+`MilitaryCommand` has 13 variants, including the internal `AdvanceTick`. `canwu-military` writes only its own force, operation, combat, occupation, ledger, and provider-outcome records; routes, resources, population, law, and fiscal procedure stay with their own extensions. [Military](/en/architecture/military/) lists what each command checks and writes, the combat and occupation rules, and the special-operation known issue.
+
+<Aside type="caution" title="Known issue">
+A successful special operation currently fails its boundary on every retry, so the run cannot advance past it. See [Military](/en/architecture/military/#marches-and-combat) for details and a workaround.
+</Aside>
+
+## Reference rulesets are synthetic
+
+`canwu-military-reference-content` provides two rulesets, `riverine_preindustrial` and `industrial_front`. Both are marked `synthetic_reference`: they exercise different branch, tactic, terrain, recruitment, combat, and occupation assumptions and make no historical claims. The current plugin reads the active ruleset to validate branch and tactic names; its combat and occupation arithmetic is built into `canwu-military`.
+
+## Compose movement
+
+The current `canwu-military` plugin completes a march one minute after the order and records only a route digest. A host that needs routes and travel time composes `canwu-routing` with `canwu-transport` or `canwu-movement` around the march in its own integration. See [Route planning and delivery execution](/en/tutorials/routing-transport/).
+
+Read the full [starter source](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-military-reference/examples/military_starter.rs) for every command and the snapshot and replay checks.

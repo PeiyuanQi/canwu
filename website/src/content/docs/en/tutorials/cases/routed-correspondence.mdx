@@ -1,22 +1,47 @@
 ---
 title: Routed correspondence from Wuxi
-description: Run local and Wuxi-to-Beijing correspondence through holder-relative routing knowledge, transport handoffs, information delivery, incidents, persistence, and exact replay.
+description: A sender in Wuxi posts the same letter to a local address and to a Beijing address; the plugin plans each route from the sender's own knowledge, moves the letter leg by leg, and records the delivery.
 sidebar:
-  order: 6
+  order: 8
   label: Routed correspondence
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../../components/MermaidDiagram.astro";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
-  Open the runnable example
-</LinkButton>
+## The scenario
 
-This case connects communication demand to physical delivery. The information
-ledger remains transport-neutral: the `canwu-correspondence` domain extension
-resolves an address, plans from the carrier's holder ledger (normally the
-sender's own), persists transport execution, and advances the addressed
-delivery through canonical ingress.
+A commander in Wuxi carries a sealed letter for one recipient. The program
+runs the delivery twice: first the commander knows the recipient's address as a
+Wuxi delivery district, then as a Beijing one. Each route is planned from the
+commander's own knowledge of stations, timetables, and addresses.
+
+The question the example answers: how does a message cross a transport network
+using only what its carrier knows, with the route and each delivery step
+recorded?
+
+The network is synthetic. Station names, timetables, and travel times are
+demonstration data.
+
+## What this example shows
+
+- The `canwu-correspondence` [domain extension](/en/developer/extensions/).
+  Its `CorrespondencePlugin` runs next to `InformationPlugin` from
+  `canwu-information`. A [correspondence](/en/reference/terminology/)
+  (`CorrespondenceOperation`) is one addressed message plus its delivery and
+  transport.
+- [Holder-relative knowledge](/en/reference/terminology/): stations,
+  connections, and addresses live in one holder's ledger (`KnowledgeHolderRef`),
+  and planning reads that ledger at a recorded read cut (`KnowledgeReadCut`).
+  See [reading holder knowledge](/en/developer/reading-state/).
+- `plan_route` from `canwu-routing` and `TransportExecution` from
+  `canwu-transport`, which runs the legs and records a `Handoff` between them.
+  See [routing and transport](/en/tutorials/routing-transport/).
+- The information lifecycle from `canwu-information`: a `Dispatch` and its
+  `DeliveryAttempt`. See
+  [encoded interception](/en/tutorials/cases/encoded-interception/).
+- An automatic communication opportunity decided by
+  [operation-keyed random draws](/en/architecture/randomness/).
 
 ## Run it
 
@@ -24,123 +49,305 @@ delivery through canonical ingress.
 cargo run -p canwu-correspondence --example routed_correspondence
 ```
 
-The example runs two requests through the same contract:
+Output:
 
-| Request | Accepted itinerary | Arrival |
-| --- | --- | ---: |
-| Wuxi local delivery | one horse leg | minute `30` |
-| Wuxi to Beijing | demonstration scheduled rail to the Beijing station, then a horse final mile | minute `3060` |
+```text
+Wuxi local delivery: 1 leg(s), arrival minute 30
+  wuxi/hub -> wuxi/delivery/recipient via Horse
+Wuxi to Beijing: 2 leg(s), arrival minute 3060
+  wuxi/hub -> beijing/station via Rail
+  beijing/station -> beijing/delivery/recipient via Horse
+```
 
-This is a synthetic 1940-style network fixture; its durations and connections are demonstration data, not a historical timetable reconstruction. The fixture branches to select local or long-distance input data. The
-correspondence plugin itself has no Beijing-specific planning path: recipient
-address and network knowledge determine the accepted route.
+The arrival minute is the plan's `estimated_arrival_at`, counted from the start
+of the run. The Beijing plan takes the direct train at hour 1, reaches Beijing
+station two days later at minute 2940, and adds two hours on horseback:
+2940 + 120 = 3060. The route through Nanjing would reach Beijing station a day
+later.
 
-## Lifecycle
+## How a letter moves
 
-<Steps>
-1. An application or channel adapter prepares one single-recipient addressed `Dispatch` and chooses a logical `due_at` deadline.
-2. A decision-backed command or a deterministically selected automatic `CommunicationOpportunity` admits the correspondence intent.
-3. The plugin reads the carrier holder's address, endpoint, and connection knowledge, then persists the accepted `RoutePlan` and exact knowledge cut. The carrier is normally the sender; a different carrier needs its own delegation (see below).
-4. One atomic information operation activates the dispatch and creates its first `DeliveryAttempt`.
-5. `TransportExecution` advances each leg and records an explicit custody `Handoff` at a carrier or mode boundary.
-6. On-time final arrival completes the attempt and dispatch through idempotent information operations, preserving exact record-version evidence. A failed or late attempt leaves the dispatch `Active` for explicit recovery.
-</Steps>
+<MermaidDiagram
+  label="Flow of one correspondence from carrier knowledge to delivery, with incidents and recovery"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the walkthrough below describes the same steps."
+  renderFailureMessage="Diagram preview unavailable; the walkthrough below describes the same steps."
+  definition={`flowchart TD
+    K["Carrier's ledger (the sender here): stations, timetables, address"]
+    O["Communication opportunity or decision ticket"]
+    C["initiate_correspondence_v1"]
+    P["RoutePlan from the ledger at a read cut"]
+    A["Dispatch active, DeliveryAttempt created"]
+    L["Transport legs, Handoff at each transfer stop"]
+    D["Attempt Delivered, dispatch Completed"]
+    X["Disaster: new ItineraryRevision for the same attempt"]
+    I["Interception: Access record, delivery continues"]
+    F["Carrier seized or late arrival: attempt Failed"]
+    R["resolve_correspondence_v1 from the sender"]
+    O --> C --> P
+    K --> P
+    P --> A --> L --> D
+    L -. disaster .-> X
+    X -. reroute .-> L
+    L -. interception .-> I
+    L -. seizure or deadline .-> F
+    F -.-> R
+    R -. retry with a new attempt .-> P
+`}
+/>
 
-`RoutePlan.estimated_arrival_at` is an estimate. `DeliveryAttempt.due_at` is the
-immutable information deadline. A late arrival marks the `DeliveryAttempt` as
-`Failed` and the `CorrespondenceOperation` as `DeadlineMissed`; it does not
-rewrite the original deadline.
+Solid arrows are the path the example runs. Dotted arrows are incidents and
+recovery, covered by the tests described at the end of this page.
 
-## Incidents and demand
+## Walkthrough
 
-A disaster uses operation-keyed RNG, fails the current leg, and replans from the
-current endpoint. Legs remain append-only and revision-qualified, and every
-accepted revision retains its exact knowledge cut and planning evidence. The
-same delivery attempt continues under the successor itinerary revision. The
-replacement first leg records custody transfer from the failed leg, including
-failure-time and delivery-attempt evidence. Incidents that are not applicable
-to an active transport attempt are retained as suppressed evidence without
-mutating the operation state.
+The code is in
+[`routed_correspondence.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs)
+and its fixture
+[`examples/support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/support/mod.rs).
+`run(long_distance)` builds a fresh simulation per request. The `1940` passed
+to `Canwu::new_with_plugins` is the random seed.
 
-While the current attempt is `WaitingForRoute` and transport is
-`ReplanPending`, the sender-authorized `resolve_correspondence_v1` command can
-replan that same attempt after knowledge changes. After terminal failure, the
-same command can create a contiguous successor `DeliveryAttempt` with a fresh
-`TransportExecution` and deadline, or explicitly finalize the failed dispatch.
-Failure alone leaves the dispatch `Active` and never rewrites the prior
-attempt's deadline.
+### 1. Prepare the letter
 
-Interception creates an `Access` record for the interceptor and does not
-automatically stop delivery. Destruction, decoding, redirection, or political
-effects require separate domain rules.
+`scenario_with_prepared_dispatch` takes the commander (sender) and the observer
+(recipient) from the deprecated `Canwu::demo(1)` compatibility scenario, then
+adds a `sealed-letter` channel, the letter content, its representation, and a
+dispatch:
 
-Automatic demand is bounded and deterministic. One operation-keyed draw decides
-whether an opportunity occurs; another selects one recipient. The opportunity
-is consumed when correspondence starts, so snapshot restore cannot choose a
-different recipient.
+```rust
+&DispatchPayload {
+    status: DispatchStatus::Prepared,
+    target: DispatchTarget::Addressed(vec![recipient.clone()]),
+    prepared_at: snapshot.initial_time,
+    dispatched_at: None,
+    completed_at: None,
+},
+```
 
-## Delegated carriers and carrier seizure
+The plugin accepts only a `Prepared` dispatch with this single recipient and
+the same sender and channel profile as the request.
 
-Since 0.13.0, a sender can hand its correspondence to another holder, such as
-an envoy, a merchant, or a courier service. The carrier must accept first:
-under its own command authority it issues `delegate_carrier_v1` with a
-delegation claim (`DelegationClaimV1`) that names itself as `performed_by`, the
-sender as `performed_for`, and the `carry_correspondence` capability. The
-sender's request then cites that admitted command in
-`InitiateCorrespondenceRequest::carrier_delegation`.
+### 2. Give the carrier a map
 
-- The claim's validity interval must cover every dispatch. It is checked when
-  the correspondence is admitted and again when the first dispatch or a retry
-  settles; replanning the same attempt does not check it again. A newer
-  delegation from the same carrier for the same sender replaces the older one,
-  which is how a carrier withdraws it; otherwise give the claim an `expires_at`
-  when the carrying should end.
-- Planning and address resolution read the carrier's ledger, because the
-  carrier is the one who travels. The engine publishes none of the carrier's
-  knowledge to the sender, who observes only consequences such as whether the
-  delivery arrives.
-- The plugin records each accepted delegation as the carrier's current
-  delegation for that sender, citable from the next boundary. Admission reads
-  that record rather than the command, so a run whose evidence was sealed
-  decides exactly as its replay. A replaced delegation can no longer be cited,
-  including by retries of a correspondence already under way.
+`network_seed` returns a `NetworkKnowledgeSeed`. The Beijing version knows a
+direct train, a route through Nanjing, and two final-mile roads. The direct
+train uses `TraversalModel::Departures`, with departures at hour 1 on days 0,
+5, and 10:
 
-A `CarrierSeized { seized_by, custody_handoff }` incident means the carrier and
-the packet were taken. Unlike interception, it ends the delivery attempt: the
-current leg fails, a terminal seizure handoff is recorded under
-`custody_handoff`, and the plugin, which owns the execution record, closes the
-transport execution and the attempt as failed. The dispatch stays active for
-the sender's explicit retry or finalization. A
-carrier waiting for a route can also be seized. Only the carrier holder
-receives an `attempt_report`, which says that the attempt ended by seizure
-without naming the seizer. A sender that delegated the carrying is not told by
-the engine; the application relays the news when it would reach the sender.
-Whether a seizure happens is an application draw.
+```rust
+connection_departure(
+    "wuxi-beijing-direct",
+    "wuxi/hub",
+    "beijing/station",
+    TransferMode::Rail,
+    departure,
+    SimDuration::days(2),
+),
+```
 
-## Historical and modern channels
+The seed also holds a `KnownAddress` that maps the recipient to
+`beijing/delivery/recipient` (or `wuxi/delivery/recipient`). `run` submits the
+seed as `KNOWLEDGE_INGRESS` for `KnowledgeHolderRef::Person(sender)`, and the
+plugin publishes each endpoint, connection, and address as a knowledge record
+in the sender's ledger.
 
-Ancient post roads, 1900/1940 rail, modern rail, air, telegraph, and other signal
-networks can share time-dependent route planning. Their adapters still own
-period-specific transfers, operating hours, booking rules, security, encoding,
-and final-mile behavior. A telegraph route, for example, can combine office
-collection, signal transmission, and physical delivery without pretending
-that the signal leg is a train journey.
+### 3. Offer a communication opportunity
 
-Route search does not reserve scarce capacity. The current request contract has
-only `CorrespondenceCapacityAdmission::Unconstrained`; the plugin neither
-checks nor persists a booking. Rail, air, courier, or signal capacity needs a
-future admission variant carrying exact `CapacityBooking` or simulation
-reservation evidence. Movement executions managed by `canwu-movement` can book
-capacity pools, but correspondence does not use them yet. This example
-therefore demonstrates only unconstrained delivery.
+In the same boundary, `run` submits `OPPORTUNITY_INGRESS`:
 
-The tests restore snapshots and replay the full operation exactly. They also
-cover disaster rerouting after a handoff that keeps prior legs and handoff evidence, route recovery after a
-knowledge update, successor-attempt retry, explicit finalization, external
-progress rejection, and holder-read authority. Persisted evidence includes the
-demand decision, per-revision knowledge cuts, routes, handoffs, incidents,
-recovery commands, information operations, and exact dispatch/attempt versions.
+```rust
+CommunicationOpportunityRequest {
+    operation_key: operation_key.to_owned(),
+    sender: EntityRef::Person(sender),
+    candidates: vec![recipient.clone()],
+    reason: "routine correspondence".to_owned(),
+    probability_per_mille: 1_000,
+    automatic: true,
+}
+```
 
-See [routing and transport](/en/tutorials/routing-transport/) for the lower-level
-planning/execution contracts and the [architecture page](/en/architecture/) for
-crate ownership.
+The plugin makes one operation-keyed draw to decide whether the opportunity
+occurs and another to pick a recipient from `candidates`, so replay gets the
+same result. With `1_000` per mille and one candidate, the observer is always
+selected, and the opportunity record gets status `SelectedAutomatic`.
+
+### 4. Send the correspondence command
+
+```rust
+let request = InitiateCorrespondenceRequest {
+    operation_key: operation_key.to_owned(),
+    sender: EntityRef::Person(sender),
+    recipient,
+    carrier: KnowledgeHolderRef::Person(sender),
+    channel_profile: "sealed-letter".to_owned(),
+    origin: RoutingNodeRef::new("wuxi/hub"),
+    due_at: canwu.time() + SimDuration::days(10),
+    prepared_dispatch,
+    delivery_attempt_operation: InformationOperationId::new(
+        "example.correspondence",
+        format!("{operation_key}-attempt"),
+    ),
+    routing_policy: canwu_api::RoutingPolicy::default(),
+    capacity_admission: CorrespondenceCapacityAdmission::Unconstrained,
+    execution_id: canwu_api::TransportExecutionId(if long_distance { 2 } else { 1 }),
+    automatic_opportunity: Some(opportunity_ref(operation_key)),
+    carrier_delegation: None,
+};
+```
+
+`correspondence_command` wraps it as the `initiate_correspondence_v1` plugin
+command, issued by `Issuer::System` with
+`CommandAuthority::no_responsible_actor(...)`. The plugin accepts that
+authority only with a `SelectedAutomatic` opportunity for the same key,
+sender, and recipient. The carrier is the sender, so `carrier_delegation` is
+`None`.
+
+### 5. Plan and activate
+
+`settle_start` in
+[`plugin.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/src/plugin.rs)
+reads the carrier's ledger, resolves the address, and plans:
+
+```rust
+let (snapshot, address) = carrier_planning_snapshot(
+    view,
+    &admitted.request.carrier,
+    &admitted.request.recipient,
+    context.at,
+)?;
+let route_plan = plan_route(
+    &snapshot,
+    &RoutingRequest {
+        origin: admitted.request.origin.clone(),
+        destination: address.destination.clone(),
+        departure_at: context.at,
+        policy: admitted.request.routing_policy.clone(),
+    },
+)
+.map_err(|error| invalid_record(error.to_string()))?;
+```
+
+The default `RoutingPolicy` picks the earliest arrival. The plugin stores a
+`CorrespondenceOperation` with the plan, the address, the read cut, and
+planning evidence, marks the opportunity `Consumed`, and asks the information
+plugin to activate the dispatch. Activation creates delivery attempt 1 with the
+request's `due_at`.
+
+### 6. Move leg by leg
+
+The plugin schedules its own `ProgressAction::StartLeg` and `CompleteLeg`
+ingress at each leg's planned times and rejects progress submitted by the host.
+When a leg before the last completes, `complete_leg` records a planned
+`Handoff` at that stop; the Beijing run records one at `beijing/station`. When
+the last leg arrives:
+
+```rust
+let status = if context.at <= operation.current_due_at {
+    DeliveryAttemptStatus::Delivered
+} else {
+    DeliveryAttemptStatus::Failed
+};
+```
+
+A delivered attempt completes the dispatch, and the operation becomes
+`CorrespondenceStatus::Settled`. `run` steps up to 80 boundaries until
+`typed_domain_record(&correspondence_operation_ref(operation_key))` shows
+`Settled`, and `print_plan` prints the `route_plan`.
+
+## What to notice
+
+- Both requests run through the same plugin code. Only the seed data and the
+  address differ.
+- The plan uses only connections in the carrier's ledger.
+- `RoutePlan.estimated_arrival_at` is an estimate; `DeliveryAttempt.due_at` is
+  the deadline. A late arrival fails the attempt, marks the operation
+  `DeadlineMissed`, and keeps the original `due_at`.
+- Each step leaves a record: the planning history with read cuts, the
+  transport legs and handoffs, and versioned dispatch and attempt records.
+
+## Try changing
+
+- **Remove the direct train.** Delete `wuxi-beijing-direct` in `network_seed`.
+  The Beijing plan becomes three legs through `nanjing/station` and arrives at
+  minute 4500: Nanjing at hour 25, Beijing station at hour 73, then two hours
+  on horseback.
+- **Miss the deadline.** Set `due_at` to `canwu.time() + SimDuration::days(1)`,
+  return from the loop once `operation.status.is_terminal()`, and print
+  `operation.status`. The local letter settles. The Beijing letter arrives at
+  minute 3060, after the deadline at minute 1440, and ends as `DeadlineMissed`.
+- **Suppress the opportunity.** Set `probability_per_mille` to `0`. The
+  opportunity is stored as `Suppressed`, the plugin rejects the command, and
+  `run` panics because no operation appears.
+
+## Beyond the example
+
+The example stops once both letters settle. The rest of the lifecycle is in the
+crate and is exercised by its tests:
+[`routed_delivery.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/routed_delivery.rs)
+covers decision-backed sending, incidents, and recovery;
+[`gap_g25_correspondence_delegated_carrier.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g25_correspondence_delegated_carrier.rs)
+covers delegated carriers; and
+[`gap_g26_correspondence_carrier_seized.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g26_correspondence_carrier_seized.rs)
+covers carrier seizure. Most of these tests end by restoring a snapshot and
+rebuilding the run with `Canwu::replay_from_journal`
+([exact replay](/en/developer/persistence/)).
+
+- **Sending by decision.** `correspondence_decision_ticket` builds a
+  [decision ticket](/en/reference/terminology/) whose `send` option carries the
+  command. The plugin accepts it when the decision origin is the sender;
+  `routed_delivery.rs` uses this path.
+- **Incidents.** The application submits a `CorrespondenceIncidentRequest`
+  with a `probability_per_mille` through `INCIDENT_INGRESS`. The plugin rolls
+  it with an operation-keyed draw and records it on the operation; an incident
+  that arrives in an inapplicable state is kept as suppressed evidence.
+  - `Disaster` fails the current leg and replans from the current stop without
+    the blocked connections. The result is a
+    [reroute](/en/reference/terminology/): a successor `ItineraryRevision` for
+    the same attempt. With no known route, the operation waits as
+    `WaitingForRoute`.
+  - `Interception` writes an `Access` record for the interceptor. Delivery
+    continues.
+  - `CarrierSeized { seized_by, custody_handoff }` is a
+    [carrier seizure](/en/reference/terminology/). The leg fails, a terminal
+    `HandoffKind::Seizure` handoff is recorded, and the attempt and its
+    transport execution close as failed. Only the carrier receives an
+    `attempt_report` knowledge record, and it omits the seizer.
+- **Recovery.** The sender's decision-backed `resolve_correspondence_v1`
+  command takes one `CorrespondenceRecoveryAction`. `ReplanCurrentAttempt`
+  continues a `WaitingForRoute` attempt after the carrier learns new
+  connections. `RetryDelivery` starts a
+  [delivery retry](/en/reference/terminology/): a new attempt that references
+  the old one under the `DomainReference` role `"previous_attempt"`, with a new
+  deadline and `TransportExecution`. `FinalizeDispatch` completes the dispatch,
+  and the operation ends as `Failed` or `DeadlineMissed`. Until then, a failed
+  attempt leaves the dispatch `Active`.
+- **Delegated carriers.** A [delegated carrier](/en/reference/terminology/)
+  first issues `delegate_carrier_v1` under its own command authority. Its
+  `DelegationClaimV1` names the carrier as `performed_by`, the sender as
+  `performed_for`, and the `carry_correspondence` capability. From the next
+  boundary the sender cites that command in
+  `InitiateCorrespondenceRequest::carrier_delegation`. Planning then reads the
+  carrier's ledger, and the engine publishes none of it to the sender. The
+  claim must cover each dispatch, including retries, and a newer delegation
+  from the same carrier to the same sender replaces the older one.
+- **Capacity.** `CorrespondenceCapacityAdmission` has one variant,
+  `Unconstrained`: planning and delivery ignore transport capacity. Capacity
+  pools belong to `canwu-movement`; see
+  [routing and transport](/en/tutorials/routing-transport/).
+
+## Source
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/examples/routed_correspondence.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/routed_delivery.rs" variant="secondary" icon="external">
+  Read the delivery, reroute, and retry tests
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g25_correspondence_delegated_carrier.rs" variant="secondary" icon="external">
+  Read the delegated carrier test
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-correspondence/tests/gap_g26_correspondence_carrier_seized.rs" variant="secondary" icon="external">
+  Read the carrier seizure test
+</LinkButton>

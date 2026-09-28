@@ -1,25 +1,49 @@
 ---
 title: 安全读取与呈现状态
-description: 为受信任上层应用、玩家、智能体和渲染器选择通用或领域读取接口。
+description: 按调用方选择读取接口：受信任工具看到完整状态，玩家、智能体和远程客户端只看到其角色知道的内容。
 sidebar:
   order: 3
-  label: 读取与呈现
+  label: 读取与呈现状态
 ---
 
-参伍把通用权威状态与角色知识分开保存，具体世界投影由领域整合生成。最重要的读取决定是“谁有权知道什么”。
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-## 按调用者选择接口
+本页帮助你决定应用中的每个读取方能看到什么，以及该用参伍的哪个接口。原则很简单：受信任代码可以读取真值；玩家和世界内的智能体只能读取其角色或机构知道的内容。
 
-| 调用者 | 推荐接口 | 说明 |
+下文反复用到三个概念：
+
+- **真值**：权威状态中的事实，不论有没有角色知道。
+- **角色知识**：某个人物或机构（即“持有人”）已经得知的内容，带有来源和时间，保存在该持有人的知识账本中，与真值分开。
+- **投影**：从状态生成的独立只读模型，例如参考世界的 `snapshot()`。修改投影不会影响参伍中的状态。
+
+<MermaidDiagram
+  label="两条读取路径：受信任代码读取权威状态和投影；玩家与智能体通过 CanwuViewer 读取单个持有人的知识，再由上层应用挑选字段生成客户端载荷"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方表格描述了同样的读取路径。"
+  definition={`flowchart LR
+    State["权威状态"] --> Trusted["受信任读取：entities()、boundaries()、events()"]
+    State --> Projection["整合投影，如 snapshot()"]
+    Trusted --> Tools["服务器、调试器、测试"]
+    Projection --> Renderer["受信任的渲染适配器"]
+    Ledger["持有人知识账本"] --> Viewer["CanwuViewer：query_knowledge()、evaluation_traces()"]
+    Viewer --> Dto["上层应用定义的 DTO"]
+    Dto --> Client["玩家、智能体、远程客户端"]
+`}
+/>
+
+## 按调用方选择接口
+
+| 调用方 | 接口 | 能拿到什么 |
 | --- | --- | --- |
-| 受信任服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()`、`person_availabilities()`、`pending_transition_manifests()` | 读取通用权威状态与完整证据 |
-| 领域规则或渲染适配器 | 整合的 `snapshot()` 或类似投影 | 把类型化领域记录组装为只读视图 |
-| 玩家或角色智能体 | `viewer_for_actor()` + `query_knowledge()` 或 `evaluation_traces()` | 只读取指定角色的知识及其可以看到的规则说明，不泄露真值 |
-| 解释界面 | `explain()` | 从已记录事件或失败生成因果说明 |
+| 受信任的服务器、调试器、测试 | `entities()`、`domain_records()`、`events()`、`boundaries()`、`person_availabilities()`、`pending_transition_manifests()` | 通用权威状态和全部已记录证据 |
+| 领域规则或渲染适配器 | 领域整合的 `snapshot()` 或类似投影 | 由类型化领域记录组装成的只读视图 |
+| 玩家或世界内的智能体 | 先 `viewer_for_actor()`，再 `query_knowledge()` 或 `evaluation_traces()` | 只有该持有人的知识，以及它有权看到的规则说明 |
+| 解释界面 | `explain()` | 根据已记录事件或失败生成的因果链 |
 
 ## 两条读取路径（节选）
 
-下面的代码只展示受信任投影与角色知识的分离，不是独立可运行程序。
+下面的片段对比受信任投影与角色知识查询，省略了 main 和错误处理。
 
 ```rust
 use canwu_api::{Canwu, KnowledgeQuery};
@@ -35,13 +59,16 @@ let commander_knowledge = canwu
     .query_knowledge(&KnowledgeQuery::default())?;
 ```
 
-`snapshot()` 是 `canwu-reference-world` 的受信任投影，包含完整世界真值。不要原样发送给玩家、角色智能体或不受信任客户端。
+- `server_world` 是参考整合的受信任投影，包含完整的世界真值，只能留在服务端，不要交给玩家、角色智能体或不受信任的客户端。
+- `commander_knowledge` 只含指挥官账本中的记录。`KnowledgeQuery::default()` 按页返回当前事实；读下一页时，把结果中的 `next` 游标填入查询的 `after`。
 
-参考世界只是一个整合。自定义领域应用 `typed_domain_record()` 组装自己的投影，同时使用 `CanwuViewer` 查询角色知识。
+在没有声明 `RunConfiguration` 的模拟运行中，`viewer_for_actor` 可以为任意已存在的人物创建查看器。声明了运行配置时，它只对绑定在本次运行席位上的角色有效；此时调用 `viewer()`，获得运行策略规定的查看器。
+
+自定义领域时，用 `typed_domain_record()` 组装自己的投影，角色知识同样通过 `CanwuViewer` 读取。
 
 ## 生成客户端安全载荷
 
-上层应用应从 `commander_knowledge` 复制界面真正需要的字段，生成自己的 DTO，再序列化该 DTO。例如：
+从 `commander_knowledge` 中挑出界面需要的字段，放进上层应用自己定义的 DTO，再序列化这个 DTO。例如：
 
 ```json
 {
@@ -52,11 +79,11 @@ let commander_knowledge = canwu
 }
 ```
 
-这个结构由上层应用定义。它只能包含角色知识查询已经返回的内容；不要把 `server_world`、隐藏实体或调试字段混入响应。
+DTO 里只能出现知识查询返回过的信息。`server_world`、隐藏实体和调试字段都不要放进去。
 
 ## 按持有人知识规划路线
 
-为某个人物或机构规划路线时，只应使用该持有人知道的内容。`canwu-correspondence` 按其插件内部使用的同一规则构建这种持有人规划快照：
+为人物或机构规划路线时，只应使用该持有人知道的内容。`canwu-correspondence` 用与其插件内部相同的规则构建“持有人规划快照”：
 
 ```rust
 use canwu_correspondence::planning_snapshot_from_holder_knowledge;
@@ -66,13 +93,19 @@ let (snapshot, read_set) =
 let plan = plan_route(&snapshot, &request)?;
 ```
 
-请在声明了 `canwu.core.knowledge` 读取的插件系统或命令处理器中调用它。它只采用持有人账本在视图给出的读取切面上声明的端点和连接；若某条已知连接指向持有人不知道的端点，构建会失败。快照的 `knowledge_cut` 记录该切面；返回的 `KnowledgeReadCutDigest` 证明读取了哪些事实，只要这些事实不变，摘要就不变。视图读取本身属于系统访问，因此 `holder` 必须取自已准入的权限，例如命令签发者，而不能取自未经验证的载荷。
+使用要点：
 
-在运行时之外，可以把已有的查询结果（例如受限查看器的 `query_knowledge(&planning_knowledge_query())`）交给纯函数 `planning_snapshot_from_knowledge_result`。分页结果会被拒绝，因为部分页面无法证明持有人的完整网络。
+1. 在插件的边界系统或命令处理器中调用，其契约要声明读取 `canwu.core.knowledge`（`StateKey::core_knowledge()`）。`view` 就是该系统拿到的 `SimulationView`。
+2. `holder` 必须取自已准入的权限，例如命令签发者。视图拥有系统级访问权，如果从未经验证的载荷里取 `holder`，就可能读到别人的知识。
+3. 快照只包含持有人账本在视图读取切面（即视图读取账本时所在的历史位置）上声明的端点和连接，快照的 `knowledge_cut` 字段记录这个切面。
+4. 如果某条已知连接指向持有人不知道的端点，调用失败。
+5. `read_set` 是 `KnowledgeReadCutDigest`，证明规划读取了哪些事实；这些事实不变，摘要就不变。
+
+在运行时之外，可以把已有的查询结果交给纯函数 `planning_snapshot_from_knowledge_result`，例如受限查看器的 `query_knowledge(&planning_knowledge_query())`。分页结果会被拒绝，因为只有部分页面时无法证明持有人掌握的完整网络。
 
 ## 解释规则结果
 
-边界系统记录[评估轨迹](/architecture/settlement/#评估轨迹)后，玩家或智能体可以看到某条规则如何得出一个数值，而看不到背后的证据：
+边界系统记录[评估轨迹](/architecture/settlement/#评估轨迹)后，玩家或智能体可以看到一条规则如何得出某个数值，但看不到背后的证据：
 
 ```rust
 let viewer = canwu.viewer_for_actor(ids.commander)?;
@@ -84,12 +117,26 @@ for trace in viewer.evaluation_traces(&EntityRef::Army(ids.army), None)? {
 }
 ```
 
-`evaluation_traces(subject, after)` 按边界与记录顺序返回 `after` 之后各边界的 `EvaluationTraceView`；传入 `None` 时返回所有保留边界的轨迹。视图保留规则、对象、边界、结果和每一项的贡献值，但不含证据，也不含产生它的插件与系统。人物或机构可以看到关于自身实体的轨迹；关于其他对象的轨迹，只有在提及该对象的知识发布于轨迹评估之前进入其账本时才可见，因此持有人不会获得它尚未得知的对象的计算明细。研究与开发者主体可以看到全部轨迹，公开主体会收到 `InvalidKnowledgeAuthority`。受信任的 `boundaries()` 读取保留带证据的完整记录。
+`evaluation_traces(subject, after)` 按结算边界和记录顺序返回 `after` 之后各结算边界的 `EvaluationTraceView`；`after` 为 `None` 时返回所有保留结算边界的轨迹。每条视图包含规则、对象、结算边界、结果和每一项的贡献值；证据以及产生轨迹的插件和系统只保留在受信任记录中。
+
+谁能看到哪些轨迹：
+
+| 主体 | 返回的轨迹 |
+| --- | --- |
+| 人物或机构 | 关于自身实体的轨迹；关于其他对象的轨迹，只有提及该对象的知识发布在轨迹评估之前进入其账本才返回，所以持有人只能看到已经得知的对象的计算明细。 |
+| 研究或开发者 | 全部轨迹 |
+| 公开 | 无；调用返回 `InvalidKnowledgeAuthority` |
+
+受信任代码通过 `boundaries()` 读取带证据的完整轨迹记录。
 
 ## 跟踪多所有者转移
 
-转移清单只能通过受信任的上层应用接口读取。`pending_transition_manifests()` 列出就绪边界尚未结算的已登记清单；每个边界的 `BoundaryReceipt::transition_audits` 与 `BoundaryRecord::transition_audits` 记录在该边界结算的清单，结果为 `Committed` 或 `Expired`。在模拟内部，只有清单的协调者和参与者可以在声明 `canwu.core.transitions` 读取后，通过 `SimulationView::transition_manifests` 与 `transition_audits` 读取它。向玩家呈现转移时，应使用应用自己的记录或报告，而不是审计记录。
+转移清单让多个插件在指定的结算边界共同写入一次转移（见[转移清单](/architecture/settlement/#转移清单)）。读取方式：
 
-## 表现层只复制，不回写
+- **上层应用（受信任）：** `pending_transition_manifests()` 列出就绪结算边界尚未结算的已登记清单。`BoundaryReceipt::transition_audits` 与 `BoundaryRecord::transition_audits` 列出在该结算边界结算的清单，结果为 `Committed` 或 `Expired`。
+- **模拟内部：** 只有清单的协调者和参与者能看到它。它们的边界系统声明读取 `canwu.core.transitions`，再调用 `SimulationView::transition_manifests` 和 `SimulationView::transition_audits`。
+- **玩家：** 用应用自己的记录或报告呈现转移。审计记录属于受信任证据。
 
-渲染器可以从领域投影复制位置、路线和状态，维护自己的动画与插值数据。这些表现数据不能写回参伍。连续客户端应区分现实时间、模拟时间和表现时间。
+## 表现状态留在渲染器
+
+渲染器可以从投影复制位置、路线和状态，并维护自己的动画与插值数据。这些数据只留在渲染器里；参伍的状态只通过命令和输入改变。连续客户端要把三种时间分开：现实时间、模拟时间和表现时间，做法见[连续时间游戏循环教程](/tutorials/continuous-game-loop/)。

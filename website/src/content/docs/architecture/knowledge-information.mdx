@@ -1,0 +1,246 @@
+---
+title: 知识与信息系统
+description: 持有人知识账本、信息生命周期和按路线投递的通信如何把世界中的一件事实变成某个角色知道的内容，适用于每个角色只能依据已送达自己的消息行动的模拟。
+sidebar:
+  order: 7
+  label: 知识与信息
+---
+
+import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="知识与信息系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/events/">事件系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/developer/reading-state/">安全读取与呈现状态</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/knowledge-information/">English version</a>
+</nav>
+
+参伍把世界中的真值和每个角色知道的内容分开保存。`canwu-knowledge` 为每个持有人（即知识归属的人物或机构）维护一本只追加的知识账本；`canwu-information` 记录一条信息如何被写成、发出、阅读、读懂和发布；`canwu-correspondence` 根据承运人所知规划路线，投递写明收件人的信件。如果玩家、智能体或机构要随着报告和信件陆续送达而行动，并且各自只看到已经到达自己的内容，就需要用到这三个 crate。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-knowledge` | 持有人账本（`KnowledgeRecord`）、持有人查询、读取切面（一次读取所看到的账本位置）和游标，以及为兼容保留的、每个角色对军队的旧式观测（`ActorKnowledge`） | 已发布到 crates.io |
+| `canwu-information` | `canwu.information` 命名空间下以领域记录表示的信息生命周期：渠道、内容、表现形式、实物载体、发送记录、投递尝试、访问、解读、受众、发布和操作；模拟插件 `InformationPlugin` | 已发布到 crates.io |
+| `canwu-correspondence` | `canwu.correspondence` 命名空间下的通信：通信操作、通信机会、知识种子和承运人委托；模拟插件 `CorrespondencePlugin`；持有人规划快照的构建函数 | 已发布到 crates.io |
+
+<MermaidDiagram
+  label="crate 依赖关系：上层应用使用两个扩展和对外 API；两个扩展依赖 canwu-api；模拟内核保存 canwu-knowledge 的账本"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    Host["上层应用<br/>场景、命令、输入、知识种子"]
+    Corr["canwu-correspondence<br/>信件、路线、承运人"]
+    Info["canwu-information<br/>信息生命周期"]
+    Api["canwu-api<br/>对外 API、CanwuViewer"]
+    Route["canwu-routing、canwu-transport<br/>路线规划、运输记录"]
+    Sim["canwu-sim<br/>校验并提交知识发布"]
+    Know["canwu-knowledge<br/>持有人账本与查询"]
+    Host --> Corr
+    Host --> Info
+    Host --> Api
+    Corr --> Info
+    Corr --> Api
+    Info --> Api
+    Api --> Route
+    Api --> Sim
+    Api --> Know
+    Sim --> Know
+`}
+/>
+
+箭头从一个 crate 指向它依赖的 crate。`canwu-knowledge` 属于模型层：模拟内核（`canwu-sim`）保存它的账本并校验每一次知识发布，`canwu-api` 重新导出它的类型。两个扩展只依赖 `canwu-api`，`canwu-correspondence` 另外依赖 `canwu-information`。上层应用注册插件，提供内容和概率，并通过对外 API 读取结果。
+
+发布知识和拥有状态是两种独立的能力。插件即使拥有某条记录，也要先注册知识 schema，并在自己的某个[边界系统](/architecture/settlement/)（插件在各结算阶段注册的函数）上声明 `KnowledgeWriteGrant`，才能把这条记录告诉任何持有人。
+
+## 核心模型
+
+### 知识账本
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `KnowledgeHolderRef` | 谁知道：`Person(PersonId)` 或 `Entity(EntityRef)`。定义在 `canwu-core` 中，由 `canwu-api` 重新导出。 |
+| `KnowledgeRecord` | 某个持有人账本中的一条事实：`schema`、带类型的 `subjects`、JSON `payload`、`as_of`（事实成立的时间，可以为空）、`learned_at`（持有人得知的时间）、`confidence_per_mille`、`origin`（获取方式和证据），以及被它取代（`supersedes`）或与它矛盾（`contradicts`）的旧记录。`as_of` 和 `learned_at` 之差，就是这条消息传到持有人手中时已经过去的时间。 |
+| `KnowledgeRecordDraft` | 边界系统提出的记录草稿。内核分配记录 ID，并把 `learned_at` 设为边界时间。 |
+| `KnowledgeRecordView` | 面向持有人的记录副本：带持有人本地 ID（`HolderKnowledgeRecordId`），不含 `origin`。 |
+| `KnowledgeQuery`、`KnowledgeQueryResult`、`KnowledgeCursor` | 某个持有人账本中的一页记录，可以按 schema、主体和得知时间过滤，并带有翻到下一页的游标。 |
+| `KnowledgeReadCut` | 一次读取所看到的账本位置：边界，加上该持有人全部记录的哈希。 |
+| `KnowledgeSnapshot` | 所有持有人账本，保存在快照或场景中。它还带有 `ActorKnowledge`，即每个角色最早对军队的观测，每条都有一个 `KnowledgeSource`（直接观察、指挥职责、报告或场景记录）。 |
+| `PluginKnowledgeSchema`、`KnowledgeWriteGrant` | 某个插件注册并拥有的带版本知识 schema，以及某个边界系统以指定可见性发布这个 schema 的许可。 |
+
+### 信息与通信
+
+下表中每种信息记录类型都有对应的载荷类型，例如 `Content` 对应 `ContentPayload`。
+
+| 类型 | crate | 表示什么 |
+| --- | --- | --- |
+| `Content` | information | 说了什么：内联 JSON 正文或外部资源的摘要；可以由其他内容衍生，并标明每个来源的角色，例如引用或更正 |
+| `Representation` | information | 内容在某种格式下的一种表现形式，带来源谱系、可选的 `ClaimedSourceRef`（它自称的来源），以及解读它所需的能力 |
+| `Instance` | information | 实物载体，带保管人和所在位置 |
+| `Channel` | information | 传递路径的配置及其能力，例如 `AddressedDelivery`、`AudienceDelivery` 或 `OpenReception` |
+| `Dispatch`、`DeliveryAttempt` | information | 一次发往指定持有人、受众或公开接收的发送；一次把信息送到某位收件人的尝试 |
+| `Access` | information | 某个持有人读了某个表现形式，带阅读方式和以千分比计的阅读程度 |
+| `Interpretation`、`AuthenticityFinding` | information | 持有人试图读懂所访问的内容，状态为 `Failed`、`Partial` 或 `Succeeded`；可选的真伪判定记录它是否接受自称的来源 |
+| `Audience`、`Release` | information | 绑定成员根的固定成员名单；面向这个受众或公开可得的发布，最终为 `Withdrawn` 或 `Expired` |
+| `InformationOperationEnvelope` | information | 一次幂等操作，以 `InformationOperationId` 为键，包含一条 `LifecycleRequest` |
+| `CorrespondenceOperation` | correspondence | 一封有收件人的信件：通信意图、已解析的地址及其读取切面、`RoutePlan`、`TransportExecution`、规划历史、意外事件，以及最终为 `Settled`、`DeadlineMissed`、`CompensationPending` 或 `Failed` 的 `CorrespondenceStatus` |
+| `NetworkKnowledgeSeed` | correspondence | 要写入某个持有人账本的路由端点、连接和收件人地址 |
+| `CommunicationOpportunity` | correspondence | 经过抽样得到的一次写信机会，发件人可以写给候选收件人中的一位 |
+| `CorrespondenceIncidentKind` | correspondence | `Disaster`、`Interception` 或 `CarrierSeized` |
+| `CarrierAuthority` | correspondence | 承运人已接受的、替某位发件人承运的委托，保存为它当前的 `CarrierDelegationRecord` |
+
+## 运行过程
+
+<MermaidDiagram
+  label="从命令或输入经过第 7 阶段生命周期系统和第 13 阶段知识发布，到达持有人账本、KnowledgePublished 事件和 CanwuViewer 的路径"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一路径。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一路径。"
+  definition={`flowchart TB
+    Input["上层应用的命令和输入<br/>apply_information_operation_v1、<br/>initiate_correspondence_v1、知识种子"]
+    Corr["第 7 阶段：correspondence-lifecycle-v1<br/>读取承运人账本、规划路线"]
+    Info7["第 7 阶段：information_lifecycle_v1<br/>校验并写入领域记录"]
+    Info13["第 13 阶段：information_publication_v1<br/>按持有人 PublishKnowledge"]
+    Seed["第 13 阶段：correspondence-knowledge-ingress-v1<br/>知识种子和尝试报告"]
+    Kernel["模拟内核<br/>检查 schema、授权和持有人<br/>边界结束时提交"]
+    Ledger["持有人知识账本<br/>KnowledgeRecord"]
+    Event["KnowledgePublished 事件<br/>受众：该持有人"]
+    Viewer["CanwuViewer<br/>query_knowledge、visible_changes_since"]
+    Input --> Corr
+    Input --> Info7
+    Input --> Seed
+    Corr -- "information_operation_v1<br/>在之后的边界准入" --> Info7
+    Info7 --> Info13
+    Info13 --> Kernel
+    Seed --> Kernel
+    Kernel --> Ledger
+    Kernel --> Event
+    Ledger --> Viewer
+    Event --> Viewer
+    Ledger -. "下一次规划读取" .-> Corr
+`}
+/>
+
+<Steps>
+1. 输入到达。上层应用提交 `apply_information_operation_v1` 命令，每条命令带一个 `InformationOperationEnvelope`。命令处理器检查幂等性，然后排入 `information_operation_v1` [规范化输入](/reference/terminology/)；命令本身不写任何记录。信息提供方也可以直接排入这条输入。通信通过 `initiate_correspondence_v1`、`delegate_carrier_v1` 和 `resolve_correspondence_v1` 三条命令，以及 `install_correspondence_knowledge_v1`、`communication_opportunity_v1` 和 `correspondence_incident_v1` 三种输入进入。
+2. 第 7 阶段运行信息生命周期。事件驱动的系统 `information_lifecycle_v1` 让每个已准入的操作依次进入 `Accepted`、`ApplyingDomainChanges`，最后应用变更，每个边界前进一步。应用之前，它检查解读权限；如果带有真伪判定，还要检查判定引用的是某个带自称来源的表现形式的当前版本。检查失败时，操作保存为 `Rejected`，错误码为 `invalid_authority` 或 `invalid_lifecycle`。`InformationLifecycle::plan` 返回记录变更，以及这次变更引出的知识发布。
+3. 第 7 阶段同时运行通信。`correspondence-lifecycle-v1` 结算启动、推进、意外事件、通信机会、恢复和委托。处理启动时，它读取承运人当前的规划知识，从中解析收件人地址，调用 `plan_route`，保存 `CorrespondenceOperation`，并为 `canwu-information` 安排信息操作。之后的 `progress_correspondence_v1` 输入等待这些操作结束，再开始和完成各段路程。
+4. 第 13 阶段发布知识。`information_publication_v1` 把一个操作要发布的知识转为 `PublishKnowledge` 指令，每个持有人一批，每个操作在一个边界内最多发布 64 条。下一个边界，`information_operation_finalize_v1` 输入记录已发布的 ID，并放出下一批。`correspondence-knowledge-ingress-v1` 发布知识种子和承运人的尝试报告。
+5. 模拟内核校验并提交。内核只接受满足以下全部条件的 `PublishKnowledge` 指令：
+   - 来自第 4 或第 13 阶段的系统，且该系统在 `knowledge_writes` 中以相应的可见性声明了这个 schema；
+   - schema 可写，并由同一个插件注册；
+   - 持有人符合资格，证据引用有效。
+
+   随后内核分配全局记录 ID，设定 `learned_at`，让同一边界中后续运行的系统读到 `SameBoundary` 记录，并在边界结束时把所有批次写入账本。
+6. 产出结果。每个批次成为 `BoundaryRecord::knowledge_changes` 中的一条 `BoundaryKnowledgeChange`，并产生一个以该持有人为受众的 `KnowledgePublished` 事件。此后该持有人读取账本时就能看到新记录。
+</Steps>
+
+[结算系统](/architecture/settlement/)列出了全部十四个阶段。[从无锡发出、按路线投递的通信](/tutorials/cases/routed-correspondence/)逐步讲解了意外事件和恢复：灾害让同一次尝试改道，截取让截取者得到一条 `Access` 记录、投递照常继续，承运人扣押则结束这次尝试。
+
+## 知识与可见性
+
+账本属于一个持有人：未死亡的人物（`KnowledgeHolderRef::Person`）、军队、政府，或者 schema 把 `holder_policy` 设为 `KnowledgeHolderPolicy::Allowed` 的领域记录实体。向其他持有人发布知识会以 `InvalidKnowledgeHolder` 失败。账本没有继承关系：继任机构的账本从空开始，直到有插件向它发布知识。
+
+| 读取方 | 接口 | 得到什么 |
+| --- | --- | --- |
+| 绑定到人物或机构的玩家或智能体 | `CanwuViewer::query_knowledge` | 自己的账本，形式为 `KnowledgeRecordView`，不含来源证据 |
+| 研究主体或开发者主体 | `CanwuViewer::query_holder_knowledge`、`CanwuViewer::audit_knowledge_record` | 任意现存持有人的账本；审计调用返回一条带 `origin` 的完整 `KnowledgeRecord` |
+| 公开主体 | 无 | `query_knowledge` 以 `InvalidKnowledgeAuthority` 失败 |
+| 受信任的上层应用代码 | `Canwu::admin_query_knowledge`、`Canwu::knowledge` | 任意持有人的账本，或完整的 `KnowledgeSnapshot` |
+| 边界系统或命令处理器 | `SimulationView::knowledge_records` | 视图读取切面上任意持有人的账本；系统契约必须声明 `StateKey::core_knowledge()` 读取 |
+
+用 `Canwu::viewer()` 打开查看器，它遵循本次运行的观察策略；角色席位也可以用 `viewer_for_actor`。[安全读取与呈现状态](/developer/reading-state/)演示了两种用法，并说明如何构建客户端载荷。
+
+查询结果按 `learned_at` 排序。默认的 `KnowledgeHistoryView::CurrentHeads` 会隐藏已被后续记录取代的记录，`FullHistory` 则返回全部记录。持有人本地 ID 从 1 开始为该持有人的记录编号，读取方无法据此推断其他持有人有多少条事实。游标绑定持有人、查询和读取切面。持有人得知新内容后，读取切面随之变化，旧游标会以 `KnowledgeReadCutUnavailable` 失败；其他持有人收到新消息，这个游标仍然有效。
+
+`CanwuViewer::visible_changes_since(since)` 为之后每个受众包含该查看者的事件返回一个 `VisibleChange`（时间、摘要和来源事件）。每次知识发布都会产生以接收持有人为受众的 `KnowledgePublished` 事件，客户端可以借此发现新知识，再去查询账本。研究主体和开发者主体能看到所有事件。其他受众类型见[事件系统](/architecture/events/)。
+
+两个扩展发布以下 schema：
+
+| schema | 发给谁 | 何时发布 |
+| --- | --- | --- |
+| `canwu.information` `representation_available` | 投递尝试的收件人 | 尝试变为 `Delivered` |
+| `canwu.information` `access_recorded` | 阅读者本人 | 记录一次访问 |
+| `canwu.information` `interpretation_recorded` | 解读所服务的持有人 | 记录一次解读 |
+| `canwu.information` `release_available` | 受众中的每个成员 | 面向受众的发布变为 `Active` |
+| `canwu.correspondence` `routing_endpoint`、`routing_connection`、`address` | 种子中指定的持有人 | 准入一个 `NetworkKnowledgeSeed` |
+| `canwu.correspondence` `attempt_report` | 承运人 | 承运人扣押结束了一次投递尝试 |
+
+信息 schema 的载荷只有 `record_version`，主体字段指明是哪些记录。持有人得知某条记录存在之后，要展示哪些内容由上层应用决定。每条事实只发给一个持有人，所以经手人私下的阅读不会传给别人，受托承运人的路线知识不会进入发件人的账本，扣押报告也不写出扣押者。
+
+## 随机性、持久化与重放
+
+`canwu-knowledge` 和 `canwu-information` 不抽取随机数。`canwu-correspondence` 在 `correspondence-lifecycle-v1` 上声明了一条[随机流](/architecture/randomness/)：`operation-resolution`，版本 1。它进行以下操作定址随机抽样：
+
+| 操作类型 | 决定什么 |
+| --- | --- |
+| `communication_opportunity` | 通信机会是否被选中：在 0 到 999 之间抽样，小于应用提供的 `probability_per_mille` 即选中 |
+| `communication_recipient` | 被选中的机会指向哪位候选收件人：在候选名单中均匀抽取一位 |
+| `correspondence_incident` | 意外事件是否发生：在 0 到 999 之间抽样，小于应用提供的 `probability_per_mille` 即发生 |
+
+0 到 999 的抽样结果以 `roll_per_mille` 保存在通信机会或意外事件记录上。持有人能否识破伪造的自称来源，由应用自己抽样决定；信息扩展只记录由此得出的 `AuthenticityFinding`。
+
+持有人账本保存在 `SimulationSnapshot::knowledge` 中，每个持有人一项，记录按 ID 排序。加载时，挂在错误持有人名下的记录和重复的全局 ID 都会被拒绝。持有人本地 ID、读取切面哈希和游标绑定都在读取时推导，从不保存。信息和通信的状态都是普通的领域记录。
+
+每条边界记录都保存本边界的 `knowledge_changes`，[精确重放](/developer/persistence/)会重新计算并与之比较。信息操作按 ID 和规范输入哈希保证幂等：完全相同的重试不改变任何状态，同一 ID 配上不同输入则以 `IdempotencyConflict` 失败。解码之类的判断在你的代码中完成，结果以已记录的内容和解读记录进入模拟，所以重放直接复用这些结果，不会再次运行你的解码器。
+
+## 上层应用需要提供什么
+
+- 持有人及其初始知识：通过 `Scenario::knowledge` 提供；通信规划所需的知识也可以用 `NetworkKnowledgeSeed` 写入。
+- 你自己的知识 schema，以及根据你的机制决定谁得知什么的第 4 或第 13 阶段系统。
+- 信息内容：正文、格式、自称来源、渠道配置和受众成员名单。
+- 解读结果，包括 `AuthenticityFinding`。
+- 权限：发信和恢复所需的控制者与[决策票据](/architecture/decisions/)（可用 `correspondence_decision_ticket` 和 `correspondence_recovery_decision_ticket` 构建）、承运人委托命令；委托解读还需要一个名为 `canwu-authority`、接受 `delegate_interpretation_v1` 命令的插件。
+- 通信机会、意外事件和伪造识别的概率。
+- 根据 `query_knowledge` 和 `visible_changes_since` 的结果构建的客户端 DTO。
+
+## 限制与预算
+
+知识账本（`DEFAULT_KNOWLEDGE_PAGE_SIZE`、`MAX_KNOWLEDGE_PAGE_SIZE` 和 `KnowledgeLimitsV1::CURRENT`）：
+
+| 限制 | 数值 |
+| --- | ---: |
+| 查询的默认和最大分页大小 | 100 条和 1,000 条 |
+| 每个插件的知识 schema 数（`schemas_per_plugin`） | 256 |
+| 每个发布批次的记录数（`records_per_batch`） | 1,000 |
+| 一个边界内每个系统的发布批次数（`batches_per_system_boundary`） | 64 |
+| 每个边界的记录数（`records_per_boundary`） | 10,000 |
+| 每条记录的载荷字节数（`payload_bytes_per_record`） | 65,536 |
+| 每条记录的主体、证据引用、取代关联和矛盾关联数（`relations_per_record`） | 各 64 |
+| 摘要和获取方式文本（`text_bytes`） | 1,024 字节 |
+
+信息生命周期（`InformationLimitsV1::canonical()`）限定每次发送的指定收件人数和显式受众成员数各为 10,000、每位收件人的投递尝试数为 256、内联正文为 65,536 字节，其余上限见 rustdoc。
+
+一次通信机会列出 1 到 64 位候选收件人。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-information --example confidential_copy_release
+cargo run -p canwu-information --example encoded_interception
+cargo run -p canwu-correspondence --example routed_correspondence
+cargo test -p canwu-knowledge -p canwu-information -p canwu-correspondence
+```
+
+- [机密副本与定向发布](/tutorials/cases/confidential-copy-release/)：经手人摘抄一份文书，把副本发布给两名读者，然后撤回。
+- [编码传递与中途截取](/tutorials/cases/encoded-interception/)：解读失败、委托解读，以及对自称来源的判定。
+- [从无锡发出、按路线投递的通信](/tutorials/cases/routed-correspondence/)：依据发件人账本规划路线，以及意外事件、恢复、受托承运人和扣押。
+- [路线规划与送信执行](/tutorials/routing-transport/)：`canwu-routing` 和 `canwu-transport` 如何规划和记录一段行程。
+- [安全读取与呈现状态](/developer/reading-state/)：查看器、客户端载荷和持有人规划快照。
+
+## 延伸阅读
+
+- [事件系统](/architecture/events/)：事件受众和因果记录。
+- [结算系统](/architecture/settlement/)：阶段、可见性和边界记录。
+- [路线、运输与移动系统](/architecture/routing-movement/)：依据持有人知识规划路线，以及移动生命周期。
+- [参伍术语表](/reference/terminology/)：持有人相对知识、通信、受托承运人、承运人扣押和真伪判定。
+- 仓库中 `docs/architecture.md` 的 [Knowledge model](https://github.com/PeiyuanQi/canwu/blob/main/docs/architecture.md#knowledge-model) 一节。

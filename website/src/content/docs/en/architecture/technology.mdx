@@ -1,0 +1,241 @@
+---
+title: Technology
+description: How Canwu models technology from evidence, turning trials into local capability, installations, use-specific adoption, and diffusion, with optional plugins for historical research.
+sidebar:
+  order: 12
+  label: Technology
+---
+
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="Technology navigation">
+  <span class="architecture-links-label">Continue exploring:</span>
+  <a href="/en/architecture/systems/">Domain systems</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/settlement/">Settlement system</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/tutorials/technology-diffusion/">Walkthrough: technology diffusion</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/technology/">中文版</a>
+</nav>
+
+`canwu-technology`, the [technology simulation extension](/en/reference/terminology/), follows a technique from a trial at one workshop to qualified practice, installed equipment, adoption for one use, and teaching at another site. Each step is its own record, and each record cites the evidence behind it. The crate has no global tech tree, era levels, research points, or automatic unlocks. You need it when your game models invention, local know-how, or the spread of techniques between places.
+
+`canwu-history-research` is a separate, optional crate. Its plugins record a historian's assessment of technology evidence and leave the simulated outcome alone.
+
+## Crates and ownership
+
+| Crate | What it owns | Published |
+| --- | --- | --- |
+| `canwu-technology` | The `canwu.technology` namespace: 17 record kinds, the tracked command `apply_technology_operation_v1`, the result ingress `technology_result_v1`, three boundary systems, five holder knowledge kinds, the reference evaluator, and restore validation | Published on crates.io |
+| `canwu-history-research` | Three optional plugins, each with its own namespace and one create-only `assessment` record kind, plus a trusted-host query and restore validation | Published on crates.io |
+
+<MermaidDiagram
+  label="Crate dependencies: canwu-technology depends on canwu-api; canwu-history-research and canwu-production depend on canwu-technology; the host application feeds both extensions"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the text below describes the same dependencies."
+  renderFailureMessage="Diagram preview unavailable; the text below describes the same dependencies."
+  definition={`flowchart TB
+    Host["Host application<br/>catalog records, commands,<br/>provider results"]
+    History["canwu-history-research<br/>optional assessment plugins"]
+    Tech["canwu-technology<br/>TechnologyPlugin"]
+    Production["canwu-production<br/>binds exact technology records"]
+    Api["canwu-api"]
+    Host -- "scenario records, commands,<br/>result ingress" --> Tech
+    Host -- "assessment commands" --> History
+    History -- "depends on" --> Tech
+    Production -- "depends on" --> Tech
+    Tech -- "depends on" --> Api
+    History -- "depends on" --> Api
+`}
+/>
+
+Both crates build on public contracts only. `canwu-api` does not re-export them, so add them to your `Cargo.toml`. Downstream, `canwu-production` binds an exact `TechniqueRevision`, a `CapabilityQualification` or `ImplementationRecord`, and, when a process requires it, an `AdoptionRecord` to its executions and projects; see [resources and production](/en/architecture/resources-production/).
+
+## Core model
+
+Create-only records never change. A versioned record gets a new version for each accepted update, and an update cannot move a record to another owner.
+
+| Type | Changes | What it represents |
+| --- | --- | --- |
+| `MetricSchema` | Create-only | A measurable quantity: label, unit, integer scale, and allowed range |
+| `TechniqueSpec` | Create-only | What a technique does: its requirement groups and a `QualificationRule` per operation |
+| `TechniqueRevision` | Create-only | One exact recipe or design of a spec, with parameters, parent revisions, and the evaluator ID |
+| `ApplicationSpec` | Create-only | One use of a technique, with the requirement groups that make the use viable |
+| `TechnicalProgram` | Versioned | A holder's investigation, adaptation, training, repair, reverse-engineering, or troubleshooting effort at one site |
+| `TechnologyExecutionIntent` | Versioned | Authorization for one named provider to return one experiment, production, or invention result for a program, inside a time window |
+| `ExperimentAttempt`, `ProductionRun` | Create-only | A provider's result under stated inputs, environment, and assets, with its `EvaluationResult` |
+| `AttemptObservation` | Create-only | One holder's measurement of an attempt, with method and uncertainty |
+| `TechnicalClaim`, `ClaimAssessment` | Create-only | A holder's proposition about technology, and a holder's confidence in a claim |
+| `CapabilityQualification` | Versioned | A holder can perform one operation of a revision at one site, backed by attempts, valid from a set time |
+| `AssetBinding` | Versioned | A holder's equipment at a site, citing the provider's asset evidence, with capability tags and condition |
+| `ImplementationRecord` | Versioned | An installation at a site: revision, qualification, assets, capacity, and reliability |
+| `AdoptionRecord` | Versioned | One site's use of one application: status (`Trial`, `Committed`, `Suspended`, `Abandoned`), scale, installations, and viability evidence |
+| `TransmissionOpportunity` | Versioned | A chance to learn by one `TransmissionMode`, from a source to a destination holder and site |
+| `TechnologyOperation` | Create-only | The terminal outcome of one admitted operation: `Applied` with its result, or `Rejected` with a code |
+
+The host loads the catalog, the first four types, as initial-scenario records with `TechnologyCatalogRecord::into_initial_record`, and names them with `initial_record_version`. Every later change is a `TechnologyRecordChange`, either `Create` or `Update` with an `expected_version`, wrapping a `TechnologyRecordPayload`.
+
+## From evidence to adoption and diffusion
+
+<MermaidDiagram
+  label="Record chain: catalog, program, authorized attempt, observation, qualification, implementation, adoption, and transmission to a learner's program"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the table below describes the same chain."
+  renderFailureMessage="Diagram preview unavailable; the table below describes the same chain."
+  definition={`flowchart TB
+    Catalog["Catalog<br/>TechniqueSpec, TechniqueRevision,<br/>ApplicationSpec"] --> Program["TechnicalProgram"]
+    Program --> Intent["TechnologyExecutionIntent"]
+    Intent --> Attempt["ExperimentAttempt<br/>provider result"]
+    Attempt --> Obs["AttemptObservation<br/>measurement"]
+    Attempt --> Qual["CapabilityQualification"]
+    Asset["AssetBinding"] --> Impl["ImplementationRecord"]
+    Qual --> Impl
+    Impl --> Adopt["AdoptionRecord<br/>one use at one site"]
+    Obs -- "viability evidence" --> Adopt
+    Impl --> Teach["TransmissionOpportunity"]
+    Ext["ExternalTransmissionSourceV1<br/>off-map teacher"] -.->|or| Teach
+    Teach --> Learner["Learner's TechnicalProgram"]
+`}
+/>
+
+Each arrow is a separate operation. A passing attempt is evidence only. A qualification, an installation, and an adoption each need their own command. Links that must keep their meaning use an [exact domain-record version](/en/reference/terminology/) (`DomainRecordVersionRef`), which fixes the record, the version, and the evidence that established it. If an installation is later deactivated, an adoption still reads the version it cited.
+
+| Link | What the plugin checks |
+| --- | --- |
+| Attempts to qualification | The attempts are unique and match the revision, operation, and site. The holder or named operator ran at least one. `reliability_per_mille` equals successes × 1,000 ÷ attempts. An active qualification also meets its `QualificationRule`: minimum successes, minimum reliability, and two distinct operators when independent reproduction is required. |
+| Qualification to installation | A new or reactivated implementation cites the current version of an active qualification for the same revision, site, and owner, valid at `installed_at`, and the current versions of active assets that the same owner holds at that site. |
+| Installation to adoption | A `Trial` or `Committed` adoption cites current versions of active implementations at the adopter's site, owned by the adopter, whose revision belongs to the application's technique. `scale` may not exceed their summed capacity, and viability must pass. |
+| Source to transmission | A new opportunity cites the source qualification or implementation version that is current in that boundary and was valid when the opportunity opened. Afterwards only `active` may change, from open to closed. |
+| Transmission to learner | `resulting_program` is the destination's program at the destination site, for the same revision, in `Training`, `Investigation`, `Adaptation`, or `ReverseEngineering` mode, started no earlier than the opportunity. |
+| Program to new revision | Runtime invention: a provider result creates a `TechniqueRevision` bound to an active `Investigation`, `Adaptation`, or `ReverseEngineering` program, its exact intent, and discovery evidence. If the program works on a revision, the new revision names it as a parent. |
+
+The practice modes `Demonstration`, `Apprenticeship`, and `PersonnelTransfer` cite exactly one source: a live `source_capability` or an [external transmission source](/en/reference/terminology/) (`ExternalTransmissionSourceV1`). An external source is an initial-scenario content record owned outside `canwu.technology`, with a declared reliability of 0 to 1,000 per mille. It has no simulated holder or site, so the destination opens the opportunity; with a live source, the source holder opens it. `DocumentAccess` and `ArtifactInspection` need a source holder, and `IndependentInvestigation` needs no source. Opening an opportunity adds nothing to the learner's knowledge or capability. The learner's program still has to produce attempts and a qualification.
+
+## How it runs
+
+<MermaidDiagram
+  label="Operation lifecycle: a command or provider result becomes ingress, phase 7 applies it, phase 12 consumes the intent, phase 13 publishes holder knowledge"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same lifecycle."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same lifecycle."
+  definition={`flowchart TB
+    Cmd["Host: apply_technology_operation_v1<br/>TechnologyCommandEnvelope"] --> Handler["Command handler<br/>authority and idempotency"]
+    Handler --> Queued["technology_command_v1<br/>queued ingress"]
+    Result["Host: technology_result_v1<br/>TechnologyResultEnvelope"] --> Admit["Phase 1<br/>boundary admits ingress"]
+    Queued --> Admit
+    Admit --> Apply["Phase 7: technology_operation_apply_v1<br/>record change and TechnologyOperation"]
+    Apply -- "over budget" --> Reject["technology_operation_rejected_capacity_v1"]
+    Apply --> Finalize["Phase 12: technology_intent_finalize_v1<br/>consume the exact intent"]
+    Finalize --> Publish["Phase 13: technology_knowledge_publish_v1<br/>holder knowledge"]
+`}
+/>
+
+1. Deliberate changes enter as the tracked [domain command](/en/reference/terminology/) `apply_technology_operation_v1` (`TECHNOLOGY_COMMAND`). Its `TechnologyCommandEnvelope` carries an operation `id`, the `subject` holder, and one change. The handler refuses legacy direct commands. The subject must own the record: a person subject must be the command's issuer, and an entity subject must be the command subject of a controller-bound decision. Resending the same `id` with the same input does nothing; the same `id` with different input fails as an idempotency conflict. An accepted command queues one `technology_command_v1` ingress item.
+2. Provider results enter as `technology_result_v1` (`TECHNOLOGY_RESULT_INGRESS`) plugin ingress that the host enqueues. A `TechnologyResultEnvelope` names the operation `id`, the `provider`, the exact `execution_intent`, and the change. Only this path creates `ExperimentAttempt`, `ProductionRun`, `AttemptObservation`, and runtime `TechniqueRevision` records, and it creates nothing else. An attempt, production run, or invention must cite a pending intent for the same provider, inside its time window, for the current version of an active program sponsored by the intent's author. The result must match the intent's request field by field, and a program that lists provider requirements accepts only those providers. An observation cites no intent.
+3. Phase 7 (`DomainDeltaProposal`) runs `technology_operation_apply_v1` whenever the boundary admitted technology ingress. It checks each command ingress item against its authorized command, then processes new operations in `id` order. Each one writes its record change and a `TechnologyOperation` outcome. A failed check becomes a `Rejected` outcome with a code such as `invalid_domain_record` or `domain_record_version_conflict`, and the boundary still commits. Two different inputs under one `id` in the same boundary are rejected together.
+4. Phase 12 (`StrategicAggregation`) runs `technology_intent_finalize_v1`. It marks each intent whose provider result was applied as `Consumed`, citing the ingress item, the operation version, and the result version. When two results cite one intent in a boundary, or a command cancels that intent in the same boundary, phase 7 has already rejected the results.
+5. Phase 13 (`PerspectiveAndReportMaterialization`) runs `technology_knowledge_publish_v1`, which publishes holder knowledge for applied records.
+
+All three systems are event-driven and declare `SameBoundary` visibility, so phase 12 and phase 13 read what phase 7 wrote. A command may create a pending intent or cancel an unchanged pending one; only phase 12 consumes it. See [settlement](/en/architecture/settlement/) for the phase order.
+
+## One evaluator for every technology
+
+Every `TechniqueRevision` names its evaluator, and validation accepts only `REFERENCE_EVALUATOR_V1` (`canwu.technology.threshold-evaluator.v1`). The code contains no technology names. Papermaking and a steam engine differ only in their catalog data.
+
+`evaluate_attempt` merges the revision's parameters into the measured values, then checks the technique's `requirements`. A measured value that contradicts a revision parameter is an error. `evaluate_application` checks an application's `viability` groups. Both return an `EvaluationResult`:
+
+1. A `RequirementGroup` lists alternatives in `any_of`. Each `MetricThreshold` names an exact metric version, `AtLeast` or `AtMost`, and an integer bound.
+2. A threshold whose metric has no measured value cannot hold, so a group with no measured values fails. A group is satisfied when any of its thresholds holds.
+3. The result passes when no group fails, and it lists `satisfied_groups` and `failed_groups`.
+4. An empty group, an unknown metric, or a threshold or value outside the metric's range is an error.
+
+The plugin runs the evaluator again whenever it validates evidence. An `ExperimentAttempt` is checked against its inputs, environment, and outputs. A `ProductionRun` is checked against its inputs and outputs, and `successful` must equal `passed`. An `AdoptionRecord` is checked against its `viability_metrics`, and each value must appear in exactly one cited observation or production-run output. A stored result that differs from the recomputed one is rejected. Providers should compute results with the same two functions before submitting them. All values are integers, so snapshots, forks, and exact replay give the same answer.
+
+The [technology diffusion tutorial](/en/tutorials/technology-diffusion/#five-technologies-one-contract) lists the five historical profiles that the tests run through this one contract.
+
+## Knowledge and visibility
+
+Technology records are [domain records](/en/reference/terminology/). A trusted host can read them directly, for example with `TechnologyRecordSet::load_host`. Players and in-world agents read holder knowledge, which phase 13 publishes for five kinds of applied record:
+
+| Applied record | Holder who learns it | Knowledge kind in `canwu.technology` |
+| --- | --- | --- |
+| `TechnicalClaim` | `asserted_by` | `claim_awareness` |
+| `AttemptObservation` | `observer` | `attempt_observation` |
+| `CapabilityQualification` | `holder` | `qualified_practice` |
+| `ImplementationRecord` | `owner` | `implementation_observation` |
+| `AdoptionRecord` | `adopter` | `adoption_assessment` |
+
+Each knowledge record cites the exact record version and carries the record body. Other records publish nothing. Creating a new revision tells nobody about it; holders learn of it through observations, claims, or transmission. A rejected operation publishes nothing either. A player client reads its own records with `viewer_for_actor(actor)` and `query_knowledge`; see [Read and present state safely](/en/developer/reading-state/).
+
+## Historical research plugins
+
+`canwu-history-research` provides three [historical research plugins](/en/reference/terminology/). Each writes only its own `assessment` record kind and reads technology records to check what an assessment cites. Base technology records and outcomes stay the same whether you enable none, one, or all three, and a plugin you leave out adds no records or handler cost. Use `HistoricalResearchSuite::plugins()` only when a run deliberately enables all three.
+
+| Plugin | Namespace | Assesses |
+| --- | --- | --- |
+| `HistoricalSourcesPlugin` | `canwu.history.sources` | A source's date range, authenticity, reliability, and provenance digest |
+| `HistoricalPracticePlugin` | `canwu.history.practice` | Participants, their practice relation, an optional notebook digest, and negative results |
+| `ProductionArchaeologyPlugin` | `canwu.history.production_archaeology` | An observed remain or sample, the inferred process, and a date range |
+
+An assessment enters as the command `record_assessment_v1` (`ASSESSMENT_COMMAND`) with a `HistoricalAssessmentCommand`. The assessor must be the command subject, under the same authority rule as technology commands. The command queues `assessment_v1` ingress, and the phase-7 system `historical_assessment_apply_v1` creates the record. Every assessment shares an `AssessmentCore`: the assessor, one exact subject version, method and method version, `as_of` time, uncertainty, a summary digest, citations, and optional contradictions and supersessions. Cited evidence must exist no later than `as_of`, and transient ingress cannot be cited. A contradiction or supersession may target only another assessment of the same exact subject.
+
+Assessment commands are trusted-host input. The plugin does not check that the assessor could see every cited source; if players must earn access first, enforce that in your own research-workflow plugin before submitting. `HistoricalAnalysis::for_subject` returns the assessments of one record as `HistoricalAssessmentView` values. It is a trusted-host read and writes nothing.
+
+## Randomness, persistence, and replay
+
+Neither crate draws random numbers or holds probabilities. Your provider decides what a trial or production run yields. If it uses Canwu random draws, cite them in an evidence field such as `discovery_evidence` or a claim's `source_evidence`.
+
+A snapshot holds the technology records, operation outcomes, and holder knowledge. Each payload also lists the older exact versions it depends on, so compaction keeps the bodies that later validation needs. Restore through the module wrappers: `from_technology_snapshot_json`, `from_technology_checkpoint_journal`, or `replay_technology_from_journal`. After another loader, call `validate_technology_runtime`. These wrappers run the core checks, then replay technology semantics: they recompute each boundary's operation outcomes from its admitted ingress, check consumed intents, check that cited evidence existed at each causal cut, and check every knowledge binding. State that passes the core checks but breaks a technology rule is rejected.
+
+Exact replay reads provider results from the recorded ingress, so your provider code does not run again. The history crate has matching wrappers: `from_historical_research_snapshot_json`, `from_historical_research_checkpoint_journal`, `replay_historical_research_from_journal`, and `validate_historical_research_runtime`. Restore and replay with the same set of plugins the run used, because it is part of the [plugin semantic environment](/en/reference/terminology/).
+
+## What your application supplies
+
+- The catalog: metric schemas, technique specs, revisions, and applications as initial-scenario records.
+- Content records for external transmission sources, owned by one of your own plugins.
+- Authority: which person issues each command, or a controller-bound decision when an institution is the subject.
+- Providers: the code that runs trials and production, measures values, computes the `EvaluationResult`, and submits result ingress; plus any randomness behind those outcomes.
+- The economic context: labor, capital, fuel, materials, and political support, through your own rules or `canwu-resource` and `canwu-production`.
+- A research workflow, if players must gain access before submitting historical assessments.
+- The client UI that presents holder knowledge.
+
+## Limits and budgets
+
+`TechnologyLimitsV1::canonical()` sets the technology limits:
+
+| Limit | Value |
+| --- | --- |
+| `max_payload_bytes` | 16 KiB per record payload |
+| `max_references`, `max_collection_entries` | 32 references and 64 entries per list in one record |
+| `max_ancestry_depth` | 8 generations of revision parents, with no cycles |
+| `max_total_records`, `max_records_per_kind` | 5,000 records in total, operation outcomes included, and 5,000 per kind |
+| `max_knowledge_records` | 5,000 technology knowledge records across all holders |
+| `max_mutations_per_boundary` | 64; a new operation counts 2, or 3 when it is a provider result that cites an intent |
+| `max_publications_per_boundary` | 32 knowledge publications |
+
+Checked text fields, such as labels, units, methods, and claim propositions, hold at most 256 bytes without control characters. Operation, record, and provider IDs hold at most 128 ASCII letters, digits, `-`, `_`, `.`, or `:`. If a boundary's new operations would exceed the record cap or the mutation budget, every new operation in it is rejected with a `technology_operation_rejected_capacity_v1` event and writes nothing, so it can be resubmitted later. Knowledge over budget emits `technology_knowledge_rejected_capacity_v1`. Resent operations that already have an outcome do not count against the budget.
+
+Each history plugin accepts at most 21 new assessments per boundary and keeps at most 1,000. An assessment holds at most 32 citations, 32 contradictions, 32 supersessions, and 16 KiB of payload; a practice assessment names at most 32 participants. Overflow emits `historical_assessment_rejected_capacity_v1`. In every case later boundaries continue normally.
+
+## Try it
+
+```shell
+cargo run -p canwu-technology --example technology_diffusion
+cargo test -p canwu-technology --test framework
+cargo test -p canwu-technology --test gap_g36_technology_external_source
+cargo test -p canwu-history-research --test plugins
+```
+
+The example prints `adoption=Committed, scale=10, learner_knowledge=0` and then confirms that snapshot restore and exact replay match the live run. The [technology diffusion tutorial](/en/tutorials/technology-diffusion/) walks through it step by step. The `framework` tests cover the five historical profiles, capacity rejections, and restoration; the external-source test opens a demonstration from an off-map teacher; the `plugins` tests cover the history plugins.
+
+## Further reading
+
+- [Technology diffusion tutorial](/en/tutorials/technology-diffusion/): the runnable walkthrough and the five-technology counterfactuals
+- [Resources and production](/en/architecture/resources-production/): how production executions bind exact technology evidence
+- [Settlement system](/en/architecture/settlement/): the fourteen boundary phases
+- [Extend with plugins](/en/developer/extensions/) and [Save, replay, and fork](/en/developer/persistence/)
+- The [technology and historical research framework](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/technology-history-research-framework.md) design and the [home-hardware technology benchmark](https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md)

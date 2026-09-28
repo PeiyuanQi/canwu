@@ -12,7 +12,7 @@ const commonCases = [
     id: "games", number: "01", api: ["enqueue_command", "advance_canonical", "typed_domain_record", "events"],
     proof: `canwu.enqueue_command(time, priority, request)?;
 canwu.advance_canonical(SimDuration::hours(1))?;
-let state = canwu.typed_domain_record::<GameState>(&record_ref)?;
+let record = canwu.typed_domain_record(&game_state_ref); // Option<&DomainRecord>
 let events = canwu.events();`,
   },
   {
@@ -24,50 +24,50 @@ let replayed = Canwu::replay_from_journal(plugins, &journal)?;
 assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());`,
   },
   {
-    id: "agents", number: "03", api: ["viewer_for_actor", "query_knowledge", "enqueue_command", "events", "explain"],
-    proof: `let viewer = canwu.viewer_for_actor(actor)?;
-let view = viewer.query_knowledge(&query)?;
+    id: "agents", number: "03", api: ["viewer_for_actor", "query_knowledge", "visible_changes_since", "evaluation_traces", "enqueue_command"],
+    proof: `let view = canwu.viewer_for_actor(actor)?.query_knowledge(&query)?;
 canwu.enqueue_command(time, priority, request)?;
-let why = canwu.explain(&explanation_request);`,
+canwu.advance_canonical(duration)?;
+let changes = canwu.viewer_for_actor(actor)?.visible_changes_since(time);`,
   },
   {
     id: "education", number: "04", api: ["entities", "events", "snapshot_json", "fork", "explain"],
-    proof: `entities()       → stable identities
-domain snapshot → timeline or map state
-events()         → causal history
-fork()           → repeatable fork`,
+    proof: `entities()        → stable identities
+domain projection → timeline or map state
+events()          → causal history
+fork()            → what-if branch`,
   },
 ];
 
 const localized = isEnglish
   ? {
       title: "Canwu integration patterns",
-      description: "Concrete integration boundaries for games, historical research, agent environments, and public-history clients.",
+      description: "How games, research tools, agent environments, and public-history projects divide the work with Canwu.",
       label: "Integration patterns",
-      heading: "Share one deterministic simulation core across different clients",
-      intro: "Canwu owns simulation time, the entity registry, command ingress, events, persistence, and replay. Domain integrations own concrete models and typed commands; clients contribute presentation, authentication, orchestration, and content.",
-      index: "Integration types", available: "Available in the core", client: "Your client provides", notIncluded: "Ecosystem opportunities", relevant: "Public API", evidence: "Integration shape",
+      heading: "One simulation engine, four kinds of application",
+      intro: "Canwu handles simulation time, entities, commands, events, saves, and replay. Domain plugins supply the rules and typed commands for a period. Your application supplies presentation, accounts, orchestration, and content. Each pattern lists what Canwu provides, what you build, and what is still open for contributions.",
+      index: "Patterns", available: "Canwu provides", client: "You build", notIncluded: "Open for contributions", relevant: "Main API calls", evidence: "Code shape",
       cases: [
-        { kind: "Games", status: "Core APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu in the game process or behind a server boundary while keeping concrete world rules in an integration plugin.", available: ["Deterministic time and frame-independent scheduling", "Canonical command ingress and causal events", "Generic entity and domain-record registries", "Plugin-owned typed state and boundary settlement"], client: ["2D or 3D rendering and input", "Menus, saves UI, localization, and accessibility", "Network transport, accounts, and authentication", "Production scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Production multiplayer services", "Complete playable campaigns"] },
-        { kind: "Research", status: "Fork APIs available", title: "Reproducible scenarios and alternative-reality analysis", purpose: "Keep runs independent of notebooks and visualization layers, then compare the committed outcomes of alternative realities created with fork().", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay interfaces", "Causal events and random-draw journals", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source datasets and provenance policy", "Statistical validation and interpretation", "Notebooks, maps, charts, and publication output"], missing: ["Curated historical datasets", "Statistical analysis packages", "Historical model-validation frameworks"] },
-        { kind: "Agents", status: "Actor-scoped loop available", title: "Multi-agent historical environments", purpose: "Give each model an actor-scoped knowledge view and route its typed decisions through the same validated command boundary.", available: ["Viewer identities scoped to represented actors", "Knowledge queries without ground-truth leakage", "Issuer and revision validation", "Causal explanations for stored events"], client: ["Model selection and orchestration", "Authentication before selecting an issuer", "Prompting, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
-        { kind: "Education", status: "Core APIs available", title: "Classroom and public-history tools", purpose: "Use replayable domain projections beneath a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and generic entity identity", "Domain projections supplied by integrations", "Repeatable interventions through snapshots and forks", "Causal records that support explanation"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Educational-standard validation"] },
+        { kind: "Games", status: "APIs available", title: "Grand strategy and persistent worlds", purpose: "Run Canwu inside the game process or behind a server, and keep your world rules in a plugin.", available: ["Deterministic time, independent of frame rate", "Command ingress and causal events", "Entity and domain-record registries", "Plugin-owned typed state, settled at boundaries"], client: ["2D or 3D rendering and input", "Menus, save screens, localization, and accessibility", "Networking, accounts, and authentication", "Scenarios, art, audio, and game content"], missing: ["Renderer adapters", "Multiplayer services", "Complete playable campaigns"] },
+        { kind: "Research", status: "Fork and replay available", title: "Reproducible scenarios and alternative histories", purpose: "Keep runs independent of your notebooks and charts, then compare alternative histories branched with fork().", available: ["Validated snapshots and checkpoint hashes", "Fork and exact replay", "Causal events and a journal of random draws", "Plugin manifests and version identities"], client: ["Research questions and model design", "Source data and provenance rules", "Statistical validation and interpretation", "Notebooks, maps, charts, and publications"], missing: ["Curated historical datasets", "Statistical analysis packages", "Frameworks for validating historical models"] },
+        { kind: "Agents", status: "Per-character loop available", title: "Multi-agent historical environments", purpose: "Give each model a view limited to its character, and send its typed decisions through the same command path as players.", available: ["Viewers tied to the character an agent plays", "Knowledge queries that return only what that character knows", "Issuer and revision checks on every command", "Rule explanations limited to what the character knows"], client: ["Model choice and orchestration", "Authentication before an agent is assigned an issuer", "Prompts, memory, and conversation state", "Rate limits, transport, evaluation, and deployment"], missing: ["Hosted agent services", "Model and prompt frameworks", "Application authorization policy"] },
+        { kind: "Education", status: "APIs available", title: "Classroom and public-history tools", purpose: "Put replayable simulation state behind a timeline, map, exhibit, or guided classroom scenario.", available: ["Historical time and stable entity identity", "Projections supplied by domain integrations", "Repeatable what-if changes through snapshots and forks", "Causal records that explain what happened"], client: ["Curriculum, interpretation, and citations", "Accessible interaction and editorial design", "Museum hardware or web presentation", "Media rights, localization, and facilitation"], missing: ["Maintained teaching applications", "Curriculum packages and museum installations", "Checks against education standards"] },
       ],
-      next: "Start with runnable evidence", nextCopy: "Run the checked-in reference integration first. Then use the architecture document to decide where your domain plugin and client boundaries belong.", run: "View starter source", architecture: "Read integration architecture", source: "Open API source",
+      next: "Start with runnable code", nextCopy: "Run the reference example first, then use the architecture guide to decide which rules belong in a plugin and which belong in your client.", run: "View starter source", architecture: "Read the architecture", source: "Open API source",
     }
   : {
       title: "参伍集成模式",
-      description: "游戏、历史研究、智能体环境与公共史客户端接入参伍的具体技术边界。",
-      label: "集成模式", heading: "让不同客户端共享同一个确定性模拟内核",
-      intro: "参伍统一维护模拟时间、实体注册表、命令输入、事件、持久化与重放。领域整合拥有具体模型和类型化命令；客户端负责表现、认证、编排与内容。",
-      index: "集成类型", available: "内核已经提供", client: "客户端需要提供", notIncluded: "生态扩展方向", relevant: "对外 API", evidence: "接入方式",
+      description: "游戏、研究工具、智能体环境和公众史学项目如何与参伍分工。",
+      label: "集成模式", heading: "同一个模拟引擎，四类应用",
+      intro: "参伍负责模拟时间、实体、命令、事件、存档与重放。领域插件提供特定时代的规则和类型化命令。你的应用负责表现、账号、编排与内容。下面每种模式都列出参伍已经提供的能力、需要你构建的部分，以及欢迎社区共建的部分。",
+      index: "模式", available: "参伍提供", client: "你来构建", notIncluded: "欢迎共建", relevant: "主要 API", evidence: "代码形态",
       cases: [
-        { kind: "游戏", status: "核心 API 已可用", title: "大战略与持续世界", purpose: "参伍既可直接嵌入游戏进程，也可置于服务端边界之后；具体世界规则由整合插件拥有。", available: ["确定性时间与画面帧率解耦调度", "规范化命令输入与因果事件", "通用实体与领域记录注册表", "插件拥有的类型化状态与边界结算"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍设计", "网络传输、账号与身份认证", "可发行的场景、美术、音频与内容"], missing: ["渲染器适配器", "生产级多人服务", "完整可玩战役"] },
-        { kind: "研究", status: "派生分支接口已可用", title: "可复现实验与平行现实分析", purpose: "让模拟运行独立于计算笔记本（notebook）或可视化层，再比较通过 fork() 创建的各平行现实已提交的结果。", available: ["经验证快照与检查点哈希", "派生分支与精确重放接口", "因果事件与随机抽样日志", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据集与溯源政策", "统计验证与历史解释", "计算笔记本、地图、图表与出版输出"], missing: ["经过整理的历史数据集", "统计分析软件包", "历史模型验证框架"] },
-        { kind: "智能体", status: "角色相对循环已可用", title: "多智能体历史环境", purpose: "为每个模型提供限定到角色的知识视图，并把类型化决策送入同一个经验证命令边界。", available: ["限定到所代表角色的观察者身份", "不泄露世界真值的知识查询", "签发者与修订版本验证", "存储事件的因果解释"], client: ["模型选择与编排", "选定签发者之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "应用授权政策"] },
-        { kind: "教育", status: "核心 API 已可用", title: "课堂与公共史工具", purpose: "在时间线、地图、展览或课堂引导场景之下使用可重放的领域投影。", available: ["历史时间与通用实体身份", "由领域整合提供的投影", "通过快照与派生分支进行可重复干预", "可用于解释的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页表现", "媒体权利、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准验证"] },
+        { kind: "游戏", status: "API 已可用", title: "大战略与持久世界", purpose: "参伍可以运行在游戏进程内，也可以部署在服务端；世界规则写在插件中。", available: ["确定性时间，与画面帧率无关", "命令输入与因果事件", "实体与领域记录注册表", "由插件拥有、在边界中结算的类型化状态"], client: ["二维或三维渲染与输入", "菜单、存档界面、本地化与无障碍", "网络、账号与身份认证", "场景、美术、音频与游戏内容"], missing: ["渲染器适配器", "多人联机服务", "完整可玩的战役"] },
+        { kind: "研究", status: "派生分支与重放已可用", title: "可复现实验与平行现实", purpose: "让模拟运行独立于计算笔记本和图表，再比较通过 fork() 派生出的多个平行现实。", available: ["经验证的快照与检查点哈希", "派生分支与精确重放", "因果事件与随机抽样日志", "插件清单与版本身份"], client: ["研究问题与模型设计", "来源数据与溯源规则", "统计验证与历史解释", "计算笔记本、地图、图表与出版物"], missing: ["整理好的历史数据集", "统计分析软件包", "历史模型验证框架"] },
+        { kind: "智能体", status: "按角色视角的智能体循环已可用", title: "多智能体历史环境", purpose: "为每个模型提供限定在其角色范围内的视图，并让它的类型化决策与玩家走同一条命令路径。", available: ["与智能体所扮演角色绑定的观察者", "只返回该角色所知内容的知识查询", "每条命令都检查签发者与修订版本", "只含该角色所知范围的规则说明"], client: ["模型选择与编排", "为智能体指定签发者之前的身份认证", "提示词、记忆与对话状态", "限流、传输、评测与部署"], missing: ["托管式智能体服务", "模型与提示词框架", "应用授权策略"] },
+        { kind: "教育", status: "API 已可用", title: "课堂与公众史学工具", purpose: "在时间线、地图、展览或课堂引导场景背后使用可重放的模拟状态。", available: ["历史时间与稳定的实体身份", "由领域整合提供的投影", "通过快照与派生分支做可重复的“如果”推演", "用于解释经过的因果记录"], client: ["课程、历史解释与引文", "无障碍交互与编辑设计", "博物馆硬件或网页呈现", "媒体版权、本地化与教学组织"], missing: ["持续维护的教学应用", "课程包与博物馆装置", "教育标准对照"] },
       ],
-      next: "先运行证据，再阅读架构", nextCopy: "先运行仓库中的参考整合示例，再通过架构文档确定领域插件与客户端的边界。", run: "查看 starter 示例", architecture: "阅读集成架构", source: "打开 API 源码",
+      next: "先运行代码", nextCopy: "先运行参考示例，再借助架构指南决定哪些规则写进插件、哪些留在客户端。", run: "查看 starter 源码", architecture: "阅读架构", source: "打开 API 源码",
     };
 
 const c = { ...localized, cases: localized.cases.map((item, index) => ({ ...commonCases[index], ...item })) };

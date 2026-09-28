@@ -1,31 +1,35 @@
 ---
 title: 接入并驱动模拟运行
-description: 在 Rust 应用中组合 canwu-api 与领域整合，再通过公开入口推进模拟。
+description: 在 Rust 上层应用中加入参伍，提交命令，并在自己的主循环里推进模拟时间。
 sidebar:
   order: 2
-  label: 接入与驱动
+  label: 接入并驱动
 ---
 
 import { Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-参伍是无界面历史模拟引擎。窗口、地图、网络、输入、AI 调度和帧循环由上层应用负责。
-参伍负责通用权威状态、验证、确定性时间、事件和证据；具体世界模型与命令属于应用选择的领域整合。
+本页介绍如何把参伍嵌入 Rust 应用：添加 crate、创建模拟、提交一条命令，再由自己的主循环推进时间。建议先读本页，再看读取、存档和扩展指南。
+
+窗口、地图、输入、网络、AI 调度和帧循环归上层应用管理；权威状态、验证、确定性时间、事件和证据归参伍管理。具体的世界模型和命令由领域整合提供，本页使用示例整合 `canwu-reference-world`。不熟悉的术语可查阅[术语表](/reference/terminology/)。
 
 ## 添加依赖
 
-当前 `main` 分支需要 Rust 1.88 或更新版本。下面的配置适合试用当前开发版本：应用依赖对外 API，并显式选择领域整合。
+参伍需要 Rust 1.88 或更新版本。在上层应用的 `Cargo.toml` 中加入 crates.io 上发布的 [`canwu-api`](https://crates.io/crates/canwu-api)：
 
 ```toml
 [dependencies]
-canwu-api = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
-canwu-reference-world = { git = "https://github.com/PeiyuanQi/canwu", branch = "main" }
+canwu-api = "=0.13.0"
 ```
 
-`canwu-reference-world` 是可替换的起步整合，不是引擎基础层。旧 `canwu-world` crate 已退役；不要依赖 `canwu-sim` 或其他运行时实现 crate。
+- `canwu-api` 是受支持的对外 API，API 文档见 [docs.rs](https://docs.rs/canwu-api)。应用代码依赖它，以及实际用到的扩展 crate（例如 [`canwu-resource`](https://crates.io/crates/canwu-resource)）。扩展 crate 也发布在 crates.io 上，版本号请与 `canwu-api` 保持一致。不要直接依赖 `canwu-sim` 或其他运行时 crate。
+- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.13.0` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
 
-进入生产环境前，应固定已发布的精确版本或 Git 修订，并把每次引擎升级与显式存档迁移一起处理。
+`=0.13.0` 会把引擎精确固定在这个发布版本。如果应用会保存存档，请等存档迁移准备好后再升级（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
 
 ## 最小接入流程
+
+下面的程序创建参考世界，命令一支军队向东移动，推进 19 小时，然后打印军队最终所在的位置：
 
 ```rust
 use canwu_api::{Canwu, CommandRequest, CommandRequestId, EntityRef, Issuer, SimDuration};
@@ -66,29 +70,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+逐步说明：
+
+1. `demo_scenario()` 构建一个有三块领土的世界，并返回其中人物、军队和领土的 ID。`ReferenceWorldPlugin` 注册移动命令和负责移动军队的边界系统。
+2. `Canwu::new_with_plugins(35, …)` 创建模拟运行。`35` 是随机种子，种子和输入相同，结果就相同。
+3. `order_movement` 构建类型化的领域命令。`.at_time(canwu.time())` 规定命令必须在哪个模拟时间准入；在其他时间准入会以 `SimulationTimeConflict` 拒绝。
+4. `CommandRequest::new(id, canwu.revision(), command)` 为命令加上请求标识，以及编写命令时所依据的状态修订号。
+5. `enqueue_command(time, 0, request)` 把命令排入当前时间，优先级为 `0`。
+6. `advance_canonical(SimDuration::hours(19))` 在排队工作到期时处理一个结算边界（一次原子结算）。向东的道路要走 18 小时，推进 19 小时足以覆盖抵达。
+7. `reference_snapshot(&canwu)` 读取参考世界的受信任投影。
+
 在仓库根目录运行完整示例：
 
 ```shell
 cargo run -p canwu-reference-world --example starter
 ```
 
-示例中的 `35` 是确定性的演示种子，`0` 是命令优先级，19 小时会跨过参考移动系统的结算时间点。
-程序会打印军队的最终位置；完整 `starter` 示例还会验证存档、派生分支和精确重放。
-真实应用通常构建自己的 `Scenario` 与插件，`demo_scenario()` 只是可运行模板。
+[完整示例](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-reference-world/examples/starter.rs)还会保存、加载、派生分支和重放，并核对各处检查点哈希一致。真实应用会构建自己的 `Scenario` 和插件，`demo_scenario()` 可以当作模板。
 
-## 选择写入入口
+## 选择输入方式
 
-| 入口 | 适用场景 |
-| --- | --- |
-| `submit(CommandEnvelope)` | 调用方已持有类型化领域命令与发令者身份 |
-| `process_command(CommandRequest)` | 外部服务需要请求标识、修订校验和结果记录 |
-| `enqueue_command(...)` | 命令必须在指定模拟时间按优先级进入 |
+外部输入（ingress）通过以下方法进入模拟。参伍按顺序记录每一条输入，存档和精确重放都依赖这份记录。领域整合负责把界面操作或智能体意图转成类型化命令，再选用下面任一方法提交：
 
-领域整合负责把 UI 或智能体意图转成类型化领域命令。无论选择哪个入口，调用方都不会取得可变世界引用。
+| 方法 | 返回值 | 适用场景 |
+| --- | --- | --- |
+| `submit(CommandEnvelope)` | `CommandReceipt` | 快速工具和测试。命令立即生效，不带请求标识。声明了 `RunConfiguration` 的模拟运行会拒绝它。 |
+| `process_command(CommandRequest)` | `CommandOutcome` | 玩家或服务提交需要立即生效的命令。预期内的拒绝，例如 `InvalidAuthority`、`IssuerUnavailable`，或 `expected_revision` 已过期（`SimulationRevisionConflict`），会被记录并以 `CommandOutcome::Rejected` 返回。 |
+| `enqueue_command(due_at, priority, CommandRequest)` | `IngressReceipt` | 命令要在指定模拟时间生效。它在 `due_at` 对应的结算边界准入；同一时间到期的命令按优先级从高到低处理。 |
+
+三种方法都会先验证命令和权限，再改动状态；上层应用拿不到世界的可变引用。
+
+同一个模拟运行只能用一种方式。运行中一旦有排队输入，`process_command` 会返回 `MixedCommandIngress`；已经直接应用过命令的运行也不能再开始排队输入。`submit` 同样不能与带请求标识的命令混用。如果运行里还用到插件输入或排队的决策，请用 `enqueue_command` 提交命令。
+
+## 驱动时间
+
+<MermaidDiagram
+  label="上层应用主循环：把现实时间换算成模拟分钟，advance_canonical 处理到期的结算边界，再根据回执、事件和投影刷新表现层"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一个循环。"
+  definition={`flowchart LR
+    Wall["现实时间或回合输入"] --> Convert["上层应用速度策略：换算为整分钟 SimDuration"]
+    Input["玩家或智能体输入"] --> Queue["enqueue_command：排队输入"]
+    Convert --> Advance["advance_canonical(duration)"]
+    Queue --> Advance
+    Advance --> Out["BoundaryReceipt 列表与新事件"]
+    Out --> Render["上层应用根据投影刷新界面"]
+`}
+/>
+
+<Steps>
+1. 读取现实时间、回合输入或研究流程的进度。
+2. 按自己的速度策略换算成 `SimDuration`。模拟时间以整分钟计，不足一分钟的余量留在上层应用里累计。
+3. 调用 `advance_canonical(duration)`。它在这段时间内每个排队工作的到期时刻处理一个结算边界，把时钟推到终点，并为每个结算边界返回一个 `BoundaryReceipt`。只想处理下一个到期的结算边界时调用 `step_canonical()`；要在指定时间处理一个结算边界时调用 `settle_boundary(BoundaryRequest)`。
+4. 根据新事件、回执或领域整合生成的只读投影刷新表现层。
+</Steps>
+
+`advance(duration)` 是较早的纯事件推进方式。它会执行已调度的动作，但只要这段时间内有排队输入到期，就返回 `InvalidBoundary`。因此优先使用 `advance_canonical`。
+
+交给参伍的只能是整数 `SimDuration`；浮点帧间隔和插值留在上层应用。[连续时间游戏循环教程](/tutorials/continuous-game-loop/)及其[示例代码](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/continuous_game_loop.rs)给出了完整做法，包括游戏倍速、暂停和不足一分钟的累加器。
 
 ## 撤回排队的插件输入
 
-用 `enqueue_plugin_ingress` 排队的插件输入，只要仍在队列中且尚未到期，就可以撤回：
+`enqueue_plugin_ingress` 把一个插件数据包（`PluginIngressRequest`）排到之后的某个模拟时间。数据包还在队列中、尚未到期时，签发者可以撤回它：
 
 ```rust
 let queued = canwu.enqueue_plugin_ingress(request)?;
@@ -96,33 +140,77 @@ let queued = canwu.enqueue_plugin_ingress(request)?;
 canwu.cancel_plugin_ingress(queued.ingress_id, "withdrawn by player")?;
 ```
 
-只有签发者可以撤回。上层应用用 `cancel_plugin_ingress` 撤回自己提交的公开数据包；内部数据包类型需要用 `cancel_permitted_plugin_ingress` 并出示所属插件的注册许可，该许可也覆盖该插件自己安排的输入；插件的边界系统用 `BoundaryDirective::CancelPluginIngress` 撤回本插件安排的输入。撤回会作为独立的 `IngressPayload::PluginCancellation` 记录写入日志，记下被撤回的输入、`IngressCancellationAuthority` 和不超过 1,024 字节的原因。被撤回的输入永远不会被准入，也不会发生回滚。已经到期、已准入、已归档或已撤回的输入会以 `LateIngress` 失败；其他签发者的输入以 `InvalidAuthority` 失败；未知 ID 以 `EvidenceUnavailable` 失败。快照、检查点日志和精确重放都会保留这次撤回。
+只有签发者可以撤回。按排队的来源选择调用方式：
+
+| 由谁排队 | 撤回方式 |
+| --- | --- |
+| 上层应用，公开数据包类型 | `canwu.cancel_plugin_ingress(ingress_id, reason)` |
+| 上层应用，内部数据包类型；或所属插件在引擎内部安排 | `canwu.cancel_permitted_plugin_ingress(ingress_id, &permit, reason)`，出示所属插件的 `PluginIngressPermit` |
+| 插件的边界系统 | 由同一插件的边界系统返回 `BoundaryDirective::CancelPluginIngress`。`SimulationView::cancellable_plugin_ingress` 会列出它可以撤回的输入。 |
+
+撤回原因不能为空，首尾不能有空白，长度不超过 1,024 字节（`MAX_INGRESS_CANCELLATION_REASON_BYTES`）。
+
+每次撤回都会作为一条独立的 `IngressPayload::PluginCancellation` 记录写入输入日志，记下被撤回的输入、撤回权限 `IngressCancellationAuthority`（`Host`、`PluginPermit` 或 `BoundarySystem`）和原因。被撤回的输入不会进入任何结算边界，其他状态保持原样。快照、检查点日志和精确重放都会保留这次撤回。
+
+上层应用调用可能返回的错误：
+
+| 错误 | 原因 |
+| --- | --- |
+| `LateIngress` | 输入已到期、已准入、已归档或已被撤回。 |
+| `InvalidAuthority` | 调用方不是签发者，例如上层应用试图撤回插件安排的输入。 |
+| `EvidenceUnavailable` | 没有这个 ID 的输入。 |
+| `InvalidPayload` | 原因不合规，或该 ID 指向的不是插件输入。 |
+
+`CancelPluginIngress` 指令的目标无效时，整个结算边界失败。
 
 ## 已无法行事的人物
 
-自 0.12.0 起，运行时为每个人物保存人物可用性（`PersonAvailability`）：生存状态（`Alive`、`Dead`、`Missing`）与人身状态（`Free`、`Detained`、`Hostage`、`Captive`、`Hiding`、`Exile`）。人物何时死亡、被俘或获释由上层应用决定，并由声明了 `StateKey::core_person_availability()` 的第 7 或第 10 阶段边界系统返回 `BoundaryDirective::SetPersonAvailability` 来记录。用 `canwu.person_availability(person)` 读取；`None` 表示存活且自由。
+参伍为每个人物保存一份人物可用性 `PersonAvailability`，包括生存状态（`LifeState`：`Alive`、`Dead`、`Missing`）、人身状态（`CustodyState`：`Free`、`Detained`、`Hostage`、`Captive`、`Hiding`、`Exile`）、可选的看管方，以及生效时间。没有记录的人物视为存活且自由。
 
-未存活、被拘押或被俘的人物不可用：
+人物何时死亡、被俘或获释，由你的应用决定。变更由第 7 或第 10 阶段的边界系统记录，该系统要在写入中声明 `StateKey::core_person_availability()`：
 
-- 若命令的签发者、决策角色或机构责任角色不可用，命令准入会以 `IssuerUnavailable` 拒绝；带请求标识的命令会记录为持久化拒绝；
-- 若决策票据的人物决策者（`DecisionMakerUnavailable`）或其控制者的权限人物（`IssuerUnavailable`）不可用，就不能开启、准备或结算该票据；
-- 在使人物变为不可用的边界结束时，以该人物为决策者的未关闭票据会以 `decision_maker_unavailable` 取消，由其担任控制者权限人物的未关闭票据会以 `controller_authority_unavailable` 取消。
+```rust
+BoundaryDirective::SetPersonAvailability {
+    person,
+    availability: PersonAvailability::new(LifeState::Alive, CustodyState::Captive, at)
+        .with_custodian(EntityRef::Army(captor)),
+    summary: "Captured at the river crossing".to_owned(),
+}
+```
 
-人质、藏匿和流亡状态默认仍可准入；更严格的规则由你自己的系统实现。已取消的票据不会被改派。若只是控制者的权限人物变为不可用，要继续这项决策，请为可用的控制者开启新票据，并把 `parent_ticket` 设为已取消的票据。决策者仍不可用时，不能为其开启新票据。
+同一结算边界内对同一人物写两次，该结算边界失败。上层应用用 `canwu.person_availability(person)` 读取；边界系统在读取中声明同一个键后，用 `SimulationView::person_availability` 读取。
 
-自 0.13.0 起，决策者死亡或被俘后，继任者也可以接续其决策：以继任者为决策者开启新票据，并把新票据指定给一个控制者，该控制者与已取消票据的控制者绑定同一个非空 `seat_id`；再把 `parent_ticket` 设为已取消的票据。这种席位继任会把谱系保留在新票据的决策轨迹上；决策者不同、席位也不同的前序票据仍会被拒绝。
+### 不可用的人物不能做什么
 
-## 限定规则说明的规模
+人物未存活，或处于 `Detained`、`Captive` 状态时，即为**不可用**（`PersonAvailability::is_available` 返回 `false`）。人质、藏匿和流亡状态默认仍可行事；如果你的设定需要更严格的规则，在自己的系统里实现。
 
-边界系统可以记录[评估轨迹](/architecture/settlement/#评估轨迹)来说明规则结果。运行配置对所有系统合计设定上限：默认每个边界 4,096 条轨迹、每条 32 项，最多 65,536 条与 256 项。运行开始前，可以用 `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })` 声明其他上限；轨迹上限为零时禁止记录轨迹。边界中的系统超出任一上限时，边界会以 `EvaluationTraceLimitExceeded` 失败且不提交任何内容，因此应按同一边界中所有系统合计（而不是按单个席位）设定上限。轨迹也计入日志大小。
+控制者的“权限人物”指 `DecisionAuthority::Actor` 中的角色，或 `DecisionAuthority::Institution` 中指定的责任角色。`Council` 和 `NoResponsibleActor` 权限没有权限人物。决策票据、控制者和席位的完整示例见[军阀援助决策案例](/tutorials/cases/warlord-aid-decision/)。
 
-## 驱动时间
+| 情况 | 结果 |
+| --- | --- |
+| 命令的签发者、决策来源角色或机构的责任角色不可用 | 准入以 `IssuerUnavailable` 拒绝；带请求标识的命令会记录这次拒绝。 |
+| 决策票据的人物决策者不可用 | 票据不能开启或准备（`DecisionMakerUnavailable`）。 |
+| 票据的控制者所代表的权限人物不可用 | 票据不能开启、准备或结算（`IssuerUnavailable`）。 |
+| 某人物在一个结算边界中变为不可用 | 在该结算边界结束时取消其未关闭票据：由其担任决策者的，原因记为 `decision_maker_unavailable`；控制者代表其行事的，原因记为 `controller_authority_unavailable`。 |
 
-<Steps>
-1. 上层应用读取现实时间、回合输入或研究任务进度。
-2. 上层应用按自己的速度策略把它转换为 `SimDuration`。
-3. 普通事件驱动场景调用 `advance()`；含日结、回合结算等边界系统时调用 `advance_canonical()` 或显式 `settle_boundary()`。
-4. 从事件、边界回执或领域整合生成的只读投影刷新表现层。
-</Steps>
+### 接续被取消的决策
 
-不要把浮点帧间隔直接写入权威状态。完整模式见[连续时间游戏循环教程](/tutorials/continuous-game-loop/)。
+已取消的票据不会恢复。要继续这项决策，就开启一张新票据，并把 `parent_ticket` 设为被取消的票据：
+
+- **只是控制者的权限人物不可用。** 为同一决策者开启新票据，指派给权限人物可用的控制者。
+- **决策者死亡或被俘。** 走席位继任：以继任者为决策者，把票据指派给一个与原票据控制者绑定同一 `seat_id` 的控制者。
+
+前序票据必须已经终止，并且仍在热决策历史中（即尚未移入决策归档）；已归档的前序票据会以 `TicketNotFound` 拒绝。决策者不同、席位也不同的前序票据会被拒绝。决策者仍不可用时，不能为其开启新票据。
+
+## 限制评估轨迹数量
+
+第 7 和第 12 阶段的边界系统可以记录[评估轨迹](/architecture/settlement/#评估轨迹)，逐项说明一条规则如何算出某个数值。玩家通过[角色相对视图](/developer/reading-state/#解释规则结果)读取。运行配置对同一结算边界内所有系统的轨迹合计设限：
+
+| 上限 | 默认值 | 最大值 |
+| --- | --- | --- |
+| `traces_per_boundary` | 4,096 | 65,536 |
+| `terms_per_trace` | 32 | 256 |
+
+要改用其他上限，在传给 `Canwu::new_with_run_configuration_and_plugins` 的运行配置上调用 `RunConfiguration::with_evaluation_limits(EvaluationLimitsV1 { traces_per_boundary, terms_per_trace })`。`traces_per_boundary` 设为 `0` 表示本次运行不记录轨迹。
+
+同一结算边界内的系统超出任一上限时，该结算边界以 `EvaluationTraceLimitExceeded` 失败，不提交任何内容。设定上限时要把同一结算边界里所有系统和席位加在一起考虑。轨迹也计入日志大小。

@@ -1,69 +1,101 @@
 ---
 title: Invention, use, and technology diffusion
-description: Build a technology system from evidence, capability, implementation, and use-specific adoption, with optional historical research plugins.
+description: Run the technology example, where a workshop proves a technique, installs it, adopts it for one use, and opens an apprenticeship; add historical research plugins if you need them.
 sidebar:
   order: 6
   label: Technology diffusion
 ---
 
-import { Aside, LinkButton, Steps } from "@astrojs/starlight/components";
+import { Aside, LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-## 1. Do not begin with a global unlock
+This tutorial follows one technique from a workshop trial to local adoption and teaching, using the `canwu-technology` [technology simulation extension](/en/reference/terminology/). You will learn the records it uses in place of a global tech tree, how the shared evaluator judges trials and uses from data, and where the optional historical research plugins fit. For the full record model and validation rules, see [Technology](/en/architecture/technology/).
 
-`canwu-technology` is a published **technology simulation extension**. It
-does not provide a global technology tree, era levels, or research points.
-Instead, it separates technology change into evidence relationships that can
-be saved, disputed, and replayed:
-
-```text
-technical claim != observed result
-one success != reproducible practice
-operational capability != installed implementation
-installation != adoption for one use
-adoption at one site != automatic diffusion
-```
-
-This separation lets a host game model problems, trials, skilled
-people, install equipment, compare uses, and create demonstrations or
-apprenticeships. The game still owns resources, characters, economics,
-information artifacts, and narrative. The extension owns only bounded,
-deterministic, validated technology state.
-
-<Aside type="note" title="Published extensions">
-  `canwu-technology` and `canwu-history-research` are officially released crates
-  and are not re-exported by `canwu-api`. They remain optional domain packages
-  and follow Canwu's pre-1.0 compatibility policy.
+<Aside type="note" title="Dependencies">
+  `canwu-technology` and `canwu-history-research` are published crates, separate from `canwu-api`. Add them to your `Cargo.toml`. Both follow Canwu's pre-1.0 compatibility policy.
 </Aside>
 
-## 2. Build play from orthogonal records
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" icon="external">
+  Open technology_diffusion.rs
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" variant="secondary" icon="external">
+  Browse the technology extension
+</LinkButton>
 
-<Steps>
-1. Define units, integer scales, and ranges with `MetricSchema`, then describe a function and alternative requirement groups with `TechniqueSpec`.
-2. Represent each recipe, process, or design as an immutable `TechniqueRevision`; a change creates a new revision with explicit ancestry.
-3. Start a `TechnicalProgram` through a tracked player command carrying issuer, authority, time, and state-revision guards.
-4. Authorize a bounded `TechnologyExecutionIntent`, then let the named provider return an exact-intent `ExperimentAttempt` or `ProductionRun` through the separate result ingress. Passive `AttemptObservation` ingress remains linked to its exact attempt. Program provider requirements are checked when the result is submitted, so a nonmatching provider may first have a pending intent and then receive a rejected result.
-5. Create `CapabilityQualification` only through a command whose evidence satisfies the configured rule; a successful trial grants nothing automatically.
-6. Represent a local installation with `ImplementationRecord`, then evaluate and authorize one use separately with `ApplicationSpec` and `AdoptionRecord`. A new installation must cite current active qualification and assets; trial, committed, or recommitted adoption must cite current active implementations. Older exact versions remain history, not fresh authority.
-7. Use `TransmissionOpportunity` for document access, demonstration, apprenticeship, artifact inspection, personnel transfer, or independent investigation. Qualifications and implementations record their validity/install start times, and new practice transmission cites the exact one that is both already valid and current in that boundary's replayed state. Later deactivation blocks new transmission without overturning old opportunities. An old opportunity may only close; resuming the relationship requires a new opportunity based on a source valid at that time. An opportunity may link a destination learning program but never copies knowledge or capability automatically.
-8. Since 0.13.0, a teacher who exists outside the simulated world can be cited as an external transmission source (`ExternalTransmissionSourceV1`) instead of a live capability: an initial-scenario content record owned outside `canwu.technology`, with a declared reliability. Demonstration, apprenticeship, and personnel-transfer opportunities cite exactly one of `source_capability` and `external_source`. An external source has no simulated holder or site, so the destination opens the opportunity, which closes like any other. Document and artifact modes keep their own rules.
-</Steps>
+## Run it
 
-Creating a new `TechniqueRevision` also does not publish it into any actor's
-readable knowledge. A game must establish holder-relative information through
-observation, technical claims, or transmission. Labor, capital, fuel,
-institutional resistance, and political support likewise belong to content and
-game rules; they are not historical causes hidden inside the shared evaluator.
+From the repository root:
 
-Relationships whose meanings outlive a mutable record use an **exact
-domain-record version**. `DomainRecordVersionRef` fixes the record, version,
-and evidence that established that version. If the current implementation is
-later deactivated, an existing adoption still reads the installation version
-it originally cited.
+```shell
+cargo run -p canwu-technology --example technology_diffusion
+```
 
-### One evaluator, different content
+```text
+adoption=Committed, scale=10, learner_knowledge=0 (opportunity is not automatic learning)
+snapshot restore and exact replay match
+```
 
-The reference evaluator reads only metric and threshold data. It never checks
-names such as “papermaking,” “gunpowder,” or “steam engine”:
+The workshop's adoption is committed at scale 10. The learner's knowledge count is 0: opening an apprenticeship creates a chance to learn, and the learning itself needs its own records. The second line confirms that a restored snapshot and an exact replay both match the live run.
+
+## One record per step
+
+`canwu-technology` stores each stage of technical change as its own record, which can be saved, disputed, and replayed:
+
+| Stage | Record | What it establishes |
+| --- | --- | --- |
+| Design | `TechniqueSpec`, `TechniqueRevision` | What the technique does, its requirement groups, and one immutable recipe or design. A change creates a new revision that names its parents. |
+| Work | `TechnicalProgram` | A holder's research, adaptation, or training effort at a site. |
+| Trial | `ExperimentAttempt`, `ProductionRun`, `AttemptObservation` | One result under stated conditions, returned by an authorized provider. |
+| Skill | `CapabilityQualification` | A holder can perform an operation at a site, backed by evidence that meets the technique's qualification rule. |
+| Installation | `ImplementationRecord` | Equipment installed at a site, with capacity and reliability. |
+| Use | `ApplicationSpec`, `AdoptionRecord` | One site adopts the technique for one use after a viability check. |
+| Spread | `TransmissionOpportunity` | A chance to learn through documents, demonstration, apprenticeship, artifact inspection, personnel transfer, or independent investigation. |
+
+Your game owns resources, characters, economics, information artifacts, and narrative. The extension owns bounded, deterministic, validated technology state. Labor, capital, fuel, institutional resistance, and political support belong in your content and game rules.
+
+## How the example works
+
+<MermaidDiagram
+  label="Technology example: program, authorized trial, qualification, installation, adoption, and apprenticeship"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the steps below describe the same flow."
+  renderFailureMessage="Diagram preview unavailable; the steps below describe the same flow."
+  definition={`flowchart LR
+    Program["TechnicalProgram"] --> Intent["TechnologyExecutionIntent<br/>authorize a trial"]
+    Intent --> Attempt["ExperimentAttempt<br/>provider result"]
+    Attempt --> Qual["CapabilityQualification"]
+    Qual --> Impl["ImplementationRecord"]
+    Impl --> Adopt["AdoptionRecord<br/>one use"]
+    Impl --> Teach["TransmissionOpportunity<br/>apprenticeship"]
+    Teach --> Learner["Learner's<br/>TechnicalProgram"]
+`}
+/>
+
+`main` in [technology_diffusion.rs](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs) is written as one linear sequence so each step is visible.
+
+1. **Catalog.** `scenario()` loads the catalog as initial-scenario records: two `MetricSchema`s (reliability in per mille and fuel cost), a `TechniqueSpec` that requires reliability of at least 700, a `TechniqueRevision` evaluated by `REFERENCE_EVALUATOR_V1`, and an `ApplicationSpec`, "drain a deep working", that is viable when fuel cost is at most 500.
+2. **Program.** The operator starts a `TechnicalProgram` with the tracked command `apply_technology_operation_v1`. The helper `apply_command` enqueues the command and settles two boundaries: the first admits it, the second applies the change.
+3. **Trial.** The operator authorizes a `TechnologyExecutionIntent` for the provider `reference-lab`. The provider returns an `ExperimentAttempt` for that exact intent through the `technology_result_v1` ingress, with reliability 820. A second provider, `meter-reader`, records an `AttemptObservation` of fuel cost 400 for the same attempt.
+4. **Qualification and installation.** A command creates the `CapabilityQualification`, citing the attempt, then the `ImplementationRecord`, citing the qualification.
+5. **Adoption.** `evaluate_application` checks the fuel cost against the use's viability rule. The `AdoptionRecord` is created with status `Committed` and scale 10, citing the installation and the fuel observation.
+6. **Teaching.** The learner opens a training program at another site, and the operator opens an apprenticeship `TransmissionOpportunity` that cites the installation as `source_capability` and links the learner's program.
+7. **Restore and replay.** `from_technology_snapshot_json` and `replay_technology_from_journal` rebuild the runtime, and the example asserts both match.
+
+## Rules the records enforce
+
+- A trial counts only after authorization. Provider requirements of the program are checked when the result arrives, so an unsuitable provider can hold a pending intent and then have its result rejected.
+- Every qualification cites distinct attempts that match its technique revision, operation, and site, and in which its holder took part. Its recorded reliability must equal the share of those attempts that passed. An active qualification must also meet the minimums of the configured `QualificationRule`; an inactive one does not have to.
+- A new installation cites a current, active qualification and its assets. A trial, committed, or recommitted adoption cites current, active installations. Older exact versions remain history and grant nothing new.
+- A new practice transmission cites the exact qualification or installation that is valid and current at that boundary. Deactivating the source later blocks new transmissions and leaves existing opportunities in place. An existing opportunity can only close; to resume, open a new opportunity from a source valid at that time.
+- A teacher outside the simulated world is cited as an [external transmission source](/en/reference/terminology/) (`ExternalTransmissionSourceV1`): an initial-scenario content record owned outside `canwu.technology`, with a declared reliability. Demonstration, apprenticeship, and personnel-transfer opportunities cite exactly one of `source_capability` and `external_source`. An external source has no holder or site in the simulation, so the destination opens the opportunity.
+- Actors learn about a new `TechniqueRevision` through observation, technical claims, or transmission; creating the revision adds nothing to anyone's knowledge.
+
+Relationships that must keep their meaning after a record changes use an [exact domain-record version](/en/reference/terminology/). `DomainRecordVersionRef` fixes the record, the version, and the evidence that established it. If an installation is later deactivated, an adoption still reads the installation version it cited.
+
+## One evaluator for every technology
+
+The reference evaluator reads metrics and thresholds from data. Technology names such as "papermaking", "gunpowder", or "steam engine" appear only in content.
 
 ```rust
 let result = evaluate_attempt(
@@ -76,104 +108,54 @@ let result = evaluate_attempt(
 )?;
 
 if result.passed {
-    // This is evidence for this trial only. Qualification, installation,
-    // and adoption still require their own authorized operations.
+    // Evidence for this trial only. Qualification, installation,
+    // and adoption each need their own authorized operation.
 }
 ```
 
-Requirement groups compose with AND; alternatives inside a group compose with
-OR. Every value has an explicit unit and integer scale, so snapshots, forks,
-and exact replay do not depend on floating-point or traversal order.
+A technique's requirement groups must all pass (AND); inside a group, any one threshold is enough (OR). Every value has a unit and an integer scale, so snapshots, forks, and exact replay produce the same result on every run.
 
-## 3. Cross-validating five technologies
+### Five technologies, one contract
 
-| Case | Counterfactual required from the shared contract |
+The repository tests check that the same contract produces these counterfactuals:
+
+| Case | Counterfactual |
 | --- | --- |
-| Papermaking | Local fiber and operator evidence can each reverse the outcome of the same process. |
-| Woodblock printing | A stable long edition passes its use criteria while a changing short edition does not. |
-| Movable type | Glyph inventory, composition labor, edition size, and text-change frequency reverse its technical and use fit relative to woodblock. |
-| Gunpowder | The same weak powder passes a visible-flame use but fails propulsion. |
-| Steam engine | Cheap-fuel pumping passes while costly pumping and low-torque rotary use fail. |
+| Papermaking | Local fiber and operator evidence can each reverse the result of the same process. |
+| Woodblock printing | A stable long edition passes its use criteria; a frequently changed short edition fails. |
+| Movable type | Glyph stock, composition labor, edition size, and text changes reverse its fit relative to woodblock. |
+| Gunpowder | The same weak powder passes a visible-flame use and fails propulsion. |
+| Steam engine | Pumping with cheap fuel passes; costly pumping and low-torque rotary use fail. |
 
-Repository tests first run every technology through catalog loading, an
-authorized program command, result ingress, boundary settlement, and an
-authoritative state query. They then prove the counterfactuals with the same
-`evaluate_attempt()` / `evaluate_application()` contract: woodblock is evaluated
-as viable for a stable long edition while movable type is evaluated as viable
-for a changing short edition; weak powder produces flame but does not satisfy
-propulsion; pumping is evaluated as viable at a cheap-coal mine and non-viable
-at an expensive site. Actual adoption still requires the authorized
-qualification, implementation, and adoption operations covered by the full
-workflow test. Case names occur only in fixture data and documentation.
+`five_technology_profiles_use_one_evaluator_contract` runs each technology through catalog loading, an authorized program command, result ingress, boundary settlement, and a state query. `historical_profiles_reverse_outcomes_without_case_specific_solver_code` checks the counterfactuals with `evaluate_attempt()` and `evaluate_application()`. Run both with:
 
-## 4. Keep historical research optional
+```shell
+cargo test -p canwu-technology --test framework
+```
 
-High-detail historical interpretation does not enter the simulation core or alter base
-technology truth. `canwu-history-research` supplies three separately selectable
-**historical research plugins**:
+## Optional historical research plugins
 
-| Plugin | What it owns | What it never owns |
-| --- | --- | --- |
-| `HistoricalSourcesPlugin` | An assessor's dating, authenticity, reliability, and provenance assessment | The source artifact or technical truth |
-| `HistoricalPracticePlugin` | Assessments of practitioners, workshops, practice relationships, notebook summaries, and negative results | Base attempts, qualification, or information transfer |
-| `ProductionArchaeologyPlugin` | Assessments of remains, samples, dates, and production-process hypotheses | Runtime assets, inventory, work orders, or production runs |
+Detailed historical interpretation lives in `canwu-history-research`, outside the simulation core, and leaves base technology records unchanged. It provides three [historical research plugins](/en/reference/terminology/) that you can enable separately:
 
-Every assessment retains its assessor, method and version, as-of time,
-uncertainty, summary digest, and durable citation identities that exist no later
-than its as-of cut. Contradiction and supersession may target only a prior
-assessment of the same exact subject. Citation existence alone does not establish
-relevance or historical truth. Assessment commands are trusted-host ingestion:
-assessor authority is not proof of player-visible information access, which a
-game may enforce in its own research-workflow plugin before submission.
-`HistoricalAnalysis` is a read-only host query. A game may omit all three
-plugins, select one method, or enable all three through
-`HistoricalResearchSuite`.
+| Plugin | Records assessments of |
+| --- | --- |
+| `HistoricalSourcesPlugin` | A source's dating, authenticity, reliability, and provenance |
+| `HistoricalPracticePlugin` | Practitioners, workshops, practice relationships, notebook summaries, and negative results |
+| `ProductionArchaeologyPlugin` | Remains, samples, dates, and production-process hypotheses |
 
-## 5. Choose a home-hardware scale
+Each plugin stores assessments only; the source artifacts, base attempts, and runtime assets they discuss keep their own records. Every assessment records its assessor, method and version, as-of time, uncertainty, summary digest, and citations that existed no later than the as-of time. A contradiction or supersession may target only an earlier assessment of the same exact subject. A citation proves that the source exists; its relevance and truth remain the assessor's claim.
 
-These figures were recorded on 2026-08-22 against engine 0.5.1 and have not been
-re-measured on 0.13.0. Format 8 has since removed the broad domain-state clone
-from each transaction, so treat them as historical reference, not current
-performance. The 20-year workload on a Ryzen 7 7800X3D, 32 GB RAM, Windows
-release build produced:
+Assessment commands are trusted-host input. If your players must first gain access to the information, enforce that in your own research-workflow plugin before you submit the command. `HistoricalAnalysis` is a read-only host query. Enable no plugin, one, or all three through `HistoricalResearchSuite`.
 
-| Profile | Sites / programs / links | Technology operation p95 | Monthly p95 | Deep validated load | Peak RSS |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Paced interactive component | 100 / 200 / 400 | 72 ms | 169 ms | 3.942 s | 648 MiB |
-| Pressure | 500 / 1,000 / 2,000 | 403 ms | 616 ms | 14.915 s | 1.158 GiB |
+## Limits
 
-The fixed paced-interactive component profile suits turn-based or deliberately
-paced home-computer play. It is not whole-game certification and must not be
-extrapolated into a larger-scale or sub-100 ms interaction claim. The 500-site pressure
-profile is appropriate for campaign turns or offline research, not immediate
-interaction. Technology is capped at 5,000 records, each history plugin at
-1,000, technology and the three history plugins together at 8,000, and technology knowledge at
-5,000. One payload is capped at 16 KiB, 32 references, and 64 collection
-entries; one boundary permits at most 127 combined extension mutations. Capacity
-overflow leaves explicit rejection events rather than permanently blocking later
-boundaries. These
-measurements come from an 8-core, 32-GiB component process, not a whole-game
-4-core/8-GiB certification. The paced profile's monthly p95 leaves about
-331 ms inside its 500 ms component budget, so a whole-game build must repeat the
-measurement with rendering, assets, and its other monthly systems present.
+The technology extension and each history plugin enforce their own per-boundary and total limits; an over-budget boundary rejects its new operations and later boundaries continue. [Technology](/en/architecture/technology/#limits-and-budgets) lists every limit.
 
-## 6. Code and evidence
+The home-hardware benchmark records how this workload performed on an earlier engine version; measure again with your own renderer, assets, and other monthly systems running.
 
-The framework test contains the complete command, result, qualification,
-installation, adoption, teaching-opportunity, snapshot, fork, and exact-replay
-path. Historical plugin tests cover independent selection, cross-assessment
-contradiction, and deep restoration validation. Performance reports retain the
-raw samples.
-
-<LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-technology" icon="external">
-  Open the technology extension
-</LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-technology/examples/technology_diffusion.rs" variant="secondary" icon="external">
-  Open the runnable example
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" icon="external">
+  Read the home-hardware evidence
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/tree/main/crates/extensions/canwu-history-research" variant="secondary" icon="external">
-  Open the historical research plugins
-</LinkButton>
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md" variant="secondary" icon="external">
-  Read the home-hardware evidence
+  Browse the historical research plugins
 </LinkButton>

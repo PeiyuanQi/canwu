@@ -1,25 +1,49 @@
 ---
 title: Read and present state safely
-description: Choose generic or domain read interfaces for trusted hosts, players, agents, and renderers.
+description: Pick the read API for each caller so trusted tools see full state and players, agents, and remote clients see only what their actor knows.
 sidebar:
   order: 3
-  label: Reading and presentation
+  label: Read and present state
 ---
 
-Canwu separates generic authoritative state from actor knowledge, while a domain integration builds concrete world projections. The most important read decision is what the caller is allowed to know.
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
+
+Use this page to decide what each reader in your application may see and which Canwu API gives it to them. The rule is short: trusted code may read ground truth; players and in-world agents read only what their actor or institution knows.
+
+Three terms come up throughout:
+
+- **Ground truth**: facts in authoritative state, whether or not any actor knows them.
+- **Actor knowledge**: what one person or institution (a *holder*) has learned, with source and time, kept in that holder's knowledge ledger apart from ground truth.
+- **Projection**: a detached read model built from state, such as the reference world's `snapshot()`. Changing it changes nothing in Canwu.
+
+<MermaidDiagram
+  label="Two read paths: trusted code reads authoritative state and projections; players and agents read one holder's knowledge through CanwuViewer, and the host copies selected fields into a client payload"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the table below describes the same read paths."
+  definition={`flowchart LR
+    State["Authoritative state"] --> Trusted["Trusted reads: entities(), boundaries(), events()"]
+    State --> Projection["Integration projection, e.g. snapshot()"]
+    Trusted --> Tools["Server, debugger, tests"]
+    Projection --> Renderer["Trusted renderer adapter"]
+    Ledger["Holder knowledge ledger"] --> Viewer["CanwuViewer: query_knowledge(), evaluation_traces()"]
+    Viewer --> Dto["Host-defined DTO"]
+    Dto --> Client["Player, agent, remote client"]
+`}
+/>
 
 ## Choose by caller
 
-| Caller | Preferred interface | Purpose |
+| Caller | API | What it gets |
 | --- | --- | --- |
-| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()`, `person_availabilities()`, `pending_transition_manifests()` | Read generic authoritative state and complete evidence |
-| Domain rule or renderer adapter | Integration `snapshot()` or equivalent projection | Assemble typed domain records into a detached view |
-| Player or in-world agent | `viewer_for_actor()` + `query_knowledge()` or `evaluation_traces()` | Read only that actor's knowledge, and the rule explanations it may see, without leaking ground truth |
-| Explanation UI | `explain()` | Build causal explanations from recorded events or failures |
+| Trusted server, debugger, or test | `entities()`, `domain_records()`, `events()`, `boundaries()`, `person_availabilities()`, `pending_transition_manifests()` | Generic authoritative state and all recorded evidence |
+| Domain rule or renderer adapter | Your integration's `snapshot()` or a similar projection | Typed domain records assembled into a detached view |
+| Player or in-world agent | `viewer_for_actor()`, then `query_knowledge()` or `evaluation_traces()` | Only that holder's knowledge and the rule explanations it may see |
+| Explanation UI | `explain()` | A causal chain built from recorded events or a failure |
 
 ## Two read paths (excerpt)
 
-This excerpt shows the separation between a trusted projection and actor knowledge; it is not a standalone program.
+This fragment puts a trusted projection next to an actor-knowledge query; main and error handling are omitted.
 
 ```rust
 use canwu_api::{Canwu, KnowledgeQuery};
@@ -35,13 +59,16 @@ let commander_knowledge = canwu
     .query_knowledge(&KnowledgeQuery::default())?;
 ```
 
-The reference integration's `snapshot()` is a trusted projection containing full world truth. Do not send it unchanged to players, actor agents, or untrusted clients.
+- `server_world` is the reference integration's trusted projection. It contains full world truth, so keep it on the server and away from players, actor agents, and untrusted clients.
+- `commander_knowledge` holds only records in the commander's ledger. `KnowledgeQuery::default()` returns current facts one page at a time; to read the next page, pass the result's `next` cursor as the query's `after`.
 
-The reference world is only one integration. A custom domain assembles its own projection from `typed_domain_record()` while using `CanwuViewer` for actor knowledge.
+`viewer_for_actor` opens a viewer for any existing person in a run created without a declared `RunConfiguration`. In a run with a declared configuration, it works only for the actor bound to the run's seat; call `viewer()` to get the viewer the run policy defines.
+
+For your own domain, build the projection from `typed_domain_record()` and use `CanwuViewer` for actor knowledge in the same way.
 
 ## Build a client-safe payload
 
-The host should copy only the fields its UI needs from `commander_knowledge` into a host-defined DTO, then serialize that DTO. For example:
+Copy the fields your UI needs from `commander_knowledge` into a DTO your host defines, then serialize that DTO. For example:
 
 ```json
 {
@@ -52,11 +79,11 @@ The host should copy only the fields its UI needs from `commander_knowledge` int
 }
 ```
 
-The host owns this shape. It may contain only information returned by the actor-knowledge query; do not merge in `server_world`, hidden entities, or debugger-only fields.
+The DTO may contain only information the knowledge query returned. Keep `server_world`, hidden entities, and debugger-only fields out of it.
 
 ## Plan from a holder's knowledge
 
-Route planning for a person or institution should use only what that holder knows. `canwu-correspondence` builds such a holder planning snapshot with the same rule its own plugin uses:
+Route planning for a person or institution should use only what that holder knows. `canwu-correspondence` builds a *holder planning snapshot* with the same rule its own plugin uses:
 
 ```rust
 use canwu_correspondence::planning_snapshot_from_holder_knowledge;
@@ -66,13 +93,19 @@ let (snapshot, read_set) =
 let plan = plan_route(&snapshot, &request)?;
 ```
 
-Call it inside a plugin system or command handler that declares the `canwu.core.knowledge` read. It admits only the endpoints and connections that the holder's ledger asserts at the read cut the view derives, and it fails if a known connection names an endpoint the holder does not know. The snapshot's `knowledge_cut` records that cut. The returned `KnowledgeReadCutDigest` is evidence of which facts were read, and it stays the same while those facts are unchanged. The view read itself is system access, so take `holder` from admitted authority, such as the command issuer, never from an unvalidated payload.
+How to use it:
 
-Outside the runtime, pass a query result you already hold, such as a restricted viewer's `query_knowledge(&planning_knowledge_query())`, to the pure `planning_snapshot_from_knowledge_result`. A paginated result is rejected because a partial page cannot prove the holder's whole network.
+1. Call it inside a plugin boundary system or command handler whose contract declares the `canwu.core.knowledge` read (`StateKey::core_knowledge()`). `view` is that system's `SimulationView`.
+2. Take `holder` from admitted authority, such as the command issuer. The view has system-level access, so a holder taken from an unvalidated payload could read someone else's knowledge.
+3. The snapshot includes exactly the endpoints and connections the holder's ledger asserts at the view's read cut, the point in the ledger's history that the view reads. Its `knowledge_cut` field records that cut.
+4. The call fails if a known connection names an endpoint the holder does not know.
+5. `read_set` is a `KnowledgeReadCutDigest`: evidence of which facts the planner read. It stays the same while those facts are unchanged.
+
+Outside the runtime, pass a query result you already hold to the pure function `planning_snapshot_from_knowledge_result`, for example a restricted viewer's `query_knowledge(&planning_knowledge_query())`. It rejects a paginated result, because a partial page cannot show the holder's whole network.
 
 ## Explain a rule result
 
-When a boundary system records an [evaluation trace](/en/architecture/settlement/#evaluation-traces), a player or agent can see how a rule arrived at a number without seeing the evidence behind it:
+When a boundary system records an [evaluation trace](/en/architecture/settlement/#evaluation-traces), a player or agent can see how a rule reached a number without seeing the evidence behind it:
 
 ```rust
 let viewer = canwu.viewer_for_actor(ids.commander)?;
@@ -84,12 +117,26 @@ for trace in viewer.evaluation_traces(&EntityRef::Army(ids.army), None)? {
 }
 ```
 
-`evaluation_traces(subject, after)` returns `EvaluationTraceView` values from the boundaries after `after`, or from every retained boundary for `None`, in boundary and recording order. A view keeps the rule, subject, boundary, result, and each term's contribution; it omits evidence and the producing plugin and system. A person or institution sees traces about its own entity, and traces about another subject only when a knowledge publication naming that subject reached its ledger before the trace was evaluated, so a holder never gains the breakdown of a subject it had not yet learned of. Research and developer principals see every trace, and a public principal receives `InvalidKnowledgeAuthority`. The trusted `boundaries()` read keeps the full records with their evidence.
+`evaluation_traces(subject, after)` returns `EvaluationTraceView` values for boundaries after `after`, or for every retained boundary when `after` is `None`, in boundary and recording order. Each view has the rule, subject, boundary, result, and each term's contribution. Evidence and the producing plugin and system stay in the trusted record.
+
+Who sees which traces:
+
+| Principal | Traces returned |
+| --- | --- |
+| Person or institution | Traces about its own entity. Traces about another subject only if a knowledge publication naming that subject reached its ledger before the trace was evaluated, so a holder sees breakdowns only for subjects it already knew about. |
+| Research or developer | Every trace |
+| Public | None; the call returns `InvalidKnowledgeAuthority` |
+
+Trusted code reads the full trace records, with evidence, through `boundaries()`.
 
 ## Follow multi-owner transitions
 
-Only trusted host reads expose transition manifests. `pending_transition_manifests()` lists the registered manifests whose ready boundary has not settled, and each boundary's `BoundaryReceipt::transition_audits` and `BoundaryRecord::transition_audits` record the manifests that settled there as `Committed` or `Expired`. Inside the simulation, only a manifest's coordinator and participants read it, through `SimulationView::transition_manifests` and `transition_audits` after declaring the `canwu.core.transitions` read. Present a transition to players from the application's own records or reports, not from the audit.
+A *transition manifest* lets several plugins write one transition together at a named boundary (see [transition manifests](/en/architecture/settlement/#transition-manifests)). Reading them:
 
-## Presentation copies state; it does not write back
+- **Host (trusted):** `pending_transition_manifests()` lists registered manifests whose ready boundary has not settled yet. `BoundaryReceipt::transition_audits` and `BoundaryRecord::transition_audits` list the manifests that settled at that boundary, each `Committed` or `Expired`.
+- **Inside the simulation:** only a manifest's coordinator and participants see it. Their boundary systems declare the `canwu.core.transitions` read and call `SimulationView::transition_manifests` and `SimulationView::transition_audits`.
+- **Players:** show a transition through your application's own records or reports. The audit is trusted evidence.
 
-A renderer may copy locations, routes, and statuses from a domain projection, then keep its own animation and interpolation data. Presentation state never feeds back into Canwu. Continuous clients keep wall time, simulation time, and presentation time separate.
+## Keep presentation state in the renderer
+
+A renderer may copy locations, routes, and statuses from a projection and keep its own animation and interpolation data. That data stays in the renderer; Canwu state changes only through commands and ingress. Continuous clients keep three clocks apart: wall time, simulation time, and presentation time. The [continuous-time game loop tutorial](/en/tutorials/continuous-game-loop/) shows how.

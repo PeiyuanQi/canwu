@@ -1,0 +1,669 @@
+---
+interface Props {
+  locale?: "zh-CN" | "en";
+}
+
+const { locale = "en" } = Astro.props;
+const en = locale === "en";
+const prefix = en ? "/en" : "";
+const crates = "https://github.com/PeiyuanQi/canwu/tree/main/crates";
+const apiSource = "https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/src/lib.rs";
+
+type Text = { en: string; zh: string };
+type Item = { name: string; href: string; code?: boolean; text: Text };
+type Group = { label: Text; items: Item[] };
+type Layer = {
+  id: string;
+  tone: string;
+  crateName?: boolean;
+  name: Text;
+  summary: Text;
+  detail: Text;
+  chips: Text[];
+  groups: Group[];
+  link?: { href: string; text: Text };
+};
+
+const crate = (path: string, text: Text): Item => ({
+  name: path.split("/")[1],
+  href: `${crates}/${path}`,
+  code: true,
+  text,
+});
+
+const layers: Layer[] = [
+  {
+    id: "app",
+    tone: "client",
+    name: { en: "Your application", zh: "上层应用" },
+    summary: { en: "Game client, research tool, AI agent", zh: "游戏客户端、研究工具、AI 智能体" },
+    detail: {
+      en: "Owns rendering, input, the real-time clock, accounts, and historical content. It depends on canwu-api, registers the plugins it needs, submits commands, and reads the results.",
+      zh: "负责渲染、输入、现实时间、账号与历史内容。它依赖 canwu-api，注册需要的插件，提交命令并读取结果。",
+    },
+    chips: [
+      { en: "game", zh: "游戏" },
+      { en: "research", zh: "研究" },
+      { en: "agent", zh: "智能体" },
+      { en: "canwu-debug", zh: "canwu-debug" },
+    ],
+    groups: [
+      {
+        label: { en: "Reference client in this repository", zh: "仓库中的参考客户端" },
+        items: [
+          crate("tools/canwu-debug", {
+            en: "Desktop debug client (egui) built on the public API and the reference integrations",
+            zh: "基于对外 API 与参考整合包的桌面调试客户端（egui）",
+          }),
+        ],
+      },
+    ],
+  },
+  {
+    id: "plugins",
+    tone: "plugin",
+    name: { en: "Domain plugins", zh: "领域插件" },
+    summary: { en: "Optional rules and example worlds", zh: "可选的领域规则与示例世界" },
+    detail: {
+      en: "Domain extensions add reusable rules as simulation plugins built on canwu-api. Register only the ones you need, or write your own. Reference content packs supply data, and reference integrations combine the pieces into small worlds you can run and copy.",
+      zh: "模拟领域扩展以模拟插件的形式提供可复用规则，它们都建立在 canwu-api 之上。按需注册，也可以自己编写。参考内容包提供数据，参考整合包把这些部件组合成可以直接运行、也可以复制改造的小型世界。",
+    },
+    chips: [
+      { en: "12 extensions", zh: "12 个扩展" },
+      { en: "3 content packs", zh: "3 个内容包" },
+      { en: "5 integrations", zh: "5 个整合包" },
+    ],
+    groups: [
+      {
+        label: { en: "Domain extensions (published on crates.io)", zh: "模拟领域扩展（已发布到 crates.io）" },
+        items: [
+          crate("extensions/canwu-resource", { en: "Resource accounts, reservations, transfers, and fulfillment", zh: "资源账户、预留、转移与履约" }),
+          crate("extensions/canwu-production", { en: "Production processes, facilities, work orders, and output", zh: "生产工艺、设施、工单与产出" }),
+          crate("extensions/canwu-movement", { en: "Movement orders, route legs, and capacity pools", zh: "移动命令、路段与运力池" }),
+          crate("extensions/canwu-military", { en: "Forces, operations, combat, and occupation", zh: "军队、行动、战斗与占领" }),
+          crate("extensions/canwu-society", { en: "Social diffusion between population groups", zh: "人群之间的社会传播" }),
+          crate("extensions/canwu-culture", { en: "Culture authoring, compilation, and lifecycle", zh: "文化编写、编译与生命周期" }),
+          crate("extensions/canwu-law", { en: "Legal procedures, versioned law, and applicability (experimental)", zh: "法律程序、版本化法律与适用（实验性）" }),
+          crate("extensions/canwu-technology", { en: "Technology from evidence to adoption and diffusion", zh: "从证据到采用与传播的技术模拟" }),
+          crate("extensions/canwu-fiscal", { en: "Fiscal institutions, procedures, and assessments", zh: "财政制度、程序与核算" }),
+          crate("extensions/canwu-information", { en: "Documents, copies, access, and interpretation", zh: "文书、副本、访问与解读" }),
+          crate("extensions/canwu-correspondence", { en: "Letters, addresses, carriers, and interception", zh: "信件、地址、承运人与截取" }),
+          crate("extensions/canwu-history-research", { en: "Optional research assessments for technology runs", zh: "技术模拟的可选历史研究评估" }),
+        ],
+      },
+      {
+        label: { en: "Reference content packs", zh: "参考内容包" },
+        items: [
+          crate("reference-content/canwu-ming-fiscal", { en: "Versioned, source-cited Ming fiscal data", zh: "带出处的版本化明代财政数据" }),
+          crate("reference-content/canwu-economy-reference-content", { en: "Economy model cards and cited data", zh: "经济模型卡与带出处的数据" }),
+          crate("reference-content/canwu-military-reference-content", { en: "Synthetic (non-historical) military rulesets for the reference integration", zh: "供参考整合包使用的合成（非史实）军事规则集" }),
+        ],
+      },
+      {
+        label: { en: "Reference integrations (repository only, not published)", zh: "参考整合包（仅在仓库中，未发布）" },
+        items: [
+          crate("integrations/canwu-reference-world", { en: "Small world with armies and territories, used by the starter example", zh: "包含军队与地区的小型示例世界，starter 示例使用它" }),
+          crate("integrations/canwu-economy-reference", { en: "Grain loop with production, transport, and military supply", zh: "包含生产、运输与军事补给的粮食循环" }),
+          crate("integrations/canwu-force-supply-reference", { en: "Military supply as a second resource consumer", zh: "作为第二个资源消费者的军事补给" }),
+          crate("integrations/canwu-military-reference", { en: "The military extension running in the reference world", zh: "在参考世界中运行的军事扩展" }),
+          crate("integrations/canwu-ming-fiscal-reference", { en: "Hongwu, Wanli, and Hongguang fiscal scenarios", zh: "洪武、万历、弘光三个财政场景" }),
+        ],
+      },
+    ],
+    link: { href: `${prefix}/developer/extensions/`, text: { en: "Write your own plugin →", zh: "编写自己的插件 →" } },
+  },
+  {
+    id: "api",
+    tone: "api",
+    crateName: true,
+    name: { en: "canwu-api", zh: "canwu-api" },
+    summary: { en: "The public API your code calls", zh: "应用代码调用的对外 API" },
+    detail: {
+      en: "The engine crate your application depends on; extension crates build on it too. Its Canwu type creates and advances a run, accepts commands, returns detached snapshots and actor-relative views, and saves, forks, and replays runs. It re-exports the types you need from the crates below.",
+      zh: "应用依赖的引擎 crate，扩展 crate 也建立在它之上。其中的 Canwu 类型负责创建和推进模拟运行、接收命令、返回独立快照和角色相对视图，并支持存档、派生分支与重放。下层 crate 中需要的类型都由它重新导出。",
+    },
+    chips: [
+      { en: "commands", zh: "命令" },
+      { en: "views", zh: "视图" },
+      { en: "snapshots", zh: "快照" },
+      { en: "replay", zh: "重放" },
+    ],
+    groups: [
+      {
+        label: { en: "Main calls", zh: "主要调用" },
+        items: [
+          { name: "Canwu::new_with_plugins", href: apiSource, code: true, text: { en: "Create a run from a scenario and a plugin list", zh: "用场景和插件列表创建模拟运行" } },
+          { name: "enqueue_command", href: apiSource, code: true, text: { en: "Queue a command for a simulation time", zh: "把命令排入指定模拟时间的输入队列" } },
+          { name: "advance_canonical", href: apiSource, code: true, text: { en: "Advance time and settle everything that falls due", zh: "推进时间并结算到期的全部工作" } },
+          { name: "viewer_for_actor", href: apiSource, code: true, text: { en: "Read the world as one actor knows it", zh: "按某个角色所知读取世界" } },
+          { name: "events · explain", href: apiSource, code: true, text: { en: "List what happened and ask why", zh: "列出发生的事件并查询原因" } },
+          { name: "snapshot_json · fork · replay_from_journal", href: apiSource, code: true, text: { en: "Save, branch, and replay a run", zh: "存档、派生分支和重放" } },
+        ],
+      },
+    ],
+    link: { href: `${prefix}/developer/integration/`, text: { en: "Integrate Canwu →", zh: "接入参伍 →" } },
+  },
+  {
+    id: "sim",
+    tone: "runtime",
+    crateName: true,
+    name: { en: "canwu-sim", zh: "canwu-sim" },
+    summary: { en: "Private runtime that holds the live world", zh: "持有实时世界状态的私有运行时" },
+    detail: {
+      en: "Holds the authoritative state. It queues incoming commands, runs scheduled work, and settles due work in boundaries: one all-or-nothing pass at one simulation time, run in 14 fixed phases. If anything fails, the whole boundary rolls back. It also records the evidence and hashes used for saves and replay. Applications reach it only through canwu-api.",
+      zh: "持有权威状态。它把收到的命令放入输入队列，运行调度工作，并以边界为单位结算到期工作：边界是某个模拟时间点上的一次整体结算，按 14 个固定阶段运行；任何一步失败，整个边界回滚。它还记录存档和重放所需的证据与哈希。应用只通过 canwu-api 访问它。",
+    },
+    chips: [
+      { en: "ingress queue", zh: "输入队列" },
+      { en: "14 phases", zh: "14 个阶段" },
+      { en: "commit / rollback", zh: "提交 / 回滚" },
+      { en: "persistence", zh: "持久化" },
+    ],
+    groups: [
+      {
+        label: { en: "Crate", zh: "crate" },
+        items: [
+          crate("runtime/canwu-sim", { en: "Runtime, scheduling, settlement, plugins, persistence, hashing, and replay", zh: "运行时、调度、结算、插件、持久化、哈希与重放" }),
+        ],
+      },
+    ],
+    link: { href: `${prefix}/architecture/settlement/`, text: { en: "How a boundary is settled →", zh: "边界如何结算 →" } },
+  },
+  {
+    id: "model",
+    tone: "model",
+    name: { en: "Models and mechanisms", zh: "模型与机制" },
+    summary: { en: "Events, knowledge, decisions, routes, transport", zh: "事件、知识、决策、路线、运输" },
+    detail: {
+      en: "Data types that plugins and applications reach through canwu-api: what happened and why, what each actor knows, pending decisions, and route and transport records. The runtime itself uses the event, knowledge, and decision types.",
+      zh: "插件和应用经由 canwu-api 使用的数据类型：发生了什么以及原因、每个角色知道什么、待定的决策，以及路线与运输记录。运行时本身使用其中的事件、知识和决策类型。",
+    },
+    chips: [
+      { en: "event", zh: "event" },
+      { en: "knowledge", zh: "knowledge" },
+      { en: "decision", zh: "decision" },
+      { en: "routing", zh: "routing" },
+      { en: "transport", zh: "transport" },
+    ],
+    groups: [
+      {
+        label: { en: "Crates", zh: "crate" },
+        items: [
+          crate("model/canwu-event", { en: "Events with their cause, audience, and evidence references", zh: "带因果、受众与证据引用的事件" }),
+          crate("model/canwu-knowledge", { en: "What each actor knows, with source, confidence, and age", zh: "角色知识，包括来源、可信度与信息时效" }),
+          crate("model/canwu-decision", { en: "Decision tickets, controllers, and policies", zh: "决策票据、控制者与决策策略" }),
+          crate("mechanisms/canwu-routing", { en: "Route planning where travel times change over time", zh: "通行时间随时间变化的路线规划" }),
+          crate("mechanisms/canwu-transport", { en: "Transport runs, bookings, handoffs, and capacity pools", zh: "运输执行、预订、交接与运力池" }),
+        ],
+      },
+    ],
+    link: { href: `${prefix}/architecture/events/`, text: { en: "Events and causality →", zh: "事件与因果 →" } },
+  },
+  {
+    id: "foundation",
+    tone: "foundation",
+    name: { en: "Foundation", zh: "基础层" },
+    summary: { en: "IDs, random numbers, time", zh: "ID、随机数、时间" },
+    detail: {
+      en: "Typed IDs, deterministic random numbers, schema metadata, and simulation time arithmetic. Every other crate builds on these two.",
+      zh: "类型化 ID、确定性随机数、schema 元数据与模拟时间运算。其他所有 crate 都建立在这两个 crate 之上。",
+    },
+    chips: [
+      { en: "core", zh: "core" },
+      { en: "time", zh: "time" },
+    ],
+    groups: [
+      {
+        label: { en: "Crates", zh: "crate" },
+        items: [
+          crate("foundation/canwu-core", { en: "Stable IDs, deterministic random numbers, and schema primitives", zh: "稳定 ID、确定性随机数与 schema 基础类型" }),
+          crate("foundation/canwu-time", { en: "Simulation time and checked duration arithmetic", zh: "模拟时间与带溢出检查的时长运算" }),
+        ],
+      },
+    ],
+    link: { href: `${prefix}/architecture/randomness/`, text: { en: "Replayable randomness →", zh: "可重放的随机性 →" } },
+  },
+];
+
+const dividers: Record<string, Text> = {
+  plugins: { en: "Public API boundary · code above this line uses only canwu-api", zh: "对外 API 边界 · 这条线以上的代码只使用 canwu-api" },
+  api: { en: "Engine internals · reached only through canwu-api", zh: "引擎内部 · 只能经由 canwu-api 访问" },
+};
+
+type Step = { layers: string[]; title: Text; text: Text; code?: string; link?: { href: string; text: Text } };
+
+const steps: Step[] = [
+  {
+    layers: ["app", "plugins"],
+    title: { en: "Build a command", zh: "构造命令" },
+    text: {
+      en: "Your client creates a typed command. In the starter example, the reference world wraps a MovementCommand into a command envelope.",
+      zh: "客户端构造一个类型化命令。在 starter 示例中，参考世界把 MovementCommand 包装成命令信封。",
+    },
+    code: "let envelope = order_movement(Issuer::Actor(commander), &command)?;",
+  },
+  {
+    layers: ["app", "api"],
+    title: { en: "Queue it", zh: "排入队列" },
+    text: {
+      en: "enqueue_command puts the request in the ingress queue for its due time and returns a receipt. Resending the identical request returns the same receipt; reusing its ID with different content fails. The world has not changed yet.",
+      zh: "enqueue_command 把请求按到期时间放入输入队列，并返回回执。原样重发同一请求会得到同一张回执；同一请求 ID 配不同内容会失败。此时世界状态还没有变化。",
+    },
+    code: "canwu.enqueue_command(due_at, priority, CommandRequest::new(id, revision, envelope))?;",
+  },
+  {
+    layers: ["api", "sim"],
+    title: { en: "Advance time", zh: "推进时间" },
+    text: {
+      en: "advance_canonical moves simulation time forward. Each batch of work that falls due is settled in one boundary.",
+      zh: "advance_canonical 推进模拟时间。每一批到期的工作都在一个边界中结算。",
+    },
+    code: "canwu.advance_canonical(SimDuration::hours(19))?;",
+  },
+  {
+    layers: ["sim", "plugins"],
+    title: { en: "Settle the boundary", zh: "结算边界" },
+    text: {
+      en: "The engine checks the issuer's authority, the revision the command was based on, and its expected time. A rejected command is recorded with its reason. Plugin systems then run in 14 fixed phases and propose changes, which commit together or roll back together.",
+      zh: "引擎检查签发者的权限、命令所基于的修订版本以及预期时间，被拒绝的命令连同原因一起记录。随后插件系统按 14 个固定阶段运行并提出变更，这些变更一起提交，或一起回滚。",
+    },
+    link: { href: `${prefix}/architecture/settlement/`, text: { en: "The 14 phases →", zh: "14 个结算阶段 →" } },
+  },
+  {
+    layers: ["sim", "model"],
+    title: { en: "Record what happened", zh: "记录结果" },
+    text: {
+      en: "Committed changes produce events that carry their cause and audience. Characters' knowledge and reports are updated, and the replay journal gains one more boundary.",
+      zh: "提交的变更生成带有因果与受众的事件。角色知识与报告随之更新，重放日志也多记录一个边界。",
+    },
+  },
+  {
+    layers: ["api", "app"],
+    title: { en: "Read it back", zh: "读取结果" },
+    text: {
+      en: "A player or agent reads through viewer_for_actor and sees only what that actor knows. Trusted host tools can also list events() and ask explain() why something happened.",
+      zh: "玩家或智能体通过 viewer_for_actor 读取，只能看到该角色知道的内容。受信任的上层应用工具还可以用 events() 列出事件，用 explain() 查询原因。",
+    },
+    code: "let viewer = canwu.viewer_for_actor(actor)?;",
+    link: { href: `${prefix}/developer/reading-state/`, text: { en: "Reading state safely →", zh: "安全读取状态 →" } },
+  },
+  {
+    layers: ["api", "sim"],
+    title: { en: "Save and replay", zh: "存档与重放" },
+    text: {
+      en: "snapshot_json saves the run, and replay_journal returns its recorded inputs. replay_from_journal rebuilds the run from those inputs; equal checkpoint hashes show the replay is exact.",
+      zh: "snapshot_json 保存模拟运行，replay_journal 返回它记录的全部输入。replay_from_journal 根据这些输入重建运行；检查点哈希相同，说明重放完全一致。",
+    },
+    code: "let replayed = Canwu::replay_from_journal(&[&plugin], &canwu.replay_journal())?;\nassert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());",
+    link: { href: `${prefix}/developer/persistence/`, text: { en: "Save, replay, and fork →", zh: "存档、重放与派生分支 →" } },
+  },
+];
+
+const t = (value: Text) => (en ? value.en : value.zh);
+const ui = en
+  ? {
+      label: "Canwu architecture",
+      layers: "Layers",
+      flow: "Follow a command",
+      hint: "Each layer uses only its own layer and the layers below it. Select a layer to see its crates, or switch to Follow a command and use the arrows.",
+      step: "Step",
+      of: "of",
+      previous: "Previous step",
+      next: "Next step",
+      stepList: "Command steps",
+    }
+  : {
+      label: "参伍架构",
+      layers: "分层",
+      flow: "跟随一条命令",
+      hint: "每一层只使用本层和下方各层。选择某一层可查看其中的 crate；切换到“跟随一条命令”后，可用箭头逐步查看。",
+      step: "第",
+      of: "/",
+      previous: "上一步",
+      next: "下一步",
+      stepList: "命令步骤",
+    };
+const stepLabel = (index: number) => (en ? `${ui.step} ${index + 1} ${ui.of} ${steps.length}` : `第 ${index + 1} 步，共 ${steps.length} 步`);
+---
+
+<figure class="arch-map not-content" data-arch-map aria-label={ui.label}>
+  <div class="am-tabs" role="tablist" aria-label={ui.label}>
+    <button type="button" role="tab" class="am-tab" data-am-mode="layers" aria-selected="true">{ui.layers}</button>
+    <button type="button" role="tab" class="am-tab" data-am-mode="flow" aria-selected="false">{ui.flow}</button>
+  </div>
+  <div class="am-grid">
+    <ol class="am-stack">
+      {layers.map((layer) => (
+        <li>
+          <button type="button" class={`am-layer tone-${layer.tone}`} data-am-layer={layer.id} aria-pressed={layer.id === "api" ? "true" : "false"}>
+            <span class="am-layer-text">
+              {layer.crateName ? <code class="am-layer-name">{t(layer.name)}</code> : <strong class="am-layer-name">{t(layer.name)}</strong>}
+              <span class="am-layer-summary">{t(layer.summary)}</span>
+            </span>
+            <span class="am-chips" aria-hidden="true">{layer.chips.map((chip) => <span>{t(chip)}</span>)}</span>
+          </button>
+          {dividers[layer.id] && <p class={`am-divider am-divider-${layer.id}`}>{t(dividers[layer.id])}</p>}
+        </li>
+      ))}
+    </ol>
+    <div class="am-panel" aria-live="polite">
+      {layers.map((layer) => (
+        <section class={`am-detail tone-${layer.tone}`} data-am-detail={layer.id}>
+          <h3>{layer.crateName ? <code>{t(layer.name)}</code> : t(layer.name)}</h3>
+          <p>{t(layer.detail)}</p>
+          {layer.groups.map((group) => (
+            <div class="am-group">
+              <h4>{t(group.label)}</h4>
+              <ul>
+                {group.items.map((item) => (
+                  <li><a href={item.href}>{item.code ? <code>{item.name}</code> : item.name}</a><span>{t(item.text)}</span></li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          {layer.link && <a class="am-more" href={layer.link.href}>{t(layer.link.text)}</a>}
+        </section>
+      ))}
+      <ol class="am-steps" aria-label={ui.stepList}>
+        {steps.map((step, index) => (
+          <li class="am-step" data-am-step={index} data-am-highlight={step.layers.join(" ")}>
+            <p class="am-step-count">{stepLabel(index)}</p>
+            <h3>{t(step.title)}</h3>
+            <p>{t(step.text)}</p>
+            {step.code && <pre><code>{step.code}</code></pre>}
+            {step.link && <a class="am-more" href={step.link.href}>{t(step.link.text)}</a>}
+          </li>
+        ))}
+      </ol>
+      <div class="am-stepper">
+        <button type="button" data-am-prev aria-label={ui.previous}>←</button>
+        <div class="am-dots">
+          {steps.map((step, index) => (
+            <button type="button" data-am-goto={index} aria-label={`${stepLabel(index)}: ${t(step.title)}`}></button>
+          ))}
+        </div>
+        <button type="button" data-am-next aria-label={ui.next}>→</button>
+      </div>
+    </div>
+  </div>
+  <figcaption>{ui.hint}</figcaption>
+</figure>
+
+<script>
+  function setupArchitectureMap(root: HTMLElement) {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>("[data-am-mode]")];
+    const layerButtons = [...root.querySelectorAll<HTMLButtonElement>("[data-am-layer]")];
+    const details = [...root.querySelectorAll<HTMLElement>("[data-am-detail]")];
+    const steps = [...root.querySelectorAll<HTMLElement>("[data-am-step]")];
+    const dots = [...root.querySelectorAll<HTMLButtonElement>("[data-am-goto]")];
+    const previous = root.querySelector<HTMLButtonElement>("[data-am-prev]");
+    const next = root.querySelector<HTMLButtonElement>("[data-am-next]");
+    if (!previous || !next || steps.length === 0) return;
+
+    let mode: "layers" | "flow" = "layers";
+    let layer = layerButtons.find((button) => button.getAttribute("aria-pressed") === "true")?.dataset.amLayer ?? "api";
+    let step = 0;
+
+    const render = () => {
+      root.dataset.mode = mode;
+      tabs.forEach((tab) => tab.setAttribute("aria-selected", String(tab.dataset.amMode === mode)));
+      const highlighted = mode === "flow" ? (steps[step].dataset.amHighlight ?? "").split(" ") : [layer];
+      layerButtons.forEach((button) => {
+        const active = highlighted.includes(button.dataset.amLayer ?? "");
+        button.classList.toggle("is-active", active);
+        button.setAttribute("aria-pressed", String(mode === "layers" && active));
+      });
+      details.forEach((detail) => { detail.hidden = mode !== "layers" || detail.dataset.amDetail !== layer; });
+      steps.forEach((item, index) => { item.hidden = mode !== "flow" || index !== step; });
+      dots.forEach((dot, index) => dot.setAttribute("aria-current", index === step ? "step" : "false"));
+      previous.disabled = step === 0;
+      next.disabled = step === steps.length - 1;
+    };
+
+    tabs.forEach((tab) => tab.addEventListener("click", () => {
+      mode = tab.dataset.amMode === "flow" ? "flow" : "layers";
+      render();
+    }));
+    layerButtons.forEach((button) => button.addEventListener("click", () => {
+      mode = "layers";
+      layer = button.dataset.amLayer ?? layer;
+      render();
+    }));
+    dots.forEach((dot, index) => dot.addEventListener("click", () => { step = index; render(); }));
+    previous.addEventListener("click", () => { step = Math.max(0, step - 1); render(); });
+    next.addEventListener("click", () => { step = Math.min(steps.length - 1, step + 1); render(); });
+    root.addEventListener("keydown", (event) => {
+      if (mode !== "flow" || !(event.target instanceof HTMLElement) || event.target.closest("a")) return;
+      if (event.key === "ArrowRight") { step = Math.min(steps.length - 1, step + 1); render(); event.preventDefault(); }
+      if (event.key === "ArrowLeft") { step = Math.max(0, step - 1); render(); event.preventDefault(); }
+    });
+
+    root.classList.add("am-ready");
+    render();
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-arch-map]").forEach(setupArchitectureMap);
+</script>
+
+<style>
+  .arch-map {
+    --am-surface: var(--sl-color-gray-6, #22252a);
+    --am-raised: var(--sl-color-black, #191b1f);
+    --am-code: var(--sl-color-black, #111317);
+    --am-text: var(--sl-color-white, #f1f3f5);
+    --am-muted: var(--sl-color-gray-2, #abb2bc);
+    --am-subtle: var(--sl-color-gray-3, #7f8791);
+    --am-border: var(--sl-color-gray-5, #59616d);
+    --am-link: var(--sl-color-accent-high, #72a8d3);
+    --tone-client: #72a8d3;
+    --tone-plugin: #72bfa5;
+    --tone-api: #ef8a67;
+    --tone-runtime: #d9a05b;
+    --tone-model: #a99ad6;
+    --tone-foundation: #9aa3ad;
+    container-type: inline-size;
+    margin: 1.5rem 0;
+    padding: clamp(0.85rem, 2.5cqi, 1.25rem);
+    color: var(--am-text);
+    background: var(--am-surface);
+    border: 1px solid var(--am-border);
+    border-radius: 10px;
+  }
+
+  :global(:root[data-theme="light"]) .arch-map {
+    --am-raised: #fffdfa;
+    --am-code: #f5f1ea;
+    --am-link: #a53e24;
+    --tone-client: #2f6f9f;
+    --tone-plugin: #2e7d64;
+    --tone-api: #a53e24;
+    --tone-runtime: #8a5a12;
+    --tone-model: #5f4fa0;
+    --tone-foundation: #56606b;
+  }
+
+  .tone-client { --tone: var(--tone-client); }
+  .tone-plugin { --tone: var(--tone-plugin); }
+  .tone-api { --tone: var(--tone-api); }
+  .tone-runtime { --tone: var(--tone-runtime); }
+  .tone-model { --tone: var(--tone-model); }
+  .tone-foundation { --tone: var(--tone-foundation); }
+
+  .am-tabs { display: none; gap: 0.35rem; margin-bottom: 0.9rem; }
+  .am-ready .am-tabs { display: flex; flex-wrap: wrap; }
+  .am-tab {
+    min-height: 2.4rem;
+    padding: 0.45rem 0.85rem;
+    color: var(--am-muted);
+    background: transparent;
+    border: 1px solid var(--am-border);
+    border-radius: 999px;
+    font-family: inherit;
+    font-size: 0.8rem;
+    font-weight: 650;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .am-tab:hover { color: var(--am-text); }
+  .am-tab[aria-selected="true"] { color: var(--am-code); background: var(--tone-api); border-color: var(--tone-api); }
+
+  .am-grid { display: grid; gap: 1rem; align-items: start; }
+  @container (min-width: 760px) {
+    .am-grid { grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr); }
+  }
+
+  .am-stack { display: grid; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+  .am-stack > li { margin: 0; }
+  .am-layer {
+    position: relative;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 3.6rem;
+    padding: 0.65rem 0.8rem 0.65rem 1rem;
+    color: var(--am-text);
+    background: var(--am-raised);
+    border: 1px solid var(--am-border);
+    border-radius: 7px;
+    font: inherit;
+    text-align: start;
+    cursor: pointer;
+    transition: opacity 160ms ease, border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+  }
+  .am-layer::before {
+    content: "";
+    position: absolute;
+    inset: 0.55rem auto 0.55rem 0.4rem;
+    width: 3px;
+    background: var(--tone);
+    border-radius: 3px;
+  }
+  .am-layer:hover { border-color: var(--tone); }
+  .am-layer.is-active { border-color: var(--tone); box-shadow: 0 0 0 1px var(--tone) inset; }
+  .am-ready[data-mode="flow"] .am-layer:not(.is-active) { opacity: 0.38; }
+  .am-ready[data-mode="flow"] .am-layer.is-active { transform: translateX(4px); }
+  .am-layer-text { display: grid; gap: 0.2rem; min-width: 0; }
+  .am-layer-name { color: var(--am-text); font-size: 0.92rem; font-weight: 700; }
+  code.am-layer-name { color: var(--tone); font-size: 0.9rem; }
+  .am-layer-summary { color: var(--am-muted); font-size: 0.78rem; line-height: 1.35; }
+  .am-chips { display: none; flex-wrap: wrap; justify-content: flex-end; gap: 0.25rem; max-width: 55%; }
+  .am-chips span {
+    padding: 0.12rem 0.4rem;
+    color: var(--am-muted);
+    border: 1px solid var(--am-border);
+    border-radius: 4px;
+    font: 0.66rem/1.4 "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    white-space: nowrap;
+  }
+  @container (min-width: 560px) {
+    .am-chips { display: flex; }
+  }
+  @container (min-width: 760px) {
+    .am-chips { max-width: 48%; }
+  }
+
+  .am-divider {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0.4rem 0 0;
+    color: var(--am-subtle);
+    font: 600 0.68rem/1.3 "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  }
+  .am-divider::before, .am-divider::after { content: ""; flex: 1 1 auto; border-top: 1px dashed var(--am-border); }
+  .am-divider-plugins { color: var(--tone-api); }
+  .am-divider-plugins::before, .am-divider-plugins::after { border-color: var(--tone-api); }
+
+  .am-panel {
+    min-width: 0;
+    padding: 1rem 1.1rem;
+    background: var(--am-raised);
+    border: 1px solid var(--am-border);
+    border-radius: 7px;
+  }
+  .am-ready .am-panel { min-height: 100%; }
+  .am-panel h3 { margin: 0 0 0.6rem; color: var(--am-text); font-size: 1.05rem; line-height: 1.3; }
+  .am-panel h3 code { color: var(--tone, var(--tone-api)); }
+  .am-panel p { margin: 0 0 0.9rem; color: var(--am-muted); font-size: 0.86rem; line-height: 1.6; }
+  .am-detail { border-top: 3px solid var(--tone); margin: -1rem -1.1rem 0; padding: 1rem 1.1rem 0; }
+  .am-detail + .am-detail { margin-top: 1.25rem; }
+  .am-ready .am-detail + .am-detail { margin-top: -1rem; }
+  .am-group { margin-top: 0.9rem; }
+  .am-group h4 {
+    margin: 0 0 0.45rem;
+    color: var(--am-subtle);
+    font: 650 0.68rem/1.3 "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .am-group ul { display: grid; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+  .am-group li { display: grid; gap: 0.1rem; margin: 0; font-size: 0.8rem; line-height: 1.45; }
+  .am-group a { width: fit-content; color: var(--am-link); text-decoration: none; }
+  .am-group a:hover { text-decoration: underline; text-underline-offset: 0.2em; }
+  .am-group a code { font-size: 0.78rem; }
+  .am-group span { color: var(--am-muted); }
+  .am-more { display: inline-block; margin-top: 1rem; color: var(--am-link); font-size: 0.8rem; font-weight: 650; text-decoration: none; }
+  .am-more:hover { text-decoration: underline; text-underline-offset: 0.2em; }
+
+  .am-steps { margin: 0; padding: 0; list-style: none; }
+  .am-step { margin: 0 0 1.25rem; }
+  .am-step-count { margin: 0 0 0.35rem !important; color: var(--tone-api) !important; font: 650 0.7rem/1.3 "Cascadia Code", "SFMono-Regular", Consolas, monospace !important; letter-spacing: 0.04em; }
+  .am-step pre {
+    margin: 0;
+    padding: 0.7rem 0.8rem;
+    overflow-x: auto;
+    color: var(--am-text);
+    background: var(--am-code);
+    border: 1px solid var(--am-border);
+    border-radius: 6px;
+    font-size: 0.74rem;
+    line-height: 1.55;
+  }
+  .am-stepper { display: none; align-items: center; justify-content: space-between; gap: 0.6rem; margin-top: 1rem; padding-top: 0.8rem; border-top: 1px solid var(--am-border); }
+  .am-ready[data-mode="flow"] .am-stepper { display: flex; }
+  .am-ready .am-step { margin: 0; }
+  .am-stepper > button {
+    width: 2.4rem;
+    height: 2.4rem;
+    color: var(--am-text);
+    background: transparent;
+    border: 1px solid var(--am-border);
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+  }
+  .am-stepper > button:hover:not(:disabled) { border-color: var(--tone-api); }
+  .am-stepper > button:disabled { opacity: 0.35; cursor: not-allowed; }
+  .am-dots { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.2rem; }
+  .am-dots button {
+    width: 1.6rem;
+    height: 1.6rem;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+  }
+  .am-dots button::before {
+    content: "";
+    display: block;
+    width: 0.55rem;
+    height: 0.55rem;
+    margin: auto;
+    background: var(--am-border);
+    border-radius: 50%;
+    transition: background-color 160ms ease, transform 160ms ease;
+  }
+  .am-dots button[aria-current="step"]::before { background: var(--tone-api); transform: scale(1.3); }
+
+  .arch-map figcaption { margin-top: 0.8rem; color: var(--am-subtle); font-size: 0.76rem; line-height: 1.5; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .am-layer, .am-dots button::before { transition: none; }
+    .am-ready[data-mode="flow"] .am-layer.is-active { transform: none; }
+  }
+</style>

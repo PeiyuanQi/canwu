@@ -6,17 +6,14 @@ sidebar:
   label: 中英文术语表
 ---
 
-本表规定参伍公开文档中的中英文写法。中文正文使用“中文规范写法”，英文正文使用
-English 栏；代码标识始终保持原样。首次出现时可同时给出英文或代码名，例如
-**模拟插件**（simulation plugin）或**决策票据**（`DecisionTicket`）。
+本页用于查询参伍术语：中英文名称、对应的代码标识及含义。带链接的术语另有专门页面
+详细说明，其余术语以本页和 API 文档中的定义为准。
 
-带链接的术语已有专门页面解释其行为和使用位置；尚未链接的术语目前以本页和 API
-文档中的定义为准。仓库中的 Agent 规范来源是
-[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md)。
-
-每个概念只保留一个公开规范写法。下方的统一写法表会标出已弃用或受限的替代
-写法：已弃用写法不应出现在新正文中，受限写法只能在表中说明的技术语境中使用。
-现有代码标识和历史记录不因本规则改名。
+编写参伍文档时，请在中英文中分别使用表中的规范写法，代码标识保持原样，并避免使用最后
+一张表中标为已弃用的写法。首次出现时可以同时给出英文或代码名，例如**模拟插件**
+（simulation plugin）或**决策票据**（`DecisionTicket`）。仓库中的
+[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md)
+是术语的权威来源，本页与之同步。
 
 <div class="terminology-reference">
 
@@ -54,7 +51,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [插件输入撤回](/developer/integration/) | plugin ingress cancellation | `cancel_plugin_ingress`, `IngressPayload::PluginCancellation` | 在到期之前终止撤回一项仍在排队的插件输入，并作为独立日志记录保存；被撤回的输入永远不会被准入，也不会发生回滚。 |
 | [撤回权限](/developer/integration/) | cancellation authority | `IngressCancellationAuthority` | 撤回排队插件输入的主体：上层应用撤回自己提交的公开数据包，所属插件以注册许可撤回其内部数据包类型，或由安排该输入的插件的边界系统撤回。只有签发者可以撤回。 |
 | [调度工作](/architecture/events/) | scheduled work | — | 具有确定模拟到期时间和插入顺序的工作。 |
-| [结算边界](/architecture/settlement/) | transaction | `BoundaryRequest`, `BoundaryRecord` | 准入工作、运行系统、记录证据并整体提交或回滚的一次已验证结算边界。 |
+| [结算边界](/architecture/settlement/) | boundary | `BoundaryRequest`, `BoundaryRecord` | 一次经过验证、要么全部提交要么整体回滚的结算：准入工作，按固定阶段运行系统，记录证据。 |
 | [结算阶段](/architecture/settlement/) | settlement phase | `BoundaryPhase` | 固定边界执行顺序中的一个位置，不代表一套独立结算算法。 |
 | [原子提交](/architecture/settlement/) | atomic commit | — | 一次性应用边界中所有通过验证的变化，避免暴露部分状态。 |
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
@@ -100,24 +97,24 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | 参考整合包 | reference integration | — | 使用对外 API 将通用领域能力映射到小型世界、生产、信息或社会模型的可替换实现；可以包含运行时插件和上层应用适配代码。 |
 | 入门套件 | starter kit | — | 将兼容的参考内容包和参考整合包组合成完整纵向切片的可运行上层应用与组合示例；它是参考代码，不是特权引擎路径。 |
 | [财政模拟扩展](/tutorials/cases/ming-fiscal/) | fiscal simulation extension | `canwu-fiscal` | 通用财政程序领域扩展；负责法规、地区采纳、核算、授权、减免、凭证、审计、聚合与持有人相对知识报告，不负责资源余额与转移。 |
-| [历史财政语境](/tutorials/cases/ming-fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
-| [财政覆盖单元](/tutorials/cases/ming-fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
+| [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
+| [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `（证据种类，外部操作 ID）` 组合最多结算一张凭证；凭证不拥有资源真值。 |
-| [代理角色](/tutorials/cases/ming-fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
-| [权限依据](/tutorials/cases/ming-fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须由所属插件声明。它可以授予财政授权绑定中的代理角色权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束。 |
+| [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
+| [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须由所属插件声明。它可以授予财政授权绑定中的代理角色权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
 | [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
-| [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStageV1` | 带生效期和出处的勘探、矿藏刻画、准入、开采准备、在产、枯竭或明确未知/不适用状态；不是永恒的矿藏布尔值。 |
-| [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevisionV1` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。 |
+| [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStage`, `ResourceCapabilityRevision` | 带生效期的修订记录，把某项资源放在从潜在储量到交付验收之间的某个阶段：潜在、已观测或勘查、已探明、技术上可开采、在产地点、路线可达、已交付验收。每条修订都引用其模型卡。 |
+| [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevision` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。 |
 | [账户损耗](/developer/production-economy/) | account-level loss | `ResourceOperationRequestV1::RecordLoss` | 不经转移、直接从单个账户扣减并引用原因的损耗；计入守恒中的已准入损耗，不动用已预留存量，除非明确允许，否则遵守受保护底线。 |
 | [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
-| [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgressVersionV1` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
+| [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
-| [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责军队、行动、战斗、占领、军事知识和跨领域凭证；不是通用战斗模型。 |
+| [军事模拟扩展](/tutorials/military-domain/) | military simulation extension | `canwu-military` | 可选的军事领域扩展，负责部队、行动、战斗、占领、军事知识，以及由其他领域结算并确认的待处理效果；不是通用战斗模型。 |
 | [军事补给参考消费者](/tutorials/cases/production-economy/) | force-supply reference consumer | `canwu-force-supply-reference` | 可替换的整合包，证明军事后勤可以消费公共资源 API，同时只拥有军队本地需求、战备、短缺后果和征发 saga；不是通用战斗模型。 |
 | [本地稀缺度投影](/tutorials/cases/production-economy/) | local scarcity projection | `LocalScarcityProjection` | 脱离式、持有人绑定的读取模型，解释可观察供给、需求、缓冲、路线可达性、安全与政策；不声称存在价格。 |
 | [价格压力投影](/tutorials/cases/production-economy/) | price-pressure projection | `PricePressureProjection` | 只有存在合格的价格证据和版本化解释规则时才生成的脱离式读取模型；既不形成市场，也不结算交易。 |
@@ -159,7 +156,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [人身状态](/developer/integration/) | custody state | `CustodyState` | `Free`、`Detained`、`Hostage`、`Captive`、`Hiding` 或 `Exile`；人物可用性的另一部分。默认只有 `Detained` 和 `Captive` 会阻止准入。 |
 | [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
-| [报告](/architecture/events/) | report | `EventKind::ReportDispatched` | 在更新角色知识前，在角色之间签发或送达的信息。 |
+| [报告](/architecture/events/) | report | `EventKind` type `"report_dispatched"` | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
@@ -186,7 +183,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [前序票据](/tutorials/cases/warlord-aid-decision/) | parent ticket | `DecisionTicket::parent_ticket` | 新票据所接续的终态票据：可以是同一决策者的票据（例如为另一控制者重新开启的已取消票据），也可以是经席位继任接续的票据。该关联会复制到新票据的决策轨迹上。 |
 | [席位继任](/tutorials/cases/warlord-aid-decision/) | seat succession | `DecisionControllerBinding::seat_id`, `DecisionTicket::parent_ticket` | 从终态票据到新票据的接续关系：新票据的指定控制者与原票据的控制者绑定同一个非空席位，因此继任者可以接续前任的决策，而不必是同一决策者。 |
 | [决策选项](/tutorials/cases/warlord-aid-decision/) | decision option | `DecisionOption` | 决策票据提供的一个候选选择。 |
-| [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 尝试解决票据时形成的权威准入、接受或拒绝记录。 |
+| [决策尝试](/tutorials/cases/warlord-aid-decision/) | decision attempt | `DecisionAttemptRecord` | 一条已准入决策请求的权威记录，写明该请求被接受还是被拒绝。请求可以是注册控制者，也可以是开启票据、替换票据选项、解决票据或取消票据。 |
 | [决策轨迹](/tutorials/cases/warlord-aid-decision/) | decision trace | `DecisionTrace` | 用于解释和重放的评分、证据、策略身份、所选选项与结果。 |
 
 ## 统一写法
@@ -197,7 +194,7 @@ English 栏；代码标识始终保持原样。首次出现时可同时给出英
 | [上层应用](/developer/integration/) / host application | 主机程序 / host program | 已弃用：嵌入参伍的游戏、服务、客户端、研究工具或智能体系统统一使用 **上层应用** 与 **host application**。 |
 | [对外 API](/developer/integration/) / public API | public facade | 已弃用：接入边界和整体 API 表面统一使用 **public API**。 |
 | [模拟插件](/developer/extensions/) / simulation plugin | 运行时模拟插件 / runtime simulation plugin；模拟规则插件 / domain plugin | 受限：仅在区分运行时插件与 Agent 工具，或说明插件领域角色时使用长写法；它们不是独立插件类别。 |
-| [结算边界](/architecture/settlement/) / transaction | settlement boundary | 已弃用：参伍的验证单元英文统一使用 **transaction**；中文规范写法仍为 **结算边界**。 |
+| [结算边界](/architecture/settlement/) / boundary | transaction, settlement boundary | 已弃用：参伍的验证单元英文统一使用 **boundary**，与 `settle_boundary` 和 `BoundaryPhase` 一致；中文规范写法仍为 **结算边界**。 |
 | [平行现实](/developer/persistence/) / alternative reality | 反事实分支 / counterfactual branch；branch（因不同输入形成新因果运行时） | 已弃用：不同输入形成的新因果现实统一使用 **平行现实** 与 **alternative reality**；API 操作和复制出的模拟继续使用 **fork**。 |
 | [权限](/developer/integration/) / authority | permission（指 `CommandAuthority` 时） | 受限：已验证的行动权统一称为 **权限** 与 **authority**；独立的运行策略上下文继续使用 **permission profile**。 |
 

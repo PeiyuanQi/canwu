@@ -1,20 +1,44 @@
 ---
 title: Confidential copy and targeted release
-description: Verify access, copy derivation, audience release, withdrawal, and retained knowledge with neutral roles, relative minutes, and synthetic content codes.
+description: A relay copies part of a document it carries, releases the copy to two listed readers, then withdraws it. Earlier reads stay on record.
 sidebar:
-  order: 4
+  order: 6
   label: Confidential copy and release
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
 
-<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/confidential_copy_release.rs" icon="external">
-  Open the runnable example
-</LinkButton>
+## The scenario
 
-This case uses only synthetic role identifiers, neutral nodes, relative minutes,
-and content codes. It does not correspond to a person, place, organization, or
-prior event. The reusable subject is the information lifecycle itself.
+A sender posts a document to one recipient. The relay carrying it reads it on
+the way and makes a partial copy, and the original still reaches the
+recipient. Later the relay releases the copy to two listed readers, then
+withdraws the release. When one of those readers tries to open the copy
+afterwards, the read is refused.
+
+The question the example answers: how do you record a copy, a limited release,
+and a withdrawal so that each holder learns only what reached them, and a
+withdrawal stops later reads while earlier reads stay on record?
+
+All holders, times, and content codes are synthetic test values.
+
+## What this example shows
+
+- `canwu-information`, the information
+  [domain extension](/en/developer/extensions/). It stores who produced, sent,
+  read, and released a piece of information as typed domain records.
+- `InformationLifecycle::plan`, which validates one `LifecycleRequest` against
+  the current records and returns an `InformationMutationPlan`: record
+  mutations plus knowledge publications, each addressed to one holder
+  ([holder-relative knowledge](/en/reference/terminology/)).
+- Copy lineage through `ContentDerivation` and `RepresentationSourceEdge`.
+- An audience fixed by its member list, count, and membership root
+  (`AudiencePayload`), and a release (`ReleasePayload`) that moves from
+  `Active` to `Withdrawn`.
+- `InformationPlugin` applying two of those requests, the audience-release
+  activation and the withdrawal, inside `Canwu`, each followed by snapshot
+  restore, [exact replay](/en/developer/persistence/), and compact checkpoint
+  restore. The other steps run only in the detached ledger.
 
 ## Run it
 
@@ -22,54 +46,215 @@ prior event. The reusable subject is the information lifecycle itself.
 cargo run -p canwu-information --example confidential_copy_release
 ```
 
-The example first exercises the public `InformationLifecycle` request by
-request, applying each `InformationMutationPlan` to a detached ledger that is
-easy to inspect line by line. It then seeds the same neutral records into
-`Canwu`, executes the final withdrawal through the authoritative
-`InformationPlugin`, and verifies snapshot restore, exact replay, compact
-evidence reconstruction, and compact checkpoint restore.
+The program prints one line once every check has passed; a failed check stops
+it earlier:
 
-## Synthetic inputs
+```text
+confidential_copy_release: hidden-operation holder isolation, derived copy, restricted release, withdrawal, retained knowledge, authoritative save/load, exact replay, and compact reconstruction verified
+```
 
-| Identifier | Neutral role | Node |
-| --- | --- | --- |
-| `H-101` | initial holder | `NODE-0` |
-| `H-202` | addressed recipient | `NODE-2` |
-| `H-303` | relay operator | `NODE-1` |
-| `H-404`, `H-505` | frozen audience members | `NODE-3` |
-| `H-606` | unrelated holder used for the isolation check | — |
+Each phrase names a group of checks in the source. "Hidden-operation holder
+isolation" means that each read publishes a fact only to its reader, so no one
+else learns of the relay's hidden read, and that in the seeded run only
+`H-404` and `H-505` gain knowledge from the release.
 
-The primary code is `SYN-C4-17`; the selected-copy code is `SYN-C4-17-X`.
-Both are meaningless test values.
+## Walkthrough
 
-## Relative timeline
+The scenario is in
+[`confidential_copy_release.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/confidential_copy_release.rs);
+shared helpers are in
+[`support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs).
+Holders are `KnowledgeHolderRef::Person` values, and times come from
+`SimTime::from_minutes`.
 
-| Minute | Model action |
-| ---: | --- |
-| `0–2` | Create content, a text representation, and a persistent instance. |
-| `5–7` | Begin an addressed dispatch and its first delivery attempt. |
-| `12` | Record the relay operator's access to the original representation. |
-| `13–14` | Create a selected copy with `ContentDerivation` and a representation parent edge. |
-| `25–27` | Complete the original addressed delivery and record recipient access. |
-| `40–43` | Freeze an explicit audience, activate a targeted release, and record member access to the copy. |
-| `50` | Transition the release to `Withdrawn`. |
-| `51` | Reject new access while retaining earlier holder-relative knowledge. |
+| Holder | Role |
+| --- | --- |
+| `H-101` | sender |
+| `H-202` | addressed recipient |
+| `H-303` | relay; reads and copies the original, then publishes the copy |
+| `H-404`, `H-505` | audience members |
+| `H-606` | unrelated holder, used to check that no fact reaches it |
 
-## Model assertions
+### 1. Plan and apply each request
 
-<Steps>
-1. `Access` records that one holder encountered one representation at a time; it does not silently rewrite content.
-2. The copy preserves lineage through `source_content`, `ContentSourceEdge`, `parent_representation`, and explicit fidelity/completeness values.
-3. The original dispatch and the copy lineage advance independently; obtaining a copy cannot fabricate a delivery attempt for the addressed recipient.
-4. `AudiencePayload` freezes a member count and membership root, and the release accepts only a listed snapshot member.
-5. `Active -> Withdrawn` is irreversible. The withdrawn release cannot authorize a later access.
-6. Existing `AccessRecorded` and `ReleaseAvailable` knowledge drafts remain present. Withdrawal controls future availability; it does not rewrite information already acquired.
-</Steps>
+`DetachedCaseLedger::plan_and_apply` keeps records in a plain map outside
+`Canwu`, so each step is easy to inspect:
 
-## Why this belongs in the reusable mechanism
+```rust
+let plan = InformationLifecycle::plan(
+    &self.record_set()?,
+    request,
+    InformationLimitsV1::canonical(),
+)?;
+self.apply(&plan)?;
+self.requests.push(request.clone());
+Ok(plan)
+```
 
-Content, representation, instance, dispatch, delivery attempt, access, audience,
-release, and derivation edges do not depend on a transmission device or social
-setting. An application plugin can replace channel profiles, role bindings,
-time distributions, and consequence rules without adding a special confidential
-event branch to the engine.
+`plan` alone validates without applying. The example uses it for requests
+that must fail.
+
+### 2. Create the original and start the delivery (minutes 0–7)
+
+The sender creates a `Content` record with code `SYN-C4-17`, a
+`Representation` of it in format `sealed_text_v1`, and an `Instance`, the
+physical carrier. A `Channel` with `AddressedDelivery` carries a `Dispatch`
+aimed at the recipient:
+
+```rust
+target: DispatchTarget::Addressed(vec![destination_holder.clone()]),
+```
+
+The dispatch moves from `Prepared` to `Active`, and its first
+`DeliveryAttempt` names `H-303` under the `relay` reference role.
+
+### 3. The relay reads and copies (minutes 12–14)
+
+The relay's `RecordAccess` cites the carrier instance and the original
+representation. The copy is new content whose derivation points back at the
+original:
+
+```rust
+derivation: Some(ContentDerivation {
+    operation: "select_and_copy".to_owned(),
+    sources: vec![ContentSourceEdge {
+        source: content,
+        role: ContentSourceRole::Quotation,
+        completeness_per_mille: 700,
+        fidelity_per_mille: 970,
+    }],
+}),
+```
+
+The copy's representation uses `ContentRelation::DerivedContent` with a
+`RepresentationSourceEdge` to the original representation. The lifecycle
+requires the `source_content` and `parent_representation` references to match
+these edges exactly, and derived content to name the parent's content as a
+source (`validate_content_lineage` and `validate_representation_lineage` in
+[`lifecycle.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/src/lifecycle.rs)).
+
+### 4. The original reaches the recipient (minutes 25–27)
+
+The delivery attempt moves to `Delivered`, which publishes
+`RepresentationAvailable` to the recipient. The recipient's access cites the
+`delivery_attempt` and `dispatch`, and the dispatch then moves to `Completed`.
+An addressed dispatch can complete only after each recipient's latest attempt
+has a terminal status (`validate_dispatch_completion`). The copy from step 3
+is a separate record chain.
+
+### 5. Freeze an audience and release the copy (minutes 40–43)
+
+```rust
+payload: AudiencePayload {
+    membership: AudienceMembership::ExplicitMembers,
+    resolved_at: minute(40),
+    resolution_version: 1,
+    resolved_boundary: None,
+    member_count: 2,
+    membership_root: audience_membership_root_v1(
+        &[audience_member_a.clone(), audience_member_b.clone()],
+        InformationLimitsV1::canonical(),
+    )?,
+},
+```
+
+The listed members must match `member_count` and `membership_root`. A
+`Release` with `ReleaseScope::Audience` points at this audience and the copied
+representation, with the relay as `publisher`. Moving it to `Active` publishes
+one `ReleaseAvailable` fact per member. Member A then reads the copy at minute
+43, citing the release and `AudienceAccessEvidence::ListedMember`.
+
+The activation also runs inside `Canwu` through
+`verify_authoritative_operation_roundtrip`. The helper seeds the ledger's
+records into a `Scenario`, sends the request to `InformationPlugin` as a plugin
+command, settles boundaries until the operation is terminal, and compares
+every record with the ledger. Then it reads each holder's knowledge with
+`Canwu::admin_query_knowledge`:
+
+```rust
+assert_authoritative_knowledge(canwu, &audience_member_a, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &audience_member_b, &["release_available"])?;
+assert_authoritative_knowledge(canwu, &origin_holder, &[])?;
+assert_authoritative_knowledge(canwu, &unrelated_holder, &[])?;
+assert_authoritative_knowledge(canwu, &relay_holder, &[])
+```
+
+The seeded simulation starts with the ledger's records and an empty knowledge
+store, so these checks see only the facts this one operation publishes. That is
+why `H-303`, who read the original at minute 12, holds nothing here. The relay
+published the release but is outside the audience, so this activation gives it
+no fact either. The helper finishes by restoring a snapshot, replaying the
+journal with `Canwu::replay_from_journal`, and restoring a compact checkpoint,
+and compares each result with the original snapshot.
+
+### 6. Withdraw and refuse a late read
+
+```rust
+proposed: ReleasePayload {
+    status: ReleaseStatus::Withdrawn,
+    active_at: Some(minute(42)),
+    ..prepared_release
+},
+```
+
+The withdrawal also runs through `verify_authoritative_operation_roundtrip`.
+It updates only the release record and publishes nothing, so no holder has
+knowledge in its seeded run. The check that matters is that the three earlier
+access records still match the ledger. `Withdrawn` is terminal,
+and a read through a release needs an `Active` release, so member B's read at
+minute 51 fails:
+
+```rust
+assert!(ledger.plan(&access_after_withdrawal).is_err());
+```
+
+## What to notice
+
+- Reading (`Access`) and copying are separate records. The copy is new
+  content with its own lineage, and the original content keeps its record.
+- Every publication has one holder: the reader, the recipient, or each listed
+  audience member.
+- A release's publisher receives a fact from it only as a listed audience
+  member.
+- Withdrawal controls later reads. Earlier access records, and the facts that
+  cite them, stay in place.
+- The detached ledger and `InformationPlugin` both call
+  `InformationLifecycle::plan`, so the same request yields the same records.
+
+## Try changing
+
+- In the minute-43 read, replace `audience_member_a` with `unrelated_holder`.
+  Planning fails with `access holder is not an explicit audience member`.
+- Remove the `source_content` reference from the copied content's binding.
+  Planning fails with
+  `content source references must exactly match derivation source edges`.
+- After the withdrawal, plan a `TransitionRelease` back to
+  `ReleaseStatus::Active` with `expected_version: 3`. It fails with
+  `terminal release cannot reopen`.
+
+## Beyond the example
+
+- Labels such as `sealed_text_v1`, `bounded_carrier`, `select_and_copy`, and
+  `temporary_read` are application strings; the extension checks only that
+  they are non-empty trimmed text. Timing, channel behavior, and consequences
+  belong in your own plugin.
+- An audience resolved from groups uses
+  `AudienceMembership::ResolvedGroupSnapshot`; a reader can then prove
+  membership against the root with `AudienceAccessEvidence::MembershipProof`.
+  A release can also use `ReleaseScope::OpenAvailability`, and an active
+  release can end as `Expired`.
+- [Routed correspondence](/en/tutorials/cases/routed-correspondence/) builds
+  letters that travel over routes on the same dispatch and delivery-attempt
+  records.
+
+## Source
+
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/confidential_copy_release.rs" icon="external">
+  Open the runnable example
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs" variant="secondary" icon="external">
+  Read the shared example helpers
+</LinkButton>
+<LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/tests/information_lifecycle.rs" variant="secondary" icon="external">
+  Read the lifecycle tests
+</LinkButton>

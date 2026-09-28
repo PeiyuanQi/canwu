@@ -1,138 +1,220 @@
 ---
-title: 生产、资源与运输边界
-description: 在参伍上构建生产、消费、建设和军事补给系统时的所有权与结算边界。
+title: 生产、资源与运输的职责划分
+description: 在参伍上构建生产、消费、建设或军事补给时，每一步由哪个 crate 负责，以及各项资源操作的规则。
 template: doc
 sidebar:
   order: 6
-  label: 生产与资源边界
+  label: 生产与资源
 ---
 
-参伍 0.13.0 提供可选的资源与生产扩展，但不会把粮食、工厂、价格、历史资源点或军队写进模拟内核。
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-## 推荐边界
+当你的游戏或模型里有会耗尽的存量，比如粮食、布匹、弹药或建材，就读这一页。它说明每一步由哪个 crate 负责、各步骤的先后顺序，以及需求来源、动用授权、损耗、交换、本地交接、生产产出和自定义消费者的规则。
 
-- 模拟内核负责命令准入、确定性时间、阶段顺序、原子提交、回滚、可见性、存档与重放。
-- `canwu-resource` 负责资源/单位版本、`ResourceAccount`、受保护底线、`ResourceDemand`、`ResourceReservation`、精确分配腿、转移、消费、损耗和履约，是物理余额的唯一写入者。
-- `canwu-production` 负责工艺、生产地点、设施、产能、工单、在制品、执行、项目和产出结算；它消费精确资源结果与技术证据，但不保存另一套库存。
-- `canwu-transport` 负责行程、容量、路线腿、执行、保管权交接和交付完成记录；自 0.13.0 起，由 `canwu-movement` 负责移动执行及其运力池的生命周期。资源扩展负责货物托管余额、损耗、接受、退回与目的地入账。
-- 人口和军事领域分别形成需求与后果，不能直接改写资源余额或生产状态。
+这些能力由可选的 `canwu-resource` 和 `canwu-production` 扩展提供。模拟内核保持通用：粮食、工厂、价格、历史矿点和军队都放在扩展、内容和你的应用中。
 
-这些可选扩展都建立在公开 `canwu-api` 之上，不会反向进入模拟内核。上层游戏仍负责货币、市场、工资、建筑界面、战斗公式和历史内容。
+## 谁负责什么
 
-## 先理解三个术语
+| 负责方 | 负责内容 |
+| --- | --- |
+| 模拟内核 | 命令准入、确定性时间、阶段顺序、原子提交、回滚、可见性、存档与重放 |
+| `canwu-resource` | 资源与单位版本、账户（`ResourceAccount`）、受保护存量底线、需求（`ResourceDemand`）、资源预留（`ResourceReservation`）、分配腿、转移、消费、损耗和履约 |
+| `canwu-production` | 工艺、生产地点、设施、产能、工单、在制品、执行、项目和产出结算。它使用资源结果和技术证据，自己不保存库存。 |
+| `canwu-transport` 与 `canwu-movement` | 行程、路段、保管交接和交付完成；`canwu-movement` 负责移动执行和运力池的生命周期。货物余额、损耗、验收、退回和目的地入账仍由 `canwu-resource` 负责。 |
+| 你的人口、军事等领域 | 形成需求，并对履约结果作出反应 |
+| 你的应用 | 货币、市场、工资、建筑界面、战斗公式和历史内容 |
+
+`canwu-resource` 是库存余额的唯一写入者。其他领域提交资源操作并读取结果，不得直接写余额，也不得改写其他领域的记录。这些 crate 都建立在对外 `canwu-api` 之上。
+
+## 关键术语
 
 | 术语 | 含义 |
 | --- | --- |
-| 受保护底线 | 账户必须保留、不能发布给本次资源分配的最低数量 |
-| 资源预留 | 绑定精确需求、账户、资源/单位版本和生命周期的 `ResourceReservation`；失败或回滚不能留下隐藏占用 |
-| 托管前驱 | 允许下一次货物状态转换的上一条精确记录，用于防止重复入账或凭空增加货物 |
+| 账户 | 某一确切资源与单位版本的一份库存余额（`balance`），由**保管人**持有；保管人即对这份库存负责的持有人。 |
+| 受保护存量底线 | 账户不参与普通分配的保留量，例如种粮（`ProtectedFloorPolicyRevision`）。需求的 `protection_override_class` 若列在该策略中，可以动用底线以下的存量。 |
+| 需求 | 申请者对一定数量的请求，带有最低有用量、部分履约策略、到期和失效时间、优先级以及来源策略。 |
+| 资源预留与分配腿 | 分配的结果：在某个账户中为某项需求留出的数量。预留被释放或过期后，这部分数量重新可用。 |
+| 转移托管量 | 已离开来源账户、正在途中的存量。在被验收、损耗或退回之前，它一直计入总量。 |
+| 完成租约 | 持有人执行一项不可逆操作的权利，以操作键标识。激活租约得到 `CompletionLeaseActivationCertificateV1`，它固定操作键、时间和操作所依赖的精确记录。不可逆请求都要携带这份凭证。 |
+| 适配器输入 | 提供方插件使用的输入路径（`enqueue_resource_adapter_operation`）。每项操作都要引用证明其合法的提供方精确记录版本。 |
 
-## 一个最小循环
+**带请求标识的命令**指通过 `CommandRequest`（含请求标识和预期修订号）提交的命令。资源命令用 `resource_command(&ResourceCommandV1 { subject, request })` 构建，签发者必须能代表 `subject`。
+
+## 生命周期
+
+<MermaidDiagram
+  label="资源生命周期及负责方：需求、canwu-resource 分配，然后是消费或发起转移进入托管、运输、验收与目的地入账，最后在之后的结算边界使用"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方编号步骤描述了同一生命周期。"
+  definition={`flowchart TB
+    Demand["需求：申请者提交 SubmitDemand 命令"] --> Alloc["分配：上层应用排入 enqueue_resource_allocation，canwu-resource 预留存量"]
+    Alloc --> Consume["消费：消费者插件经适配器输入"]
+    Alloc --> Begin["BeginTransfer：来源保管人或被授权方提交命令，存量进入托管"]
+    Begin --> Move["运输：canwu-transport 与 canwu-movement"]
+    Move --> Accept["经适配器输入 Accept"]
+    Begin -. "相同 place_scope" .-> Local["AcceptLocal：目的地保管人"]
+    Move --> LoseReturn["Lose 或 Return：转移控制方"]
+    Accept --> Credit["目的地账户入账"]
+    Local --> Credit
+    Credit --> Later["之后的结算边界：消费者使用存量"]
+`}
+/>
+
+1. **需求。** 申请者以带请求标识的资源命令提交 `SubmitDemand`，之后可用 `AmendDemand` 或 `CancelDemand` 修改或取消。适配器输入不能提交或修改需求。
+2. **分配。** 上层应用用 `enqueue_resource_allocation` 为某个申请者排入一次分配。`canwu-resource` 依据受保护存量底线、最低有用量、部分履约策略、到期时间、优先级和稳定的 tie-break 键做确定性分配，并记录资源预留和分配腿。
+3. **扣减。** 消费者插件经适配器输入消费分配结果（`Consume`），或者由来源保管人（授权下的分配则为被授权方）发起转移（`BeginTransfer`），把相应数量移入托管。
+4. **运输。** `canwu-transport` 和 `canwu-movement` 负责运送。转移进度（`AdvanceTransfer`）经适配器输入提交，并引用运输证据。
+5. **到达。** `CompleteTransfer` 结束转移：经适配器输入的 `Accept` 为目的地入账；`AcceptLocal` 处理同地交接；其余情况用 `Lose` 或 `Return` 结束。
+6. **使用。** 生产、军事补给等消费者在之后的结算边界使用已入账的存量。它们引用精确的分配与履约证据，只写自己的记录。
+
+转移的每一步都要给出 `expected_transfer_revision`，过期或重复的步骤会被拒绝，同一次到货不会入账两次。守恒、版本或权限校验任一失败，该操作的全部变化一起回滚。
+
+`canwu-resource` 用 `ResourceState::validate_conservation` 按 `ConservationTotalsV1` 检查守恒：
 
 ```text
-需求 -> 资源预留/分配 -> 来源账户扣减 -> 在途托管 -> 到货验收
-     -> 目的地入账 -> 下一结算边界允许消费
+期末余额 + 期末转移托管量
+  = 期初余额 + 期初托管量 + 已准入产出 + 外部流入
+    - 已准入消费 - 已准入损耗 - 外部流出
 ```
 
-1. 运行中的需求通过持有人授权的资源命令提交和修改。类型化适配器输入仅支持已声明的提供方操作，不支持需求提交或修改；消费者不能直接写库存。
-2. `canwu-resource` 按受保护底线、最低有效量、部分履约政策、到期时间和稳定 tie-break 生成确定性分配腿。
-3. 生产、军事或其他消费者引用精确分配与履约证据，只写本领域的工单或后果记录。
-4. 只要守恒、版本、托管前驱或权限校验失败，整组提案回滚。
-5. 目的地只有在货物处置被接受后才入账；军事消费在下一次合适的结算边界生效。
+只有 `balance` 是存储值；可用量、预留量和受保护量都是派生出来的（`ResourceState::account_quantities`）。路线估算、到货验收和消费是三件独立的事，各自需要单独的步骤。
 
-库存余额是唯一可写数量。预留量、可用量和储备视图都必须从它派生；“到达”不是“可消费”，路线可达也不是交付。
-
-## 授权自定义消费者
-
-自 0.10.1 起，参伍支持自定义消费提供方使用现有 `ResourceConsumptionIntentV1` 合同。
-在插件拥有的有效领域记录中保存顶层 `resource_consumption_intents` 映射，
-每个键等于对应已封存意图的 `id`。无需回调，也无需冒用参考提供方名称。
-在 `ResourcePlugin::new` 中注册该记录种类，使适配器能够读取精确来源。
-
-提交前，先完成现有的分配与完成租约生命周期。通过规范适配器输入提交
-`ResourceOperationRequestV1::Consume`。其中 `consumer_evidence` 必须等于
-提供方的精确**当前**来源；完成凭证必须绑定该来源和同一操作键。
-持有者、参与者、时间、版本及租约校验仍然适用。
-
-必须恰有一个 `Authorized` 意图匹配完整分配腿、需求与账户版本、消费标识
-和操作键。该合同不支持只消费分配腿的一部分。映射条目数不得超过资源状态的
-`max_operation_outcomes`；超限会在解码前被拒绝。缺失或格式错误的映射、
-标识或摘要不符，以及已退役、有歧义或不匹配的授权都会被拒绝。
-封存摘要只验证内容一致性，本身不授予权限。拒绝不会授权扣减。
-
-提供方负责意图的授权、退役以及资源回执产生后的本领域后果；
-`canwu-resource` 负责守恒余额和重复操作的处理。军事补给参考消费者保留其
-专用适配器及不同的保留来源政策；自定义消费者应使用上述当前来源合同。
-
-## 版本与存档
-
-应用必须精确固定同一发布线的 `canwu-api`、`canwu-resource`、`canwu-production` 与插件语义哈希。加载时恢复同一参伍快照并重新验证扩展记录；不能把旧快照只按“当前时间”重建，也不能把未发布的本地引擎版本当成兼容 API。
-
-继续阅读[生产、资源与军事补给案例](/tutorials/cases/production-economy/)与[已交付机制决议](/proposals/production-economy-mechanism/)。
+可运行的十四个月粮食循环：执行 `cargo run -p canwu-economy-reference --example grain_loop`，并参阅[生产、资源与军事补给案例](/tutorials/cases/production-economy/)。
 
 ## 需求来源策略
 
-自 0.11.0 起，每个 `ResourceDemand` 都持久化保存 `source_policy`：
+每个 `ResourceDemand` 都保存一个 `source_policy`（`ResourceDemandSourcePolicyV1`），决定哪些账户可以为它供给：
 
-- `ResourceDemandSourcePolicyV1::Pooled` 保留原有资源池行为，按账户 ID 的确定性顺序，从资源版本和单位版本均匹配的所有开放账户分配。
-- `ExactAccounts(Vec<ResourceAccountId>)` 明确列出 1–256 个账户；ID 必须严格递增且不重复。每个账户必须存在、未关闭、与需求的资源和单位版本精确匹配，且保管人为需求申请者。无效列表在资源变化前产生命令拒绝；分配时会再次验证。
-- 自 0.13.0 起，`Granted { grant_id, accounts }` 以同样方式列出 1–256 个账户，但每个账户都必须由所指动用授权的授权方保管，且该授权的被授权方必须是申请者（见[动用授权](#动用授权)）。
+| 策略 | 可供给的账户 |
+| --- | --- |
+| `Pooled`（默认） | 资源版本和单位版本都匹配的所有开放账户，按账户 ID 顺序访问 |
+| `ExactAccounts(accounts)` | 只限列出的账户。每个账户必须存在、未关闭、两个版本都匹配，且保管人是申请者本人。 |
+| `Granted { grant_id, accounts }` | 只限列出的账户。每个账户都必须由所指动用授权的授权方保管，且申请者必须是该授权的被授权方（见[动用授权](#动用授权)）。 |
 
-分配器仅以所选账户计算可用量、最低有用量和部分履约。明确列出的账户不足时，不会回退到资源池。受保护底线，以及后续转移和消费的权限检查仍然适用。精确来源路径只访问列表中的账户，数量受 `MAX_DEMAND_SOURCE_ACCOUNTS` 限制；资源池路径保留原有账户扫描。
+规则：
 
-首次分配前，可携带预期版本修改需求来源策略。一旦存在任何资源预留（包括已消费、但仍对应在途转移托管余额的预留）或任何履约，策略便不可再改。需要新策略时，应取消需求并提交新需求；取消需求不会取消独立的转移。预留历史会保留在索引中，直到需求终止、相关归档记录具备归档条件；终止需求不能修改。自 0.13.0 起，修改也不能改变需求的生命周期状态、拒绝原因或申请者；这样的修改会被记录为拒绝，而不再造成此后的边界无法推进。
+- `ExactAccounts` 和 `Granted` 的列表含 1 到 256 个账户（`MAX_DEMAND_SOURCE_ACCOUNTS`），ID 严格递增、不能重复。列表无效时，命令在任何存量变化之前就被拒绝；分配时还会再检查一次。
+- 分配只根据所选账户计算可用量、最低有用量和部分履约。列出的账户不够时，需求只能拿到这些账户里的存量。受保护存量底线以及之后的转移、消费校验照常适用。
+- 在需求第一次分配之前，可以凭预期需求修订号修改策略。一旦有了任何资源预留（包括已消费、但仍对应在途转移的预留）或任何履约，策略就固定下来；要换策略，请取消需求再提交新需求。取消需求不会影响它已经发起的转移。
+- `AmendDemand` 不能修改需求的状态、拒绝原因或申请者，这类修改会被记录为拒绝。已终止的需求不能修改。
 
-`Pooled` 是选择策略，不是动用其他保管人库存的授权。上层应用必须控制谁可以提交资源池需求，以及使用哪个申请者；`ExactAccounts` 列表同样不能证明任何委托。带上限和有效期的跨保管人委托只能通过动用授权与 `Granted` 策略表达；任命、用途以及谁可以授权给谁，仍由应用或领域规则负责。转移保管权限和完成租约仍需单独验证。
+权限：`Pooled` 和 `ExactAccounts` 只决定从哪里取得供给，不赋予动用其他保管人存量的权利。由你的应用控制谁可以提交资源池需求、以哪个申请者身份提交。要让一个保管人在限额和时间窗口内动用另一方的存量，请使用动用授权和 `Granted` 策略。任命、用途以及谁可以授权给谁，仍由你的应用决定。
 
-策略进入请求摘要、运行时快照、精确重放和终止需求归档载荷。恢复时验证有效来源引用与保留预留的账户归属；归档验证保留策略及其摘要。持有人相对报告沿用现有可见性合同，不会自动公开权威来源列表。独立 DTO 缺少 `source_policy` 时反序列化为 `Pooled`，但这不迁移旧快照：引擎版本和插件身份的精确检查仍然适用。Rust 结构体字面量必须补充该字段，因此这是 0.11.0 的源码不兼容变更。
-
-## 账户损耗
-
-自 0.12.0 起，`ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` 可以直接在单个账户上记录腐坏、失窃或其他损耗，而不必虚构一次转移。请求携带自己的 `loss_id`、精确账户版本、数量、原因和完成凭证，结算为 `account: Some(..)`、`transfer: None` 的 `ResourceLoss`，并在守恒总量中计为已准入损耗。
-
-扣减不会动用已预留存量；除非设置 `allow_protected`，否则遵守受保护底线；账户版本过期会被拒绝。带请求标识的命令必须来自账户保管人；规范适配器输入可以把原因记录作为提供方来源引用。持有人报告会包含 `ResourceLossObservationV1` 条目，其可见性与转移详情相同。
-
-## 原子交换
-
-`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` 同时发起两条转移腿：两项转移要么都创建，要么都不创建；无论成功还是被拒绝，唯一的 `BeginExchange` 结果都会在 `cited_transfers` 中列出两个转移 ID。
-
-1. 双方先约定 `ResourceExchangeTermsV1`：交换键，以及每条腿的转移 ID、精确分配和目的地。
-2. `ResourceExchangeTermsV1::leg_operation_keys` 从这些条款的摘要派生每条腿的操作键。
-3. 每条腿的来源保管人为该腿的派生键取得完成租约，因此每份租约都表示同意整个交换，不能用于其他条款。
-4. 由 `leg_a` 的来源保管人把交换作为带请求标识的命令提交。
-
-交换本身没有单独的完成凭证。发起之后，两项转移各自独立结算，因此可能一项被验收、另一项损耗或退回。原子交换不是委托访问：每一方仍只能动用自己保管的存量。
-
-## 本地验收
-
-`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` 不经运输执行即可结算一项转移，例如同一仓库或同一城镇内的交接。它只适用于仍处于 `PendingDispatch`、没有运输关联的转移，并且两个账户必须声明相同的 `ResourceAccount::place_scope`。
-
-地点范围由场景在安装账户时声明，不可更改，引擎也不会推断；默认值为 `None`，带请求标识的 `CreateAccount` 命令不能设置它。缺少或不一致的地点范围会以 `invalid_definition` 拒绝，已关联运输的转移会以 `invalid_lifecycle` 拒绝。终止凭证会锁定精确的交接记录；带请求标识的命令必须来自目的地保管人。
-
-## 实际产出
-
-`ProductionOperation::CompleteExecution` 可以携带 `realized_output_per_mille` 和 `realization_evidence`。该比例以工艺名义产出的千分比表示，`None` 表示 1,000。第 7 阶段按该比例对每项产出结算数量向下取整缩放，并把两个值保存在生产执行上；资源入账和产出确认随后精确结算缩放后的数量。
-
-- 任何非 1,000 的比例都需要精确证据记录版本，其种类必须列在工艺版本的 `realization_evidence_kinds` 中；名义比例若附带证据会被拒绝。该列表默认为空，因此默认工艺只接受名义产出。
-- 比例必须为正数，也不能把任何产出腿缩放为零。完全损失应通过取消工单记录。
-- 比例不能超过工艺版本的 `max_realized_per_mille`，默认值为 1,000；更高的上限允许有证据支持的超名义产出。
-- 持有人、生命周期、比例和种类规则会先于证据记录解析运行，因此拒绝结果不会泄露其他记录是否存在。
+持久化：策略进入请求摘要、运行时快照、精确重放和已终止需求的归档。持有人相对报告不会公开来源列表。缺少 `source_policy` 的 JSON 需求会反序列化为 `Pooled`。
 
 ## 动用授权
 
-自 0.13.0 起，一个保管人可以让另一方直接动用自己的存量，而不必先转移存量。动用授权（`ResourceAccessGrantV1`）记录授权保管人、被授权方、精确的资源与单位版本、上限 `cap_quantity`、半开区间有效期 `valid_from..valid_until`，以及证明该授权的精确 `authority_evidence` 记录版本，例如应用中已被接受的征发记录。
+**动用授权**（`ResourceAccessGrantV1`）让被授权方无需先转移，就能动用授权方保管的存量。它记录：
 
-1. 授权保管人以受跟踪命令提交 `ResourceOperationRequestV1::IssueAccessGrant`；权限证据必须是可用的精确记录版本。适配器输入不能签发或撤销授权。
-2. 被授权方提交来源策略为 `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }` 的需求。授权必须有效且被授权方就是申请者，资源与单位必须匹配，需求的时间窗口必须位于授权有效期内，列出的每个账户都必须开放并由授权方保管，数量也不能超过剩余上限。
-3. 分配在稀缺资源仲裁之前检查授权。已撤销或不在有效期内的授权不提供任何供给，任何分配都不会超过剩余上限，也不会回退到资源池或其他账户。
-4. 被授权方在自己的完成租约下扣减分配结果，方式可以是消费，也可以是发起转移或交换的一条腿。动用授权下的扣减只能在时间等于其认证时间的边界结算，且该时间必须位于授权有效期内，因此在有效期内认证、却在有效期后才结算的扣减会被拒绝。其他任何人（包括授权方）持有的租约都不能扣减动用授权下的分配。
+- `grantor_custodian`（授权方保管人）和 `grantee`（被授权方）；
+- 精确的 `resource_revision` 与 `unit_revision`；
+- `cap_quantity`，这份授权最多能供给的总量；
+- 有效期 `valid_from..valid_until`（不含终点）；
+- `authority_evidence`，证明这份授权成立的精确记录版本，例如应用中已被接受的征发记录。
 
-`ResourceAccessGrantRecordV1` 保持 `cap_quantity = remaining + reserved + debited`：分配把数量移到 reserved，扣减再移到 debited，因此每个单位只计扣一次；释放或过期的预留会回到 remaining。由动用授权下的分配发起的转移会记录其 `access_grant`，其取消、退回和损耗由被授权方而不是来源保管人控制；本地验收仍属于目的地保管人。`RevokeAccessGrant` 同样由授权方凭预期授权修订号提交，一旦有任何预留或扣减就会被拒绝，因此应按委托的实际需要设定上限和有效期。动用授权需求中过期的预留，会在为被授权方运行的下一次分配中释放；上层应用通过 `enqueue_resource_allocation` 发起这次分配。
+授权方以带请求标识的命令签发授权：
 
-授权保存在热状态中，受 `MAX_RESOURCE_ACCESS_GRANTS`（4,096）限制，且不归档，因此应像控制账户创建一样控制谁可以签发授权。`resource_access_grant_status` 是绑定持有人的读取接口，供授权方或被授权方查看授权及其计数。谁可以授权给谁、授权背后的记录，仍属于应用的权限。
+```rust
+use canwu_api::{CommandEnvelope, CommandRequest, CommandRequestId, Issuer};
+use canwu_resource::{
+    ResourceCommandV1, ResourceIssueAccessGrantRequestV1, ResourceOperationRequestV1,
+    resource_command,
+};
 
-例如，应用中的征发 saga 先记录人口所有者的同意；所有者再引用这条同意记录签发授权，军队随后提交 `Granted` 需求，并用自己的租约扣减分配结果。
+let command = resource_command(&ResourceCommandV1 {
+    subject: grant.grantor_custodian.clone(),
+    request: ResourceOperationRequestV1::IssueAccessGrant(ResourceIssueAccessGrantRequestV1 {
+        operation_key,
+        grant, // 一个 ResourceAccessGrantV1
+    }),
+})?;
+canwu.enqueue_command(
+    now,
+    0,
+    CommandRequest::new(
+        CommandRequestId::new(41),
+        canwu.revision(),
+        CommandEnvelope::new(Issuer::Actor(grantor_person), command).at_time(now),
+    ),
+)?;
+```
 
-## 实时生产产出结算
+授权的使用过程：
 
-0.13.0 之前，通过实时命令完成的生产执行无法结算产出。执行完成租约中的资源一方，在授予租约时就把生产运行时记录锁定在当时的版本上，而那时执行尚不存在；之后每次生产转移都会推进这条记录。现在，产出记账引用协调器在执行上固定为 `output_source` 的精确生产版本。资源运行时接受该版本作为锁定记录（不早于锁定版本），生产产出批次输入也要求它与固定的来源完全一致；通用资源适配器输入会拒绝生产记账。因此，在开始时间或之后通过实时命令完成执行，现在都会结算产出。
+1. **签发。** 授权方保管人以带请求标识的命令提交 `IssueAccessGrant`。权限证据必须是可用的精确记录版本。适配器输入不能签发或撤销授权。
+2. **提出需求。** 被授权方提交来源策略为 `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }` 的需求。授权必须有效且被授权方就是申请者；资源和单位必须匹配；需求的到期和失效时间必须落在授权有效期内；列出的每个账户都必须开放并由授权方保管。
+3. **分配。** 分配在多个需求之间分摊紧缺存量之前，先检查授权。已撤销或不在有效期内的授权不提供任何供给，任何分配都不会超过剩余额度。供给只来自列出的账户。
+4. **扣减。** 被授权方在自己的完成租约下扣减分配结果，方式可以是消费，也可以是发起转移或交换的一条腿。其他任何人（包括授权方）持有的租约都不能扣减授权下的分配。扣减只在时间等于租约认证时间的结算边界结算，且该时间必须位于授权有效期内。
+
+额度核算：`ResourceAccessGrantRecordV1` 始终满足 `cap_quantity = remaining + reserved + debited`。分配把数量从 remaining 移到 reserved，扣减再移到 debited，每个单位只计一次。预留被释放或过期时，数量回到 remaining。授权需求中过期的预留，会在为被授权方运行的下一次分配中释放；这次分配由上层应用通过 `enqueue_resource_allocation` 排入。
+
+转移：由授权下的分配发起的转移会记录其 `access_grant`，之后由被授权方控制它的取消、退回和损耗。本地验收仍归目的地保管人。
+
+撤销：授权方凭预期授权修订号提交 `RevokeAccessGrant`。授权下一旦有过任何预留或扣减，撤销就会被拒绝，所以额度和有效期要按实际委托来定。
+
+上限与读取：授权（包括已撤销的）一直保存在热状态中，每个资源状态最多 4,096 份（`MAX_RESOURCE_ACCESS_GRANTS`）。要像控制账户创建一样控制谁能签发授权。`resource_access_grant_status(canwu, holder, grant_id)` 向授权方或被授权方返回授权内容及其额度核算。
+
+举个例子：应用中的征发流程先记录人口所有者的同意；所有者再引用这条记录签发授权，军队提交 `Granted` 需求，并用自己的租约扣减分配结果。[动用授权测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-resource/tests/gap_g05_resource_access_grant.rs)通过对外 API 演示了签发授权、在授权下分配、以转移方式扣减以及撤销授权。
+
+## 账户损耗
+
+`ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` 直接在单个账户上记录腐坏、失窃或其他损耗。请求携带 `loss_id`、账户的预期修订号、数量、`cause`、`allow_protected`、时间和完成凭证。
+
+- 它结算为 `account: Some(..)`、`transfer: None` 的 `ResourceLoss`，在守恒总量中计为已准入损耗。
+- 扣减不动用已预留的存量；除非设置了 `allow_protected`，否则遵守受保护存量底线。账户修订号过期会被拒绝。
+- 作为带请求标识的命令时，必须来自账户保管人。经适配器输入时，`cause` 必须是提供方的精确来源记录。
+- 持有人报告会包含 `ResourceLossObservationV1` 条目，可见性规则与转移详情相同。
+
+## 原子交换
+
+`ResourceOperationRequestV1::BeginExchange(ResourceExchangeStartRequestV1)` 同时发起两项转移：要么都创建，要么都不创建。无论成功还是被拒绝，唯一的结果都会在 `cited_transfers` 中列出两个转移 ID。
+
+1. 双方先约定 `ResourceExchangeTermsV1`：交换的操作键，以及每条腿的转移 ID、精确分配和目的地。
+2. `ResourceExchangeTermsV1::leg_operation_keys` 根据这些条款的摘要派生每条腿的操作键。
+3. 每条腿的来源保管人（授权下的腿则为被授权方）为该腿的派生键取得完成租约。这份租约因此代表对整个交换的同意，换成其他条款就用不上。
+4. `leg_a` 的扣减方把交换作为带请求标识的命令提交。
+
+交换本身没有单独的凭证。发起之后，两项转移各自结算，可能一项被验收、另一项损耗或退回。每一方动用的都只是自己保管的、或经授权可以动用的存量。
+
+## 本地验收
+
+`ResourceTransferDispositionV1::AcceptLocal { destination, expected_destination_revision, handover_evidence }` 不经运输执行就结算一项转移，例如同一仓库或同一城镇内的交接。它只适用于仍处于 `PendingDispatch`、没有运输关联的转移，且两个账户声明了相同的 `ResourceAccount::place_scope`。
+
+- `place_scope` 由场景在安装账户时声明，之后保持不变，参伍不做推断。默认值 `None` 表示该账户不能使用本地验收。带请求标识的 `CreateAccount` 命令不能设置它。
+- 地点范围缺失或不一致时以 `invalid_definition` 拒绝；已有运输关联的转移以 `invalid_lifecycle` 拒绝。
+- 终结凭证会锁定精确的交接记录。作为带请求标识的命令时，`AcceptLocal` 必须来自目的地保管人；经适配器输入时，交接记录必须是提供方的来源记录。
+
+## 生产产出
+
+### 实际产出
+
+`ProductionOperation::CompleteExecution` 可以携带 `realized_output_per_mille` 和 `realization_evidence`。比例以工艺名义产出的千分之一为单位，`None` 表示 1,000。执行完成时，每项产出结算数量按该比例缩放并向下取整，两个值都保存在生产执行上；资源入账和产出确认随后按缩放后的数量精确结算。
+
+- 比例不等于 1,000 时，需要一个精确证据记录版本，其种类必须列在工艺版本的 `realization_evidence_kinds` 中。该列表默认为空，所以默认工艺只接受名义产出。名义比例附带证据会被拒绝。
+- 比例必须为正，且不能把任何一条产出腿缩放为零。要记录完全损失，请取消工单。
+- 比例不能超过工艺版本的 `max_realized_per_mille`，默认值为 1,000；调高它即可接受有证据支持的超名义产出。
+- 持有人、生命周期、比例和种类规则都在查找证据记录之前检查，因此拒绝结果不会透露其他记录是否存在。
+
+### 产出如何结算
+
+执行完成后，`canwu-production` 的一个第 12 阶段系统把当前生产运行时记录的版本固定为该执行的 `output_source`，并向 `canwu-resource` 排入一个产出批次。资源插件通过生产产出批次输入为各产出账户入账，并要求入账引用的正是这个固定来源。通用适配器输入会拒绝生产入账。
+
+## 授权自定义消费者
+
+你自己的消费者插件可以通过 `ResourceConsumptionIntentV1` 契约消费分配结果：
+
+1. 在插件自己的有效领域记录中，保存一个顶层 `resource_consumption_intents` 映射，每个键等于对应已封存意图的 `id`。无需回调，也无需借用参考提供方的名称。
+2. 把这个记录种类传给 `ResourcePlugin::new`，让资源适配器可以读取精确来源。
+3. 提交之前，先完成分配和完成租约的各个步骤。
+4. 经适配器输入（`enqueue_resource_adapter_operation`）提交 `ResourceOperationRequestV1::Consume`。其 `consumer_evidence` 必须等于提供方当前的精确来源记录，完成凭证必须锁定该来源并使用同一操作键。持有人、参与者、时间、修订号和租约的常规校验照常进行。
+
+只有当映射中恰好一个 `Authorized` 意图与完整的分配腿、需求和账户修订号、消费 ID 以及操作键全部匹配时，资源插件才接受这次消费。只消费一条分配腿的一部分，不在这个契约范围内。映射最多容纳 `max_operation_outcomes` 个条目（取自资源状态的 `ResourceLimitsV1`），超出时在解码任何条目之前就被拒绝。映射缺失或格式错误、标识或摘要不符，以及意图已退役、有歧义或不匹配时，都会被拒绝，不发生任何扣减。封存摘要只证明意图内容前后一致；许可来自你的插件对意图的授权。
+
+意图的授权与退役，以及资源回执之后的本领域后果，都由你的插件负责；守恒余额和重复操作的处理由 `canwu-resource` 负责。军事补给参考消费者（`canwu-force-supply-reference`）保留自己的专用适配器，也接受其来源记录的较早版本；自定义消费者使用上面的当前来源契约。
+
+## 版本与存档
+
+请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
+
+继续阅读[生产、资源与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。

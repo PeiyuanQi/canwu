@@ -29,9 +29,13 @@ const ui = {
     homeLabel: "Canwu home",
     navLabel: "Primary navigation",
     docs: "Docs",
-    developerGuide: "Developer guide",
-    tutorials: "Tutorials",
-    architecture: "Architecture",
+    getStarted: "Get started",
+    guides: "Guides",
+    engineArchitecture: "Engine architecture",
+    domainSystems: "Domain systems",
+    caseStudies: "Case studies",
+    reference: "Reference",
+    developerGuide: "Guides",
     integrations: "Integrations",
     contribute: "Contribute",
     download: "Install",
@@ -41,7 +45,7 @@ const ui = {
     license: "License",
     menu: "Menu",
     language: "中文",
-    footerLine: "A deterministic historical simulation core written in Rust for host applications.",
+    footerLine: "A deterministic Rust engine for historical and strategy simulations.",
     footerSub: "Open source · Rust · Windows / macOS / Linux",
   },
   zh: {
@@ -49,9 +53,13 @@ const ui = {
     homeLabel: "参伍引擎首页",
     navLabel: "主导航",
     docs: "文档",
-    developerGuide: "开发者指南",
-    tutorials: "使用教程",
-    architecture: "架构",
+    getStarted: "快速开始",
+    guides: "开发指南",
+    engineArchitecture: "引擎架构",
+    domainSystems: "领域系统",
+    caseStudies: "案例",
+    reference: "参考",
+    developerGuide: "开发指南",
     integrations: "集成",
     contribute: "参与贡献",
     download: "安装",
@@ -61,7 +69,7 @@ const ui = {
     license: "许可证",
     menu: "菜单",
     language: "EN",
-    footerLine: "用 Rust 构建的确定性历史模拟内核，供上层应用接入。",
+    footerLine: "用 Rust 编写的确定性历史与策略模拟引擎。",
     footerSub: "开源 · Rust · Windows / macOS / Linux",
   },
 };
@@ -73,10 +81,32 @@ const variants = isAuto
     ]
   : [{ locale: documentLocale, ui: isEnglish ? ui.en : ui.zh, prefix: isEnglish ? "/en" : "", languageHref: isEnglish ? zhPath : enPath }];
 
-const documentationItems = (variant: typeof variants[number]) => [
-  { href: `${variant.prefix}/tutorials/`, label: variant.ui.tutorials },
-  { href: `${variant.prefix}/developer/`, label: variant.ui.developerGuide },
-  { href: `${variant.prefix}/architecture/`, label: variant.ui.architecture },
+// Domain-system design pages live under /architecture/ but belong to the
+// "Domain systems" section, not "Engine architecture".
+const domainSystemSlugs = [
+  "knowledge-information",
+  "decisions",
+  "resources-production",
+  "routing-movement",
+  "military",
+  "technology",
+  "fiscal",
+  "culture-law",
+];
+
+type DocumentationItem = { href: string; label: string; match?: string[] };
+
+const documentationItems = (variant: typeof variants[number]): DocumentationItem[] => [
+  { href: `${variant.prefix}/tutorials/`, label: variant.ui.getStarted },
+  { href: `${variant.prefix}/developer/`, label: variant.ui.guides },
+  { href: `${variant.prefix}/architecture/`, label: variant.ui.engineArchitecture },
+  {
+    href: `${variant.prefix}/architecture/systems/`,
+    label: variant.ui.domainSystems,
+    match: domainSystemSlugs.map((slug) => `${variant.prefix}/architecture/${slug}/`),
+  },
+  { href: `${variant.prefix}/tutorials/cases/`, label: variant.ui.caseStudies },
+  { href: `${variant.prefix}/reference/terminology/`, label: variant.ui.reference },
 ];
 
 const navItems = (variant: typeof variants[number]) => [
@@ -86,6 +116,21 @@ const navItems = (variant: typeof variants[number]) => [
 
 const isCurrent = (href: string) =>
   !href.startsWith("http") && (currentPath === href || currentPath.startsWith(href));
+
+// Documentation sections nest (/tutorials/cases/ sits under /tutorials/), so
+// the item whose href or extra match prefix is the longest match counts as the
+// current section.
+const currentDocumentationHref = (variant: typeof variants[number]) =>
+  documentationItems(variant)
+    .map((item) => ({
+      href: item.href,
+      length: Math.max(
+        -1,
+        ...[item.href, ...(item.match ?? [])].filter(isCurrent).map((prefix) => prefix.length),
+      ),
+    }))
+    .filter((candidate) => candidate.length >= 0)
+    .sort((a, b) => b.length - a.length)[0]?.href;
 ---
 
 <!doctype html>
@@ -142,7 +187,7 @@ const isCurrent = (href: string) =>
             <div class="nav-docs-popover">
               <div>
                 {documentationItems(variant).map((item) => (
-                  <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>
+                  <a href={item.href} aria-current={item.href === currentDocumentationHref(variant) ? "page" : undefined}>{item.label}</a>
                 ))}
               </div>
             </div>
@@ -163,7 +208,7 @@ const isCurrent = (href: string) =>
               </summary>
               <div>
                 {documentationItems(variant).map((item) => (
-                  <a href={item.href} aria-current={isCurrent(item.href) ? "page" : undefined}>{item.label}</a>
+                  <a href={item.href} aria-current={item.href === currentDocumentationHref(variant) ? "page" : undefined}>{item.label}</a>
                 ))}
               </div>
             </details>
@@ -253,7 +298,7 @@ const isCurrent = (href: string) =>
     {variants.map((variant) => (
       <footer class="site-footer" data-locale-content={isAuto ? variant.locale : undefined}>
         <div>
-          <p class="footer-mark"><span>参伍引擎</span> {variant.ui.footerLine}</p>
+          <p class="footer-mark"><span>{variant.locale === "en" ? "Canwu Engine" : "参伍引擎"}</span> {variant.ui.footerLine}</p>
           <p>{variant.ui.footerSub}</p>
         </div>
         <div class="footer-links">

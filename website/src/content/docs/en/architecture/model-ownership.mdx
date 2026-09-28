@@ -1,13 +1,13 @@
 ---
-title: World and event model ownership
-description: See how the retired canwu-world package moved into a reference integration while generic event contracts stayed in the engine.
+title: Model ownership
+description: Which layer owns each kind of simulation concept in Canwu, the engine, an extension crate, or your application, and where the generic event contracts live.
 template: doc
 sidebar:
   order: 5
   label: Model ownership
 ---
 
-import { Aside, Steps } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="Model ownership navigation">
   <span class="architecture-links-label">Continue exploring:</span>
@@ -18,101 +18,73 @@ import { Aside, Steps } from "@astrojs/starlight/components";
   <a href="/architecture/model-ownership/">中文版</a>
 </nav>
 
-This audit asks which layer owns a meaning, not which crate has too few lines. The result is: **do not broadly consolidate crates**. Concrete event payloads moved out of generic `EventKind`, and the example world moved into `canwu-reference-world` before its old package boundary was removed.
+Canwu splits responsibility across three layers. The engine owns what must be deterministic, authoritative, and replayable. Optional extension crates own generic domain mechanics, such as movement or law, built on the public API. Your application owns period content and the decisions that give those mechanics meaning. Use this page to decide where a new rule belongs and which crate your code should depend on.
 
-<Aside type="note" title="Migration status">
-The ownership migration is complete. `canwu-reference-world` owns the example model, movement plugin, projection, and routing adapter. The old source package and dependency edges are gone. Format 8 snapshots carry their canonical entity registry and initial scenario; pre-8 saves are rejected instead of being implicitly migrated.
-</Aside>
+<MermaidDiagram
+  label="Dependency layers: the application and extension crates build on the public API, which wraps the engine crates"
+  diagramLoading="Rendering diagram…"
+  sourceSummary="View diagram source"
+  noScriptMessage="JavaScript is required for the diagram preview; the tables below describe the same split."
+  renderFailureMessage="Diagram preview unavailable; the tables below describe the same split."
+  definition={`flowchart TB
+    App["Your application<br/>period content, scenarios,<br/>incidents, authority records"]
+    Ext["Extension crates<br/>canwu-movement, canwu-law,<br/>canwu-culture, canwu-society, …"]
+    Ref["Reference integrations<br/>canwu-reference-world and others<br/>replaceable examples"]
+    Api["canwu-api<br/>public API"]
+    Engine["Engine and mechanism crates<br/>canwu-core, canwu-event, canwu-sim,<br/>canwu-routing, canwu-transport, …"]
+    App --> Ext
+    App --> Api
+    Ext --> Api
+    Ref --> Api
+    Api --> Engine
+`}
+/>
+
+Arrows point from a crate to what it depends on. Engine and mechanism crates never depend on extensions, reference integrations, or application code.
 
 ## One ownership rule
 
-Generic engine crates own deterministic simulation contracts. Reference integrations own concrete world entities such as armies, governments, territories, people, and letters, plus the event payloads that describe their domain behavior.
+Generic engine crates own deterministic simulation contracts: state, settlement, evidence, randomness, persistence, and replay. Extension crates and reference integrations own concrete world concepts, such as armies, governments, territories, people, and letters, together with the event payloads that describe them.
 
-Format 8 applies the same rule to cross-plugin maintenance. The kernel verifies
-the participant set, versions, budgets, and atomic commit; it does not invent
-domain semantics. Each participant may mutate only schemas owned by that
-plugin; the target owner must also include an exact mutation of the target
-record. Resolver registration is frozen in plugin descriptors, so callers
-cannot bypass the check by omitting a participant.
+The rule also covers changes that span several plugins. When a maintenance operation must update records owned by different plugins, for example when a culture target retires while legal records still cite it, the kernel checks the participant set, the record versions, the work budgets, and that everything commits together or not at all. Each participant changes only records whose schema its own plugin owns, and the plugin that owns the target record must include an exact change to it. Plugins register as participants with `register_owner_authorized_maintenance_participant` or as dependency resolvers with `register_maintenance_dependency_resolver`. Both registrations are stored in the plugin descriptor, so a caller cannot leave a participant out.
 
-That rule gives the two candidate crates different outcomes:
+## Domain ownership
 
-| Crate | Audit result |
-| --- | --- |
-| retired `canwu-world` | Its concrete model now lives in `canwu-reference-world`. The current `WorldSnapshot` remains a reference/runtime projection, not a persistence migration surface. |
-| `canwu-event` | It now contains only generic event contracts and a structured event record. Concrete payloads are extracted; decide whether the residual generic types belong in `canwu-sim` only after their independent consumption is known. |
+The table lists concerns that come up often and shows which crate owns the mechanism and what your application decides.
 
-## The 12 public `canwu-world` types
-
-| Public type | Classification | Target owner |
+| Concern | Owned by | Your application decides |
 | --- | --- | --- |
-| `MapPoint` | Concrete map and presentation model | Reference world integration |
-| `Person` | Concrete person model | Reference movement/world integration |
-| `PersonTransitState` | Concrete person journey state | Move with `Person` |
-| `LetterStatus` | Concrete letter custody and delivery lifecycle | Reference information/logistics integration |
-| `LetterCargo` | Concrete letter body, parties, location, and custody | Reference information/logistics integration |
-| `Government` | Concrete government and capital model | Reference political/world integration |
-| `Territory` | Concrete territory, controller, and coordinate model | Reference topology/world integration |
-| `Route` | Concrete bidirectional territory route | Reference topology integration, adapted to routing's own `PlanningSnapshot` |
-| `TransitState` | Concrete army journey state | Reference movement/world integration |
-| `Army` | Concrete unit, commander, strength, and morale model | Reference movement/world integration |
-| `WorldSnapshot` | Reference projection containing only the concrete entities above | Provide it from the reference integration; it does not migrate old saves |
-| `WorldDiff` | Reference diff limited to army, person, territory, and letter IDs | Provide it from the reference integration; the kernel uses generic change evidence |
-
-`canwu-routing` does not own this world. Its solver consumes the generic `PlanningSnapshot`; the `WorldSnapshot` conversion now lives in `canwu-reference-world`.
-
-## The 4 public `canwu-event` types
-
-| Public type | Classification | Target owner |
-| --- | --- | --- |
-| `CauseRef` | Generic engine contract | Preserve command, parent-event, boundary, and system causes plus serialized compatibility |
-| `EventAudience` | Generic engine contract | Preserve private-by-default, actor-scoped, replay-stable visibility |
-| `SimEvent` | Generic event envelope | Preserve identity, time, affected references, summary, cause, and correlation ID |
-| `EventKind` | Generic type tag and flattened structured-field record | Preserve the legacy JSON wire shape; domain owners define typed payloads outside this crate and use the generic encode/decode API |
-
-Typed payloads for movement, army arrival, person travel, letter delivery, report dispatch, knowledge, and debug fields are no longer public `canwu-event` variants. Private compatibility payloads in the reference runtime still validate the legacy tags and fields strictly; they move again with their world, knowledge, or debug integration. Plugin events expose their compatibility namespace through `plugin_identity`.
-
-## Domain ownership after 0.13.0
-
-The same rule decides where the downstream gap-set contracts of 0.12.0 and 0.13.0 live. The engine owns what must be deterministic, authoritative, and replayable; the application keeps period content and its own authority.
-
-| Concern | Owner | Application boundary |
-| --- | --- | --- |
-| Person life and custody state, runtime person creation, queued-ingress cancellation | `canwu-sim` core state and directives (0.12.0) | When a person dies, is captured, is released, or appears; what to withdraw |
+| Person life and custody state, runtime person creation, withdrawing queued ingress | `canwu-sim` core state and directives | When a person dies, is captured, is released, or appears; what to withdraw |
 | Multi-owner conditional transitions | `canwu-sim` transition manifest, phase-10 staging, and phase-11 audit | The participants, expected versions, and meaning of each transition |
-| Rule-evaluation evidence | `canwu-core` record, `canwu-sim` boundary evidence, `canwu-api` viewer read | Rule IDs and the meaning of their terms |
-| Decision lineage and seat succession | `canwu-decision` ticket and controller binding | Who holds a seat and when a successor takes it |
-| Delegated resource access | `canwu-resource` access grant and `Granted` source policy | Who may grant whom, and the authority evidence record |
+| Rule-evaluation evidence | `canwu-core` record, `canwu-sim` boundary evidence, `canwu-api` viewer read | Rule IDs and what their terms mean |
+| Decision lineage and seat succession | `canwu-decision` ticket and controller binding | Who holds a seat and when a successor takes over |
+| Delegated resource access | `canwu-resource` access grant and `Granted` source policy | Who may grant access to whom, and the authority evidence record |
 | Movement lifecycle and capacity pools | `canwu-movement` runtime record and plugin; `canwu-transport` records and pure allocation | Incidents, hazards, hostility, their random draws, and authority-basis records |
 | Delegated carriers and carrier seizure | `canwu-correspondence` | The relationship behind a delegation, and relaying news of a seizure to the sender |
-| Authenticity finding | `canwu-information` interpretation | How likely a forgery is to be detected |
-| Weighted, unit-block, and advisory procedure stages | `canwu-law` compiled procedure | Seat weights, blocks, and the tie-break choice |
-| Culture boundary settlement | `canwu-culture` `CultureBoundaryPlugin` settles the lifecycle and produces deltas; `canwu-society` remains the single writer of `canwu.society:state` | Exposure signals and the culture definition |
+| Authenticity findings | `canwu-information` interpretation | How likely a forgery is to be detected |
+| Weighted, unit-block, and advisory procedure stages | `canwu-law` compiled procedure | Seat weights, blocks, and the tie-break rule |
+| Culture boundary settlement | `canwu-culture` `CultureBoundaryPlugin` settles the lifecycle and produces deltas; `canwu-society` stays the only writer of `canwu.society:state` | Exposure signals and the culture definition |
 | Policy-pressure provenance and cohort headcount rebase | `canwu-society` | The external stock record a rebase cites |
-| External transmission source | `canwu-technology` | The cited content record and its declared reliability |
-| Fiscal archive, observer bound, batched consumption, production limits | Not shipped; deferred series items | — |
+| External transmission sources | `canwu-technology` | The cited content record and its declared reliability |
 
-Two names are easy to confuse. The reference-world movement plugin moves the example world's armies and people through `OrderMovement`; it is replaceable example code. `canwu-movement` is the generic movement lifecycle extension for `canwu-transport` records, and it knows nothing about the reference world.
+Two movement crates have similar names. `canwu-reference-world` includes a movement plugin that moves the example world's armies and people with its `order_movement_v1` command; it is replaceable example code. `canwu-movement` is the generic movement lifecycle extension for `canwu-transport` records and has no knowledge of the reference world.
 
-## Why direct merges fail
+## Generic event contracts
 
-- Folding `canwu-world` into `canwu-core` would make one historical worldview foundational.
-- Folding `canwu-event` into `canwu-sim` now would still enlarge the persistence blast radius; independent use of the remaining generic contracts must decide that boundary.
-- Creating `canwu-model` would consolidate names without clarifying responsibilities.
-- Merging `canwu-api` and `canwu-sim` would erase the public API/private-runtime boundary.
+`canwu-event` holds only generic event contracts:
 
-## Safe migration sequence
+| Type | What it is |
+| --- | --- |
+| `SimEvent` | The event envelope: identity, time, affected entities, summary, cause, and correlation ID |
+| `EventKind` | A type tag plus flattened structured fields. Domain crates define typed payloads and convert them with `from_payload` and `decode_payload`. |
+| `CauseRef` | The cause of an event: a command, a parent event, a boundary, or a system |
+| `EventAudience` | Who may see an event in actor-relative views; `Private` unless the plugin declares otherwise |
+| `EventKindError` | The error returned when a payload cannot be encoded or decoded |
 
-<Steps>
-1. Representative JSON saves, event journals, `canwu-api` calls, and exact replay outcomes are frozen.
-2. `EventKind` is now a generic structured record and its concrete public variants are extracted without changing legacy JSON. A complete cross-integration namespace and payload-version contract remains future work.
-3. `canwu-reference-world` now owns the concrete entities, movement behavior, detached projection, and routing conversion through public APIs.
-4. Since Format 7, snapshots self-describe the entity registry and initial scenario (current Format 8 keeps this); the runnable starter proves save/load, fork, and exact replay.
-5. `canwu-world` is retired after reaching zero normal consumers. The independent `canwu-event` decision remains separate.
-</Steps>
+Typed payloads for movement, army arrival, person travel, letter delivery, report dispatch, knowledge, and debug fields live with the integrations that own them. The runtime keeps private compatibility payloads that validate the older event tags and fields strictly. A plugin event carries its plugin name and event type, which `EventKind::plugin_identity` returns. See the [event system](/en/architecture/events/) for how events are recorded and shown.
 
-## Completion gates
+## History: the retired `canwu-world` crate
 
-Since Format 7, Canwu rejects Format 2–6 saves and journals. Format 8 preserves those migration contracts and additionally rejects Format 7 persistence. Cause, correlation ID, audience, affected-reference, and commitment validation must stay deterministic and fail closed. Routing must no longer depend on the example world. At least one runnable starter kit must prove save/load, fork, and exact replay, and a second integration or fixture must prove the generic engine does not depend on the first historical model.
+Earlier versions shipped a `canwu-world` crate that put one example world into the engine's dependency graph. Its twelve public types, `MapPoint`, `Person`, `PersonTransitState`, `LetterStatus`, `LetterCargo`, `Government`, `Territory`, `Route`, `TransitState`, `Army`, `WorldSnapshot`, and `WorldDiff`, now live in `canwu-reference-world`. That crate provides them through the public API, together with the example movement plugin, a detached projection, and the routing adapter `planning_snapshot_from_world`. `canwu-routing` plans over the generic `PlanningSnapshot` and does not depend on the example world.
 
-The canonical repository audit records the complete per-type rationale, dependency evidence, and gates.
+`canwu-sim` still keeps its own copies of most of these types, re-exported by `canwu-api`, for the deprecated `Canwu::world()` projection and the legacy `Command::OrderMovement` path. New code should use `canwu-reference-world` or its own domain records. The per-type rationale is in the repository's [world and event ownership audit](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/world-event-ownership-audit.md).

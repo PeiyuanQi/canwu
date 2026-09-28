@@ -1,0 +1,260 @@
+---
+title: 财政制度
+description: 财政扩展如何把带出处的财政内容落实为受权限约束的核算、征收和以证据为据的执行凭证；游戏的税收和财库规则需要随时期、地区变化时，请阅读本页。
+sidebar:
+  order: 13
+  label: 财政制度
+---
+
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="财政制度导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/tutorials/cases/ming-fiscal/">明代财政案例</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/fiscal/">English version</a>
+</nav>
+
+`canwu-fiscal` 即[财政模拟扩展](/reference/terminology/)，它把财政制度建模为一套程序：带版本的法规及其在各地区的采纳、核算、减免、经授权的征收和转移、审计，以及由证据证明的执行凭证。粮食、白银等余额留在你的资源或物流领域，财政扩展记录的是应征多少、授权了什么、证据证明了什么。如果你的游戏需要随时期和地区变化的税收与财库规则，请读这一页；`canwu-ming-fiscal` 中的明代内容和可运行的参考整合包 `canwu-ming-fiscal-reference` 是贯穿全页的示例。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-fiscal` | 与时期无关的通用模型：内容包 schema 与编译器（`compile_fiscal_content`）、目录记录和状态记录、`FiscalPlugin`、权限校验、凭证校验、聚合和持有人报告 | 发布到 crates.io |
+| `canwu-ming-fiscal` | 明代内容：内嵌的 `data/pack.json`（1368–1683）、三个起点 fixture 和 `compile_ming_fiscal` | 发布到 crates.io |
+| `canwu-ming-fiscal-reference` | 一个可运行的上层应用：场景构建、执行适配器插件、语义校验、trace 写出与查看器，以及示例 `ming_fiscal_starter` | 仅在仓库中 |
+
+<MermaidDiagram
+  label="crate 依赖关系：canwu-fiscal 和明代内容包建立在 canwu-api 之上，参考整合包把它们与参考世界组合起来"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；上表列出了同样的 crate。"
+  renderFailureMessage="图表预览不可用；上表列出了同样的 crate。"
+  definition={`flowchart TB
+    Host["你的上层应用<br/>场景、适配器、命令"]
+    Ref["canwu-ming-fiscal-reference<br/>可运行的明代示例"]
+    Ming["canwu-ming-fiscal<br/>明代数据包"]
+    World["canwu-reference-world<br/>示例世界"]
+    Fiscal["canwu-fiscal<br/>与时期无关的模型"]
+    Api["canwu-api<br/>对外 API"]
+    Host -.->|"可以从这里起步"| Ref
+    Host --> Fiscal
+    Ref --> Ming
+    Ref --> World
+    Ref --> Fiscal
+    Ming --> Fiscal
+    Ming --> Api
+    Fiscal --> Api
+    World --> Api
+`}
+/>
+
+箭头从一个 crate 指向它依赖的 crate。在参伍的各个 crate 中，`canwu-fiscal` 只依赖 `canwu-api`，引擎内核里没有任何财政代码。`canwu-ming-fiscal` 只包含数据、fixture 加载函数和编译辅助函数，不含运行时行为。参考整合包从 `canwu-reference-world` 借用一个政府、一支军队和几个人物，充当机构和官员。
+
+## 核心模型
+
+### 哪些与时期无关，哪些由内容包提供
+
+| 层 | 提供什么 | 示例 |
+| --- | --- | --- |
+| `canwu-fiscal`（与时期无关） | 内容包 schema、校验、覆盖解析、封闭词表、财政状态、行动、权限校验、凭证校验、聚合、报告 | `compile_fiscal_content`、`FiscalPlugin` |
+| 内容包（特定时期） | 时期、地区、机构、带法定年份范围的法规、改革转型、覆盖声明，以及带禁止推断的出处 | `canwu-ming-fiscal` 的 `data/pack.json` |
+| 上层应用（特定运行） | 年份与模式、各类绑定、初始采纳阶段、机构实体、执行适配器和命令 | `canwu-ming-fiscal-reference` |
+
+这些词表是 `canwu-fiscal` 中的封闭 Rust 枚举：11 个 `FiscalMechanism` 值（如 `LandTax`、`SaltMonopoly`、`MerchantCredit`）、7 个 `FiscalPaymentForm` 值（`Grain`、`Silver`、`Labor`、`SaltCertificate`、`Coin`、`Goods`、`Credit`）、10 个 `FiscalAssessmentBasis` 值和 4 个 `FiscalCommutationPolicy` 值。内容包在 manifest 中列出自己用到的机制，并把本时期的制度对应到这些值上。
+
+`compile_fiscal_content(&pack, selection)` 校验整个内容包，返回 `CompiledFiscalCatalog`。它要求 ID 规范且唯一、引用全部可以解析、各个年份范围落在内容包的历史范围内、`pack_version` 符合 SemVer、许可证为 `Apache-2.0`、每个机构、法规和转型都有出处、转型的前置条件无环，并且每个覆盖单元都有状态。`FiscalContentSelection` 中的地区和机制集合留空，表示全部选中。目录保留全部时期，所以一次运行可以跨越多个年份；`selected_period_ids` 列出覆盖所选年份的时期，`content_hash` 是整个内容包的哈希。
+
+### 主要类型
+
+| 类型 | 表示什么 |
+| --- | --- |
+| `FiscalContentPack` | 编写好的内容包：manifest、时期、地区、机构、法规、转型、覆盖声明、出处 |
+| `CompiledFiscalCatalog` | 一次运行使用的不可变目录，存为只可创建的记录 `canwu.fiscal:catalog` |
+| `FiscalRuleDefinition` | 一条法规：机制、法定年份范围、辖区、核算依据、支付形态、折纳政策、出处、可信度 |
+| `FiscalTransitionDefinition` | 一项改革：来源法规与目标法规、史实观察窗口与可行窗口、辖区、被取代或停用的法规、前置转型 |
+| `FiscalState` | 运行时记录 `canwu.fiscal:state`：各类绑定、采纳、核算、减免、执行请求、凭证、审计、行动结果、候选、聚合 |
+| `FiscalHistoricalContext` | 当前的历史年份和 `FiscalHistoricalMode` |
+| `FiscalAuthorityBinding` | 谁可以代表某个机构行动 |
+| `FiscalScopeBinding` | 某个机构对一个辖区、一个征收对象范围和一种机制承担的职责 |
+| `FiscalObserverBinding` | 谁接收报告、能看到哪些机构、以什么置信度 |
+| `FiscalAdoptionState` | 一条法规在一个范围内所处的阶段，以及记录变更次数的变更代次（generation） |
+| `FiscalActionRequest`、`FiscalAction` | 一个程序步骤，以领域命令提交 |
+| `FiscalExecutionRequest` | 征收、汇解、支出、储备或退还一定数量的授权 |
+| `FiscalExecutionEvidence` | 适配器完成实际操作后写入的类型化结果 |
+| `FiscalExecutionReceiptPacket`、`FiscalExecutionReceipt` | 引用精确证据版本的凭证请求，以及结算后的凭证 |
+| `FiscalStrategicAggregate` | 一个核算分区的汇总 |
+| `FiscalProjection`、`FiscalReportFact` | 某个持有人的报告，每个总数都是一个区间 |
+
+`FiscalAdoptionStage` 依次为 `Promulgated`、`Communicated`、`Accepted`、`Implemented`、`Audited`、`Entrenched`、`Suspended` 和 `Repealed`。只有 `Implemented`、`Audited`、`Entrenched` 算作可执行（`is_operational`），核算也只能在可执行的采纳下开立。所以一条法规可以已经在某省颁布，却还没有在那里执行。
+
+## 覆盖单元与显式未知
+
+[财政覆盖单元](/reference/terminology/)（`FiscalCoverageCell`）是一个“时期 × 地区 × 机制”组合。编译器生成全部组合，再用内容包中的 `FiscalCoverageDeclaration` 逐一解析：在命中的声明里，`priority` 最高的一条胜出。某个单元没有任何声明命中时编译失败，最高优先级出现并列时同样失败，所以文件顺序左右不了历史解读。
+
+| `FiscalCoverageStatus` | 含义 | 声明规则 |
+| --- | --- | --- |
+| `Supported` | 有带出处的定义，可以直接模拟 | 需要出处，并需要该地区针对这一机制的法规或转型 |
+| `ArchetypeFallback` | 用比较原型替代，并注明限制 | 需要出处，并需要针对这一机制的法规或转型，可以来自其他地区 |
+| `ExplicitUnknown` | 内容包声明这个单元没有行为 | 不带任何定义 |
+| `NotApplicable` | 这种机制不适用于此处 | 不带任何定义 |
+
+明代内容包有 8 个时期、8 个地区、11 种机制，共 704 个单元：`supported` 160 个，`archetype_fallback` 101 个，`explicit_unknown` 443 个。这些未知单元中，425 个来自优先级 0 的默认声明，18 个来自 `zheng_other_mechanisms`，这是一条优先级为 60 的声明，覆盖郑氏时期两个地区的九种机制。每条 `FiscalProvenance` 都写明引文、URL、论断范围、可信度和至少一条禁止推断，例如 “Do not infer actual receipts directly from statutory quotas.”（不要直接从法定额度推断实际征收）。
+
+覆盖、出处、可信度和折纳政策都属于目录元数据，供上层应用、工具和审阅者读取。插件在准入时检查的是法规、法定年份范围、辖区、机制、支付形态和采纳阶段。
+
+## 运行过程：从应征义务到凭证
+
+<MermaidDiagram
+  label="财政流程：从可执行的法规开始，经过核算、授权、外部证据和凭证，到聚合和持有人报告"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的步骤描述了同一流程。"
+  renderFailureMessage="图表预览不可用；下文的步骤描述了同一流程。"
+  definition={`flowchart TB
+    Adopt["法规在某范围内可执行<br/>FiscalAdoptionState"] --> Assess["OpenAssessment<br/>一个核算周期的应征额"]
+    Assess --> Remit["GrantRemission<br/>减少应征额"]
+    Assess --> Auth["AuthorizeExecution<br/>FiscalExecutionRequest"]
+    Auth --> Adapter["上层适配器在自己的领域<br/>完成实际转移"]
+    Adapter --> Evidence["证据记录<br/>载荷为 FiscalExecutionEvidence"]
+    Evidence --> Packet["FiscalExecutionReceiptPacket<br/>引用精确版本"]
+    Packet --> Receipt["FiscalExecutionReceipt<br/>数量与处置结果取自证据"]
+    Remit --> Agg["第 12 阶段<br/>FiscalStrategicAggregate"]
+    Receipt --> Agg
+    Agg --> Report["第 13 阶段<br/>以知识形式发布的持有人报告"]
+`}
+/>
+
+法规在某个范围内被采纳，就形成了应征义务；核算则把一个核算周期内应缴多少固定下来。引擎按下面的顺序运行这条流程：
+
+1. **安装。** 场景带上编译好的目录（`CompiledFiscalCatalog::into_record`）和初始状态（`FiscalState::into_record`）。注册 `FiscalPlugin::new(evidence_kinds)`；如果绑定用到代理角色，再加上 `.with_authority_basis_kinds(kinds)`。绑定引用的权限依据种类没有声明时，激活会被拒绝。
+2. **提交。** 用 `fiscal_action_command` 包装 `FiscalActionRequest`，得到 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。请求带有行动 ID、权限绑定 ID，以及构造请求时依据的 `expected_procedure_revision`。
+3. **准入。** 在准入该命令的[结算边界](/architecture/settlement/)上，处理函数拒绝重复使用的行动 ID（`IdempotencyConflict`）、已满的行动结果记录（`ValueOutOfRange`），以及绑定之外的签发者或范围（`InvalidAuthority`），引擎把这些记为被拒绝的命令。过期的 `expected_procedure_revision` 不同：它返回 `DomainRecordVersionConflict`，让整个边界失败，命令仍留在队列中，之后每个边界都会以同样方式失败。引用的折纳报价必须是一个已存在的精确记录版本；报价不存在时返回 `InvalidDomainRecord`，同样会让边界失败。随后处理函数安排一条内部的 `fiscal_action_v1` [规范化输入](/reference/terminology/)（类别 `Decision`）。
+4. **结算（第 7 阶段）。** 下一个边界上，`settle-fiscal-ingress-v1` 在 `DomainDeltaProposal` 阶段运行。它确认这条输入确实来自那条已准入的命令，重新检查代理角色的权限依据，在状态副本上执行行动，再按目录校验整个副本。结果记为一条 `FiscalActionOutcome`，即 `Applied` 或带原因的 `Rejected`，同时发出 `canwu.fiscal.action_settled.v1`。被拒绝的行动作为结果保存下来，边界照常提交。
+5. **凭证与语境。** 同一个系统还结算 `fiscal_execution_receipt_v1`（用 `enqueue_execution_receipt` 提交，类别 `Acknowledgement`，事件 `canwu.fiscal.execution_receipt_recorded.v1`）和 `fiscal_historical_context_v1`（用 `fiscal_historical_context_ingress` 构造、`enqueue_plugin_ingress` 排队，事件 `canwu.fiscal.historical_context_changed.v1`）。证据校验不通过的凭证，或者背后没有已准入命令的行动输入，会让整个边界失败。
+6. **派生。** 第 10 阶段（`HistoricalCandidateEvaluation`）的 `evaluate-fiscal-transition-candidates-v1` 重新计算改革候选；第 12 阶段（`StrategicAggregation`）的 `aggregate-fiscal-state-v1` 重新计算聚合。二者只在结果变化时写入状态。
+7. **报告（第 13 阶段）。** `materialize-fiscal-reports-v1` 在 `PerspectiveAndReportMaterialization` 阶段运行：每当边界写入新的状态版本，它就为每个观察者发布一份报告。
+
+这四个系统都是事件驱动的。在明代示例程序中，核算命令在第 1 个边界准入、第 2 个边界结算，授权占用第 3、4 个边界，适配器在第 5 个边界写入证据，凭证在第 6 个边界结算。
+
+### 行动
+
+| `FiscalAction` | 效果 | 主要检查 |
+| --- | --- | --- |
+| `ChangeAdoption` | 新建采纳或改变其阶段；每次变更，代次加一 | 法规的机制与范围一致，且法规覆盖该范围的辖区；新建采纳要求当前年份在法规的法定年份范围内，也不能让转型目标直接以可执行阶段起步 |
+| `ApplyTransition` | 在一个辖区内把目标法规设为 `Implemented`，并在同一辖区停用被该转型取代的法规，一次行动完成 | 每条目标法规恰好绑定一次；目标范围同属一个辖区；该转型当前是这个辖区的候选；绑定拥有全部目标范围 |
+| `OpenAssessment` | 记录数量、单位、支付形态、核算周期和可选的折纳报价 | 年份在法规的法定年份范围内；采纳可执行；法规允许该支付形态；同一范围、核算周期、单位和支付形态只能有一笔核算 |
+| `GrantRemission` | 减少应征额 | 减免总额不超过应征数量 |
+| `AuthorizeExecution` | 创建一条 `FiscalExecutionRequest`，种类为 `Collect`、`Remit`、`Disburse`、`Reserve` 或 `Return` | 单位与核算一致；来源和目标不同；机构是其中一方；`Collect` 请求合计不超过应征减去减免 |
+| `RecordAudit` | 记录一条带 `FiscalAuditSeverity` 和证据的审计结论 | 目标是一笔核算、一条请求或一张凭证 |
+
+### 凭证
+
+`FiscalExecutionReceiptPacket` 只包含凭证 ID、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在 `FiscalState::execution_evidence_kinds` 中；这个精确版本存在；载荷能解码为 `FiscalExecutionEvidence`，并且其中的请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入汇总，`Rejected` 和 `Excused` 的数量为零。在同一份财政状态中，每个精确版本、每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证。以相同内容重复提交同一张凭证，状态保持不变。
+
+`FiscalStrategicAggregate` 按机构、机制、范围、核算周期、单位和支付形态分区。核算周期 ID 由上层应用决定，与历史时期相互独立。聚合分别记录 `assessed`、`remission_granted`、`collected`、`remitted`、`disbursed`、`reserved` 和 `returned`，`outstanding` 等于应征减去减免、再减去已征。
+
+### 程序修订号
+
+每结算一个行动（无论应用还是拒绝）、每新记录一张凭证、每改变一次语境，`FiscalState::procedure_revision` 都加一。候选和聚合的刷新不改变它，因此不会让待决的决策过期。在一个边界内，第一个改变修订号的输入会把它用掉，同一边界中后续的财政行动都会作为过期行动被拒绝。每个边界只提交一个财政行动，等它结算后再按新的修订号构造下一个请求；按旧修订号构造的请求会在准入时让边界失败（见第 3 步）。
+
+### 历史语境与改革
+
+[历史财政语境](/reference/terminology/)包含 `year` 和 `mode`。`RecordedBaseline` 和 `ResearchReplay` 看转型的 `observed_window`，`Counterfactual` 看它的 `eligibility_window`。满足以下条件时，转型成为某个辖区的 `FiscalTransitionCandidate`：年份符合；该辖区有目标机制对应的范围；如果转型列出了来源法规，其中一条已在该辖区采纳且未废止；目标法规尚未全部可执行；前置转型的目标在该辖区已可执行。候选只有通过经授权的 `ApplyTransition` 才会生效。语境输入中的年份必须落在内容包的范围之内。
+
+## 权限
+
+`FiscalAuthorityBinding` 指定一个 `institution`（`EntityRef`）和一名常设的 `authorized_actor`，还可以指定一名 `acting_actor` 及其 `authority_basis`。准入接受两种签发者：
+
+| 签发者 | 准入条件 |
+| --- | --- |
+| `Issuer::Actor(actor)`，没有决策控制者 | `actor` 是绑定中的常设角色或代理角色 |
+| `Issuer::Human` 或 `Issuer::Ai`，且等于已校验的 `decision_controller_id` | `CommandAuthority` 中的命令主体是绑定的机构，并且决策来源是指向某个绑定角色的 `DecisionOrigin::Actor`，或者是该机构的 `DecisionOrigin::Institution`，其负责角色已在绑定中 |
+
+绑定的机构还必须拥有行动涉及的范围；对 `ApplyTransition` 来说，要拥有全部目标范围。[代理角色](/reference/terminology/)需要一个精确的[权限依据](/reference/terminology/)版本，其种类已用 `with_authority_basis_kinds` 声明，而且代理角色必须与常设角色不同。只要这个版本仍是其记录的当前版本，代理角色就能被准入；第 7 阶段结算时还会再检查一次。一旦记录更新到新版本或已退休，代理角色会以 `FISCAL_ACTING_BASIS_NOT_CURRENT`（`InvalidAuthority`）失败，常设角色仍可准入。
+
+权限绑定、范围绑定和观察者绑定都来自初始场景，没有哪个财政行动能修改它们。通过席位、投票和程序阶段作决定的机构，参见[社会、文化与法律](/architecture/culture-law/)。
+
+## 知识与可见性
+
+`FiscalState` 属于权威状态。上层应用可以通过受信任读取访问它，例如 `typed_domain_record(&fiscal_state_reference())`。玩家和智能体应当读取财政报告，它是[持有人相对知识](/developer/reading-state/)。
+
+`FiscalObserverBinding` 指定一名角色、该角色本人的持有人（同一角色的 `KnowledgeHolderRef::Person`）、可见的机构，以及不超过 1,000 的 `confidence_per_mille`。第 13 阶段为每个观察者发布一条知识记录，schema 为 `fiscal_report_knowledge_schema_id()`（种类 `canwu-fiscal` / `fiscal_report`，版本 1）。记录的主体是财政状态记录，来源方法为 `fiscal_authority_report_v1`，并引用新状态的精确版本；它会取代该观察者的上一份报告。载荷是一个 `FiscalProjection`，每个可见的聚合对应一条 `FiscalReportFact`，其中应征、已征和未结各是一个 `FiscalAmountEstimate` 区间。
+
+| `confidence_per_mille` | 量级为 M 的数值对应的区间宽度 |
+| --- | --- |
+| 900 至 1,000 | M / 100 |
+| 750 至 899 | M / 10 |
+| 500 至 749 | M / 2 |
+| 低于 500 | M |
+
+M 是不超过该值的最大 10 的幂，区间宽度至少为 2，所以每个总数都以区间呈现。置信度为 850 时，应征 100 显示为 100–109，已征 70 显示为 70–71。角色用 `canwu.viewer_for_actor(actor)` 和针对 `fiscal_report_knowledge_schema_id()` 的 `KnowledgeQuery` 读取自己的报告。
+
+## 随机性、持久化与重放
+
+财政扩展不抽取随机数，也不声明随机流。报告区间来自整数分桶，部分征收之类的结果由你的适配器作为证据带进来。
+
+财政状态存放在两条领域记录中，分别通过 `fiscal_catalog_reference()` 和 `fiscal_state_reference()` 访问。目录记录只可创建。状态记录引用目录，并把凭证和折纳报价引用的、运行中产生的精确证据版本标记为需要保留载荷，因此引擎会让这些载荷始终可以加载。每次通过 `load_fiscal_catalog` 或 `load_fiscal_state` 读取，都会校验目录、状态，以及存储的记录与解码后的载荷是否一致。
+
+快照和[精确重放](/developer/persistence/)要求插件身份一致：名称 `canwu-fiscal`、版本 `0.1.0-experimental` 和它的语义哈希。重放消费记录下来的命令和输入，不会重新运行玩家或 AI 的选择。参考整合包的 `restore_ming_fiscal_reference` 和 `replay_ming_fiscal_reference` 注册同样的三个插件，然后运行 `validate_ming_fiscal_reference`：重新计算聚合和候选，并把每张凭证与其证据重新核对一遍。
+
+## 上层应用需要提供什么
+
+- 内容包：你自己的 `FiscalContentPack`（可以用 serde 读取 JSON）或明代内容包，以及 `FiscalContentSelection`。
+- 初始 `FiscalState`：年份和模式、证据种类、权限绑定、范围绑定、观察者绑定，以及初始采纳阶段。
+- 场景中的机构实体和角色，例如政府、军队或组织。
+- 执行适配器：在你的资源、市场、生产或物流领域完成实际转移，写入类型化证据记录，再调用 `enqueue_execution_receipt`。
+- 使用代理角色时，还要提供权限依据记录及其种类。
+- 各项决定：提交哪些行动、何时提交、数量、单位、核算周期 ID，以及何时改变历史语境。
+- 如果需要 `validate_ming_fiscal_reference` 那样的检查，提供恢复时运行的语义校验；此外还有展示报告的界面。
+
+## 限制与预算
+
+| 常量 | 值 | 限制对象 |
+| --- | ---: | --- |
+| `MAX_FISCAL_ASSESSMENTS` | 4,096 | 核算；减免、审计和聚合也用这个上限 |
+| `MAX_FISCAL_EXECUTION_REQUESTS` | 8,192 | 执行请求；采纳也用这个上限 |
+| `MAX_FISCAL_EXECUTION_RECEIPTS` | 8,192 | 凭证 |
+| `MAX_FISCAL_ACTION_OUTCOMES` | 16,384 | 已结算的行动结果；记满后准入拒绝新行动 |
+| `MAX_FISCAL_RUNTIME_BINDINGS` | 4,096 | 权限绑定和范围绑定 |
+| `MAX_FISCAL_OBSERVERS` | 64 | 观察者绑定 |
+| `MAX_FISCAL_EVIDENCE_KINDS` | 32 | 获准的证据种类 |
+| `MAX_FISCAL_EVIDENCE_PER_RECORD` | 32 | 每张凭证或每条审计的证据数 |
+| `MAX_FISCAL_STATE_JSON_BYTES` | 32 MiB | 序列化后的财政状态 |
+
+目录的各项上限（时期、地区、定义、覆盖单元、单个定义内的引用、内容包大小）见 [`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/model.rs)。
+
+聚合重建使用单遍索引。更大的战役需要拆成多次运行或多个分片；这个 crate 没有分区或归档 API，跨分片的操作 ID 去重由上层应用负责。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-1581
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
+cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence monthly
+```
+
+每次运行都会打印 checkpoint 哈希，并把 trace 写到 `artifacts/traces/ming-fiscal-reference/<fixture>/`。最后一条命令在示例流程之后再运行 365 个模拟日，每 30 天一个月度边界。[明代财政案例](/tutorials/cases/ming-fiscal/)逐步讲解示例流程、三个起点、trace 和各个选项。要验证本页描述的约定，可以运行这些测试：
+
+```shell
+cargo test -p canwu-ming-fiscal-reference --test reference
+cargo test -p canwu-ming-fiscal --test pack
+cargo test -p canwu-fiscal --test gap_g13_fiscal_acting_actor
+```
+
+`reference` 测试覆盖过期拒绝、一条鞭法转型、持有人报告、伪造输入、凭证复用以及快照和重放；`pack` 覆盖覆盖声明与编译；`gap_g13_fiscal_acting_actor` 覆盖代理角色。
+
+## 延伸阅读
+
+- [结算系统](/architecture/settlement/)：十四个阶段，以及写入何时可见
+- [安全读取与呈现状态](/developer/reading-state/)：视图与持有人知识查询
+- [存档、重放与派生分支](/developer/persistence/)：快照、日志和精确重放
+- [通过插件扩展](/developer/extensions/)：插件、领域记录和边界系统
+- [粮食、生产与军事补给](/tutorials/cases/production-economy/)：执行适配器可以在其中完成实际转移的资源领域
+- 仓库文档：[canwu-fiscal README](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/README.md) 和[明代财政案例说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md)

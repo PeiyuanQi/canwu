@@ -1,0 +1,241 @@
+---
+title: 技术系统
+description: 参伍如何从证据出发模拟技术，让试验依次变成本地能力、设备安装、按用途采用和技术传播，以及可选的历史研究插件放在哪里。
+sidebar:
+  order: 12
+  label: 技术系统
+---
+
+import MermaidDiagram from "../../../components/MermaidDiagram.astro";
+
+<nav class="architecture-links" aria-label="技术系统导航">
+  <span class="architecture-links-label">继续阅读：</span>
+  <a href="/architecture/systems/">领域系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/architecture/settlement/">结算系统</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/tutorials/technology-diffusion/">实践：技术传播</a>
+  <span class="architecture-links-separator" aria-hidden="true">·</span>
+  <a href="/en/architecture/technology/">English version</a>
+</nav>
+
+`canwu-technology` 即[技术模拟扩展](/reference/terminology/)，跟踪一项技术从试验到传播的每一步：先在某个工坊里试验，再有人取得操作资格、安装设备、为某种用途采用，最后传授到别的地方。每一步都是一条独立的记录，并引用支撑它的证据。这个 crate 没有全局科技树、时代等级和研究点数，也不会自动解锁任何东西。游戏要模拟发明、地方性技艺，或技术在不同地点之间的传播时，就会用到它。
+
+`canwu-history-research` 是另一个可选的 crate。它的插件记录历史学者对技术证据的评估，模拟出来的技术结果保持不变。
+
+## crate 与所有权
+
+| crate | 负责什么 | 发布情况 |
+| --- | --- | --- |
+| `canwu-technology` | `canwu.technology` 命名空间：17 种记录、带请求标识的命令 `apply_technology_operation_v1`、结果输入 `technology_result_v1`、三个边界系统、五种持有人知识、参考评估器和恢复校验 | 已发布到 crates.io |
+| `canwu-history-research` | 三个可选插件，各自拥有独立的命名空间和一种只能创建的 `assessment` 记录；另有一个供可信上层应用使用的查询和恢复校验 | 已发布到 crates.io |
+
+<MermaidDiagram
+  label="crate 依赖：canwu-technology 依赖 canwu-api；canwu-history-research 和 canwu-production 依赖 canwu-technology；上层应用向两个扩展提供输入"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文描述了同样的依赖关系。"
+  renderFailureMessage="图表预览不可用；下文描述了同样的依赖关系。"
+  definition={`flowchart TB
+    Host["上层应用<br/>目录记录、命令、<br/>提供方结果"]
+    History["canwu-history-research<br/>可选的评估插件"]
+    Tech["canwu-technology<br/>TechnologyPlugin"]
+    Production["canwu-production<br/>绑定精确技术记录"]
+    Api["canwu-api"]
+    Host -- "场景记录、命令、<br/>结果输入" --> Tech
+    Host -- "评估命令" --> History
+    History -- "依赖" --> Tech
+    Production -- "依赖" --> Tech
+    Tech -- "依赖" --> Api
+    History -- "依赖" --> Api
+`}
+/>
+
+两个 crate 都只建立在公开契约之上。`canwu-api` 没有重新导出它们，请自行加入 `Cargo.toml`。在下游，`canwu-production` 会把一个精确的 `TechniqueRevision`、一个 `CapabilityQualification` 或 `ImplementationRecord`，以及工艺要求时的 `AdoptionRecord` 绑定到自己的生产执行和项目上，详见[资源与生产](/architecture/resources-production/)。
+
+## 核心模型
+
+只能创建的记录一经写入就不再改变。带版本的记录每接受一次更新就产生一个新版本，而且更新不能把记录转给另一个持有人。
+
+| 类型 | 变更方式 | 表示什么 |
+| --- | --- | --- |
+| `MetricSchema` | 只能创建 | 一个可度量的量：名称、单位、整数尺度和取值范围 |
+| `TechniqueSpec` | 只能创建 | 一项技术的功能：它的条件组，以及每种操作的 `QualificationRule` |
+| `TechniqueRevision` | 只能创建 | 某项技术的一份确定配方或设计，带参数、前序修订和评估器 ID |
+| `ApplicationSpec` | 只能创建 | 技术的一种用途，带判断该用途是否可行的条件组 |
+| `TechnicalProgram` | 带版本 | 某个持有人在一处地点开展的研究、改良、培训、修理、逆向工程或故障排查 |
+| `TechnologyExecutionIntent` | 带版本 | 授权某个指定提供方在一段时间内为某个项目返回一次试验、生产或发明结果 |
+| `ExperimentAttempt`、`ProductionRun` | 只能创建 | 提供方在给定输入、环境和资产下得到的一次结果，附 `EvaluationResult` |
+| `AttemptObservation` | 只能创建 | 某个持有人对一次试验的测量，带方法和不确定度 |
+| `TechnicalClaim`、`ClaimAssessment` | 只能创建 | 某个持有人提出的技术主张，以及某个持有人对一条主张的置信度 |
+| `CapabilityQualification` | 带版本 | 某个持有人能在某地执行某个修订的一种操作，以试验为依据，自指定时间起生效 |
+| `AssetBinding` | 带版本 | 某个持有人在某地的设备，引用提供方的资产证据，带能力标签和状况 |
+| `ImplementationRecord` | 带版本 | 某地的一次安装：修订、资格、资产、产能和可靠度 |
+| `AdoptionRecord` | 带版本 | 某地对一种用途的采用：状态（`Trial`、`Committed`、`Suspended`、`Abandoned`）、规模、安装记录和可行性证据 |
+| `TransmissionOpportunity` | 带版本 | 以某种 `TransmissionMode` 从来源传到目的地持有人和地点的学习机会 |
+| `TechnologyOperation` | 只能创建 | 一次已准入操作的最终结果：`Applied` 并指向结果记录，或 `Rejected` 并带拒绝代码 |
+
+上层应用用 `TechnologyCatalogRecord::into_initial_record` 把目录，也就是前四种类型，作为初始场景记录载入，并用 `initial_record_version` 引用它们。此后的每次变化都是一个 `TechnologyRecordChange`：`Create`，或带 `expected_version` 的 `Update`，其中包着一个 `TechnologyRecordPayload`。
+
+## 从证据到采用与传播
+
+<MermaidDiagram
+  label="记录链：目录、项目、获授权的试验、观察、资格、安装、采用，以及传播到学习者的项目"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下表描述了同一条记录链。"
+  renderFailureMessage="图表预览不可用；下表描述了同一条记录链。"
+  definition={`flowchart TB
+    Catalog["目录<br/>TechniqueSpec、TechniqueRevision、<br/>ApplicationSpec"] --> Program["TechnicalProgram"]
+    Program --> Intent["TechnologyExecutionIntent"]
+    Intent --> Attempt["ExperimentAttempt<br/>提供方结果"]
+    Attempt --> Obs["AttemptObservation<br/>测量"]
+    Attempt --> Qual["CapabilityQualification"]
+    Asset["AssetBinding"] --> Impl["ImplementationRecord"]
+    Qual --> Impl
+    Impl --> Adopt["AdoptionRecord<br/>某地的一种用途"]
+    Obs -- "可行性证据" --> Adopt
+    Impl --> Teach["TransmissionOpportunity"]
+    Ext["ExternalTransmissionSourceV1<br/>地图外的师傅"] -.->|或| Teach
+    Teach --> Learner["学习者的 TechnicalProgram"]
+`}
+/>
+
+图中每个箭头都是一次单独的操作。试验通过只算证据；资格、安装和采用各自需要一条命令。需要保持原意的关联使用[精确领域记录版本](/reference/terminology/)（`DomainRecordVersionRef`），它同时固定记录、版本和确立该版本的证据。某项安装后来停用时，采用记录仍按它当初引用的那个版本解释。
+
+| 环节 | 插件检查什么 |
+| --- | --- |
+| 试验到资格 | 所引用的试验互不重复，且修订、操作和地点都一致；持有人或指定的操作者至少亲自做过一次；`reliability_per_mille` 等于成功次数 × 1,000 ÷ 试验次数。处于有效状态的资格还要满足 `QualificationRule`：最少成功次数、最低可靠度，要求独立复现时至少有两名不同的操作者。 |
+| 资格到安装 | 新建或重新启用的安装必须引用有效资格的当前版本，该资格的修订、地点和持有人与安装一致，并在 `installed_at` 时有效；所引用的资产也必须是当前版本、处于有效状态，且由同一持有人在同一地点持有。 |
+| 安装到采用 | `Trial` 或 `Committed` 状态的采用必须引用有效安装的当前版本，这些安装位于采用者所在地点、归采用者所有，且其修订属于该用途对应的技术。`scale` 不能超过这些安装的产能之和，可行性检查也必须通过。 |
+| 来源到传播 | 新的机会必须引用在该边界中为当前版本、并在机会开启时有效的来源资格或安装。此后只能修改 `active`，而且只能从开放改为关闭。 |
+| 传播到学习者 | `resulting_program` 必须是目的地持有人在目的地的项目，针对同一修订，模式为 `Training`、`Investigation`、`Adaptation` 或 `ReverseEngineering`，开始时间不早于机会开启时间。 |
+| 项目到新修订 | 运行时发明：提供方结果创建一个 `TechniqueRevision`，绑定一个处于 `Investigation`、`Adaptation` 或 `ReverseEngineering` 模式的有效项目、对应的精确执行意图和发现证据。项目本身针对某个修订时，新修订必须把它列为前序修订。 |
+
+`Demonstration`、`Apprenticeship` 和 `PersonnelTransfer` 这三种实践传播模式必须恰好引用一个来源：一个模拟中现有的 `source_capability`，或一个[外部传播来源](/reference/terminology/)（`ExternalTransmissionSourceV1`）。外部来源是初始场景中一条归属 `canwu.technology` 以外的内容记录，带 0 到 1,000 的声明可靠度（千分比）。它在模拟中没有持有人和地点，所以由目的地开启机会；来源是模拟中的持有人时，由来源持有人开启。`DocumentAccess` 和 `ArtifactInspection` 需要来源持有人，`IndependentInvestigation` 不需要来源。开启机会不会给学习者增加任何知识或能力，学习者的项目仍然要自己做试验、取得资格。
+
+## 运行流程
+
+<MermaidDiagram
+  label="操作生命周期：命令或提供方结果变成输入，第 7 阶段应用，第 12 阶段消费执行意图，第 13 阶段发布持有人知识"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下方步骤描述了同一生命周期。"
+  renderFailureMessage="图表预览不可用；下方步骤描述了同一生命周期。"
+  definition={`flowchart TB
+    Cmd["上层应用：apply_technology_operation_v1<br/>TechnologyCommandEnvelope"] --> Handler["命令处理器<br/>权限与幂等检查"]
+    Handler --> Queued["technology_command_v1<br/>排队的输入"]
+    Result["上层应用：technology_result_v1<br/>TechnologyResultEnvelope"] --> Admit["第 1 阶段<br/>边界准入输入"]
+    Queued --> Admit
+    Admit --> Apply["第 7 阶段：technology_operation_apply_v1<br/>记录变化与 TechnologyOperation"]
+    Apply -- "超出预算" --> Reject["technology_operation_rejected_capacity_v1"]
+    Apply --> Finalize["第 12 阶段：technology_intent_finalize_v1<br/>消费精确执行意图"]
+    Finalize --> Publish["第 13 阶段：technology_knowledge_publish_v1<br/>持有人知识"]
+`}
+/>
+
+1. 主动发起的变更通过带请求标识的[领域命令](/reference/terminology/) `apply_technology_operation_v1`（`TECHNOLOGY_COMMAND`）进入。它的 `TechnologyCommandEnvelope` 包含操作 `id`、`subject` 持有人和一项变化。处理器拒绝旧式直接命令。`subject` 必须拥有该记录：个人作为 `subject` 时必须是命令的签发者；实体作为 `subject` 时，必须是某个绑定了控制者的决策中的命令主体。用同一 `id` 重发相同输入不会产生任何效果；同一 `id` 配不同输入会以幂等冲突失败。命令被接受后，会排入一条 `technology_command_v1` 输入。
+2. 提供方结果以 `technology_result_v1`（`TECHNOLOGY_RESULT_INGRESS`）插件输入的形式进入，由上层应用提交。`TechnologyResultEnvelope` 写明操作 `id`、`provider`、精确的 `execution_intent` 和变化。只有这条路径能创建 `ExperimentAttempt`、`ProductionRun`、`AttemptObservation` 和运行时 `TechniqueRevision`，它也只能创建这几种记录。试验、生产或发明结果必须引用一个待处理的执行意图：提供方相同，处在时间窗口内，所属项目是当前版本、处于有效状态，且由签发意图的持有人主持。结果要与意图的请求逐项一致；如果项目列出了提供方要求，只接受其中的提供方。观察记录不引用执行意图。
+3. 第 7 阶段（`DomainDeltaProposal`）：只要边界准入了技术输入，`technology_operation_apply_v1` 就会运行。它先核对每条命令输入是否与获授权的命令一致，再按 `id` 顺序处理新操作。每个操作写入它的记录变化和一条 `TechnologyOperation` 结果。检查失败的操作会得到 `Rejected` 结果和拒绝代码，例如 `invalid_domain_record` 或 `domain_record_version_conflict`，边界照常提交。同一边界中同一 `id` 出现两种不同输入时，两者一起被拒绝。
+4. 第 12 阶段（`StrategicAggregation`）：`technology_intent_finalize_v1` 把提供方结果已被应用的执行意图标为 `Consumed`，并引用那条输入、操作版本和结果版本。如果同一边界中有两个结果引用同一个意图，或有命令在同一边界取消了该意图，第 7 阶段已经拒绝了这些结果。
+5. 第 13 阶段（`PerspectiveAndReportMaterialization`）：`technology_knowledge_publish_v1` 为已应用的记录发布持有人知识。
+
+三个系统都由事件驱动，并声明 `SameBoundary` 可见性，所以第 12、13 阶段能读到第 7 阶段写入的内容。命令可以创建待处理的执行意图，或者取消一个未被改动的待处理意图；只有第 12 阶段能消费它。阶段顺序见[结算系统](/architecture/settlement/)。
+
+## 一个评估器适用所有技术
+
+每个 `TechniqueRevision` 都写明自己的评估器，校验只接受 `REFERENCE_EVALUATOR_V1`（`canwu.technology.threshold-evaluator.v1`）。代码里没有任何技术名称，造纸术和蒸汽机的区别只存在于目录数据中。
+
+`evaluate_attempt` 先把修订的参数并入测量值，再检查技术的 `requirements`；测量值与修订参数矛盾时报错。`evaluate_application` 检查用途的 `viability` 条件组。两者都返回 `EvaluationResult`：
+
+1. `RequirementGroup` 在 `any_of` 中列出若干备选阈值。每个 `MetricThreshold` 指定一个精确的指标版本、`AtLeast` 或 `AtMost`，以及一个整数界限。
+2. 没有测量值的阈值不会成立；组内阈值都没有测量值时，该组不满足。组内任一阈值成立，该组即满足。
+3. 没有任何组失败时结果通过，并列出 `satisfied_groups` 和 `failed_groups`。
+4. 空的条件组、未知指标，或者阈值、测量值超出指标范围，都会报错。
+
+插件校验证据时会重新运行评估器。`ExperimentAttempt` 按输入、环境和输出重算；`ProductionRun` 按输入和输出重算，并要求 `successful` 等于 `passed`；`AdoptionRecord` 按 `viability_metrics` 重算，其中每个值都必须出现在所引用的某一条观察或生产输出中，且只出现一次。保存的结果与重算结果不一致时，记录会被拒绝。因此，提供方提交结果之前应当用同样的两个函数计算。所有数值都是整数，快照、派生分支和精确重放都会得到相同的结论。
+
+[技术传播教程](/tutorials/technology-diffusion/)列出了测试中用这同一份契约运行的五个历史案例。
+
+## 知识与可见性
+
+技术记录属于[领域记录](/reference/terminology/)。可信的上层应用可以直接读取，例如使用 `TechnologyRecordSet::load_host`。玩家和游戏内的智能体读取持有人知识。第 13 阶段为五种已应用的记录发布知识：
+
+| 已应用的记录 | 获得知识的持有人 | `canwu.technology` 中的知识种类 |
+| --- | --- | --- |
+| `TechnicalClaim` | `asserted_by` | `claim_awareness` |
+| `AttemptObservation` | `observer` | `attempt_observation` |
+| `CapabilityQualification` | `holder` | `qualified_practice` |
+| `ImplementationRecord` | `owner` | `implementation_observation` |
+| `AdoptionRecord` | `adopter` | `adoption_assessment` |
+
+每条知识都引用精确的记录版本，并带上记录内容。其他记录不发布知识。创建新修订不会让任何人知道它，持有人要通过观察、技术主张或传播才会了解。被拒绝的操作同样不发布知识。玩家客户端用 `viewer_for_actor(actor)` 和 `query_knowledge` 读取自己的记录，详见[安全读取与呈现状态](/developer/reading-state/)。
+
+## 历史研究插件
+
+`canwu-history-research` 提供三个[历史研究插件](/reference/terminology/)。每个插件只写入自己的 `assessment` 记录，读取技术记录只是为了核对评估所引用的内容。无论一个都不启用、只启用一个还是全部启用，基础技术记录和结果都一样；没有启用的插件不会带来任何记录或处理开销。只有一次运行确实要启用全部三个插件时，才使用 `HistoricalResearchSuite::plugins()`。
+
+| 插件 | 命名空间 | 评估对象 |
+| --- | --- | --- |
+| `HistoricalSourcesPlugin` | `canwu.history.sources` | 文献的年代范围、真伪、可靠性和来源链摘要 |
+| `HistoricalPracticePlugin` | `canwu.history.practice` | 参与者及其实践关系、可选的笔记摘要，以及负结果 |
+| `ProductionArchaeologyPlugin` | `canwu.history.production_archaeology` | 观察到的遗存或样品、推断的工艺，以及年代范围 |
+
+评估通过命令 `record_assessment_v1`（`ASSESSMENT_COMMAND`）进入，载荷是 `HistoricalAssessmentCommand`。评估者必须就是命令的 `subject`，权限规则与技术命令相同。命令排入一条 `assessment_v1` 输入，再由第 7 阶段系统 `historical_assessment_apply_v1` 创建记录。所有评估共用 `AssessmentCore`：评估者、一个精确的评估对象版本、方法及其版本、截至时间 `as_of`、不确定度、摘要哈希、引用，以及可选的反驳和取代关系。所引用的证据必须在 `as_of` 之前已经存在，也不能引用临时的输入记录。反驳和取代只能指向针对同一精确对象的其他评估。
+
+评估命令属于可信上层应用的输入。插件不检查评估者是否真的看得到每一份所引用的资料；如果玩家需要先取得访问权，请在自己的研究流程插件中校验之后再提交。`HistoricalAnalysis::for_subject` 以 `HistoricalAssessmentView` 的形式返回某条记录的全部评估，它是可信上层应用的只读查询，不写入任何状态。
+
+## 随机性、持久化与重放
+
+两个 crate 都不进行随机抽样，也不保存任何概率。一次试验或生产得到什么结果，由你的提供方决定。如果提供方使用了参伍的随机抽样，可以把抽样记录放进证据字段，例如 `discovery_evidence` 或技术主张的 `source_evidence`。
+
+快照保存技术记录、操作结果和持有人知识。每个载荷还列出它依赖的旧精确版本，压缩存档时会保留后续校验需要的记录内容。恢复时请使用模块提供的包装函数：`from_technology_snapshot_json`、`from_technology_checkpoint_journal` 或 `replay_technology_from_journal`；用其他加载方式之后，调用 `validate_technology_runtime`。这些函数先执行内核的通用检查，再重演技术语义：根据每个边界准入的输入重新计算操作结果，核对已消费的执行意图，检查所引用的证据在每个因果切点上是否已经存在，并核对每条知识的绑定。通过了通用检查、却违反技术规则的状态会被拒绝。
+
+精确重放从已记录的输入中读取提供方结果，不会再次运行你的提供方代码。历史研究 crate 也有对应的函数：`from_historical_research_snapshot_json`、`from_historical_research_checkpoint_journal`、`replay_historical_research_from_journal` 和 `validate_historical_research_runtime`。恢复和重放时请使用运行时的同一组插件，因为插件组合属于[插件语义环境](/reference/terminology/)。
+
+## 上层应用需要提供什么
+
+- 目录：指标定义、技术规格、修订和用途，作为初始场景记录载入。
+- 外部传播来源所引用的内容记录，由你自己的某个插件拥有。
+- 权限：每条命令由哪个人签发；持有人是机构时，需要经过绑定控制者的决策。
+- 提供方：执行试验和生产、测量数值、计算 `EvaluationResult` 并提交结果输入的代码，以及这些结果背后的随机性。
+- 经济背景：劳动力、资本、燃料、材料和政治支持，可以由你自己的规则提供，也可以接入 `canwu-resource` 和 `canwu-production`。
+- 研究流程：如果玩家需要先取得访问权才能提交历史评估。
+- 呈现持有人知识的客户端界面。
+
+## 限制与预算
+
+技术扩展的上限由 `TechnologyLimitsV1::canonical()` 规定：
+
+| 上限 | 取值 |
+| --- | --- |
+| `max_payload_bytes` | 每个记录载荷 16 KiB |
+| `max_references`、`max_collection_entries` | 每条记录 32 个引用，每个列表 64 项 |
+| `max_ancestry_depth` | 修订前序最多 8 代，且不能成环 |
+| `max_total_records`、`max_records_per_kind` | 总计 5,000 条记录（含操作结果），每种 5,000 条 |
+| `max_knowledge_records` | 所有持有人合计 5,000 条技术知识 |
+| `max_mutations_per_boundary` | 64；每个新操作计 2 次，引用执行意图的提供方结果计 3 次 |
+| `max_publications_per_boundary` | 每个边界发布 32 条知识 |
+
+经过校验的文本字段，例如名称、单位、方法和技术主张的内容，最多 256 字节，且不含控制字符。操作、记录和提供方的 ID 最多 128 个字符，只能使用 ASCII 字母、数字和 `-`、`_`、`.`、`:`。如果某个边界的新操作会超出记录上限或变更预算，这个边界的所有新操作都会被拒绝，各自产生一条 `technology_operation_rejected_capacity_v1` 事件，不写入任何记录，之后可以重新提交。知识超出预算时发出 `technology_knowledge_rejected_capacity_v1`。已经有结果的重发操作不占用预算。
+
+每个历史研究插件每个边界最多接受 21 条新评估，最多保留 1,000 条。一条评估最多 32 条引用、32 条反驳、32 条取代关系，载荷不超过 16 KiB；实践评估最多列出 32 名参与者。超出时发出 `historical_assessment_rejected_capacity_v1`。无论哪种情况，后续边界都照常运行。
+
+## 动手试试
+
+```shell
+cargo run -p canwu-technology --example technology_diffusion
+cargo test -p canwu-technology --test framework
+cargo test -p canwu-technology --test gap_g36_technology_external_source
+cargo test -p canwu-history-research --test plugins
+```
+
+示例先输出 `adoption=Committed, scale=10, learner_knowledge=0`，再确认快照恢复和精确重放都与实际运行一致。[技术传播教程](/tutorials/technology-diffusion/)逐步讲解了这个示例。`framework` 测试覆盖五个历史案例、容量拒绝和恢复；外部来源测试让一位地图外的师傅开启一次示范；`plugins` 测试覆盖历史研究插件。
+
+## 延伸阅读
+
+- [技术传播教程](/tutorials/technology-diffusion/)：可运行的示例讲解和五项技术的反事实
+- [资源与生产](/architecture/resources-production/)：生产执行如何绑定精确的技术证据
+- [结算系统](/architecture/settlement/)：边界的十四个阶段
+- [通过插件扩展](/developer/extensions/)和[存档、重放与派生分支](/developer/persistence/)
+- [技术与历史研究框架](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/technology-history-research-framework.md)设计文档，以及[技术扩展的家用硬件基准](https://github.com/PeiyuanQi/canwu/blob/main/benchmarks/2026-08-22-technology.md)

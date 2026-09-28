@@ -1,180 +1,205 @@
 ---
 title: 军阀请求邻军援助
-description: 用可持久化、可解释、可精确重放的决策链处理一场进行中战役的援军请求。
+description: 控制者用效用策略为援军请求打分，选中的选项转成普通命令执行，整个决策可以按决策轨迹重放。
 sidebar:
   order: 2
   label: 军阀援军决策
 ---
 
-import { LinkButton, Steps } from "@astrojs/starlight/components";
+import { LinkButton } from "@astrojs/starlight/components";
+import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-## 1. 要解决什么问题
+## 场景
 
-假设你正在制作一个军阀混战时期的历史模拟。军阀甲正在交战，请求相邻的
-军阀乙派兵支援。最初，军阀乙只知道共同敌人确实存在，却还不能确认补给路线
-是否安全；新情报到达后，“派兵支援”才成为一个可执行选项。
+军阀甲正在交战，请求相邻的军阀乙出兵支援。一开始，军阀乙知道双方有共同的敌人，
+但无法确认补给线是否安全，所以唯一的选项是拒绝。补给线得到确认后，“派兵支援”
+成为第二个选项。军阀乙的 AI 给两个选项打分并做出选择，选中的结果会调动军阀乙的军队。
 
-你需要的不只是让 AI 返回“同意”或“拒绝”，而是一条可以进入正式游戏循环的
-决策链：
+这个示例回答的问题是：AI、玩家或模型做出的选择，怎样按角色的权限校验、记录下来，
+并在重放时不必再次询问决策者？
 
-- 情报变化后，安全地更新当前可选方案；
-- 无论决策者是 AI、玩家还是外部模型，都只能选择已有选项，不能凭空生成命令；
-- 选中“派兵支援”后，由获授权的控制者（controller）提交经过验证的命令；
-- 保存每次尝试、评分和执行结果，使存档恢复与精确重放不必再次询问决策者。
+场景是带北洋时期风格的合成数据，不对应具体人物或史实事件。
 
-这是一个带北洋时期风格的合成案例，不是对具体人物、机构或有记录事件的复原。人物性格、情报来源和“为什么值得援助”等历史语义
-仍由你的领域包定义；参伍负责守住决策、权限、命令和证据之间的边界。
+## 示例涉及的引擎部件
 
-## 2. 我们如何实现
+- [决策票据](/reference/terminology/)（`DecisionTicket`）：一个持久化保存的决策问题，
+  附带带版本号的决策选项（`DecisionOption`）列表。
+- [控制者](/reference/terminology/)（controller，`DecisionControllerBinding`）：
+  由谁决策、使用哪个决策策略、以谁的权限行动。
+- 效用策略 `WeightedUtilityPolicy`：用整数权重为选项打分，并把每个因子的贡献写入
+  决策轨迹（`DecisionTrace`）。
+- 选中的选项转成[命令](/developer/integration/)，和其他命令走同一套校验。
+- 整个决策的快照恢复与[精确重放](/developer/persistence/)。
 
-这个案例把多个系统串在一起：
-
-| 系统 | 在案例中的作用 | 相关文档 |
-| --- | --- | --- |
-| 决策票据、控制者与决策策略 | 保存问题、当前选项、决策身份和评分过程 | 本页下文 |
-| 权限与命令入口 | 把选中的决策选项转成经过验证的命令 | [架构总览](/architecture/)、[接入并驱动模拟运行](/developer/integration/) |
-| 结算边界 | 准入决策输入，持久化决策轨迹，再执行派生命令 | [结算系统](/architecture/settlement/) |
-| 角色相对信息 | 用军阀乙可见的事实构造决策上下文（context），避免泄露全知状态 | [安全读取与呈现状态](/developer/reading-state/) |
-| 存档与精确重放 | 保存票据、决策尝试、决策轨迹和命令证据 | [存档、重放与派生分支](/developer/persistence/) |
-
-先运行示例：
+## 运行
 
 ```shell
 cargo run -p canwu-api --example decision_ticket
 ```
 
-程序会输出一条完整的 `DecisionTrace`。`WeightedUtilityPolicy` 最终选择
-`send-aid`，决策轨迹会记录每个选项的总分和逐项贡献；示例随后恢复存档并执行
-精确重放，验证两条路径得到完全相同的快照。
-
-### 实现流程
+程序以 JSON 打印决策轨迹，再确认存档恢复和重放结果。下面的输出做了删减，只保留
+`send-aid` 的因子列表：
 
 ```text
-军阀乙可见的事实
-  -> 打开 DecisionTicket
-  -> 新情报到达，ReplaceOptions
-  -> 效用策略只选择已有 option ID
-  -> 控制者派生签发者与权限
-  -> 普通 Command 验证和执行
-  -> 持久化 DecisionTrace
+{
+  "id": 1,
+  "ticket_id": 1,
+  "ticket_version": 2,
+  "controller_id": "warlord-b-ai",
+  "policy": { "kind": "utility", "id": "aid-utility", "version": "1" },
+  "outcome": { "type": "selected", "option_id": "send-aid" },
+  "summary": "utility policy selected send-aid",
+  "evaluations": [
+    { "option_id": "decline", "available": true, "score": -40, ... },
+    {
+      "option_id": "send-aid",
+      "available": true,
+      "score": 250,
+      "factors": [
+        { "factor": "alliance", "value": 90, "weight": 3, "contribution": 270 },
+        { "factor": "home_defense", "value": -20, "weight": 1, "contribution": -20 }
+      ]
+    }
+  ],
+  "command_request_id": 1
+}
+snapshot_restore=ok exact_replay=ok
 ```
 
-<Steps>
-1. 注册 `warlord-b-ai` 控制者，把它绑定到明确的决策策略身份、负责人物和可控制军队。
-2. 打开援军请求票据。补给路线尚未确认，因此最初只有“拒绝援助”可选。
-3. 路线确认后，通过 `DecisionMutation::ReplaceOptions` 更新决策上下文，并加入 `send-aid`。
-4. 使用 `WeightedUtilityPolicy` 为当前选项计算确定性整数分数。
-5. 调用 `drive_decision()` 生成决策结算输入；下一个规范边界持久化决策轨迹，并把选中的命令交给普通命令入口。
-6. 保存快照、重新加载并执行精确重放，确认重放不需要再次运行决策策略。
-</Steps>
+`ticket_version` 为 2，因为选项被替换过一次。`decline` 得分为
+`-40 × 3 + 80 × 1 = -40`，`send-aid` 得分为 `90 × 3 − 20 × 1 = 250`。
 
-### 第一步：绑定决策身份与行动权限
+## 决策流程
+
+<MermaidDiagram
+  label="军阀援军决策跨三个结算边界的时序"
+  diagramLoading="正在渲染图表……"
+  sourceSummary="查看图表源码"
+  noScriptMessage="图表预览需要 JavaScript；下文的代码走读描述了同样的步骤。"
+  renderFailureMessage="图表预览不可用；下文的代码走读描述了同样的步骤。"
+  definition={`sequenceDiagram
+    participant Host as 上层应用
+    participant Canwu as 参伍
+    participant Policy as WeightedUtilityPolicy
+    Host->>Canwu: 注册控制者，开启票据（只有 decline）
+    Note over Canwu: 边界 1：票据版本 1
+    Host->>Canwu: ReplaceOptions（补给线已确认）
+    Note over Canwu: 边界 2：票据版本 2
+    Host->>Canwu: drive_decision(policy)
+    Canwu->>Policy: 为票据版本 2 打分
+    Policy-->>Canwu: 选择 send-aid
+    Note over Canwu: 边界 3：写入决策轨迹，执行调动命令
+`}
+/>
+
+## 代码走读
+
+代码都在
+[`decision_ticket.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/decision_ticket.rs)
+中。示例使用 `Canwu::demo(1918)` 提供的兼容场景（已标记为 deprecated），
+通过 `Canwu::demo_ids()` 取得指挥官、军队和地区的 ID。
+
+### 1. 注册控制者
+
+`open_aid_request` 把控制者 `warlord-b-ai` 绑定到一个决策策略身份、它借用其权限的
+指挥官，以及它可以调动的军队：
 
 ```rust
 let controller = DecisionControllerBinding::new(
     "warlord-b-ai",
-    DecisionPolicyIdentity::new(
-        DecisionPolicyKind::Utility,
-        "aid-utility",
-        "1",
-    ),
-    DecisionAuthority::Actor { actor: ids.commander },
+    DecisionPolicyIdentity::new(DecisionPolicyKind::Utility, "aid-utility", "1"),
+    DecisionAuthority::Actor {
+        actor: ids.commander,
+    },
 )
 .with_command_subject(EntityRef::Army(ids.army));
 ```
 
-控制者不是领域 AI 的“大脑”。它只持久化三件事：由谁作决定、使用哪个
-决策策略，以及选中选项后可以代表谁控制什么。决策策略不会获得签发者、席位、
-permission profile，也拿不到可变世界引用。
+它以 `DecisionMutation::RegisterController` 提交这个绑定。决策策略本身只拿到票据；签发者、
+权限和命令对象都保存在持久化的绑定里。
 
-### 第二步：用票据保存一个明确问题
+### 2. 开启只有一个选项的票据
 
-`DecisionTicketDraft` 保存稳定定义、决策者、控制者、截止时间、显式
-决策上下文和当前选项。示例开始时只提供 `decline`：
+同一个函数用 `DecisionTicketDraft` 提交 `DecisionMutation::Open`。决策上下文记录
+军阀乙已知的情况，唯一的选项是 `decline`：
 
 ```rust
-DecisionMutation::Open {
-    ticket: DecisionTicketDraft {
-        id: DecisionTicketId::new(1),
-        definition: "beiyang.request-military-aid".to_owned(),
-        decision_maker: EntityRef::Person(ids.commander),
-        assigned_controller: "warlord-b-ai".to_owned(),
-        summary: "Neighboring warlord requests immediate military aid".to_owned(),
-        context: DecisionContext::new(
-            "beiyang.aid-request.v1",
-            json!({ "common_enemy": true }),
-        ),
-        options: vec![DecisionOption::new("decline", "Decline aid")],
-        deadline: Some(now + SimDuration::days(2)),
+context: DecisionContext::new(
+    "beiyang.aid-request.v1",
+    json!({
+        "requester": "warlord-a",
+        "battle": "ongoing-front",
+        "common_enemy": true
+    }),
+),
+options: vec![DecisionOption {
+    action: DecisionAction::None,
+    utility_inputs: BTreeMap::from([
+        ("home_defense".to_owned(), 80),
+        ("alliance".to_owned(), -40),
+    ]),
+    ..DecisionOption::new("decline", "Decline aid")
+}],
+deadline: Some(now + SimDuration::days(2)),
+```
+
+两条变更都通过 `enqueue_decision` 入队，`step_canonical()` 结算的边界会开启票据，
+版本为 1。实际应用中，应当用军阀乙的[角色知识](/developer/reading-state/)构造
+决策上下文，让决策策略只看到军阀乙知道的事实。
+
+### 3. 补给线确认后替换选项
+
+`refresh_aid_options` 提交 `DecisionMutation::ReplaceOptions`，带上
+`expected_version: 1`、加入 `"route_confirmed": true` 的新上下文，以及两个选项。
+新的 `send-aid` 选项携带一条序列化命令：
+
+```rust
+DecisionOption {
+    action: DecisionAction::Command {
+        command: serde_json::to_value(Command::OrderMovement {
+            subject: EntityRef::Army(ids.army),
+            destination: ids.eastern_territory,
+            cargo: Vec::new(),
+        })?,
     },
-}
+    utility_inputs: BTreeMap::from([
+        ("home_defense".to_owned(), -20),
+        ("alliance".to_owned(), 90),
+    ]),
+    ..DecisionOption::new("send-aid", "Send the neighboring army")
+},
 ```
 
-正式应用应从军阀乙的角色知识或观察结果构造决策上下文，而不是把
-全知的世界状态直接交给决策策略。
+票据升到版本 2。针对版本 1 准备的 Human、External 或 LLM 答复会被拒绝，过期答复
+无法在新的选项集合里生效。在这个示例中，补给线确认是作者设定的场景输入；研究型应用
+应为它引用一条证据记录。
 
-### 第三步：让新情报显式改变选项
+`Command::OrderMovement` 是为这个兼容示例保留的旧命令变体。新应用应使用
+`canwu-reference-world` 的 `MovementCommand`，或自己插件中的命令，参见
+[移动军队](/tutorials/move-army/)。票据选项以 JSON 保存命令，两种写法都可以。
 
-本案例中的路线确认由上层应用作为场景观察提供，并未绑定史料证据。研究应用应先关联证据记录，再把它称为权威事实。随后应用提交一次由 `expected_version` 保护的选项
-替换：
+### 4. 为选项打分
 
-```rust
-DecisionMutation::ReplaceOptions {
-    ticket_id: DecisionTicketId::new(1),
-    expected_version: 1,
-    context: DecisionContext::new(
-        "beiyang.aid-request.v1",
-        json!({ "common_enemy": true, "route_confirmed": true }),
-    ),
-    options: vec![decline, send_aid],
-}
-```
-
-更新后，票据版本会递增。Human、External 或 LLM 决策策略如果仍提交旧版本
-答案，就会被拒绝，不会误选已经变化的选项集合。
-
-`send-aid` 可以保存一个序列化的既有参伍命令，但决策策略只能返回它的
-option ID。下面可运行的 `canwu-api` 示例是刻意保留的兼容性夹具；它用旧版
-`Command::OrderMovement` 验证通用决策框架：
-
-```rust
-DecisionOption::new("send-aid", "Send the neighboring army").with_command(
-    serde_json::to_value(Command::OrderMovement {
-        subject: EntityRef::Army(ids.army),
-        destination: ids.eastern_territory,
-        cargo: Vec::new(),
-    })?,
-)
-```
-
-新应用应通过 `canwu-reference-world` 编码 `MovementCommand`，或在自己的领域
-crate 中定义等价的插件命令。当前接入方式见[移动军队](/tutorials/move-army/)；
-决策票据可以保存任一形式，因为它持久化的是在控制者权限下选中的
-序列化命令。
-
-### 第四步：用效用评分解释为什么出兵
+`resolve_aid_request` 构造决策策略：
 
 ```rust
 let policy = WeightedUtilityPolicy::new(
     "aid-utility",
     "1",
     UtilityProfile {
-        weights: BTreeMap::from([
-            ("alliance".to_owned(), 3),
-            ("home_defense".to_owned(), 1),
-        ]),
+        weights: BTreeMap::from([("alliance".to_owned(), 3), ("home_defense".to_owned(), 1)]),
     },
 );
 ```
 
-每个选项提供由领域定义的整数输入。通用评估器计算 `value * weight`，
-使用稳定 option ID 处理平分，并把逐项贡献写入决策轨迹。引擎不理解“同盟信誉”或
-“本土防御”的历史含义；这些含义和权重属于领域或决策策略。
+每个可用选项的得分是其 `utility_inputs` 中各项 `value * weight` 之和；没有配置权重的
+因子按权重 0 计算。最高分胜出，同分时取 option ID 最小的选项。“同盟”和“本土防御”
+代表什么、各占多少权重，由你的领域代码决定。
 
-### 第五步：让决策策略选择，让控制者行动
+### 5. 结算票据并执行命令
 
 ```rust
-canwu.drive_decision(
+let evaluation = canwu.drive_decision(
     canwu.time(),
     0,
     DecisionRequestId::new(4),
@@ -182,63 +207,61 @@ canwu.drive_decision(
     DecisionTicketId::new(1),
     &policy,
 )?;
-canwu.step_canonical()?;
+assert!(matches!(evaluation, DecisionEvaluation::Prepared(_)));
+canwu.step_canonical()?.expect("decision resolution boundary");
 ```
 
-这里始终保留两道边界：
+`drive_decision` 对当前票据运行决策策略，并把结果作为决策输入入队。下一个边界中，
+参伍写入决策轨迹，并以控制者的权限提交 `send-aid` 的命令。这条命令同样要通过常规的
+权限、修订版本、时间和领域校验。决策策略只返回 option ID，因此换成玩家、外部服务或
+LLM，也无法生成新命令或冒用他人权限。
 
-- 决策策略只能选择票据中已有且未被阻止的选项。
-- 控制者从持久化绑定派生命令权限；命令仍要通过参伍的
-  普通权限、修订版本、时间和领域验证。
+### 6. 检查存档与重放
 
-所以，即使把效用策略换成玩家、外部服务或 LLM，也不会获得任意生成命令
-或伪造军阀乙权限的能力。
+`verify_persistence_and_replay` 从 JSON 恢复快照，再用 `Canwu::replay_from_journal`
+重建整个运行，断言两者都与原快照一致。重放使用已记录的决策输入和决策尝试，决策策略
+不再运行。
 
-### 第六步：保存决策轨迹，并在重放时复用证据
+在自己的代码中读取结果时，用 `Canwu::decision_trace(id)` 读取决策轨迹，用
+`Canwu::decision_attempt(request_id)` 读取某次决策请求被接受或拒绝的结果。修订版本
+或票据版本过期、或票据已关闭的请求，会记为一次被拒绝的决策尝试（`DecisionAttemptRecord`），模拟照常推进。
 
-`decision_attempts()` 返回每次规范准入的接受或拒绝结果。旧的修订版本、
-旧票据版本或已经关闭的票据会形成持久化拒绝，而不是让同一条输入持续回滚并
-卡住模拟。`decision_traces()` 则返回成功结算的选择结果、票据版本、决策策略
-身份、效用分项、外部证据和命令请求 ID。
+## 值得注意的地方
 
-快照会保存控制者、票据、当前选项、截止时间、决策尝试与决策轨迹。
-精确重放消费已经记录的决策输入、决策尝试和命令尝试，不会再次询问玩家、
-外部服务或模型。如果你要比较另一套决策策略，应从快照派生分支（`fork`）后
-产生新的决策输入；那是平行现实，不是精确重放。
+- 决策策略只能从已有选项中选择，既不能增加选项，也不能改动命令。
+- 替换选项会提升票据版本，针对旧版本准备的答复随之失效。
+- 决策轨迹逐个因子解释了选择的依据，重放时直接复用。
+- 想在同一局面下试另一种决策策略，就从快照[派生分支](/developer/persistence/)
+  （`fork`）并提交新的决策输入。这样得到的是[平行现实](/reference/terminology/)，
+  与精确重放分开。
 
-可替换的决策方式包括：
+## 动手改一改
 
-- `WeightedUtilityPolicy`：用确定性评分表达战略 AI、人物性格或军事条令参数；
-- `OrderedRulePolicy`：按规则顺序选择或推迟；
-- `GuardedUtilityPolicy`：前置规则效用策略，先由有序前置规则选择、推迟或排除选项，再做效用评分，并可在分数接近的最高选项之间随机平局决胜；
-- `QueuedHumanPolicy`：等待 UI 或玩家提交绑定票据版本的选择；
-- `QueuedExternalPolicy`：通过集成适配器调用外部决策服务；
-- `QueuedLlmPolicy`：把决策上下文和选项描述交给模型，但不暴露命令动作。
+- **权重。** 把 `home_defense` 改成 5。此时 `decline` 得分为 `-120 + 400 = 280`，
+  高于 `send-aid` 的 `270 - 100 = 170`。
+- **决策策略。** 把 `WeightedUtilityPolicy` 换成 `canwu-api` 中的其他策略类型：
+  - `OrderedRulePolicy` 按有序规则选择或推迟。
+  - `GuardedUtilityPolicy`（前置规则效用策略）先运行有序前置规则，选择、推迟或排除
+    选项，再为剩余选项打分，并可在分数接近的最高选项之间随机平局决胜（见
+    [随机决策与 LLM 选择](/tutorials/cases/uncertainty-resolution/)）。它的决策轨迹
+    会记录决策阶段（`Guard`、`Utility` 或 `Random`）和触发的前置规则。
+  - `QueuedHumanPolicy`、`QueuedExternalPolicy` 和 `QueuedLlmPolicy` 分别等待玩家、
+    外部服务或模型针对当前票据版本返回一个 option ID。
+- **决策者不可用。** 如果军阀乙死亡或被俘，参伍会在该边界结束时取消以军阀乙为决策者的
+  未关闭票据，并在军阀乙不可用期间拒绝为其开启新票据。如果只是控制者的权限人物不可用，
+  参伍取消的是该控制者的未关闭票据。要继续这项决策，就为可用的控制者开启新票据，并把
+  `parent_ticket` 设为被取消的票据；这条关联会复制到新的决策轨迹上。详见
+  [接入并驱动模拟运行](/developer/integration/)。
+- **席位继任。** 用 `with_seat` 把军阀乙的控制者绑定到席位，例如
+  `faction-b.leader`。军阀乙死亡后，把继任者的控制者绑定到同一席位，以继任者为决策者
+  开启新票据，并让 `parent_ticket` 指向被取消的票据。两个控制者占据同一席位，参伍便接受
+  这条关联。决策者不同、席位也不同的前序票据会被拒绝。
 
-自 0.12.0 起，决策轨迹会记录决策阶段（`Guard`、`Utility` 或 `Random`）以及触发的
-前置规则。票据还可以用 `parent_ticket` 指定前序票据，即新票据所接续的终态票据：它可以
-属于同一决策者；自 0.13.0 起，也可以是其控制者与新票据的控制者占据同一席位的票据。
-
-如果军阀乙死亡或被俘，参伍会在该边界结束时取消以军阀乙为决策者的未关闭票据；在军阀乙
-仍不可用期间，也会拒绝为其开启新票据。如果只是控制者的权限人物（即控制者代其行事的
-人物）不可用，参伍会取消该控制者的未关闭票据，并拒绝再为它开启新票据。要继续这类决策，
-请为可用的控制者开启新票据，并把 `parent_ticket` 设为已取消的票据；这一关联会复制到
-新的决策轨迹上。
-
-自 0.13.0 起，这项决策还可以通过席位继任交给军阀乙的继任者。假设军阀乙的控制者绑定在
-席位 `faction-b.leader` 上。军阀乙死亡后，把继任者的控制者绑定到同一席位，以继任者为
-决策者开启新票据，并把 `parent_ticket` 设为已取消的票据。由于两个控制者绑定同一个非空
-席位，参伍会接受这张前序票据，新的决策轨迹也会保留谱系。决策者不同、控制者又位于其他
-席位的前序票据仍会被拒绝。
-
-## 3. 代码在哪里
-
-建议先阅读可运行示例，了解完整调用顺序；再看框架测试，确认票据版本、
-权限、持久化和精确重放在失败路径上如何表现。
+## 源码
 
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/decision_ticket.rs" icon="external">
   打开可运行示例
 </LinkButton>
 <LinkButton href="https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/tests/decision_framework.rs" variant="secondary" icon="external">
-  查看决策框架测试
+  阅读决策框架测试
 </LinkButton>

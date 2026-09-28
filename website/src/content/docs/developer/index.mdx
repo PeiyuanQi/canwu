@@ -1,12 +1,12 @@
 ---
-title: 开发者指南
-description: 面向将参伍嵌入游戏、研究工具、智能体系统及其他上层应用的开发者指南。
+title: 开发指南
+description: 如何把参伍嵌入游戏、研究工具或智能体系统：接入、读取状态、存档与重放，以及编写插件。
 template: doc
 sidebar:
   order: 1
-  label: 开发者指南
+  label: 开发指南
 hero:
-  tagline: 按接入、读取、存档和扩展等常见任务了解参伍的对外 API。
+  tagline: 从添加第一个依赖到编写自己的插件，逐步把参伍接入你的应用。
   actions:
     - text: 运行第一个示例
       link: /tutorials/move-army/
@@ -26,56 +26,56 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 
 <AgentDevelopmentNote locale="zh-CN" />
 
-这组文档写给**使用参伍构建产品的开发者**。它不记录项目路线、维护流程、
-品牌规范或内部设计提案，而是解释上层应用如何正确使用 `canwu-api`。
+这组指南写给在参伍之上开发游戏、研究工具或智能体系统的开发者。每一页讲一项任务，
+并给出其中需要的 `canwu-api` 调用。
 
 ## 第一次接入
 
-1. 先运行[移动军队示例](/tutorials/move-army/)，确认本地工具链和对外 API 可以工作。
-2. 再阅读[接入并驱动模拟运行](/developer/integration/)，把同一流程放进自己的上层应用。
-3. 接入完成后，按需求继续阅读安全读取、存档或插件扩展页面。
+1. 运行[移动军队教程](/tutorials/move-army/)，确认本地 Rust 工具链可以构建并运行参伍。
+2. 阅读[接入并驱动模拟运行](/developer/integration/)，把同样的流程放进自己的应用。
+3. 在下面选择与下一项任务对应的指南。
 
-## 你会在这里找到什么
+## 按任务选择指南
 
 <CardGrid>
   <LinkCard
     title="接入并驱动模拟运行"
     href="/developer/integration/"
-    description="添加依赖、创建模拟运行、选择命令入口，并把现实时间转换为参伍模拟时间。"
+    description="添加依赖、创建模拟运行、提交命令，并把现实时间换算成模拟时间。"
   />
   <LinkCard
     title="安全读取与呈现状态"
     href="/developer/reading-state/"
-    description="区分只读快照与角色相对视图，避免向玩家、智能体或远程客户端泄露真值。"
+    description="只向玩家和智能体展示其角色知道的内容，完整快照只留给受信任的代码。"
   />
   <LinkCard
     title="存档、重放与派生分支"
     href="/developer/persistence/"
-    description="选择快照或检查点日志，恢复插件语义环境，并构建精确重放与平行现实。"
+    description="在快照和检查点日志之间选择，用相同插件重新加载，并重放或派生一次模拟运行。"
   />
   <LinkCard
     title="通过插件扩展"
     href="/developer/extensions/"
-    description="用领域命令和边界系统添加领域规则，同时保留权限、确定性和审计边界。"
-  />
-  <LinkCard
-    title="生产与资源边界"
-    href="/developer/production-economy/"
-    description="划分参伍结算能力与上层应用的生产、库存、运输、消费和军事补给权威。"
+    description="用领域命令和边界系统添加自己的规则。"
   />
 </CardGrid>
 
-## 如何搭配其他文档
+只涉及某个领域系统的指南，例如[生产、资源与运输的职责划分](/developer/production-economy/)，
+与对应系统一起列在[领域系统](/architecture/systems/)下。
 
-- 想先运行代码：从[教程](/tutorials/)开始。
-- 想知道上层应用该调用什么、何时调用：留在开发者指南。
-- 想理解结算、事件和随机数为什么这样设计：阅读[架构](/architecture/)。
-- 想查完整类型和函数签名：查看 `canwu-api` 源码及公开示例。
+## 每个接入都要遵守的规则
 
-## 开发者的核心约束
+1. **以 `canwu-api` 和已发布的扩展为依赖。** 具体规则来自 `canwu-military` 等模拟领域扩展、
+   参考整合包或你自己编写的插件。不要直接依赖 `canwu-sim` 等内部 crate，它们不提供兼容性承诺。
+2. **通过命令改变世界。** 使用引擎命令、领域命令或插件输入。
+3. **给玩家和智能体使用角色相对视图。** 完整快照只用于受信任的上层应用代码和调试工具。
+4. **时钟由上层应用掌管。** 渲染、输入和现实时间都留在上层应用；调用引擎前，先把经过的
+   现实时间换算成模拟时长。
+5. **需要存档时固定版本。** 固定引擎版本，并用相同的插件加载或重放。引擎会把它们与存档中
+   保存的插件描述逐一比对。
 
-1. 应用代码通过 `canwu-api` 接入；具体领域规则选择领域扩展或参考整合包，不依赖内部 crate 作为兼容接口。
-2. 外部修改通过命令、领域命令或其他规范化输入进入，不直接改写世界状态。
-3. 玩家和智能体默认读取角色相对视图；只读快照只用于受信任的上层应用逻辑和调试工具。
-4. 现实时间、渲染和输入由上层应用负责；参伍只接收能准确表示的模拟时间。
-5. 需要存档时固定引擎版本，并在加载和重放时恢复相同的插件语义环境。
+## 其他资料
+
+- 可运行代码：[快速开始](/tutorials/)与[案例](/tutorials/cases/)。
+- 结算、事件和随机数为什么这样设计：[引擎架构](/architecture/)。
+- 完整类型与函数签名：[`canwu-api` 源码](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/src/lib.rs)及其[示例](https://github.com/PeiyuanQi/canwu/tree/main/crates/api/canwu-api/examples)。
