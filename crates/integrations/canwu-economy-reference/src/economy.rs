@@ -363,6 +363,10 @@ pub struct LocalEconomyV1 {
     pub cooperation_per_mille: u16,
     pub pending_harvest_penalty_per_mille: u16,
     pub latest_decision: GrainDecision,
+    /// Resource outcome sequence of the last harvest credit a monthly close
+    /// cited. A later close accepts only a newer credit.
+    #[serde(default)]
+    pub last_harvest_credit_sequence: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -570,6 +574,11 @@ pub struct EconomyReferenceStateV1 {
         canwu_resource::ResourceConsumptionIntentV1,
     >,
     pub completion_run_budget: RunBudgetRevisionV1,
+    /// Each local economy's revision when a participant grant locked the then-current
+    /// runtime version, kept while that grant is held, prepared, or consumed.
+    #[serde(default)]
+    pub completion_target_revisions:
+        BTreeMap<CompletionLeaseAcquisitionId, BTreeMap<LocalEconomyId, u64>>,
     pub completion_participants:
         BTreeMap<CompletionLeaseAcquisitionId, ExternalCompletionParticipantGrantV1>,
     pub completion_target_locks: BTreeMap<CompletionLockedTargetV1, CompletionCapacityGrantId>,
@@ -618,6 +627,9 @@ struct EconomyReferenceStateStorageV1 {
         canwu_resource::ResourceConsumptionIntentV1,
     >,
     completion_run_budget: RunBudgetRevisionV1,
+    #[serde(default)]
+    completion_target_revisions:
+        BTreeMap<CompletionLeaseAcquisitionId, BTreeMap<LocalEconomyId, u64>>,
     completion_participants:
         BTreeMap<CompletionLeaseAcquisitionId, ExternalCompletionParticipantGrantV1>,
     completion_reserved_units: u64,
@@ -647,6 +659,7 @@ impl From<EconomyReferenceStateV1> for EconomyReferenceStateStorageV1 {
             resilience_postures: state.resilience_postures,
             resource_consumption_intents: state.resource_consumption_intents,
             completion_run_budget: state.completion_run_budget,
+            completion_target_revisions: state.completion_target_revisions,
             completion_participants: state.completion_participants,
             completion_reserved_units: state.completion_reserved_units,
             frames: state.frames,
@@ -678,6 +691,7 @@ impl TryFrom<EconomyReferenceStateStorageV1> for EconomyReferenceStateV1 {
             resilience_postures: state.resilience_postures,
             resource_consumption_intents: state.resource_consumption_intents,
             completion_run_budget: state.completion_run_budget,
+            completion_target_revisions: state.completion_target_revisions,
             completion_participants: state.completion_participants,
             completion_target_locks: BTreeMap::new(),
             completion_expiry_due: BTreeMap::new(),
@@ -718,6 +732,7 @@ impl Default for EconomyReferenceStateV1 {
             resilience_postures: BTreeMap::new(),
             resource_consumption_intents: BTreeMap::new(),
             completion_run_budget: default_completion_run_budget(),
+            completion_target_revisions: BTreeMap::new(),
             completion_participants: BTreeMap::new(),
             completion_target_locks: BTreeMap::new(),
             completion_expiry_due: BTreeMap::new(),
@@ -996,6 +1011,35 @@ impl EconomyReferenceStateV1 {
         Ok(())
     }
 
+    /// A participant lock on this runtime must name its current version. The
+    /// grant then saves each local economy's revision, which a later
+    /// externality compares with the economy it would change.
+    fn runtime_target_revisions(
+        &self,
+        targets: &[CompletionLockedTargetV1],
+    ) -> Result<Option<BTreeMap<LocalEconomyId, u64>>, CanwuError> {
+        let runtime = economy_reference_runtime_reference().into_untyped();
+        let mut locks_runtime = false;
+        for target in targets {
+            if let CompletionLockedTargetV1::ExternalRecord { version } = target
+                && version.record == runtime
+            {
+                if version.version != self.revision {
+                    return Err(invalid(
+                        "economy completion participant locks a stale economy runtime version",
+                    ));
+                }
+                locks_runtime = true;
+            }
+        }
+        Ok(locks_runtime.then(|| {
+            self.local_economies
+                .iter()
+                .map(|(id, economy)| (id.clone(), economy.revision))
+                .collect()
+        }))
+    }
+
     pub fn grant_completion_participant(
         &mut self,
         request: RequestExternalCompletionParticipantGrantV1,
@@ -1041,6 +1085,7 @@ impl EconomyReferenceStateV1 {
                 "economy completion participant acquisition is already bound differently",
             ));
         }
+        let target_revisions = self.runtime_target_revisions(&request.target_versions)?;
         let grant = CompletionCapacityGrantV1 {
             id: request.grant_id,
             revision: ResourceRevision::INITIAL,
@@ -1080,6 +1125,10 @@ impl EconomyReferenceStateV1 {
             .entry(participant.grant.expires_after_boundary)
             .or_default()
             .insert(request.acquisition.clone());
+        if let Some(revisions) = target_revisions {
+            self.completion_target_revisions
+                .insert(request.acquisition.clone(), revisions);
+        }
         self.completion_participants
             .insert(request.acquisition, participant.clone());
         Ok(participant)
@@ -1212,6 +1261,8 @@ impl EconomyReferenceStateV1 {
         for target in &participant.grant.target_versions {
             self.completion_target_locks.remove(target);
         }
+        self.completion_target_revisions
+            .remove(&request.acquisition);
         Ok(())
     }
 
@@ -1249,6 +1300,8 @@ impl EconomyReferenceStateV1 {
         for target in &participant.grant.target_versions {
             self.completion_target_locks.remove(target);
         }
+        self.completion_target_revisions
+            .remove(&request.acquisition);
         for values in self.completion_expiry_due.values_mut() {
             values.remove(&request.acquisition);
         }
@@ -1299,6 +1352,7 @@ impl EconomyReferenceStateV1 {
                 for target in &participant.grant.target_versions {
                     self.completion_target_locks.remove(target);
                 }
+                self.completion_target_revisions.remove(acquisition);
             }
         }
         for values in self.completion_expiry_due.values_mut() {
@@ -1336,6 +1390,56 @@ impl EconomyReferenceStateV1 {
     pub(crate) fn draft(&self) -> Result<DomainRecordDraft, CanwuError> {
         self.validate()?;
         DomainRecordDraft::from_typed(economy_reference_runtime_reference(), self)
+    }
+
+    /// Saved target revisions exist exactly for live grants that lock this
+    /// runtime, name existing local economies, and never run ahead of them.
+    fn validate_completion_target_revisions(&self) -> Result<(), CanwuError> {
+        let runtime = economy_reference_runtime_reference().into_untyped();
+        let live_runtime_locks = self
+            .completion_participants
+            .iter()
+            .filter(|(_, participant)| {
+                matches!(
+                    participant.grant.state,
+                    CompletionGrantStateV1::Held
+                        | CompletionGrantStateV1::Prepared
+                        | CompletionGrantStateV1::Consumed
+                ) && participant.grant.target_versions.iter().any(|target| {
+                    matches!(
+                        target,
+                        CompletionLockedTargetV1::ExternalRecord { version }
+                            if version.record == runtime
+                    )
+                })
+            })
+            .map(|(acquisition, _)| acquisition)
+            .collect::<BTreeSet<_>>();
+        if self
+            .completion_target_revisions
+            .keys()
+            .collect::<BTreeSet<_>>()
+            != live_runtime_locks
+        {
+            return Err(invalid(
+                "economy completion target revisions differ from live runtime locks",
+            ));
+        }
+        if self
+            .completion_target_revisions
+            .values()
+            .flat_map(BTreeMap::iter)
+            .any(|(economy, saved)| {
+                self.local_economies
+                    .get(economy)
+                    .is_none_or(|current| *saved > current.revision)
+            })
+        {
+            return Err(invalid(
+                "economy completion target revision names a missing or future local economy",
+            ));
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1398,6 +1502,7 @@ impl EconomyReferenceStateV1 {
                 return Err(invalid("economy completion target lock is invalid"));
             }
         }
+        self.validate_completion_target_revisions()?;
         let indexed_expiry = self
             .completion_expiry_due
             .values()

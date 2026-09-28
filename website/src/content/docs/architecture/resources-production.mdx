@@ -256,7 +256,7 @@ cargo test -p canwu-force-supply-reference --test g4_contract
 cargo test -p canwu-economy-reference --test grain_harness
 ```
 
-`grain_loop` 以 JSON 输出 `GrainLoopSummary`；由于没有转移还停留在托管中，其中的 `conservation_closing` 等于 `final_stock`（2,860）。[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)逐月讲解了这个示例。`resource_lifecycle` 不启动引擎，直接构建一个 `ResourceState` 并为一项需求分配；`completion_lease` 最后输出 `lease state: Activated`；`process_constraints` 输出一个机器工艺的三个阻塞项（`ToolsMachines`、`Energy` 和 `Maintenance`）。
+`grain_loop` 以 JSON 输出 `GrainLoopSummary`；由于没有转移还停留在托管中，其中的 `conservation_closing` 等于 `final_stock`（2,206）。[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)逐月讲解了这个示例。`resource_lifecycle` 不启动引擎，直接构建一个 `ResourceState` 并为一项需求分配；`completion_lease` 最后输出 `lease state: Activated`；`process_constraints` 输出一个机器工艺的三个阻塞项（`ToolsMachines`、`Energy` 和 `Maintenance`）。
 
 `resource_contract` 测试覆盖守恒、受保护存量底线、转移托管和租约。`g3_contract` 测试覆盖产能重叠、只在确认之后才结算的产出、在第 10 阶段暂存并在第 11 阶段提交的事故，以及降级设施票据。`g4_contract` 中的 `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` 完整走一遍征发 saga，`grain_harness` 中的 `snapshot_checkpoint_journal_and_fork_continue_identically` 检查快照、检查点日志和派生分支得到相同的检查点哈希。
 

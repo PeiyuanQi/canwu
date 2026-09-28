@@ -18,8 +18,8 @@ civilians (320 baskets), relief (120), and a garrison dispatch (1,200). The
 river route is closed in months 1 and 2, so nothing ships. The only shipment
 leaves in month 3; its river crossing is closed and it reaches the garrison by
 road. From month 4 the dispatch demand still claims grain each month but
-nothing ships, so in lean months it crowds out civilians. The harvest arrives
-at the end of month 10.
+nothing ships, so when it ranks first in a lean month it crowds out civilians.
+The harvest arrives at the end of month 10.
 
 The question the example answers: how can several domains draw on one stock so
 that every basket is accounted for, competing claims are settled in a recorded
@@ -42,7 +42,8 @@ historical population, yields, rations, or prices.
   shipment.
 - The [force-supply reference consumer](/en/reference/terminology/)
   (`canwu-force-supply-reference`): the garrison eats from its own account by
-  submitting a consumption intent.
+  submitting a consumption intent, and the month 5 requisition runs through
+  the full saga.
 - A [reference content pack](/en/reference/terminology/)
   (`canwu-economy-reference-content`): `synthetic_grain_fixture()` supplies
   the garrison's food requirement and the requisition policy, each bound to a
@@ -70,16 +71,16 @@ month 3 frame and the totals:
       "force_requested": 1200,
       "force_fulfilled": 1200,
       ...
-        "force_operation": "canwu.force-supply-reference:operation:283:89280",
+        "force_operation": "canwu.force-supply-reference:operation:287:89280",
       ...
     },
     ...
   ],
-  "final_stock": 2860,
-  "final_population_wellbeing_per_mille": 940,
+  "final_stock": 2206,
+  "final_population_wellbeing_per_mille": 840,
   "final_force_readiness_per_mille": 800,
-  "final_cooperation_per_mille": 939,
-  "total_harvest": 4620,
+  "final_cooperation_per_mille": 859,
+  "total_harvest": 3966,
   "transport_executions": 1,
   "closed_route_months": [
     1,
@@ -88,34 +89,34 @@ month 3 frame and the totals:
   "rerouted_months": [
     3
   ],
-  "conservation_closing": 2860,
-  "checkpoint_hash": "72c4c8d3231be522d8cd3bb401e29b22b718e24fdfa852d95642d600e0fed99e"
+  "conservation_closing": 2206,
+  "checkpoint_hash": "2e04345348f3d7b30ced46a653833a9e9be7403edf447badfc218fee1c8044f1"
 }
 ```
 
 The key fields of all fourteen frames from the same run:
 
-| Month | Chosen (applies next month) | Opening stock | Civilians (of 320) | Relief (of 120) | Garrison dispatch (of 1,200) | Harvest | Wellbeing ‰ | Cooperation ‰ |
+| Month | Decision | Opening stock | Civilians (of 320) | Relief (of 120) | Garrison dispatch (of 1,200) | Harvest | Wellbeing ‰ | Cooperation ‰ |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `balanced` | 4300 | 320 | 120 | 0 | 0 | 1000 | 903 |
 | 2 | `relief_first` | 3860 | 320 | 120 | 0 | 0 | 1000 | 906 |
 | 3 | `balanced` | 3420 | 320 | 120 | 1200 | 0 | 1000 | 909 |
-| 4 | `force_first` | 1780 | 280 | 120 | 0 | 0 | 1000 | 912 |
-| 5 | `requisition_for_force` | 1380 | 180 | 0 | 0 | 0 | 860 | 912 |
-| 6 | `balanced` | 1200 | 0 | 0 | 0 | 0 | 540 | 915 |
-| 7 | `relief_first` | 1200 | 320 | 120 | 0 | 0 | 660 | 918 |
-| 8 | `balanced` | 760 | 320 | 120 | 0 | 0 | 780 | 921 |
-| 9 | `force_first` | 320 | 320 | 0 | 0 | 0 | 780 | 924 |
-| 10 | `balanced` | 0 | 0 | 0 | 0 | 4620 | 460 | 927 |
-| 11 | `relief_first` | 4620 | 320 | 120 | 0 | 0 | 580 | 930 |
-| 12 | `balanced` | 4180 | 320 | 120 | 0 | 0 | 700 | 933 |
-| 13 | `force_first` | 3740 | 320 | 120 | 0 | 0 | 820 | 936 |
-| 14 | `balanced` | 3300 | 320 | 120 | 0 | 0 | 940 | 939 |
+| 4 | `force_first` | 1780 | 320 | 120 | 0 | 0 | 1000 | 912 |
+| 5 | `requisition_for_force` | 1340 | 140 | 0 | 0 | 0 | 820 | 832 |
+| 6 | `balanced` | 1200 | 320 | 120 | 0 | 0 | 940 | 835 |
+| 7 | `relief_first` | 760 | 320 | 120 | 0 | 0 | 1000 | 838 |
+| 8 | `balanced` | 320 | 320 | 0 | 0 | 0 | 1000 | 841 |
+| 9 | `force_first` | 0 | 0 | 0 | 0 | 0 | 680 | 844 |
+| 10 | `balanced` | 0 | 0 | 0 | 0 | 3966 | 360 | 847 |
+| 11 | `relief_first` | 3966 | 320 | 120 | 0 | 0 | 480 | 850 |
+| 12 | `balanced` | 3526 | 320 | 120 | 0 | 0 | 600 | 853 |
+| 13 | `force_first` | 3086 | 320 | 120 | 0 | 0 | 720 | 856 |
+| 14 | `balanced` | 2646 | 320 | 120 | 0 | 0 | 840 | 859 |
 
 Opening stock is the granary's balance before the month's allocation.
 Wellbeing falls by one per basket of civilian shortfall and rises by one per
-basket of relief, capped at 1000. Cooperation rises by 3 each month except the
-requisition month.
+basket of relief, capped at 1000. Cooperation rises by 3 each month except
+month 5, when the requisition costs 80 instead.
 
 ## How grain moves
 
@@ -189,13 +190,11 @@ fn decision_priority(decision: GrainDecision, label: &str) -> i32 {
 }
 ```
 
-Priorities take effect the month after they are chosen. The resilience and
-garrison-posture tickets are resolved inside `advance_month`, but the commands
-they carry settle one boundary later, after `advance_month` has read the
-postures. Each month's allocation therefore uses the previous month's choice;
-month 1 uses the starting posture `keep_buffer` (`balanced`). Month 6's row
-says `balanced`, but the allocation still ranks the garrison dispatch first, as
-month 5's `requisition_for_force` does.
+Resolving a ticket admits the command it carries, and the owning plugin applies
+that command at the next boundary. `advance_month` settles both boundaries
+before it reads the postures, so each month's allocation uses that month's
+choice. `requisition_for_force` sets the garrison's posture to
+`requisition_locally`, which also changes how the garrison eats (step 5).
 
 ### 3. Submit three demands and allocate once
 
@@ -222,11 +221,11 @@ Relief (`RELIEF_TARGET`, 120) and the garrison dispatch (`SHIPMENT_QUANTITY`,
 demand expires one month after it is due, which releases whatever it still
 holds.
 
-Month 4's 40-basket shortfall comes from the default source policy,
+The demands use the default source policy,
 `ResourceDemandSourcePolicyV1::Pooled`, which lets a demand draw on every grain
-account in ID order: the civilian demand reserves the last 40 baskets in the
-garrison's `a-field-force` account before 280 from `z-granary`, and
-`reserved_allocation` passes only the granary's 280 on to consumption.
+account in ID order. In month 4 the dispatch demand ranks first, so it reserves
+the last 40 baskets in the garrison's `a-field-force` account before 1,160
+from `z-granary`.
 
 ### 4. Ship to the garrison in month 3
 
@@ -271,6 +270,27 @@ garrison 100‰ readiness (900 to 800). After that the account is empty,
 `service_force_if_due` returns early when there is nothing to issue, and
 readiness stays at 800.
 
+Under the `requisition_locally` posture, `consume_for_force` attaches the
+requisition policy from `synthetic_grain_fixture()` to the garrison's
+consumption intent, which opens
+a requisition saga in `canwu-force-supply-reference`. After the resource
+outcome and the readiness consequence, the force records an externality
+intent. The economy plugin applies it to the local economy (cooperation −80‰
+and a 60‰ penalty on the next harvest; these values come from the fixture's
+`cooperation_cost_per_mille` and `next_harvest_input_cost_per_mille`, while the
+economy profile's own `requisition` block in `grain.rs` is recorded but not
+read) and publishes the outcome, the force
+acknowledges it, and `FinalizeRequisition` settles the saga. Month 5 runs this
+path with the garrison's last 40 baskets. A requisition chosen once the
+garrison account is empty issues nothing, so no saga starts.
+
+The economy plugin applies the externality only if the local economy still has
+the revision it had when the plugin joined the requisition's completion lease.
+If another command changed the local economy in between, the outcome is
+`Rejected` and the local economy stays as it is;
+`requisition_externality_rejects_a_local_economy_changed_after_its_lock` tests
+this.
+
 ### 6. Credit the harvest and close the month
 
 In month 10, `credit_harvest` computes
@@ -285,8 +305,10 @@ let quantity = HARVEST_BASE
 ```
 
 and credits it to the granary as `ResourceCreditSourceV1::ExternalInflow`. With
-cooperation at 924 after month 9 and no pending penalty, that is
-`5000 × 924 / 1000 = 4620`. Every month ends with
+cooperation at 844 after month 9 and the 60‰ penalty from month 5's
+requisition, that is `5000 × 844 × 940 / 1,000,000 = 3966` (rounded down).
+Without the requisition, cooperation would be 927 and the harvest 4,635.
+Every month ends with
 `EconomyOperationV1::CloseMonth`, which checks the cited demand and outcome
 records and appends the frame you saw in the output.
 `summary` calls `ResourceState::validate_conservation` before it builds the
@@ -299,32 +321,37 @@ totals.
 - Arrival and acceptance are separate steps. The garrison account changes only
   when `CompleteTransfer` accepts the transfer.
 - One allocation pass settles the competing claims from stored priorities and
-  tie-break keys. In month 6 the dispatch demand ranks first under the lagged
-  `requisition_for_force` posture and reserves all 1,200 baskets. Nothing
-  ships, so that grain stays out of reach until the demand expires, and
-  civilians get nothing that month. In month 10 the granary is empty until the
-  harvest is credited at the end of the month.
-- `conservation_closing` equals `final_stock` (2,860) because no transfer is
-  left in escrow. At the end, the granary holds all 2,860 baskets, 1,200 of them
+  tie-break keys. In month 5 `requisition_for_force` ranks the dispatch demand
+  first: it reserves 1,200 of the 1,340 baskets, civilians get 140, and relief
+  gets nothing. Nothing ships, so that grain stays out of reach until the
+  demand expires. The granary is empty in months 9 and 10 until the harvest is
+  credited at the end of month 10.
+- `conservation_closing` equals `final_stock` (2,206) because no transfer is
+  left in escrow. At the end, the granary holds all 2,206 baskets, 1,200 of them
   reserved for the month 14 dispatch.
-- Month 5's `requisition_for_force` skips that month's +3 cooperation.
-  Because of the one-month lag, its postures apply in month 6: the dispatch
-  ranks first, but the garrison account is already empty, so the requisition
-  saga in `canwu-force-supply-reference` never starts. The force-supply test
-  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps`
-  runs it.
+- The requisition feeds the garrison no more than `force_first` would, because
+  the garrison eats only from its own account. What it adds is the cost:
+  cooperation falls from 912 to 832, and the harvest five months later is
+  3,966 instead of 4,635. `requisition_branch_is_reproducible_and_carries_future_cost`
+  in `grain_harness` checks that cost, and
+  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` in
+  `canwu-force-supply-reference` tests each saga step on its own.
 
 ## Try changing
 
 - **Decisions.** Edit the `decisions` array in `grain_loop.rs` and watch how
-  `civilian_fulfilled` and `population_wellbeing_per_mille` change. Remember the
-  one-month lag from step 2.
+  `civilian_fulfilled` and `population_wellbeing_per_mille` change. Moving
+  `requisition_for_force` to month 6 or later still ranks the dispatch first,
+  so civilians can go short that month, but it starts no saga because the
+  garrison account is already empty: the cooperation drop and harvest penalty
+  never apply, and cooperation only misses that month's +3.
 - **Harvest.** Set `HARVEST_BASE` to `6_000` in `grain.rs`. Month 10's
-  `harvest_output` becomes `6000 × 924 / 1000 = 5544`.
+  `harvest_output` becomes `6000 × 844 × 940 / 1,000,000 = 4760` (rounded
+  down).
 - **Seed floor.** The economy profile's `seed_floor: 180` is recorded, but no
   code reads it, and neither grain account has a protected floor
   (`protected_floor_policy: None`), so allocation empties the granary by the
-  end of month 9. Adding a
+  end of month 8. Adding a
   [protected stock floor](/en/reference/terminology/)
   (`ProtectedFloorPolicyRevision`) here takes more than pointing the granary
   at one. Allocation fails with `VersionConflict` whenever a demand's

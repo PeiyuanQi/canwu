@@ -14,8 +14,8 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 河谷里的一座粮仓开局存粮 4,300 筐。每个月，管粮人在四种优先顺序中选一种（优先赈济、
 优先军粮、平衡分配、为军队征发），粮仓要应付三项需求：民食 320 筐、赈济 120 筐、
 驻军调粮 1,200 筐。前两个月河道不通，不发军粮。唯一一次运粮在第 3 个月：渡口中断，
-粮船改走陆路送到驻军手里。从第 4 个月起，调粮需求每月仍要求预留粮食，但不再发运，
-缺粮的月份里它会挤占民食。第 10 个月月末秋收入仓。
+粮船改走陆路送到驻军手里。从第 4 个月起，调粮需求每月仍要求预留粮食，但不再发运；
+缺粮的月份里如果它排在最前，就会挤占民食。第 10 个月月末秋收入仓。
 
 这个示例回答的问题是：几个领域共用同一份存量时，怎样让每一筐粮都有账可查、
 相互竞争的需求按记录下来的顺序结算，并且整个运行可以精确重放？
@@ -31,7 +31,7 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 - [运输执行](/tutorials/routing-transport/)（`TransportExecution`）：河运一程失败后，
   同一批货通过[改道](/reference/terminology/)（`ItineraryRevision`）继续运送。
 - [军事补给参考消费者](/reference/terminology/)（`canwu-force-supply-reference`）：
-  驻军提交消费意图，从自己的账户里取粮。
+  驻军提交消费意图，从自己的账户里取粮；第 5 个月的征发会完整走一遍 saga。
 - [参考内容包](/reference/terminology/)（`canwu-economy-reference-content`）：
   `synthetic_grain_fixture()` 提供驻军的口粮需求和征发策略，每项都关联一张模型卡。
   民食、赈济和收成的数值是 `grain.rs` 中的常量。
@@ -56,16 +56,16 @@ cargo run -p canwu-economy-reference --example grain_loop
       "force_requested": 1200,
       "force_fulfilled": 1200,
       ...
-        "force_operation": "canwu.force-supply-reference:operation:283:89280",
+        "force_operation": "canwu.force-supply-reference:operation:287:89280",
       ...
     },
     ...
   ],
-  "final_stock": 2860,
-  "final_population_wellbeing_per_mille": 940,
+  "final_stock": 2206,
+  "final_population_wellbeing_per_mille": 840,
   "final_force_readiness_per_mille": 800,
-  "final_cooperation_per_mille": 939,
-  "total_harvest": 4620,
+  "final_cooperation_per_mille": 859,
+  "total_harvest": 3966,
   "transport_executions": 1,
   "closed_route_months": [
     1,
@@ -74,32 +74,32 @@ cargo run -p canwu-economy-reference --example grain_loop
   "rerouted_months": [
     3
   ],
-  "conservation_closing": 2860,
-  "checkpoint_hash": "72c4c8d3231be522d8cd3bb401e29b22b718e24fdfa852d95642d600e0fed99e"
+  "conservation_closing": 2206,
+  "checkpoint_hash": "2e04345348f3d7b30ced46a653833a9e9be7403edf447badfc218fee1c8044f1"
 }
 ```
 
 同一次运行中十四帧的关键字段：
 
-| 月份 | 本月选定（下月生效） | 月初存粮 | 民食（需 320） | 赈济（需 120） | 驻军调粮（需 1,200） | 收成 | 民生 ‰ | 合作度 ‰ |
+| 月份 | 决策 | 月初存粮 | 民食（需 320） | 赈济（需 120） | 驻军调粮（需 1,200） | 收成 | 民生 ‰ | 合作度 ‰ |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `balanced` | 4300 | 320 | 120 | 0 | 0 | 1000 | 903 |
 | 2 | `relief_first` | 3860 | 320 | 120 | 0 | 0 | 1000 | 906 |
 | 3 | `balanced` | 3420 | 320 | 120 | 1200 | 0 | 1000 | 909 |
-| 4 | `force_first` | 1780 | 280 | 120 | 0 | 0 | 1000 | 912 |
-| 5 | `requisition_for_force` | 1380 | 180 | 0 | 0 | 0 | 860 | 912 |
-| 6 | `balanced` | 1200 | 0 | 0 | 0 | 0 | 540 | 915 |
-| 7 | `relief_first` | 1200 | 320 | 120 | 0 | 0 | 660 | 918 |
-| 8 | `balanced` | 760 | 320 | 120 | 0 | 0 | 780 | 921 |
-| 9 | `force_first` | 320 | 320 | 0 | 0 | 0 | 780 | 924 |
-| 10 | `balanced` | 0 | 0 | 0 | 0 | 4620 | 460 | 927 |
-| 11 | `relief_first` | 4620 | 320 | 120 | 0 | 0 | 580 | 930 |
-| 12 | `balanced` | 4180 | 320 | 120 | 0 | 0 | 700 | 933 |
-| 13 | `force_first` | 3740 | 320 | 120 | 0 | 0 | 820 | 936 |
-| 14 | `balanced` | 3300 | 320 | 120 | 0 | 0 | 940 | 939 |
+| 4 | `force_first` | 1780 | 320 | 120 | 0 | 0 | 1000 | 912 |
+| 5 | `requisition_for_force` | 1340 | 140 | 0 | 0 | 0 | 820 | 832 |
+| 6 | `balanced` | 1200 | 320 | 120 | 0 | 0 | 940 | 835 |
+| 7 | `relief_first` | 760 | 320 | 120 | 0 | 0 | 1000 | 838 |
+| 8 | `balanced` | 320 | 320 | 0 | 0 | 0 | 1000 | 841 |
+| 9 | `force_first` | 0 | 0 | 0 | 0 | 0 | 680 | 844 |
+| 10 | `balanced` | 0 | 0 | 0 | 0 | 3966 | 360 | 847 |
+| 11 | `relief_first` | 3966 | 320 | 120 | 0 | 0 | 480 | 850 |
+| 12 | `balanced` | 3526 | 320 | 120 | 0 | 0 | 600 | 853 |
+| 13 | `force_first` | 3086 | 320 | 120 | 0 | 0 | 720 | 856 |
+| 14 | `balanced` | 2646 | 320 | 120 | 0 | 0 | 840 | 859 |
 
 月初存粮是本月分配之前粮仓的余额。民食每缺一筐，民生值减 1；赈济每发一筐，民生值加 1，
-上限 1000。合作度每月加 3，征发的那个月除外。
+上限 1000。合作度每月加 3；第 5 个月例外，征发让它减少 80。
 
 ## 粮食流向
 
@@ -169,11 +169,9 @@ fn decision_priority(decision: GrainDecision, label: &str) -> i32 {
 }
 ```
 
-优先顺序在选定后的下一个月才生效。应对姿态和驻军姿态的票据在 `advance_month` 中结算，
-但票据携带的命令要晚一个边界才结算，此时 `advance_month` 已经读过姿态。所以每个月的分配
-沿用上个月的选择；第 1 个月沿用初始姿态 `keep_buffer`（即 `balanced`）。第 6 个月这一行
-写的是 `balanced`，分配时却仍把驻军调粮排在最前，和第 5 个月选定的 `requisition_for_force`
-一样。
+票据结算时准入它携带的命令，所属插件在下一个结算边界才执行这条命令。`advance_month` 先跑完
+这两个结算边界，再读取姿态，所以每个月的分配用的就是当月的选择。`requisition_for_force` 把
+驻军的补给姿态设为 `requisition_locally`，这也会改变驻军取粮的方式（见第 5 步）。
 
 ### 3. 提交三项需求，只做一次分配
 
@@ -198,10 +196,9 @@ let civilian = self.submit_demand(
 需求记录[资源预留](/reference/terminology/)。每项需求在到期一个月后过期，届时释放它
 仍占着的预留。
 
-第 4 个月民食少了 40 筐，原因在默认的来源策略 `ResourceDemandSourcePolicyV1::Pooled`：
-它允许需求按账户 ID 顺序动用所有粮食账户，于是民食需求先预留了驻军账户 `a-field-force`
-里剩下的 40 筐，再从 `z-granary` 预留 280 筐，而 `reserved_allocation` 只把粮仓那 280 筐
-交给消费。
+这些需求使用默认的来源策略 `ResourceDemandSourcePolicyV1::Pooled`，可以按账户 ID 顺序
+动用所有粮食账户。第 4 个月调粮需求排在最前，所以它先预留驻军账户 `a-field-force` 里
+剩下的 40 筐，再从 `z-granary` 预留 1,160 筐。
 
 ### 4. 第 3 个月运粮给驻军
 
@@ -238,6 +235,19 @@ let operation = self.submit_force(ForceOperationV1::SubmitConsumptionIntent { in
 下降 100‰（从 900 到 800）。此后账户见底，`service_force_if_due` 在没有粮可发时直接
 返回，战备值停在 800。
 
+驻军姿态为 `requisition_locally` 时，`consume_for_force` 会把 `synthetic_grain_fixture()`
+提供的征发策略附在驻军的消费意图上，从而在 `canwu-force-supply-reference` 中开启一个征发 saga。资源结果和
+战备后果落定之后，军队记下一项外部性意图；经济插件把它施加到本地经济上（合作度减少
+80‰，下一次收成扣减 60‰；这两个数值来自 `synthetic_grain_fixture()` 中征发定义的
+`cooperation_cost_per_mille` 和 `next_harvest_input_cost_per_mille`，`grain.rs` 经济配置里的
+`requisition` 只做记录，没有代码读取），并发布结果；军队确认这一结果，最后由 `FinalizeRequisition`
+结清 saga。第 5 个月正是用驻军账户里最后 40 筐粮走完这条路径。驻军账户见底之后再选征发，
+没有粮可发，也就不会开启 saga。
+
+经济插件只在本地经济的修订号仍与它加入这次征发的完成租约时相同的情况下，才施加这项
+外部性。如果其间有别的命令改动了本地经济，结果就是 `Rejected`，本地经济保持原样；
+`requisition_externality_rejects_a_local_economy_changed_after_its_lock` 测试的正是这一点。
+
 ### 6. 收成入账，结束本月
 
 第 10 个月，`credit_harvest` 这样计算收成：
@@ -251,8 +261,9 @@ let quantity = HARVEST_BASE
     / 1_000_000;
 ```
 
-然后以 `ResourceCreditSourceV1::ExternalInflow` 计入粮仓。第 9 个月末合作度为 924，
-没有待扣减的收成惩罚，因此收成是 `5000 × 924 / 1000 = 4620`。每个月都以
+然后以 `ResourceCreditSourceV1::ExternalInflow` 计入粮仓。第 9 个月末合作度为 844，
+第 5 个月的征发又留下 60‰ 的收成惩罚，因此收成是 `5000 × 844 × 940 / 1,000,000 = 3966`
+（向下取整）。如果没有征发，合作度会是 927，收成是 4,635。每个月都以
 `EconomyOperationV1::CloseMonth` 结束：它核对所引用的需求和结果记录，再追加一帧，
 也就是输出里看到的那些帧。`summary` 在生成汇总之前调用
 `ResourceState::validate_conservation`。
@@ -261,25 +272,29 @@ let quantity = HARVEST_BASE
 
 - 只有 `canwu-resource` 能改动余额。驻军提交的是消费意图，收成则作为带证据的入账到达。
 - 到达和验收是两个步骤。只有 `CompleteTransfer` 验收之后，驻军账户才有变化。
-- 相互竞争的需求在一次分配中按保存下来的优先级和平局决胜键结算。第 6 个月，调粮需求
-  因滞后生效的 `requisition_for_force` 姿态排在最前，预留了粮仓全部 1,200 筐；这批粮不会
-  发运，要等需求过期才释放，所以当月民食一筐也没分到。第 10 个月则是粮仓已经见底，收成
-  要到月末才入账。
-- `conservation_closing` 等于 `final_stock`（2,860），因为没有转移还停留在托管中。
-  运行结束时，2,860 筐全在粮仓，其中 1,200 筐预留给第 14 个月的调粮需求。
-- 第 5 个月的 `requisition_for_force` 让当月合作度少加 3。由于一个月的滞后，它的姿态在
-  第 6 个月才生效：调粮排在最前，但那时驻军账户已经没有存粮，所以
-  `canwu-force-supply-reference` 的征发 saga 没有启动。军事补给测试
-  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` 完整运行了这一流程。
+- 相互竞争的需求在一次分配中按保存下来的优先级和平局决胜键结算。第 5 个月，
+  `requisition_for_force` 把调粮需求排在最前：它从 1,340 筐中预留了 1,200 筐，民食只分到
+  140 筐，赈济一筐也没有。这批粮不会发运，要等需求过期才释放。第 9、10 个月粮仓见底，
+  收成要到第 10 个月月末才入账。
+- `conservation_closing` 等于 `final_stock`（2,206），因为没有转移还停留在托管中。
+  运行结束时，2,206 筐全在粮仓，其中 1,200 筐预留给第 14 个月的调粮需求。
+- 征发给驻军的粮并不比 `force_first` 多，因为驻军只从自己的账户取粮。征发多出来的是
+  代价：合作度从 912 降到 832，五个月后的收成是 3,966 筐，而不是 4,635 筐。`grain_harness`
+  中的 `requisition_branch_is_reproducible_and_carries_future_cost` 检查这份代价，
+  `canwu-force-supply-reference` 中的
+  `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` 则逐一测试
+  saga 的每个步骤。
 
 ## 动手改一改
 
 - **决策序列。** 修改 `grain_loop.rs` 里的 `decisions` 数组，观察 `civilian_fulfilled`
-  和 `population_wellbeing_per_mille` 怎样变化。注意第 2 步提到的一个月滞后。
+  和 `population_wellbeing_per_mille` 怎样变化。把 `requisition_for_force` 挪到第 6 个月或
+  之后，调粮仍会排在最前，那个月民食可能短缺；但驻军账户已经见底，不会开启 saga，合作度
+  不会减少 80，收成也不受惩罚，只是那个月少加 3 点合作度。
 - **收成。** 把 `grain.rs` 中的 `HARVEST_BASE` 改为 `6_000`。第 10 个月的
-  `harvest_output` 会变成 `6000 × 924 / 1000 = 5544`。
+  `harvest_output` 会变成 `6000 × 844 × 940 / 1,000,000 = 4760`（向下取整）。
 - **种子底线。** 经济配置中记录了 `seed_floor: 180`，但没有代码读取它；两个粮食账户
-  也都没有受保护底线（`protected_floor_policy: None`），所以第 9 个月末粮仓被取空。
+  也都没有受保护底线（`protected_floor_policy: None`），所以第 8 个月末粮仓被取空。
   在这里加一个[受保护存量底线](/reference/terminology/)（`ProtectedFloorPolicyRevision`）
   并不只是让粮仓账户指向它：只要需求的 `protected_floor_policy` 与它所动用账户的不一致，
   分配就会以 `VersionConflict` 失败。这个循环里的需求都使用默认的 `Pooled` 来源策略

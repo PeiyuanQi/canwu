@@ -41,7 +41,8 @@ use canwu_force_supply_reference::{
     ForceOperationV1, ForceStockCustodyBindingV1, ForceSupplyReferencePlugin,
     ForceSupplyRuntimeRecord, ForceSupplyStateV1, ReferenceForce, ReferenceForceId,
     ResourceOutcomePacketV1, SupplyResourceKind, enqueue_force_archive,
-    finalize_force_archive_retention, force_supply_command, force_supply_runtime_reference,
+    finalize_force_archive_retention, force_externality_completion_participant_reference,
+    force_supply_command, force_supply_runtime_reference,
 };
 use canwu_resource::{
     ActivateCompletionLeaseV1, AllocationLegStatus, CompleteExternalCompletionParticipantGrantV1,
@@ -380,6 +381,8 @@ pub struct GrainHarness {
     granary_account: ResourceAccountId,
     army_account: ResourceAccountId,
     scope: ResourceScopeId,
+    /// Test-only and not persisted: see `reselect_decision_during_requisition`.
+    reselect_during_requisition: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -587,6 +590,7 @@ impl GrainHarness {
             cooperation_per_mille: 900,
             pending_harvest_penalty_per_mille: 0,
             latest_decision: GrainDecision::Balanced,
+            last_harvest_credit_sequence: None,
         };
         let mut economy_state =
             EconomyReferenceStateV1::default().with_compiled_content(compiled)?;
@@ -719,6 +723,7 @@ impl GrainHarness {
             granary_account,
             army_account,
             scope,
+            reselect_during_requisition: false,
         })
     }
 
@@ -797,6 +802,14 @@ impl GrainHarness {
 
     pub fn set_archive_storage_available(&mut self, available: bool) {
         *self.archive_store.available.borrow_mut() = available;
+    }
+
+    /// Test hook: once a requisition lease is active, resolve one more grain
+    /// ticket, so the targeted local economy changes before the requisition's
+    /// externality arrives. The setting is not persisted or forked.
+    #[doc(hidden)]
+    pub fn reselect_decision_during_requisition(&mut self, enabled: bool) {
+        self.reselect_during_requisition = enabled;
     }
 
     pub fn archive_reference_history(&mut self) -> Result<(), GrainLoopError> {
@@ -896,6 +909,7 @@ impl GrainHarness {
             granary_account,
             army_account,
             scope: local.scope.clone(),
+            reselect_during_requisition: false,
         })
     }
 
@@ -1433,7 +1447,12 @@ impl GrainHarness {
                     .decision_attempt(DecisionRequestId::new(10_001 + u64::from(month) * 2))
             )));
         };
-        grain_decision_from_option(option_id)
+        let resolved = grain_decision_from_option(option_id)?;
+        self.require_economy_operation_applied(&format!(
+            "canwu.economy-reference:operation:grain-decision:{month:02}:{}",
+            decision_option_id(resolved),
+        ))?;
+        Ok(resolved)
     }
 
     fn record_force_decision(
@@ -1504,7 +1523,21 @@ impl GrainHarness {
             &options,
             selected,
             "Commander selected a persisted force-supply option",
-        )
+        )?;
+        let operation = ForceOperationId::new(format!(
+            "canwu.force-supply-reference:decision:month-{month:02}:{selected}"
+        ))?;
+        if !self
+            .force_state()?
+            .outcomes
+            .get(&operation)
+            .is_some_and(|outcome| outcome.applied)
+        {
+            return Err(GrainLoopError::Rejected(format!(
+                "force-supply decision {operation} was not applied"
+            )));
+        }
+        Ok(())
     }
 
     fn record_g5_decision(
@@ -1598,7 +1631,29 @@ impl GrainHarness {
             &options,
             selected,
             "Manager selected a persisted projection-backed resilience option",
-        )
+        )?;
+        self.require_economy_operation_applied(&format!(
+            "canwu.economy-reference:decision:month-{month:02}:{selected}"
+        ))
+    }
+
+    /// Fails unless the exact economy operation carried by a resolved ticket
+    /// was applied, so a rejected command cannot leave last month's choice.
+    fn require_economy_operation_applied(&self, operation: &str) -> Result<(), GrainLoopError> {
+        let operation = EconomyOperationId::new(operation)?;
+        let (_, economy_state) = economy_reference_state(&self.canwu)?
+            .ok_or_else(|| GrainLoopError::Missing("economy runtime".to_owned()))?;
+        if economy_state
+            .outcomes
+            .get(&operation)
+            .is_some_and(|outcome| outcome.applied)
+        {
+            Ok(())
+        } else {
+            Err(GrainLoopError::Rejected(format!(
+                "economy decision {operation} was not applied"
+            )))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1680,6 +1735,10 @@ impl GrainHarness {
                     .at_time(self.canwu.time()),
             )),
         )?;
+        // Resolution admits the carried command in this boundary; its owning
+        // plugin applies the admitted ingress in the next one. Drain both so
+        // the caller reads this month's selected posture, not last month's.
+        self.settle_current(&[])?;
         self.settle_current(&[])?;
         let ticket = self
             .canwu
@@ -2310,6 +2369,10 @@ impl GrainHarness {
             economy_target.as_ref(),
             service_at,
         )?;
+        if self.reselect_during_requisition && economy_target.is_some() {
+            // A second resolved ticket bumps the local economy's revision.
+            self.record_decision(month + 100, decision)?;
+        }
         let intent_id = ForceConsumptionIntentId::new(format!(
             "canwu.force-supply-reference:intent:grain-month-{month:02}"
         ))?;
@@ -2650,8 +2713,9 @@ impl GrainHarness {
             let (_, economy) = economy_reference_state(&self.canwu)?
                 .ok_or_else(|| GrainLoopError::Missing("economy runtime".to_owned()))?;
             let economy_participant = economy.completion_participants[&acquisition].clone();
-            let economy_owner_source =
-                self.current_exact(economy_reference_runtime_reference().into_untyped())?;
+            let economy_owner_source = self.current_exact(
+                force_externality_completion_participant_reference(&acquisition).into_untyped(),
+            )?;
             grant_acknowledgements.push(ForceOperationV1::Completion {
                 operation: ForceCompletionOperationV1::AcknowledgeExternalParticipant {
                     owner_source: economy_owner_source,
@@ -2742,8 +2806,9 @@ impl GrainHarness {
             let (_, economy) = economy_reference_state(&self.canwu)?
                 .ok_or_else(|| GrainLoopError::Missing("economy runtime".to_owned()))?;
             let economy_participant = economy.completion_participants[&acquisition].clone();
-            let economy_owner_source =
-                self.current_exact(economy_reference_runtime_reference().into_untyped())?;
+            let economy_owner_source = self.current_exact(
+                force_externality_completion_participant_reference(&acquisition).into_untyped(),
+            )?;
             prepare_acknowledgements.push(ForceOperationV1::Completion {
                 operation: ForceCompletionOperationV1::AcknowledgeExternalParticipant {
                     owner_source: economy_owner_source,

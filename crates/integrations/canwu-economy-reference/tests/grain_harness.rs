@@ -8,7 +8,9 @@ use canwu_api::{ItineraryRevisionReason, LegExecutionStatus};
 use canwu_economy_reference::{
     ECONOMY_ARCHIVE_BLOB_NAMESPACE, GrainDecision, GrainHarness, economy_reference_state,
 };
-use canwu_force_supply_reference::{ForceSupplyRuntimeRecord, force_supply_runtime_reference};
+use canwu_force_supply_reference::{
+    ExternalityOutcomeDisposition, ForceSupplyRuntimeRecord, force_supply_runtime_reference,
+};
 use canwu_resource::{
     RESOURCE_ARCHIVE_BLOB_NAMESPACE, ResourceOperationStatus, ResourceReportDtoV1, resource_state,
 };
@@ -33,17 +35,27 @@ fn decisions() -> [GrainDecision; 14] {
 }
 
 #[test]
-fn resolved_grain_ticket_drives_the_next_months_allocation() {
-    let mut harness = GrainHarness::new().expect("real Canwu composition");
-    harness
+fn resolved_resilience_ticket_drives_the_same_months_allocation() {
+    let mut base = GrainHarness::new().expect("real Canwu composition");
+    for decision in decisions().into_iter().take(4) {
+        base.advance_month(decision).expect("prefix month");
+    }
+    // Month 4 chose force first. Month 5 is scarce, so its own choice must
+    // decide whether civilians and relief outrank the garrison dispatch.
+    let balanced = base
+        .fork()
+        .expect("balanced fork")
         .advance_month(GrainDecision::Balanced)
-        .expect("balanced prefix");
-    let relief = harness
-        .advance_month(GrainDecision::ReliefFirst)
-        .expect("relief branch");
-    assert_eq!(relief.decision, GrainDecision::ReliefFirst);
-    assert!(relief.relief_fulfilled > 0);
-    assert!(relief.relief_fulfilled <= relief.relief_requested);
+        .expect("balanced month");
+    let force_first = base
+        .fork()
+        .expect("force-first fork")
+        .advance_month(GrainDecision::ForceFirst)
+        .expect("force-first month");
+    assert_eq!(balanced.civilian_fulfilled, balanced.civilian_requested);
+    assert_eq!(balanced.relief_fulfilled, balanced.relief_requested);
+    assert!(force_first.civilian_fulfilled < force_first.civilian_requested);
+    assert_eq!(force_first.relief_fulfilled, 0);
 }
 
 #[test]
@@ -574,6 +586,34 @@ fn requisition_branch_is_reproducible_and_carries_future_cost() {
     requisition_b
         .advance_month(GrainDecision::RequisitionForForce)
         .expect("requisition decision B");
+    // Month 5 settles the saga with an applied externality, which leaves the
+    // compiled penalty pending for the next harvest.
+    let force = requisition_a
+        .canwu()
+        .typed_domain_record(&force_supply_runtime_reference())
+        .expect("force runtime")
+        .decode_payload::<ForceSupplyRuntimeRecord>()
+        .expect("force state");
+    assert!(force.terminal_receipts.values().any(|receipt| {
+        receipt.saga.is_some()
+            && receipt.externality_outcome.as_ref().is_some_and(|outcome| {
+                outcome.disposition == ExternalityOutcomeDisposition::Applied
+            })
+    }));
+    let policy = force
+        .requisition_policies
+        .values()
+        .next()
+        .expect("compiled requisition policy");
+    let cooperation_cost = policy.cooperation_delta_per_mille.unsigned_abs();
+    let (_, economy) = economy_reference_state(requisition_a.canwu())
+        .expect("economy query")
+        .expect("economy runtime");
+    let local = economy.local_economies.values().next().expect("economy");
+    assert_eq!(
+        local.pending_harvest_penalty_per_mille,
+        policy.harvest_input_delta_per_mille.unsigned_abs()
+    );
     for decision in decisions().into_iter().skip(5).take(5) {
         balanced.advance_month(decision).expect("balanced future");
         requisition_a
@@ -583,11 +623,62 @@ fn requisition_branch_is_reproducible_and_carries_future_cost() {
             .advance_month(decision)
             .expect("requisition future B");
     }
+    // The month 10 harvest used the penalty up.
+    let (_, economy) = economy_reference_state(requisition_a.canwu())
+        .expect("economy query")
+        .expect("economy runtime");
+    let local = economy.local_economies.values().next().expect("economy");
+    assert_eq!(local.pending_harvest_penalty_per_mille, 0);
     let balanced = balanced.summary().expect("balanced summary");
     let requisition_a = requisition_a.summary().expect("requisition summary A");
     let requisition_b = requisition_b.summary().expect("requisition summary B");
     assert_eq!(requisition_a.checkpoint_hash, requisition_b.checkpoint_hash);
     assert_ne!(balanced.checkpoint_hash, requisition_a.checkpoint_hash);
-    assert!(requisition_a.final_cooperation_per_mille < balanced.final_cooperation_per_mille);
-    assert!(requisition_a.total_harvest < balanced.total_harvest);
+    // Month 5 applies the compiled cooperation cost exactly once.
+    assert_eq!(
+        requisition_a.frames[4].cooperation_per_mille + cooperation_cost,
+        requisition_a.frames[3].cooperation_per_mille
+    );
+    // The month 10 harvest reads cooperation after month 9. The pending
+    // penalty lowers the yield per cooperation point below the balanced one.
+    let balanced_cooperation = u64::from(balanced.frames[8].cooperation_per_mille);
+    let requisition_cooperation = u64::from(requisition_a.frames[8].cooperation_per_mille);
+    assert!(
+        requisition_a.total_harvest * balanced_cooperation
+            < balanced.total_harvest * requisition_cooperation
+    );
+}
+
+#[test]
+fn requisition_externality_rejects_a_local_economy_changed_after_its_lock() {
+    let mut harness = GrainHarness::new().expect("real Canwu composition");
+    let mut prefix = None;
+    for decision in decisions().into_iter().take(4) {
+        prefix = Some(harness.advance_month(decision).expect("prefix month"));
+    }
+    let month_4 = prefix.expect("month 4 frame");
+    // Another resolved grain ticket changes the local economy after the
+    // requisition lease locked it, so the externality must not apply.
+    harness.reselect_decision_during_requisition(true);
+    let month_5 = harness
+        .advance_month(GrainDecision::RequisitionForForce)
+        .expect("requisition month");
+    let force = harness
+        .canwu()
+        .typed_domain_record(&force_supply_runtime_reference())
+        .expect("force runtime")
+        .decode_payload::<ForceSupplyRuntimeRecord>()
+        .expect("force state");
+    assert!(force.terminal_receipts.values().any(|receipt| {
+        receipt.saga.is_some()
+            && receipt.externality_outcome.as_ref().is_some_and(|outcome| {
+                outcome.disposition == ExternalityOutcomeDisposition::Rejected
+            })
+    }));
+    let (_, economy) = economy_reference_state(harness.canwu())
+        .expect("economy query")
+        .expect("economy runtime");
+    let local = economy.local_economies.values().next().expect("economy");
+    assert_eq!(local.pending_harvest_penalty_per_mille, 0);
+    assert_eq!(month_5.cooperation_per_mille, month_4.cooperation_per_mille);
 }

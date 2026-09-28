@@ -256,7 +256,7 @@ cargo test -p canwu-force-supply-reference --test g4_contract
 cargo test -p canwu-economy-reference --test grain_harness
 ```
 
-`grain_loop` prints a `GrainLoopSummary` as JSON; its `conservation_closing` equals `final_stock` (2,860) because no transfer is left in escrow. The [grain, production, and military supply case](/en/tutorials/cases/production-economy/) walks through it month by month. `resource_lifecycle` builds a `ResourceState` without an engine and allocates one demand, `completion_lease` ends with `lease state: Activated`, and `process_constraints` prints the three blockers of a machine process (`ToolsMachines`, `Energy`, and `Maintenance`).
+`grain_loop` prints a `GrainLoopSummary` as JSON; its `conservation_closing` equals `final_stock` (2,206) because no transfer is left in escrow. The [grain, production, and military supply case](/en/tutorials/cases/production-economy/) walks through it month by month. `resource_lifecycle` builds a `ResourceState` without an engine and allocates one demand, `completion_lease` ends with `lease state: Activated`, and `process_constraints` prints the three blockers of a machine process (`ToolsMachines`, `Energy`, and `Maintenance`).
 
 The `resource_contract` tests cover conservation, protected floors, transfer escrow, and leases. The `g3_contract` tests cover overlapping capacity, output settled only after the acknowledgement, incidents staged in phase 10 and committed in phase 11, and degraded-facility tickets. `requisition_keeps_resource_force_externality_and_ack_as_distinct_steps` in `g4_contract` walks the requisition saga, and `snapshot_checkpoint_journal_and_fork_continue_identically` in `grain_harness` checks that a snapshot, a checkpoint journal, and a fork reach the same checkpoint hash.
 

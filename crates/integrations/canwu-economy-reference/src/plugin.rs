@@ -37,7 +37,7 @@ pub const ECONOMY_COMMAND_INGRESS: &str = "economy_reference_operation_v1";
 pub const ECONOMY_ARCHIVE_COMMIT_INGRESS: &str = "economy_archive_commit_v1";
 pub const ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS: &str = "economy_archive_retention_ack_v1";
 pub const ECONOMY_SEMANTIC_HASH: &str =
-    "41ce9f999320db6c724753f81af44a31237bf78ec17b2df7a56943eb10f12a7f";
+    "757240e04b3005ee269ca91cfd3e00bcc03cd450bb1a8b9ed85deb81430fd780";
 static ECONOMY_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ECONOMY_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -353,8 +353,13 @@ impl SimulationPlugin for EconomyReferencePlugin {
             StateKey::new(canwu_resource::PLUGIN_NAMESPACE, "runtime"),
             StateKey::new(canwu_force_supply_reference::PLUGIN_NAMESPACE, "runtime"),
             externality_outcome_state_key(),
+            externality_participant_state_key(),
         ];
-        externalities.writes = vec![economy_state_key(), externality_outcome_state_key()];
+        externalities.writes = vec![
+            economy_state_key(),
+            externality_outcome_state_key(),
+            externality_participant_state_key(),
+        ];
         externalities.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(externalities, apply_force_externalities)?;
 
@@ -1191,6 +1196,7 @@ fn close_month(
         .demands
         .get(&evidence.force_demand)
         .ok_or_else(|| missing("force demand is unavailable"))?;
+    let mut harvest_credit_sequence = None;
     if let Some(exact) = &evidence.harvest_credit {
         let actual = resource_state
             .outcomes
@@ -1203,6 +1209,7 @@ fn close_month(
                 "harvest credit outcome does not match authoritative resource state",
             ));
         }
+        harvest_credit_sequence = Some(actual.sequence);
     }
     if let Some(force_operation) = &evidence.force_operation {
         let force_record = view
@@ -1264,6 +1271,24 @@ fn close_month(
         .harvest_credit
         .as_ref()
         .map_or(0, |outcome| outcome.quantity);
+    if let Some(sequence) = harvest_credit_sequence {
+        // Only the profile's harvest month may cite a credit, and only one
+        // newer than any credit already cited, so an old credit can neither
+        // count twice nor clear a penalty that no harvest used.
+        if (month - 1) % 12 + 1 != profile.harvest.harvest_month
+            || economy
+                .last_harvest_credit_sequence
+                .is_some_and(|last| sequence <= last)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceUnavailable,
+                "harvest credit is not a new credit closed in the harvest month",
+            ));
+        }
+        economy.last_harvest_credit_sequence = Some(sequence);
+        // A requisition's harvest penalty applies to the next harvest only.
+        economy.pending_harvest_penalty_per_mille = 0;
+    }
     economy.month = month;
     economy.revision = economy
         .revision
@@ -1645,6 +1670,26 @@ fn apply_force_externalities(
             .get(&saga.intent)
             .ok_or_else(|| invalid("force externality source intent is unavailable"))?;
         let acquisition = &force_intent.completion_certificate.acquisition;
+        // The requisition locked the economy runtime version that was current
+        // when this plugin granted its participant, and the grant saved every
+        // local economy's revision. The participant's own grant and prepare
+        // advance the runtime record but no local economy, so a target is exact
+        // while its local economy keeps the revision saved at the grant. This
+        // reads persisted state only, never a retained historical version.
+        let expected_target = canwu_resource::CompletionLockedTargetV1::ExternalRecord {
+            version: intent.expected_economy_target.clone(),
+        };
+        let target_is_runtime = intent.expected_economy_target.record
+            == economy_reference_runtime_reference().into_untyped();
+        let target_is_current =
+            target_is_runtime && intent.expected_economy_target.version == economy_record.version;
+        let saved_revisions = economy_state
+            .completion_participants
+            .get(acquisition)
+            .filter(|participant| participant.grant.target_versions == [expected_target])
+            .and_then(|_| economy_state.completion_target_revisions.get(acquisition))
+            .filter(|_| target_is_runtime)
+            .cloned();
         if economy_state
             .completion_participants
             .contains_key(acquisition)
@@ -1665,6 +1710,14 @@ fn apply_force_externalities(
                     operation_key: force_intent.resource_operation_key.clone(),
                 },
             )?;
+            // The force coordinator acknowledges the externality against this
+            // provider record, so it must carry the completed grant.
+            publish_externality_participant_provider(
+                view,
+                &economy_state,
+                acquisition,
+                &mut directives,
+            )?;
         }
         let authoritative_scope =
             authoritative_force_externality_scope(view, &force_state, &intent)?;
@@ -1675,10 +1728,12 @@ fn apply_force_externalities(
         let candidate_ids: Vec<_> = economy_state
             .local_economies
             .values()
-            .filter(|_| {
-                intent.expected_economy_target.record
-                    == economy_reference_runtime_reference().into_untyped()
-                    && intent.expected_economy_target.version == economy_record.version
+            .filter(|economy| {
+                target_is_current
+                    || saved_revisions
+                        .as_ref()
+                        .and_then(|saved| saved.get(&economy.id))
+                        == Some(&economy.revision)
             })
             .filter(|economy| {
                 economy_state
@@ -2326,6 +2381,7 @@ mod tests {
                 cooperation_per_mille: 1_000,
                 pending_harvest_penalty_per_mille: 0,
                 latest_decision: crate::GrainDecision::Balanced,
+                last_harvest_credit_sequence: None,
             },
         );
         let grant = crate::EconomyObservationGrantV1 {
