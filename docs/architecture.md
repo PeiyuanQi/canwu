@@ -7,24 +7,13 @@ fourteen independent algorithms. At the lowest level, the runtime combines two
 state-write paths, one deterministic allocation primitive, and one
 cross-cutting visibility policy:
 
-## Format 8 contract / Format 8 契约
-
-Before 1.0, Canwu uses a clean persistence break. Format 8 requires a declared
-run manifest, declared run configuration, canonical initial scenario, versioned
-commitments, content-addressed state-page envelopes, and a self-contained replay
-journal. The engine does not load or silently migrate pre-8 saves.
-`SimulationGranularity` supplies the generic
-`aggregate` / `group` / `actor` levels; Population, Special Group, and Character
-are Celestial Mandate mappings owned by a downstream reference integration.
-Southern Ming and WWII content therefore does not belong in Canwu core.
-
 ```mermaid
 flowchart TB
     Inputs["Commands / events / scheduled work<br/>命令 / 事件 / 调度工作"]
     Claims["Offers + competing claims<br/>供给 + 竞争性申请"]
 
     subgraph Writes["State-write paths / 状态写入路径"]
-        Immediate["1. Immediate transaction<br/>立即事务写入"]
+        Immediate["1. Immediate write<br/>立即写入"]
         Boundary["3. Staged atomic boundary commit<br/>分阶段批量原子提交"]
     end
 
@@ -45,13 +34,13 @@ flowchart TB
 
 ### English
 
-1. **Immediate transactional write** is the direct command/event path. The
-   operation applies inside its own transaction and either commits completely
-   or rolls back completely. It remains the compatibility path for the existing
-   movement slice and legacy event reactors.
-   Synchronous reactors are therefore compatibility-only: nested event
-   re-entry is bounded by `MAX_SYNCHRONOUS_REACTION_DEPTH`, and a limit breach
-   rolls back the enclosing transaction. New mechanics should use phased
+1. **Immediate write** is the direct command/event path. The operation applies
+   atomically on its own, without staging for a boundary commit, and either
+   commits completely or rolls back completely. It remains the compatibility
+   path for the existing movement slice and legacy event reactors. Synchronous
+   reactors are therefore compatibility-only: nested event re-entry is bounded
+   by `MAX_SYNCHRONOUS_REACTION_DEPTH`, and a limit breach rolls back the
+   enclosing command or event application. New mechanics should use phased
    boundary systems, which collect proposals before one deterministic commit.
 2. **Deterministic reservation and allocation** is a calculation primitive, not
    a state-write path. Systems publish capacity and competing claims; the
@@ -77,11 +66,12 @@ foundations rather than introducing fourteen separate settlement models.
 
 ### 中文
 
-1. **立即事务写入**是命令或事件的直接处理路径。操作在自己的事务中
-   执行，要么完整提交，要么完整回滚。它仍是既有移动逻辑和旧式事件
+1. **立即写入**是命令或事件的直接处理路径。操作不经过边界的暂存与提交，
+   单独原子执行，要么完整提交，要么完整回滚。它仍是既有移动逻辑和旧式事件
    reactor 的兼容路径。
    因此，同步 reactor 只保留为兼容能力：嵌套事件重入受
-   `MAX_SYNCHRONOUS_REACTION_DEPTH` 限制，超过限制会回滚整个外层事务。
+   `MAX_SYNCHRONOUS_REACTION_DEPTH` 限制，超过限制会回滚整个外层命令或
+   事件处理。
    新机制应使用分阶段 boundary system，先收集提案，再统一确定性提交。
 2. **确定性资源仲裁与分配**是一种计算原语，不是状态写入路径。系统先
    发布资源容量和竞争性申请；内核再按资源池、优先级（降序）、显式
@@ -100,6 +90,18 @@ foundations rather than introducing fourteen separate settlement models.
 因此最实用的分类是：**1 和 3 负责写入；2 负责计算分配结果；4 负责控制
    分阶段结果何时可读**。十四个阶段负责把这些底层机制组织成确定的顺序、
    校验、证据和重演流程，而不是提供十四种彼此独立的结算算法。
+
+## Format 8 contract / Format 8 契约
+
+Before 1.0, Canwu uses a clean persistence break. Format 8 requires a declared
+run manifest, a declared or `CompatibilityV1` run configuration (the plain
+constructors write `CompatibilityV1`), canonical initial scenario, versioned
+commitments, content-addressed state-page envelopes, and a self-contained replay
+journal. The engine does not load or silently migrate pre-8 saves.
+`SimulationGranularity` supplies the generic
+`aggregate` / `group` / `actor` levels; Population, Special Group, and Character
+are Celestial Mandate mappings owned by a downstream reference integration.
+Southern Ming and WWII content therefore does not belong in Canwu core.
 
 ## Boundary
 
@@ -404,11 +406,13 @@ are rejected rather than migrated. / 事件迁出会破坏 Rust 源 API：调用
 
 `canwu-decision` is the official headless decision SDK. It defines persisted
 decision tickets, versioned dynamic options, controller bindings, persisted
-decision attempts and traces, a reusable weighted utility evaluator, Utility, Rule, Human,
-Random, External, and LLM policy contracts, and a guarded utility policy that
-composes rules, utility, and a bounded random tie-break. Domain packages still define when a
-decision exists, what its context means, which options are legal, and which
-domain command an option represents.
+decision attempts and traces, a reusable weighted utility evaluator, policy
+contracts for the `Utility`, `Rule`, `Human`, `External`, and `Llm` policy kinds
+(`DecisionPolicyKind`), the `Random` kind that a boundary draw resolves, and a
+guarded utility policy that composes rules, utility, and a bounded random
+tie-break. Domain packages still define when a decision exists, what its
+context means, which options are legal, and which domain command an option
+represents.
 
 The authoritative flow is:
 
@@ -431,7 +435,7 @@ handler can also require `CommandContext::decision_controller_id`; the engine
 sets it only for the nested command of validated decision ingress, so callers
 cannot manufacture DecisionTicket provenance with `CommandEnvelope::with_authority`.
 
-Random selection stays inside the boundary transaction. A declared boundary
+Random selection stays inside the boundary. A declared boundary
 system uses `random_sample_for_operation` with
 `RandomOperationTarget::DecisionTicket`, supplies canonical
 `DecisionOptionWeight` values through `ResolveDecisionRandomly`, and lets the
@@ -484,7 +488,7 @@ therefore skip such tickets, read through `SimulationView::person_availability`.
 
 Registration, opening, option replacement, resolution, and cancellation enter
 the runtime through `DecisionIngressRequest`. They use request IDs, revision
-guards, deterministic queue order, transactional settlement, and exact-retry
+guards, deterministic queue order, atomic boundary settlement, and exact-retry
 semantics. A selected command option carries a serialized existing Canwu
 command; it must exactly match the nested command request admitted with the
 resolution. Decisions cannot bypass the command boundary or invent a new
@@ -553,7 +557,7 @@ describes how its authoritative commands and boundary systems execute. It
 depends on `canwu-api` and `canwu-information`; neither dependency points back
 to it.
 
-`canwu-information` owns the neutral information lifecycle. Since 0.13.0 an
+`canwu-information` owns the neutral information lifecycle. An
 interpretation's `InterpretationPayload` may carry an `AuthenticityFinding`:
 the interpreting holder's judgment of whether a
 representation's claimed source is accepted, with a basis of at most
@@ -602,34 +606,37 @@ population transitions. A ruler or policy therefore cannot directly set a
 population belief percentage. Phase 10 produces mobilization candidates only;
 downstream political or conflict packages decide what, if anything, follows.
 
-Since 0.13.0, a `PolicyPressure` may record its provenance: an optional
-`issuer` (a government, organization, or person, bound into the record's core
-references) and a `decision_version`, which requires an issuer when non-zero.
-Both fields are omitted when unused. Two canonical ingress types reach the
-society owner through one queue. The public `cohort_headcount_rebase_v1`
-packet (`CohortHeadcountRebaseV1` with a `RebaseReason`) rebases a cohort to an
-external conserved stock: the cited stock must be the current version of a
-record outside `canwu.society` when the packet is admitted, or the rebase is
-rejected as `stale_external_stock`. The internal `society_lifecycle_delta_v1`
-packet (`SocietyLifecycleDeltaV1`) carries a lifecycle provider's
-target-scoped rule, alignment, and release changes, one packet per target, for
-example from the culture boundary plugin. The event-driven phase-12 system
+A `PolicyPressure` may record its provenance: an optional `issuer` (a
+government, organization, or person, bound into the record's core references)
+and a `decision_version`, which requires an issuer when non-zero. Both fields
+are omitted when unused. Two canonical ingress types reach the society owner
+through one queue. The public `cohort_headcount_rebase_v1` packet
+(`CohortHeadcountRebaseV1` with a `RebaseReason`) rebases a cohort to an
+external conserved stock: the cited stock must be a record outside
+`canwu.society`, or the rebase is rejected as `invalid_external_stock`, and it
+must be that record's current version when the packet is admitted, or the rebase
+is rejected as `stale_external_stock`. The internal `society_lifecycle_delta_v1`
+packet (`SocietyLifecycleDeltaV1`) carries a lifecycle provider's target-scoped
+rule, alignment, and release changes, one packet per target, for example from
+the culture boundary plugin. The event-driven phase-12 system
 `intake-society-ingress` queues admitted packets in the
 `canwu.society:ingress-queue` record, because the society writer runs only on
 Daily boundaries and only one system may write the state in a phase. The next
 Daily phase-7 settlement applies the queue after cohort transfers and before
-institutional decisions and transitions, and records each outcome in the
-cohort exchange ledger (`rebases`, `lifecycle_deltas`). A rebase re-proportions
-every distribution of the cohort with integer largest-remainder allocation, so
-each distribution totals the new headcount and every bucket stays within one
-unit of its exact share. Queued packets supplied by a scenario or snapshot are
-validated like admitted packets, and the society plugin remains the only writer
-of `canwu.society:state`.
+institutional decisions and transitions, and records each outcome in the cohort
+exchange ledger (`rebases`, `lifecycle_deltas`). A rebase re-proportions every
+distribution of the cohort with integer largest-remainder allocation, so each
+distribution totals the new headcount and every bucket stays within one unit of
+its exact share. Only the intake writes the queue: an initial scenario that
+seeds a non-empty queue is refused with `InvalidAuthority`, and the module-level
+restore check (`from_society_snapshot_json` or `validate_society_runtime`)
+re-derives a restored snapshot's queued packets from the ingress journal, which
+must match the packets admitted at their recorded boundaries. The society plugin
+remains the only writer of `canwu.society:state`.
 
-Applying a cohort transfer now invalidates the derived aggregates,
-mobilization candidates, and projections it affects, and the transfer digest
-binds only the state the transfer depends on. Before 0.13.0, the Daily boundary
-after any applied cohort transfer failed.
+Applying a cohort transfer invalidates the derived aggregates, mobilization
+candidates, and projections it affects, and the transfer digest binds only the
+state the transfer depends on.
 
 Actor-facing queries require a valid `ViewerContext` and return only a
 previously materialized projection for that actor. Absence is an authorization
@@ -664,7 +671,7 @@ deadline, scheduled-version, live-culture-dependency, participation, outbox,
 and applicability indexes keep ordinary settlement proportional to due or
 changed work rather than immutable history.
 
-Since 0.13.0, procedure stages tally integer vote weights, can require a
+Procedure stages tally integer vote weights, can require a
 number of unit blocks in the `For` position with a `status-quo` or
 `casting-seat:<seat>` tie-break, and can be advisory `Consultation` stages whose
 ballots never count and which complete at their deadline. A stage that stops
@@ -760,7 +767,6 @@ The host application controls use of pooled demands and requester identity.
 Holder-relative reports keep their existing visibility contract and do not
 automatically disclose the source list. Standalone DTOs default a missing field
 to `Pooled`; strict snapshots still require the exact engine and plugin identity.
-Adding the public Rust struct field requires the 0.11.0 minor release.
 
 `ResourceOperationRequestV1::RecordLoss(ResourceAccountLossRequestV1)` records
 an account-level loss with its own `loss_id` and cause. The phase-7 lifecycle
@@ -797,10 +803,10 @@ account, immutable, and defaults to `None`; a tracked `CreateAccount` that sets
 it fails with `InvalidAuthority`. A tracked command must come from the
 destination custodian. None of these operations grants access to another
 custodian's stock; only an access grant does. The resource plugin semantic hash
-and holder-report knowledge schema changed with these operations, while
-default values keep their previous canonical encoding.
+and holder-report knowledge schema cover these operations, and fields left at
+their defaults are omitted from the canonical encoding.
 
-Since 0.13.0, a delegated access grant (`ResourceAccessGrantV1`) records a
+A delegated access grant (`ResourceAccessGrantV1`) records a
 grantor custodian's consent that a grantee may draw on its stock of one exact
 resource and unit revision, up to `cap_quantity` within the half-open window
 `valid_from..valid_until`, citing the exact `authority_evidence` record version
@@ -844,18 +850,13 @@ controls its cancellation, return, and loss. Grants stay hot, bounded by
 holder-bound read for the grantor or grantee. Who may grant whom stays
 application authority.
 
-Version 0.13.0 also fixes two resource behaviors. `AmendDemand` may no longer
-change a demand's lifecycle status, rejection reason, or requester; such an amendment is a
-durable rejection instead of a change that jammed later boundaries. And a live
-production completion now settles its output: the resource side of an
-execution's completion lease locked the production runtime at the version
-current when the lease was granted, before the execution existed, so on 0.11
-and 0.12 a live completion could never settle its credit. The credit now cites
-the version production pinned as the execution's `output_source`; the resource
-runtime accepts the locked record at or after its locked version and requires
-the pinned source exactly. Production credits settle only through the
-production output batch ingress; the generic resource adapter ingress rejects
-them.
+`AmendDemand` cannot change a demand's lifecycle status, rejection reason, or
+requester; such an amendment becomes a durable rejection. A live production
+completion settles its output credit: the credit cites the production runtime
+version pinned as the execution's `output_source`, and the resource runtime
+accepts the locked record at or after its locked version while requiring the
+pinned source exactly. Production credits settle only through the production
+output batch ingress; the generic resource adapter ingress rejects them.
 
 Non-force consumption providers publish a top-level `resource_consumption_intents`
 map in their owned, active domain record. Map keys equal the IDs of sealed
@@ -869,8 +870,9 @@ certificate must bind that source and operation key, with the existing holder,
 participant, time and lease checks. A digest verifies content consistency; it
 does not grant authority. The provider owns intent authorization and retirement;
 resource settlement owns the debit and receipt. The force-supply reference keeps
-its specialized retained-source adapter. This 0.10.1 behavior changes the resource
-plugin semantic identity but introduces no callback registry or core schema.
+its specialized retained-source adapter. This provider contract is part of the
+resource plugin semantic identity and introduces no callback registry or core
+schema.
 
 `canwu-production` is a downstream production-asset extension. It owns
 processes, sites, facilities, capacity allocation, work orders, work in
@@ -895,16 +897,18 @@ exact evidence record version of a kind listed in the process revision's
 admits only nominal output. The holder, lifecycle, ratio, and kind rules run
 before the evidence record is resolved, so a rejection does not reveal whether
 another record exists. The resource credit and output acknowledgement settle
-exactly the scaled quantities. The production plugin now declares the
-administrative domain-record read to resolve that evidence, and its semantic
-hash changed; nominal completions serialize as before.
+exactly the scaled quantities. The production plugin declares the
+administrative domain-record read to resolve that evidence; a nominal
+completion omits both fields from its serialized form.
 
 `canwu-force-supply-reference` proves that a second independent domain can
 consume the same resource API. It owns force-local recurring demand,
 consumption intent, readiness and shortage consequences, and the requisition
 saga. It cannot write civilian population, cooperation, harvest, property, or
 occupation state; the receiving integration applies or rejects those typed
-externality intents at an exact expected revision.
+externality intents at an exact expected revision. In `canwu-economy-reference`
+the exact target is the local economy, which must be unchanged since the
+revision it had when the requisition locked the economy record.
 
 `canwu-economy-reference` composes these packages with routing and transport in
 a runnable synthetic grain loop. It also provides detached, holder-bound local
@@ -920,8 +924,8 @@ truth or scenario branches.
 kind, exclusive record cursor, and limit. Subsequent pages reject a stale
 revision. Boundary views use the same ordered kind range and merge only bounded
 overlay pages, avoiding copies of unrelated record kinds. Format 8 boundary
-rollback and proposal overlays now share persistent domain roots and validate
-affected closures, removing the former broad domain-map clone. The recorded
+rollback and proposal overlays share persistent domain roots and validate
+affected closures instead of cloning the whole domain map. The recorded
 home-hardware profile still treats 100 sites as paced interactive use and 500
 sites as non-interactive pressure evidence for the technology extension's own
 semantic workload; see
@@ -942,8 +946,7 @@ the current version of its record, and the fiscal settlement system checks it
 again in the domain-delta phase. Once the basis record advances or retires, the
 acting actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`
 (`InvalidAuthority`), while the authorized actor is still admitted. Bindings are
-set in the starting scenario. The fiscal plugin semantic hash changed with this
-contract.
+set in the starting scenario.
 
 ### Reference content and starter kits / 参考内容与入门套件
 
@@ -1019,10 +1022,11 @@ use representable checked time arithmetic rather than saturation.
 `canwu-time` exposes checked hour/day construction and checked time/duration
 arithmetic for data-dependent values. Its convenience constructors and
 operators never clamp; an out-of-range convenience operation fails loudly.
-Initial `Scenario` values currently admit stationary armies only: in-flight
-state requires the command, event, correlation, and queue evidence carried by a
-runtime snapshot. Scenario admission also rejects non-finite map coordinates so
-every accepted state can round-trip through the JSON persistence format.
+Initial `Scenario` values admit no army, person, or letter in transit:
+in-flight state requires the command, event, correlation, and queue evidence
+carried by a runtime snapshot. Scenario admission also rejects non-finite map
+coordinates so every accepted state can round-trip through the JSON
+persistence format.
 
 A queued plugin ingress item can be withdrawn, strictly before its due time, by
 its issuer only. `cancel_plugin_ingress` lets the host withdraw a public packet
@@ -1037,7 +1041,7 @@ record, with `IngressCancellationAuthority` naming `Host`, `PluginPermit`, or
 `BoundarySystem` and a canonical reason of at most
 `MAX_INGRESS_CANCELLATION_REASON_BYTES`. The record is never queued or
 admitted; its due time equals its issue time, the withdrawn item leaves the
-queue in the same transaction, and nothing is rolled back. The errors reuse
+queue in the same operation, and nothing is rolled back. The errors reuse
 existing codes: due, admitted, archived, or already withdrawn items fail with
 `LateIngress`; another issuer's item with `InvalidAuthority`; an unknown ID
 with `EvidenceUnavailable`; a non-plugin target or invalid reason with
@@ -1083,17 +1087,19 @@ kind label `"plugin"`. Consumers that need its namespaced identity should use
 
 Player-facing event projection reuses the same deterministic resolver for
 built-in and plugin events. A plugin may register an `EventAudience` for an
-event type (`public`, one or more actors, `affected_actors`, or `private`) in
-its persisted `PluginDescriptor`; an undeclared plugin event is private by
-default. `Canwu::viewer_context` derives the authorized actor and observation
-policy from the run configuration and binds the detached context to the current
-checkpoint. `observe_with_viewer` accepts only a freshly revalidated context
-plus the normal time/focus input; a context becomes stale after authoritative
-state changes. The input cannot upgrade a private event to public. This
-audience policy governs player projections only; plugin system subscriptions
-and declared state reads remain separate runtime permissions. Because the
-declaration is persisted with the plugin descriptor, snapshot loading and
-replay use the same visibility rule.
+event type (`public`, one or more actors, one knowledge holder,
+`affected_actors`, or `private`) with `PluginRegistrar::register_event_audience`
+in its persisted `PluginDescriptor`; an undeclared plugin event is private by
+default. `CanwuViewer::visible_changes_since` returns the changes one viewer may
+see under these rules. `Canwu::viewer_context(actor)` checks the actor against
+the run configuration and returns a detached `ViewerContext` bound to the
+current checkpoint hash; the context becomes stale after authoritative state
+changes, and consumers such as `canwu_society::projection_for_viewer` reject a
+context that no longer equals a freshly derived one. No viewer input can
+upgrade a private event to public. This audience policy governs player
+projections only; plugin system subscriptions and declared state reads remain
+separate runtime permissions. Because the declaration is persisted with the
+plugin descriptor, snapshot loading and replay use the same visibility rule.
 
 ```mermaid
 sequenceDiagram
@@ -1218,10 +1224,10 @@ Hosts read committed availability through `Canwu::person_availability` and its
 compact counterpart; boundary systems use `SimulationView::person_availability`
 after declaring the read. The snapshot's `person_availability` map,
 `created_persons` registry, and person counter are omitted while empty or zero,
-so a run that never uses these contracts serializes and hashes exactly as
-before. When present, they become optional sub-roots of the world commitment
-and a counter in the control root. Validation rebuilds availability, the
-registry, and the counter from boundary evidence.
+so a run that never uses these contracts serializes and hashes the same as a run
+without them. When present, they become optional sub-roots of the world
+commitment and a counter in the control root. Validation rebuilds availability,
+the registry, and the counter from boundary evidence.
 
 ## Routing and transport execution
 
@@ -1301,24 +1307,24 @@ viewer's, and rejects a paginated result. The caller does not pass a read cut:
 the engine derives it. The view read is system access, so callers must derive
 `holder` from admitted authority, not from an unvalidated payload.
 
-Since `canwu-transport.v4`, `MovementSubjectRole::PersonsGroup` moves an
-aggregate of people as one subject, normally identified by an application
-domain record; like `Cargo`, it requires a positive quantity, here a head count,
-and `MovementSubjectRole::requires_quantity` states the rule. `Handoff.kind`
+`MovementSubjectRole::PersonsGroup` moves an aggregate of people as one subject,
+normally identified by an application domain record; like `Cargo`, it requires a
+positive quantity, here a head count, and
+`MovementSubjectRole::requires_quantity` states the rule. `Handoff.kind`
 distinguishes `HandoffKind::Planned`, the default omitted from JSON, from
 `Seizure { by }`, custody taken by an entity outside the itinerary. A seizure
 follows the same leg rules as a planned handoff, except that a terminal seizure
 names its failed source leg as both ends: custody leaves the itinerary and no
-leg receives it. `ItineraryRevisionReason`
-gains `ExternalCondition { record, version, kind }`, which cites an
-application-owned condition record at an exact positive version with a
-non-empty label and is validated for both the initial itinerary and a reroute
-before mutation. Transport records these facts; incidents, hostility, hazards,
-and their authority stay in application systems.
+leg receives it. `ItineraryRevisionReason::ExternalCondition { record, version,
+kind }` cites an application-owned condition record at an exact positive version
+with a non-empty label and is validated for both the initial itinerary and a
+reroute before mutation. Transport records these facts; incidents, hostility,
+hazards, and their authority stay in application systems.
 
-`canwu-transport.v5` adds capacity pools and closes an execution on a terminal
-seizure. A `TransportCapacityPoolV1` offers a windowed quantity of one
-interchangeable resource held by a custodian; confirmed bookings hold
+Transport also records capacity pools, and a terminal seizure closes an
+execution to further progress (`TRANSPORT_SEMANTIC_VERSION` is
+`canwu-transport.v5`). A `TransportCapacityPoolV1` offers a windowed quantity
+of one interchangeable resource held by a custodian; confirmed bookings hold
 `booked`, consumed bookings hold `consumed`, and the pool revision advances with
 every change. `allocate_capacity_bookings` is a pure function over one pool
 revision: it visits `CapacityBookingRequestV1` values by descending priority,
@@ -1371,9 +1377,10 @@ draws randomness.
 
 The router supports fixed, scheduled, and piecewise traversal. Historical
 content can therefore express foot, horse, road, river, sea, 1900/1940 rail,
-air, telegraph, or other signal systems as data. FIFO networks use stable
-Dijkstra ordering; explicitly non-FIFO networks use a bounded label-correcting
-algorithm. Capacity is a persistent transport booking, not hidden mutable
+air, telegraph, or other signal systems as data. `RoutingPolicy::algorithm`
+selects stable Dijkstra ordering (`FifoDijkstraV1`, the default, for FIFO
+timetables) or a bounded label-correcting search (`BoundedLabelCorrectingV1`)
+for non-FIFO timetables. Capacity is a persistent transport booking, not hidden mutable
 state in a route cache. `RoutingCache` is derived, digest-keyed, rebuildable,
 and excluded from authoritative commitments.
 
@@ -1400,7 +1407,7 @@ The implemented composition boundary and Wuxi delivery slice are documented in
 ## Plugins
 
 Plugins register schemas, typed command handlers, legacy
-event reactors, and phased boundary systems. Registration is transactional:
+event reactors, and phased boundary systems. Registration is atomic:
 duplicate plugin, command, system, schema, state owner, phase writer, or
 reservation offerer claims reject the complete plugin registration without
 changing the live registry. Immediate handlers use `SystemContract`;
@@ -1432,8 +1439,8 @@ the retirement is admitted; later retirement of that successor can extend a
 stable, cycle-free succession chain without invalidating earlier links. Domain
 record collections are ordered and are queryable through both `Simulation` and
 `Canwu`. Initial domain records may reference entities listed only in
-`Scenario::entities`; since 0.13.0 snapshot restore accepts them as the live
-state check already did. Scenarios that contain initial domain records must use a plugin-aware
+`Scenario::entities`; snapshot restore accepts them just as the live state
+check does. Scenarios that contain initial domain records must use a plugin-aware
 constructor such as `new_with_plugins`; ordinary constructors reject them
 instead of returning a half-configured runtime that could emit an unloadable
 snapshot.
@@ -1448,7 +1455,7 @@ deserialization. `DomainRecordSchema::for_entity` and `for_record`,
 `DomainRecordDraft::from_typed`, typed simulation/view queries, and
 `DomainRecord::decode_payload` provide a typed package path while the
 authoritative snapshot keeps the existing schema-validated representation.
-This additive public API leaves checkpoint and snapshot formats unchanged.
+The typed path does not change the checkpoint or snapshot format.
 
 Domain record state is boundary-only: immediate reactors and commands cannot
 write a record kind as an untyped component. Boundary systems declare the
@@ -1460,7 +1467,7 @@ visibility and rollback contract as other authoritative domain changes.
 ## Phased settlement boundary
 
 `settle_boundary(BoundaryRequest)` is the authoritative extension path for new
-domain mechanics. It transactionally executes internal scheduled continuations
+domain mechanics. It atomically executes internal scheduled continuations
 strictly before the requested time, admits and processes due canonical ingress,
 then executes equal-time internal scheduled continuations before taking the
 immutable boundary snapshot. It visits all fourteen settlement phases in order.
@@ -1519,9 +1526,9 @@ persisted final state.
 Boundary-caused events do not invoke
 legacy immediate reactors; they enter the next boundary through normal event
 admission. Format 8 snapshots validate this evidence and require exact plugin
-identity and descriptor rehydration before continuation. Format 2 through 6
-saves and journals are rejected before runtime construction; no legacy
-migration path exists in the pre-1.0 engine.
+identity and descriptor rehydration before continuation. Pre-8 saves and
+journals are rejected before runtime construction; no legacy migration path
+exists in the pre-1.0 engine.
 Boundary-aware replay uses command admission lists to reconstruct operation
 order and rejects any regenerated boundary whose complete evidence differs from
 the journal.
@@ -1532,7 +1539,7 @@ the cursors after the boundary record commits, so admission work is proportional
 to newly admitted evidence instead of all prior boundaries and journals. The
 cursors are persisted derived metadata: loading validates them against the
 global boundary-prefix proof, and failed settlement restores them with the rest
-of the transaction. Format 8 does not derive them for older snapshots because
+of the boundary. Format 8 does not derive them for older snapshots because
 older snapshots are outside the supported load contract.
 
 Append-only events, commands, command attempts, ingress, boundary records, and
@@ -1548,9 +1555,10 @@ zero cut, remain contiguous, advance at least one journal, encode truthful end
 cursors, and finish exactly at the checkpoint cut. It then reconstructs the
 flat snapshot in memory and runs the current validation path, so
 the checkpoint roots, boundary chain, IDs, authority, causal evidence, and exact
-replay contract bind the archived records just as before. `CheckpointJournal`
-is a portable full-save convenience envelope; incremental stores should persist
-the smaller current-state checkpoint and only newly appended segments.
+replay contract bind the archived records as they bind a flat snapshot.
+`CheckpointJournal` is a portable full-save convenience envelope; incremental
+stores should persist the smaller current-state checkpoint and only newly
+appended segments.
 
 `CompactedSimulation` and `CompactedCanwu` add the explicit live archive
 contract. Entering compact mode preserves the retained history;
@@ -1611,7 +1619,7 @@ authoritative revision, and boundary-admission cursors; `RuntimeMetadata` owns
 the initial scenario binding, run identity, plugin-registration state, replay
 revision provenance, and current checkpoint commitment. These owners are
 private implementation boundaries. Snapshot and replay formats remain flat,
-and command application and phased settlement now checkpoint only their writable
+and command application and phased settlement checkpoint only their writable
 domains. Commands capture armies, actor knowledge, plugin components, scheduled
 actions, counters, the event/command/attempt tails, registration state, and
 commitments. Boundaries additionally capture generic records, random streams,
@@ -1633,13 +1641,13 @@ restore rather than rescanning cold history at every boundary.
 Ingress insertion checkpoints only its next identifier, evidence tail, exact
 pending-queue entry, registration state, and commitments. None of these rollback
 checkpoints clones immutable core maps or unrelated accumulated journals. Phased
-settlement now snapshots only current authoritative state for stable early-phase
+settlement snapshots only current authoritative state for stable early-phase
 reads; each system view borrows command, event, and ingress evidence for the
 duration of its handler call. Later phases read the committed current state, so
 same-boundary visibility remains unchanged without duplicating accumulated
 history, scheduler, counters, or metadata. When an expected rejection is
-detected before mutable command application, its evidence transaction is
-narrower again: it preflights identifiers and revision, then checkpoints only
+detected before mutable command application, its rollback checkpoint is
+narrower still: it preflights identifiers and revision, then checkpoints only
 the attempt tail, affected counters and registration flag, commitment cache and
 roots, and checkpoint hash.
 The six rollback checkpoint definitions and their exact capture/restore logic
@@ -1650,7 +1658,7 @@ the dedicated private `canwu-sim` state module. This is an implementation
 ownership boundary only: public snapshots and replay journals remain flat and
 unchanged.
 
-Every current snapshot stores commitment format 2 roots for world, knowledge,
+Every current snapshot stores commitment format 4 roots for world, knowledge,
 plugin components, generic records, scheduler state, commands and attempts,
 events, ingress, random state/evidence, the boundary chain, run/plugin identity,
 and runtime control counters. Unordered collections are canonicalized by stable
@@ -1660,8 +1668,8 @@ exact run-manifest hash and authoritative revision contract. Loading recomputes
 and compares every root before accepting the outer checkpoint.
 
 Format 8 boundaries write a `v1:`-tagged commitment over the current canonical
-roots with the prior boundary-chain head, so settlement no longer serializes and
-hashes the complete retained journals. When a snapshot is exactly at its
+roots with the prior boundary-chain head, so settlement does not serialize and
+hash the complete retained journals. When a snapshot is exactly at its
 boundary head, loading derives the expected contract from the tag and compares
 it with the independently validated current state; unknown tags are rejected. Runtime
 checkpoint refresh keeps cloneable incremental hash
@@ -1671,23 +1679,23 @@ last canonical roots for world, knowledge, plugin components, domain records,
 the scheduler, random streams, and run/plugin identity. The private mutation
 helpers invalidate the domains they own; settlement remains conservative where
 several domains can change together. Runtime control and the combined roots are
-cheaply rebuilt at every checkpoint. The cache is cloneable with transaction
-state, is restored by rollback, and is never trusted on load: snapshot validation
-independently rebuilds every persisted root from serialized evidence before the
-runtime cache is reconstructed.
+cheaply rebuilt at every checkpoint. The cache is cloned into each rollback
+checkpoint, is restored by rollback, and is never trusted on load: snapshot
+validation independently rebuilds every persisted root from serialized evidence
+before the runtime cache is reconstructed.
 
 Randomness is available to phased systems only through declared
 `RandomStreamKey` values. The kernel derives each stream from the run root seed,
 keeps its position independent from unrelated domains, and records every draw
 automatically. Draws made by a boundary that later fails disappear with the
-rest of that transaction. Core report-delay draws additionally name the exact
+rest of that boundary. Core report-delay draws additionally name the exact
 recipient, army, dispatch event, and arrival time they produced, and loading
 recomputes that time from the recorded value. Validation also requires every
 report-dispatch event to have exactly one such draw, so removing both draw and
 stream progress cannot preserve an apparently coherent report history.
 
 The legacy immediate command/event path remains for the movement slice and
-compatibility examples. It is transactional, but it is not a substitute for the
+compatibility examples. It is atomic, but it is not a substitute for the
 fourteen-phase boundary and cannot own state also managed by phased systems.
 `submit` preserves that direct compatibility path. `process_command` accepts an
 owned tracked `CommandRequest` with an idempotency key, expected revision,
@@ -1705,8 +1713,8 @@ by exact replay. Exact retries return the original outcome without new mutation;
 request-ID collisions are fail-closed without creating evidence. The persisted
 authoritative revision advances exactly once for every accepted command,
 persisted expected command rejection, and published settlement boundary. Failed
-transactions and exact retries do not advance it. Bare clock movement, queued but
-unadmitted ingress, and plugin setup do not create a revision transaction;
+commands or boundaries and exact retries do not advance it. Bare clock movement,
+queued but unadmitted ingress, and plugin setup do not create a revision;
 expected simulation time independently detects clock and scheduled-work
 advancement. Declared external commands require both guards. Live requests,
 compatibility-only legacy-direct calls, and frozen replay inputs remain distinct;
@@ -1720,8 +1728,8 @@ work.
 
 Command handlers receive an immutable `CommandContext` containing the issuer
 asserted by the trusted in-process host, typed decision origin, seat and
-permission-profile context, command-relevant run policy, ingress class, command
-and attempt identities, request identity, revision, simulation time, and
+permission-profile context, command-relevant run policy, the command ingress
+mode (`CommandIngress`), command and attempt identities, request identity, revision, simulation time, and
 expected revision/time guards alongside the read-only simulation view. Canwu
 does not authenticate a freely constructed `CommandEnvelope`; network, IPC, and
 account adapters must authenticate callers before selecting an `Issuer` and
@@ -1738,9 +1746,9 @@ This keeps command rollback, failed-boundary recovery, forks, snapshots, and
 replay independent.
 
 Command application, each same-timestamp scheduled batch, and each phased
-settlement are transactional. If fallible event or plugin processing fails,
-state, time, queues, events, boundary records, random state, and ID counters
-return to the last successful transaction or timestamp boundary. Commands and
+settlement are atomic. If fallible event or plugin processing fails, state,
+time, queues, events, boundary records, random state, and ID counters return
+to their values before the failed command, batch, or boundary. Commands and
 phased boundaries use the explicit writable-domain checkpoints described above.
 Scheduled batches checkpoint only armies, knowledge, plugin components, random
 streams, clock and scheduled actions, counters, event/random-draw tails,
@@ -1775,13 +1783,13 @@ authoritative revision before executing anything. Automatic package discovery
 remains later work. Format 8 rejects older revision provenance and cannot export
 a journal that claims current exact replay from an unsupported save. New plugin
 registration closes after the first recorded tracked attempt (accepted or
-expected-rejected), successful compatibility command, time advance, or phased
-settlement; exact snapshot rehydration remains allowed after that point.
+expected-rejected), successful compatibility command, queued canonical ingress
+item (including a withdrawal record), time advance, or phased settlement; exact snapshot rehydration remains allowed after that point.
 Snapshots retain the run's initial time and reject a
 registration-open flag when commands, events, queued work, component state,
 counter movement, or elapsed simulation time proves execution already began.
-There is no pre-1.0 continuation or migration exception for format 2, 3, 4, or
-5 data. Hosts that need to retain those saves must use the old engine or perform
+There is no pre-1.0 continuation or migration exception for pre-8 data. Hosts
+that need to retain those saves must use the old engine or perform
 an explicit application-owned export outside Canwu.
 
 ### Transition manifests and audit / 转移清单与审计
@@ -1831,8 +1839,8 @@ register a new attempt. There is no withdrawal directive.
 The `TransitionAuditRecord { manifest_id, ready_at, outcome, participants }`
 is recorded on `BoundaryRecord::transition_audits` and
 `BoundaryReceipt::transition_audits`; manifest IDs may be reused after
-settlement, so `(manifest_id, ready_at)` identifies an audit. Phase-12 systems
-of the coordinator and participants read it through
+settlement, so `(manifest_id, ready_at)` identifies an audit. Systems of the
+coordinator and participants that run after phase 11 read it through
 `SimulationView::transition_audits`, and only they list pending manifests
 through `SimulationView::transition_manifests`. Pending manifests live in
 scheduler state, roll back with a failed boundary, persist as
@@ -1840,9 +1848,9 @@ scheduler state, roll back with a failed boundary, persist as
 sub-root, and are read by hosts through `pending_transition_manifests` on
 `Simulation`, `CompactedSimulation`, `Canwu`, and `CompactedCanwu`. Snapshot
 validation rebuilds the pending set from registration and audit evidence, and
-exact replay proves the participant and version checks. Runs without manifests
-hash exactly as before, and phase-10 directives outside a manifest keep their
-previous behavior.
+exact replay proves the participant and version checks. A run that never
+registers a manifest hashes the same as a run without this feature, and
+phase-10 directives outside a manifest are unaffected.
 
 ### Rule-evaluation traces / 规则评估轨迹
 
@@ -1906,7 +1914,7 @@ releases and storage migrations do not have to move in lockstep.
 
 Canwu is developed against the normative engine-neutral capability profile in
 [`engine-conformance.md`](engine-conformance.md). It requires deterministic
-settlement, authority, ownership, transactions, knowledge, persistence,
+settlement, authority, ownership, atomic commit, knowledge, persistence,
 lineage, packages, and publication through public extension points. Current
 coverage and remaining gaps are tracked in the profile itself. The public-only
 [`representative_conformance`](../crates/api/canwu-api/tests/representative_conformance.rs)

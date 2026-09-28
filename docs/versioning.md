@@ -2,7 +2,7 @@
 
 Canwu is pre-1.0. Format 8 is a deliberate clean break: the 0.13 runtime
 writes and reads only its current contracts. There is no implicit loader or
-runtime migration for format 2 through 6 data. Applications that need old
+runtime migration for pre-8 data. Applications that need old
 records must keep the old engine or run an explicit, application-owned export
 outside the Canwu runtime.
 
@@ -16,8 +16,8 @@ The workspace version is `0.13.0`. A live `SimulationSnapshot` has:
 - state revision format `3`;
 - admission cursor format `3`;
 - exact replay revision format `3`;
-- a declared `RunManifest`, declared run configuration, and canonical
-  `initial_scenario`;
+- a declared `RunManifest`, a declared or `CompatibilityV1` run
+  configuration, and canonical `initial_scenario`;
 - a non-zero `authority_root_seed`, derived independently from the simulation
   random streams.
 
@@ -131,8 +131,9 @@ Version 0.13.0 also fixes these behaviors, which are visible to existing runs:
 - The society Daily boundary after an applied cohort transfer no longer fails:
   applying a transfer invalidates the derived aggregates, mobilization
   candidates, and projections it affects, and a transfer's digest binds only
-  the state the transfer depends on. Queued society ingress supplied by a
-  scenario or snapshot is validated like admitted packets.
+  the state the transfer depends on. An initial scenario cannot seed queued
+  society ingress, and a restored snapshot's queue is validated like admitted
+  packets.
 - Snapshot restore accepts initial domain records that reference entities
   listed only in `Scenario::entities`, as the live state check already did.
 

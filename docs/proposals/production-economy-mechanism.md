@@ -1,6 +1,10 @@
 # Production, Resource, and Facility Mechanism Proposal
 
-> Status: iteration-4 validated by the CM 0.6 public-API host fixture; proposal only; no Canwu runtime or crate implementation approved
+> Status: delivered. `canwu-resource` and `canwu-production` ship as optional
+> extensions above the public `canwu-api`, first released in 0.10.0. This record
+> keeps the iteration-4 design validated by the CM 0.6 public-API host fixture;
+> where its candidate record shapes differ from the shipped crates, the crate
+> APIs and [the architecture](../architecture.md) are authoritative.
 > Date: 2026-08-30
 > Scope: the reusable boundary between Canwu, production/resource extensions,
 > transport, technology, fiscal procedure, and host-owned military rules
@@ -78,7 +82,8 @@ It is not a persistent resource ledger.
 | `canwu-resource` candidate | conserved account/demand/reservation/transfer subset, allocation coordination when richer than the core scalar primitive, fulfillment results, typed transport projections | host cargo movement/disposition lifecycle, arrears/debt, route search, population rules, technology qualification, fiscal law, historical goods |
 | `canwu-production` candidate | process revisions, production sites/assets, work orders, WIP, production runs, input/output settlement, maintenance and production-asset project lifecycle | universal projects/construction, technology tree, markets, map truth, labor demography, military doctrine |
 | `canwu-routing` | observer-relative route estimates | delivery, cargo balance, stock ownership |
-| `canwu-transport` | MovementOrder, TransportExecution, CapacityBooking, itinerary legs, handoffs, delivery-completion bridge | cargo balance, inventory, production, demand priority, destination account credit, loss/disposition accounting |
+| `canwu-transport` | MovementOrder, TransportExecution, CapacityBooking, and capacity-pool records, itinerary legs, handoffs, delivery-completion bridge | the plugin lifecycle that admits and settles those records; cargo balance, inventory, production, demand priority, destination account credit, loss/disposition accounting |
+| `canwu-movement` | the lifecycle of transport records: movement-order admission, leg settlement, capacity-pool allocation, holder-relative movement reports | cargo balance, destination account credit, incidents and hazards, route search |
 | `canwu-technology` | technique evidence, qualification, installed implementation, use-specific adoption | real stock, work in progress, prices, transport |
 | `canwu-fiscal` | law, assessment, authorization, remission, audit, execution receipt | money/grain truth and physical transfer |
 | Host population/society domain | labor and consumption-demand formation, health and social consequences | production stock or route truth |
@@ -134,9 +139,10 @@ DemandFulfillmentProjection
 `ResourceAccount.amount` is the single authoritative account quantity.
 Reserved, available and protected-floor values are derived; in-transit
 quantity is host-owned active cargo, not an independently writable account
-field. `canwu-transport` supplies movement execution, capacity booking,
-itinerary legs, handoffs, and a delivery-completion bridge; it does not own a
-generic `Shipment` or `ShipmentDisposition` balance in the published 0.6 API.
+field. `canwu-transport` holds the movement-execution, capacity-booking,
+itinerary-leg, handoff, and delivery-completion records, and `canwu-movement`
+runs their lifecycle; neither owns a generic `Shipment` or
+`ShipmentDisposition` balance.
 The host cargo adapter owns cargo custody/disposition and publishes a typed
 read-only projection to a resource extension. Unmet demand
 does not automatically create arrears or debt: `ResourceDemand` retains the

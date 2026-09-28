@@ -27,7 +27,7 @@ boundary-system mechanics with random draw evidence.
 ### Replayable random policy
 
 `DecisionPolicyKind::Random` is not an executable `DecisionPolicy` that draws
-outside a transaction. A boundary system:
+outside a boundary. A boundary system:
 
 1. reads an open ticket through `SimulationView`;
 2. calls `random_sample_for_operation` with a stable operation ID and
@@ -53,14 +53,14 @@ The runnable reference is
 
 ### Random tie-break in a guarded utility policy
 
-Since 0.12.0, a deterministic utility selector can hand only a genuine tie to
-chance. `GuardedUtilityPolicy` runs ordered guard rules, scores the remaining
-options, and, when `random_tie_break` is set and two or more options score
-within its near-equivalence margin of the best, returns
-`DecisionOutcome::PendingRandom` with only those candidates at weight 1. A
-declared boundary system then draws for the exact ticket version as above and
-passes the pending decision as the `tie_break` of `ResolveDecisionRandomly`;
-the weights must equal the candidates. The controller must opt in with
+A deterministic utility selector can hand only a genuine tie to chance.
+`GuardedUtilityPolicy` runs ordered guard rules, scores the remaining options,
+and, when `random_tie_break` is set and two or more options score within its
+near-equivalence margin of the best, returns `DecisionOutcome::PendingRandom`
+with only those candidates at weight 1. A declared boundary system then draws
+for the exact ticket version as above and passes the pending decision as the
+`tie_break` of the `RandomDecisionResolution` in `ResolveDecisionRandomly`; the
+weights must equal the candidates. The controller must opt in with
 `DecisionControllerBinding::with_random_tie_break`, and the trace records the
 `Random` stage. Without the policy flag, the best score wins and exactly equal
 scores fall back to the lowest option ID.
@@ -93,7 +93,7 @@ or model infrastructure.
   expose `pass` and `fail` on a ticket and weight them explicitly. A law seat
   may instead use a Human, External, or LLM controller. `canwu-law` preserves a
   compatible controller pre-registered under its stable seat controller ID;
-  otherwise it creates the backward-compatible default Human controller.
+  otherwise it creates a default Human controller.
 - **Person:** personality, knowledge, doctrine, obligations, and current
   options belong in ticket context. Utility or Rule policies give deterministic
   behavior; Random represents bounded behavioral variability; Human, External,
@@ -140,7 +140,7 @@ or model infrastructure.
 
 ### 可重放的随机决策策略
 
-`DecisionPolicyKind::Random` 不会在事务外部直接调用随机数。边界系统应当：
+`DecisionPolicyKind::Random` 不会在结算边界之外直接调用随机数。边界系统应当：
 
 1. 通过 `SimulationView` 读取开放的决策票据；
 2. 使用稳定 operation ID 和 `RandomOperationTarget::DecisionTicket` 调用
@@ -162,13 +162,13 @@ or model infrastructure.
 
 ### 前置规则效用策略中的随机平局决胜
 
-自 0.12.0 起，确定性的效用选择器可以只把真正的平局交给随机性。
+确定性的效用选择器可以只把真正的平局交给随机性。
 `GuardedUtilityPolicy` 先运行有序前置规则，再为剩余选项评分；若设置了
 `random_tie_break`，且有两个或更多选项与最高分的差距不超过其近似相等阈值，
 策略返回 `DecisionOutcome::PendingRandom`，只列出这些候选，每个权重为 1。
 随后，声明过的边界系统按上述方式对精确票据版本抽样，并把这个待定决定作为
-`ResolveDecisionRandomly` 的 `tie_break` 提交；权重必须与候选完全一致。控制者
-必须通过 `DecisionControllerBinding::with_random_tie_break` 显式启用，决策轨迹
+`ResolveDecisionRandomly` 中 `RandomDecisionResolution` 的 `tie_break` 提交；
+权重必须与候选完全一致。控制者必须通过 `DecisionControllerBinding::with_random_tie_break` 显式启用，决策轨迹
 会记录 `Random` 阶段。策略未设置该标志时，最高分获胜；分数完全相同时按最小
 option ID 决出。
 
@@ -193,7 +193,7 @@ External 和 LLM 适配器只接收 `ExternalDecisionRequest`：票据标识、�
   确定。如果规则把未建模的协商或批准过程表示成“通过/不通过”的概率选择，就在
   票据上明确提供 `pass`、`fail` 并配置权重；也可以给同一席位使用 Human、External
   或 LLM controller。`canwu-law` 会保留上层应用用稳定席位 controller ID 预注册的
-  兼容策略；没有预注册时仍创建兼容旧行为的默认 Human controller。
+  兼容策略；没有预注册时创建默认 Human controller。
 - **人物：**性格、知识、信条、义务和当前可选行动进入票据上下文。Utility 或 Rule
   提供确定行为；Random 表示有边界的行为波动；Human、External、LLM 使用同一组选项。
   任何策略都不能创造票据中不存在的命令。

@@ -166,6 +166,7 @@ sidebar:
 | [改道](/tutorials/cases/routed-correspondence/) | reroute | `ItineraryRevision` | 因灾害或路线知识变化，为同一个投递尝试建立后继行程。 |
 | [外部条件](/tutorials/routing-transport/) | external condition | `ItineraryRevisionReason::ExternalCondition` | 引用应用所有的条件记录精确正数版本及应用标签的改道原因；运输只记录引用，不解释条件本身。 |
 | [投递重试](/tutorials/cases/routed-correspondence/) | delivery retry | `DomainReference` 角色 `"previous_attempt"` | 终态失败后新建的后继投递尝试，不是对旧 attempt 的改道。 |
+| [移动命令](/tutorials/routing-transport/) | movement order | `MovementOrder`, `MovementOrderRequestV1` | 一条已准入、不可变的意图：沿规划路线把一个或多个移动主体从起点移到终点。`canwu-movement` 通过其 `Order` 操作准入移动命令，并创建对应的运输执行；移动所有者以外的主体需要权限依据。 |
 | [人员群体](/tutorials/routing-transport/) | persons group | `MovementSubjectRole::PersonsGroup` | 作为一个整体移动的一群人所对应的移动主体，以正数人数作为数量；其身份通常是应用领域记录。 |
 | [扣押交接](/tutorials/routing-transport/) | seizure handoff | `HandoffKind::Seizure` | 行程之外的主体夺取保管权时形成的交接，记录夺取方身份。终态扣押以失败路段同时作为起止路段，保管权离开行程，此后运输执行只能由其所有者关闭。背后的事件和权限仍属于应用系统；其余交接均为计划交接。 |
 | [运力池](/tutorials/routing-transport/) | capacity pool | `TransportCapacityPoolV1` | 由一个持有人提供、在时间窗口内可以互换的运输能力数量，例如渡船班次或驿马。已确认和已消耗的预订占用它；每次变化都会推进其修订号，便于分配证据引用。 |

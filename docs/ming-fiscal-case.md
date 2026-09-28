@@ -85,6 +85,17 @@ so source-file order cannot select an interpretation.
 | `explicit_unknown` | The pack deliberately supplies no behavior / 参考包明确不提供行为 |
 | `not_applicable` | The mechanism does not apply to that cell / 该机制不适用于此单元 |
 
+`canwu-fiscal` supports all four statuses, but the Ming pack uses only the first
+three: 160 cells are `supported`, 101 are `archetype_fallback`, and 443 are
+`explicit_unknown`. Of the unknown cells, 425 come from the priority-0
+`default_explicit_unknown` default and 18 from the `zheng_other_mechanisms`
+declaration. No cell is `not_applicable`.
+
+`canwu-fiscal` 支持全部四种状态，但明代参考包只使用前三种：160 个单元为
+`supported`，101 个为 `archetype_fallback`，443 个为 `explicit_unknown`。其中
+425 个明确未知单元来自优先级为 0 的 `default_explicit_unknown` 默认值，18 个来自
+`zheng_other_mechanisms` 声明。没有任何单元为 `not_applicable`。
+
 Every provenance entry carries a claim scope and forbidden inferences. A
 promulgated quota is not actual collection, registered population is not actual
 population, and a court's territorial claim is not stable control.
@@ -115,7 +126,7 @@ receipts. The four dispositions are fulfilled, partial, rejected, and excused.
 `（证据种类，外部操作 ID）` 组合都不能结算两张凭证。处置结果可以是完成、
 部分完成、拒绝或豁免。
 
-Since 0.12.0, a `FiscalAuthorityBinding` may name an acting actor next to its
+A `FiscalAuthorityBinding` may name an acting actor next to its
 standing `authorized_actor`, together with an exact `authority_basis` record
 version, such as a host grant record of a kind declared with
 `FiscalPlugin::with_authority_basis_kinds`. Actions from the acting actor are
@@ -125,7 +136,7 @@ actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`, while the authorized
 actor is still admitted. Who may appoint an acting actor, and for how long, is
 host content recorded in that basis record.
 
-自 0.12.0 起，`FiscalAuthorityBinding` 除常设的 `authorized_actor` 外，还可以
+`FiscalAuthorityBinding` 除常设的 `authorized_actor` 外，还可以
 指定一个代理角色，并附带精确的 `authority_basis` 权限依据记录版本，例如种类
 已通过 `FiscalPlugin::with_authority_basis_kinds` 声明的上层应用授权记录。只有
 当该依据仍是其记录的当前版本时，代理角色的行动才会被准入，结算时还会再次
@@ -180,11 +191,13 @@ early. For example:
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongwu-1391 --days 365 --cadence daily
 ```
 
-Add `--open-viewer` to start a localhost trace viewer after the simulation
-finishes. It opens the default browser and loads that run's generated
-`manifest.json` and `steps.jsonl`; `--viewer-port <N>` selects a port, with `0`
-meaning any available port. Set `CANWU_WORKSPACE_ROOT` when invoking the
-starter outside the repository root.
+Add `--open-viewer` to start a trace viewer on `127.0.0.1` before the sample
+cycle runs. It opens the default browser, loads that run's `manifest.json` and
+`steps.jsonl` as the trace grows, and keeps serving after the run until the
+process is interrupted. `--viewer-port <N>` selects a port; the default `0`
+takes any available port. `--trace-dir <path>` or `CANWU_TRACE_DIR` changes the
+trace root. The viewer needs the workspace's `tools/trace-viewer/`, so set
+`CANWU_WORKSPACE_ROOT` when invoking the starter outside the repository root.
 
 Each command runs assessment, authorization, typed external execution,
 receipt, report materialization, and semantic validation. The integration

@@ -15,34 +15,35 @@ It uses three simulation plugins:
 
 ## Transition protocol
 
-The case follows one deterministic transaction protocol:
+The case follows one deterministic protocol across two boundaries:
 
 1. A canonical ingress asks the central plugin to issue order
    `relief-order-1646`.
-2. The central `publish-order` boundary system creates a manifest containing
-   the expected owner, system, version, disposition, and post-state hash for
-   both participants. It schedules one zero-delay plugin ingress for the
-   treasury and one for the county. Canwu admits those generated inputs at the
-   next boundary.
+2. The central `publish-order` boundary system creates a manifest naming, for
+   both participants, the system that must act, the record version it must
+   produce, a disposition, and the hash of the expected payload. It schedules
+   one zero-delay plugin ingress for the treasury and one for the county. Canwu
+   admits those generated inputs at the next boundary.
 3. The treasury and county `prepare-*` systems consume only their own admitted
    ingress, validate the manifest, and stage their owner-scoped domain record
    with `SameBoundary` visibility.
-4. The central `audit-order` system is read-only. It checks both committed
-   records against the manifest and fails the transaction if either participant
-   is missing or mismatched.
+4. The central `audit-order` system is read-only. In phase 12 of the same
+   boundary it checks both office records against the manifest and fails the
+   boundary if either participant is missing or mismatched, so neither record
+   commits.
 5. Snapshot restore and exact replay reproduce the same final state without
    rerunning an external choice.
 
 The important property is not the number of offices. It is the explicit
 ownership and commit contract: each institution owns its state, the central
-manifest states what must be produced, and one transaction either commits the
+manifest states what must be produced, and one boundary either commits the
 complete transition or rolls it back.
 
 ## Built-in transition manifests
 
 The example keeps its own `ReliefOrder` manifest and read-only audit, which
-remains a valid application pattern. Since 0.13.0, Canwu offers the same
-guarantee as a built-in contract, the transition manifest:
+remains a valid application pattern. Canwu also offers the same guarantee as a
+built-in contract, the transition manifest:
 
 - The central plugin's `publish-order` system registers a `TransitionManifest`
   with `lineage_id` set to the order ID, the treasury and county plugins as
@@ -50,15 +51,15 @@ guarantee as a built-in contract, the transition manifest:
   (`expected_pre`, `expected_post`) in place of a post-state hash.
 - In phase 10 of the ready boundary, each office's system stages its own record
   through `StageTransitionWrite`, still writing only the state it owns.
-- Before phase 11 commits, the simulation core audits the manifest. If one office staged
-  and the other did not, or a version differs, the whole boundary rolls back;
-  if neither office acted, the order expires and the center can register a new
-  attempt.
+- In phase 11, the simulation core audits the manifest before committing it.
+  If one office staged and the other did not, or a version differs, the whole
+  boundary rolls back; if neither office acted, the order expires and the
+  center can register a new attempt.
 - The central `audit-order` system reads the `TransitionAuditRecord` in phase
   12 instead of rechecking both records itself.
 
 A manifest that must catch a missing office needs at least two participants.
-If the order also needs a council's approval, `canwu-law` procedures can now
+If the order also needs a council's approval, `canwu-law` procedures can
 weigh seats, count unit blocks such as regional delegations, and hold an
 advisory consultation stage before the deciding vote.
 
@@ -72,7 +73,7 @@ The example deliberately keeps period-specific semantics outside Canwu:
 | treasury | `case-relief-treasury` simulation plugin | owner-scoped domain record and event-driven boundary system |
 | county grain office | `case-relief-county` simulation plugin | owner-scoped domain record and event-driven boundary system |
 | imperial or ministerial order | `ReliefOrder` manifest | typed domain record with expected post-state hashes |
-| local execution report | `ReliefAction` record | typed entity record with version and owner |
+| local execution report | `ReliefAction` record | typed domain record with version and owner |
 | officials, households, and social groups | host-defined actors and domain records | actor-relative reads, authority, knowledge, and decisions supplied by the host |
 
 Canwu does not assume that a bureaucracy is a tree, that one person makes the

@@ -232,13 +232,15 @@ a pressure measurement.
   profile with its renderer and asset workload present;
 - 100 sites, 5 techniques, at most 40 immutable revisions;
 - 200 active programs and 400 transmission
-  opportunities; at most 5,000 technology records, 1,000 records in each
-  history plugin, 8,000 combined extension records, and 5,000 technology
-  knowledge records;
+  opportunities; `TechnologyLimitsV1::canonical()` allows at most 5,000
+  technology records and 5,000 technology knowledge records, and each
+  `canwu-history-research` plugin keeps at most 1,000 assessments;
 - per record at most 16 KiB encoded payload, 32 references, 64 collection
   entries, graph degree 16, ancestry depth 8;
-- per boundary at most 127 combined extension mutations: 64 technology plus
-  21 from each history plugin; technology publication is capped at 32;
+- per boundary at most 64 technology record mutations, where each new
+  operation costs 2, or 3 when it cites an execution intent; each
+  `canwu-history-research` plugin creates at most 21 assessments; technology
+  publication is capped at 32;
 - every technology collection is independently capped at 64 entries, future
   attempt/claim/production facts are rejected, and terminal operation records
   are reserved inside the shared 5,000-record limit before reduction;
