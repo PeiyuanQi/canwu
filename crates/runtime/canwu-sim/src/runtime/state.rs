@@ -473,11 +473,12 @@ pub(super) struct RuntimeCounters {
 pub(super) struct RuntimeMetadata {
     pub(super) initial_scenario: Option<Scenario>,
     pub(super) initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
-    /// Exact provenance for each current domain-record version. This is
-    /// maintained incrementally at boundary commit time and rebuilt from the
-    /// retained journal during restore, keeping hot-path lookups O(log n).
+    /// Exact provenance and establishment time for each current domain-record
+    /// version. This is maintained incrementally at boundary commit time and
+    /// rebuilt from the retained journal during restore, keeping hot-path
+    /// lookups O(log n).
     pub(super) current_domain_record_versions:
-        BTreeMap<DomainRecordRef, super::DomainRecordVersionRef>,
+        BTreeMap<DomainRecordRef, CurrentDomainRecordVersion>,
     pub(super) run_manifest: RunManifest,
     pub(super) run_manifest_hash: String,
     pub(super) run_configuration: RunConfigurationSnapshot,
@@ -487,6 +488,16 @@ pub(super) struct RuntimeMetadata {
     pub(super) commitment_cache: Option<RuntimeCommitmentCache>,
     pub(super) plugin_registration_closed: bool,
     pub(super) replay_revision_format_version: u32,
+}
+
+/// A live record's current version with the time it became authoritative.
+///
+/// Keeping the time in this index lets the current version resolve its
+/// establishment time after its establishing boundary is sealed.
+#[derive(Clone)]
+pub(super) struct CurrentDomainRecordVersion {
+    pub(super) version: super::DomainRecordVersionRef,
+    pub(super) established_at: SimTime,
 }
 
 #[derive(Clone)]

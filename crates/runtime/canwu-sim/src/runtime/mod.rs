@@ -189,7 +189,7 @@ use revision::{
 };
 use settlement::{PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_system_due};
 use state::{
-    CommitmentDomains, JournalCommitmentRoots, RuntimeCommitmentCache,
+    CommitmentDomains, CurrentDomainRecordVersion, JournalCommitmentRoots, RuntimeCommitmentCache,
     RuntimeCommitmentRootUpdates, RuntimeCounters, RuntimeCurrentState,
     RuntimeDomainCommitmentRoots, RuntimeEvidence, RuntimeMetadata, RuntimeScheduler, RuntimeState,
 };
@@ -453,21 +453,24 @@ fn retained_domain_record_version(
         return None;
     }
     retained_domain_record_version_body(state, reference)
-        .or_else(|| {
-            state
-                .current
-                .domain_records
-                .get(&reference.record)
-                .filter(|record| {
-                    record.version == reference.version
-                        && state
-                            .metadata
-                            .current_domain_record_versions
-                            .get(&reference.record)
-                            == Some(reference)
-                })
-        })
+        .or_else(|| live_current_domain_record_version(state, reference).map(|(record, _)| record))
         .cloned()
+}
+
+/// Returns the live record and its provenance entry while `reference` names
+/// the record's current version. Both stay authoritative after the version's
+/// establishing boundary is sealed.
+fn live_current_domain_record_version<'a>(
+    state: &'a RuntimeState,
+    reference: &DomainRecordVersionRef,
+) -> Option<(&'a DomainRecord, &'a CurrentDomainRecordVersion)> {
+    let record = state.current.domain_records.get(&reference.record)?;
+    let current = state
+        .metadata
+        .current_domain_record_versions
+        .get(&reference.record)?;
+    (record.version == reference.version && current.version == *reference)
+        .then_some((record, current))
 }
 
 fn retained_domain_record_version_body<'a>(
@@ -509,36 +512,40 @@ fn current_domain_record_version(
     let Some(record) = state.current.domain_records.get(reference) else {
         return Ok(None);
     };
-    let Some(version) = state.metadata.current_domain_record_versions.get(reference) else {
+    let Some(current) = state.metadata.current_domain_record_versions.get(reference) else {
         return Err(CanwuError::new(
             ErrorCode::InvalidSnapshot,
             "current domain-record provenance index is missing a live record",
         ));
     };
-    if version.version != record.version {
+    if current.version.version != record.version {
         return Err(CanwuError::new(
             ErrorCode::InvalidSnapshot,
             "current domain-record provenance index disagrees with live state",
         ));
     }
-    Ok(Some(version.clone()))
+    Ok(Some(current.version.clone()))
 }
 
 fn build_current_domain_record_versions(
     initial_scenario: Option<&Scenario>,
+    initial_time: SimTime,
     boundaries: &[BoundaryRecord],
     current_records: &[DomainRecord],
-) -> Result<BTreeMap<DomainRecordRef, DomainRecordVersionRef>, CanwuError> {
+) -> Result<BTreeMap<DomainRecordRef, CurrentDomainRecordVersion>, CanwuError> {
     let mut versions = initial_scenario
         .into_iter()
         .flat_map(|scenario| scenario.domain_records.iter())
         .map(|record| {
             (
                 record.reference.clone(),
-                DomainRecordVersionRef {
-                    record: record.reference.clone(),
-                    version: record.version,
-                    established_by: DomainRecordVersionSource::InitialScenario,
+                CurrentDomainRecordVersion {
+                    version: DomainRecordVersionRef {
+                        record: record.reference.clone(),
+                        version: record.version,
+                        established_by: DomainRecordVersionSource::InitialScenario,
+                    },
+                    established_at: initial_time,
                 },
             )
         })
@@ -553,13 +560,16 @@ fn build_current_domain_record_versions(
             })?;
             versions.insert(
                 change.current.reference.clone(),
-                DomainRecordVersionRef {
-                    record: change.current.reference.clone(),
-                    version: change.current.version,
-                    established_by: DomainRecordVersionSource::BoundaryChange {
-                        boundary: boundary.id,
-                        change_index,
+                CurrentDomainRecordVersion {
+                    version: DomainRecordVersionRef {
+                        record: change.current.reference.clone(),
+                        version: change.current.version,
+                        established_by: DomainRecordVersionSource::BoundaryChange {
+                            boundary: boundary.id,
+                            change_index,
+                        },
                     },
+                    established_at: boundary.at,
                 },
             );
         }
@@ -569,13 +579,13 @@ fn build_current_domain_record_versions(
         .map(|record| record.reference.clone())
         .collect::<BTreeSet<_>>();
     for record in current_records {
-        let Some(version) = versions.get(&record.reference) else {
+        let Some(current) = versions.get(&record.reference) else {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "current domain-record state has no exact provenance index entry",
             ));
         };
-        if version.version != record.version {
+        if current.version.version != record.version {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "current domain-record provenance index disagrees with snapshot state",
@@ -622,6 +632,13 @@ fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Opti
                         .evidence
                         .retained_boundary(boundary)
                         .map(|record| record.at)
+                        // Only a sealed boundary's current version reaches the
+                        // index. Full-retention replay never does, so it
+                        // independently checks the indexed time.
+                        .or_else(|| {
+                            live_current_domain_record_version(state, version)
+                                .map(|(_, current)| current.established_at)
+                        })
                 })
             }
         },
@@ -1458,6 +1475,7 @@ impl Simulation {
             .unwrap_or_default();
         let current_domain_record_versions = build_current_domain_record_versions(
             initial_scenario.as_ref(),
+            scenario.start_time,
             &[],
             &scenario.domain_records,
         )?;
@@ -2436,6 +2454,7 @@ impl Simulation {
             .unwrap_or_default();
         let current_domain_record_versions = build_current_domain_record_versions(
             initial_scenario.as_ref(),
+            snapshot.initial_time,
             &snapshot.boundaries,
             &snapshot.domain_records,
         )?;

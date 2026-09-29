@@ -761,7 +761,9 @@ impl SimulationView<'_> {
     ///
     /// Archived identity receipts do not retain a precise semantic time, so
     /// they return `None` and callers that require temporal ordering must fail
-    /// closed or load the archived evidence body.
+    /// closed or load the archived evidence body. A record's committed current
+    /// version keeps its establishment time after its establishing boundary is
+    /// sealed.
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Result<Option<SimTime>, CanwuError> {
         if !self.evidence_exists(reference)? {
             return Ok(None);

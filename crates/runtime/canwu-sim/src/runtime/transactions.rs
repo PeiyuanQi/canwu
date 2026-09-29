@@ -167,7 +167,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     boundary_count: usize,
     random_draw_count: usize,
     plugin_registration_closed: bool,
-    current_domain_record_versions: BTreeMap<DomainRecordRef, super::DomainRecordVersionRef>,
+    current_domain_record_versions: BTreeMap<DomainRecordRef, super::CurrentDomainRecordVersion>,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
     commitment_cache: Option<RuntimeCommitmentCache>,

@@ -723,10 +723,13 @@ Dependencies whose meaning relies on a mutable domain-record body use an exact
 the retained body for that exact version, so a later update cannot reinterpret
 older evidence. Generic `EvidenceRef` citations validate retained identity and
 existence only; they do not by themselves establish relevance or historical
-truth. A compacted receipt still proves existence, but body inspection requires
-retained or archive-provided content. Module-owned restore wrappers re-run
-technology semantics after normal core snapshot, checkpoint, or replay
-validation.
+truth. A compacted receipt still proves existence, but its body and
+`evidence_time` require retained or archive-provided content. A record's current
+version is the exception: its live record and runtime provenance index keep
+both after the establishing boundary is sealed, so a compact run resolves it
+exactly as its replay does.
+Module-owned restore wrappers re-run technology semantics after normal core
+snapshot, checkpoint, or replay validation.
 
 Historical fidelity is downstream and optional. `canwu-history-research`
 provides separately selectable source, practice, and production-archaeology

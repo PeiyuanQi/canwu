@@ -30,10 +30,21 @@ fn propose_same_boundary_update(
             "the current exact record version is not current evidence",
         ));
     }
+    let established_at = view
+        .evidence_time(&EvidenceRef::DomainRecordVersion(exact))?
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::EvidenceUnavailable,
+                "the current exact record version has no establishment time",
+            )
+        })?;
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Update {
-                record: DomainRecordDraft::new(reference, serde_json::json!({"value": 2})),
+                record: DomainRecordDraft::new(
+                    reference,
+                    serde_json::json!({"value": 2, "prior_established_at": established_at}),
+                ),
                 expected_version: current.version,
             },
             summary: "Propose a same-boundary replacement version".to_owned(),
@@ -170,6 +181,7 @@ fn current_record_version_is_rebuilt_and_fails_closed_on_cache_corruption() {
         .current_domain_record_versions
         .get_mut(&same_boundary_record_ref())
         .expect("cached provenance")
+        .version
         .version = 1;
     let error = simulation
         .current_domain_record_version(&same_boundary_record_ref())
@@ -190,15 +202,20 @@ fn sealed_current_record_version_stays_current_evidence_and_replays_exactly() {
         references: Vec::new(),
     });
     let plugins: &[&dyn SimulationPlugin] = &[&SameBoundaryVersionPlugin];
-    let daily = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
-    let admit = BoundaryRequest::at(SimTime::EPOCH);
+    // Each update records its prior version's establishment time, so distinct
+    // boundary times make a wrong sealed time diverge from exact replay.
+    let day = |days| {
+        SimTime::EPOCH
+            .checked_add(SimDuration::days(days))
+            .expect("fixture day should fit")
+    };
     let mut simulation = Simulation::new_with_plugins(813, scenario.clone(), plugins)
         .expect("sealed-version fixture should initialize");
     simulation
-        .settle_boundary(daily.clone())
+        .settle_boundary(BoundaryRequest::at(day(1)).with_cadence(SystemCadence::Daily))
         .expect("the fixture should establish version two");
     simulation
-        .settle_boundary(admit.clone())
+        .settle_boundary(BoundaryRequest::at(day(1)))
         .expect("a later boundary should admit the update's emissions");
     let current = simulation
         .current_domain_record_version(&same_boundary_record_ref())
@@ -227,10 +244,10 @@ fn sealed_current_record_version_stays_current_evidence_and_replays_exactly() {
             .is_none()
     );
     compact
-        .settle_boundary(daily)
-        .expect("a sealed current version must remain exact current evidence");
+        .settle_boundary(BoundaryRequest::at(day(2)).with_cadence(SystemCadence::Daily))
+        .expect("a sealed current version must remain exact, timed current evidence");
     compact
-        .settle_boundary(admit)
+        .settle_boundary(BoundaryRequest::at(day(2)))
         .expect("a later boundary should admit the continuation's emissions");
     assert_eq!(
         compact
@@ -244,19 +261,47 @@ fn sealed_current_record_version_stays_current_evidence_and_replays_exactly() {
         .expect("the continuation tail should seal")
         .expect("the continuation tail should contain evidence");
 
+    let assert_exact_replay =
+        |runtime: &CompactedSimulation, segments: Vec<EvidenceJournalSegment>| {
+            let snapshot = runtime
+                .snapshot_with_segments(segments.clone())
+                .expect("the sealed archive should reconstruct a full snapshot");
+            let replayed = Simulation::replay_from_journal_with_scenario(
+                scenario.clone(),
+                plugins,
+                &runtime
+                    .replay_journal_with_segments(segments)
+                    .expect("the sealed archive should produce an exact replay journal"),
+            )
+            .expect("the sealed run should replay exactly");
+            assert_eq!(replayed.snapshot(), snapshot);
+        };
     let segments = vec![first, second];
-    let snapshot = compact
-        .snapshot_with_segments(segments.clone())
-        .expect("the sealed archive should reconstruct a full snapshot");
-    let replayed = Simulation::replay_from_journal_with_scenario(
-        scenario,
+    assert_exact_replay(&compact, segments.clone());
+
+    // Restore rebuilds the establishment time from the full journal, and it
+    // survives sealing that journal again.
+    let mut restored = CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+        compact.checkpoint().expect("compact checkpoint"),
+        segments,
         plugins,
-        &compact
-            .replay_journal_with_segments(segments)
-            .expect("the sealed archive should produce an exact replay journal"),
     )
-    .expect("the sealed run should replay exactly");
-    assert_eq!(replayed.snapshot(), snapshot);
+    .expect("the sealed archive should restore");
+    let whole = restored
+        .seal_evidence()
+        .expect("the restored history should seal")
+        .expect("the restored history should contain evidence");
+    restored
+        .settle_boundary(BoundaryRequest::at(day(3)).with_cadence(SystemCadence::Daily))
+        .expect("a restored sealed current version must remain timed current evidence");
+    restored
+        .settle_boundary(BoundaryRequest::at(day(3)))
+        .expect("a later boundary should admit the restored continuation's emissions");
+    let third = restored
+        .seal_evidence()
+        .expect("the restored continuation should seal")
+        .expect("the restored continuation should contain evidence");
+    assert_exact_replay(&restored, vec![whole, third]);
 }
 
 #[test]

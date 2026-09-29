@@ -1762,15 +1762,21 @@ fn index_current_domain_record_version(
     change_index: u64,
     change: &DomainRecordChange,
 ) {
+    // Records change only while their boundary settles, when `now` is that
+    // boundary's committed time.
+    let established_at = state.scheduler.now;
     state.metadata.current_domain_record_versions.insert(
         change.current.reference.clone(),
-        super::DomainRecordVersionRef {
-            record: change.current.reference.clone(),
-            version: change.current.version,
-            established_by: super::DomainRecordVersionSource::BoundaryChange {
-                boundary,
-                change_index,
+        super::CurrentDomainRecordVersion {
+            version: super::DomainRecordVersionRef {
+                record: change.current.reference.clone(),
+                version: change.current.version,
+                established_by: super::DomainRecordVersionSource::BoundaryChange {
+                    boundary,
+                    change_index,
+                },
             },
+            established_at,
         },
     );
 }

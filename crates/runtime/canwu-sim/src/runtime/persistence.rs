@@ -2411,6 +2411,7 @@ impl Simulation {
                 .metadata
                 .current_domain_record_versions
                 .get(&record.reference)
+                .map(|current| &current.version)
                 .filter(|version| version.version == record.version)
                 .ok_or_else(|| {
                     CanwuError::new(
