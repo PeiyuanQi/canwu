@@ -519,14 +519,17 @@ its parent.
 Decision state is authoritative persisted state. Snapshots retain controller
 bindings, tickets, deadlines, versions, admission attempts, and traces; loading
 validates entity identities and reconstructs accepted and rejected outcomes from
-admitted decision ingress. Revision, ticket-version, closed-ticket, and similar
-expected conflicts become persisted rejected attempts, so one bad request cannot
-poison the canonical ingress queue. Decision and nested command request IDs are
-nonzero and globally collision-checked before persistence. Decision state has
-its own optional commitment root. Exact replay replays recorded decision ingress
-and verifies the resulting attempts, state, and traces; it deliberately does not
-rerun a possibly external, human, or nondeterministic policy. The recorded draw
-and generated decision ingress are the replay inputs for Random policy.
+admitted decision ingress. A `Deferred` resolution records a trace and bumps the
+ticket version but leaves the ticket open under its original deadline, so live,
+restored, and replayed runs expire it at the same boundary. Revision,
+ticket-version, closed-ticket, and similar expected conflicts become persisted
+rejected attempts, so one bad request cannot poison the canonical ingress queue.
+Decision and nested command request IDs are nonzero and globally
+collision-checked before persistence. Decision state has its own optional
+commitment root. Exact replay replays recorded decision ingress and verifies the
+resulting attempts, state, and traces; it deliberately does not rerun a possibly
+external, human, or nondeterministic policy. The recorded draw and generated
+decision ingress are the replay inputs for Random policy.
 
 ### Deterministic outcomes, reloads, and forks
 

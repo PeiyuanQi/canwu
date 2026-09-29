@@ -2650,7 +2650,13 @@ impl DecisionState {
             };
         }
         ticket.validate()?;
-        let deadline = ticket.deadline;
+        // A deferred ticket stays open and keeps its deadline index entry, so
+        // a live run expires it exactly like a run restored from a snapshot.
+        let released_deadline = if ticket.is_open() {
+            None
+        } else {
+            ticket.deadline
+        };
         let updated_ticket = ticket.clone();
         let _ = ticket;
         self.replace_hot_history_record(
@@ -2661,7 +2667,7 @@ impl DecisionState {
                 ticket: updated_ticket,
             },
         )?;
-        self.remove_deadline(ticket_id, deadline);
+        self.remove_deadline(ticket_id, released_deadline);
         self.insert_hot_history_record(&DecisionArchiveRecord::Trace {
             trace: trace.clone(),
         })?;

@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.13.0`. A live `SimulationSnapshot` has:
+The workspace version is `0.13.1`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -25,7 +25,22 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.13.0 ships the second and final release group of the
+Version 0.13.1 is a patch release. A `Deferred` resolution no longer removes
+its ticket from the decision deadline index, so a deferred ticket expires at
+the first boundary after its deadline in live, restored, and replayed runs
+alike. Under 0.13.0 a live run kept such a ticket `Open` indefinitely, yet
+every later mutation was rejected as `ClosedTicket`; a person-availability
+sweep that tried to cancel it failed the boundary; and a run restored from a
+snapshot expired it and so diverged from the live run. Snapshot format 8,
+commitment format 4, checkpoint/evidence-journal format 4, and public type
+shapes are unchanged. The engine version is part of every checkpoint hash, so
+every run's checkpoint hashes differ from 0.13.0; a run in which a deferred
+ticket was still open when a boundary passed its deadline also records the
+ticket as `Expired`, which changes its decision commitment. The exact
+engine-version check rejects 0.13.0 saves; retain the 0.13.0 engine to read
+them.
+
+Version 0.13.0 shipped the second and final release group of the
 [downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md);
 only the §29 series items remain future work. Every contract is additive:
 
@@ -114,7 +129,7 @@ plugin identities. The `CulturePlugin`, production, fiscal, military,
 history-research, and reference-world plugin semantic identities are unchanged. Existing law plans keep their canonical encoding and
 content hash.
 
-Version 0.13.0 also fixes these behaviors, which are visible to existing runs:
+Version 0.13.0 also fixed these behaviors, which are visible to existing runs:
 
 - A live production completion now settles its output. The resource side of an
   execution's completion lease locked the production runtime at the version

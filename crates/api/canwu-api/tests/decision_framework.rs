@@ -3,7 +3,8 @@ use canwu_api::{
     DecisionAttemptOutcome, DecisionAuthority, DecisionContext, DecisionControllerBinding,
     DecisionEvaluation, DecisionIngressRequest, DecisionMutation, DecisionOption, DecisionOutcome,
     DecisionPolicyIdentity, DecisionPolicyKind, DecisionRequestId, DecisionTicketDraft,
-    DecisionTicketId, EntityRef, ErrorCode, SimDuration, UtilityProfile, WeightedUtilityPolicy,
+    DecisionTicketId, DecisionTicketState, EntityRef, ErrorCode, OrderedRulePolicy, SimDuration,
+    SystemCadence, UtilityProfile, WeightedUtilityPolicy,
 };
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -321,6 +322,106 @@ fn conflicting_decision_mutations_are_persisted_rejections_without_poisoning_the
     )
     .expect("restore rejected decision");
     assert_eq!(restored.snapshot(), snapshot);
+}
+
+#[test]
+fn deferred_ticket_expires_at_its_deadline_in_live_and_restored_runs() {
+    let mut live = Canwu::demo(1918).expect("demo");
+    let ids = Canwu::demo_ids();
+    let ticket_id = DecisionTicketId::new(1);
+    let now = live.time();
+    let deadline = now + SimDuration::days(2);
+    let controller = DecisionControllerBinding::new(
+        "standing-orders",
+        DecisionPolicyIdentity::new(DecisionPolicyKind::Rule, "standing-orders", "1"),
+        DecisionAuthority::Actor {
+            actor: ids.commander,
+        },
+    );
+    for (request_id, mutation) in [
+        (1, DecisionMutation::RegisterController { controller }),
+        (
+            2,
+            DecisionMutation::Open {
+                ticket: DecisionTicketDraft {
+                    id: ticket_id,
+                    definition: "beiyang.request-military-aid".to_owned(),
+                    decision_maker: EntityRef::Person(ids.commander),
+                    assigned_controller: "standing-orders".to_owned(),
+                    summary: "Aid request".to_owned(),
+                    context: DecisionContext::new("beiyang.aid-request.v1", json!({})),
+                    options: vec![DecisionOption::new("decline", "Decline")],
+                    deadline: Some(deadline),
+                    parent_ticket: None,
+                },
+            },
+        ),
+    ] {
+        live.enqueue_decision(
+            now,
+            0,
+            DecisionIngressRequest::new(
+                DecisionRequestId::new(request_id),
+                live.revision(),
+                mutation,
+            ),
+        )
+        .expect("setup decision");
+    }
+    live.step_canonical().expect("open").expect("boundary");
+
+    // A rule policy that matches nothing defers: the trace is authoritative,
+    // but the ticket stays open under its original deadline.
+    let policy = OrderedRulePolicy::new("standing-orders", "1", Vec::new());
+    let evaluation = live
+        .drive_decision(
+            live.time(),
+            0,
+            DecisionRequestId::new(3),
+            None,
+            ticket_id,
+            &policy,
+        )
+        .expect("drive deferral");
+    assert!(matches!(evaluation, DecisionEvaluation::Prepared(_)));
+    live.step_canonical().expect("deferral").expect("boundary");
+    let deferred = live.decision_ticket(ticket_id).expect("deferred ticket");
+    assert_eq!(deferred.state, DecisionTicketState::Open);
+    assert_eq!(deferred.version, 2);
+    assert!(matches!(
+        live.decision_trace(canwu_api::DecisionTraceId::new(1))
+            .map(|trace| &trace.outcome),
+        Some(DecisionOutcome::Deferred { .. })
+    ));
+
+    let snapshot = live.snapshot();
+    let mut restored =
+        Canwu::from_snapshot_json(&serde_json::to_string(&snapshot).expect("snapshot json"))
+            .expect("restore deferred ticket");
+    assert_eq!(restored.snapshot(), snapshot);
+
+    let after_deadline = deadline + SimDuration::days(1);
+    for run in [&mut live, &mut restored] {
+        run.schedule_calendar_boundary(after_deadline, vec![SystemCadence::Daily])
+            .expect("post-deadline boundary");
+        while run.time() < after_deadline {
+            run.step_canonical()
+                .expect("advance past deadline")
+                .expect("scheduled boundary");
+        }
+        assert_eq!(
+            run.decision_ticket(ticket_id).map(|ticket| &ticket.state),
+            Some(&DecisionTicketState::Expired)
+        );
+    }
+    let snapshot = live.snapshot();
+    assert_eq!(restored.snapshot(), snapshot);
+    let reloaded =
+        Canwu::from_snapshot_json(&serde_json::to_string(&snapshot).expect("snapshot json"))
+            .expect("restore expired ticket");
+    assert_eq!(reloaded.snapshot(), snapshot);
+    let replayed = Canwu::replay_from_journal(&[], &live.replay_journal()).expect("exact replay");
+    assert_eq!(replayed.snapshot(), snapshot);
 }
 
 #[test]
