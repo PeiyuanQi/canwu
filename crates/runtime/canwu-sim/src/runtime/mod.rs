@@ -442,6 +442,9 @@ fn domain_record_candidates(
         .collect()
 }
 
+/// Resolves an exact version body from retained evidence or, for the current
+/// version, from the live record, which stays available after its
+/// establishing boundary is sealed.
 fn retained_domain_record_version(
     state: &RuntimeState,
     reference: &DomainRecordVersionRef,
@@ -449,7 +452,29 @@ fn retained_domain_record_version(
     if reference.version == 0 {
         return None;
     }
-    let record = match reference.established_by {
+    retained_domain_record_version_body(state, reference)
+        .or_else(|| {
+            state
+                .current
+                .domain_records
+                .get(&reference.record)
+                .filter(|record| {
+                    record.version == reference.version
+                        && state
+                            .metadata
+                            .current_domain_record_versions
+                            .get(&reference.record)
+                            == Some(reference)
+                })
+        })
+        .cloned()
+}
+
+fn retained_domain_record_version_body<'a>(
+    state: &'a RuntimeState,
+    reference: &DomainRecordVersionRef,
+) -> Option<&'a DomainRecord> {
+    match reference.established_by {
         DomainRecordVersionSource::InitialScenario => state
             .metadata
             .initial_scenario
@@ -474,8 +499,7 @@ fn retained_domain_record_version(
             .filter(|record| {
                 record.reference == reference.record && record.version == reference.version
             }),
-    }?;
-    Some(record.clone())
+    }
 }
 
 fn current_domain_record_version(
@@ -1786,7 +1810,8 @@ impl Simulation {
     /// Resolves the retained record body for one exact domain-record version.
     ///
     /// Returns `None` when the version is unavailable or only its compacted
-    /// archive receipt remains.
+    /// archive receipt remains. The current version resolves to its live body
+    /// even after its establishing boundary is sealed.
     #[must_use]
     pub fn domain_record_version(
         &self,

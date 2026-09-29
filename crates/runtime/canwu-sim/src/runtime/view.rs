@@ -685,8 +685,11 @@ impl SimulationView<'_> {
     ///
     /// This validates both the record identity/version and its establishment
     /// source. Earlier same-boundary proposals are considered before retained
-    /// or archived runtime evidence. Either the exact record-kind read or the
-    /// administrative domain-record read grants access.
+    /// or archived runtime evidence. An archived version resolves through its
+    /// own kept receipt. Each seal keeps the receipt of every record's current
+    /// version, including retired and deleted records, and of any other version
+    /// only if a live dependency declares it at that seal. Either the exact
+    /// record-kind read or the administrative domain-record read grants access.
     pub fn domain_record_version_evidence_exists(
         &self,
         reference: &DomainRecordVersionRef,
@@ -779,7 +782,8 @@ impl SimulationView<'_> {
     ///
     /// Archived receipts prove that a version existed but do not contain its
     /// body, so this returns `None` when the corresponding evidence segment is
-    /// not live in the runtime.
+    /// not live in the runtime. The committed current version resolves to its
+    /// live body even after its establishing boundary is sealed.
     pub fn domain_record_version(
         &self,
         reference: &DomainRecordVersionRef,

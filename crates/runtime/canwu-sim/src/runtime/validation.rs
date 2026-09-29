@@ -2751,24 +2751,34 @@ fn resolve_runtime_domain_record_version(
         DomainRecordVersionSource::BoundaryChange {
             boundary,
             change_index,
-        } => match RuntimeValidationContext::new(state).boundary(boundary) {
-            EvidenceLookup::Retained(record)
-                if boundary_domain_record_matches(record, change_index, reference) =>
-            {
-                EvidenceAvailability::Retained
-            }
-            EvidenceLookup::Archived
-                if state
+        } => {
+            // The exact version receipt is Merkle-bound to its boundary item and
+            // change index, so it proves the version without the boundary's own
+            // receipt. Compaction keeps it for every live record's current
+            // version, which the boundary receipt alone would not guarantee.
+            let archived_receipt = boundary.get() <= state.evidence.archived.boundary_count
+                && state
                     .evidence
                     .archived_evidence_receipts
-                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone())) =>
-            {
-                EvidenceAvailability::Archived
+                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone()));
+            match RuntimeValidationContext::runtime_lookup(
+                boundary.get(),
+                state.counters.next_boundary_id,
+                state.evidence.archived.boundary_count,
+                state.evidence.retained_boundary(boundary),
+                archived_receipt,
+            ) {
+                EvidenceLookup::Retained(record)
+                    if boundary_domain_record_matches(record, change_index, reference) =>
+                {
+                    EvidenceAvailability::Retained
+                }
+                EvidenceLookup::Archived => EvidenceAvailability::Archived,
+                EvidenceLookup::Retained(_) | EvidenceLookup::Missing => {
+                    EvidenceAvailability::Missing
+                }
             }
-            EvidenceLookup::Archived | EvidenceLookup::Retained(_) | EvidenceLookup::Missing => {
-                EvidenceAvailability::Missing
-            }
-        },
+        }
     }
 }
 

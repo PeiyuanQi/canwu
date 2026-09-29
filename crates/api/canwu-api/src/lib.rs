@@ -395,7 +395,8 @@ impl Canwu {
     /// Resolves the retained record body for one exact domain-record version.
     ///
     /// A compacted archive receipt proves existence but does not expose the
-    /// version body through this trusted-host query.
+    /// version body through this trusted-host query. The current version
+    /// resolves to its live body.
     #[must_use]
     pub fn domain_record_version(
         &self,

@@ -17,6 +17,19 @@ fn propose_same_boundary_update(
     let current = view
         .domain_record(&reference)?
         .ok_or_else(|| CanwuError::new(ErrorCode::InvalidDomainRecord, "fixture record missing"))?;
+    let exact = view
+        .current_domain_record_version(&reference)?
+        .ok_or_else(|| {
+            CanwuError::new(ErrorCode::EvidenceUnavailable, "fixture version missing")
+        })?;
+    if view.domain_record_version(&exact)?.is_none()
+        || !view.domain_record_version_is_current(&exact)?
+    {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "the current exact record version is not current evidence",
+        ));
+    }
     Ok(BoundaryProposal {
         directives: vec![BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Update {
@@ -162,6 +175,88 @@ fn current_record_version_is_rebuilt_and_fails_closed_on_cache_corruption() {
         .current_domain_record_version(&same_boundary_record_ref())
         .expect_err("a corrupted provenance index must fail closed");
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+}
+
+#[test]
+fn sealed_current_record_version_stays_current_evidence_and_replays_exactly() {
+    let (mut scenario, _) = demo_scenario();
+    scenario.domain_records.push(DomainRecord {
+        reference: same_boundary_record_ref(),
+        owner: SAME_BOUNDARY_VERSION_PLUGIN.to_owned(),
+        class: DomainRecordClass::Record,
+        version: 1,
+        lifecycle: DomainRecordLifecycle::Active,
+        payload: serde_json::json!({"value": 1}),
+        references: Vec::new(),
+    });
+    let plugins: &[&dyn SimulationPlugin] = &[&SameBoundaryVersionPlugin];
+    let daily = BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily);
+    let admit = BoundaryRequest::at(SimTime::EPOCH);
+    let mut simulation = Simulation::new_with_plugins(813, scenario.clone(), plugins)
+        .expect("sealed-version fixture should initialize");
+    simulation
+        .settle_boundary(daily.clone())
+        .expect("the fixture should establish version two");
+    simulation
+        .settle_boundary(admit.clone())
+        .expect("a later boundary should admit the update's emissions");
+    let current = simulation
+        .current_domain_record_version(&same_boundary_record_ref())
+        .expect("exact-version query")
+        .expect("retained boundary provenance");
+    let DomainRecordVersionSource::BoundaryChange { boundary, .. } = current.established_by else {
+        panic!("version two should be established by a boundary change");
+    };
+
+    let mut compact = simulation
+        .into_compacted()
+        .expect("the fixture should enter compact mode");
+    let first = compact
+        .seal_evidence()
+        .expect("the settled tail should seal")
+        .expect("the settled tail should contain evidence");
+    // Compaction keeps the current version's own receipt, not its boundary's.
+    assert!(
+        compact
+            .archived_evidence_receipt(&EvidenceRef::DomainRecordVersion(current))
+            .is_some()
+    );
+    assert!(
+        compact
+            .archived_evidence_receipt(&EvidenceRef::Boundary(boundary))
+            .is_none()
+    );
+    compact
+        .settle_boundary(daily)
+        .expect("a sealed current version must remain exact current evidence");
+    compact
+        .settle_boundary(admit)
+        .expect("a later boundary should admit the continuation's emissions");
+    assert_eq!(
+        compact
+            .domain_record(&same_boundary_record_ref())
+            .expect("updated record")
+            .version,
+        3
+    );
+    let second = compact
+        .seal_evidence()
+        .expect("the continuation tail should seal")
+        .expect("the continuation tail should contain evidence");
+
+    let segments = vec![first, second];
+    let snapshot = compact
+        .snapshot_with_segments(segments.clone())
+        .expect("the sealed archive should reconstruct a full snapshot");
+    let replayed = Simulation::replay_from_journal_with_scenario(
+        scenario,
+        plugins,
+        &compact
+            .replay_journal_with_segments(segments)
+            .expect("the sealed archive should produce an exact replay journal"),
+    )
+    .expect("the sealed run should replay exactly");
+    assert_eq!(replayed.snapshot(), snapshot);
 }
 
 #[test]
