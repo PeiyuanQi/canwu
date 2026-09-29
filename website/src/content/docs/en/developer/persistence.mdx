@@ -117,8 +117,10 @@ The repository's [versioning and persistence contract](https://github.com/Peiyua
 ## Version and save compatibility
 
 :::note
-Canwu 0.13.0 writes snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4. A save also records the exact `engine_version`, so a 0.13.0 run loads only 0.13.0 saves. A save from 0.12.0 or earlier cannot be relabeled or loaded; keep the older engine to read it, or export the data with your own tool.
+Canwu 0.13.1 writes snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4. A save also records the exact `engine_version`, so a 0.13.1 run loads only 0.13.1 saves. A save from 0.13.0 or earlier cannot be loaded, and editing its recorded `engine_version` does not make it load; keep the older engine to read it, or export the data with your own tool.
 :::
+
+Canwu 0.13.1 is a patch release with the same formats and public types as 0.13.0. Its checkpoint hashes still differ, because every hash includes the engine version, and 0.13.0 saves still do not load. It fixes [deferred decision tickets](/en/architecture/decisions/) that never expired in a live run: such a ticket stayed open past its deadline, yet every later request on it was rejected as `ClosedTicket`. It now expires at the first boundary after its deadline, as it already did in a run restored from a snapshot.
 
 - Pin an exact release or Git revision for any application that keeps saves.
 - Treat a plugin semantic-hash change as a behavior change. A minor release (for example, 0.12 → 0.13) can change the semantic hashes of several extensions at once, and older saves that use those extensions then fail to load.

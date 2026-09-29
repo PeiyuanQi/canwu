@@ -19,13 +19,13 @@ Canwu needs Rust 1.88 or newer. Add the published [`canwu-api`](https://crates.i
 
 ```toml
 [dependencies]
-canwu-api = "=0.13.0"
+canwu-api = "=0.13.1"
 ```
 
 - `canwu-api` is the supported public API; its API docs are on [docs.rs](https://docs.rs/canwu-api). Application code depends on it and on any extension crates it uses, such as [`canwu-resource`](https://crates.io/crates/canwu-resource). Extension crates are also published on crates.io; use the same version number as `canwu-api`. Do not depend on `canwu-sim` or other runtime crates directly.
-- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.13.0` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
+- `canwu-reference-world` is a small example world you can replace, and the minimal flow below uses it. It is not published to crates.io, so the only way to get its source is to clone the [GitHub repository](https://github.com/PeiyuanQi/canwu) (check out the `v0.13.1` tag to match the version above). Run the examples inside the clone, or copy the crate into your project as a template and point it at the same crates.io `canwu-api`. If `canwu-api` comes from crates.io in one place and from Git in another, Cargo builds two separate copies whose types do not mix.
 
-`=0.13.0` pins the engine to exactly this release. If your application keeps saves, upgrade only once a save migration is ready (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
+`=0.13.1` pins the engine to exactly this release. If your application keeps saves, upgrade only once a save migration is ready (see [persistence](/en/developer/persistence/#version-and-save-compatibility)).
 
 ## Minimal host flow
 

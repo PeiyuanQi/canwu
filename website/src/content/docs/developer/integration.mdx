@@ -19,13 +19,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ```toml
 [dependencies]
-canwu-api = "=0.13.0"
+canwu-api = "=0.13.1"
 ```
 
 - `canwu-api` 是受支持的对外 API，API 文档见 [docs.rs](https://docs.rs/canwu-api)。应用代码依赖它，以及实际用到的扩展 crate（例如 [`canwu-resource`](https://crates.io/crates/canwu-resource)）。扩展 crate 也发布在 crates.io 上，版本号请与 `canwu-api` 保持一致。不要直接依赖 `canwu-sim` 或其他运行时 crate。
-- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.13.0` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
+- `canwu-reference-world` 是一个可替换的小型示例世界，下面的最小流程会用到它。它没有发布到 crates.io，只能克隆 [GitHub 仓库](https://github.com/PeiyuanQi/canwu)获取源码（检出 `v0.13.1` 标签，与上面的版本对应）。可以直接在克隆的仓库里运行示例，也可以把它复制到自己的项目里当模板，改为依赖上面这个 crates.io 版本的 `canwu-api`。如果 `canwu-api` 一处来自 crates.io、另一处来自 Git，Cargo 会编译出两份互不相通的副本，类型无法混用。
 
-`=0.13.0` 会把引擎精确固定在这个发布版本。如果应用会保存存档，请等存档迁移准备好后再升级（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
+`=0.13.1` 会把引擎精确固定在这个发布版本。如果应用会保存存档，请等存档迁移准备好后再升级（见[存档与重放](/developer/persistence/#版本与存档兼容)）。
 
 ## 最小接入流程
 

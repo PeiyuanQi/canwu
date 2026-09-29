@@ -86,7 +86,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
 
-`Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
+`Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启，推迟不会延长截止时间。如果到那时仍未选定选项，票据会在截止时间之后的第一个结算边界到期（见第 8 步）；持续运行、从快照恢复和重放的运行都是如此。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
 
 ## 一个决策的生命周期
 

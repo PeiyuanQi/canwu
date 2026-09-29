@@ -8,7 +8,7 @@ const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const prefix = isEnglish ? "/en" : "";
 const installCommand = `[dependencies]
-canwu-api = "=0.13.0"`;
+canwu-api = "=0.13.1"`;
 const releaseUrl = "https://github.com/PeiyuanQi/canwu/releases";
 const cratesUrl = "https://crates.io/crates/canwu-api";
 const conformanceUrl = "https://github.com/PeiyuanQi/canwu/blob/main/docs/engine-conformance.md";
@@ -48,7 +48,7 @@ const c = isEnglish
   ? {
       title: "Canwu Engine — Replayable historical simulations in Rust",
       description: "A deterministic Rust engine for historical and strategy simulations. Clients change the world through validated commands, and each character sees only what it knows.",
-      status: "open source · 0.13.0 · pre-1.0",
+      status: "open source · 0.13.1 · pre-1.0",
       name: "Canwu Engine", nativeName: "参伍引擎",
       summary: "Build replayable historical simulations where each player sees only what their character knows.",
       intro: "Canwu is a headless simulation engine written in Rust. Your code sends it commands; it advances time, records what happened and why, and tracks what each character knows. Rendering, UI, and historical content stay in your game, research tool, or agent system.",
@@ -64,7 +64,7 @@ const c = isEnglish
         ["commands", "One API for every client", "Clients change the world only by submitting commands, and read it through snapshots, events, or a character's view. A game, a research notebook, and an AI agent use the same calls."],
       ],
       scopeLabel: "Scope", scopeTitle: "Any period, region, or renderer", scopeCopy: "The core has no built-in period or map. Scenario data and plugins define institutions, geography, population, trade, and conflict. The repository includes reusable extensions for resources, production, movement, military operations, fiscal procedure, technology, information and correspondence, social diffusion, culture, and law (experimental).",
-      installLabel: "Install", installTitle: "Add canwu-api 0.13.0", installIntro: "Requires Rust 1.88 or newer. Add canwu-api to your application's Cargo.toml. The reference world used by the examples lives in the repository; clone it to run the examples. The exact = pin matters because a save loads only in the engine version that wrote it.", installCommandLabel: "Cargo.toml", release: "View releases",
+      installLabel: "Install", installTitle: "Add canwu-api 0.13.1", installIntro: "Requires Rust 1.88 or newer. Add canwu-api to your application's Cargo.toml. The reference world used by the examples lives in the repository; clone it to run the examples. The exact = pin matters because a save loads only in the engine version that wrote it.", installCommandLabel: "Cargo.toml", release: "View releases",
       quickLabel: "Five-minute check", quickTitle: "Run the starter example", quickIntro: "The starter moves an army with a typed command and advances 19 hours. It then saves and reloads, forks, and replays the run, and checks that all three copies match the original's checkpoint hash.",
       clone: "Clone and run", output: "Expected output", quickTutorial: "Step-by-step tutorial",
       statusTitle: "What works today", statusCopy: "Canwu is pre-1.0, so a minor version can still change the API. Everything listed under “Implemented” has tests. Before you depend on an area that is still in progress, check the conformance profile.",
@@ -81,7 +81,7 @@ const c = isEnglish
   : {
       title: "参伍引擎 — 用 Rust 构建可重放的历史模拟",
       description: "用于历史与策略模拟的确定性 Rust 引擎。客户端通过经过验证的命令改变世界，每个角色只看到自己知道的内容。",
-      status: "开源 · 0.13.0 · 尚未到 1.0",
+      status: "开源 · 0.13.1 · 尚未到 1.0",
       name: "参伍引擎", nativeName: "Canwu Engine",
       summary: "构建可重放的历史模拟，让每个玩家只看到自己角色知道的世界。",
       intro: "参伍是用 Rust 编写的无界面模拟引擎。你的代码向它提交命令，它负责推进时间、记录发生了什么以及原因，并跟踪每个角色知道什么。渲染、界面和历史内容仍由你的游戏、研究工具或智能体系统负责。",
@@ -97,7 +97,7 @@ const c = isEnglish
         ["commands", "所有客户端共用一套 API", "客户端只通过提交命令改变世界，通过快照、事件或角色视图读取世界。游戏、研究笔记本和 AI 智能体调用的是同一组接口。"],
       ],
       scopeLabel: "适用范围", scopeTitle: "不限时代、地区与渲染器", scopeCopy: "内核没有内置任何时代或地图。制度、地理、人口、贸易和冲突都由场景数据和插件定义。仓库中提供可复用的资源、生产、移动、军事、财政程序、技术、信息与通信、社会传播、文化和法律（实验性）扩展。",
-      installLabel: "安装", installTitle: "添加 canwu-api 0.13.0", installIntro: "需要 Rust 1.88 或更新版本。在应用的 Cargo.toml 中添加 canwu-api。示例使用的参考世界位于仓库中，克隆仓库即可运行示例。使用 = 精确锁定版本，是因为存档只能由写入它的引擎版本加载。", installCommandLabel: "Cargo.toml", release: "查看发布版本",
+      installLabel: "安装", installTitle: "添加 canwu-api 0.13.1", installIntro: "需要 Rust 1.88 或更新版本。在应用的 Cargo.toml 中添加 canwu-api。示例使用的参考世界位于仓库中，克隆仓库即可运行示例。使用 = 精确锁定版本，是因为存档只能由写入它的引擎版本加载。", installCommandLabel: "Cargo.toml", release: "查看发布版本",
       quickLabel: "五分钟上手", quickTitle: "运行 starter 示例", quickIntro: "starter 用一条类型化命令让军队移动，并推进 19 小时。随后它对这次运行做存档与读档、派生分支和重放，并检查三份副本的检查点哈希都与原运行一致。",
       clone: "克隆并运行", output: "预期输出", quickTutorial: "查看分步教程",
       statusTitle: "目前可用的功能", statusCopy: "参伍仍处于 1.0 之前，次版本更新仍可能改变 API。“已实现”中列出的功能都有测试覆盖。依赖仍在推进的部分之前，请先查看契约符合性说明。",
