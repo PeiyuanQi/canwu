@@ -9,11 +9,15 @@ It deliberately does not own money, grain, inventory, market quotes, transport,
 or physical transfer truth. A resource or logistics adapter performs the real
 operation, then submits a `FiscalExecutionReceiptPacket` citing exact external
 domain-record versions through `enqueue_execution_receipt`. At the live
-settlement boundary the extension decodes the generic execution-evidence
-envelope, validates every field against the authorization, and derives the
-receipt quantity and disposition from the evidence. A configured evidence-kind
-allowlist and the host integration's redundant semantic validator keep
-arbitrary world records from proving execution. Exact evidence versions and
+settlement boundary the extension requires each cited version to be the current
+version of its record, decodes the generic execution-evidence envelope,
+validates every field against the authorization, and derives the receipt
+quantity and disposition from the evidence. If a cited record changes in a
+boundary before the one that settles its receipt, the settling boundary fails,
+and a receipt that is already due cannot be cancelled, so cite create-only
+evidence kinds or cancel a pending receipt before its due time. A configured
+evidence-kind allowlist and the host integration's redundant semantic validator
+keep arbitrary world records from proving execution. Exact evidence versions and
 `(evidence kind, external_operation_id)` pairs can each settle at most one
 receipt within one `FiscalState`.
 

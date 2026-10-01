@@ -724,10 +724,21 @@ the retained body for that exact version, so a later update cannot reinterpret
 older evidence. Generic `EvidenceRef` citations validate retained identity and
 existence only; they do not by themselves establish relevance or historical
 truth. A compacted receipt still proves existence, but its body and
-`evidence_time` require retained or archive-provided content. A record's current
-version is the exception: its live record and runtime provenance index keep
-both after the establishing boundary is sealed, so a compact run resolves it
-exactly as its replay does.
+`evidence_time` require retained or archive-provided content, and a seal keeps
+a version's receipt only while the version is current or a live dependency
+declares it. A record's current version is the exception: its live record and
+runtime provenance index keep its body and time after the establishing boundary
+is sealed, so a compact run resolves it exactly as its replay does. Plugin views
+cannot load archived content, so another version's existence, body, and time can
+differ between a compact run and its exact replay. A rule whose outcome must
+replay exactly therefore reads each cited exact version through
+`SimulationView::replay_stable_domain_record_version`. It resolves only the
+committed current version, a version proposed earlier in the boundary, or an
+initial-scenario version, and the exact reference still fixes the cited meaning
+after the record changes. `canwu-history-research` assessment admission and
+`canwu-fiscal` receipt settlement follow this rule. Generic evidence has no such
+read: after a seal, both its existence and its time depend on what the seal
+kept, and `canwu-history-research` still checks generic citations that way.
 Module-owned restore wrappers re-run technology semantics after normal core
 snapshot, checkpoint, or replay validation.
 

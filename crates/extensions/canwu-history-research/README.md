@@ -14,7 +14,13 @@ Assessment commands are trusted-host ingestion: the declared assessor controls
 authority, but the plugin does not claim that the assessor had player-visible
 access to every cited source. A game that needs that stronger rule must prove it
 in its own research-workflow plugin before submitting the assessment. Commands
-cite durable evidence rather than transient ingress identities.
+cite durable evidence rather than transient ingress identities. Every exact
+domain-record version a command names, including its subject, must be the
+current version of its record, or an initial-scenario version, when the command
+is admitted. Sealing evidence therefore cannot change whether such a citation is
+accepted. Generic citations, such as events and boundaries, are still checked
+against retained evidence, so a run that seals evidence can reject one that its
+replay accepts.
 
 Restore through `from_historical_research_snapshot_json` or the corresponding
 checkpoint/replay wrapper, or call `validate_historical_research_runtime`

@@ -33,7 +33,7 @@ pub const FISCAL_EXECUTION_RECEIPT_INGRESS: &str = "fiscal_execution_receipt_v1"
 pub const FISCAL_HISTORICAL_CONTEXT_INGRESS: &str = "fiscal_historical_context_v1";
 
 const PLUGIN_VERSION: &str = "0.1.0-experimental";
-const SEMANTIC_HASH: &str = "01691929ee6bb913d39af123fe10c952af099a7c3280f92ac9def23ea3b30f47";
+const SEMANTIC_HASH: &str = "9ec2a32d29a0287ef4d7a86901a6dadfeab069f112ce884a6df6ab9b618d0667";
 const FISCAL_REPORT_KNOWLEDGE: &str = "fiscal_report";
 const FISCAL_REPORT_SCHEMA_HASH: &str =
     "820036a60b05e071d4833590800432f6b0d2a1c0fa89b19e813ebe7131e1a14a";
@@ -697,6 +697,19 @@ fn settle_execution_receipt(
     at: SimTime,
     catalog: &CompiledFiscalCatalog,
 ) -> Result<bool, CanwuError> {
+    // A resent receipt cites the same exact versions, so it would derive the
+    // same content. Settle it unchanged before its evidence is checked again,
+    // since that evidence may no longer be current.
+    if state
+        .execution_receipts
+        .get(&packet.receipt_id)
+        .is_some_and(|existing| {
+            existing.request_id == packet.request_id
+                && existing.external_evidence == packet.external_evidence
+        })
+    {
+        return Ok(false);
+    }
     let evidence = validate_execution_evidence(view, state, &packet)?;
     let receipt_count = state.execution_receipts.len();
     apply_receipt(state, packet, evidence, ingress_id, at, catalog)?;
@@ -776,14 +789,16 @@ fn validate_execution_evidence(
                 "fiscal execution receipt cites an unapproved external evidence kind",
             ));
         }
-        if !view.domain_record_version_evidence_exists(evidence)? {
-            return Err(invalid(
-                "fiscal execution receipt cites unavailable exact external evidence",
-            ));
-        }
-        let record = view
-            .domain_record_version(evidence)?
-            .ok_or_else(|| invalid("fiscal execution evidence payload is unavailable"))?;
+        // An earlier version's body and time can depend on what a seal kept,
+        // so the receipt would settle differently in a compact run than in
+        // its exact replay.
+        let (record, established_at) = view
+            .replay_stable_domain_record_version(evidence)?
+            .ok_or_else(|| {
+                invalid(
+                    "fiscal execution receipt must cite the current version of its external evidence",
+                )
+            })?;
         let claim: FiscalExecutionEvidence =
             decode(&record.payload, "typed fiscal execution evidence")?;
         let operation = FiscalExternalOperationRef {
@@ -821,13 +836,6 @@ fn validate_execution_evidence(
         evidenced_quantity = evidenced_quantity
             .checked_add(claim.quantity)
             .ok_or_else(|| invalid("fiscal execution evidence quantity overflowed"))?;
-        let established_at = view
-            .evidence_time(&canwu_api::EvidenceRef::DomainRecordVersion(
-                evidence.clone(),
-            ))?
-            .ok_or_else(|| {
-                invalid("fiscal execution receipt evidence has no establishment time")
-            })?;
         if established_at < request.requested_at {
             return Err(invalid(
                 "fiscal execution receipt evidence predates its execution request",
@@ -1443,14 +1451,18 @@ pub fn enqueue_execution_receipt(
             "fiscal execution receipt has an invalid external evidence count",
         ));
     }
-    if packet
-        .external_evidence
-        .iter()
-        .any(|evidence| !canwu.domain_record_version_evidence_exists(evidence))
-    {
-        return Err(invalid(
-            "fiscal execution receipt requires exact available external record versions",
-        ));
+    // Settlement needs the current version, so reject an older one here
+    // rather than fail the settling boundary.
+    for evidence in &packet.external_evidence {
+        if canwu
+            .current_domain_record_version(&evidence.record)?
+            .as_ref()
+            != Some(evidence)
+        {
+            return Err(invalid(
+                "fiscal execution receipt requires exact available external record versions that are current",
+            ));
+        }
     }
     let payload = serde_json::to_value(packet).map_err(encode_error)?;
     canwu.enqueue_plugin_ingress(PluginIngressRequest::new(

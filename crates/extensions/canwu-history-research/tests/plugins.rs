@@ -4,8 +4,8 @@ use canwu_api::{
     DomainRecordLifecycle, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
     DomainReference, DomainReferenceTarget, EntityRef, ErrorCode, EvidenceRef, Government,
     GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person, PersonId,
-    PluginIngressRequest, Scenario, SimTime, Territory, TerritoryId, TypedDomainRecordRef,
-    WorldSnapshot,
+    PluginIngressRequest, Scenario, SimDuration, SimTime, SimulationPlugin, Territory, TerritoryId,
+    TypedDomainRecordRef, WorldSnapshot,
 };
 use canwu_history_research::{
     ASSESSMENT_COMMAND, ASSESSMENT_INGRESS, AssessmentCore, AssessmentRecord, HistoricalAnalysis,
@@ -17,8 +17,8 @@ use canwu_history_research::{
 };
 use canwu_technology::{
     MetricSchema, MetricSchemaPayload, ProgramMode, ProgramStatus, TECHNOLOGY_COMMAND,
-    TechnicalProgramPayload, TechnologyCatalogRecord, TechnologyCommandEnvelope, TechnologyPlugin,
-    TechnologyRecordChange, TechnologyRecordPayload, initial_record_version,
+    TechnicalProgram, TechnicalProgramPayload, TechnologyCatalogRecord, TechnologyCommandEnvelope,
+    TechnologyPlugin, TechnologyRecordChange, TechnologyRecordPayload, initial_record_version,
 };
 
 #[test]
@@ -571,6 +571,246 @@ fn historical_total_cap_persists_rejection_without_poisoning() {
         .expect("capacity rejection must not poison the next boundary");
     validate_historical_research_runtime(&canwu)
         .expect("capacity rejection must preserve a valid runtime");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn sealed_run_admits_only_current_exact_versions_and_replays_exactly() {
+    let technology = TechnologyPlugin;
+    let history = HistoricalSourcesPlugin;
+    let plugins: &[&dyn SimulationPlugin] = &[&technology, &history];
+    let actor = PersonId::new(1);
+    let program = TypedDomainRecordRef::<TechnicalProgram>::new("program").into_untyped();
+    let program_change = |id: &str, change| {
+        serde_json::to_value(TechnologyCommandEnvelope {
+            id: id.to_owned(),
+            subject: KnowledgeHolderRef::Person(actor),
+            change,
+        })
+        .expect("technology command should encode")
+    };
+    let program_value = |status| {
+        TechnologyRecordPayload::TechnicalProgram(TechnicalProgramPayload {
+            sponsor: KnowledgeHolderRef::Person(actor),
+            site: EntityRef::Territory(TerritoryId::new(1)),
+            revision: None,
+            mode: ProgramMode::Investigation,
+            status,
+            requirements: vec![],
+            started_at: SimTime::EPOCH,
+            due_at: None,
+        })
+    };
+    // The program is created one day in and every assessment is dated then,
+    // while later boundaries run a day after, so an establishment time that
+    // differed after a seal would change the as-of check.
+    let day = |days| {
+        SimTime::EPOCH
+            .checked_add(SimDuration::days(days))
+            .expect("fixture day should fit")
+    };
+    let created_at = day(1);
+    let assessment = |id: &str, subject| {
+        let mut core = core(actor, subject);
+        core.as_of = created_at;
+        serde_json::to_value(HistoricalAssessmentCommand {
+            id: id.to_owned(),
+            subject: KnowledgeHolderRef::Person(actor),
+            assessment: HistoricalSourcesAssessmentPayload {
+                core,
+                earliest_date: SimTime::EPOCH,
+                latest_date: SimTime::EPOCH,
+                authenticity_per_mille: 900,
+                reliability_per_mille: 750,
+                provenance_digest: digest('b'),
+            },
+        })
+        .expect("assessment command should encode")
+    };
+    let sources = HistoricalSourcesAssessment::PLUGIN_NAME;
+
+    let mut canwu =
+        Canwu::new_with_plugins(43, scenario(actor), plugins).expect("plugins should initialize");
+    canwu
+        .enqueue_command(
+            created_at,
+            0,
+            tracked_command(
+                actor,
+                1,
+                canwu.revision(),
+                created_at,
+                "canwu-technology",
+                TECHNOLOGY_COMMAND,
+                program_change(
+                    "program-create",
+                    TechnologyRecordChange::Create {
+                        id: "program".to_owned(),
+                        value: program_value(ProgramStatus::Active),
+                    },
+                ),
+            ),
+        )
+        .expect("program command should enqueue");
+    // The third boundary admits the creation's emissions, so the history can
+    // seal.
+    for _ in 0..3 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(created_at))
+            .expect("program should be created");
+    }
+    let first = current_version(&canwu, &program);
+    let first_evidence = EvidenceRef::DomainRecordVersion(first.clone());
+
+    // Seal the program's first version while it is current, so its body and
+    // establishing boundary leave the runtime and only its receipt remains.
+    let mut sealed = canwu.into_compacted().expect("compact mode should start");
+    let mut segments = vec![
+        sealed
+            .seal_evidence()
+            .expect("settled history should seal")
+            .expect("settled history should contain evidence"),
+    ];
+
+    // The assessment is admitted while its subject is current, and the
+    // subject is superseded before the assessment's ingress settles.
+    sealed
+        .enqueue_command(
+            day(2),
+            0,
+            tracked_command(
+                actor,
+                2,
+                sealed.revision(),
+                day(2),
+                "canwu-technology",
+                TECHNOLOGY_COMMAND,
+                program_change(
+                    "program-pause",
+                    TechnologyRecordChange::Update {
+                        id: "program".to_owned(),
+                        expected_version: 1,
+                        value: program_value(ProgramStatus::Paused),
+                    },
+                ),
+            ),
+        )
+        .expect("program update should enqueue");
+    sealed
+        .settle_boundary(BoundaryRequest::at(day(2)))
+        .expect("program update should be admitted");
+    sealed
+        .enqueue_command(
+            sealed.time(),
+            0,
+            tracked_command(
+                actor,
+                3,
+                sealed.revision(),
+                sealed.time(),
+                sources,
+                ASSESSMENT_COMMAND,
+                assessment("while-current", first.clone()),
+            ),
+        )
+        .expect("assessment should enqueue");
+    sealed
+        .settle_boundary(BoundaryRequest::at(sealed.time()))
+        .expect("the update should settle as the assessment is admitted");
+    assert_eq!(sealed.domain_record(&program).expect("program").version, 2);
+    sealed
+        .settle_boundary(BoundaryRequest::at(sealed.time()))
+        .expect("an admitted assessment must settle after its subject changes");
+
+    // A superseded version is rejected at admission whether or not a seal
+    // kept its receipt, exactly as replay rejects it.
+    assert!(sealed.archived_evidence_receipt(&first_evidence).is_some());
+    for (request_id, id) in [(4, "superseded-with-receipt"), (5, "superseded-sealed")] {
+        if request_id == 5 {
+            sealed
+                .settle_boundary(BoundaryRequest::at(sealed.time()))
+                .expect("a later boundary should admit the tail's emissions");
+            segments.extend(sealed.seal_evidence().expect("settled tail should seal"));
+            assert!(sealed.archived_evidence_receipt(&first_evidence).is_none());
+        }
+        sealed
+            .enqueue_command(
+                sealed.time(),
+                0,
+                tracked_command(
+                    actor,
+                    request_id,
+                    sealed.revision(),
+                    sealed.time(),
+                    sources,
+                    ASSESSMENT_COMMAND,
+                    assessment(id, first.clone()),
+                ),
+            )
+            .expect("assessment should enqueue");
+        sealed
+            .settle_boundary(BoundaryRequest::at(sealed.time()))
+            .expect("a superseded citation should become a persisted rejection");
+    }
+    let assessment_exists = |id: &str| {
+        sealed
+            .typed_domain_record(&TypedDomainRecordRef::<HistoricalSourcesAssessment>::new(
+                id,
+            ))
+            .is_some()
+    };
+    assert!(assessment_exists("while-current"));
+    assert!(!assessment_exists("superseded-with-receipt"));
+    assert!(!assessment_exists("superseded-sealed"));
+
+    let replayed = Canwu::replay_from_journal(
+        plugins,
+        &sealed
+            .replay_journal_with_segments(segments.clone())
+            .expect("the sealed run should produce an exact replay journal"),
+    )
+    .expect("the sealed run should replay exactly");
+    assert_eq!(
+        replayed.snapshot(),
+        sealed
+            .snapshot_with_segments(segments)
+            .expect("the sealed archive should reconstruct a full snapshot")
+    );
+    let rejections = replayed
+        .command_attempts()
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                &attempt.outcome,
+                CommandAttemptOutcome::Rejected { error } if error.code == ErrorCode::InvalidPayload
+            )
+        })
+        .count();
+    assert_eq!(rejections, 2);
+}
+
+fn tracked_command(
+    actor: PersonId,
+    request_id: u64,
+    revision: u64,
+    at: SimTime,
+    plugin: &str,
+    command: &str,
+    payload: serde_json::Value,
+) -> CommandRequest {
+    CommandRequest::new(
+        CommandRequestId::new(request_id),
+        revision,
+        CommandEnvelope::new(
+            Issuer::Actor(actor),
+            Command::Plugin {
+                plugin: plugin.to_owned(),
+                command: command.to_owned(),
+                payload,
+            },
+        )
+        .at_time(at),
+    )
 }
 
 fn has_capacity_rejection(canwu: &Canwu) -> bool {

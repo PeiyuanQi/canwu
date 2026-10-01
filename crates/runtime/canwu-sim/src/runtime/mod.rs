@@ -596,6 +596,12 @@ fn build_current_domain_record_versions(
     Ok(versions)
 }
 
+/// Returns when evidence the runtime can still read became authoritative.
+///
+/// Archived evidence returns `None` even though exact replay knows its time,
+/// except a record's current version, whose time the provenance index keeps.
+/// Rules that must replay exactly use
+/// `SimulationView::replay_stable_domain_record_version` instead.
 fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Option<SimTime> {
     match reference {
         EvidenceRef::Command(id) => state

@@ -25,31 +25,61 @@ Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
 
-Version 0.13.1 is a patch release. A `Deferred` resolution no longer removes
-its ticket from the decision deadline index, so a deferred ticket expires at
-the first boundary after its deadline in live, restored, and replayed runs
-alike. Under 0.13.0 a live run kept such a ticket `Open` indefinitely, yet
-every later mutation was rejected as `ClosedTicket`; a person-availability
-sweep that tried to cancel it failed the boundary; and a run restored from a
-snapshot expired it and so diverged from the live run. `canwu-production` now
-admits an exact domain-record version as evidence only when it is the current
-version of its record: the realization evidence of a `CompleteExecution`, and
-every version a `StartExecution` or `CreateFacilityProject` cites or reads
-through a cited record. `AdvanceFacilityProject` no longer rereads a
-project's provider and technology evidence, which its creation validated, and
-still rechecks its resource evidence. Under 0.13.0 these rules also accepted
-an earlier version while its evidence was retained, but rejected the command,
-or failed its boundary, once `seal_evidence` had removed that evidence, so a
-compact run could diverge from its exact replay. Such an earlier version is
-now rejected in every run, and the production plugin semantic identity
-changes. Snapshot format 8, commitment format 4, checkpoint/evidence-journal
-format 4, and public type shapes are unchanged. The engine version is part of
-every checkpoint hash, so
-every run's checkpoint hashes differ from 0.13.0; a run in which a deferred
-ticket was still open when a boundary passed its deadline also records the
-ticket as `Expired`, which changes its decision commitment. The exact
-engine-version check rejects 0.13.0 saves; retain the 0.13.0 engine to read
-them.
+Version 0.13.1 is a patch release. Snapshot format 8, commitment format 4,
+checkpoint/evidence-journal format 4, and public type shapes are unchanged. It
+adds one public method, `SimulationView::replay_stable_domain_record_version`,
+and fixes these behaviors, which are visible to existing runs:
+
+- A `Deferred` resolution no longer removes its ticket from the decision
+  deadline index, so a deferred ticket expires at the first boundary after its
+  deadline in live, restored, and replayed runs alike. Under 0.13.0 a live run
+  kept such a ticket `Open` indefinitely, yet every later mutation was rejected
+  as `ClosedTicket`; a person-availability sweep that tried to cancel it failed
+  the boundary; and a run restored from a snapshot expired it and so diverged
+  from the live run.
+- A record's current version keeps its exact-version evidence after
+  `seal_evidence`: `domain_record_version_evidence_exists`,
+  `domain_record_version_is_current`, `domain_record_version`, and
+  `evidence_time` resolve it in a sealed run as they do in full exact replay.
+  Under 0.13.0 a sealed run lost that evidence with its establishing boundary,
+  so it could reject a continuation that its exact replay accepted. A sealed
+  non-current version still has no body or time.
+- `canwu-production` admits an exact domain-record version as evidence only
+  when it is the current version of its record: the realization evidence of a
+  `CompleteExecution`, and every version a `StartExecution` or
+  `CreateFacilityProject` cites or reads through a cited record.
+  `AdvanceFacilityProject` no longer rereads a project's provider and
+  technology evidence, which its creation validated, and still rechecks its
+  resource evidence. Under 0.13.0 an earlier version was accepted while its
+  evidence was retained, but the command was rejected, or its boundary failed,
+  once `seal_evidence` had removed that evidence, so a compact run could
+  diverge from its exact replay. Such an earlier version is now rejected in
+  every run.
+- `canwu-history-research` and `canwu-fiscal` resolve the exact versions they
+  cite through `SimulationView::replay_stable_domain_record_version`, which
+  returns a version's body and establishment time only when no seal can change
+  them: for the committed current version, a version proposed earlier in the
+  boundary, or an initial-scenario version. Every exact domain-record version a
+  historical assessment command names (its subject, contradictions,
+  supersessions, and record-version citations) must resolve through it when
+  the command is admitted. Settlement no longer re-checks that evidence, so a
+  later update to the subject cannot fail the boundary, and an identical
+  resubmission of a recorded assessment stays a no-op. Each external evidence
+  version a fiscal execution receipt cites must resolve the same way when the
+  receipt settles, and `enqueue_execution_receipt` rejects one that would not;
+  an identical resent receipt settles unchanged before its evidence is
+  checked. As with production, an earlier version that 0.13.0 accepted only
+  while its evidence was retained is now rejected in every run, so an
+  assessment can no longer name a superseded version that the scenario did not
+  provide. Generic history-research citations, such as events and boundaries,
+  are still checked against retained evidence.
+
+The production, history-research, and fiscal plugin semantic identities
+change. The engine version is part of every checkpoint hash, so every run's
+checkpoint hashes differ from 0.13.0; a run in which a deferred ticket was
+still open when a boundary passed its deadline also records the ticket as
+`Expired`, which changes its decision commitment. The exact engine-version
+check rejects 0.13.0 saves; retain the 0.13.0 engine to read them.
 
 Version 0.13.0 shipped the second and final release group of the
 [downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md);

@@ -2,14 +2,16 @@ use super::{
     ActorKnowledge, Army, ArmyId, BoundaryId, BoundaryKnowledgeChange, CanwuError, CauseRef,
     CommandId, CommandRecord, CreatedPerson, DecisionAttemptRecord, DecisionControllerBinding,
     DecisionRequestId, DecisionTicket, DecisionTicketId, DomainRecord, DomainRecordKind,
-    DomainRecordRef, DomainRecordType, DomainRecordVersionRef, EntityRef, ErrorCode, EventId,
-    EvidenceRef, Government, GovernmentId, HashSet, IngressId, IngressPayload, IngressQueueKey,
-    IngressRecord, KnowledgeHolderRef, KnowledgeQuery, KnowledgeRecord, KnowledgeRecordId, Person,
-    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomOperationTarget,
-    RandomStreamKey, RefCell, ReservationAllocation, ReservationRef, Route, RouteId,
-    RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent, SimTime, StateKey, Territory,
-    TerritoryId, TypedDomainRecordRef, Value, component_key, domain_record_candidates, random,
-    records, retained_domain_record_version, validate_domain_record_page_request, validation,
+    DomainRecordRef, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
+    EntityRef, ErrorCode, EventId, EvidenceRef, Government, GovernmentId, HashSet, IngressId,
+    IngressPayload, IngressQueueKey, IngressRecord, KnowledgeHolderRef, KnowledgeQuery,
+    KnowledgeRecord, KnowledgeRecordId, Person, PersonAvailability, PersonId, PluginComponentKey,
+    PluginComponentRecord, RandomOperationTarget, RandomStreamKey, RefCell, ReservationAllocation,
+    ReservationRef, Route, RouteId, RuntimeCurrentState, RuntimeEvidence, RuntimeState, SimEvent,
+    SimTime, StateKey, Territory, TerritoryId, TypedDomainRecordRef, Value, component_key,
+    domain_record_candidates, live_current_domain_record_version, random, records,
+    retained_domain_record_version, retained_evidence_time, validate_domain_record_page_request,
+    validation,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -688,8 +690,11 @@ impl SimulationView<'_> {
     /// or archived runtime evidence. An archived version resolves through its
     /// own kept receipt. Each seal keeps the receipt of every record's current
     /// version, including retired and deleted records, and of any other version
-    /// only if a live dependency declares it at that seal. Either the exact
-    /// record-kind read or the administrative domain-record read grants access.
+    /// only if a live dependency declares it at that seal. Exact replay always
+    /// finds that other version, so a rule whose outcome must match exact
+    /// replay should use [`Self::replay_stable_domain_record_version`]
+    /// instead. Either the exact record-kind read or the administrative
+    /// domain-record read grants access.
     pub fn domain_record_version_evidence_exists(
         &self,
         reference: &DomainRecordVersionRef,
@@ -760,10 +765,13 @@ impl SimulationView<'_> {
     /// authoritative at this proposal-visible cut.
     ///
     /// Archived identity receipts do not retain a precise semantic time, so
-    /// they return `None` and callers that require temporal ordering must fail
-    /// closed or load the archived evidence body. A record's committed current
-    /// version keeps its establishment time after its establishing boundary is
-    /// sealed.
+    /// they return `None` where exact replay, which retains every item, returns
+    /// the time. A record's committed current version is the exception: it
+    /// keeps its establishment time after its establishing boundary is sealed.
+    /// A rule whose outcome must match exact replay therefore reads an exact
+    /// version's time through [`Self::replay_stable_domain_record_version`].
+    /// Generic evidence has no such read: after a seal, both its existence
+    /// and its time depend on what the seal kept.
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Result<Option<SimTime>, CanwuError> {
         if !self.evidence_exists(reference)? {
             return Ok(None);
@@ -807,6 +815,55 @@ impl SimulationView<'_> {
             self.state.runtime(),
             reference,
         ))
+    }
+
+    /// Resolves an exact domain-record version whose body and establishment
+    /// time do not depend on how much evidence a seal kept.
+    ///
+    /// Returns them for the committed current version of a record, for a
+    /// version proposed earlier in this boundary and not superseded since, and
+    /// for an initial-scenario version. Any other version returns `None` even while it is retained,
+    /// because `seal_evidence` can remove its existence proof, body, and time
+    /// while exact replay keeps them. A rule whose outcome must match exact
+    /// replay relies on this instead of [`Self::domain_record_version`] and
+    /// [`Self::evidence_time`]. The committed current version still resolves
+    /// after an earlier system in this boundary proposes a newer one. Either
+    /// the exact record-kind read or the administrative domain-record read
+    /// grants access.
+    pub fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Result<Option<(DomainRecord, SimTime)>, CanwuError> {
+        self.require_domain_record_read(&reference.record)?;
+        // A proposal still visible in an overlay resolves from it. A change
+        // this boundary has already committed is the current version below.
+        if self.proposal_evidence.is_some_and(|evidence| {
+            evidence.contains(&EvidenceRef::DomainRecordVersion(reference.clone()))
+        }) && let Some(record) = [self.proposed_records, self.record_overlay]
+            .into_iter()
+            .flatten()
+            .find_map(|records| {
+                records
+                    .get(&reference.record)
+                    .filter(|record| record.version == reference.version)
+            })
+        {
+            return Ok(Some((record.clone(), self.time())));
+        }
+        let runtime = self.state.runtime();
+        if !matches!(
+            reference.established_by,
+            DomainRecordVersionSource::InitialScenario
+        ) && live_current_domain_record_version(runtime, reference).is_none()
+        {
+            return Ok(None);
+        }
+        Ok(
+            retained_domain_record_version(runtime, reference).zip(retained_evidence_time(
+                runtime,
+                &EvidenceRef::DomainRecordVersion(reference.clone()),
+            )),
+        )
     }
 
     /// Returns a bounded, deterministic projection of records of one kind.

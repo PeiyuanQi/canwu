@@ -94,7 +94,7 @@ where
 impl AssessmentRecord for HistoricalSourcesAssessment {
     const PLUGIN_NAME: &'static str = "canwu-history-sources";
     const SEMANTIC_HASH: &'static str =
-        "911b7c4bc63bcecc0e4b9775abb8dfaf30d62507c5da59712a84027a423c4dc7";
+        "35a877e9577e8718d4e8b2b0db715b55b5172324e7bc93bab98143b449bec517";
 
     fn core(payload: &Self::Payload) -> &AssessmentCore {
         &payload.core
@@ -119,7 +119,7 @@ impl AssessmentRecord for HistoricalSourcesAssessment {
 impl AssessmentRecord for HistoricalPracticeAssessment {
     const PLUGIN_NAME: &'static str = "canwu-history-practice";
     const SEMANTIC_HASH: &'static str =
-        "481939020371a8ef828513cff5afac35e8c1bbbba6d27938ee50526eac181318";
+        "8d5eb8fd697810aa0c440eabd4d7a1f8301b4a7a24e5a55b735c0f48b83cf148";
 
     fn core(payload: &Self::Payload) -> &AssessmentCore {
         &payload.core
@@ -144,7 +144,7 @@ impl AssessmentRecord for HistoricalPracticeAssessment {
 impl AssessmentRecord for ProductionArchaeologyAssessment {
     const PLUGIN_NAME: &'static str = "canwu-history-production-archaeology";
     const SEMANTIC_HASH: &'static str =
-        "9af1863f1edf903939356c3e853f281685c53155f816bf71896250d7446622e5";
+        "779d9b281302005416a09b66cdc8694291f940eed8b035d11c79ee67c8955e67";
 
     fn core(payload: &Self::Payload) -> &AssessmentCore {
         &payload.core

@@ -250,8 +250,9 @@ where
             "historical assessment cannot be dated in the future",
         ));
     }
-    validate_assessment_evidence(view, T::core(&envelope.assessment))
-        .map_err(|error| invalid_payload(error.message))?;
+    // A recorded assessment passed its evidence checks when it was admitted,
+    // so an identical resubmission stays a no-op after a cited version
+    // changes.
     let reference = TypedDomainRecordRef::<T>::new(&envelope.id);
     if let Some(existing) = view.typed_domain_record(&reference)? {
         let existing_payload = existing.decode_payload::<T>()?;
@@ -265,6 +266,8 @@ where
             "assessment ID was reused with different input",
         ));
     }
+    validate_assessment_evidence(view, T::core(&envelope.assessment))
+        .map_err(|error| invalid_payload(error.message))?;
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: SimDuration::ZERO,
         packet_type: ASSESSMENT_INGRESS.to_owned(),
@@ -365,7 +368,10 @@ where
                 "historical assessment cannot be dated in the future",
             ));
         }
-        validate_assessment_evidence(view, core)?;
+        // The matched command passed `validate_assessment_evidence` when it
+        // was admitted, and no seal can run while this ingress is pending.
+        // Checking again could fail only because a cited version stopped
+        // being current since then, which must not fail this boundary.
         let reference = TypedDomainRecordRef::<T>::new(&id);
         if let Some(existing) = view.typed_domain_record(&reference)? {
             let existing = existing.decode_payload::<T>()?;
@@ -481,6 +487,15 @@ fn assessment_kinds() -> Vec<canwu_api::DomainRecordKind> {
     ]
 }
 
+/// Checks an assessment's evidence when its command is admitted.
+///
+/// Every exact domain-record version it names must be the current version of
+/// its record, or an initial-scenario version. `seal_evidence` can remove
+/// another version's existence proof, body, and establishment time while
+/// exact replay keeps them, so accepting one would let a compact run decide
+/// differently from its replay. The exact reference still fixes the cited
+/// meaning after the record changes. Generic citations are still checked
+/// against retained evidence.
 fn validate_assessment_evidence(
     view: &SimulationView<'_>,
     core: &AssessmentCore,
@@ -489,26 +504,17 @@ fn validate_assessment_evidence(
         .chain(core.contradicts.iter())
         .chain(core.supersedes.iter())
     {
-        if !view.domain_record_version_evidence_exists(reference)? {
-            return Err(invalid(
-                "historical assessment cites unavailable exact evidence",
-            ));
-        }
-        let evidence = canwu_api::EvidenceRef::DomainRecordVersion(reference.clone());
-        if view
-            .evidence_time(&evidence)?
-            .is_none_or(|at| at > core.as_of)
-        {
-            return Err(invalid(
-                "historical assessment cites exact evidence established after its as-of cut",
-            ));
-        }
+        validate_exact_evidence(view, reference, core.as_of)?;
     }
     for citation in &core.citations {
         if matches!(citation, canwu_api::EvidenceRef::Ingress(_)) {
             return Err(invalid(
                 "historical assessment commands must cite durable evidence rather than transient ingress",
             ));
+        }
+        if let canwu_api::EvidenceRef::DomainRecordVersion(reference) = citation {
+            validate_exact_evidence(view, reference, core.as_of)?;
+            continue;
         }
         if !view.evidence_exists(citation)? {
             return Err(invalid("historical assessment cites unavailable evidence"));
@@ -531,6 +537,24 @@ fn validate_assessment_evidence(
                 "historical contradiction or supersession must concern the same exact subject",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_exact_evidence(
+    view: &SimulationView<'_>,
+    reference: &canwu_api::DomainRecordVersionRef,
+    as_of: canwu_api::SimTime,
+) -> Result<(), CanwuError> {
+    let (_, established_at) = view
+        .replay_stable_domain_record_version(reference)?
+        .ok_or_else(|| {
+            invalid("historical assessment must cite the current version of exact evidence")
+        })?;
+    if established_at > as_of {
+        return Err(invalid(
+            "historical assessment cites exact evidence established after its as-of cut",
+        ));
     }
     Ok(())
 }
