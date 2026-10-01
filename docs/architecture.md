@@ -735,8 +735,9 @@ replay exactly therefore reads each cited exact version through
 `SimulationView::replay_stable_domain_record_version`. It resolves only the
 committed current version, a version proposed earlier in the boundary, or an
 initial-scenario version, and the exact reference still fixes the cited meaning
-after the record changes. `canwu-history-research` assessment admission and
-`canwu-fiscal` receipt settlement follow this rule. Generic evidence has no such
+after the record changes. `canwu-history-research` assessment admission,
+`canwu-fiscal` receipt settlement, and `canwu-fiscal` commutation-quote
+admission follow this rule. Generic evidence has no such
 read: after a seal, both its existence and its time depend on what the seal
 kept, and `canwu-history-research` still checks generic citations that way.
 Module-owned restore wrappers re-run technology semantics after normal core

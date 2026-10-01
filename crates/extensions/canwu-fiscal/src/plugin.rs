@@ -33,7 +33,7 @@ pub const FISCAL_EXECUTION_RECEIPT_INGRESS: &str = "fiscal_execution_receipt_v1"
 pub const FISCAL_HISTORICAL_CONTEXT_INGRESS: &str = "fiscal_historical_context_v1";
 
 const PLUGIN_VERSION: &str = "0.1.0-experimental";
-const SEMANTIC_HASH: &str = "9ec2a32d29a0287ef4d7a86901a6dadfeab069f112ce884a6df6ab9b618d0667";
+const SEMANTIC_HASH: &str = "8569ce7be21f437cde93216896116591f339c7a1f0fa2aef6dea470e5a583b34";
 const FISCAL_REPORT_KNOWLEDGE: &str = "fiscal_report";
 const FISCAL_REPORT_SCHEMA_HASH: &str =
     "820036a60b05e071d4833590800432f6b0d2a1c0fa89b19e813ebe7131e1a14a";
@@ -274,6 +274,10 @@ fn register_derived_system(
     registrar.register_boundary_system(contract, handler)
 }
 
+/// Admits one fiscal action. A rejection caused by the command uses a code the
+/// engine records as a rejected command attempt instead of failing the
+/// boundary. `expected_procedure_revision` is checked only at settlement,
+/// where a stale action is recorded as a rejected outcome.
 fn admit_fiscal_action(
     view: &SimulationView<'_>,
     context: &CommandContext,
@@ -286,20 +290,15 @@ fn admit_fiscal_action(
         ));
     }
     let request: FiscalActionRequest = decode(payload, "fiscal action")?;
-    validate_identifier(&request.action_id, "fiscal action")?;
-    validate_identifier(&request.authority_binding_id, "fiscal authority binding")?;
+    validate_identifier(&request.action_id, "fiscal action").map_err(as_invalid_payload)?;
+    validate_identifier(&request.authority_binding_id, "fiscal authority binding")
+        .map_err(as_invalid_payload)?;
     let Some((_, catalog)) = load_fiscal_catalog(view)? else {
         return Err(missing("fiscal catalog is not configured"));
     };
     let Some((_, state)) = load_fiscal_state(view, &catalog)? else {
         return Err(missing("fiscal state is not configured"));
     };
-    if request.expected_procedure_revision != state.procedure_revision {
-        return Err(CanwuError::new(
-            ErrorCode::DomainRecordVersionConflict,
-            "fiscal action expected a stale procedure revision",
-        ));
-    }
     if state.action_outcomes.contains_key(&request.action_id) {
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
@@ -317,11 +316,25 @@ fn admit_fiscal_action(
         commutation_quote: Some(reference),
         ..
     } = &request.action
-        && !view.domain_record_version_evidence_exists(reference)?
     {
-        return Err(invalid(
-            "fiscal commutation requires an exact available quote record version",
-        ));
+        // A quote of a kind the plugin was not configured to read is as
+        // unavailable as one that does not exist. Only a version whose answer
+        // no seal can change qualifies, so a sealed run admits exactly what
+        // its replay admits.
+        match view.replay_stable_domain_record_version(reference) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(not_found(
+                    "fiscal commutation quote must be the current or initial-scenario version of its record",
+                ));
+            }
+            Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
+                return Err(not_found(
+                    "fiscal commutation quote kind is not readable by FiscalPlugin",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: canwu_api::SimDuration::ZERO,
@@ -373,7 +386,7 @@ fn validate_action_scope_authority(
             .assessments
             .get(assessment_id)
             .map(|assessment| assessment.scope_binding_id.as_str())
-            .ok_or_else(|| invalid("fiscal action names an unknown assessment"))?,
+            .ok_or_else(|| not_found("fiscal action names an unknown assessment"))?,
         FiscalAction::RecordAudit { target_id, .. } => {
             if let Some(assessment) = state.assessments.get(target_id) {
                 assessment.scope_binding_id.as_str()
@@ -394,7 +407,7 @@ fn validate_action_scope_authority(
                     .map(|assessment| assessment.scope_binding_id.as_str())
                     .ok_or_else(|| invalid("fiscal audit receipt lost its assessment"))?
             } else {
-                return Err(invalid("fiscal audit target is unavailable"));
+                return Err(not_found("fiscal audit target is unavailable"));
             }
         }
         FiscalAction::ApplyTransition { .. } => unreachable!("handled above"),
@@ -402,7 +415,7 @@ fn validate_action_scope_authority(
     let scope = state
         .scope_bindings
         .get(scope_id)
-        .ok_or_else(|| invalid("fiscal action scope is unavailable"))?;
+        .ok_or_else(|| not_found("fiscal action scope is unavailable"))?;
     if &scope.institution != institution {
         return Err(invalid_authority(
             "fiscal authority binding does not own the action scope",
@@ -1509,6 +1522,16 @@ fn encode_error(error: serde_json::Error) -> CanwuError {
 
 fn missing(message: &str) -> CanwuError {
     CanwuError::new(ErrorCode::DomainRecordNotFound, message)
+}
+
+/// A command names a fiscal object or record version that does not exist.
+fn not_found(message: &str) -> CanwuError {
+    CanwuError::new(ErrorCode::EntityNotFound, message)
+}
+
+fn as_invalid_payload(mut error: CanwuError) -> CanwuError {
+    error.code = ErrorCode::InvalidPayload;
+    error
 }
 
 fn invalid_authority(message: &str) -> CanwuError {

@@ -1,7 +1,8 @@
 use canwu_api::{
-    Canwu, CommandEnvelope, CommandId, CommandRequest, CommandRequestId, DomainRecordVersionRef,
-    DomainRecordVersionSource, EntityRef, IngressId, Issuer, KnowledgeQuery, PluginIngressRequest,
-    ResourceId, SimDuration, SimTime,
+    Canwu, CommandAttemptOutcome, CommandEnvelope, CommandId, CommandRequest, CommandRequestId,
+    DomainRecordKind, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
+    EntityRef, ErrorCode, IngressId, Issuer, KnowledgeQuery, PluginIngressRequest, ResourceId,
+    SimDuration, SimTime,
 };
 use canwu_fiscal::{
     FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FiscalAction, FiscalActionDisposition,
@@ -395,6 +396,123 @@ fn action_stale_at_settlement_is_persisted_as_a_rejected_outcome() {
             .contains("stale")
     );
     assert!(!state.assessments.contains_key("stale.assessment"));
+}
+
+#[test]
+fn rejected_fiscal_actions_do_not_block_later_boundaries() {
+    let reference = ming_fiscal_reference_scenario("hongwu-1391").expect("fixture");
+    let actor = reference.world_ids.observer;
+    let mut canwu = new_ming_fiscal_reference(DEFAULT_SEED, "hongwu-1391").expect("runtime");
+
+    // A request built before a context change is already stale when admitted.
+    let stale_revision = fiscal_state_version(&canwu);
+    let context = fiscal_historical_context_ingress(
+        canwu.time(),
+        &FiscalHistoricalContextPacket {
+            year: 1391,
+            mode: FiscalHistoricalMode::Counterfactual,
+        },
+    )
+    .expect("historical context ingress");
+    canwu
+        .enqueue_plugin_ingress(context)
+        .expect("historical context");
+    canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("context boundary");
+    enqueue_action(
+        &mut canwu,
+        actor,
+        1,
+        &land_assessment("stale.action", stale_revision, None),
+    );
+    canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("a stale action settles as an outcome");
+    let outcome = &fiscal_state(&canwu).action_outcomes["stale.action"];
+    assert_eq!(outcome.disposition, FiscalActionDisposition::Rejected);
+    assert!(outcome.reason.starts_with("domain_record_version_conflict"));
+
+    // A quote version that does not exist, or whose kind the plugin does not
+    // read, is a recorded command rejection.
+    let missing_quotes = [
+        reference_execution_evidence_ref("quote.missing").into_untyped(),
+        DomainRecordRef {
+            kind: DomainRecordKind::new("host.market", "quote"),
+            id: "quote.unreadable".to_owned(),
+        },
+    ];
+    for (request_id, record) in (2..).zip(missing_quotes) {
+        let quote = DomainRecordVersionRef {
+            record,
+            version: 1,
+            established_by: DomainRecordVersionSource::InitialScenario,
+        };
+        let quote_action = land_assessment(
+            &format!("quote.action.{request_id}"),
+            fiscal_state_version(&canwu),
+            Some(quote),
+        );
+        enqueue_action(&mut canwu, actor, request_id, &quote_action);
+        canwu
+            .advance_canonical(SimDuration::minutes(1))
+            .expect("a missing quote is rejected at admission");
+        let CommandAttemptOutcome::Rejected { error } = &canwu
+            .command_attempts()
+            .last()
+            .expect("quote attempt")
+            .outcome
+        else {
+            panic!("a missing quote must be a rejected command attempt");
+        };
+        assert_eq!(error.code, ErrorCode::EntityNotFound);
+        assert!(
+            !fiscal_state(&canwu)
+                .action_outcomes
+                .contains_key(&quote_action.action_id)
+        );
+    }
+
+    // Neither rejection holds up the next action.
+    let valid_action = land_assessment("valid.action", fiscal_state_version(&canwu), None);
+    enqueue_action(&mut canwu, actor, 4, &valid_action);
+    canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("valid action boundary");
+    let state = fiscal_state(&canwu);
+    assert_eq!(
+        state.action_outcomes["valid.action"].disposition,
+        FiscalActionDisposition::Applied
+    );
+
+    let snapshot = canwu.snapshot_json().expect("snapshot");
+    let restored = restore_ming_fiscal_reference(&snapshot).expect("restore");
+    let replayed = replay_ming_fiscal_reference(&canwu.replay_journal()).expect("replay");
+    assert_eq!(restored.checkpoint_hash(), canwu.checkpoint_hash());
+    assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
+    assert_eq!(replayed.command_attempts(), canwu.command_attempts());
+}
+
+fn land_assessment(
+    action_id: &str,
+    revision: u64,
+    commutation_quote: Option<DomainRecordVersionRef>,
+) -> FiscalActionRequest {
+    FiscalActionRequest {
+        action_id: action_id.to_owned(),
+        authority_binding_id: "authority.revenue-minister".to_owned(),
+        expected_procedure_revision: revision,
+        action: FiscalAction::OpenAssessment {
+            assessment_id: format!("{action_id}.assessment"),
+            rule_id: "yellow_register_land_assessment".to_owned(),
+            scope_binding_id: "scope.lower-yangzi.land".to_owned(),
+            accounting_cycle_id: "hongwu-1391.cycle-1".to_owned(),
+            quantity: 10,
+            unit: "shi_grain_equivalent".to_owned(),
+            payment_form: FiscalPaymentForm::Grain,
+            commutation_quote,
+        },
+    }
 }
 
 #[test]

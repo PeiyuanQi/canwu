@@ -3,13 +3,14 @@
 //! principal after the basis advances.
 
 use canwu_api::{
-    BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    Canwu, CanwuError, CommandAttemptOutcome, CommandEnvelope, CommandRequest, CommandRequestId,
-    DomainRecord, DomainRecordClass, DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle,
-    DomainRecordMutation, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
-    DomainRecordVersionSource, DomainValueKindClass, EntityRef, ErrorCode, Government,
-    GovernmentId, IngressClass, IngressPayload, Issuer, KnowledgeSnapshot, MapPoint, PayloadSchema,
-    Person, PersonId, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, Scenario,
+    BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
+    BoundarySystemContract, Canwu, CanwuError, CommandAttemptOutcome, CommandEnvelope,
+    CommandRequest, CommandRequestId, CompactedCanwu, DomainRecord, DomainRecordClass,
+    DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
+    DomainRecordSchema, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
+    DomainValueKindClass, EntityRef, ErrorCode, EvidenceRef, Government, GovernmentId,
+    IngressClass, IngressPayload, Issuer, KnowledgeSnapshot, MapPoint, PayloadSchema, Person,
+    PersonId, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, Scenario,
     SimDuration, SimTime, SimulationGranularity, SimulationPlugin, SimulationView, StateKey,
     StateVisibility, SystemCadence, Territory, TerritoryId, TypedDomainRecordRef, WorldSnapshot,
 };
@@ -458,4 +459,150 @@ fn gap_g13_fiscal_acting_actor() {
         replayed.snapshot_json().expect("replayed snapshot"),
         snapshot
     );
+}
+
+fn renew_grant_now(canwu: &mut Canwu) {
+    canwu
+        .enqueue_plugin_ingress(PluginIngressRequest::new(
+            GRANT_PLUGIN,
+            RENEW_GRANT_INGRESS,
+            canwu.time(),
+            serde_json::json!({}),
+        ))
+        .expect("grant renewal ingress");
+    canwu
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("grant renewal boundary");
+}
+
+fn current_grant(canwu: &Canwu) -> DomainRecordVersionRef {
+    canwu
+        .current_domain_record_version(&grant_reference().into_untyped())
+        .expect("current grant version query")
+        .expect("current grant version")
+}
+
+fn sealed_fiscal_state(sealed: &CompactedCanwu) -> FiscalState {
+    sealed
+        .typed_domain_record(&fiscal_state_reference())
+        .expect("fiscal state record")
+        .decode_payload::<FiscalStateRecord>()
+        .expect("fiscal state payload")
+}
+
+/// Submits one tracked assessment action that cites `quote` as its
+/// commutation quote, as the principal, and runs the boundary that admits it.
+fn submit_quoted_assessment(
+    sealed: &mut CompactedCanwu,
+    action_id: &str,
+    quote: DomainRecordVersionRef,
+) {
+    let request = FiscalActionRequest {
+        action_id: action_id.to_owned(),
+        authority_binding_id: AUTHORITY_ID.to_owned(),
+        expected_procedure_revision: sealed_fiscal_state(sealed).procedure_revision,
+        action: FiscalAction::OpenAssessment {
+            assessment_id: format!("{action_id}.assessment"),
+            rule_id: "rule.land".to_owned(),
+            scope_binding_id: "scope.a".to_owned(),
+            accounting_cycle_id: action_id.to_owned(),
+            quantity: 100,
+            unit: "grain".to_owned(),
+            payment_form: FiscalPaymentForm::Grain,
+            commutation_quote: Some(quote),
+        },
+    };
+    sealed
+        .enqueue_command(
+            sealed.time(),
+            0,
+            CommandRequest::new(
+                CommandRequestId::new(sealed.revision() + 1),
+                sealed.revision(),
+                CommandEnvelope::new(
+                    Issuer::Actor(PRINCIPAL),
+                    fiscal_action_command(&request).expect("fiscal command"),
+                )
+                .at_time(sealed.time()),
+            ),
+        )
+        .expect("tracked fiscal command");
+    sealed
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("a quote check must not fail the boundary");
+}
+
+/// A commutation quote is admitted only while no seal can change its
+/// answer, so a sealed run rejects a superseded quote version exactly as its
+/// full-retention replay does. The acting grant stands in for an application
+/// quote record of a kind the fiscal plugin reads.
+#[test]
+fn sealed_run_rejects_a_superseded_commutation_quote_like_its_replay() {
+    let grant_plugin = ActingGrantPlugin;
+    let fiscal_plugin = FiscalPlugin::default()
+        .with_authority_basis_kinds([DomainRecordKind::for_type::<ActingGrant>()]);
+    let plugins: [&dyn SimulationPlugin; 2] = [&grant_plugin, &fiscal_plugin];
+    let mut canwu = Canwu::new_with_plugins(13, scenario(), &plugins).expect("fixture runtime");
+
+    // Version 2 is established by a boundary and then superseded, and nothing
+    // live depends on it, so the next seal drops its evidence.
+    renew_grant_now(&mut canwu);
+    let superseded = current_grant(&canwu);
+    assert_eq!(superseded.version, 2);
+    renew_grant_now(&mut canwu);
+    let current = current_grant(&canwu);
+    assert_eq!(current.version, 3);
+    // Later boundaries admit the renewals' emissions, so the history can seal.
+    for _ in 0..2 {
+        canwu
+            .settle_boundary(BoundaryRequest::at(canwu.time()))
+            .expect("a quiet boundary before sealing");
+    }
+
+    let mut sealed = canwu.into_compacted().expect("compact mode should start");
+    let segments = vec![
+        sealed
+            .seal_evidence()
+            .expect("settled history should seal")
+            .expect("settled history should contain evidence"),
+    ];
+    assert!(
+        sealed
+            .archived_evidence_receipt(&EvidenceRef::DomainRecordVersion(superseded.clone()))
+            .is_none()
+    );
+
+    submit_quoted_assessment(&mut sealed, "action.quote.superseded", superseded);
+    submit_quoted_assessment(&mut sealed, "action.quote.current", current);
+    sealed
+        .advance_canonical(SimDuration::minutes(1))
+        .expect("the admitted quote action settles");
+    let outcomes = sealed_fiscal_state(&sealed).action_outcomes;
+    assert!(!outcomes.contains_key("action.quote.superseded"));
+    assert!(outcomes.contains_key("action.quote.current"));
+
+    let replayed = Canwu::replay_from_journal(
+        &plugins,
+        &sealed
+            .replay_journal_with_segments(segments.clone())
+            .expect("the sealed run should produce an exact replay journal"),
+    )
+    .expect("the sealed run should replay exactly");
+    assert_eq!(
+        replayed.snapshot(),
+        sealed
+            .snapshot_with_segments(segments)
+            .expect("the sealed archive should reconstruct a full snapshot")
+    );
+    let quote_rejections = replayed
+        .command_attempts()
+        .iter()
+        .filter(|attempt| {
+            matches!(
+                &attempt.outcome,
+                CommandAttemptOutcome::Rejected { error } if error.code == ErrorCode::EntityNotFound
+            )
+        })
+        .count();
+    assert_eq!(quote_rejections, 1);
 }

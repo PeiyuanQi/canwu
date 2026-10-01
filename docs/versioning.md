@@ -94,6 +94,16 @@ and fixes these behaviors, which are visible to existing runs:
   packet. `MAX_RECORDS` (4,096 records per kind over a run),
   `MAX_COMPOSITION_ENTRIES`, and `MAX_OPERATION_PARTICIPANTS` (distinct
   forces) are now enforced.
+- `canwu-fiscal` admission rejects a bad command instead of failing the
+  boundary. Under 0.13.0 a stale procedure revision, a missing quote, a quote
+  of an undeclared kind, a remission naming an unknown assessment, an unknown
+  scope, or a malformed action ID failed the boundary, and every later
+  boundary failed the same way with time and revision frozen. Admission no
+  longer checks the revision; settlement records a stale action as a
+  `Rejected` outcome. A missing assessment, scope, audit target, or quote is
+  rejected as `EntityNotFound`, and a malformed action or binding ID as
+  `InvalidPayload`. A missing fiscal catalog or state still fails the
+  boundary, as a host setup error.
 
 The production, history-research, fiscal, and military plugin semantic
 identities change. The engine version is part of every checkpoint hash, so
