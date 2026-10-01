@@ -191,7 +191,8 @@ The exchange has no certificate of its own. After the start, the two transfers s
 
 `ProductionOperation::CompleteExecution` may carry `realized_output_per_mille` and `realization_evidence`. The ratio is in thousandths of the process's nominal output; `None` means 1,000. At completion, every output settlement quantity is scaled by the ratio and rounded down, and both values are stored on the execution. The resource credit and the output acknowledgement then settle exactly the scaled quantities.
 
-- A ratio other than 1,000 needs an exact evidence record version of a kind listed in the process revision's `realization_evidence_kinds`. The list is empty by default, so a default process accepts only nominal output. Evidence sent with the nominal ratio is rejected.
+- A ratio other than 1,000 needs an evidence record of a kind listed in the process revision's `realization_evidence_kinds`. The list is empty by default, so a default process accepts only nominal output. Evidence sent with the nominal ratio is rejected.
+- The evidence must be the exact current version of its record. An earlier version is rejected even while the run still keeps it, so a run sealed with `seal_evidence` accepts the same completions as its exact replay.
 - The ratio must be positive and must not scale any output leg to zero. To record a total loss, cancel the work order.
 - The ratio may not exceed the process revision's `max_realized_per_mille`, which defaults to 1,000; set it higher to accept evidenced yields above nominal.
 - Holder, lifecycle, ratio, and kind rules run before the evidence record is looked up, so a rejection reveals nothing about whether another record exists.

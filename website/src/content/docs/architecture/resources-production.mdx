@@ -60,7 +60,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 `}
 />
 
-`canwu-resource` 只依赖 `canwu-api`。`canwu-production` 另外依赖 `canwu-resource` 和 `canwu-technology`。每个生产执行和设施项目都带一个 `TechnologyEvidenceBinding`：一个精确的 `TechniqueRevision`，一个 `CapabilityQualification` 或 `ImplementationRecord`，工艺设置了 `adoption_required` 时还要有一个 `AdoptionRecord`。`canwu-api` 没有重新导出这两个扩展，请自行加入 `Cargo.toml`。
+`canwu-resource` 只依赖 `canwu-api`。`canwu-production` 另外依赖 `canwu-resource` 和 `canwu-technology`。每个生产执行和设施项目都带一个 `TechnologyEvidenceBinding`：一个精确的 `TechniqueRevision`，一个 `CapabilityQualification` 或 `ImplementationRecord`，工艺设置了 `adoption_required` 时还要有一个 `AdoptionRecord`。生产执行开始或设施项目创建时，它引用的每个精确领域记录版本都必须是其记录的当前版本，因此用 `seal_evidence` 封存过的模拟运行与其精确重放接受相同的命令。项目此后推进时不再重新检查这些证据。`canwu-api` 没有重新导出这两个扩展，请自行加入 `Cargo.toml`。
 
 `canwu-resource` 是库存余额的唯一写入者。生产、军事补给和你自己的领域提交资源操作，再读取结果。`canwu-transport` 和 `canwu-movement` 负责运送货物，并提供途中的证据。转移通过 `TransportExecutionLink` 关联这些证据，货物的余额、损耗和验收仍由 `canwu-resource` 记录。
 

@@ -60,7 +60,7 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 `}
 />
 
-`canwu-resource` depends only on `canwu-api`. `canwu-production` adds `canwu-resource` and `canwu-technology`. Each execution and facility project carries a `TechnologyEvidenceBinding`: an exact `TechniqueRevision`, a `CapabilityQualification` or `ImplementationRecord`, and an `AdoptionRecord` when the process sets `adoption_required`. `canwu-api` re-exports neither extension, so add them to your `Cargo.toml` yourself.
+`canwu-resource` depends only on `canwu-api`. `canwu-production` adds `canwu-resource` and `canwu-technology`. Each execution and facility project carries a `TechnologyEvidenceBinding`: an exact `TechniqueRevision`, a `CapabilityQualification` or `ImplementationRecord`, and an `AdoptionRecord` when the process sets `adoption_required`. When an execution starts or a facility project is created, each exact domain-record version it cites must be the current version of its record, so a run sealed with `seal_evidence` accepts the same commands as its exact replay. A project's later progress does not check that evidence again. `canwu-api` re-exports neither extension, so add them to your `Cargo.toml` yourself.
 
 `canwu-resource` is the only writer of stock balances. Production, force supply, and your own domains submit resource operations and read the outcomes. `canwu-transport` and `canwu-movement` carry cargo and supply evidence about the journey. A transfer links to that evidence through a `TransportExecutionLink`, and the cargo's balance, loss, and acceptance stay in `canwu-resource`.
 
