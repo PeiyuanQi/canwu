@@ -5525,3 +5525,877 @@ fn live_completion_settles_output() {
         snapshot
     );
 }
+
+const SEALED_EVIDENCE_PLUGIN: &str = "fixture-sealed-evidence";
+
+fn sealed_evidence_technique() -> TypedDomainRecordRef<canwu_technology::TechniqueRevision> {
+    TypedDomainRecordRef::new("technology:sealed-evidence-technique")
+}
+
+fn sealed_evidence_qualification() -> TypedDomainRecordRef<canwu_technology::CapabilityQualification>
+{
+    TypedDomainRecordRef::new("technology:sealed-evidence-qualification")
+}
+
+fn sealed_evidence_harvest() -> TypedDomainRecordRef<HarvestReport> {
+    TypedDomainRecordRef::new("harvest:sealed-evidence")
+}
+
+/// Owns the technology records a real execution cites and the harvest report
+/// that justifies its realized output. Like a real technique revision, the
+/// technique is created once, at the first daily boundary, and never changes.
+/// Each daily boundary writes a new qualification, bound to the technique once
+/// it exists, and a new harvest report.
+struct SealedEvidenceFixturePlugin;
+
+impl canwu_api::SimulationPlugin for SealedEvidenceFixturePlugin {
+    fn name(&self) -> &'static str {
+        SEALED_EVIDENCE_PLUGIN
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "00000000000000000000000000000000000000000000000000000000000000d2"
+    }
+
+    fn register(
+        &self,
+        registrar: &mut canwu_api::PluginRegistrar<'_>,
+    ) -> Result<(), canwu_api::CanwuError> {
+        let schemas = [
+            canwu_api::DomainRecordSchema::for_record::<canwu_technology::TechniqueRevision>(),
+            canwu_api::DomainRecordSchema::for_record::<canwu_technology::CapabilityQualification>(
+            ),
+            canwu_api::DomainRecordSchema::for_record::<HarvestReport>(),
+        ];
+        let keys = schemas
+            .iter()
+            .map(canwu_api::DomainRecordSchema::state_key)
+            .collect::<Vec<_>>();
+        for schema in schemas {
+            registrar.register_record_schema(schema)?;
+        }
+        let mut touch = canwu_api::BoundarySystemContract::new(
+            "touch-sealed-evidence-fixture",
+            BoundaryPhase::DomainDeltaProposal,
+            canwu_api::SystemCadence::Daily,
+        );
+        touch.reads.clone_from(&keys);
+        touch.writes = keys;
+        touch.visibility = canwu_api::StateVisibility::SameBoundary;
+        registrar.register_boundary_system(touch, touch_sealed_evidence_fixture)
+    }
+}
+
+fn touch_sealed_evidence_fixture(
+    view: &canwu_api::SimulationView<'_>,
+    _context: &canwu_api::BoundaryContext,
+) -> Result<canwu_api::BoundaryProposal, canwu_api::CanwuError> {
+    let update = |expected_version: u64, record: canwu_api::DomainRecordDraft| {
+        canwu_api::BoundaryDirective::MutateRecord {
+            mutation: canwu_api::DomainRecordMutation::Update {
+                record,
+                expected_version,
+            },
+            summary: "Advance a sealed-evidence fixture record".to_owned(),
+        }
+    };
+    let mut directives = Vec::new();
+    let technique = view.current_domain_record_version(sealed_evidence_technique().as_untyped())?;
+    if technique.is_none() {
+        directives.push(canwu_api::BoundaryDirective::MutateRecord {
+            mutation: canwu_api::DomainRecordMutation::Create {
+                record: canwu_api::DomainRecordDraft::from_typed(
+                    sealed_evidence_technique(),
+                    &canwu_technology::TechniqueRevisionPayload {
+                        label: "sealed evidence technique".to_owned(),
+                        spec: version::<canwu_technology::TechniqueSpec>(
+                            "technology:sealed-evidence-spec",
+                        ),
+                        parents: Vec::new(),
+                        parameters: Vec::new(),
+                        evaluator: "fixture".to_owned(),
+                        produced_by: None,
+                        execution_intent: None,
+                        discovery_evidence: Vec::new(),
+                    },
+                )?,
+            },
+            summary: "Create the sealed-evidence fixture technique".to_owned(),
+        });
+    }
+    let qualification = view
+        .typed_domain_record(&sealed_evidence_qualification())?
+        .expect("fixture qualification");
+    let mut payload =
+        qualification.decode_payload::<canwu_technology::CapabilityQualification>()?;
+    if let Some(technique) = technique {
+        payload.revision = technique;
+    }
+    payload.reliability_per_mille -= 1;
+    directives.push(update(
+        qualification.version,
+        canwu_api::DomainRecordDraft::from_typed(sealed_evidence_qualification(), &payload)?,
+    ));
+    let harvest = view
+        .typed_domain_record(&sealed_evidence_harvest())?
+        .expect("fixture harvest");
+    let mut payload = harvest.decode_payload::<HarvestReport>()?;
+    payload.realized_per_mille += 1;
+    directives.push(update(
+        harvest.version,
+        canwu_api::DomainRecordDraft::from_typed(sealed_evidence_harvest(), &payload)?,
+    ));
+    Ok(canwu_api::BoundaryProposal {
+        directives,
+        ..canwu_api::BoundaryProposal::default()
+    })
+}
+
+fn sealed_evidence_record<T: DomainRecordType>(
+    reference: TypedDomainRecordRef<T>,
+    payload: &T::Payload,
+) -> canwu_api::DomainRecord
+where
+    T::Payload: serde::Serialize,
+{
+    let draft = canwu_api::DomainRecordDraft::from_typed(reference, payload)
+        .expect("sealed-evidence fixture draft");
+    canwu_api::DomainRecord {
+        reference: draft.reference,
+        owner: SEALED_EVIDENCE_PLUGIN.to_owned(),
+        class: canwu_api::DomainRecordClass::Record,
+        version: 1,
+        lifecycle: canwu_api::DomainRecordLifecycle::Active,
+        payload: draft.payload,
+        references: draft.references,
+    }
+}
+
+/// Finds the boundary-established version of a record that the given current
+/// version superseded.
+fn superseded_record_version(
+    canwu: &Canwu,
+    current: &DomainRecordVersionRef,
+) -> DomainRecordVersionRef {
+    let version = current.version - 1;
+    for boundary in canwu.boundaries().iter().rev() {
+        for (change_index, change) in boundary.record_changes.iter().enumerate() {
+            if change.current.reference == current.record && change.current.version == version {
+                return DomainRecordVersionRef {
+                    record: current.record.clone(),
+                    version,
+                    established_by: DomainRecordVersionSource::BoundaryChange {
+                        boundary: boundary.id,
+                        change_index: u64::try_from(change_index).expect("change index"),
+                    },
+                };
+            }
+        }
+    }
+    panic!("superseded record version provenance is unavailable")
+}
+
+#[derive(Default)]
+struct SealedEvidenceArchive {
+    segments: RefCell<BTreeMap<String, canwu_api::EvidenceJournalSegment>>,
+}
+
+impl canwu_api::ArchiveProvider for SealedEvidenceArchive {
+    fn load_evidence_segment(
+        &self,
+        segment_id: &str,
+    ) -> Result<Option<canwu_api::EvidenceJournalSegment>, canwu_api::CanwuError> {
+        Ok(self.segments.borrow().get(segment_id).cloned())
+    }
+}
+
+impl canwu_api::ArchiveStore for SealedEvidenceArchive {
+    fn store_evidence_segment(
+        &self,
+        segment: &canwu_api::EvidenceJournalSegment,
+    ) -> Result<canwu_api::ArchiveStoreOutcome, canwu_api::CanwuError> {
+        let segment_id = segment
+            .archive
+            .as_ref()
+            .expect("sealed segment archive index")
+            .header
+            .segment_id
+            .clone();
+        self.segments
+            .borrow_mut()
+            .insert(segment_id, segment.clone());
+        Ok(canwu_api::ArchiveStoreOutcome::Stored)
+    }
+}
+
+/// Seals the retained tail through the provider-backed protocol that active
+/// payload-required continuations require.
+fn seal_through_archive(
+    compact: &mut canwu_api::CompactedCanwu,
+    archive: &SealedEvidenceArchive,
+) -> canwu_api::EvidenceJournalSegment {
+    let prepared = compact
+        .prepare_evidence_seal()
+        .expect("prepare seal")
+        .expect("retained tail");
+    canwu_api::ArchiveStore::store_evidence_segment(archive, &prepared.segment)
+        .expect("store segment");
+    compact
+        .commit_evidence_seal(&prepared.token, archive)
+        .expect("commit seal");
+    prepared.segment
+}
+
+fn compact_production_state(canwu: &canwu_api::CompactedCanwu) -> ProductionState {
+    canwu
+        .typed_domain_record(&production_runtime_reference())
+        .expect("production runtime")
+        .decode_payload::<ProductionRuntimeRecord>()
+        .expect("production state")
+}
+
+fn settle_compact(canwu: &mut canwu_api::CompactedCanwu, label: &str) {
+    canwu
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+        .unwrap_or_else(|error| panic!("{label}: {error}"));
+}
+
+fn apply_compact_operation(
+    compact: &mut canwu_api::CompactedCanwu,
+    holder: &KnowledgeHolderRef,
+    request_id: u64,
+    operation_id: &str,
+    operation: ProductionOperation,
+) -> ProductionOperationOutcome {
+    let time = compact.time();
+    let revision = compact.revision();
+    let expected_runtime_revision = compact_production_state(compact).revision;
+    let operation_id = ProductionOperationOutcomeId::new(operation_id).expect("operation ID");
+    compact
+        .enqueue_command(
+            time,
+            0,
+            CommandRequest::new(
+                CommandRequestId::new(request_id),
+                revision,
+                CommandEnvelope::new(
+                    Issuer::Actor(PersonId::new(1)),
+                    Command::Plugin {
+                        plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                        command: PRODUCTION_COMMAND.to_owned(),
+                        payload: serde_json::to_value(ProductionCommandEnvelope {
+                            operation_id: operation_id.clone(),
+                            holder: holder.clone(),
+                            expected_runtime_revision,
+                            operation,
+                        })
+                        .expect("production command payload"),
+                    },
+                )
+                .at_time(time),
+            ),
+        )
+        .expect("compact production command");
+    settle_compact(compact, &format!("{operation_id} command boundary"));
+    settle_compact(compact, &format!("{operation_id} apply boundary"));
+    compact_production_state(compact).operation_outcomes[&operation_id].clone()
+}
+
+/// Drives the canonical completion coordinator, as in the real-ingress
+/// contract, until the resource participant is consumed and acknowledged.
+/// Returns the activation certificate and the two grant IDs.
+fn coordinate_sealed_evidence_completion(
+    canwu: &mut Canwu,
+    holder: &KnowledgeHolderRef,
+    account: &ResourceAccountId,
+    operation_key: &ResourceOperationKey,
+    recipe: &CompletionCapacityRecipeV1,
+) -> (
+    canwu_resource::CompletionLeaseActivationCertificateV1,
+    CompletionCapacityGrantId,
+    CompletionCapacityGrantId,
+) {
+    let acquisition =
+        CompletionLeaseAcquisitionId::new("production:completion-acquisition:sealed-evidence")
+            .expect("acquisition");
+    let eligibility = EligibilityEnvelopeV1::new(
+        Vec::new(),
+        BTreeMap::new(),
+        BTreeSet::new(),
+        Vec::new(),
+        Vec::new(),
+    )
+    .expect("eligibility");
+    enqueue_tracked_production_operation(
+        canwu,
+        holder,
+        1,
+        "production:sealed-evidence:request-completion",
+        ProductionOperation::RequestCompletionLease {
+            request: RequestCompletionLeaseV1 {
+                id: acquisition.clone(),
+                operation_key: operation_key.clone(),
+                holder: holder.clone(),
+                operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
+                eligibility_time: SimTime::EPOCH,
+                eligibility_envelope: eligibility.clone(),
+                recipe: recipe.clone(),
+                expected_participants: BTreeSet::from([
+                    canwu_production::PLUGIN_NAME.to_owned(),
+                    canwu_resource::PLUGIN_NAME.to_owned(),
+                ]),
+                policy_class: CompletionPolicyClassV1::Guaranteed,
+            },
+        },
+    );
+    settle_at_epoch(canwu, "completion command boundary");
+    settle_at_epoch(canwu, "completion request boundary");
+    let production_grant =
+        CompletionCapacityGrantId::new("production:completion-grant:sealed-evidence")
+            .expect("production grant");
+    let resource_grant =
+        CompletionCapacityGrantId::new("resource:completion-grant:sealed-evidence")
+            .expect("resource grant");
+    let participant_grant = |canwu: &Canwu| {
+        canwu_resource::resource_state(canwu)
+            .expect("resource query")
+            .expect("resource state")
+            .1
+            .external_completion_participants
+            .grants[&acquisition]
+            .grant
+            .clone()
+    };
+    let production_source = current_record_version(canwu, production_runtime_reference());
+    let boundary = next_boundary(canwu);
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::GrantLocal(GrantCompletionCapacityV1 {
+            grant_id: production_grant.clone(),
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::INITIAL,
+            owner_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+            target_versions: vec![CompletionLockedTargetV1::ExternalRecord {
+                version: production_source,
+            }],
+            current_boundary: boundary,
+        }),
+    )
+    .expect("production grant ingress");
+    settle_at_epoch(canwu, "production grant boundary");
+    let coordinator_source = current_record_version(canwu, production_runtime_reference());
+    let mut target_versions = vec![
+        CompletionLockedTargetV1::ExternalRecord {
+            version: coordinator_source.clone(),
+        },
+        CompletionLockedTargetV1::Account {
+            id: account.clone(),
+            revision: resource_revision(),
+        },
+    ];
+    target_versions.sort();
+    let boundary = next_boundary(canwu);
+    enqueue_resource_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ResourceCompletionOperationV1::GrantExternalParticipant(
+            RequestExternalCompletionParticipantGrantV1 {
+                coordinator_plugin: canwu_production::PLUGIN_NAME.to_owned(),
+                coordinator_source,
+                coordinator_acquisition_revision: ResourceRevision::new(2).expect("revision"),
+                acquisition: acquisition.clone(),
+                operation_key: operation_key.clone(),
+                holder: holder.clone(),
+                operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
+                eligibility_time: SimTime::EPOCH,
+                eligibility_envelope_digest: eligibility.digest.clone(),
+                recipe: recipe.clone(),
+                policy_class: CompletionPolicyClassV1::Guaranteed,
+                grant_id: resource_grant.clone(),
+                target_versions,
+                current_boundary: boundary,
+            },
+        ),
+    )
+    .expect("resource participant grant ingress");
+    settle_at_epoch(canwu, "resource participant grant boundary");
+    let resource_source =
+        current_record_version(canwu, canwu_resource::resource_runtime_reference());
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::AcknowledgeParticipantGrant {
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::new(2).expect("revision"),
+            participant: canwu_resource::PLUGIN_NAME.to_owned(),
+            provider_source: resource_source,
+            grant: participant_grant(canwu),
+        },
+    )
+    .expect("resource grant acknowledgement ingress");
+    settle_at_epoch(canwu, "resource grant acknowledgement boundary");
+    let boundary = next_boundary(canwu);
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::PrepareLocal(PrepareCompletionCapacityV1 {
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::new(3).expect("revision"),
+            grant: production_grant.clone(),
+            expected_grant_revision: ResourceRevision::INITIAL,
+            current_boundary: boundary,
+            eligibility_envelope_digest: eligibility.digest.clone(),
+        }),
+    )
+    .expect("production prepare ingress");
+    settle_at_epoch(canwu, "production prepare boundary");
+    let coordinator_source = current_record_version(canwu, production_runtime_reference());
+    let boundary = next_boundary(canwu);
+    enqueue_resource_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ResourceCompletionOperationV1::PrepareExternalParticipant(
+            PrepareExternalCompletionParticipantGrantV1 {
+                coordinator_source,
+                acquisition: acquisition.clone(),
+                expected_grant_revision: ResourceRevision::INITIAL,
+                current_boundary: boundary,
+                eligibility_envelope_digest: eligibility.digest,
+            },
+        ),
+    )
+    .expect("resource prepare ingress");
+    settle_at_epoch(canwu, "resource prepare boundary");
+    let resource_source =
+        current_record_version(canwu, canwu_resource::resource_runtime_reference());
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::AcknowledgeParticipantPrepared {
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::new(4).expect("revision"),
+            participant: canwu_resource::PLUGIN_NAME.to_owned(),
+            provider_source: resource_source,
+            grant: participant_grant(canwu),
+        },
+    )
+    .expect("resource prepare acknowledgement ingress");
+    settle_at_epoch(canwu, "resource prepare acknowledgement boundary");
+    let boundary = next_boundary(canwu);
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::Activate {
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::new(5).expect("revision"),
+            current_boundary: boundary,
+        },
+    )
+    .expect("activation ingress");
+    settle_at_epoch(canwu, "activation boundary");
+    let certificate =
+        production_state(canwu).production_completion_certificates[&acquisition].clone();
+    let coordinator_source = current_record_version(canwu, production_runtime_reference());
+    enqueue_resource_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ResourceCompletionOperationV1::ConsumeExternalParticipant(
+            ConsumeExternalCompletionParticipantGrantV1 {
+                coordinator_source,
+                certificate: certificate.clone(),
+                at: SimTime::EPOCH,
+            },
+        ),
+    )
+    .expect("resource consume ingress");
+    settle_at_epoch(canwu, "resource consume boundary");
+    let resource_source =
+        current_record_version(canwu, canwu_resource::resource_runtime_reference());
+    enqueue_production_completion_operation(
+        canwu,
+        SimTime::EPOCH,
+        &ProductionCompletionIngressV1::AcknowledgeParticipantConsumed {
+            acquisition: acquisition.clone(),
+            expected_acquisition_revision: ResourceRevision::new(6).expect("revision"),
+            participant: canwu_resource::PLUGIN_NAME.to_owned(),
+            provider_source: resource_source,
+            grant: participant_grant(canwu),
+        },
+    )
+    .expect("resource consumption acknowledgement ingress");
+    settle_at_epoch(canwu, "resource consumption acknowledgement boundary");
+    (certificate, production_grant, resource_grant)
+}
+
+/// A seal keeps each record's current version but drops an earlier version
+/// that nothing live declares, while exact replay keeps every version. A new
+/// execution's technology citations and a completion's realization evidence
+/// must therefore be current versions, so a sealed run admits exactly the
+/// commands its replay admits, and its save restores and validates.
+#[test]
+fn sealed_run_admits_only_current_production_evidence_and_replays_exactly() {
+    let (mut production, holder, site_id, facility_id) = base_state();
+    let process_id = ProcessRevisionId::new("production:household-process:v1").expect("process ID");
+    {
+        let process = production.processes.get_mut(&process_id).expect("process");
+        process.requirements.clear();
+        process.inputs.clear();
+        process.max_realized_per_mille = 1_200;
+        process.realization_evidence_kinds =
+            BTreeSet::from([canwu_api::DomainRecordKind::for_type::<HarvestReport>()]);
+    }
+    production.observer_grants.clear();
+    let process = production.processes[&process_id].clone();
+    let order = work_order(
+        "production:order:sealed-evidence",
+        &holder,
+        &process_id,
+        &site_id,
+    );
+    let order_id = order.id.clone();
+    for (id, operation) in [
+        (
+            "production:sealed-evidence:create",
+            ProductionOperation::CreateWorkOrder { work_order: order },
+        ),
+        (
+            "production:sealed-evidence:authorize",
+            ProductionOperation::AuthorizeWorkOrder {
+                work_order: order_id.clone(),
+            },
+        ),
+    ] {
+        production
+            .apply_operation(
+                &command(&production, &holder, id, operation),
+                SimTime::EPOCH,
+            )
+            .expect("prepare sealed-evidence order");
+    }
+    let recipe = CompletionCapacityRecipeV1 {
+        receipts: MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+        mutations: 4,
+        reports_per_holder: 1,
+        holders: 1,
+        bytes: 4_096,
+    };
+    let units = recipe.canonical_units().expect("recipe units");
+    let budget = RunBudgetRevisionV1 {
+        revision: ResourceRevision::INITIAL,
+        total_completion_units: units.saturating_mul(4),
+        shared_pending_slots: 0,
+        partitions: vec![CompletionCapacityPartitionV1 {
+            authority: holder.clone(),
+            operation_namespace: PRODUCTION_COMPLETION_OPERATION_NAMESPACE.to_owned(),
+            guaranteed_units: units.saturating_mul(2),
+            reserved_pending_slots: 2,
+            maximum_burst_units: units,
+            request_token_capacity: 2,
+            request_token_refill_minutes: 1,
+            reacquire_cooldown_minutes: 1,
+            root_acquisition_cap_per_sim_time: 2,
+            guaranteed_max_wait_boundaries: 4,
+        }],
+        semantic_digest: String::new(),
+    }
+    .seal()
+    .expect("run budget");
+    production.production_run_budget = Some(budget.clone());
+    let mut resource = ResourceState::empty(ResourceLimitsV1::canonical()).expect("resource");
+    resource
+        .install_run_budget(budget)
+        .expect("resource run budget");
+    resource
+        .install_report_grant(ResourceReportGrantV1 {
+            id: ResourceReportGrantId::new("resource:sealed-evidence-report")
+                .expect("report grant ID"),
+            holder: holder.clone(),
+            scope: ResourceScopeId::new("resource:sealed-evidence-scope").expect("report scope ID"),
+            accounts: BTreeSet::new(),
+            demands: BTreeSet::new(),
+            include_transfer_details: false,
+            confidence_per_mille: 1_000,
+            cadence_minutes: 60,
+            delay_minutes: 0,
+        })
+        .expect("completion report grant");
+    resource.report_dirty_grants.clear();
+    let output = process.outputs[0].clone();
+    resource
+        .install_unit(ResourceUnitRevision {
+            id: output.unit.clone(),
+            revision: ResourceRevision::INITIAL,
+            symbol: "u0".to_owned(),
+            scale_numerator: 1,
+            scale_denominator: 1,
+            semantic_digest: format!("{:064x}", 1),
+        })
+        .expect("output unit");
+    resource
+        .install_definition(ResourceDefinitionRevision {
+            id: output.resource.clone(),
+            resource: ResourceDefinitionId::new("resource:sealed-output-definition")
+                .expect("definition ID"),
+            revision: ResourceRevision::INITIAL,
+            canonical_unit: output.unit.clone(),
+            quality: ResourceQualityId::new("resource:sealed-output-quality").expect("quality"),
+            scope: ResourceScopeId::new("resource:sealed-output-scope").expect("scope"),
+            effective_from: SimTime::EPOCH,
+            effective_until: None,
+            process_suitability: BTreeSet::new(),
+            semantic_digest: format!("{:064x}", 100),
+        })
+        .expect("output definition");
+    let account = ResourceAccountId::new("resource:sealed-output-account").expect("account ID");
+    resource.accounts.insert(
+        account.clone(),
+        ResourceAccount {
+            id: account.clone(),
+            revision: resource_revision(),
+            custodian: holder.clone(),
+            resource_revision: output.resource.clone(),
+            unit_revision: output.unit.clone(),
+            balance: 0,
+            capacity: None,
+            protected_floor_policy: None,
+            closed: false,
+            place_scope: None,
+        },
+    );
+    let mut scenario = scenario_with_production(production);
+    scenario.domain_records.extend([
+        resource.into_record().expect("resource root"),
+        sealed_evidence_record(
+            sealed_evidence_qualification(),
+            &canwu_technology::CapabilityQualificationPayload {
+                holder: holder.clone(),
+                operator: None,
+                site: EntityRef::Territory(TerritoryId::new(1)),
+                // Bound to the technique once the first daily boundary
+                // creates it.
+                revision: version::<canwu_technology::TechniqueRevision>(
+                    "technology:sealed-evidence-technique",
+                ),
+                operation: "customary-hand-milling".to_owned(),
+                reliability_per_mille: 1_000,
+                attempts: Vec::new(),
+                last_practiced_at: SimTime::EPOCH,
+                valid_from: SimTime::EPOCH,
+                valid_until: None,
+                active: true,
+            },
+        ),
+        sealed_evidence_record(
+            sealed_evidence_harvest(),
+            &HarvestReportPayload {
+                realized_per_mille: 875,
+            },
+        ),
+    ]);
+    let production_plugin = ProductionPlugin;
+    let resource_plugin = ResourcePlugin::default();
+    let fixture_plugin = SealedEvidenceFixturePlugin;
+    let plugins: [&dyn canwu_api::SimulationPlugin; 3] =
+        [&production_plugin, &resource_plugin, &fixture_plugin];
+    let mut canwu = Canwu::new_with_plugins(215, scenario, &plugins).expect("sealed-evidence run");
+    let settle_daily = |canwu: &mut Canwu| {
+        canwu
+            .settle_boundary(
+                BoundaryRequest::at(SimTime::EPOCH).with_cadence(canwu_api::SystemCadence::Daily),
+            )
+            .expect("daily fixture boundary");
+    };
+
+    // The first daily boundary creates the technique, and the qualification
+    // binds it from the second on. After three, qualification three and
+    // harvest report three are superseded but still retained, and version
+    // four of each is current. A payload-required dependency cannot be an
+    // initial-scenario version, so the technique is boundary-established.
+    for _ in 0..3 {
+        settle_daily(&mut canwu);
+    }
+    let technique = canwu
+        .current_domain_record_version(sealed_evidence_technique().as_untyped())
+        .expect("technique version query")
+        .expect("created technique");
+    let qualification = current_record_version(&canwu, sealed_evidence_qualification());
+    let harvest = current_record_version(&canwu, sealed_evidence_harvest());
+    assert_eq!((qualification.version, harvest.version), (4, 4));
+    let stale_qualification = superseded_record_version(&canwu, &qualification);
+    let stale_harvest = superseded_record_version(&canwu, &harvest);
+    let binding = |technique: &DomainRecordVersionRef, qualification: &DomainRecordVersionRef| {
+        let bodies = [technique, qualification].map(|version| {
+            canwu
+                .domain_record_version(version)
+                .expect("retained technology body")
+        });
+        TechnologyEvidenceBinding {
+            technique_revision: technique.clone(),
+            capability_qualification: Some(qualification.clone()),
+            implementation: None,
+            adoption: None,
+            semantic_digest: canwu_api::canonical_hash(
+                "canwu.production.technology-binding.v1",
+                &bodies,
+            )
+            .expect("technology digest"),
+        }
+    };
+    // Both bindings are internally consistent; only currency separates them.
+    let stale_technology = binding(&technique, &stale_qualification);
+    let current_technology = binding(&technique, &qualification);
+
+    let operation_key =
+        ResourceOperationKey::new("resource:production-output:sealed-evidence").expect("key");
+    let (certificate, production_grant, resource_grant) = coordinate_sealed_evidence_completion(
+        &mut canwu,
+        &holder,
+        &account,
+        &operation_key,
+        &recipe,
+    );
+    settle_at_epoch(&mut canwu, "drain before the first seal");
+    let execution_id =
+        ProductionExecutionId::new("production:execution:sealed-evidence").expect("execution");
+    let allocation_id =
+        ProductionCapacityAllocationId::new("production:allocation:sealed-evidence")
+            .expect("allocation ID");
+    let start = |technology: TechnologyEvidenceBinding| ProductionOperation::StartExecution {
+        execution: ProductionExecution {
+            id: execution_id.clone(),
+            work_order: order_id.clone(),
+            process: process_id.clone(),
+            site: site_id.clone(),
+            facility: facility_id.clone(),
+            allocations: vec![allocation_id.clone()],
+            lifecycle: WorkOrderLifecycle::Running,
+            started_at: SimTime::EPOCH,
+            completed_at: None,
+            evidence: Vec::new(),
+            technology,
+            inputs: Vec::new(),
+            output_requests: vec![ProductionOutputSettlementRequest {
+                operation_key: operation_key.clone(),
+                account: account.clone(),
+                expected_account_revision: resource_revision(),
+                resource: output.resource.clone(),
+                unit: output.unit.clone(),
+                quantity: output.quantity,
+            }],
+            output_outcomes: Vec::new(),
+            output_source: None,
+            output_ack_digest: None,
+            completion_certificate: certificate.clone(),
+            production_completion_grant: production_grant.clone(),
+            resource_completion_grant: resource_grant.clone(),
+            realized_output_per_mille: None,
+            realization_evidence: None,
+        },
+        allocations: vec![ProductionCapacityAllocation {
+            id: allocation_id.clone(),
+            facility: facility_id.clone(),
+            facility_generation: 1,
+            capability: "bench".to_owned(),
+            start: SimTime::EPOCH,
+            end: SimTime::EPOCH
+                .checked_add(canwu_api::SimDuration::minutes(60))
+                .expect("allocation end"),
+            quantity: 1,
+            work_order: order_id.clone(),
+            execution: execution_id.clone(),
+            operation_key: "production:capacity:sealed-evidence".to_owned(),
+            state: CapacityAllocationState::Reserved,
+        }],
+    };
+    let complete = |evidence: &DomainRecordVersionRef| ProductionOperation::CompleteExecution {
+        execution: execution_id.clone(),
+        realized_output_per_mille: Some(875),
+        realization_evidence: Some(evidence.clone()),
+    };
+
+    // The seal drops the superseded versions: nothing live declares them.
+    let archive = SealedEvidenceArchive::default();
+    let mut compact = canwu.into_compacted().expect("compact mode");
+    let first = seal_through_archive(&mut compact, &archive);
+    for superseded in [&stale_qualification, &stale_harvest] {
+        assert!(
+            compact
+                .archived_evidence_receipt(&EvidenceRef::DomainRecordVersion(superseded.clone()))
+                .is_none()
+        );
+    }
+    let mut request_id = 1;
+    let mut apply = |compact: &mut canwu_api::CompactedCanwu,
+                     operation_id: &str,
+                     operation: ProductionOperation| {
+        request_id += 1;
+        apply_compact_operation(compact, &holder, request_id, operation_id, operation)
+    };
+    for (operation_id, operation, code) in [
+        (
+            "production:sealed-evidence:start-stale",
+            start(stale_technology),
+            Some("invalid_domain_record"),
+        ),
+        (
+            "production:sealed-evidence:start",
+            start(current_technology),
+            None,
+        ),
+        (
+            "production:sealed-evidence:advance",
+            ProductionOperation::AdvanceExecution {
+                execution: execution_id.clone(),
+                completed_units: process.work_units,
+            },
+            None,
+        ),
+        (
+            "production:sealed-evidence:complete-stale",
+            complete(&stale_harvest),
+            Some("domain_record_not_found"),
+        ),
+        (
+            "production:sealed-evidence:complete",
+            complete(&harvest),
+            None,
+        ),
+    ] {
+        let outcome = apply(&mut compact, operation_id, operation);
+        assert_eq!(
+            outcome.rejection_code.as_deref(),
+            code,
+            "{operation_id}: {:?}",
+            outcome.rejection_message
+        );
+    }
+    let completed = &compact_production_state(&compact).executions[&execution_id];
+    assert_eq!(completed.realization_evidence.as_ref(), Some(&harvest));
+    assert_eq!(completed.output_requests[0].quantity, 7);
+
+    // Exact replay of the sealed archive admits and rejects the same
+    // commands, and the reconstructed save restores and validates.
+    let segments = vec![first];
+    let snapshot = compact
+        .snapshot_with_segments(segments.clone())
+        .expect("sealed archive reconstructs a full snapshot");
+    let replayed = Canwu::replay_from_journal(
+        &plugins,
+        &compact
+            .replay_journal_with_segments(segments)
+            .expect("sealed archive produces an exact replay journal"),
+    )
+    .expect("the sealed run replays exactly");
+    assert_eq!(replayed.snapshot(), snapshot);
+    let restored = Canwu::from_snapshot_json_with_plugins(
+        &serde_json::to_string(&snapshot).expect("snapshot JSON"),
+        &plugins,
+    )
+    .expect("the sealed save restores");
+    validate_production_runtime(&restored).expect("the restored production runtime validates");
+}

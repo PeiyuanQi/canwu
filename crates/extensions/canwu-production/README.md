@@ -17,7 +17,10 @@ The ownership boundary is strict:
   releases production capacity and moves the execution to `Settled`.
 - `canwu-technology` owns technique revisions, qualifications,
   implementations, and adoption. Production binds their exact record versions
-  and never treats knowledge or a calendar year as capability.
+  and never treats knowledge or a calendar year as capability. A new execution
+  or facility project must cite the current version of each record when it is
+  applied, because `seal_evidence` can remove an earlier version's body that
+  exact replay still reads.
 - Roads, routes, transport bookings, general construction, markets, money,
   labor population, and military readiness remain outside this crate.
 
@@ -75,9 +78,11 @@ output leg to zero, may not exceed the process revision's
 `max_realized_per_mille` (default 1,000; a higher bound admits evidenced yields
 above nominal), and requires evidence of a kind listed in the process
 revision's `realization_evidence_kinds` (default empty, so nominal only). The
-holder, lifecycle, ratio, and kind rules run before the evidence is resolved as
-an available exact record version, so a rejection does not reveal whether other
-records exist.
+holder, lifecycle, ratio, and kind rules run before the evidence is resolved,
+so a rejection does not reveal whether other records exist. The evidence must
+then be the current exact version of its record, which a sealed run and its
+exact replay resolve alike; an earlier version is rejected even while it is
+retained.
 The resource credit and output acknowledgement settle exactly the scaled
 quantities, so production and resource balances stay conserved.
 
@@ -85,8 +90,10 @@ Facility construction and repair use the same authoritative completion path.
 A project names an existing planned/authorized or repairing facility generation,
 exact consumed resource inputs, exact provider and technology evidence, one
 activated certificate, and matching production/resource grants at its certified
-eligibility time. The reducer consumes the production grant on first progress,
-derives the commissioned next-generation operational asset and restored
+eligibility time. Creation validates the provider and technology evidence;
+progress rechecks only the live resource evidence, because the cited exact
+bodies cannot change. The reducer consumes the production grant on first
+progress, derives the commissioned next-generation operational asset and restored
 condition from the authoritative base, and never accepts a caller-authored
 result. Commissioning completes the production grant and makes the terminal
 project archive-eligible.

@@ -40,7 +40,7 @@ const OUTPUT_DISPATCH_SYSTEM: &str = "production_output_dispatch_v1";
 const REPORT_SYSTEM: &str = "production_holder_report_publish_v1";
 const PRODUCTION_REPORT_KNOWLEDGE: &str = "holder_report";
 pub const PRODUCTION_SEMANTIC_HASH: &str =
-    "b4c821cfd8a6fba2faa33ea0064ade2b2ae969ae39e708fc00988662ca6b7ee2";
+    "c5f874654c76ba35232809d4cf69a517eb31c2f54eec92ecfc78612713237cb3";
 const REPORT_SCHEMA_HASH: &str = "2e84d66c85841a251a94aa15fa4fd477d29136ed31c8434c5dd61dc92156fdf8";
 static PRODUCTION_ARCHIVE_COMMIT_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static PRODUCTION_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
@@ -1718,10 +1718,14 @@ fn validate_external_operation_evidence(
             *realized_output_per_mille,
             Some(evidence),
         )?;
-        if !view.domain_record_version_evidence_exists(evidence)? {
+        // Every seal keeps a record's current version, but drops an earlier
+        // version's receipt unless a live dependency declares it, while exact
+        // replay still finds that version. Only the current version is
+        // therefore admitted the same way in a sealed run and its replay.
+        if !view.domain_record_version_is_current(evidence)? {
             return Err(CanwuError::new(
                 ErrorCode::DomainRecordNotFound,
-                "production realization evidence is not an available exact record version",
+                "production realization evidence is not the current exact version of its record",
             ));
         }
         return Ok(());
@@ -1737,7 +1741,11 @@ fn validate_external_operation_evidence(
             .facility_projects
             .get(project)
             .ok_or_else(|| invalid("facility project provider validation record is unavailable"))?;
-        validate_external_project_evidence(view, &production, project)?;
+        // Creation validated the provider and technology evidence, and
+        // neither its exact bodies nor the project's holder, site, process,
+        // and time can change. A seal can remove those bodies while exact
+        // replay keeps them, so only the live resource evidence is rechecked.
+        validate_project_resource_evidence(view, &production, project)?;
         return Ok(());
     }
     let crate::ProductionOperation::StartExecution { execution, .. } = operation else {
@@ -1776,22 +1784,24 @@ fn validate_external_operation_evidence(
     .into_iter()
     .flatten()
     {
-        technology_records.push(
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production technology evidence body is unavailable"))?,
-        );
+        technology_records.push(current_version_body(
+            view,
+            reference,
+            "technology evidence",
+        )?);
     }
-    let technique_record = view
-        .domain_record_version(&execution.technology.technique_revision)?
-        .ok_or_else(|| invalid("production technique revision body is unavailable"))?;
+    let technique_record = current_version_body(
+        view,
+        &execution.technology.technique_revision,
+        "technique revision",
+    )?;
     let _technique = technique_record.decode_payload::<canwu_technology::TechniqueRevision>()?;
     let qualification = execution
         .technology
         .capability_qualification
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production capability qualification body is unavailable"))?
+            current_version_body(view, reference, "capability qualification")?
                 .decode_payload::<canwu_technology::CapabilityQualification>()
         })
         .transpose()?;
@@ -1818,8 +1828,7 @@ fn validate_external_operation_evidence(
         .implementation
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production implementation body is unavailable"))?
+            current_version_body(view, reference, "implementation")?
                 .decode_payload::<canwu_technology::ImplementationRecord>()
         })
         .transpose()?;
@@ -1845,16 +1854,14 @@ fn validate_external_operation_evidence(
         .adoption
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production adoption body is unavailable"))?
+            current_version_body(view, reference, "adoption")?
                 .decode_payload::<canwu_technology::AdoptionRecord>()
         })
         .transpose()?;
     if let Some(adoption) = &adoption {
-        let application = view
-            .domain_record_version(&adoption.application)?
-            .ok_or_else(|| invalid("production adoption application body is unavailable"))?
-            .decode_payload::<canwu_technology::ApplicationSpec>()?;
+        let application =
+            current_version_body(view, &adoption.application, "adoption application")?
+                .decode_payload::<canwu_technology::ApplicationSpec>()?;
         if adoption.adopter != order.holder
             || adoption.site != site.place
             || adoption.status != canwu_technology::AdoptionStatus::Committed
@@ -2025,6 +2032,14 @@ fn validate_external_project_evidence(
         site,
         &project.technology,
     )?;
+    validate_project_resource_evidence(view, production, project)
+}
+
+fn validate_project_resource_evidence(
+    view: &SimulationView<'_>,
+    production: &crate::ProductionState,
+    project: &crate::FacilityProject,
+) -> Result<(), CanwuError> {
     if authoritative_resource_inputs_are_hot(view, &project.inputs)? {
         validate_authoritative_resource_inputs(view, &project.inputs)?;
     } else {
@@ -2149,21 +2164,20 @@ fn validate_authoritative_technology_binding(
     .into_iter()
     .flatten()
     {
-        records.push(
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production technology evidence body is unavailable"))?,
-        );
+        records.push(current_version_body(
+            view,
+            reference,
+            "technology evidence",
+        )?);
     }
-    let technique_record = view
-        .domain_record_version(&binding.technique_revision)?
-        .ok_or_else(|| invalid("production technique revision body is unavailable"))?;
+    let technique_record =
+        current_version_body(view, &binding.technique_revision, "technique revision")?;
     let _technique = technique_record.decode_payload::<canwu_technology::TechniqueRevision>()?;
     let qualification = binding
         .capability_qualification
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production capability qualification body is unavailable"))?
+            current_version_body(view, reference, "capability qualification")?
                 .decode_payload::<canwu_technology::CapabilityQualification>()
         })
         .transpose()?;
@@ -2189,8 +2203,7 @@ fn validate_authoritative_technology_binding(
         .implementation
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production implementation body is unavailable"))?
+            current_version_body(view, reference, "implementation")?
                 .decode_payload::<canwu_technology::ImplementationRecord>()
         })
         .transpose()?;
@@ -2214,16 +2227,14 @@ fn validate_authoritative_technology_binding(
         .adoption
         .as_ref()
         .map(|reference| {
-            view.domain_record_version(reference)?
-                .ok_or_else(|| invalid("production adoption body is unavailable"))?
+            current_version_body(view, reference, "adoption")?
                 .decode_payload::<canwu_technology::AdoptionRecord>()
         })
         .transpose()?;
     if let Some(adoption) = &adoption {
-        let application = view
-            .domain_record_version(&adoption.application)?
-            .ok_or_else(|| invalid("production adoption application body is unavailable"))?
-            .decode_payload::<canwu_technology::ApplicationSpec>()?;
+        let application =
+            current_version_body(view, &adoption.application, "adoption application")?
+                .decode_payload::<canwu_technology::ApplicationSpec>()?;
         if adoption.adopter != *holder
             || adoption.site != site.place
             || adoption.status != canwu_technology::AdoptionStatus::Committed
@@ -2301,14 +2312,7 @@ fn validate_authoritative_provider_binding(
     site: &crate::ProductionSite,
     binding: &crate::ProductionEvidenceBinding,
 ) -> Result<(), CanwuError> {
-    let record = view
-        .domain_record_version(&binding.version)?
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::EvidenceContentUnavailable,
-                "production provider evidence body is unavailable",
-            )
-        })?;
+    let record = current_version_body(view, &binding.version, "provider evidence")?;
     let (allowed_kinds, explicit_capabilities, available_quantity) =
         if record
             .reference
@@ -2410,12 +2414,12 @@ fn validate_authoritative_provider_binding(
             .matches_type::<canwu_technology::AttemptObservation>()
         {
             let observation = record.decode_payload::<canwu_technology::AttemptObservation>()?;
-            let attempt_record = view
-                .domain_record_version(&observation.attempt)?
-                .ok_or_else(|| {
-                    invalid("production environment observation attempt is unavailable")
-                })?;
-            let attempt = attempt_record.decode_payload::<canwu_technology::ExperimentAttempt>()?;
+            let attempt = current_version_body(
+                view,
+                &observation.attempt,
+                "environment observation attempt",
+            )?
+            .decode_payload::<canwu_technology::ExperimentAttempt>()?;
             if observation.observer != *holder
                 || observation.observed_at > effective_at
                 || observation.uncertainty_per_mille > 1_000
@@ -2494,6 +2498,29 @@ fn validate_authoritative_provider_binding(
         ));
     }
     Ok(())
+}
+
+/// Reads the body of an exact version that a new execution or facility project
+/// cites, directly or through another cited record. Only a record's current
+/// version, or one proposed earlier in this boundary, qualifies: its body
+/// survives every seal, while a seal can remove an earlier version's body that
+/// exact replay still reads.
+fn current_version_body(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+    label: &str,
+) -> Result<DomainRecord, CanwuError> {
+    if !view.domain_record_version_is_current(version)? {
+        return Err(invalid(format!(
+            "production {label} is not the current exact version of its record"
+        )));
+    }
+    view.domain_record_version(version)?.ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::EvidenceContentUnavailable,
+            format!("production {label} body is unavailable"),
+        )
+    })
 }
 
 fn holder_entity_ref(holder: &KnowledgeHolderRef) -> canwu_api::EntityRef {
@@ -2722,6 +2749,9 @@ fn validate_output_ack_source(
             "production output acknowledgement differs from the resource-owned outcome",
         ));
     }
+    // Phase 12 dispatch pins a version its own boundary established, and the
+    // resource batch and this acknowledgement keep an ingress pending until
+    // now. A pending ingress blocks sealing, so the body is still retained.
     let source_record = view
         .domain_record_version(&acknowledgement.production_source)?
         .ok_or_else(|| invalid("production output source body is unavailable"))?;

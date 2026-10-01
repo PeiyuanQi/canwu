@@ -31,9 +31,20 @@ the first boundary after its deadline in live, restored, and replayed runs
 alike. Under 0.13.0 a live run kept such a ticket `Open` indefinitely, yet
 every later mutation was rejected as `ClosedTicket`; a person-availability
 sweep that tried to cancel it failed the boundary; and a run restored from a
-snapshot expired it and so diverged from the live run. Snapshot format 8,
-commitment format 4, checkpoint/evidence-journal format 4, and public type
-shapes are unchanged. The engine version is part of every checkpoint hash, so
+snapshot expired it and so diverged from the live run. `canwu-production` now
+admits an exact domain-record version as evidence only when it is the current
+version of its record: the realization evidence of a `CompleteExecution`, and
+every version a `StartExecution` or `CreateFacilityProject` cites or reads
+through a cited record. `AdvanceFacilityProject` no longer rereads a
+project's provider and technology evidence, which its creation validated, and
+still rechecks its resource evidence. Under 0.13.0 these rules also accepted
+an earlier version while its evidence was retained, but rejected the command,
+or failed its boundary, once `seal_evidence` had removed that evidence, so a
+compact run could diverge from its exact replay. Such an earlier version is
+now rejected in every run, and the production plugin semantic identity
+changes. Snapshot format 8, commitment format 4, checkpoint/evidence-journal
+format 4, and public type shapes are unchanged. The engine version is part of
+every checkpoint hash, so
 every run's checkpoint hashes differ from 0.13.0; a run in which a deferred
 ticket was still open when a boundary passed its deadline also records the
 ticket as `Expired`, which changes its decision commitment. The exact

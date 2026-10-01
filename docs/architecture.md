@@ -897,15 +897,29 @@ execution; `None` means `NOMINAL_REALIZED_OUTPUT_PER_MILLE` (1,000), and
 evidence is rejected for a nominal ratio. Any other ratio must be positive
 (a total loss cancels the work order instead), must not scale any output leg to
 zero, may not exceed the process revision's `max_realized_per_mille` (default
-1,000; a larger bound admits evidenced yields above nominal), and requires an
-exact evidence record version of a kind listed in the process revision's
+1,000; a larger bound admits evidenced yields above nominal), and requires
+evidence of a kind listed in the process revision's
 `realization_evidence_kinds`, which is empty by default so a default process
-admits only nominal output. The holder, lifecycle, ratio, and kind rules run
-before the evidence record is resolved, so a rejection does not reveal whether
-another record exists. The resource credit and output acknowledgement settle
-exactly the scaled quantities. The production plugin declares the
-administrative domain-record read to resolve that evidence; a nominal
-completion omits both fields from its serialized form.
+admits only nominal output. The evidence must be the current exact
+domain-record version of its record. The holder, lifecycle, ratio, and kind
+rules run before the evidence record is resolved, so a rejection does not
+reveal whether another record exists. The resource credit and output
+acknowledgement settle exactly the scaled quantities. The production plugin
+declares the administrative domain-record read to resolve that evidence; a
+nominal completion omits both fields from its serialized form.
+
+A seal keeps every record's current version but drops an earlier version's
+body, and its receipt unless a live dependency declares it, while exact replay
+keeps both, and a plugin view cannot load archived bodies. Production admission
+therefore reads only current versions: every exact domain-record version that
+a `StartExecution` or `CreateFacilityProject` cites, or reads through a cited
+record such as an adoption's application or an observation's attempt, must be
+the current version of its record when the operation is applied, as must
+realization evidence.
+`AdvanceFacilityProject` does not reread a project's provider and technology
+evidence, whose exact bodies and bindings its creation already validated, and
+rechecks only its live resource evidence. A compact run therefore admits and
+rejects exactly the production commands its exact replay does.
 
 `canwu-force-supply-reference` proves that a second independent domain can
 consume the same resource API. It owns force-local recurring demand,
