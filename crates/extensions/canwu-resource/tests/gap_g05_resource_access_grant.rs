@@ -578,7 +578,7 @@ fn gap_g05_resource_access_grant() {
         2,
         GRANTOR,
         issue(grant("main", 80, acceptance(2))),
-        "authority evidence is not an available exact record version",
+        "authority evidence is not the current exact version of its record",
     );
     let issued = settled(
         &mut canwu,

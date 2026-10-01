@@ -32,7 +32,7 @@ const RESOURCE_DISPATCH_SYSTEM: &str = "force_supply_resource_dispatch_v1";
 const DUE_EVALUATION_SYSTEM: &str = "force_supply_due_evaluation_v1";
 const VALIDATE_SYSTEM: &str = "force_supply_lifecycle_validate_v1";
 pub const FORCE_SUPPLY_SEMANTIC_HASH: &str =
-    "6c5239c3bb16c2a2c33194907e2bd398afb4f29ed286233fd876355a60960c8d";
+    "463307e2b3ebcd17dc6bfb5da61dc1c5f15306bd81e0f55dc7cb7a6da752fc5c";
 static FORCE_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static FORCE_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -745,23 +745,12 @@ fn authenticate_archived_resource_outcome(
         ));
     };
     let receipt = lifecycle.receipt;
-    let provider = view
-        .domain_record_version(&packet.authoritative_resource_state)?
-        .ok_or_else(|| invalid("archived force resource provider body is unavailable"))?;
-    if provider.owner != canwu_resource::PLUGIN_NAME
-        || provider.reference != resource_runtime_reference().into_untyped()
-    {
-        return Err(invalid("archived force resource provider identity differs"));
-    }
-    let resource = provider.decode_payload::<ResourceRuntimeRecord>()?;
-    let exact = resource
-        .outcomes
-        .get(&receipt.resource_outcome.operation_key)
-        .map(ResourceOperationOutcomeVersionV1::from)
-        .ok_or_else(|| invalid("archived force resource outcome is unavailable"))?;
+    // The receipt holds the exact resource version and outcome this intent
+    // acknowledged, and an outcome never changes once written, so a
+    // redelivered packet is the same one exactly when it cites both. The cited
+    // body adds nothing, and only retained evidence holds it.
     if receipt.resource_outcome_source != packet.authoritative_resource_state
         || receipt.resource_outcome.id != packet.outcome_id
-        || receipt.resource_outcome != exact
     {
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
@@ -796,30 +785,18 @@ fn authenticate_archived_externality_outcome(
     let crate::ForceArchivePayloadV1::TerminalLifecycle(lifecycle) = lifecycle.payload else {
         return Err(invalid("force archived saga lifecycle payload differs"));
     };
-    let expected = lifecycle
-        .receipt
-        .externality_outcome
-        .ok_or_else(|| invalid("force archived saga has no externality outcome"))?;
+    if lifecycle.receipt.externality_outcome.is_none() {
+        return Err(invalid("force archived saga has no externality outcome"));
+    }
     let expected_source = lifecycle
         .receipt
         .externality_outcome_source
         .ok_or_else(|| invalid("force archived saga has no externality provider"))?;
-    let provider = view
-        .domain_record_version(&packet.authoritative_outcome)?
-        .ok_or_else(|| invalid("archived force externality provider body is unavailable"))?;
-    let expected_owner = lifecycle
-        .external_participants
-        .keys()
-        .find(|owner| {
-            owner.as_str() != PLUGIN_NAME && owner.as_str() != canwu_resource::PLUGIN_NAME
-        })
-        .ok_or_else(|| invalid("archived force saga lost its externality provider"))?;
-    if packet.authoritative_outcome != expected_source
-        || provider.owner != *expected_owner
-        || provider.reference
-            != crate::force_externality_outcome_reference(&expected.id).into_untyped()
-        || provider.decode_payload::<crate::ForceExternalityOutcomeProviderRecord>()? != expected
-    {
+    // The receipt holds the exact provider version this saga acknowledged, and
+    // the economy never rewrites an outcome record's body, so a redelivered
+    // packet is the same one exactly when it cites that version. The cited
+    // body adds nothing, and only retained evidence holds it.
+    if packet.authoritative_outcome != expected_source {
         return Err(CanwuError::new(
             ErrorCode::IdempotencyConflict,
             "archived force saga received a different externality outcome",
@@ -849,9 +826,9 @@ fn validate_force_observation_source(
         .ok_or_else(|| invalid("force observation requirement is unavailable"))?;
     let mut authenticated = false;
     for source in &observation.source_versions {
-        let record = view
-            .domain_record_version(source)?
-            .ok_or_else(|| invalid("force observation source body is unavailable"))?;
+        // The observation persists its sources, and without retained evidence
+        // only a record's current version can be proven.
+        let record = current_provider_body(view, source)?;
         let matches_source = match observation.source {
             crate::ForceSupplyObservationSourceV1::ResourceProvider => {
                 if record.owner != canwu_resource::PLUGIN_NAME
@@ -923,13 +900,22 @@ fn validate_force_observation_source(
     }
 }
 
+/// Checks an acknowledged participant against its owner's live grant. The
+/// cited owner version need only be known, and its body is never read. The
+/// acknowledgement keeps only the participant, which must therefore still be
+/// the owner's grant when the operation applies.
 fn validate_completion_participant_source(
     view: &SimulationView<'_>,
     source: &canwu_api::DomainRecordVersionRef,
     participant: &canwu_resource::ExternalCompletionParticipantGrantV1,
 ) -> Result<(), CanwuError> {
+    if !cites_known_version(view, source)? {
+        return Err(invalid(
+            "completion participant owner source is unavailable",
+        ));
+    }
     let record = view
-        .domain_record_version(source)?
+        .domain_record(&source.record)?
         .ok_or_else(|| invalid("completion participant owner source is unavailable"))?;
     if record.owner != participant.grant.owner_plugin {
         return Err(CanwuError::new(
@@ -981,7 +967,7 @@ fn validate_completion_participant_source(
     if authoritative.as_ref() != Some(participant) {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
-            "completion participant acknowledgement differs from the exact owner body",
+            "completion participant acknowledgement differs from its owner's live grant",
         ));
     }
     Ok(())
@@ -1004,9 +990,13 @@ fn resolve_resource_outcome(
             "force resource acknowledgement does not cite the authoritative resource root",
         ));
     }
-    let record = view
-        .domain_record_version(&packet.authoritative_resource_state)?
-        .ok_or_else(|| invalid("authoritative resource outcome version is not retained"))?;
+    // A host reads the resource runtime's current version and enqueues this
+    // packet for the next boundary. The resource plugin, that record's only
+    // writer, changes it no earlier in a boundary than this phase, whose
+    // proposals are not visible here, so the citation is still current and
+    // its body is the live record. The settlement persists the citation, and
+    // restore validation reads the outcome from that version's body.
+    let record = current_provider_body(view, &packet.authoritative_resource_state)?;
     if record.owner != "canwu-resource" {
         return Err(invalid(
             "force resource acknowledgement cites a non-resource provider",
@@ -1141,9 +1131,10 @@ fn resolve_externality_outcome(
     ),
     CanwuError,
 > {
-    let record = view
-        .domain_record_version(&packet.authoritative_outcome)?
-        .ok_or_else(|| invalid("authoritative economy outcome version is not retained"))?;
+    // The economy schedules this packet in the boundary that creates the
+    // outcome, citing both provider records' versions current then. Each must
+    // still be current here, so its body is the live record.
+    let record = current_provider_body(view, &packet.authoritative_outcome)?;
     let outcome = exact_externality_outcome_from_record(&record)?;
     let saga = force_state
         .sagas
@@ -1167,9 +1158,7 @@ fn resolve_externality_outcome(
             "externality acknowledgement cites a different participant owner",
         ));
     }
-    let participant_record = view
-        .domain_record_version(&packet.authoritative_participant)?
-        .ok_or_else(|| invalid("externality completion participant version is not retained"))?;
+    let participant_record = current_provider_body(view, &packet.authoritative_participant)?;
     let provider = participant_record
         .decode_payload::<crate::ForceExternalityCompletionParticipantProviderRecord>()?;
     if participant_record.owner != *expected_owner
@@ -1223,6 +1212,49 @@ fn exact_externality_outcome_from_record(
         return Err(invalid("authoritative economy outcome digest is forged"));
     }
     Ok(outcome)
+}
+
+/// Whether a citation is consistent with a live record's current-version
+/// index: the current version must match it exactly, and an older version must
+/// precede it in both number and establishment. Sources order the initial
+/// scenario first, then boundary changes by boundary and change index. An
+/// older citation's establishment source is not proven, so this suits only a
+/// citation that is not persisted. Evidence cannot decide even this much:
+/// sealing drops every retained body and every receipt no live record depends
+/// on, while exact replay retains them all.
+fn cites_known_version(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> Result<bool, CanwuError> {
+    Ok(view
+        .current_domain_record_version(&version.record)?
+        .is_some_and(|current| {
+            if version.version == current.version {
+                *version == current
+            } else {
+                (1..current.version).contains(&version.version)
+                    && version.established_by < current.established_by
+            }
+        }))
+}
+
+/// The live body of a cited provider version, which must be the provider's
+/// current version. An older body is readable only while the host retains its
+/// evidence, and exact replay always retains it, so reading one could settle
+/// the same input differently in a sealed run and its replay.
+fn current_provider_body(
+    view: &SimulationView<'_>,
+    source: &canwu_api::DomainRecordVersionRef,
+) -> Result<DomainRecord, CanwuError> {
+    if view.current_domain_record_version(&source.record)?.as_ref() != Some(source) {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordVersionConflict,
+            "force provider source is not the provider's current version",
+        ));
+    }
+    view.domain_record(&source.record)?
+        .cloned()
+        .ok_or_else(|| invalid("force provider source record is unavailable"))
 }
 
 fn validate_force_candidate(

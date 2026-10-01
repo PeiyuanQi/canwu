@@ -30,6 +30,7 @@ use canwu_resource::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 pub const ECONOMY_COMMAND: &str = "apply_economy_reference_operation_v1";
@@ -37,7 +38,7 @@ pub const ECONOMY_COMMAND_INGRESS: &str = "economy_reference_operation_v1";
 pub const ECONOMY_ARCHIVE_COMMIT_INGRESS: &str = "economy_archive_commit_v1";
 pub const ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS: &str = "economy_archive_retention_ack_v1";
 pub const ECONOMY_SEMANTIC_HASH: &str =
-    "757240e04b3005ee269ca91cfd3e00bcc03cd450bb1a8b9ed85deb81430fd780";
+    "6e845016e90acc5c03101c700eeea61735166e633cd774bb3a3bd5eec89bc8eb";
 static ECONOMY_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ECONOMY_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -84,6 +85,9 @@ pub enum EconomyOperationV1 {
         posture: String,
         selection: EconomyDecisionSelectionV1,
     },
+    /// Grant, prepare, consume, and release must cite the force runtime version
+    /// that is current when the operation applies; an older citation is
+    /// rejected with `domain_record_version_conflict`.
     GrantCompletionParticipant {
         request: canwu_resource::RequestExternalCompletionParticipantGrantV1,
     },
@@ -102,12 +106,14 @@ pub enum EconomyOperationV1 {
     ExpireCompletionParticipants {
         request: canwu_resource::ExpireExternalCompletionParticipantGrantsV1,
     },
+    /// Must cite its provider record's current version.
     RecordRouteObservation {
         observation: EconomyRouteObservationV1,
     },
     PublishRouteProvider {
         payload: crate::EconomyRouteProviderPayloadV1,
     },
+    /// Must cite its provider record's current version.
     RecordPriceObservation {
         observation: EconomyPriceObservationV1,
     },
@@ -796,21 +802,32 @@ fn apply_operation(
                 .get(intent)
                 .cloned()
                 .ok_or_else(|| missing("economy resource consumption intent is unavailable"))?;
-            let record = view
-                .domain_record_version(authoritative_resource_state)?
-                .ok_or_else(|| missing("resource consumption outcome source is unavailable"))?;
-            if record.owner != canwu_resource::PLUGIN_NAME
-                || record.reference != resource_runtime_reference().into_untyped()
-            {
-                return Err(CanwuError::new(
+            let other_provider = || {
+                CanwuError::new(
                     ErrorCode::InvalidAuthority,
                     "resource consumption retirement cites another provider",
+                )
+            };
+            if authoritative_resource_state.record != resource_runtime_reference().into_untyped() {
+                return Err(other_provider());
+            }
+            // Only retained evidence holds the cited version's body. An
+            // outcome is written once, so the live resource runtime, or its
+            // package archive once archiving moves the outcome out, shows it
+            // in a sealed run and its replay alike.
+            if !cites_known_version(view, authoritative_resource_state)? {
+                return Err(missing(
+                    "resource consumption outcome source is unavailable",
                 ));
             }
+            let record = view
+                .typed_domain_record(&resource_runtime_reference())?
+                .ok_or_else(|| missing("resource runtime is unavailable"))?;
+            if record.owner != canwu_resource::PLUGIN_NAME {
+                return Err(other_provider());
+            }
             let resource = record.decode_payload::<ResourceRuntimeRecord>()?;
-            let outcome = resource
-                .outcomes
-                .get(&authorized.operation_key)
+            let outcome = resource_outcome(view, &resource, &authorized.operation_key)?
                 .ok_or_else(|| missing("resource consumption outcome is unavailable"))?;
             if &outcome.id != outcome_id
                 || outcome.status != ResourceOperationStatus::Applied
@@ -1396,7 +1413,7 @@ fn validate_source_versions(
         ));
     }
     for version in versions {
-        if !view.domain_record_version_evidence_exists(version)? {
+        if !cites_known_version(view, version)? {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceUnavailable,
                 "economy evidence source version is unavailable",
@@ -1404,6 +1421,120 @@ fn validate_source_versions(
         }
     }
     Ok(())
+}
+
+/// Whether a citation is consistent with a live record's current-version
+/// index: the current version must match it exactly, and an older version must
+/// precede it in both number and establishment. Sources order the initial
+/// scenario first, then boundary changes by boundary and change index. An
+/// older citation's establishment source is not proven. Evidence cannot decide
+/// even this much: sealing drops every receipt no live record depends on,
+/// while exact replay retains them all.
+pub(crate) fn cites_known_version(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> Result<bool, CanwuError> {
+    Ok(view
+        .current_domain_record_version(&version.record)?
+        .is_some_and(|current| {
+            if version.version == current.version {
+                *version == current
+            } else {
+                (1..current.version).contains(&version.version)
+                    && version.established_by < current.established_by
+            }
+        }))
+}
+
+/// Reads the resource package archive through this view. Resource archiving
+/// moves terminal records out of live state, and the host gives a live run and
+/// its replay the same authenticated archive store, so a record read here is
+/// persisted state, not retained evidence.
+struct ViewResourceArchive<'a>(&'a SimulationView<'a>);
+
+impl canwu_resource::ResourceArchiveStore for ViewResourceArchive<'_> {
+    fn store_resource_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "economy resource archive view is read-only".to_owned(),
+        ))
+    }
+
+    fn load_resource_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, canwu_resource::ResourceError> {
+        self.0
+            .plugin_archive_object(namespace, object_id)
+            .map_err(|error| canwu_resource::ResourceError::InvalidDefinition(error.to_string()))
+    }
+
+    fn persist_resource_archive_retention(
+        &self,
+        _handle: &canwu_resource::ResourceArchiveRetentionHandleV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "economy resource archive view cannot persist retention".to_owned(),
+        ))
+    }
+
+    fn finalize_resource_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: canwu_resource::ResourceArchiveRetentionPhaseV1,
+    ) -> Result<(), canwu_resource::ResourceError> {
+        Err(canwu_resource::ResourceError::InvalidLifecycle(
+            "economy resource archive view cannot finalize retention".to_owned(),
+        ))
+    }
+}
+
+/// One resource terminal record from live state, or from the resource package
+/// archive once archiving has moved it out. An unreadable archive is a
+/// boundary error, never a durable rejection; exceeding the lookup's bounded
+/// directory walk depends only on persisted state, so it may be one.
+fn resource_terminal_record<T: Clone>(
+    view: &SimulationView<'_>,
+    state: &canwu_resource::ResourceState,
+    live: Option<&T>,
+    key: &canwu_resource::ResourceTerminalRecordKeyV1,
+    archived: fn(canwu_resource::ResourceTerminalArchivePayloadV1) -> Option<T>,
+) -> Result<Option<T>, CanwuError> {
+    if let Some(value) = live {
+        return Ok(Some(value.clone()));
+    }
+    canwu_resource::archived_resource_terminal_record(state, &ViewResourceArchive(view), key)
+        .map(|record| record.and_then(|record| archived(record.payload)))
+        .map_err(|error| {
+            let code = if matches!(error, canwu_resource::ResourceError::LimitExceeded(_)) {
+                ErrorCode::QueryBudgetExceeded
+            } else {
+                ErrorCode::InvalidArchive
+            };
+            CanwuError::new(code, format!("resource archive lookup failed: {error}"))
+        })
+}
+
+fn resource_outcome(
+    view: &SimulationView<'_>,
+    state: &canwu_resource::ResourceState,
+    operation_key: &canwu_resource::ResourceOperationKey,
+) -> Result<Option<canwu_resource::ResourceOperationOutcome>, CanwuError> {
+    resource_terminal_record(
+        view,
+        state,
+        state.outcomes.get(operation_key),
+        &canwu_resource::ResourceTerminalRecordKeyV1::Outcome(operation_key.clone()),
+        |payload| match payload {
+            canwu_resource::ResourceTerminalArchivePayloadV1::Outcome(outcome) => Some(outcome),
+            _ => None,
+        },
+    )
 }
 
 fn require_observation_grant(
@@ -1433,24 +1564,48 @@ fn require_observation_grant(
     Ok(())
 }
 
+/// Provider records are created once and never updated, so a cited provider
+/// version must be the live record's current version, whose body is live
+/// state. An older body is readable only while its evidence is retained.
+fn current_provider_record<T: canwu_api::DomainRecordType>(
+    view: &SimulationView<'_>,
+    source: &canwu_api::DomainRecordVersionRef,
+    non_authoritative: &'static str,
+) -> Result<DomainRecord, CanwuError> {
+    if !source.record.kind.matches_type::<T>() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            non_authoritative,
+        ));
+    }
+    if view.current_domain_record_version(&source.record)?.as_ref() != Some(source) {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordVersionConflict,
+            "economy provider source is not the provider's current version",
+        ));
+    }
+    let record = view
+        .domain_record(&source.record)?
+        .cloned()
+        .ok_or_else(|| missing("economy provider body is unavailable"))?;
+    if record.owner != PLUGIN_NAME {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            non_authoritative,
+        ));
+    }
+    Ok(record)
+}
+
 fn validate_route_provider_payload(
     view: &SimulationView<'_>,
     observation: &EconomyRouteObservationV1,
 ) -> Result<(), CanwuError> {
-    let record = view
-        .domain_record_version(&observation.provider_source)?
-        .ok_or_else(|| missing("economy route provider body is unavailable"))?;
-    if record.owner != PLUGIN_NAME
-        || !record
-            .reference
-            .kind
-            .matches_type::<crate::EconomyRouteProviderRecord>()
-    {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            "economy route observation cites a non-authoritative provider",
-        ));
-    }
+    let record = current_provider_record::<crate::EconomyRouteProviderRecord>(
+        view,
+        &observation.provider_source,
+        "economy route observation cites a non-authoritative provider",
+    )?;
     let payload = record.decode_payload::<crate::EconomyRouteProviderRecord>()?;
     let mut detached = payload.clone();
     let recorded = std::mem::take(&mut detached.semantic_digest);
@@ -1473,20 +1628,34 @@ fn validate_route_provider_payload(
     Ok(())
 }
 
+/// A participant transition may cite only the force runtime's current version,
+/// whose body is live state. An older body is readable only while the host
+/// retains its evidence, and exact replay always retains it, so accepting one
+/// would let a sealed run and its replay settle the same command differently.
 fn validate_completion_coordinator_source(
     view: &SimulationView<'_>,
     source: &canwu_api::DomainRecordVersionRef,
 ) -> Result<canwu_force_supply_reference::ForceSupplyStateV1, CanwuError> {
-    let record = view
-        .domain_record_version(source)?
-        .ok_or_else(|| missing("force completion coordinator source is unavailable"))?;
-    if record.owner != canwu_force_supply_reference::PLUGIN_NAME
-        || record.reference != force_supply_runtime_reference().into_untyped()
-    {
-        return Err(CanwuError::new(
+    let non_force = || {
+        CanwuError::new(
             ErrorCode::InvalidAuthority,
             "economy completion participant cites a non-force coordinator",
+        )
+    };
+    if source.record != force_supply_runtime_reference().into_untyped() {
+        return Err(non_force());
+    }
+    if view.current_domain_record_version(&source.record)?.as_ref() != Some(source) {
+        return Err(CanwuError::new(
+            ErrorCode::DomainRecordVersionConflict,
+            "force completion coordinator source is not the current coordinator version",
         ));
+    }
+    let record = view
+        .typed_domain_record(&force_supply_runtime_reference())?
+        .ok_or_else(|| missing("force completion coordinator is unavailable"))?;
+    if record.owner != canwu_force_supply_reference::PLUGIN_NAME {
+        return Err(non_force());
     }
     record.decode_payload::<ForceSupplyRuntimeRecord>()
 }
@@ -1563,20 +1732,11 @@ fn validate_price_provider_payload(
     view: &SimulationView<'_>,
     observation: &EconomyPriceObservationV1,
 ) -> Result<(), CanwuError> {
-    let record = view
-        .domain_record_version(&observation.provider_source)?
-        .ok_or_else(|| missing("economy price provider body is unavailable"))?;
-    if record.owner != PLUGIN_NAME
-        || !record
-            .reference
-            .kind
-            .matches_type::<crate::EconomyPriceProviderRecord>()
-    {
-        return Err(CanwuError::new(
-            ErrorCode::InvalidAuthority,
-            "economy price observation cites a non-authoritative provider",
-        ));
-    }
+    let record = current_provider_record::<crate::EconomyPriceProviderRecord>(
+        view,
+        &observation.provider_source,
+        "economy price observation cites a non-authoritative provider",
+    )?;
     let payload = record.decode_payload::<crate::EconomyPriceProviderRecord>()?;
     let mut detached = payload.clone();
     let recorded = std::mem::take(&mut detached.semantic_digest);
@@ -1642,6 +1802,12 @@ fn apply_force_externalities(
     force_state.validate()?;
     let mut intents: Vec<_> = force_state.externality_intents.values().cloned().collect();
     intents.sort_by(|left, right| left.id.cmp(&right.id));
+    // Each local economy's revision at the visible runtime version.
+    let visible_revisions: BTreeMap<_, _> = economy_state
+        .local_economies
+        .iter()
+        .map(|(id, economy)| (id.clone(), economy.revision))
+        .collect();
     let mut directives = Vec::new();
     let mut economy_changed = false;
     for intent in intents {
@@ -1670,26 +1836,33 @@ fn apply_force_externalities(
             .get(&saga.intent)
             .ok_or_else(|| invalid("force externality source intent is unavailable"))?;
         let acquisition = &force_intent.completion_certificate.acquisition;
-        // The requisition locked the economy runtime version that was current
-        // when this plugin granted its participant, and the grant saved every
-        // local economy's revision. The participant's own grant and prepare
-        // advance the runtime record but no local economy, so a target is exact
-        // while its local economy keeps the revision saved at the grant. This
-        // reads persisted state only, never a retained historical version.
-        let expected_target = canwu_resource::CompletionLockedTargetV1::ExternalRecord {
-            version: intent.expected_economy_target.clone(),
+        // A target is exact while its local economy keeps the revision it had
+        // at the economy runtime version the requisition locked. A lock on the
+        // visible version compares with the revisions before any externality
+        // in this boundary, so two intents holding that lock cannot both change
+        // one local economy. A lock on an earlier version compares with the
+        // revisions saved when this plugin's participant grant took the lock;
+        // the participant's own grant and prepare advance the runtime record
+        // but no local economy. This target check reads persisted state only,
+        // never a retained historical body; the scope check below reads the
+        // live resource runtime for the same reason.
+        let locked_revisions = if intent.expected_economy_target.record
+            != economy_reference_runtime_reference().into_untyped()
+        {
+            None
+        } else if intent.expected_economy_target.version == economy_record.version {
+            Some(visible_revisions.clone())
+        } else {
+            let expected_target = canwu_resource::CompletionLockedTargetV1::ExternalRecord {
+                version: intent.expected_economy_target.clone(),
+            };
+            economy_state
+                .completion_participants
+                .get(acquisition)
+                .filter(|participant| participant.grant.target_versions == [expected_target])
+                .and_then(|_| economy_state.completion_target_revisions.get(acquisition))
+                .cloned()
         };
-        let target_is_runtime = intent.expected_economy_target.record
-            == economy_reference_runtime_reference().into_untyped();
-        let target_is_current =
-            target_is_runtime && intent.expected_economy_target.version == economy_record.version;
-        let saved_revisions = economy_state
-            .completion_participants
-            .get(acquisition)
-            .filter(|participant| participant.grant.target_versions == [expected_target])
-            .and_then(|_| economy_state.completion_target_revisions.get(acquisition))
-            .filter(|_| target_is_runtime)
-            .cloned();
         if economy_state
             .completion_participants
             .contains_key(acquisition)
@@ -1729,11 +1902,10 @@ fn apply_force_externalities(
             .local_economies
             .values()
             .filter(|economy| {
-                target_is_current
-                    || saved_revisions
-                        .as_ref()
-                        .and_then(|saved| saved.get(&economy.id))
-                        == Some(&economy.revision)
+                locked_revisions
+                    .as_ref()
+                    .and_then(|locked| locked.get(&economy.id))
+                    == Some(&economy.revision)
             })
             .filter(|economy| {
                 economy_state
@@ -1930,9 +2102,21 @@ fn authoritative_force_externality_scope(
             "force externality does not cite the authoritative resource root",
         ));
     }
+    // The cited version's body is readable only while the host retains its
+    // evidence, and exact replay always retains it. Read the live resource
+    // runtime instead. The outcome, consumed leg, settled consumption, account
+    // binding, and definition checked below never change once written, and an
+    // account's revision only grows, so live state shows the cited version's
+    // facts in a sealed run and its replay alike. Terminal records that
+    // resource archiving has moved out are read from its package archive.
+    if !cites_known_version(view, source)? {
+        return Err(invalid(
+            "force externality resource provider version is unknown",
+        ));
+    }
     let resource_record = view
-        .domain_record_version(source)?
-        .ok_or_else(|| invalid("force externality resource provider version is not retained"))?;
+        .typed_domain_record(&resource_runtime_reference())?
+        .ok_or_else(|| invalid("force externality resource runtime is unavailable"))?;
     if resource_record.owner != canwu_resource::PLUGIN_NAME {
         return Err(invalid(
             "force externality resource provider is not resource-owned",
@@ -1949,21 +2133,30 @@ fn authoritative_force_externality_scope(
             "force externality resource provider record and state revisions differ",
         ));
     }
-    let outcome = resource_state
-        .outcomes
-        .get(&externality.operation_key)
+    let outcome = resource_outcome(view, &resource_state, &externality.operation_key)?
         .ok_or_else(|| invalid("force externality resource outcome is unavailable"))?;
-    if canwu_resource::ResourceOperationOutcomeVersionV1::from(outcome)
+    if canwu_resource::ResourceOperationOutcomeVersionV1::from(&outcome)
         != externality.resource_outcome
     {
         return Err(invalid(
             "force externality resource outcome differs from its provider version",
         ));
     }
-    let allocation = resource_state
-        .allocation_legs
-        .get(&consumption_intent.allocation.id)
-        .ok_or_else(|| invalid("force externality allocation is unavailable"))?;
+    let allocation = resource_terminal_record(
+        view,
+        &resource_state,
+        resource_state
+            .allocation_legs
+            .get(&consumption_intent.allocation.id),
+        &canwu_resource::ResourceTerminalRecordKeyV1::AllocationLeg(
+            consumption_intent.allocation.id.clone(),
+        ),
+        |payload| match payload {
+            canwu_resource::ResourceTerminalArchivePayloadV1::AllocationLeg(leg) => Some(leg),
+            _ => None,
+        },
+    )?
+    .ok_or_else(|| invalid("force externality allocation is unavailable"))?;
     let exact = &consumption_intent.allocation;
     let consumed_leg_revision = exact
         .revision
@@ -1989,13 +2182,27 @@ fn authoritative_force_externality_scope(
             "force externality resource outcome does not identify a consumption",
         ));
     };
-    let consumption = resource_state
-        .consumptions
-        .get(consumption_id)
-        .ok_or_else(|| invalid("force externality resource consumption is unavailable"))?;
-    let force_evidence = view
-        .domain_record_version(&consumption.consumer_evidence)?
-        .ok_or_else(|| invalid("force externality force provider version is not retained"))?;
+    let consumption = resource_terminal_record(
+        view,
+        &resource_state,
+        resource_state.consumptions.get(consumption_id),
+        &canwu_resource::ResourceTerminalRecordKeyV1::Consumption(consumption_id.clone()),
+        |payload| match payload {
+            canwu_resource::ResourceTerminalArchivePayloadV1::Consumption(consumption) => {
+                Some(consumption)
+            }
+            _ => None,
+        },
+    )?
+    .ok_or_else(|| invalid("force externality resource consumption is unavailable"))?;
+    // The consumer evidence must equal the force version the completion
+    // certificate locked, checked below, so its body is never read: every
+    // version of the force runtime has its record kind's owner, which the live
+    // record shows.
+    let force_owner = view
+        .typed_domain_record(&force_supply_runtime_reference())?
+        .map(|record| record.owner.clone())
+        .ok_or_else(|| invalid("force externality force runtime is unavailable"))?;
     let expected_force_evidence = consumption_intent
         .completion_certificate
         .locked_target_versions
@@ -2018,7 +2225,7 @@ fn authoritative_force_externality_scope(
         || consumption.quantity != allocation.quantity
         || consumption.consumer_evidence.record != force_supply_runtime_reference().into_untyped()
         || &consumption.consumer_evidence != expected_force_evidence
-        || force_evidence.owner != canwu_force_supply_reference::PLUGIN_NAME
+        || force_owner != canwu_force_supply_reference::PLUGIN_NAME
         || consumption.status != canwu_resource::ConsumptionStatus::Settled
     {
         return Err(invalid(

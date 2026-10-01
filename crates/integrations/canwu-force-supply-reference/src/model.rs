@@ -569,6 +569,11 @@ pub enum ForceOperationV1 {
     GrantObservation {
         grant: ForceObserverGrantV1,
     },
+    /// Every source must still be its record's current version when the
+    /// operation applies, in the boundary after the command is admitted; an
+    /// older one is rejected with `domain_record_version_conflict`. Resource
+    /// reports alone can advance the resource runtime in the admitting
+    /// boundary.
     RecordSupplyObservation {
         force: ReferenceForceId,
         observation: ForceSupplyObservationV1,
@@ -619,6 +624,10 @@ pub struct ForceCommandEnvelopeV1 {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceOutcomePacketV1 {
     pub intent: ForceConsumptionIntentId,
+    /// The resource runtime's current version when the packet applies, unless
+    /// the intent is already archived and the packet repeats its receipt.
+    /// Cite the version current when you enqueue the packet, due now: a stale
+    /// citation fails its boundary.
     pub authoritative_resource_state: DomainRecordVersionRef,
     pub outcome_id: ResourceOperationOutcomeId,
 }

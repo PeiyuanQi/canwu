@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "45ad5005551ce351e17151e997bba1ed2749234317270a6aed3467f103bc0663";
+    "59a8d41ebd57073b96d6694957d30f0c0ea69a3be897d293cf7604c940532b84";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -745,8 +745,7 @@ fn settle_resource_lifecycle(
                             })
                             .try_fold(true, |all_current, version| {
                                 Ok::<_, CanwuError>(
-                                    all_current
-                                        && view.domain_record_version_is_current(version)?,
+                                    all_current && is_current_version(view, version)?,
                                 )
                             })?;
                         state
@@ -1305,14 +1304,35 @@ fn validate_adapter_packet(
     resource_state: &crate::ResourceState,
 ) -> Result<(), CanwuError> {
     reject_adapter_production_credit(&packet.request)?;
-    let source = view
-        .domain_record_version(&packet.provider_source)?
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::EvidenceContentUnavailable,
-                "resource adapter source exact body is unavailable",
-            )
-        })?;
+    // Only the live body is read, and a provider must cite its current
+    // version, whose body that is. A force consumption may also cite an
+    // earlier version of the force runtime, which the resource does not
+    // persist: the pending intent in the live body keeps the key, allocation,
+    // and certificate it had then until the force acknowledges this
+    // consumption's outcome. Its persisted consumer evidence must be the force
+    // version its certificate locked.
+    let force_consumption = packet.provider_plugin == "canwu-force-supply-reference"
+        && matches!(packet.request, ResourceOperationRequestV1::Consume(_));
+    let source = if force_consumption {
+        require_known_version(view, &packet.provider_source)?;
+        live_body(view, &packet.provider_source)?
+    } else {
+        current_version_body(view, &packet.provider_source)?
+    };
+    if let ResourceOperationRequestV1::Consume(request) = &packet.request
+        && force_consumption
+        && !request
+            .completion_certificate
+            .locked_target_versions
+            .contains(&crate::CompletionLockedTargetV1::ExternalRecord {
+                version: request.consumer_evidence.clone(),
+            })
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "force consumption evidence is not the force version its certificate locked",
+        ));
+    }
     if source.owner != packet.provider_plugin || !adapter_source_matches(packet) {
         return Err(CanwuError::new(
             ErrorCode::InvalidDomainRecord,
@@ -1324,11 +1344,6 @@ fn validate_adapter_packet(
             ErrorCode::InvalidAuthority,
             "resource irreversible adapter operation must use its canonical boundary time",
         ));
-    }
-    if packet.provider_plugin == "canwu-force-supply-reference" {
-        require_exact_body(view, &packet.provider_source)?;
-    } else {
-        require_exact_current_body(view, &packet.provider_source)?;
     }
     if let ResourceOperationRequestV1::Consume(request) = &packet.request
         && packet.provider_plugin != "canwu-force-supply-reference"
@@ -1384,15 +1399,13 @@ fn validate_production_output_batch(
             "production output batch has an invalid provider or bounded leg set",
         ));
     }
-    let source = view
-        .domain_record_version(&packet.provider_source)?
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::EvidenceContentUnavailable,
-                "production output batch exact source body is unavailable",
-            )
-        })?;
-    require_exact_body(view, &packet.provider_source)?;
+    // The coordinator pins the cited version on the execution as it
+    // dispatches this batch, which advances its runtime, so the cited version
+    // is never current here. Read the live body instead: until this batch
+    // settles, it must still show the pinned execution awaiting output
+    // settlement, with the certificate and output requests it had then.
+    require_known_version(view, &packet.provider_source)?;
+    let source = live_body(view, &packet.provider_source)?;
     if source.owner != packet.provider_plugin {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
@@ -1451,7 +1464,7 @@ fn validate_production_output_batch(
         ));
     }
     let execution = authoritative_production_output_batch(&source.payload, packet)?;
-    require_pinned_output_source(view, &packet.provider_source, &execution)?;
+    require_pinned_output_source(&source.payload, &packet.provider_source, &execution)?;
     Ok(execution)
 }
 
@@ -1461,20 +1474,15 @@ fn validate_production_output_batch(
 /// credit must cite the exact source version the coordinator pinned on the
 /// execution (`output_source`) when it dispatched the output.
 fn require_pinned_output_source(
-    view: &SimulationView<'_>,
+    current: &Value,
     provider_source: &canwu_api::DomainRecordVersionRef,
     execution: &Value,
 ) -> Result<(), CanwuError> {
-    let pinned = view
-        .domain_record(&provider_source.record)?
-        .and_then(|current| {
-            current
-                .payload
-                .get("executions")?
-                .get(execution.as_str()?)?
-                .get("output_source")
-                .cloned()
-        });
+    let pinned = current
+        .get("executions")
+        .and_then(|executions| executions.get(execution.as_str()?))
+        .and_then(|entry| entry.get("output_source"))
+        .cloned();
     if pinned != Some(encode(provider_source)?) {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
@@ -1867,6 +1875,9 @@ fn validate_completion_ingress(
                 ));
             }
             validate_completion_report_reservation(view, state, &request.recipe)?;
+            // The acquisition persists this evidence as a payload-required
+            // dependency, so each version must be proven, which only the
+            // current version can be without retained evidence.
             for version in request
                 .eligibility_envelope
                 .exact_evidence
@@ -1874,13 +1885,13 @@ fn validate_completion_ingress(
                 .chain(&request.eligibility_envelope.capability_bindings)
                 .chain(&request.eligibility_envelope.route_evidence)
             {
-                require_exact_body(view, version)?;
+                require_current_version(view, version)?;
             }
         }
         crate::ResourceCompletionOperationV1::Grant(request) => {
             for target in &request.target_versions {
                 if let crate::CompletionLockedTargetV1::ExternalRecord { version } = target {
-                    require_exact_current_body(view, version)?;
+                    require_current_version(view, version)?;
                 }
             }
         }
@@ -1932,19 +1943,12 @@ fn validate_completion_ingress(
             validate_external_grant_authorization(&source.payload, request)?;
             for target in &request.target_versions {
                 if let crate::CompletionLockedTargetV1::ExternalRecord { version } = target {
-                    require_exact_current_body(view, version)?;
+                    require_current_version(view, version)?;
                 }
             }
         }
         crate::ResourceCompletionOperationV1::PrepareExternalParticipant(request) => {
-            let source = &request.coordinator_source;
-            let record = view.domain_record_version(source)?.ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::InvalidDomainRecord,
-                    "external completion coordinator source is unavailable",
-                )
-            })?;
-            let source = require_external_coordinator_source(view, &record.owner, source)?;
+            let source = current_version_body(view, &request.coordinator_source)?;
             let participant = state
                 .external_completion_participants
                 .grants
@@ -1962,14 +1966,7 @@ fn validate_completion_ingress(
             )?;
         }
         crate::ResourceCompletionOperationV1::ReleaseExternalParticipant(request) => {
-            let source = &request.coordinator_source;
-            let record = view.domain_record_version(source)?.ok_or_else(|| {
-                CanwuError::new(
-                    ErrorCode::InvalidDomainRecord,
-                    "external completion coordinator source is unavailable",
-                )
-            })?;
-            let source = require_external_coordinator_source(view, &record.owner, source)?;
+            let source = current_version_body(view, &request.coordinator_source)?;
             let participant = state
                 .external_completion_participants
                 .grants
@@ -1993,19 +1990,7 @@ fn validate_completion_ingress(
                     "external participant consumption must use canonical boundary time",
                 ));
             }
-            let record = view
-                .domain_record_version(&request.coordinator_source)?
-                .ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::InvalidDomainRecord,
-                        "external completion coordinator source is unavailable",
-                    )
-                })?;
-            let source = require_external_coordinator_source(
-                view,
-                &record.owner,
-                &request.coordinator_source,
-            )?;
+            let source = current_version_body(view, &request.coordinator_source)?;
             let participant = state
                 .external_completion_participants
                 .grants
@@ -2075,13 +2060,7 @@ fn require_external_coordinator_source(
     coordinator_plugin: &str,
     source: &canwu_api::DomainRecordVersionRef,
 ) -> Result<canwu_api::DomainRecord, CanwuError> {
-    require_exact_current_body(view, source)?;
-    let record = view.domain_record_version(source)?.ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::InvalidDomainRecord,
-            "external completion coordinator source is unavailable",
-        )
-    })?;
+    let record = current_version_body(view, source)?;
     if coordinator_plugin.is_empty() || record.owner != coordinator_plugin {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
@@ -2364,38 +2343,96 @@ fn validate_request_certificate_evidence(
     for certificate in certificates {
         for target in &certificate.locked_target_versions {
             if let crate::CompletionLockedTargetV1::ExternalRecord { version } = target {
-                require_exact_body(view, version)?;
+                require_known_version(view, version)?;
             }
         }
     }
     Ok(())
 }
 
-fn require_exact_body(
+// Exact version checks read only the current-version provenance index and
+// live records. Sealing drops every retained body and every receipt no live
+// record depends on, while exact replay retains them all, so a check that
+// reads evidence could settle differently in a sealed run and its replay.
+
+/// Requires `version` to be consistent with its live record's current-version
+/// index: the current version must match it exactly, and an older version
+/// must precede it in both number and establishment. An older version's
+/// establishment source is not proven, so this suits only a citation that is
+/// not persisted or is bound to persisted state elsewhere; a persisted
+/// unproven citation would fail restore validation or a later seal.
+fn require_known_version(
     view: &SimulationView<'_>,
     version: &canwu_api::DomainRecordVersionRef,
 ) -> Result<(), CanwuError> {
-    if view.domain_record_version(version)?.is_none() {
+    let known = view
+        .current_domain_record_version(&version.record)?
+        .is_some_and(|current| {
+            if version.version == current.version {
+                *version == current
+            } else {
+                (1..current.version).contains(&version.version)
+                    && version.established_by < current.established_by
+            }
+        });
+    if !known {
         return Err(CanwuError::new(
-            ErrorCode::EvidenceContentUnavailable,
-            "resource exact completion evidence body is unavailable",
+            ErrorCode::EvidenceUnavailable,
+            "resource exact completion evidence version is unknown",
         ));
     }
     Ok(())
 }
 
-fn require_exact_current_body(
+/// Whether `version` is its record's current version. Evidence existence
+/// cannot decide this: a seal keeps a current version's receipt but not
+/// necessarily its boundary's, so it can report that version missing.
+fn is_current_version(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> Result<bool, CanwuError> {
+    Ok(view
+        .current_domain_record_version(&version.record)?
+        .as_ref()
+        == Some(version))
+}
+
+fn require_current_version(
     view: &SimulationView<'_>,
     version: &canwu_api::DomainRecordVersionRef,
 ) -> Result<(), CanwuError> {
-    require_exact_body(view, version)?;
-    if !view.domain_record_version_is_current(version)? {
+    if !is_current_version(view, version)? {
         return Err(CanwuError::new(
             ErrorCode::InvalidAuthority,
             "resource locked external target is not the current exact version",
         ));
     }
     Ok(())
+}
+
+/// The body of `version`, which must be its record's current version. The
+/// live record is that body, while retained evidence holds it only until its
+/// establishing boundary is sealed.
+fn current_version_body(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> Result<DomainRecord, CanwuError> {
+    require_current_version(view, version)?;
+    live_body(view, version)
+}
+
+fn live_body(
+    view: &SimulationView<'_>,
+    version: &canwu_api::DomainRecordVersionRef,
+) -> Result<DomainRecord, CanwuError> {
+    view.domain_record(&version.record)?
+        .cloned()
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidDomainRecord,
+                "resource exact source record is unavailable",
+            )
+        })
 }
 
 fn adapter_source_matches(packet: &ResourceAdapterOperationV1) -> bool {
@@ -2524,11 +2561,15 @@ fn validate_resource_authority(
         ResourceOperationRequestV1::BeginExchange(request) => {
             state.allocation_debit_holder(&request.leg_a.allocation)
         }
+        // The applied outcome keeps this citation as exact evidence, which
+        // resource restore checks against full history. Only the current
+        // version is both provable here without retained evidence and certain
+        // to exist in that history.
         ResourceOperationRequestV1::IssueAccessGrant(request) => {
-            if !view.domain_record_version_evidence_exists(&request.grant.authority_evidence)? {
+            if !is_current_version(view, &request.grant.authority_evidence)? {
                 return Err(CanwuError::new(
                     ErrorCode::InvalidAuthority,
-                    "resource access grant authority evidence is not an available exact record version",
+                    "resource access grant authority evidence is not the current exact version of its record",
                 ));
             }
             Some(request.grant.grantor_custodian.clone())

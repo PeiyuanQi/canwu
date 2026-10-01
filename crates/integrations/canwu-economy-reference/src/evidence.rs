@@ -19,7 +19,7 @@ pub const ECONOMY_EVIDENCE_ADAPTER_PLUGIN_NAMESPACE: &str = "canwu.economy-evide
 pub const ECONOMY_EVIDENCE_COMMAND: &str = "publish_typed_economy_evidence_v1";
 const ECONOMY_EVIDENCE_INGRESS: &str = "typed_economy_evidence_v1";
 pub const ECONOMY_EVIDENCE_SEMANTIC_HASH: &str =
-    "4aec5a3870c2c929cc31a20f24ff1ef4b70db1f3a2a12867b788b66f9b230674";
+    "5421fc347dfb91359490d5e9119659e71b2d9b319e98fb00b94e3e8b8c700b8e";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "evidence", content = "payload", rename_all = "snake_case")]
@@ -244,9 +244,16 @@ fn validate_sources(
     view: &SimulationView<'_>,
     sources: &[canwu_api::DomainRecordVersionRef],
 ) -> Result<(), CanwuError> {
+    // A source need only be a known version of the resource runtime, whose
+    // owner never changes, so its body is never read: that body is readable
+    // only while the host retains its evidence, and exact replay always
+    // retains it.
     for source in sources {
+        if !crate::plugin::cites_known_version(view, source)? {
+            return Err(invalid("typed economy evidence source is unavailable"));
+        }
         let record = view
-            .domain_record_version(source)?
+            .domain_record(&source.record)?
             .ok_or_else(|| invalid("typed economy evidence source is unavailable"))?;
         if record.reference != canwu_resource::resource_runtime_reference().into_untyped()
             || record.owner != canwu_resource::PLUGIN_NAME

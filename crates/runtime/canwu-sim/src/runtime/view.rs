@@ -648,12 +648,15 @@ impl SimulationView<'_> {
     /// The current boundary overlay/proposal is preferred, followed by the
     /// runtime's verified current-record provenance index. The index is
     /// maintained at commit time and rebuilt from canonical evidence on
-    /// restore, so lookup does not scan retained or archived history.
+    /// restore, so lookup does not scan retained or archived history, and its
+    /// answer does not depend on how much evidence a seal kept. Either the
+    /// exact record-kind read or the administrative domain-record read grants
+    /// access.
     pub fn current_domain_record_version(
         &self,
         reference: &DomainRecordRef,
     ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
-        self.require_read(&records::record_state_key(&reference.kind))?;
+        self.require_domain_record_read(reference)?;
         let Some(record) = self.domain_record(reference)? else {
             return Ok(None);
         };

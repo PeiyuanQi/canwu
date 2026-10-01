@@ -733,11 +733,11 @@ cannot load archived content, so another version's existence, body, and time can
 differ between a compact run and its exact replay. A rule whose outcome must
 replay exactly therefore reads each cited exact version through
 `SimulationView::replay_stable_domain_record_version`. It resolves only the
-committed current version, a version proposed earlier in the boundary, or an
-initial-scenario version, and the exact reference still fixes the cited meaning
-after the record changes. `canwu-history-research` assessment admission,
-`canwu-fiscal` receipt settlement, and `canwu-fiscal` commutation-quote
-admission follow this rule. Generic evidence has no such
+committed current version, a version proposed earlier in the boundary and not
+superseded since, or an initial-scenario version, and the exact reference still
+fixes the cited meaning after the record changes. `canwu-history-research`
+assessment admission, `canwu-fiscal` receipt settlement, and `canwu-fiscal`
+commutation-quote admission follow this rule. Generic evidence has no such
 read: after a seal, both its existence and its time depend on what the seal
 kept, and `canwu-history-research` still checks generic citations that way.
 Module-owned restore wrappers re-run technology semantics after normal core
@@ -831,11 +831,17 @@ resource and unit revision, up to `cap_quantity` within the half-open window
 that justifies it. Grantor and grantee are `KnowledgeHolderRef` values.
 `ResourceOperationRequestV1::IssueAccessGrant` is admitted only as a tracked
 command whose subject is the grantor custodian and whose authority evidence is
-an available exact record version; `RevokeAccessGrant` also comes from the
-grantor, with the expected grant revision, and is refused once anything is
-reserved or debited under the grant. Adapter ingress cannot issue or revoke
-grants. The resource command descriptor therefore reads the administrative
-domain-record set to resolve that evidence.
+the exact current version of its record. Admission checks this against the
+current-version provenance index rather than retained evidence, so a run whose
+evidence was sealed admits exactly what its replay admits. An earlier version
+is rejected: without retained evidence its establishment source cannot be
+proven, and the applied outcome keeps the citation as exact evidence that
+resource restore checks. `RevokeAccessGrant` also comes from the grantor, with
+the expected grant revision, and is refused once anything is reserved or
+debited under the grant. Adapter ingress cannot issue or revoke grants. The
+resource command descriptor therefore reads the administrative domain-record
+set, under which `SimulationView::current_domain_record_version` resolves a
+record of any kind.
 
 A demand draws on a grant through
 `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. Admission and
@@ -888,9 +894,9 @@ certificate must bind that source and operation key, with the existing holder,
 participant, time and lease checks. A digest verifies content consistency; it
 does not grant authority. The provider owns intent authorization and retirement;
 resource settlement owns the debit and receipt. The force-supply reference keeps
-its specialized retained-source adapter. This provider contract is part of the
-resource plugin semantic identity and introduces no callback registry or core
-schema.
+its specialized adapter, which also accepts an earlier version of its source
+record. This provider contract is part of the resource plugin semantic identity
+and introduces no callback registry or core schema.
 
 `canwu-production` is a downstream production-asset extension. It owns
 processes, sites, facilities, capacity allocation, work orders, work in

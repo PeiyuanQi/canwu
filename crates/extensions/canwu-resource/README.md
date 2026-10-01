@@ -239,7 +239,9 @@ example an application's accepted requisition record).
 
 - `ResourceOperationRequestV1::IssueAccessGrant(ResourceIssueAccessGrantRequestV1)`
   is admitted only as a tracked command whose subject is the grantor custodian,
-  and only when the authority evidence is an available exact record version.
+  and only when the authority evidence is the exact current version of its
+  record. Admission reads the current-version provenance index, not retained
+  evidence, so a sealed run admits exactly what its replay admits.
   Adapter ingress cannot issue or revoke grants. The applied outcome keeps the
   authority evidence as its exact evidence.
 - `RevokeAccessGrant(ResourceRevokeAccessGrantRequestV1)` also comes from the

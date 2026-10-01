@@ -60,58 +60,103 @@ and fixes these behaviors, which are visible to existing runs:
   cite through `SimulationView::replay_stable_domain_record_version`, which
   returns a version's body and establishment time only when no seal can change
   them: for the committed current version, a version proposed earlier in the
-  boundary, or an initial-scenario version. Every exact domain-record version a
-  historical assessment command names (its subject, contradictions,
-  supersessions, and record-version citations) must resolve through it when
-  the command is admitted. Settlement no longer re-checks that evidence, so a
-  later update to the subject cannot fail the boundary, and an identical
-  resubmission of a recorded assessment stays a no-op. Each external evidence
-  version a fiscal execution receipt cites must resolve the same way when the
-  receipt settles, and `enqueue_execution_receipt` rejects one that would not;
-  an identical resent receipt settles unchanged before its evidence is
-  checked. As with production, an earlier version that 0.13.0 accepted only
-  while its evidence was retained is now rejected in every run, so an
-  assessment can no longer name a superseded version that the scenario did not
-  provide. Generic history-research citations, such as events and boundaries,
-  are still checked against retained evidence.
+  boundary and not superseded since, or an initial-scenario version. Every
+  exact domain-record version a historical assessment command names (its
+  subject, contradictions, supersessions, and record-version citations) must
+  resolve through it when the command is admitted. Settlement no longer
+  re-checks that evidence, so a later update to the subject cannot fail the
+  boundary, and an identical resubmission of a recorded assessment stays a
+  no-op. Each external evidence version a fiscal execution receipt cites must
+  resolve the same way when the receipt settles, and
+  `enqueue_execution_receipt` rejects one that would not; an identical resent
+  receipt settles unchanged before its evidence is checked. If a cited
+  evidence record changes after the receipt is enqueued and before it
+  settles, the settling boundary fails and the due receipt cannot be
+  cancelled, so receipts should cite create-only evidence kinds. As with
+  production, an earlier version that 0.13.0 accepted only while its evidence
+  was retained is now rejected in every run, so an assessment can no longer
+  name a superseded version that the scenario did not provide. Generic
+  history-research citations, such as events and boundaries, are still
+  checked against retained evidence and remain a known way for a sealed run
+  to differ from its exact replay.
 - `canwu-military` no longer panics or jams its queue. A successful special
   operation completes and returns the force to its start as `Ready`, instead
-  of panicking. Admission returns only errors the engine records as rejected
-  attempts. A command that fails in phase 7, including a stale
-  `expected_force_revision`, a duplicate ID, a missing opposing force, or an
-  over-long operation ID, becomes a `Rejected` ledger outcome and a
-  `canwu.military.ingress_rejected.v1` event (`MILITARY_REJECTION_EVENT`); a
-  bad provider acknowledgement only emits that event. Two provider
-  acknowledgements due in one boundary now compose, reports skip dead
-  commanders and send one knowledge batch per commander (at most 64
-  commanders per boundary), and combat losses come off subunits in ID order,
-  so a force that has fought still validates. Under 0.13.0 each of these
-  failed the boundary, and every later boundary failed the same way. Authority
-  is tightened: `CreateForce` must name the issuer as commander, force and
-  occupation commands require the current commander, `AssignCommander`
-  rejects a missing or dead commander, `AdvanceTick` sent as a command is
-  rejected, and hosts can no longer enqueue the internal `military_command_v1`
-  packet. `MAX_RECORDS` (4,096 records per kind over a run),
-  `MAX_COMPOSITION_ENTRIES`, and `MAX_OPERATION_PARTICIPANTS` (distinct
-  forces) are now enforced.
+  of panicking. Apart from host setup errors, admission returns only errors
+  the engine records as rejected attempts. A command that fails in phase 7,
+  including a stale `expected_force_revision`, a duplicate ID, a missing
+  opposing force, or an over-long operation ID, becomes a `Rejected` ledger
+  outcome and a `canwu.military.ingress_rejected.v1` event
+  (`MILITARY_REJECTION_EVENT`); a bad provider acknowledgement only emits that
+  event. Two provider acknowledgements due in one boundary now compose,
+  reports skip dead commanders and send one knowledge batch per commander (at
+  most 64 commanders per boundary), and combat losses come off subunits in ID
+  order, so a force that has fought still validates. Under 0.13.0 each of
+  these failed the boundary, and every later boundary failed the same way. A
+  failure in a tick the plugin scheduled for itself still fails the boundary.
+  Authority is tightened: `CreateForce` must name the issuer as commander,
+  force and occupation commands require the current commander,
+  `AssignCommander` rejects a missing or dead commander, `AdvanceTick` sent as
+  a command is rejected, and hosts can no longer enqueue the internal
+  `military_command_v1` packet. `MAX_RECORDS` (4,096 records per kind over a
+  run), `MAX_COMPOSITION_ENTRIES` (at most 64 branch profiles, 64 tactics, and
+  64 terrain modifiers in a ruleset), and `MAX_OPERATION_PARTICIPANTS`
+  (distinct forces) are now enforced. Admission validates the installed
+  ruleset, so a ruleset over these limits rejects every military command as
+  `InvalidPayload`.
 - `canwu-fiscal` admission rejects a bad command instead of failing the
   boundary. Under 0.13.0 a stale procedure revision, a missing quote, a quote
   of an undeclared kind, a remission naming an unknown assessment, an unknown
   scope, or a malformed action ID failed the boundary, and every later
   boundary failed the same way with time and revision frozen. Admission no
   longer checks the revision; settlement records a stale action as a
-  `Rejected` outcome. A missing assessment, scope, audit target, or quote is
-  rejected as `EntityNotFound`, and a malformed action or binding ID as
-  `InvalidPayload`. A missing fiscal catalog or state still fails the
-  boundary, as a host setup error.
+  `Rejected` outcome, which consumes its action ID and advances the procedure
+  revision like any settled action, so a client retries with a new action ID.
+  A missing assessment, scope, or audit target is rejected as
+  `EntityNotFound`, and so is a commutation quote of an undeclared kind or one
+  that does not resolve through `replay_stable_domain_record_version`, such as
+  a superseded version that the scenario did not provide. A malformed action
+  or binding ID is rejected as `InvalidPayload`. A missing fiscal catalog or
+  state still fails the boundary, as a host setup error.
+- `canwu-resource` checks the exact versions it cites against the
+  current-version provenance index rather than retained evidence, so a sealed
+  run admits exactly what its replay admits. The authority evidence of
+  `IssueAccessGrant` (0.13.0 accepted any available exact version), the
+  eligibility-envelope evidence of an `Acquire`, and adapter packets that name
+  a force-supply record must cite the record's current version; an `Acquire`
+  whose eligibility evidence is no longer current when it settles fails that
+  boundary. A production output batch's pinned provider source, a
+  certificate's locked targets, and a force `Consume` may cite an earlier
+  version, which is checked only for consistency with the current version (an
+  earlier version number and establishing source); a force `Consume` must
+  keep as its consumer evidence the exact force version its certificate
+  locked. Under 0.13.0 output settlement read the retained bodies of those
+  earlier versions, so a sealed production run stalled when its output
+  settled. `SimulationView::current_domain_record_version` also accepts the
+  administrative domain-record read.
+- The economy and force-supply reference integrations no longer read
+  historical record bodies that a seal can remove. Requisition coordinator
+  commands, force supply observations, and route and price observations cite
+  the current version of the record they name; other observation source
+  versions are checked only for consistency with the current version. The
+  economy plugin reads live state, or the resource package archive for an
+  archived record, instead of a cited body, and a second intent holding the
+  same lock can no longer change a local economy the first one already
+  changed. A force-supply resource outcome or externality packet whose cited
+  version is no longer current when it applies fails its boundary, so a host
+  cites the version current when it enqueues a packet that is due at once.
+  Under 0.13.0 a sealed run of the requisition saga could stall or diverge
+  from its exact replay. The grain loop also applies each month's resilience
+  and force postures in the month they were chosen rather than a month late,
+  and its requisition branch applies its local cost.
 
-The production, history-research, fiscal, and military plugin semantic
-identities change. The engine version is part of every checkpoint hash, so
-every run's checkpoint hashes differ from 0.13.0; a run in which a deferred
-ticket was still open when a boundary passed its deadline also records the
-ticket as `Expired`, which changes its decision commitment. The exact
-engine-version check rejects 0.13.0 saves; retain the 0.13.0 engine to read
-them.
+The production, history-research, fiscal, military, resource, economy
+reference (its plugin and its typed-evidence adapter), and force-supply
+reference plugin semantic identities change. The engine version is part of
+every checkpoint hash, so every run's checkpoint hashes differ from 0.13.0; a
+run in which a deferred ticket was still open when a boundary passed its
+deadline also records the ticket as `Expired`, which changes its decision
+commitment. The exact engine-version check rejects 0.13.0 saves; retain the
+0.13.0 engine to read them.
 
 Version 0.13.0 shipped the second and final release group of the
 [downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md);
