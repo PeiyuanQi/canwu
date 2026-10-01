@@ -181,7 +181,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `HistoricalPracticePlugin` | `canwu.history.practice` | 参与者及其实践关系、可选的笔记摘要，以及负结果 |
 | `ProductionArchaeologyPlugin` | `canwu.history.production_archaeology` | 观察到的遗存或样品、推断的工艺，以及年代范围 |
 
-评估通过命令 `record_assessment_v1`（`ASSESSMENT_COMMAND`）进入，载荷是 `HistoricalAssessmentCommand`。评估者必须就是命令的 `subject`，权限规则与技术命令相同。命令排入一条 `assessment_v1` 输入，再由第 7 阶段系统 `historical_assessment_apply_v1` 创建记录。所有评估共用 `AssessmentCore`：评估者、一个精确的评估对象版本、方法及其版本、截至时间 `as_of`、不确定度、摘要哈希、引用，以及可选的反驳和取代关系。所引用的证据必须在 `as_of` 之前已经存在，也不能引用临时的输入记录。反驳和取代只能指向针对同一精确对象的其他评估。
+评估通过命令 `record_assessment_v1`（`ASSESSMENT_COMMAND`）进入，载荷是 `HistoricalAssessmentCommand`。评估者必须就是命令的 `subject`，权限规则与技术命令相同。命令排入一条 `assessment_v1` 输入，再由第 7 阶段系统 `historical_assessment_apply_v1` 创建记录。所有评估共用 `AssessmentCore`：评估者、一个精确的评估对象版本、方法及其版本、截至时间 `as_of`、不确定度、摘要哈希、引用，以及可选的反驳和取代关系。所引用的证据必须在 `as_of` 之前已经存在，也不能引用临时的输入记录。命令列出的每个精确领域记录版本，包括评估对象，在命令准入时都必须是其记录的当前版本或初始场景版本，因此封存证据不会改变它是否被接受。事件、边界等通用引用仍然按保留的证据检查，所以封存了证据的运行可能拒绝其重放会接受的引用。反驳和取代只能指向针对同一精确对象的其他评估。
 
 评估命令属于可信上层应用的输入。插件不检查评估者是否真的看得到每一份所引用的资料；如果玩家需要先取得访问权，请在自己的研究流程插件中校验之后再提交。`HistoricalAnalysis::for_subject` 以 `HistoricalAssessmentView` 的形式返回某条记录的全部评估，它是可信上层应用的只读查询，不写入任何状态。
 

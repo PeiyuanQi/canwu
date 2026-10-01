@@ -142,7 +142,7 @@ canwu.enqueue_command(
 
 How a grant is used:
 
-1. **Issue.** The grantor custodian submits `IssueAccessGrant` as a tracked command. The authority evidence must be an available exact record version. Adapter ingress cannot issue or revoke grants.
+1. **Issue.** The grantor custodian submits `IssueAccessGrant` as a tracked command. The authority evidence must be the exact current version of its record; an earlier version is rejected. Adapter ingress cannot issue or revoke grants.
 2. **Demand.** The grantee submits a demand with `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }`. The grant must be active and name the requester as grantee; the resource and unit must match; the demand's due and expiry times must fall inside the grant window; every listed account must be open and custodied by the grantor.
 3. **Allocate.** Allocation checks the grant before it divides scarce supply among demands. A revoked or out-of-window grant supplies nothing, and no allocation exceeds the remaining cap. Supply comes only from the listed accounts.
 4. **Debit.** The grantee debits the allocation, by consumption or by starting a transfer or exchange leg, under its own completion lease. A lease held by anyone else, including the grantor, cannot debit a granted allocation. The debit settles only in a boundary whose time equals the lease's certified time, and the grant window must contain that time.

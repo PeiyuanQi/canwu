@@ -134,8 +134,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 1. **安装。** 场景带上编译好的目录（`CompiledFiscalCatalog::into_record`）和初始状态（`FiscalState::into_record`）。注册 `FiscalPlugin::new(evidence_kinds)`；如果绑定用到代理角色，再加上 `.with_authority_basis_kinds(kinds)`。绑定引用的权限依据种类没有声明时，激活会被拒绝。
 2. **提交。** 用 `fiscal_action_command` 包装 `FiscalActionRequest`，得到 `apply_fiscal_action_v1` 的[领域命令](/tutorials/command-plugin/)，再用 `Canwu::enqueue_command` 排队；旧式的直接命令路径会以 `MixedCommandIngress` 失败。请求带有行动 ID、权限绑定 ID，以及构造请求时依据的 `expected_procedure_revision`。
-3. **准入。** 在准入该命令的[结算边界](/architecture/settlement/)上，处理函数拒绝重复使用的行动 ID（`IdempotencyConflict`）、已满的行动结果记录（`ValueOutOfRange`），以及绑定之外的签发者或范围（`InvalidAuthority`），引擎把这些记为被拒绝的命令。过期的 `expected_procedure_revision` 不同：它返回 `DomainRecordVersionConflict`，让整个边界失败，命令仍留在队列中，之后每个边界都会以同样方式失败。引用的折纳报价必须是一个已存在的精确记录版本；报价不存在时返回 `InvalidDomainRecord`，同样会让边界失败。随后处理函数安排一条内部的 `fiscal_action_v1` [规范化输入](/reference/terminology/)（类别 `Decision`）。
-4. **结算（第 7 阶段）。** 下一个边界上，`settle-fiscal-ingress-v1` 在 `DomainDeltaProposal` 阶段运行。它确认这条输入确实来自那条已准入的命令，重新检查代理角色的权限依据，在状态副本上执行行动，再按目录校验整个副本。结果记为一条 `FiscalActionOutcome`，即 `Applied` 或带原因的 `Rejected`，同时发出 `canwu.fiscal.action_settled.v1`。被拒绝的行动作为结果保存下来，边界照常提交。
+3. **准入。** 在准入该命令的[结算边界](/architecture/settlement/)上，处理函数拒绝以下命令：
+   - 行动 ID 或绑定 ID 不规范（`InvalidPayload`）；
+   - 重复使用行动 ID（`IdempotencyConflict`），或行动结果记录已满（`ValueOutOfRange`）；
+   - 签发者不在绑定之内，或绑定不拥有行动涉及的范围，包括 `ApplyTransition` 中不存在的目标范围（`InvalidAuthority`）；
+   - 核算、行动范围、审计目标或折纳报价不存在（`EntityNotFound`）。报价必须是其记录的当前精确版本或初始场景中的版本，且种类由插件读取，例如传给 `FiscalPlugin::new` 的种类。已被取代的版本或其他种类的报价按不存在处理，因此用 `seal_evidence` 封存过的模拟运行与其精确重放接受的报价相同。
+
+   引擎把每次拒绝都记为 `Canwu::command_attempts` 中被拒绝的尝试，边界照常提交，这次拒绝也不会占用行动 ID。准入不检查 `expected_procedure_revision`，这项检查在结算时进行。随后处理函数安排一条内部的 `fiscal_action_v1` [规范化输入](/reference/terminology/)（类别 `Decision`）。
+4. **结算（第 7 阶段）。** 下一个边界上，`settle-fiscal-ingress-v1` 在 `DomainDeltaProposal` 阶段运行。它确认这条输入确实来自那条已准入的命令；如果行动的 `expected_procedure_revision` 已与状态不一致，就把它作为过期行动拒绝（`DomainRecordVersionConflict`）；然后重新检查代理角色的权限依据，在状态副本上执行行动，再按目录校验整个副本。结果记为一条 `FiscalActionOutcome`，即 `Applied` 或带原因的 `Rejected`，同时发出 `canwu.fiscal.action_settled.v1`。被拒绝的行动作为结果保存下来，并占用它的行动 ID，边界照常提交。
 5. **凭证与语境。** 同一个系统还结算 `fiscal_execution_receipt_v1`（用 `enqueue_execution_receipt` 提交，类别 `Acknowledgement`，事件 `canwu.fiscal.execution_receipt_recorded.v1`）和 `fiscal_historical_context_v1`（用 `fiscal_historical_context_ingress` 构造、`enqueue_plugin_ingress` 排队，事件 `canwu.fiscal.historical_context_changed.v1`）。证据校验不通过的凭证，或者背后没有已准入命令的行动输入，会让整个边界失败。
 6. **派生。** 第 10 阶段（`HistoricalCandidateEvaluation`）的 `evaluate-fiscal-transition-candidates-v1` 重新计算改革候选；第 12 阶段（`StrategicAggregation`）的 `aggregate-fiscal-state-v1` 重新计算聚合。二者只在结果变化时写入状态。
 7. **报告（第 13 阶段）。** `materialize-fiscal-reports-v1` 在 `PerspectiveAndReportMaterialization` 阶段运行：每当边界写入新的状态版本，它就为每个观察者发布一份报告。
@@ -155,13 +161,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ### 凭证
 
-`FiscalExecutionReceiptPacket` 只包含凭证 ID、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在 `FiscalState::execution_evidence_kinds` 中；这个精确版本存在；载荷能解码为 `FiscalExecutionEvidence`，并且其中的请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入汇总，`Rejected` 和 `Excused` 的数量为零。在同一份财政状态中，每个精确版本、每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证。以相同内容重复提交同一张凭证，状态保持不变。
+`FiscalExecutionReceiptPacket` 只包含凭证 ID、请求 ID 和 1 到 32 个精确证据版本。插件逐个检查：版本的种类在 `FiscalState::execution_evidence_kinds` 中；这个精确版本是其记录的当前版本；载荷能解码为 `FiscalExecutionEvidence`，并且其中的请求、单位、支付形态、执行种类、资源、来源和目标都与请求一致。所有被引用记录的处置结果相同，数量合计不超过请求数量，建立时间都不早于请求。凭证的数量和 `FiscalReceiptDisposition` 取自这些证据。`Fulfilled` 和 `Partial` 计入汇总，`Rejected` 和 `Excused` 的数量为零。在同一份财政状态中，每个精确版本、每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证。以相同内容重复提交同一张凭证，状态保持不变。如果被引用的记录在结算该凭证的边界之前的某个边界中发生变化，结算边界会失败，而已到期的凭证无法撤回，所以应引用只可创建的证据种类，或在到期前撤回待结算的凭证。
 
 `FiscalStrategicAggregate` 按机构、机制、范围、核算周期、单位和支付形态分区。核算周期 ID 由上层应用决定，与历史时期相互独立。聚合分别记录 `assessed`、`remission_granted`、`collected`、`remitted`、`disbursed`、`reserved` 和 `returned`，`outstanding` 等于应征减去减免、再减去已征。
 
 ### 程序修订号
 
-每结算一个行动（无论应用还是拒绝）、每新记录一张凭证、每改变一次语境，`FiscalState::procedure_revision` 都加一。候选和聚合的刷新不改变它，因此不会让待决的决策过期。在一个边界内，第一个改变修订号的输入会把它用掉，同一边界中后续的财政行动都会作为过期行动被拒绝。每个边界只提交一个财政行动，等它结算后再按新的修订号构造下一个请求；按旧修订号构造的请求会在准入时让边界失败（见第 3 步）。
+每结算一个行动（无论应用还是拒绝）、每新记录一张凭证、每改变一次语境，`FiscalState::procedure_revision` 都加一。候选和聚合的刷新不改变它，因此不会让待决的决策过期。在一个边界内，第一个改变修订号的输入会把它用掉，同一边界中后续的财政行动都会作为过期行动被拒绝。每个边界只提交一个财政行动，等它结算后再按新的修订号构造下一个请求。按旧修订号构造的请求会作为过期行动被拒绝（见第 4 步）；请换一个新的行动 ID，按当前修订号重新提交。
 
 ### 历史语境与改革
 

@@ -6,7 +6,6 @@ sidebar:
   label: Military simulation extension
 ---
 
-import { Aside } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 This tutorial runs the military reference starter. It creates a field force, recruits reinforcements, marches into a defended territory, resolves the battle, and occupies the territory, then checks that a saved and a replayed copy match. You will learn how `canwu-military` accepts commands, where its randomness comes from, and which state it leaves to other extensions.
@@ -26,7 +25,7 @@ cargo run -p canwu-military-reference --example military_starter
 ```
 
 ```text
-military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=3b647676eb58a48594665edc09d190b25eb7932e4d630496c3f57fc6ddc2b691
+military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=ac3476c1efe18748614dc7f14e0318f0c47999899bc057e8b71ff7ac26be52e7
 ```
 
 `military_gameplan=complete` means every assertion passed: the battle reached a result, the occupation exists, and the restored and replayed copies have the same checkpoint hash as the live run. `riverine` and `industrial` print the names of the two reference rulesets.
@@ -41,9 +40,9 @@ military_gameplan=complete riverine=riverine_preindustrial industrial=industrial
   renderFailureMessage="Diagram preview unavailable; the steps below describe the same path."
   definition={`flowchart TB
     Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command()<br/>canonical ingress"]
-    Queue --> Admit["Admission checks<br/>commander, revision,<br/>branch, tactic"]
+    Queue --> Admit["Admission checks<br/>commander, branch, tactic"]
     Admit --> Packet["military_command_v1<br/>ingress packet"]
-    Packet --> Apply["Phase 7<br/>write records, draw"]
+    Packet --> Apply["Phase 7<br/>check revision,<br/>write records, draw"]
     Apply --> Report["Phase 13<br/>report to commanders"]
 `}
 />
@@ -68,9 +67,9 @@ fn submit(
 }
 ```
 
-Military commands must use canonical ingress (`enqueue_command`); the direct `submit` path returns `MixedCommandIngress`. At admission, the handler checks that the issuer commands the force, that `expected_force_revision` matches the force record, and that the branch or tactic exists in the active ruleset. It then queues a `military_command_v1` packet, which the phase-7 system `apply-military-ingress-v1` applies.
+Military commands must use canonical ingress (`enqueue_command`); the direct `submit` path returns `MixedCommandIngress`. At admission, the handler checks that the issuer commands the force and that the branch or tactic exists in the active ruleset. For `CreateForce`, the issuer must be the new force's commander. The handler then queues a `military_command_v1` packet. The phase-7 system `apply-military-ingress-v1` applies it after checking that `expected_force_revision` still matches the force record.
 
-Every command carries a `MilitaryOperationKey`. The same key with different input fails with `IdempotencyConflict`. Resending the same key with the same input is a no-op only when admission accepts the copy. Once the first copy of a command that carries `expected_force_revision` has raised the force revision, a resend fails admission as stale (`DomainRecordVersionConflict`). That fails the boundary and leaves the input in the queue.
+Every command carries a `MilitaryOperationKey`. Resending the same key with the same input does nothing, and the same key with different input is rejected with `IdempotencyConflict`. A command that fails in phase 7, for example because its `expected_force_revision` is stale, is recorded in the military ledger as `Rejected` under its key, and the plugin emits a `canwu.military.ingress_rejected.v1` event. Later commands still run. To try again, send a corrected command under a new key.
 
 ## What the starter does
 
@@ -110,11 +109,7 @@ Then `canwu.advance_canonical(SimDuration::days(5))` runs five days:
 
 ## Commands and ownership
 
-`MilitaryCommand` has 13 variants, including the internal `AdvanceTick`. `canwu-military` writes only its own force, operation, combat, occupation, ledger, and provider-outcome records; routes, resources, population, law, and fiscal procedure stay with their own extensions. [Military](/en/architecture/military/) lists what each command checks and writes, the combat and occupation rules, and the special-operation known issue.
-
-<Aside type="caution" title="Known issue">
-A successful special operation currently fails its boundary on every retry, so the run cannot advance past it. See [Military](/en/architecture/military/#marches-and-combat) for details and a workaround.
-</Aside>
+`MilitaryCommand` has 13 variants, including `AdvanceTick`, which only the plugin itself schedules. `canwu-military` writes only its own force, operation, combat, occupation, ledger, and provider-outcome records; routes, resources, population, law, and fiscal procedure stay with their own extensions. [Military](/en/architecture/military/) lists what each command checks and writes, the combat and occupation rules, and how rejected commands are recorded.
 
 ## Reference rulesets are synthetic
 

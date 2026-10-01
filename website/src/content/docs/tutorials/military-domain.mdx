@@ -6,7 +6,6 @@ sidebar:
   label: 军事模拟扩展
 ---
 
-import { Aside } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 本教程运行军事参考起步示例。它建立一支野战部队，补充兵员，向有守军的领地行军，结算战斗并占领该地，最后确认保存和重放得到的副本与原运行一致。你会了解 `canwu-military` 如何接收命令、随机性从哪里来，以及哪些状态交给其他扩展管理。
@@ -26,7 +25,7 @@ cargo run -p canwu-military-reference --example military_starter
 ```
 
 ```text
-military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=3b647676eb58a48594665edc09d190b25eb7932e4d630496c3f57fc6ddc2b691
+military_gameplan=complete riverine=riverine_preindustrial industrial=industrial_front checkpoint=ac3476c1efe18748614dc7f14e0318f0c47999899bc057e8b71ff7ac26be52e7
 ```
 
 `military_gameplan=complete` 表示所有断言都已通过：战斗得出了结果，占领已经建立，恢复和重放得到的副本与原运行的检查点哈希相同。`riverine` 和 `industrial` 打印的是两套参考规则集的名称。
@@ -41,9 +40,9 @@ military_gameplan=complete riverine=riverine_preindustrial industrial=industrial
   renderFailureMessage="图表预览不可用；下方步骤描述了同一路径。"
   definition={`flowchart TB
     Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command()<br/>规范化输入"]
-    Queue --> Admit["准入检查<br/>指挥官、版本、<br/>兵种、战术"]
+    Queue --> Admit["准入检查<br/>指挥官、兵种、战术"]
     Admit --> Packet["military_command_v1<br/>输入数据包"]
-    Packet --> Apply["第 7 阶段<br/>写入记录、抽样"]
+    Packet --> Apply["第 7 阶段<br/>检查修订号、<br/>写入记录、抽样"]
     Apply --> Report["第 13 阶段<br/>向指挥官报告"]
 `}
 />
@@ -68,9 +67,9 @@ fn submit(
 }
 ```
 
-军事命令必须走规范化输入（`enqueue_command`）；直接调用 `submit` 会返回 `MixedCommandIngress`。准入时，处理器检查签发者是否指挥这支部队、`expected_force_revision` 是否与部队记录一致，以及兵种或战术是否存在于当前规则集中。检查通过后，它排入一个 `military_command_v1` 数据包，由第 7 阶段的系统 `apply-military-ingress-v1` 应用。
+军事命令必须走规范化输入（`enqueue_command`）；直接调用 `submit` 会返回 `MixedCommandIngress`。准入时，处理器检查签发者是否指挥这支部队，以及兵种或战术是否存在于当前规则集中；对 `CreateForce`，签发者必须把自己指定为新部队的指挥官。检查通过后，处理器排入一个 `military_command_v1` 数据包。第 7 阶段的系统 `apply-military-ingress-v1` 先确认 `expected_force_revision` 仍与部队记录一致，再应用它。
 
-每条命令都带一个 `MilitaryOperationKey`。同一个键配上不同输入，会以 `IdempotencyConflict` 失败。用同一个键、同样的输入再次发送，只有在这次发送通过准入时才是空操作。带 `expected_force_revision` 的命令在第一次执行提高了部队修订号之后，再发一次就会在准入时因版本过期（`DomainRecordVersionConflict`）而失败，这会让边界失败，并把该输入留在队列里。
+每条命令都带一个 `MilitaryOperationKey`。用同一个键、同样的输入再次发送什么也不做；同一个键配上不同输入，会以 `IdempotencyConflict` 被拒绝。在第 7 阶段失败的命令，例如 `expected_force_revision` 已过期，会在军事账本中以 `Rejected` 记在它的键下，插件同时发出 `canwu.military.ingress_rejected.v1` 事件，之后的命令照常执行。要重试，请用新键发送修正后的命令。
 
 ## 起步示例做了什么
 
@@ -110,11 +109,7 @@ MilitaryCommand::OrderMarch {
 
 ## 命令与所有权
 
-`MilitaryCommand` 有 13 个变体（含内部使用的 `AdvanceTick`）。`canwu-military` 只写入自己的部队、行动、战斗、占领、账本和提供方结果记录；路线、资源、人口、法律和财政程序留给各自的扩展。每条命令检查和写入什么、战斗与占领规则，以及特种行动的已知问题，见[军事系统](/architecture/military/)。
-
-<Aside type="caution" title="已知问题">
-特种行动一旦抽样成功，当前会让所在边界每次重试都失败，运行无法越过这一步。详情和规避办法见[军事系统](/architecture/military/#行军与战斗)。
-</Aside>
+`MilitaryCommand` 有 13 个变体，其中 `AdvanceTick` 只能由插件自己安排。`canwu-military` 只写入自己的部队、行动、战斗、占领、账本和提供方结果记录；路线、资源、人口、法律和财政程序留给各自的扩展。每条命令检查和写入什么、战斗与占领规则，以及被拒绝的命令如何记录，见[军事系统](/architecture/military/)。
 
 ## 参考规则集是合成数据
 

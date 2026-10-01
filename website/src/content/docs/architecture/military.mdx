@@ -6,7 +6,7 @@ sidebar:
   label: 军事系统
 ---
 
-import { Aside, Steps } from "@astrojs/starlight/components";
+import { Steps } from "@astrojs/starlight/components";
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <nav class="architecture-links" aria-label="军事系统导航">
@@ -22,7 +22,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 [军事模拟扩展](/reference/terminology/) `canwu-military` 把部队、行动、战斗和占领保存为插件自有的领域记录，只通过校验过的 `MilitaryCommand` 输入修改它们。另外两个配套 crate 提供合成规则集，以及一个与参考世界组合、可以直接运行的示例。决定是直接使用这个扩展、在自己的整合层里包装它，还是整体替换它之前，请先读这一页。
 
-简要来说：行军在下令一分钟后抵达，战斗使用内置的固定公式，补给是每支部队上只减不增的一个数值，占领阶段只是标签。特种行动一旦成功，当前会让运行卡住（见“[已知问题](#行军与战斗)”）。
+简要来说：行军在下令一分钟后抵达，战斗使用内置的固定公式，补给是每支部队上只减不增的一个数值，占领阶段只是标签。只有部队的指挥官能指挥这支部队。没有通过检查的命令会被记为拒绝，不会卡住之后的结算边界。
 
 ## crate 与所有权
 
@@ -90,25 +90,25 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `ProviderOutcome` | `provider_outcome` | 其他领域一次已确认结果的留存副本，带 `ProviderDisposition` |
 | `MilitaryKnowledge` | `knowledge` | 已注册的军事估计 schema（`KnowledgeFact`）；当前没有系统读写它 |
 
-每个 `MilitaryCommand` 变体都带一个 `MilitaryOperationKey`。只有当命令指向一支已经存在的部队时，准入才检查签发者和 `expected_force_revision`；签发者必须是指挥这支部队的角色。
+每个 `MilitaryCommand` 变体都带一个 `MilitaryOperationKey`，签发者必须是角色。准入检查谁可以发送这条命令，以及命令本身是否有效；第 7 阶段系统再对照当前状态检查它：带 `expected_force_revision` 的命令，这个值必须仍等于部队的修订号。
 
-| 变体 | 准入时的其他检查 | 第 7 阶段系统写入什么 |
+| 变体 | 准入时检查 | 第 7 阶段系统写入什么 |
 | --- | --- | --- |
-| `CreateForce` | 兵种在规则集中 | 一支部队，带一个 ID 以 `:initial` 结尾的子单位，状态 `Forming`，补给 1,000，士气 500 |
-| `AssignCommander` | 签发者、修订号 | 替换指挥官 |
-| `Recruit` | 签发者、修订号、兵种 | 新子单位，人数以剩余编制为上限 |
-| `TrainAndEquip` | 签发者、修订号 | 提高部队训练和装备，上限 1,000 |
-| `PlanOperation` | 签发者、战术 | 一条处于 `Planned` 的 `strategic` 行动；之后不会被推进 |
-| `OrderMarch` | 签发者、修订号、战术 | 部队转为 `Moving`，建立 `march` 行动，一分钟后推进 |
-| `PrepareAmbush` | 签发者、修订号、战术 | 在某节点布置 `prepared_ambush`，有效七天 |
-| `Recon` | 签发者、修订号 | 一次抽样和事件 `canwu.military.transition_applied.v1` |
-| `ExecuteSpecialOperation` | 签发者 | 部队转为 `Moving`，建立 `special` 行动，一天后推进 |
-| `EstablishOccupation` | 签发者、修订号 | 部队位于该节点且不处于 `Routing` 时建立占领，并每天推进 |
-| `SetOccupationPolicy` | 数值不超过 1,000 | `policy_revision` 匹配时写入安全、合作和征敛负担 |
-| `MilitaryAdministrationAction` | 无 | 账本中的一条 `PendingMilitaryEffect` |
-| `AdvanceTick` | 无 | 推进一次行动或占领；由插件自己安排 |
+| `CreateForce` | `commander` 就是签发者；兵种在规则集中 | 一支部队，带一个 ID 以 `:initial` 结尾的子单位，状态 `Forming`，补给 1,000，士气 500 |
+| `AssignCommander` | 签发者指挥这支部队；新指挥官存在且未死亡 | 替换指挥官 |
+| `Recruit` | 签发者指挥这支部队；兵种 | 新子单位，人数以剩余编制为上限 |
+| `TrainAndEquip` | 签发者指挥这支部队 | 提高部队训练和装备，上限 1,000 |
+| `PlanOperation` | 签发者指挥这支部队；战术 | 一条处于 `Planned` 的 `strategic` 行动；之后不会被推进 |
+| `OrderMarch` | 签发者指挥这支部队；战术 | 部队转为 `Moving`，建立 `march` 行动，一分钟后推进 |
+| `PrepareAmbush` | 签发者指挥这支部队；战术 | 在某节点布置 `prepared_ambush`，有效七天 |
+| `Recon` | 签发者指挥这支部队 | 一次抽样和事件 `canwu.military.transition_applied.v1` |
+| `ExecuteSpecialOperation` | 签发者指挥这支部队 | 部队转为 `Moving`，建立 `special` 行动，一天后推进 |
+| `EstablishOccupation` | 签发者指挥这支部队 | 部队位于该节点且不处于 `Routing` 时建立占领，并每天推进 |
+| `SetOccupationPolicy` | 签发者指挥占领部队；数值不超过 1,000 | `policy_revision` 匹配时写入安全、合作和征敛负担 |
+| `MilitaryAdministrationAction` | 签发者指挥占领部队 | 账本中的一条 `PendingMilitaryEffect` |
+| `AdvanceTick` | 一律拒绝：推进包只能由插件自己安排 | 推进一次行动或占领 |
 
-兵种和战术检查只在场景装入了军事目录时进行。
+兵种和战术检查只在场景装入了军事目录时进行。装入目录后，准入还会对其中的规则集调用 `MilitaryRulesetV1::validate`；规则集无效期间，所有命令都会被拒绝。
 
 ## 运行过程
 
@@ -120,11 +120,12 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
   renderFailureMessage="图表预览不可用；下方步骤描述了同一流程。"
   definition={`flowchart TB
     Cmd["military_command()<br/>Command::Plugin"] --> Queue["enqueue_command<br/>规范化输入"]
-    Queue --> Admit["admit_command<br/>摘要、签发者、修订号、<br/>兵种、战术"]
-    Admit -- "拒绝" --> Rejected["命令被拒绝，<br/>不入队"]
+    Queue --> Admit["admit_command<br/>摘要、签发者、<br/>兵种、战术"]
+    Admit -- "拒绝" --> Rejected["记为被拒绝的尝试，<br/>不入队"]
     Admit -- "接受" --> Packet["military_command_v1<br/>零延迟"]
     Ack["enqueue_provider_outcome<br/>military_provider_ack_v1"] --> Apply
     Packet --> Apply["第 7 阶段<br/>apply-military-ingress-v1"]
+    Apply -- "检查未通过" --> Refused["记为拒绝，<br/>发出拒绝事件"]
     Apply -- "SchedulePluginIngress" --> Tick["AdvanceTick 数据包<br/>一分钟或一天后"]
     Tick --> Apply
     Apply --> Commit["第 9 阶段<br/>原子提交"]
@@ -134,13 +135,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 <Steps>
 1. `military_command(command)` 把命令装进 `MilitaryCommandEnvelope`，附上命令的 `input_digest`，返回一个 `Command::Plugin`。上层应用用 `enqueue_command` 把它入队，再推进时钟，例如调用 `advance_canonical`。直接调用 `submit` 会以 `MixedCommandIngress` 被拒绝。
-2. [结算边界](/reference/terminology/)准入这条命令时，处理函数 `admit_command` 重新计算摘要，并执行上表中的检查。检查通过后，它以零延迟排入一个 `military_command_v1` 数据包（输入类别 `Decision`），由下一个边界准入。
+2. [结算边界](/reference/terminology/)准入这条命令时，处理函数 `admit_command` 重新计算摘要，并执行上表中的检查。然后它在账本中查找行动键：这个键已经有同一输入的结果时，命令被接受但什么也不做；以其他方式重复使用这个键，会以 `IdempotencyConflict` 被拒绝。否则它以零延迟排入一个 `military_command_v1` 数据包（输入类别 `Decision`），由下一个边界准入。这是内部数据包类型，上层应用不能直接排入：`enqueue_plugin_ingress` 会以 `InvalidAuthority` 拒绝它。
 3. 第 7 阶段（`DomainDeltaProposal`）的事件驱动系统 `apply-military-ingress-v1` 逐个读取已准入的军事数据包。
-4. 对 `AdvanceTick` 以外的命令，它先在账本中查找行动键。键和摘要都相同时不做任何事；键相同而摘要不同时以 `IdempotencyConflict` 失败。
-5. 随后它以 `SameBoundary` 可见性暂存记录的创建和更新，从军事随机流抽样，并用 `SchedulePluginIngress` 安排后续的 `AdvanceTick` 数据包。除 `MilitaryAdministrationAction` 和 `AdvanceTick` 外，每条命令还会在自己的键下记录一条 `MilitaryOutcome`。
+4. 对 `AdvanceTick` 以外的命令，它再在账本中查一次行动键，然后对照部队检查 `expected_force_revision`。
+5. 随后它以 `SameBoundary` 可见性暂存记录的创建和更新，从军事随机流抽样，并用 `SchedulePluginIngress` 安排后续的 `AdvanceTick` 数据包。除 `MilitaryAdministrationAction` 和 `AdvanceTick` 外，每条命令还会在自己的键下记录一条 `MilitaryOutcome`。同一个边界里应用的数据包能看到彼此暂存的写入，所以对同一条记录的两次修改会合并成一次更新。
 6. 同一系统也处理 `military_provider_ack_v1` 数据包，详见[其他领域中的效果](#其他领域中的效果)。
-7. 内核在第 8 阶段校验暂存的写入，在第 9 阶段一并提交。任何错误都会让整个边界回滚。
-8. 第 13 阶段（`PerspectiveAndReportMaterialization`）的事件驱动系统 `materialize-military-reports-v1` 向每支部队的指挥官发布 `military_report`。
+7. 在第 7 阶段失败的命令或提供方确认只丢弃它自己的写入，并被记为拒绝，详见[命令失败时](#命令失败时)。内核在第 8 阶段校验暂存的写入，在第 9 阶段一并提交。
+8. 第 13 阶段（`PerspectiveAndReportMaterialization`）的事件驱动系统 `materialize-military-reports-v1` 向每支部队的指挥官发布 `military_report`，指挥官已死亡的除外。
 9. 安排好的推进包在到期时作为 `military_command_v1` 数据包回来，再走一遍第 7 阶段。
 </Steps>
 
@@ -166,14 +167,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 - 抵达时，补给不低于 100 的部队扣 100 补给、疲劳加 20、士气减 10，然后移到目的地。
 - 接敌时建立战斗记录，ID 为 `canwu.military:combat:` 加行动 ID。防守方如果在该节点布置了未过期的伏击，准备度按 850 计，否则为 500，该伏击随即清除。记录中的战术固定写为 `screen-and-advance` 和 `hold`；命令里指定的战术只在准入时检查，之后不再使用。
-- 战斗每天结算一轮，最多四轮。每轮抽取一个小于 1,000 的值 `s`。进攻方损失防守方兵力的二十分之一（至少 1）再加 `s` 除以 8 的余数；防守方损失进攻方兵力的十八分之一（至少 1）再加 999 减 `s` 后除以 8 的余数。双方士气各减去本方损失的一半，疲劳各加 35。准备度只保存在记录里；每轮的计算只读取双方兵力和这次抽样。
+- 战斗每天结算一轮，最多四轮。每轮抽取一个小于 1,000 的值 `s`。进攻方损失防守方兵力的二十分之一（至少 1）再加 `s` 除以 8 的余数；防守方损失进攻方兵力的十八分之一（至少 1）再加 999 减 `s` 后除以 8 的余数。损失按子单位 ID 顺序从各方子单位中扣除，兵力降到零的子单位被移除。双方士气各减去本方损失的一半，疲劳各加 35。准备度只保存在记录里；每轮的计算只读取双方兵力和这次抽样。
 - 战斗结束时，兵力归零的一方转为 `Routing`，仍有兵力的一方转为 `Ready`。`AttackerVictory` 会在目的地建立占领，ID 为 `canwu.military:occupation:` 加行动 ID。`Withdrawing` 是最终标签：之后不再推进，也没有部队移动。
 
-特种行动在下令一天后结算。先执行同样的补给扣减，然后抽取一个小于 1,000 的值。低于 650 时，部队留在目标地并处于 `Routing`，行动为 `Failed`。650 及以上按设计应让部队返回出发地、行动为 `Completed`，但当前代码有下面的问题。
-
-<Aside type="caution" title="已知问题：特种行动成功会让运行卡住">
-抽到 650 及以上时，`advance_operation` 会对对手部队调用 `expect`，而特种行动从不带对手部队。边界以 `PluginPanicked` 失败并回滚。推进包仍留在队列里，每次重试都会得到相同的抽样，所以之后每次调用 `advance_canonical` 都会在这里失败。修复之前，需要持续推进的运行请不要发送 `ExecuteSpecialOperation`；如果要发送，先保存快照，以便出错后恢复。
-</Aside>
+特种行动在下令一天后结算。先执行同样的补给扣减，然后抽取一个小于 1,000 的值。低于 650 时，部队留在目标地并处于 `Routing`，行动为 `Failed`。650 及以上时，部队返回出发地并转为 `Ready`，行动为 `Completed`。无论哪种结果，部队的当前行动都会清空；特种行动从不引发战斗。
 
 撤退移动、追击、补给预留、路线行程时间，以及把伤亡转入人口，都在当前插件的范围之外。[`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-military/src/model.rs) 中声明的 `ForceStatus`、`OperationPhase`、`CombatStage` 和 `CombatResult` 有一部分变体，当前系统从不设置。
 
@@ -198,25 +195,27 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 提供方在自己的记录里结算这项效果。之后由你的整合层调用 `enqueue_provider_outcome(canwu, due_at, outcome)` 报告结果，它会排入一个 `military_provider_ack_v1` 数据包（输入类别 `Acknowledgement`）。军事插件在第 7 阶段：
 
-1. 查找 `outcome.operation` 对应的待处理效果，找不到时以 `InvalidAuthority` 失败；
-2. 要求提供方名称和版本与待处理效果一致，否则以 `InvalidAuthority` 失败；
-3. 要求 `digest` 和 `provider_record` 非空，否则以 `InvalidPayload` 失败；
+1. 查找 `outcome.operation` 对应的待处理效果，找不到时以 `InvalidAuthority` 拒绝这条确认；
+2. 要求提供方名称和版本与待处理效果一致，否则以 `InvalidAuthority` 拒绝；
+3. 要求 `digest` 和 `provider_record` 非空，否则以 `InvalidPayload` 拒绝；
 4. 移除待处理效果，在账本中记录结果，并保存一份 `provider_outcome` 记录；
 5. 更新占领。`Accepted` 或 `Committed` 把 `MilitaryControl` 推进到 `AdministrativeTakeover`，或把 `AdministrativeTakeover` 推进到 `LegalRecognition`。`Rejected` 或 `Compensating` 把阶段退回 `MilitaryControl`，正当性减 50。
 
-这项检查比对的是账本里保存的名称和版本。军事插件从不读取提供方的记录，所以要由你的整合层保证传来的是真实结果。
+被拒绝的确认除了发出一个拒绝事件，不改变任何状态，待处理效果会继续等待正确的确认。同一时刻到期的多条确认在同一个边界里结算。效果待处理期间，它的行动键不能再次使用。这项检查比对的是账本里保存的名称和版本。军事插件从不读取提供方的记录，所以要由你的整合层保证传来的是真实结果。
 
 ### 命令失败时
 
-- 签发者不对（`InvalidAuthority`）、摘要不符或兵种、战术不存在（`InvalidPayload`），以及直接提交（`MixedCommandIngress`），都会在准入时被拒绝，什么也不入队。
-- `expected_force_revision` 过期时，准入以 `DomainRecordVersionConflict` 失败。引擎把这个错误码当作边界失败处理：`advance_canonical` 返回错误，边界回滚。
-- 第 7 阶段系统中的任何错误同样会让边界失败，例如行动键相同而输入不同、部队已无剩余编制时补充兵员、部队不存在，或者提供方确认找不到对应的待处理效果。
+命令可能在准入时或第 7 阶段被拒绝。两种拒绝都不会让结算边界失败，之后的命令照常执行。
 
-边界失败后，出错的输入仍留在队列里，之后每次调用 `advance_canonical` 都会以同样的方式失败。要继续运行，请恢复该输入入队之前保存的快照或检查点。入队前请先核对部队修订号，以及提供方确认中的名称和版本。重复发送键和输入都相同的命令，只有在准入通过时才是空操作；带 `expected_force_revision` 的命令在第一次执行提高了部队修订号之后，再发一次就会因版本过期而失败。
+- **准入时。** 引擎在 `Canwu::command_attempts` 中把这次尝试记为被拒绝，不排入任何数据包，行动键仍可使用。原因包括：签发者不是角色或不指挥这支部队（`InvalidAuthority`）；`CreateForce` 的 `commander` 不是签发者，或者发送的是 `AdvanceTick`（`InvalidAuthority`）；部队、占领或新指挥官不存在（`EntityNotFound`）；摘要不符、兵种或战术不存在、规则集无效，或新指挥官已死亡（`InvalidPayload`）；政策数值超过 1,000（`ValueOutOfRange`）；以及行动键相同而输入不同（`IdempotencyConflict`）。直接提交不同：`submit` 直接向调用方返回 `MixedCommandIngress`，不留下尝试记录。
+- **第 7 阶段。** 系统丢弃这条命令的写入，在它的键下记录一条处置为 `Rejected`、附带错误说明的 `MilitaryOutcome`，并发出事件 `canwu.military.ingress_rejected.v1`（`MILITARY_REJECTION_EVENT`）。原因包括：`expected_force_revision` 或 `policy_revision` 过期（`DomainRecordVersionConflict`）；部队已无剩余编制时补充兵员；部队已有 `MAX_SUBUNITS` 个子单位；部队、行动或占领的 ID 已被占用；对手部队不存在，或者就是行军部队本身；行动 ID 过长，由它派生的战斗和占领 ID 会超出长度上限；以及某类记录已满（`ValueOutOfRange`，见[限制与预算](#限制与预算)）。如果这个键已有结果，只发出事件。
+- **提供方确认**没有通过检查时，发出同样的事件，不改变其他任何状态。
+
+在第 7 阶段被拒绝的命令会占用它的行动键。用同样的输入再发一次什么也不做，输入改变则以 `IdempotencyConflict` 被拒绝，所以修正后的命令要换一个新键发送。插件为自己安排的推进包如果出错，仍会让边界失败，因为这说明军事记录已经不一致。
 
 ## 知识与可见性
 
-第 13 阶段系统为每支有指挥官的部队发布一条 `military_report` 知识记录（schema 为 `canwu.military` / `military_report`，版本 1）。持有人是指挥官，主体是这支部队的记录。载荷包括部队 ID、位置、以正负十分之一表示的兵力范围、以正负 100（千分比）表示的补给范围，以及观察时间。置信度为 900（千分比），来源引用部队记录的精确版本。
+第 13 阶段系统为每支指挥官未死亡的部队发布一条 `military_report` 知识记录（schema 为 `canwu.military` / `military_report`，版本 1）。每位指挥官收到一个批次，里面是其指挥的全部部队的报告；由于内核限制每个系统在一个边界内最多发布 64 个批次，一个边界内最多有 64 位指挥官（按 ID 顺序）收到批次。持有人是指挥官，主体是这支部队的记录。载荷包括部队 ID、位置、以正负十分之一表示的兵力范围、以正负 100（千分比）表示的补给范围，以及观察时间。置信度为 900（千分比），来源引用部队记录的精确版本。
 
 面向玩家的客户端通过 `viewer_for_actor(person)` 和 `CanwuViewer::query_knowledge` 读取这些报告。其他角色，包括对方指挥官，从军事插件得不到任何信息：`Recon` 只记录一次抽样和一个事件，不发布知识。起步示例用 `Canwu::typed_domain_record` 读取战斗和占领记录，它返回的是真值，只应在受信任的上层应用代码中使用。
 
@@ -236,10 +235,10 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 ## 上层应用需要提供什么
 
-- 场景内容。构造 `MilitaryCatalog`，用 `record_from(catalog_reference(), ...)` 放进 `scenario.domain_records`，并自行调用 `MilitaryRulesetV1::validate`。规则集哈希覆盖规则集 ID、配置名，以及兵种、战术和地形修正的数量。
+- 场景内容。构造 `MilitaryCatalog`，用 `record_from(catalog_reference(), ...)` 放进 `scenario.domain_records`。构造时就调用 `MilitaryRulesetV1::validate`：装入的规则集无效期间，准入会拒绝所有命令。规则集哈希覆盖规则集 ID、配置名，以及兵种、战术和地形修正的数量。
 - 节点标识。插件只比较 `MilitaryNodeId` 字符串是否相等，从不对照军事目录中的节点。行程、路线和相邻关系由你的整合层负责。
-- 权限。建立部队时就指定指挥官：没有指挥官的部队不再接受任何部队命令，`AssignCommander` 也不例外。`CreateForce`、`SetOccupationPolicy`、`MilitaryAdministrationAction` 和 `AdvanceTick` 在准入时不检查签发者，由你的上层应用决定谁能发送。
-- 唯一的行动键和最新的修订号。每个意图使用新的 `MilitaryOperationKey`，入队前再读一次部队修订号。
+- 指挥链。建立部队的角色必须把自己指定为指挥官，之后只有指挥官能用 `AssignCommander` 把部队交给别人。只有占领部队的指挥官能发送 `SetOccupationPolicy` 或 `MilitaryAdministrationAction`。场景记录里的部队同样需要指挥官，否则没有任何命令能到达它。插件没有继任规则：指挥官死亡后，没有人能再指挥这支部队。
+- 唯一的行动键和最新的修订号。每个意图使用新的 `MilitaryOperationKey`，被拒绝后修正重发也要换新键；入队前再读一次部队修订号。
 - 负责行政效果的提供方插件，以及调用 `enqueue_provider_outcome` 的代码。
 - 补给、伤亡流向和更丰富的战斗规则。这些需要你自己的插件，或者替换 `canwu-military`。
 - 呈现：地图、给非指挥官的报告和情报估计。
@@ -248,15 +247,19 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | 常量或规则 | 值 | 如何执行 |
 | --- | --- | --- |
-| `MAX_SUBUNITS` | 64 | `ForceState::validate` 拒绝子单位更多的部队 |
-| `SCHEMA_VERSION` | 1 | 规则集和部队记录必须使用 |
+| `MAX_RECORDS` | 每类记录 4,096 条 | 会让部队、行动或占领超过这个数量的命令在第 7 阶段被拒绝；如果 `MilitaryAdministrationAction` 将来产生的 `provider_outcome` 记录会超过这个数量，这条命令同样被拒绝 |
+| `MAX_SUBUNITS` | 64 | 部队已有 64 个子单位时 `Recruit` 被拒绝；`ForceState::validate` 检查同一上限 |
+| `MAX_COMPOSITION_ENTRIES` | 64 | `MilitaryRulesetV1::validate` 拒绝兵种配置、战术或地形修正超过这个数量的规则集 |
+| `MAX_OPERATION_PARTICIPANTS` | 128 | `OperationState::validate` 拒绝参与部队（含对手部队）超过这个数量，或同一部队出现两次的行动 |
+| `SCHEMA_VERSION` | 1 | 规则集、部队记录和行动记录必须使用 |
 | 军事 ID | 1 到 192 字节，含 `:` | ASCII 字母、数字和 `. _ - : /` |
 | 千分比数值 | 不超过 1,000 | 部队指标、占领指标和占领政策 |
 | 报告扫描 | 每个边界 256 条部队记录 | 第 13 阶段系统按规范顺序读取前 256 条部队记录 |
+| 报告批次 | 每个边界 64 位指挥官 | 每位指挥官一个批次；按 ID 顺序排在第 64 位之后的指挥官，在该边界收不到报告 |
 
 `ForceState::validate` 还要求各子单位兵力之和等于实有兵力，各类损失之和不超过编制兵力。
 
-`MAX_RECORDS`（4,096）、`MAX_COMPOSITION_ENTRIES`（64）和 `MAX_OPERATION_PARTICIPANTS`（128）已声明，但当前没有检查。
+战斗记录只来自行动，每次行动最多一条，所以行动的上限也限制了它们。胜利建立占领时不检查数量，所以占领总数可能超过 4,096，每次行动最多多出一条。插件从不退役记录，所以这些上限作用于整个运行期间：例如行动记录达到 4,096 条后，就不能再下达新的行军命令。
 
 ## 动手试试
 

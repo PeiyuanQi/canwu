@@ -189,11 +189,11 @@ action: FiscalAction::OpenAssessment {
 
 `submit_reference_action_with_trace` wraps the `FiscalActionRequest` with
 `fiscal_action_command` and issues it as the binding's actor. At the first
-boundary, admission checks the actor against the binding, the binding's
-institution against the scope, and `expected_procedure_revision` against the
-state. The next boundary settles the action into `action_outcomes`. The
-accounting cycle ID belongs to the host and is separate from the historical
-period. The second action, `AuthorizeExecution`, permits collecting 70 of
+boundary, admission checks the actor against the binding and the binding's
+institution against the scope. The next boundary checks
+`expected_procedure_revision` against the state and settles the action into
+`action_outcomes`. The accounting cycle ID belongs to the host and is separate
+from the historical period. The second action, `AuthorizeExecution`, permits collecting 70 of
 resource `ResourceId::new(1)` from the actor to the institution; resource
 balances stay as they are.
 

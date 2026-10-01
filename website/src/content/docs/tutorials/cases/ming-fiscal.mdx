@@ -168,8 +168,8 @@ action: FiscalAction::OpenAssessment {
 
 `submit_reference_action_with_trace` 用 `fiscal_action_command` 包装
 `FiscalActionRequest`，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与
-绑定、绑定机构与范围，以及 `expected_procedure_revision` 与财政状态是否一致；下一个
-边界把行动结算进 `action_outcomes`。核算周期 ID 由上层应用决定，与历史时期相互独立。
+绑定、绑定机构与范围；下一个边界核对 `expected_procedure_revision` 与财政状态是否
+一致，再把行动结算进 `action_outcomes`。核算周期 ID 由上层应用决定，与历史时期相互独立。
 第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色
 征收给机构，资源余额保持不变。
 
