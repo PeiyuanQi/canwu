@@ -2,15 +2,16 @@ use crate::model::*;
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    Canwu, CanwuError, Command, CommandContext, CommandIngress, DomainRecordDraft,
-    DomainRecordKind, DomainRecordMutation, DomainRecordSchema, DomainRecordType, ErrorCode,
-    EvidenceRef, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin,
+    Canwu, CanwuError, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordClass,
+    DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
+    DomainRecordRef, DomainRecordSchema, DomainRecordType, EntityRef, ErrorCode, EvidenceRef,
+    IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1, KnowledgeOrigin,
     KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject,
     KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, PayloadSchema, PluginActionDescriptor, PluginIngressDescriptor,
-    PluginIngressRequest, PluginRegistrar, RandomOperationTarget, RandomStreamKey, SimDuration,
-    SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemDirective,
+    KnowledgeWriteGrant, LifeState, PayloadSchema, PersonId, PluginActionDescriptor,
+    PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, RandomOperationTarget,
+    RandomStreamKey, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemDirective, TypedDomainRecordRef,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -20,8 +21,11 @@ pub const MILITARY_COMMAND: &str = "military_command_v1";
 pub const MILITARY_COMMAND_INGRESS: &str = "military_command_v1";
 pub const MILITARY_PROVIDER_ACK_INGRESS: &str = "military_provider_ack_v1";
 pub const MILITARY_REPORT_KNOWLEDGE: &str = "military_report";
+/// Event recorded when phase 7 rejects a military command or provider
+/// acknowledgement instead of failing the boundary.
+pub const MILITARY_REJECTION_EVENT: &str = "canwu.military.ingress_rejected.v1";
 const VERSION: &str = "0.1.0";
-const SEMANTIC_HASH: &str = "2a4b5d2d3f16ef3a37035f3c9c66e1742d3e2acfbfdc5f6e01b2b3be20d7d6f1";
+const SEMANTIC_HASH: &str = "b8c3f8a2a95ff7becd1d61190fdb0e168700120c6de911a325c28084265cc765";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct AdmittedCommand {
@@ -62,17 +66,21 @@ impl SimulationPlugin for MilitaryPlugin {
         }
 
         registrar.register_knowledge_schema(report_schema())?;
+        let mut command_reads = military_state_keys();
+        command_reads.push(StateKey::core_person_availability());
         registrar.register_command(
             PluginActionDescriptor {
                 name: MILITARY_COMMAND.to_owned(),
                 description: "Admit one military domain command".to_owned(),
                 payload_schema: PayloadSchema::Any,
-                reads: military_state_keys(),
+                reads: command_reads,
                 writes: Vec::new(),
             },
             admit_command,
         )?;
-        registrar.register_ingress(PluginIngressDescriptor {
+        // Only the command handler and the plugin's own ticks queue this
+        // packet; hosts cannot author it.
+        registrar.register_internal_ingress(PluginIngressDescriptor {
             name: MILITARY_COMMAND_INGRESS.to_owned(),
             description: "Apply one admitted military command".to_owned(),
             class: IngressClass::Decision,
@@ -95,7 +103,10 @@ impl SimulationPlugin for MilitaryPlugin {
         apply.writes = military_state_keys();
         apply.visibility = StateVisibility::SameBoundary;
         apply.random_streams = vec![military_random_stream()];
-        apply.emits = vec!["canwu.military.transition_applied.v1".to_owned()];
+        apply.emits = vec![
+            "canwu.military.transition_applied.v1".to_owned(),
+            MILITARY_REJECTION_EVENT.to_owned(),
+        ];
         apply.plugin_ingress_targets = vec![canwu_api::PluginIngressTarget {
             target_plugin: PLUGIN_NAME.to_owned(),
             packet_type: MILITARY_COMMAND_INGRESS.to_owned(),
@@ -107,6 +118,7 @@ impl SimulationPlugin for MilitaryPlugin {
             SystemCadence::EventDriven,
         );
         report.reads = military_state_keys();
+        report.reads.push(StateKey::core_person_availability());
         report.knowledge_writes = vec![KnowledgeWriteGrant {
             schema: report_schema_id(),
             visibilities: vec![StateVisibility::SameBoundary],
@@ -199,27 +211,38 @@ fn admit_command(
         ));
     }
     let envelope: MilitaryCommandEnvelope = decode(payload, "military command")?;
-    if envelope.input_digest != input_digest(&envelope.command)? {
+    let command_digest = input_digest(&envelope.command)?;
+    if envelope.input_digest != command_digest {
         return Err(err(
             ErrorCode::InvalidPayload,
             "military command semantic digest mismatch",
         ));
     }
-    validate_command(view, context, &envelope.command)?;
+    let affected = validate_command(view, context, &envelope.command)?;
+    let ledger = view
+        .typed_domain_record(&ledger_reference())?
+        .map(DomainRecord::decode_payload::<MilitaryLedgerRecord>)
+        .transpose()?;
+    if already_settled(ledger.as_ref(), &envelope.command, &command_digest)? {
+        return Ok(Vec::new());
+    }
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: SimDuration::ZERO,
         packet_type: MILITARY_COMMAND_INGRESS.to_owned(),
         priority: 0,
         payload: serde_json::to_value(AdmittedCommand { envelope }).map_err(encode)?,
-        affected: Vec::new(),
+        affected,
     }])
 }
 
+/// Checks authority and static validity. Every error uses a code the engine
+/// records as a rejected command attempt, so a bad command never blocks the
+/// queue. Checks against changing force state run again in phase 7.
 fn validate_command(
     view: &SimulationView<'_>,
     context: &CommandContext,
     command: &MilitaryCommand,
-) -> Result<(), CanwuError> {
+) -> Result<Vec<EntityRef>, CanwuError> {
     let operation = command_operation(command);
     if operation.as_str().is_empty() {
         return Err(err(
@@ -227,44 +250,76 @@ fn validate_command(
             "military operation key is empty",
         ));
     }
-    if let Some(force) = command_force(command) {
-        if let Some(record) = view.typed_domain_record(&force_reference(force))? {
-            let state = record.decode_payload::<ForceStateRecord>()?;
-            if let Issuer::Actor(actor) = context.issuer {
-                if state.commander != Some(actor) {
-                    return Err(err(
-                        ErrorCode::InvalidAuthority,
-                        "actor does not command this force",
-                    ));
-                }
-            } else {
+    let Issuer::Actor(actor) = context.issuer else {
+        return Err(err(
+            ErrorCode::InvalidAuthority,
+            "military commands require an actor issuer",
+        ));
+    };
+    let mut affected = Vec::new();
+    match command {
+        MilitaryCommand::AdvanceTick { .. } => {
+            return Err(err(
+                ErrorCode::InvalidAuthority,
+                "military ticks are scheduled by the plugin and cannot be sent as commands",
+            ));
+        }
+        MilitaryCommand::CreateForce { commander, .. } => {
+            if *commander != Some(actor) {
                 return Err(err(
                     ErrorCode::InvalidAuthority,
-                    "military force commands require an actor issuer",
-                ));
-            }
-            let expected = command_expected_revision(command);
-            if expected != Some(state.meta.revision) && expected.is_some() {
-                return Err(err(
-                    ErrorCode::DomainRecordVersionConflict,
-                    "military force revision is stale",
+                    "a new military force must be commanded by the actor who creates it",
                 ));
             }
         }
+        MilitaryCommand::AssignCommander { commander, .. } => {
+            if view
+                .person_availability(*commander)?
+                .is_some_and(|availability| availability.life == LifeState::Dead)
+            {
+                return Err(err(
+                    ErrorCode::InvalidPayload,
+                    "a dead person cannot command a military force",
+                ));
+            }
+            // The kernel rejects the command if this person does not exist.
+            affected.push(EntityRef::Person(*commander));
+        }
+        MilitaryCommand::SetOccupationPolicy {
+            occupation,
+            security_per_mille,
+            collaboration_per_mille,
+            extraction_burden_per_mille,
+            ..
+        } => {
+            for (value, label) in [
+                (security_per_mille, "security"),
+                (collaboration_per_mille, "collaboration"),
+                (extraction_burden_per_mille, "extraction burden"),
+            ] {
+                validate_per_mille(*value, label)
+                    .map_err(|error| err(ErrorCode::ValueOutOfRange, error.message))?;
+            }
+            require_occupation_commander(view, occupation, actor)?;
+        }
+        MilitaryCommand::MilitaryAdministrationAction { occupation, .. } => {
+            require_occupation_commander(view, occupation, actor)?;
+        }
+        _ => {}
     }
-    if let MilitaryCommand::SetOccupationPolicy {
-        security_per_mille,
-        collaboration_per_mille,
-        extraction_burden_per_mille,
-        ..
-    } = command
-    {
-        validate_per_mille(*security_per_mille, "security")?;
-        validate_per_mille(*collaboration_per_mille, "collaboration")?;
-        validate_per_mille(*extraction_burden_per_mille, "extraction burden")?;
+    if let Some(force) = command_force(command) {
+        if !matches!(command, MilitaryCommand::CreateForce { .. }) {
+            require_force_commander(view, force, actor)?;
+        }
     }
     if let Some(catalog_record) = view.typed_domain_record(&catalog_reference())? {
         let catalog = catalog_record.decode_payload::<MilitaryCatalogRecord>()?;
+        catalog.ruleset.validate().map_err(|error| {
+            err(
+                ErrorCode::InvalidPayload,
+                format!("installed military ruleset is invalid: {}", error.message),
+            )
+        })?;
         let branch = match command {
             MilitaryCommand::CreateForce { branch, .. }
             | MilitaryCommand::Recruit { branch, .. } => Some(branch),
@@ -293,6 +348,249 @@ fn validate_command(
             }
         }
     }
+    Ok(affected)
+}
+
+fn require_force_commander(
+    view: &SimulationView<'_>,
+    force: &ForceId,
+    actor: PersonId,
+) -> Result<(), CanwuError> {
+    let state = view
+        .typed_domain_record(&force_reference(force))?
+        .ok_or_else(|| err(ErrorCode::EntityNotFound, "military force does not exist"))?
+        .decode_payload::<ForceStateRecord>()?;
+    if state.commander != Some(actor) {
+        return Err(err(
+            ErrorCode::InvalidAuthority,
+            "actor does not command this force",
+        ));
+    }
+    Ok(())
+}
+
+fn require_occupation_commander(
+    view: &SimulationView<'_>,
+    occupation: &OccupationId,
+    actor: PersonId,
+) -> Result<(), CanwuError> {
+    let state = view
+        .typed_domain_record(&occupation_reference(occupation))?
+        .ok_or_else(|| {
+            err(
+                ErrorCode::EntityNotFound,
+                "military occupation does not exist",
+            )
+        })?
+        .decode_payload::<OccupationStateRecord>()?;
+    require_force_commander(view, &state.occupying_force, actor)
+}
+
+/// Returns true when this exact command already has an outcome under its
+/// key. Any other use of a settled or pending key is an idempotency conflict.
+fn already_settled(
+    ledger: Option<&MilitaryLedger>,
+    command: &MilitaryCommand,
+    command_digest: &str,
+) -> Result<bool, CanwuError> {
+    let key = command_operation(command);
+    let Some(ledger) = ledger else {
+        return Ok(false);
+    };
+    match ledger.outcomes.get(key) {
+        Some(existing) if existing.input_digest == command_digest => Ok(true),
+        None if !ledger.pending.contains_key(key) => Ok(false),
+        _ => Err(err(
+            ErrorCode::IdempotencyConflict,
+            "military operation key was reused with different input",
+        )),
+    }
+}
+
+/// Military writes staged by one phase-7 pass. Later packets in the pass read
+/// the writes of earlier ones, and each record receives one mutation.
+struct Staging<'v, 'a> {
+    view: &'v SimulationView<'a>,
+    directives: Vec<BoundaryDirective>,
+    mutations: BTreeMap<DomainRecordRef, usize>,
+}
+
+type StagingCheckpoint = (Vec<BoundaryDirective>, BTreeMap<DomainRecordRef, usize>);
+
+impl<'v, 'a> Staging<'v, 'a> {
+    fn new(view: &'v SimulationView<'a>) -> Self {
+        Self {
+            view,
+            directives: Vec::new(),
+            mutations: BTreeMap::new(),
+        }
+    }
+
+    /// Reads a record as staged so far. A staged record keeps the version it
+    /// had before this pass (0 when created in it), so a second change in the
+    /// same pass derives the same next revision.
+    fn record<T: DomainRecordType>(
+        &self,
+        reference: &TypedDomainRecordRef<T>,
+    ) -> Result<Option<DomainRecord>, CanwuError> {
+        let reference = reference.as_untyped();
+        let Some(index) = self.mutations.get(reference) else {
+            return Ok(self.view.domain_record(reference)?.cloned());
+        };
+        let (draft, version) = match self.directives.get(*index) {
+            Some(BoundaryDirective::MutateRecord {
+                mutation: DomainRecordMutation::Create { record },
+                ..
+            }) => (record, 0),
+            Some(BoundaryDirective::MutateRecord {
+                mutation:
+                    DomainRecordMutation::Update {
+                        record,
+                        expected_version,
+                    },
+                ..
+            }) => (record, *expected_version),
+            _ => return Err(staging_error()),
+        };
+        Ok(Some(DomainRecord {
+            reference: draft.reference.clone(),
+            owner: PLUGIN_NAME.to_owned(),
+            class: DomainRecordClass::Record,
+            version,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: draft.payload.clone(),
+            references: draft.references.clone(),
+        }))
+    }
+
+    fn create<T: DomainRecordType>(
+        &mut self,
+        reference: TypedDomainRecordRef<T>,
+        payload: &T::Payload,
+        summary: &str,
+    ) -> Result<(), CanwuError>
+    where
+        T::Payload: Serialize,
+    {
+        if self.record(&reference)?.is_some() {
+            return Err(err(
+                ErrorCode::DuplicateDomainRecord,
+                "military record already exists",
+            ));
+        }
+        let record = DomainRecordDraft::from_typed(reference, payload)?;
+        self.mutations
+            .insert(record.reference.clone(), self.directives.len());
+        self.directives.push(BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Create { record },
+            summary: summary.to_owned(),
+        });
+        Ok(())
+    }
+
+    fn upsert<T: DomainRecordType>(
+        &mut self,
+        reference: TypedDomainRecordRef<T>,
+        payload: &T::Payload,
+        summary: &str,
+    ) -> Result<(), CanwuError>
+    where
+        T::Payload: Serialize,
+    {
+        let record = DomainRecordDraft::from_typed(reference, payload)?;
+        if let Some(index) = self.mutations.get(&record.reference) {
+            return match self.directives.get_mut(*index) {
+                Some(BoundaryDirective::MutateRecord {
+                    mutation:
+                        DomainRecordMutation::Create { record: staged }
+                        | DomainRecordMutation::Update { record: staged, .. },
+                    ..
+                }) => {
+                    *staged = record;
+                    Ok(())
+                }
+                _ => Err(staging_error()),
+            };
+        }
+        let current = self.view.domain_record(&record.reference)?.ok_or_else(|| {
+            err(
+                ErrorCode::DomainRecordNotFound,
+                "military record is unavailable",
+            )
+        })?;
+        let expected_version = current.version;
+        self.mutations
+            .insert(record.reference.clone(), self.directives.len());
+        self.directives.push(BoundaryDirective::MutateRecord {
+            mutation: DomainRecordMutation::Update {
+                record,
+                expected_version,
+            },
+            summary: summary.to_owned(),
+        });
+        Ok(())
+    }
+
+    fn push(&mut self, directive: BoundaryDirective) {
+        self.directives.push(directive);
+    }
+
+    fn checkpoint(&self) -> StagingCheckpoint {
+        (self.directives.clone(), self.mutations.clone())
+    }
+
+    fn restore(&mut self, (directives, mutations): StagingCheckpoint) {
+        self.directives = directives;
+        self.mutations = mutations;
+    }
+
+    fn ledger(&self) -> Result<Option<MilitaryLedger>, CanwuError> {
+        self.record(&ledger_reference())?
+            .map(|record| record.decode_payload::<MilitaryLedgerRecord>())
+            .transpose()
+    }
+
+    fn created_count(&self, kind: &DomainRecordKind) -> usize {
+        self.mutations
+            .iter()
+            .filter(|(reference, index)| {
+                reference.kind == *kind
+                    && matches!(
+                        self.directives.get(**index),
+                        Some(BoundaryDirective::MutateRecord {
+                            mutation: DomainRecordMutation::Create { .. },
+                            ..
+                        })
+                    )
+            })
+            .count()
+    }
+}
+
+fn staging_error() -> CanwuError {
+    err(
+        ErrorCode::InvalidBoundary,
+        "staged military mutation is inconsistent",
+    )
+}
+
+/// Rejects a command that would create one more record of a kind that
+/// already holds `MAX_RECORDS` records, counting `reserved` future records.
+fn ensure_record_capacity<T: DomainRecordType>(
+    staging: &Staging<'_, '_>,
+    reserved: usize,
+) -> Result<(), CanwuError> {
+    let kind = DomainRecordKind::for_type::<T>();
+    let stored = staging
+        .view
+        .domain_records_of_kind(&kind, MAX_RECORDS)?
+        .len();
+    if stored + staging.created_count(&kind) + reserved >= MAX_RECORDS {
+        return Err(err(
+            ErrorCode::ValueOutOfRange,
+            format!("military {} records are at MAX_RECORDS", kind.name),
+        ));
+    }
     Ok(())
 }
 
@@ -300,7 +598,7 @@ fn apply_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let mut directives = Vec::new();
+    let mut staging = Staging::new(view);
     for id in &context.admitted_ingress {
         let Some(ingress) = view.ingress(*id)? else {
             continue;
@@ -319,42 +617,109 @@ fn apply_ingress(
         }
         if packet_type == MILITARY_COMMAND_INGRESS {
             let admitted: AdmittedCommand = decode(payload, "admitted military command")?;
-            apply_command(view, context, &admitted.envelope.command, &mut directives)?;
+            let command = &admitted.envelope.command;
+            // A plugin-scheduled tick that fails is a broken invariant, so it
+            // still fails the boundary.
+            if matches!(command, MilitaryCommand::AdvanceTick { .. }) {
+                apply_command(&mut staging, context, command)?;
+                continue;
+            }
+            let checkpoint = staging.checkpoint();
+            if let Err(error) = apply_command(&mut staging, context, command) {
+                staging.restore(checkpoint);
+                reject_command(&mut staging, context, command, &error)?;
+            }
         }
         if packet_type == MILITARY_PROVIDER_ACK_INGRESS {
-            let ack: ProviderAck = decode(payload, "military provider acknowledgement")?;
-            apply_ack(view, context, &ack.outcome, &mut directives)?;
+            let checkpoint = staging.checkpoint();
+            let result = decode::<ProviderAck>(payload, "military provider acknowledgement")
+                .and_then(|ack| apply_ack(&mut staging, context, &ack.outcome));
+            if let Err(error) = result {
+                staging.restore(checkpoint);
+                record_rejection(
+                    &mut staging,
+                    format!("military provider acknowledgement rejected: {error}"),
+                );
+            }
         }
     }
     Ok(BoundaryProposal {
-        directives,
+        directives: staging.directives,
         ..BoundaryProposal::default()
     })
 }
 
-fn apply_command(
-    view: &SimulationView<'_>,
+/// Records a rejected command under its key when the key is free, so a
+/// resend is a no-op, and emits a rejection event either way.
+fn reject_command(
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
     command: &MilitaryCommand,
-    out: &mut Vec<BoundaryDirective>,
+    error: &CanwuError,
+) -> Result<(), CanwuError> {
+    let key = command_operation(command);
+    let key_in_use = staging.ledger()?.is_some_and(|ledger| {
+        ledger.outcomes.contains_key(key) || ledger.pending.contains_key(key)
+    });
+    if !key_in_use {
+        record_command_outcome(
+            staging,
+            command,
+            input_digest(command)?,
+            context.at,
+            OutcomeDisposition::Rejected,
+            &error.to_string(),
+        )?;
+    }
+    record_rejection(staging, format!("military command {key} rejected: {error}"));
+    Ok(())
+}
+
+fn record_rejection(staging: &mut Staging<'_, '_>, summary: String) {
+    staging.push(BoundaryDirective::Emit {
+        event_type: MILITARY_REJECTION_EVENT.to_owned(),
+        summary,
+        affected: Vec::new(),
+    });
+}
+
+/// Rechecks a command's expected force revision against the force as staged
+/// in this pass.
+fn check_force_revision(
+    staging: &Staging<'_, '_>,
+    command: &MilitaryCommand,
+) -> Result<(), CanwuError> {
+    let (Some(force), Some(expected)) =
+        (command_force(command), command_expected_revision(command))
+    else {
+        return Ok(());
+    };
+    let state = staging
+        .record(&force_reference(force))?
+        .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "force is unavailable"))?
+        .decode_payload::<ForceStateRecord>()?;
+    if state.meta.revision != expected {
+        return Err(err(
+            ErrorCode::DomainRecordVersionConflict,
+            "military force revision is stale",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_command(
+    staging: &mut Staging<'_, '_>,
+    context: &BoundaryContext,
+    command: &MilitaryCommand,
 ) -> Result<(), CanwuError> {
     let at = context.at;
-    let operation_key = command_operation(command).clone();
     let command_digest = input_digest(command)?;
     let internal_tick = matches!(command, MilitaryCommand::AdvanceTick { .. });
     if !internal_tick {
-        if let Some(record) = view.typed_domain_record(&ledger_reference())? {
-            let ledger = record.decode_payload::<MilitaryLedgerRecord>()?;
-            if let Some(existing) = ledger.outcomes.get(&operation_key) {
-                if existing.input_digest == command_digest {
-                    return Ok(());
-                }
-                return Err(err(
-                    ErrorCode::IdempotencyConflict,
-                    "military operation key was reused with different input",
-                ));
-            }
+        if already_settled(staging.ledger()?.as_ref(), command, &command_digest)? {
+            return Ok(());
         }
+        check_force_revision(staging, command)?;
     }
     match command {
         MilitaryCommand::CreateForce {
@@ -367,12 +732,13 @@ fn apply_command(
             commander,
             ..
         } => {
-            if view.typed_domain_record(&force_reference(force))?.is_some() {
+            if staging.record(&force_reference(force))?.is_some() {
                 return Err(err(
                     ErrorCode::DuplicateDomainRecord,
                     "force already exists",
                 ));
             }
+            ensure_record_capacity::<ForceStateRecord>(staging, 0)?;
             let initial_strength = initial_strength.unwrap_or(*authorized_strength);
             if initial_strength > *authorized_strength {
                 return Err(err(
@@ -420,11 +786,11 @@ fn apply_command(
             };
             state.meta = MilitaryRecordMeta::new(1, at, &state)?;
             state.validate()?;
-            create(out, force_reference(force), &state, "Create military force")?;
+            staging.create(force_reference(force), &state, "Create military force")?;
         }
         MilitaryCommand::AssignCommander {
             force, commander, ..
-        } => update_force(view, out, force, at, |s| {
+        } => update_force(staging, force, at, |s| {
             s.commander = Some(*commander);
             Ok(())
         })?,
@@ -434,11 +800,17 @@ fn apply_command(
             branch,
             quantity,
             ..
-        } => update_force(view, out, force, at, |s| {
+        } => update_force(staging, force, at, |s| {
             if s.subunits.contains_key(subunit) {
                 return Err(err(
                     ErrorCode::IdempotencyConflict,
                     "subunit already exists",
+                ));
+            }
+            if s.subunits.len() >= MAX_SUBUNITS {
+                return Err(err(
+                    ErrorCode::ValueOutOfRange,
+                    "force already has MAX_SUBUNITS subunits",
                 ));
             }
             let recruitable =
@@ -469,7 +841,7 @@ fn apply_command(
             training_delta,
             equipment_delta,
             ..
-        } => update_force(view, out, force, at, |s| {
+        } => update_force(staging, force, at, |s| {
             s.training_per_mille = s
                 .training_per_mille
                 .saturating_add(*training_delta)
@@ -488,22 +860,23 @@ fn apply_command(
             opposing_force,
             ..
         } => {
-            update_force(view, out, force, at, |s| {
-                s.active_operation = Some(operation_id.clone());
-                s.status = ForceStatus::Moving;
-                Ok(())
-            })?;
+            let current = force_state(staging, force)?;
+            if let Some(opponent) = opposing_force {
+                require_opposing_force(staging, opponent)?;
+                ensure_derived_ids(operation_id)?;
+            }
+            ensure_record_capacity::<OperationStateRecord>(staging, 0)?;
             let operation = OperationState {
                 meta: MilitaryRecordMeta::new(1, at, &())?,
                 id: operation_id.clone(),
                 key: command_operation(command).clone(),
-                owner: force_owner(view, force)?,
+                owner: current.owner,
                 objective: objective.clone(),
                 kind: "march".to_owned(),
                 forces: vec![force.clone()],
                 opposing_force: opposing_force.clone(),
                 phase: OperationPhase::Moving,
-                from: force_location(view, force)?,
+                from: current.location,
                 destination: destination.clone(),
                 route_digest: digest(&(force, destination))?,
                 terrain: String::new(),
@@ -516,14 +889,19 @@ fn apply_command(
                 supply_line: None,
                 exit_condition: String::new(),
             };
-            create(
-                out,
+            operation.validate()?;
+            update_force(staging, force, at, |s| {
+                s.active_operation = Some(operation_id.clone());
+                s.status = ForceStatus::Moving;
+                Ok(())
+            })?;
+            staging.create(
                 operation_reference(operation_id),
                 &operation,
                 "Order military march",
             )?;
             schedule_tick(
-                out,
+                staging,
                 SimDuration::minutes(1),
                 Some(operation_id.clone()),
                 None,
@@ -540,6 +918,10 @@ fn apply_command(
             opposing_force,
             ..
         } => {
+            if let Some(opponent) = opposing_force {
+                require_opposing_force(staging, opponent)?;
+            }
+            ensure_record_capacity::<OperationStateRecord>(staging, 0)?;
             let op = OperationState {
                 meta: MilitaryRecordMeta::new(1, at, &())?,
                 id: operation_id.clone(),
@@ -561,8 +943,8 @@ fn apply_command(
                 supply_line: None,
                 exit_condition: String::new(),
             };
-            create(
-                out,
+            op.validate()?;
+            staging.create(
                 operation_reference(operation_id),
                 &op,
                 "Plan military operation",
@@ -574,21 +956,15 @@ fn apply_command(
             node,
             ..
         } => {
-            let force_record = view
-                .typed_domain_record(&force_reference(force))?
-                .ok_or_else(|| {
-                    err(
-                        ErrorCode::DomainRecordNotFound,
-                        "occupation force is unavailable",
-                    )
-                })?;
-            let force_state = force_record.decode_payload::<ForceStateRecord>()?;
+            let force_state = force_state(staging, force)?;
             if force_state.location != *node || force_state.status == ForceStatus::Routing {
                 return Err(err(
                     ErrorCode::InvalidDecision,
                     "force must be present and not routing before occupation",
                 ));
             }
+            occupation_tick_key(occupation)?;
+            ensure_record_capacity::<OccupationStateRecord>(staging, 0)?;
             let occ = OccupationState {
                 meta: MilitaryRecordMeta::new(1, at, &())?,
                 id: occupation.clone(),
@@ -607,14 +983,13 @@ fn apply_command(
                 policy_revision: 1,
                 pending_provider_outcomes: Default::default(),
             };
-            create(
-                out,
+            staging.create(
                 occupation_reference(occupation),
                 &occ,
                 "Establish military occupation",
             )?;
             schedule_tick(
-                out,
+                staging,
                 SimDuration::days(1),
                 None,
                 Some(occupation.clone()),
@@ -628,7 +1003,7 @@ fn apply_command(
             collaboration_per_mille,
             extraction_burden_per_mille,
             ..
-        } => update_occupation(view, out, occupation, at, |s| {
+        } => update_occupation(staging, occupation, at, |s| {
             if s.policy_revision != *policy_revision {
                 return Err(err(
                     ErrorCode::DomainRecordVersionConflict,
@@ -647,9 +1022,16 @@ fn apply_command(
             expected_provider_version,
             ..
         } => {
-            let ledger = ledger(view)?;
+            let record = staging.record(&ledger_reference())?.ok_or_else(|| {
+                err(
+                    ErrorCode::DomainRecordNotFound,
+                    "military ledger is unavailable",
+                )
+            })?;
+            let mut next = record.decode_payload::<MilitaryLedgerRecord>()?;
+            // Each pending effect creates one provider outcome record later.
+            ensure_record_capacity::<ProviderOutcomeRecord>(staging, next.pending.len())?;
             let key = command_operation(command).clone();
-            let mut next = ledger.clone();
             next.pending.insert(
                 key.clone(),
                 PendingMilitaryEffect {
@@ -661,28 +1043,21 @@ fn apply_command(
                     state: PendingEffectState::Pending,
                 },
             );
-            next.meta = MilitaryRecordMeta::new(next.meta.revision + 1, at, &next)?;
-            upsert(
-                view,
-                out,
-                ledger_reference(),
-                &next,
-                "Queue military provider effect",
-            )?;
-            let _ = occupation;
+            next.meta = MilitaryRecordMeta::new(record.version + 1, at, &next)?;
+            staging.upsert(ledger_reference(), &next, "Queue military provider effect")?;
         }
         MilitaryCommand::AdvanceTick {
             operation,
             occupation,
             ..
-        } => advance_tick(view, context, out, operation.as_ref(), occupation.as_ref())?,
+        } => advance_tick(staging, context, operation.as_ref(), occupation.as_ref())?,
         MilitaryCommand::PrepareAmbush {
             force,
             node,
             tactic,
             ..
         } => {
-            update_force(view, out, force, at, |state| {
+            update_force(staging, force, at, |state| {
                 state.prepared_ambush = Some(AmbushPreparation {
                     node: node.clone(),
                     tactic: tactic.clone(),
@@ -702,22 +1077,19 @@ fn apply_command(
             target,
             ..
         } => {
-            update_force(view, out, force, at, |state| {
-                state.active_operation = Some(operation_id.clone());
-                state.status = ForceStatus::Moving;
-                Ok(())
-            })?;
+            let current = force_state(staging, force)?;
+            ensure_record_capacity::<OperationStateRecord>(staging, 0)?;
             let operation = OperationState {
                 meta: MilitaryRecordMeta::new(1, at, &())?,
                 id: operation_id.clone(),
                 key: command_operation(command).clone(),
-                owner: force_owner(view, force)?,
+                owner: current.owner,
                 objective: objective.clone(),
                 kind: "special".to_owned(),
                 forces: vec![force.clone()],
                 opposing_force: None,
                 phase: OperationPhase::Moving,
-                from: force_location(view, force)?,
+                from: current.location,
                 destination: target.clone(),
                 route_digest: digest(&(force, target))?,
                 terrain: String::new(),
@@ -730,14 +1102,19 @@ fn apply_command(
                 supply_line: None,
                 exit_condition: "extract".to_owned(),
             };
-            create(
-                out,
+            operation.validate()?;
+            update_force(staging, force, at, |state| {
+                state.active_operation = Some(operation_id.clone());
+                state.status = ForceStatus::Moving;
+                Ok(())
+            })?;
+            staging.create(
                 operation_reference(operation_id),
                 &operation,
                 "Start special operation",
             )?;
             schedule_tick(
-                out,
+                staging,
                 SimDuration::days(1),
                 Some(operation_id.clone()),
                 None,
@@ -745,7 +1122,7 @@ fn apply_command(
             )?;
         }
         MilitaryCommand::Recon { .. } => {
-            let _ = view.random_range_for_operation(
+            let _ = staging.view.random_range_for_operation(
                 &military_random_stream(),
                 EvidenceRef::Boundary(context.boundary_id),
                 "military_command",
@@ -755,7 +1132,7 @@ fn apply_command(
                 1_000,
                 "resolve military operation uncertainty",
             )?;
-            out.push(BoundaryDirective::Emit {
+            staging.push(BoundaryDirective::Emit {
                 event_type: "canwu.military.transition_applied.v1".to_owned(),
                 summary: "Resolve military operation uncertainty".to_owned(),
                 affected: Vec::new(),
@@ -768,23 +1145,41 @@ fn apply_command(
             MilitaryCommand::MilitaryAdministrationAction { .. }
         )
     {
-        record_command_outcome(view, out, command, command_digest, at)?;
+        record_command_outcome(
+            staging,
+            command,
+            command_digest,
+            at,
+            OutcomeDisposition::Accepted,
+            "Military command applied exactly once",
+        )?;
+    }
+    Ok(())
+}
+
+fn require_opposing_force(staging: &Staging<'_, '_>, force: &ForceId) -> Result<(), CanwuError> {
+    if staging.record(&force_reference(force))?.is_none() {
+        return Err(err(
+            ErrorCode::DomainRecordNotFound,
+            "opposing force is unavailable",
+        ));
     }
     Ok(())
 }
 
 fn record_command_outcome(
-    view: &SimulationView<'_>,
-    out: &mut Vec<BoundaryDirective>,
+    staging: &mut Staging<'_, '_>,
     command: &MilitaryCommand,
     input_digest: String,
     at: SimTime,
+    disposition: OutcomeDisposition,
+    message: &str,
 ) -> Result<(), CanwuError> {
     let key = command_operation(command).clone();
-    let current = view.typed_domain_record(&ledger_reference())?;
+    let current = staging.record(&ledger_reference())?;
     let mut ledger = current
         .as_ref()
-        .map(|record| record.decode_payload::<MilitaryLedgerRecord>())
+        .map(DomainRecord::decode_payload::<MilitaryLedgerRecord>)
         .transpose()?
         .unwrap_or(MilitaryLedger {
             meta: MilitaryRecordMeta::new(1, at, &())?,
@@ -796,25 +1191,22 @@ fn record_command_outcome(
         MilitaryOutcome {
             operation: key,
             input_digest,
-            disposition: OutcomeDisposition::Accepted,
+            disposition,
             record: "command".to_owned(),
-            message: "Military command applied exactly once".to_owned(),
+            message: message.to_owned(),
             at,
         },
     );
-    ledger.meta.revision = current.map_or(1, |record| record.version + 1);
+    ledger.meta.revision = current.as_ref().map_or(1, |record| record.version + 1);
     ledger.meta.established_at = at;
     ledger.meta.semantic_digest = digest(&ledger)?;
     match current {
-        Some(_record) => upsert(
-            view,
-            out,
+        Some(_record) => staging.upsert(
             ledger_reference(),
             &ledger,
             "Record military command outcome",
         ),
-        None => create(
-            out,
+        None => staging.create(
             ledger_reference(),
             &ledger,
             "Create military command ledger",
@@ -909,58 +1301,41 @@ fn command_expected_revision(command: &MilitaryCommand) -> Option<u64> {
 fn input_digest<T: Serialize>(value: &T) -> Result<String, CanwuError> {
     crate::model::input_digest(value)
 }
-fn create<T: DomainRecordType>(
-    out: &mut Vec<BoundaryDirective>,
-    reference: canwu_api::TypedDomainRecordRef<T>,
-    payload: &T::Payload,
-    summary: &str,
-) -> Result<(), CanwuError>
-where
-    T::Payload: Serialize,
-{
-    out.push(BoundaryDirective::MutateRecord {
-        mutation: DomainRecordMutation::Create {
-            record: DomainRecordDraft::from_typed(reference, payload)?,
-        },
-        summary: summary.to_owned(),
-    });
-    Ok(())
+fn combat_id(operation: &OperationId) -> Result<CombatId, CanwuError> {
+    CombatId::new(format!("canwu.military:combat:{operation}"))
 }
-fn upsert<T: DomainRecordType>(
-    view: &SimulationView<'_>,
-    out: &mut Vec<BoundaryDirective>,
-    reference: canwu_api::TypedDomainRecordRef<T>,
-    payload: &T::Payload,
-    summary: &str,
-) -> Result<(), CanwuError>
-where
-    T::Payload: Serialize,
-{
-    let current = view.typed_domain_record(&reference)?.ok_or_else(|| {
-        err(
-            ErrorCode::DomainRecordNotFound,
-            "military record is unavailable",
-        )
-    })?;
-    out.push(BoundaryDirective::MutateRecord {
-        mutation: DomainRecordMutation::Update {
-            record: DomainRecordDraft::from_typed(reference, payload)?,
-            expected_version: current.version,
-        },
-        summary: summary.to_owned(),
-    });
-    Ok(())
+fn victory_occupation_id(operation: &OperationId) -> Result<OccupationId, CanwuError> {
+    OccupationId::new(format!("canwu.military:occupation:{}", operation.as_str()))
+}
+fn occupation_tick_key(occupation: &OccupationId) -> Result<MilitaryOperationKey, CanwuError> {
+    MilitaryOperationKey::new(format!(
+        "canwu.military:occupation-tick:{}",
+        occupation.as_str()
+    ))
+}
+/// Rejects an operation ID whose derived combat, occupation, or tick IDs
+/// would exceed the identifier limit when a later tick builds them.
+fn ensure_derived_ids(operation: &OperationId) -> Result<(), CanwuError> {
+    combat_id(operation)
+        .and_then(|_| victory_occupation_id(operation))
+        .and_then(|occupation| occupation_tick_key(&occupation))
+        .map(|_| ())
+        .map_err(|_| {
+            err(
+                ErrorCode::InvalidPayload,
+                "operation ID is too long for its derived combat and occupation IDs",
+            )
+        })
 }
 fn update_force(
-    view: &SimulationView<'_>,
-    out: &mut Vec<BoundaryDirective>,
+    staging: &mut Staging<'_, '_>,
     id: &ForceId,
     at: SimTime,
     change: impl FnOnce(&mut ForceState) -> Result<(), CanwuError>,
 ) -> Result<(), CanwuError> {
     let reference = force_reference(id);
-    let record = view
-        .typed_domain_record(&reference)?
+    let record = staging
+        .record(&reference)?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "force is unavailable"))?;
     let mut state = record.decode_payload::<ForceStateRecord>()?;
     change(&mut state)?;
@@ -968,18 +1343,17 @@ fn update_force(
     state.meta.established_at = at;
     state.meta.semantic_digest = digest(&state)?;
     state.validate()?;
-    upsert(view, out, reference, &state, "Update military force")
+    staging.upsert(reference, &state, "Update military force")
 }
 fn update_occupation(
-    view: &SimulationView<'_>,
-    out: &mut Vec<BoundaryDirective>,
+    staging: &mut Staging<'_, '_>,
     id: &OccupationId,
     at: SimTime,
     change: impl FnOnce(&mut OccupationState) -> Result<(), CanwuError>,
 ) -> Result<(), CanwuError> {
     let reference = occupation_reference(id);
-    let record = view
-        .typed_domain_record(&reference)?
+    let record = staging
+        .record(&reference)?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "occupation is unavailable"))?;
     let mut state = record.decode_payload::<OccupationStateRecord>()?;
     change(&mut state)?;
@@ -987,44 +1361,21 @@ fn update_occupation(
     state.meta.established_at = at;
     state.meta.semantic_digest = digest(&state)?;
     state.validate()?;
-    upsert(view, out, reference, &state, "Update military occupation")
+    staging.upsert(reference, &state, "Update military occupation")
 }
-fn force_owner(
-    view: &SimulationView<'_>,
-    id: &ForceId,
-) -> Result<canwu_api::EntityRef, CanwuError> {
-    Ok(view
-        .typed_domain_record(&force_reference(id))?
+fn force_state(staging: &Staging<'_, '_>, id: &ForceId) -> Result<ForceState, CanwuError> {
+    staging
+        .record(&force_reference(id))?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "force is unavailable"))?
-        .decode_payload::<ForceStateRecord>()?
-        .owner)
-}
-fn force_location(view: &SimulationView<'_>, id: &ForceId) -> Result<MilitaryNodeId, CanwuError> {
-    Ok(view
-        .typed_domain_record(&force_reference(id))?
-        .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "force is unavailable"))?
-        .decode_payload::<ForceStateRecord>()?
-        .location)
-}
-fn ledger(view: &SimulationView<'_>) -> Result<MilitaryLedger, CanwuError> {
-    Ok(view
-        .typed_domain_record(&ledger_reference())?
-        .ok_or_else(|| {
-            err(
-                ErrorCode::DomainRecordNotFound,
-                "military ledger is unavailable",
-            )
-        })?
-        .decode_payload::<MilitaryLedgerRecord>()?)
+        .decode_payload::<ForceStateRecord>()
 }
 fn apply_ack(
-    view: &SimulationView<'_>,
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
     outcome: &ProviderOutcome,
-    out: &mut Vec<BoundaryDirective>,
 ) -> Result<(), CanwuError> {
     let reference = ledger_reference();
-    let record = view.typed_domain_record(&reference)?.ok_or_else(|| {
+    let record = staging.record(&reference)?.ok_or_else(|| {
         err(
             ErrorCode::DomainRecordNotFound,
             "military ledger is unavailable",
@@ -1070,19 +1421,12 @@ fn apply_ack(
     state.meta.revision = record.version + 1;
     state.meta.established_at = context.at;
     state.meta.semantic_digest = digest(&state)?;
-    upsert(
-        view,
-        out,
-        reference,
-        &state,
-        "Acknowledge military provider outcome",
-    )?;
-    if view
-        .typed_domain_record(&provider_outcome_reference(&outcome.id))?
+    staging.upsert(reference, &state, "Acknowledge military provider outcome")?;
+    if staging
+        .record(&provider_outcome_reference(&outcome.id))?
         .is_none()
     {
-        create(
-            out,
+        staging.create(
             provider_outcome_reference(&outcome.id),
             outcome,
             "Retain exact provider outcome",
@@ -1090,7 +1434,7 @@ fn apply_ack(
     }
     if let Some(occupation_id) = pending_occupation {
         let occupation_ref = occupation_reference(&occupation_id);
-        if let Some(occupation_record) = view.typed_domain_record(&occupation_ref)? {
+        if let Some(occupation_record) = staging.record(&occupation_ref)? {
             let mut occupation = occupation_record.decode_payload::<OccupationStateRecord>()?;
             match outcome.disposition {
                 ProviderDisposition::Rejected | ProviderDisposition::Compensating => {
@@ -1116,9 +1460,7 @@ fn apply_ack(
             occupation.meta.revision = occupation_record.version + 1;
             occupation.meta.established_at = context.at;
             occupation.meta.semantic_digest = digest(&occupation)?;
-            upsert(
-                view,
-                out,
+            staging.upsert(
                 occupation_ref,
                 &occupation,
                 "Apply provider result to occupation",
@@ -1128,7 +1470,7 @@ fn apply_ack(
     Ok(())
 }
 fn schedule_tick(
-    out: &mut Vec<BoundaryDirective>,
+    staging: &mut Staging<'_, '_>,
     after: SimDuration,
     operation: Option<OperationId>,
     occupation: Option<OccupationId>,
@@ -1143,7 +1485,7 @@ fn schedule_tick(
         input_digest: input_digest(&command)?,
         command,
     };
-    out.push(BoundaryDirective::SchedulePluginIngress {
+    staging.push(BoundaryDirective::SchedulePluginIngress {
         target_plugin: PLUGIN_NAME.to_owned(),
         after,
         packet_type: MILITARY_COMMAND_INGRESS.to_owned(),
@@ -1155,30 +1497,28 @@ fn schedule_tick(
 }
 
 fn advance_tick(
-    view: &SimulationView<'_>,
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
-    out: &mut Vec<BoundaryDirective>,
     operation: Option<&OperationId>,
     occupation: Option<&OccupationId>,
 ) -> Result<(), CanwuError> {
     if let Some(operation) = operation {
-        advance_operation(view, context, out, operation)?;
+        advance_operation(staging, context, operation)?;
     }
     if let Some(occupation) = occupation {
-        advance_occupation_state(view, context, out, occupation)?;
+        advance_occupation_state(staging, context, occupation)?;
     }
     Ok(())
 }
 
 fn advance_operation(
-    view: &SimulationView<'_>,
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
-    out: &mut Vec<BoundaryDirective>,
     id: &OperationId,
 ) -> Result<(), CanwuError> {
     let reference = operation_reference(id);
-    let record = view
-        .typed_domain_record(&reference)?
+    let record = staging
+        .record(&reference)?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "operation is unavailable"))?;
     let mut operation = record.decode_payload::<OperationStateRecord>()?;
     if matches!(
@@ -1192,8 +1532,8 @@ fn advance_operation(
         .first()
         .cloned()
         .ok_or_else(|| err(ErrorCode::InvalidDomainRecord, "operation has no force"))?;
-    let force_record = view
-        .typed_domain_record(&force_reference(&force_id))?
+    let force_record = staging
+        .record(&force_reference(&force_id))?
         .ok_or_else(|| {
             err(
                 ErrorCode::DomainRecordNotFound,
@@ -1214,7 +1554,7 @@ fn advance_operation(
             force.morale_per_mille = force.morale_per_mille.saturating_sub(10);
         }
         if operation.phase != OperationPhase::Failed && operation.kind == "special" {
-            let success = view.random_range_for_operation(
+            let success = staging.view.random_range_for_operation(
                 &military_random_stream(),
                 context
                     .admitted_ingress
@@ -1253,23 +1593,24 @@ fn advance_operation(
                 ForceStatus::Ready
             };
         }
-        if operation.phase != OperationPhase::Failed
-            && operation.kind != "special"
-            && operation.opposing_force.is_none()
-        {
+        // A special operation has already settled above; only an arriving
+        // march completes or makes contact here.
+        let arrived_march =
+            operation.phase != OperationPhase::Failed && operation.kind != "special";
+        if arrived_march && operation.opposing_force.is_none() {
             force.active_operation = None;
             operation.phase = OperationPhase::Completed;
-        } else if operation.phase != OperationPhase::Failed {
+        } else if let (true, Some(defender)) = (arrived_march, operation.opposing_force.clone()) {
             operation.phase = OperationPhase::Engaged;
-            let defender = operation.opposing_force.clone().expect("checked above");
-            let defender_record = view
-                .typed_domain_record(&force_reference(&defender))?
-                .ok_or_else(|| {
-                    err(
-                        ErrorCode::DomainRecordNotFound,
-                        "opposing force is unavailable",
-                    )
-                })?;
+            let defender_record =
+                staging
+                    .record(&force_reference(&defender))?
+                    .ok_or_else(|| {
+                        err(
+                            ErrorCode::DomainRecordNotFound,
+                            "opposing force is unavailable",
+                        )
+                    })?;
             let mut defender_state = defender_record.decode_payload::<ForceStateRecord>()?;
             let ambush_ready = defender_state
                 .prepared_ambush
@@ -1280,11 +1621,8 @@ fn advance_operation(
                             .expires_at
                             .is_none_or(|expires| expires >= context.at)
                 });
-            let combat_id = CombatId::new(format!("canwu.military:combat:{}", operation.id))?;
-            if view
-                .typed_domain_record(&combat_reference(&combat_id))?
-                .is_none()
-            {
+            let combat_id = combat_id(&operation.id)?;
+            if staging.record(&combat_reference(&combat_id))?.is_none() {
                 let combat = CombatState {
                     meta: MilitaryRecordMeta::new(1, context.at, &())?,
                     id: combat_id.clone(),
@@ -1308,8 +1646,7 @@ fn advance_operation(
                     random_envelopes: Vec::new(),
                     causal_notes: vec!["contact confirmed at destination".to_owned()],
                 };
-                create(
-                    out,
+                staging.create(
                     combat_reference(&combat_id),
                     &combat,
                     "Create military contact",
@@ -1319,9 +1656,7 @@ fn advance_operation(
                     defender_state.meta.revision = defender_record.version + 1;
                     defender_state.meta.established_at = context.at;
                     defender_state.meta.semantic_digest = digest(&defender_state)?;
-                    upsert(
-                        view,
-                        out,
+                    staging.upsert(
                         force_reference(&defender),
                         &defender_state,
                         "Consume prepared ambush",
@@ -1329,7 +1664,7 @@ fn advance_operation(
                 }
             }
             schedule_tick(
-                out,
+                staging,
                 SimDuration::days(1),
                 Some(operation.id.clone()),
                 None,
@@ -1337,55 +1672,42 @@ fn advance_operation(
             )?;
         }
     } else if operation.phase == OperationPhase::Engaged {
-        resolve_combat_round(view, context, out, &mut operation)?;
+        resolve_combat_round(staging, context, &mut operation)?;
     }
     if force_changed {
         force.meta.revision = force_record.version + 1;
         force.meta.established_at = context.at;
         force.meta.semantic_digest = digest(&force)?;
         force.validate()?;
-        upsert(
-            view,
-            out,
-            force_reference(&force_id),
-            &force,
-            "Advance military force",
-        )?;
+        staging.upsert(force_reference(&force_id), &force, "Advance military force")?;
     }
     operation.meta.revision = record.version + 1;
     operation.meta.established_at = context.at;
     operation.meta.semantic_digest = digest(&operation)?;
-    upsert(
-        view,
-        out,
-        reference,
-        &operation,
-        "Advance military operation",
-    )?;
+    staging.upsert(reference, &operation, "Advance military operation")?;
     Ok(())
 }
 
 fn resolve_combat_round(
-    view: &SimulationView<'_>,
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
-    out: &mut Vec<BoundaryDirective>,
     operation: &mut OperationState,
 ) -> Result<(), CanwuError> {
-    let combat_id = CombatId::new(format!("canwu.military:combat:{}", operation.id))?;
+    let combat_id = combat_id(&operation.id)?;
     let combat_reference = combat_reference(&combat_id);
-    let combat_record = view
-        .typed_domain_record(&combat_reference)?
+    let combat_record = staging
+        .record(&combat_reference)?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "combat is unavailable"))?;
     let mut combat = combat_record.decode_payload::<CombatStateRecord>()?;
-    let attacker_record = view
-        .typed_domain_record(&force_reference(&combat.attacker))?
+    let attacker_record = staging
+        .record(&force_reference(&combat.attacker))?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "attacker is unavailable"))?;
-    let defender_record = view
-        .typed_domain_record(&force_reference(&combat.defender))?
+    let defender_record = staging
+        .record(&force_reference(&combat.defender))?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "defender is unavailable"))?;
     let mut attacker = attacker_record.decode_payload::<ForceStateRecord>()?;
     let mut defender = defender_record.decode_payload::<ForceStateRecord>()?;
-    let sample = view.random_range_for_operation(
+    let sample = staging.view.random_range_for_operation(
         &military_random_stream(),
         context
             .admitted_ingress
@@ -1407,13 +1729,13 @@ fn resolve_combat_round(
     let defender_loss = (attacker.actual_strength / 18).max(1) + ((999 - sample) % 8) as u32;
     let attacker_loss = attacker_loss.min(attacker.actual_strength);
     let defender_loss = defender_loss.min(defender.actual_strength);
-    attacker.actual_strength -= attacker_loss;
+    remove_losses(&mut attacker, attacker_loss);
     attacker.casualties = attacker.casualties.saturating_add(attacker_loss);
     attacker.morale_per_mille = attacker
         .morale_per_mille
         .saturating_sub(u16::try_from(attacker_loss / 2).unwrap_or(u16::MAX));
     attacker.fatigue_per_mille = attacker.fatigue_per_mille.saturating_add(35).min(1_000);
-    defender.actual_strength -= defender_loss;
+    remove_losses(&mut defender, defender_loss);
     defender.casualties = defender.casualties.saturating_add(defender_loss);
     defender.morale_per_mille = defender
         .morale_per_mille
@@ -1448,12 +1770,9 @@ fn resolve_combat_round(
         attacker.active_operation = None;
         defender.active_operation = None;
         if matches!(combat.result, Some(CombatResult::AttackerVictory)) {
-            let occupation_id = OccupationId::new(format!(
-                "canwu.military:occupation:{}",
-                operation.id.as_str()
-            ))?;
-            if view
-                .typed_domain_record(&occupation_reference(&occupation_id))?
+            let occupation_id = victory_occupation_id(&operation.id)?;
+            if staging
+                .record(&occupation_reference(&occupation_id))?
                 .is_none()
             {
                 let occupation = OccupationState {
@@ -1474,14 +1793,13 @@ fn resolve_combat_round(
                     policy_revision: 1,
                     pending_provider_outcomes: BTreeSet::new(),
                 };
-                create(
-                    out,
+                staging.create(
                     occupation_reference(&occupation_id),
                     &occupation,
                     "Establish military control after victory",
                 )?;
                 schedule_tick(
-                    out,
+                    staging,
                     SimDuration::days(1),
                     None,
                     Some(occupation_id),
@@ -1493,7 +1811,7 @@ fn resolve_combat_round(
         combat.round = combat.round.saturating_add(1);
         combat.stage = CombatStage::RoundResolved;
         schedule_tick(
-            out,
+            staging,
             SimDuration::days(1),
             Some(operation.id.clone()),
             None,
@@ -1518,23 +1836,21 @@ fn resolve_combat_round(
     combat.meta.revision = combat_record.version + 1;
     combat.meta.established_at = context.at;
     combat.meta.semantic_digest = digest(&combat)?;
-    upsert(view, out, combat_reference, &combat, "Resolve combat round")?;
+    staging.upsert(combat_reference, &combat, "Resolve combat round")?;
     attacker.meta.revision = attacker_record.version + 1;
     attacker.meta.established_at = context.at;
     attacker.meta.semantic_digest = digest(&attacker)?;
     defender.meta.revision = defender_record.version + 1;
     defender.meta.established_at = context.at;
     defender.meta.semantic_digest = digest(&defender)?;
-    upsert(
-        view,
-        out,
+    attacker.validate()?;
+    defender.validate()?;
+    staging.upsert(
         force_reference(&attacker.id),
         &attacker,
         "Apply attacker combat result",
     )?;
-    upsert(
-        view,
-        out,
+    staging.upsert(
         force_reference(&defender.id),
         &defender,
         "Apply defender combat result",
@@ -1542,15 +1858,27 @@ fn resolve_combat_round(
     Ok(())
 }
 
+/// Takes combat losses from subunits in ID order and removes any subunit that
+/// reaches zero, so subunit strengths keep adding up to the force strength.
+fn remove_losses(force: &mut ForceState, loss: u32) {
+    force.actual_strength -= loss;
+    let mut remaining = loss;
+    for unit in force.subunits.values_mut() {
+        let taken = unit.strength.min(remaining);
+        unit.strength -= taken;
+        remaining -= taken;
+    }
+    force.subunits.retain(|_, unit| unit.strength > 0);
+}
+
 fn advance_occupation_state(
-    view: &SimulationView<'_>,
+    staging: &mut Staging<'_, '_>,
     context: &BoundaryContext,
-    out: &mut Vec<BoundaryDirective>,
     id: &OccupationId,
 ) -> Result<(), CanwuError> {
     let reference = occupation_reference(id);
-    let record = view
-        .typed_domain_record(&reference)?
+    let record = staging
+        .record(&reference)?
         .ok_or_else(|| err(ErrorCode::DomainRecordNotFound, "occupation unavailable"))?;
     let mut occupation = record.decode_payload::<OccupationStateRecord>()?;
     occupation.security_per_mille = occupation.security_per_mille.saturating_add(25).min(1_000);
@@ -1605,20 +1933,14 @@ fn advance_occupation_state(
     occupation.meta.revision = record.version + 1;
     occupation.meta.established_at = context.at;
     occupation.meta.semantic_digest = digest(&occupation)?;
-    upsert(
-        view,
-        out,
-        reference,
-        &occupation,
-        "Advance occupation administration",
-    )?;
+    staging.upsert(reference, &occupation, "Advance occupation administration")?;
     if occupation.integration != IntegrationStage::Intergenerational {
         schedule_tick(
-            out,
+            staging,
             SimDuration::days(1),
             None,
             Some(id.clone()),
-            MilitaryOperationKey::new(format!("canwu.military:occupation-tick:{}", id.as_str()))?,
+            occupation_tick_key(id)?,
         )?;
     }
     Ok(())
@@ -1628,13 +1950,21 @@ fn materialize_reports(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let mut directives = Vec::new();
+    let mut reports: BTreeMap<PersonId, Vec<(String, KnowledgeRecordDraft)>> = BTreeMap::new();
     let kind = DomainRecordKind::for_type::<ForceStateRecord>();
     for record in view.domain_records_of_kind(&kind, 256)? {
         let force = record.decode_payload::<ForceStateRecord>()?;
         let Some(commander) = force.commander else {
             continue;
         };
+        // A dead person's ledger accepts no knowledge; publishing there would
+        // fail every boundary after the commander dies.
+        if view
+            .person_availability(commander)?
+            .is_some_and(|availability| availability.life == LifeState::Dead)
+        {
+            continue;
+        }
         let report = serde_json::json!({
             "force": force.id,
             "location": force.location,
@@ -1652,11 +1982,9 @@ fn materialize_reports(
                     "force evidence is unavailable",
                 )
             })?;
-        directives.push(BoundaryDirective::PublishKnowledge {
-            holder: KnowledgeHolderRef::Person(commander),
-            visibility: StateVisibility::SameBoundary,
-            producer_correlation: Some(format!("military-report:{}:{}", force.id, record.version)),
-            records: vec![KnowledgeRecordDraft {
+        reports.entry(commander).or_default().push((
+            format!("{}:{}", force.id, record.version),
+            KnowledgeRecordDraft {
                 schema: report_schema_id(),
                 subjects: vec![KnowledgeSubject {
                     role: "force".to_owned(),
@@ -1671,7 +1999,26 @@ fn materialize_reports(
                 },
                 supersedes: Vec::new(),
                 contradicts: Vec::new(),
-            }],
+            },
+        ));
+    }
+    // One batch per commander keeps the pass within the kernel's batch limit;
+    // commanders past that limit, in ID order, get no report this boundary.
+    let mut directives = Vec::new();
+    for (commander, forces) in reports
+        .into_iter()
+        .take(KnowledgeLimitsV1::CURRENT.batches_per_system_boundary)
+    {
+        let (sources, records): (Vec<String>, Vec<KnowledgeRecordDraft>) =
+            forces.into_iter().unzip();
+        directives.push(BoundaryDirective::PublishKnowledge {
+            holder: KnowledgeHolderRef::Person(commander),
+            visibility: StateVisibility::SameBoundary,
+            producer_correlation: Some(format!(
+                "military-report:{commander}:{}",
+                digest(&sources)?
+            )),
+            records,
             summary: "Publish actor-relative military force report".to_owned(),
         });
     }

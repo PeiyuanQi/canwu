@@ -133,6 +133,9 @@ impl MilitaryRulesetV1 {
             || self.branch_profiles.is_empty()
             || self.tactics.is_empty()
             || self.terrain_modifiers.is_empty()
+            || self.branch_profiles.len() > MAX_COMPOSITION_ENTRIES
+            || self.tactics.len() > MAX_COMPOSITION_ENTRIES
+            || self.terrain_modifiers.len() > MAX_COMPOSITION_ENTRIES
             || self.combat.max_rounds == 0
             || self.occupation.max_resistance_per_mille > 1_000
         {
@@ -649,6 +652,24 @@ impl ForceState {
         if subunit_strength != u64::from(self.actual_strength) {
             return Err(invalid(
                 "subunit strength does not reconcile with force strength",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl OperationState {
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        let participants: BTreeSet<&ForceId> =
+            self.forces.iter().chain(&self.opposing_force).collect();
+        let listed = self.forces.len() + usize::from(self.opposing_force.is_some());
+        if self.meta.schema_version != SCHEMA_VERSION
+            || self.forces.is_empty()
+            || listed > MAX_OPERATION_PARTICIPANTS
+            || participants.len() != listed
+        {
+            return Err(invalid(
+                "operation participants are empty, repeated, or over the limit",
             ));
         }
         Ok(())

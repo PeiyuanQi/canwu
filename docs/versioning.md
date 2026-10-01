@@ -27,7 +27,8 @@ object and rejects a wire value whose canonical re-encoding changes shape.
 
 Version 0.13.1 is a patch release. Snapshot format 8, commitment format 4,
 checkpoint/evidence-journal format 4, and public type shapes are unchanged. It
-adds one public method, `SimulationView::replay_stable_domain_record_version`,
+adds `SimulationView::replay_stable_domain_record_version`,
+`canwu_military::MILITARY_REJECTION_EVENT`, and `OperationState::validate`,
 and fixes these behaviors, which are visible to existing runs:
 
 - A `Deferred` resolution no longer removes its ticket from the decision
@@ -73,13 +74,34 @@ and fixes these behaviors, which are visible to existing runs:
   assessment can no longer name a superseded version that the scenario did not
   provide. Generic history-research citations, such as events and boundaries,
   are still checked against retained evidence.
+- `canwu-military` no longer panics or jams its queue. A successful special
+  operation completes and returns the force to its start as `Ready`, instead
+  of panicking. Admission returns only errors the engine records as rejected
+  attempts. A command that fails in phase 7, including a stale
+  `expected_force_revision`, a duplicate ID, a missing opposing force, or an
+  over-long operation ID, becomes a `Rejected` ledger outcome and a
+  `canwu.military.ingress_rejected.v1` event (`MILITARY_REJECTION_EVENT`); a
+  bad provider acknowledgement only emits that event. Two provider
+  acknowledgements due in one boundary now compose, reports skip dead
+  commanders and send one knowledge batch per commander (at most 64
+  commanders per boundary), and combat losses come off subunits in ID order,
+  so a force that has fought still validates. Under 0.13.0 each of these
+  failed the boundary, and every later boundary failed the same way. Authority
+  is tightened: `CreateForce` must name the issuer as commander, force and
+  occupation commands require the current commander, `AssignCommander`
+  rejects a missing or dead commander, `AdvanceTick` sent as a command is
+  rejected, and hosts can no longer enqueue the internal `military_command_v1`
+  packet. `MAX_RECORDS` (4,096 records per kind over a run),
+  `MAX_COMPOSITION_ENTRIES`, and `MAX_OPERATION_PARTICIPANTS` (distinct
+  forces) are now enforced.
 
-The production, history-research, and fiscal plugin semantic identities
-change. The engine version is part of every checkpoint hash, so every run's
-checkpoint hashes differ from 0.13.0; a run in which a deferred ticket was
-still open when a boundary passed its deadline also records the ticket as
-`Expired`, which changes its decision commitment. The exact engine-version
-check rejects 0.13.0 saves; retain the 0.13.0 engine to read them.
+The production, history-research, fiscal, and military plugin semantic
+identities change. The engine version is part of every checkpoint hash, so
+every run's checkpoint hashes differ from 0.13.0; a run in which a deferred
+ticket was still open when a boundary passed its deadline also records the
+ticket as `Expired`, which changes its decision commitment. The exact
+engine-version check rejects 0.13.0 saves; retain the 0.13.0 engine to read
+them.
 
 Version 0.13.0 shipped the second and final release group of the
 [downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md);
