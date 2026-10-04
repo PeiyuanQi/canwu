@@ -1,0 +1,4 @@
+# Downloaded fonts and render outputs are reproducible; see README.md.
+fonts/
+build/
+__pycache__/
