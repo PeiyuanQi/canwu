@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>参伍引擎 封面</title>
+<!-- Bilibili covers. Open cover.html?ratio=16x9 (1920x1080) or cover.html?ratio=4x3 (1440x1080).
+     Key content stays out of the bottom strip, where feed cards overlay play stats. -->
+<style>
+@font-face { font-family: "CW Serif"; font-weight: 600; src: url(fonts/NotoSerifSC-600.ttf); }
+@font-face { font-family: "CW Serif"; font-weight: 900; src: url(fonts/NotoSerifSC-900.ttf); }
+@font-face { font-family: "CW Sans"; font-weight: 500; src: url(fonts/NotoSansSC-500.ttf); }
+@font-face { font-family: "CW Sans"; font-weight: 700; src: url(fonts/NotoSansSC-700.ttf); }
+@font-face { font-family: "CW Mono"; font-weight: 400; src: url(fonts/JetBrainsMono-400.ttf); }
+@font-face { font-family: "CW Mono"; font-weight: 600; src: url(fonts/JetBrainsMono-600.ttf); }
+:root { --paper: #F3EEE3; --paper-hi: #F8F4EC; --ink: #161412; --ink2: #3B3631; --mist: #8C857A; --red: #B5352A; --gold: #D9A55B; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { height: 1080px; overflow: hidden; background: var(--paper); font-family: "CW Sans", sans-serif; color: var(--ink); }
+body.r169 { width: 1920px; }
+body.r43 { width: 1440px; }
+#stage { position: relative; width: 100%; height: 1080px; overflow: hidden; background-size: cover; }
+.abs { position: absolute; }
+svg { overflow: visible; }
+.bloom { position: absolute; border-radius: 50%; filter: url(#rough);
+  background: radial-gradient(circle, rgba(22,20,18,.95) 0%, rgba(22,20,18,.55) 34%, rgba(22,20,18,0) 68%); }
+.banner { position: absolute; mix-blend-mode: multiply; }
+.headline { position: absolute; font-family: "CW Serif"; font-weight: 900; letter-spacing: .02em; line-height: 1.06; }
+.headline em { font-style: normal; color: var(--red); }
+.subline { position: absolute; font-weight: 500; color: var(--ink2); letter-spacing: .06em; }
+.chips { position: absolute; display: flex; gap: 18px; }
+.chip { font-weight: 700; font-size: 36px; padding: 8px 26px; border: 3px solid var(--ink); border-radius: 999px; background: var(--paper-hi); white-space: nowrap; }
+.chip.red { border-color: var(--red); color: var(--red); }
+.seal { position: absolute; background: var(--red); color: var(--paper-hi); font-family: "CW Serif"; font-weight: 900; display: flex;
+  align-items: center; justify-content: center; border-radius: 8px; filter: url(#brush); writing-mode: vertical-rl; letter-spacing: .05em; }
+.code { position: absolute; background: #1C1A1D; border-radius: 18px; box-shadow: 0 40px 80px rgba(40,25,10,.35); overflow: hidden; }
+.code .bar { height: 54px; display: flex; align-items: center; gap: 12px; padding: 0 24px; border-bottom: 1px solid rgba(239,232,218,.08); }
+.code .bar i { width: 14px; height: 14px; border-radius: 50%; background: rgba(239,232,218,.2); }
+.code .bar span { margin-left: 10px; font-family: "CW Mono"; font-size: 20px; color: #8F887C; }
+.code pre { font-family: "CW Mono", "CW Sans"; font-size: 25px; line-height: 44px; color: #EFE8DA; padding: 24px 32px; white-space: pre; }
+.code .kw { color: var(--gold); font-weight: 600; }
+.code .fn { color: #E9C98F; }
+.code .cm { color: #8F887C; font-family: "CW Sans"; }
+.code .q { color: #E0705F; }
+.hashcard { position: absolute; background: var(--paper-hi); border: 3px solid var(--ink); border-radius: 12px; box-shadow: 0 30px 60px rgba(40,25,10,.28); padding: 26px 34px; }
+.hashcard h3 { font-family: "CW Serif"; font-weight: 900; font-size: 38px; margin-bottom: 14px; display: flex; justify-content: space-between; align-items: baseline; }
+.hashcard h3 small { font-family: "CW Sans"; font-weight: 700; font-size: 26px; color: var(--red); }
+.hrow { display: flex; align-items: center; gap: 18px; height: 58px; }
+.hrow b { width: 136px; font-family: "CW Serif"; font-weight: 600; font-size: 30px; }
+.hrow code { font-family: "CW Mono"; font-size: 26px; color: var(--red); flex: 1; }
+.hrow i { width: 42px; height: 42px; border-radius: 50%; background: var(--red); color: var(--paper-hi); font-style: normal; font-weight: 700;
+  font-size: 26px; display: flex; align-items: center; justify-content: center; }
+
+/* 16:9 */
+.r169 #bloom { left: 900px; top: -120px; width: 1300px; height: 1300px; opacity: .1; }
+.r169 .banner { left: 104px; top: 70px; width: 780px; }
+.r169 .headline { left: 128px; top: 336px; font-size: 172px; }
+.r169 .subline { left: 136px; top: 728px; font-size: 44px; }
+.r169 .chips { left: 132px; top: 812px; }
+.r169 .code { left: 1090px; top: 150px; width: 760px; height: 470px; transform: rotate(-3deg); }
+.r169 .hashcard { left: 1170px; top: 560px; width: 640px; transform: rotate(2deg); }
+.r169 .seal { left: 1738px; top: 84px; width: 118px; height: 118px; font-size: 44px; transform: rotate(-8deg); }
+
+/* 4:3 */
+.r43 #bloom { left: 120px; top: -160px; width: 1200px; height: 1200px; opacity: .08; }
+.r43 .banner { left: 290px; top: 128px; width: 860px; }
+.r43 .headline { left: 0; right: 0; top: 452px; text-align: center; font-size: 156px; }
+.r43 .subline { left: 0; right: 0; top: 650px; text-align: center; font-size: 48px; }
+.r43 .chips { left: 0; right: 0; top: 750px; justify-content: center; }
+.r43 .seal { left: 1196px; top: 150px; width: 112px; height: 112px; font-size: 42px; transform: rotate(-8deg); }
+.r43 .code, .r43 .hashcard { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <svg width="0" height="0" style="position:absolute">
+    <defs>
+      <filter id="rough" x="-25%" y="-25%" width="150%" height="150%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.011" numOctaves="3" seed="7" result="n"/>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="70" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+      <filter id="brush" x="-8%" y="-8%" width="116%" height="116%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.09" numOctaves="2" seed="3" result="n"/>
+        <feDisplacementMap in="SourceGraphic" in2="n" scale="6" xChannelSelector="R" yChannelSelector="G"/>
+      </filter>
+      <filter id="mtnblur" x="-10%" y="-50%" width="120%" height="200%"><feGaussianBlur stdDeviation="6"/></filter>
+      <linearGradient id="mtnGrad" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#161412" stop-opacity="1"/><stop offset="1" stop-color="#161412" stop-opacity="0"/>
+      </linearGradient>
+    </defs>
+  </svg>
+  <div class="bloom" id="bloom"></div>
+  <svg class="abs" id="mtn" style="left:0;top:0" width="100%" height="1080"></svg>
+  <img class="banner" src="../../branding/canwu-banner-zh-cn.png" alt="">
+  <div class="headline" id="headline"></div>
+  <div class="subline">每个角色，只看见自己知道的世界</div>
+  <div class="chips"><span class="chip">Rust</span><span class="chip red">确定性重放</span><span class="chip">AI 智能体</span></div>
+  <div class="code">
+    <div class="bar"><i></i><i></i><i></i><span>agent_loop.rs</span></div>
+<pre><b class="cm">// 读取该角色知道的内容</b>
+<b class="kw">let</b> viewer = canwu.<b class="fn">viewer_for_actor</b>(actor)<b class="q">?</b>;
+<b class="kw">let</b> knowledge = viewer.<b class="fn">query_knowledge</b>(&amp;q)<b class="q">?</b>;
+
+<b class="cm">// 提交类型化命令，推进模拟时间</b>
+canwu.<b class="fn">enqueue_command</b>(time, 0, request)<b class="q">?</b>;
+canwu.<b class="fn">advance_canonical</b>(duration)<b class="q">?</b>;</pre>
+  </div>
+  <div class="hashcard">
+    <h3>检查点哈希<small>✓ 完全一致</small></h3>
+    <div class="hrow"><b>读档</b><code>d4c5e270…bd7627ce</code><i>✓</i></div>
+    <div class="hrow"><b>派生分支</b><code>d4c5e270…bd7627ce</code><i>✓</i></div>
+    <div class="hrow"><b>重放</b><code>d4c5e270…bd7627ce</code><i>✓</i></div>
+  </div>
+  <div class="seal">开源</div>
+</div>
+<script>
+'use strict';
+const q = new URLSearchParams(location.search);
+const ratio = q.get('ratio') === '4x3' ? '4x3' : '16x9';
+document.body.className = ratio === '4x3' ? 'r43' : 'r169';
+const W = ratio === '4x3' ? 1440 : 1920, H = 1080;
+document.getElementById('headline').innerHTML = ratio === '4x3'
+  ? '可<em>重放</em>的历史模拟'
+  : '可<em>重放</em>的<br>历史模拟';
+
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+}
+// Same rice-paper recipe as the video, so the cover matches its look.
+function makePaper(w, h, seed) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); const r = rng(seed);
+  g.fillStyle = '#F3EEE3'; g.fillRect(0, 0, w, h);
+  for (let i = 0; i < 160; i++) {
+    const x = r() * w, y = r() * h, rad = 90 + r() * 420, a = 0.022 * r();
+    const grd = g.createRadialGradient(x, y, 0, x, y, rad);
+    grd.addColorStop(0, r() < 0.45 ? `rgba(150,120,80,${a})` : `rgba(255,255,255,${a * 3})`); grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd; g.fillRect(x - rad, y - rad, rad * 2, rad * 2);
+  }
+  for (let i = 0; i < 1100; i++) {
+    const x = r() * w, y = r() * h, l = 8 + r() * 46, ang = r() * Math.PI * 2;
+    g.strokeStyle = `rgba(110,90,60,${0.025 + r() * 0.05})`; g.beginPath(); g.moveTo(x, y);
+    g.quadraticCurveTo(x + Math.cos(ang) * l * 0.5 + (r() - 0.5) * 12, y + Math.sin(ang) * l * 0.5 + (r() - 0.5) * 12, x + Math.cos(ang) * l, y + Math.sin(ang) * l);
+    g.stroke();
+  }
+  const v = g.createRadialGradient(w / 2, h / 2, h * 0.35, w / 2, h / 2, h * 1.05);
+  v.addColorStop(0, 'rgba(0,0,0,0)'); v.addColorStop(1, 'rgba(80,60,35,0.11)');
+  g.fillStyle = v; g.fillRect(0, 0, w, h);
+  return c.toDataURL('image/jpeg', 0.95);
+}
+function ridge(r, baseY, amp, rough, w) {
+  const n = 48, pts = [];
+  const f1 = 0.6 + r() * 1.4, f2 = 2 + r() * 3, ph1 = r() * 6, ph2 = r() * 6;
+  for (let i = 0; i <= n; i++) {
+    const x = -60 + ((w + 120) * i) / n;
+    pts.push([x, baseY - amp * (0.55 * Math.sin(i / n * Math.PI * f1 + ph1) + 0.3 * Math.sin(i / n * Math.PI * f2 + ph2) + rough * (r() - 0.5))]);
+  }
+  let d = `M -60 1100 L ${pts[0][0]} ${pts[0][1]}`;
+  for (let i = 1; i < pts.length; i++) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i]; d += ` Q ${x0} ${y0} ${(x0 + x1) / 2} ${(y0 + y1) / 2}`; }
+  return d + ` L ${w + 60} 1100 Z`;
+}
+async function init() {
+  document.getElementById('stage').style.backgroundImage = `url(${makePaper(W, H, 4)})`;
+  const svg = document.getElementById('mtn'), r = rng(27);
+  for (const [y, amp, rough, op] of [[900, 110, 0.4, 0.06], [960, 80, 0.5, 0.09], [1030, 55, 0.6, 0.13]]) {
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', ridge(r, y, amp, rough, W)); p.setAttribute('fill', 'url(#mtnGrad)');
+    p.setAttribute('opacity', op); p.setAttribute('filter', 'url(#mtnblur)'); svg.appendChild(p);
+  }
+  await Promise.all(['600 20px "CW Serif"', '900 20px "CW Serif"', '500 20px "CW Sans"', '700 20px "CW Sans"', '400 20px "CW Mono"', '600 20px "CW Mono"']
+    .map(f => document.fonts.load(f, '参伍abc')));
+  await document.fonts.ready;
+  await Promise.all(Array.from(document.images).map(i => i.complete ? null : new Promise(res => { i.onload = i.onerror = res; })));
+}
+window.ready = init();
+</script>
+</body>
+</html>

@@ -15,6 +15,8 @@ re-rendered:
 | `music.py` | The original soundtrack, synthesized from code (no samples). |
 | `render.mjs` | Renders frames with headless Chromium and muxes them with the music into an MP4 and an SRT. |
 | `fetch_fonts.py` | Downloads the SIL OFL fonts the scenes use into `fonts/`. |
+| `cover.html` | Bilibili covers in the video's style; `?ratio=16x9` or `?ratio=4x3`. |
+| `canwu-cover-16x9.jpg`, `canwu-cover-4x3.jpg` | The rendered covers (1920×1080 and 1440×1080). |
 
 ## Storyboard
 
@@ -58,10 +60,40 @@ Outputs land in `build/` (ignored by git): `canwu-promo-zh-cn.mp4` and
   add `--skip-frames` to re-mux existing frames after changing the music.
 - Serve this folder over HTTP and open `scenes.html?play` to preview in real
   time, or `scenes.html?t=42` to inspect a single moment.
+- `node render.mjs --covers` writes `build/canwu-cover-16x9.jpg` and
+  `build/canwu-cover-4x3.jpg`.
 
 When you change subtitles or scene timing, edit `timeline.json`; the scenes,
 the SRT, and the music's tempo all read it. Keep Chinese copy aligned with
 [`docs/terminology.md`](../../../docs/terminology.md).
+
+## Publishing on Bilibili
+
+Bilibili asks for a 4:3 cover, shown in the mobile feed, and a 16:9 cover for
+other placements. Upload `canwu-cover-4x3.jpg` and `canwu-cover-16x9.jpg`. Both
+keep key content out of the bottom strip, where feed cards overlay play counts
+and duration.
+
+- Title: 【开源】参伍引擎：用 Rust 构建可重放的历史模拟，每个角色只看见自己知道的世界
+- Subtitles: the video already has burned-in subtitles, so don't also upload
+  the SRT as closed captions, or viewers will see them twice.
+- Tags: 参伍引擎、Rust、开源项目、历史模拟、游戏引擎、大战略游戏、AI智能体、数字人文
+
+Description:
+
+```text
+参伍引擎（Canwu）是用 Rust 编写的开源无界面历史模拟引擎。它负责推进时间、验证命令、
+记录事件与因果，并分别记录每个角色掌握的信息。
+
+· 确定性重放：读档、派生分支、重放，检查点哈希都与原运行一致
+· 每个角色所知不同：世界的真实状态与角色知识分开保存
+· 所有客户端共用一套 API：游戏、研究工具和 AI 智能体调用同一组接口
+
+开源许可：Apache License 2.0，商业使用免版税
+官网：https://canwu.org
+源码：https://github.com/PeiyuanQi/canwu
+配乐为原创，由代码合成。
+```
 
 ## Credits and licenses
 

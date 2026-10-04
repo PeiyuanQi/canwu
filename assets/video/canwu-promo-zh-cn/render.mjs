@@ -2,7 +2,7 @@
 // frames with the generated soundtrack into an H.264/AAC MP4 and writes an SRT.
 //
 // Usage: node render.mjs [--workers N] [--from SECONDS] [--to SECONDS]
-//                        [--stills t1,t2,...] [--skip-frames]
+//                        [--stills t1,t2,...] [--skip-frames] [--covers]
 // Requires: Node 18+, the `playwright` package, ffmpeg, and build/music.wav
 // (python3 music.py). Run python3 fetch_fonts.py once first.
 
@@ -82,6 +82,22 @@ if (stills) {
     await page.evaluate(tt => window.renderAt(tt), t);
     await page.screenshot({ path: join(build, `still-${t.toFixed(2)}.png`) });
     console.log(`still ${t}`);
+  }
+  await browser.close();
+  process.exit(0);
+}
+
+if (args.includes('--covers')) {
+  // Bilibili covers: 16:9 for desktop placements, 4:3 for the mobile feed.
+  for (const [ratio, width] of [['16x9', 1920], ['4x3', 1440]]) {
+    const page = await browser.newPage({ viewport: { width, height: 1080 }, deviceScaleFactor: 1 });
+    page.on('pageerror', e => console.error('page error:', e.message));
+    await page.goto(`${pathToFileURL(join(here, 'cover.html')).href}?ratio=${ratio}`);
+    await page.evaluate(() => window.ready);
+    const path = join(build, `canwu-cover-${ratio}.jpg`);
+    await page.screenshot({ path, type: 'jpeg', quality: 92 });
+    console.log(`wrote ${path}`);
+    await page.close();
   }
   await browser.close();
   process.exit(0);
