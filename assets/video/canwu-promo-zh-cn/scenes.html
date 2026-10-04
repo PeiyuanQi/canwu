@@ -234,8 +234,6 @@ pre .sec { color: var(--gold); }
 #ou-tag2 { left: 0; right: 0; top: 742px; text-align: center; font-size: 30px; color: var(--ink2); letter-spacing: .08em; }
 #ou-links { left: 0; right: 0; top: 812px; display: flex; justify-content: center; align-items: baseline; gap: 34px; }
 #ou-links .serif { font-weight: 600; font-size: 42px; color: var(--red); letter-spacing: .04em; }
-#ou-links .mono { font-size: 30px; color: var(--ink2); }
-#ou-links i { width: 8px; height: 8px; border-radius: 50%; background: var(--mist); display: inline-block; transform: translateY(-8px); }
 
 .inkdisk { position: absolute; width: 2600px; height: 2600px; border-radius: 50%; background: var(--ink); filter: url(#rough); opacity: 0; z-index: 40; }
 .inkhole { position: absolute; left: 0; top: 0; z-index: 40; pointer-events: none; }
@@ -494,7 +492,7 @@ pre .sec { color: var(--gold); }
     <img id="ou-banner" src="../../branding/canwu-banner-zh-cn.png" alt="">
     <div class="abs chars" id="ou-tag">构建可重放的历史模拟</div>
     <div class="abs" id="ou-tag2">让每个玩家只看到自己角色知道的世界</div>
-    <div class="abs" id="ou-links"><span class="serif">canwu.org</span><i></i><span class="mono">github.com/PeiyuanQi/canwu</span></div>
+    <div class="abs" id="ou-links"><span class="serif">canwu.org</span></div>
     <svg class="inkhole" id="ou-hole" width="1920" height="1080"><g filter="url(#rough)"><path fill="#161412" fill-rule="evenodd"/></g></svg>
   </section>
 
@@ -1042,6 +1040,7 @@ function setupCausality() {
     const d = edge(a, b);
     const base = svgEl('path', { d, stroke: '#161412', 'stroke-width': 3, fill: 'none', 'marker-end': 'url(#arrow)' }, svg);
     const red = svgEl('path', { d: edge(a, b), stroke: '#B5352A', 'stroke-width': 5, fill: 'none' }, svg);
+    red.style.opacity = 0;
     return { a, b, t0, base, red };
   });
   S.caTrace = [5, 4, 3, 1, 0];
@@ -1173,7 +1172,8 @@ R.agents = (t) => {
 
 const ST_TOML = `[dependencies]
 canwu-api = "=0.13.1"`;
-const ST_CMDS = ['git clone https://github.com/PeiyuanQi/canwu', 'cd canwu', 'cargo run -p canwu-reference-world --example starter'];
+const ST_HINT = '# starter 示例在参伍仓库中，仓库地址见 canwu.org';
+const ST_CMDS = ['cargo run -p canwu-reference-world --example starter'];
 const ST_OUT = 'army_location=3 checkpoint=d4c5e270…bd7627ce';
 R.start = (t) => {
   css($('#s-start .chapter'), { o: p(t, 0.1, 0.6) });
@@ -1187,7 +1187,7 @@ R.start = (t) => {
   rise($('#st-s2'), t, 4.85, 0.6, 16, 4);
   rise($('#st-term'), t, 5.0, 0.7, 26, 5);
   // terminal typing: commands typed one after another with short pauses
-  let html = '', clock = 5.2, allDone = true;
+  let html = `<b class="cm">${esc(ST_HINT)}</b>\n`, clock = 5.8, allDone = true;
   const cps = 48;
   for (const c of ST_CMDS) {
     const startAt = clock;

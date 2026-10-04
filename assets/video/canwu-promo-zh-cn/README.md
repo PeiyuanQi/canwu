@@ -17,6 +17,8 @@ re-rendered:
 | `fetch_fonts.py` | Downloads the SIL OFL fonts the scenes use into `fonts/`. |
 | `cover.html` | Bilibili covers in the video's style; `?ratio=16x9` or `?ratio=4x3`. |
 | `canwu-cover-16x9.jpg`, `canwu-cover-4x3.jpg` | The rendered covers (1920×1080 and 1440×1080). |
+| `canwu-promo-zh-cn.mp4` | The rendered video, stored with Git LFS. |
+| `canwu-promo-zh-cn.srt` | The subtitle cues as an SRT sidecar. |
 
 ## Storyboard
 
@@ -32,10 +34,10 @@ re-rendered:
 | 0:53 | causality | Causal evidence traced back from a result to its origin. |
 | 1:02 | extensions | Domain-neutral core with optional domain extensions. |
 | 1:12 | agents | Agents and players share one API (actor-relative reads, typed commands). |
-| 1:22 | start | Add `canwu-api = "=0.13.1"`, run the starter example. |
+| 1:22 | start | Add `canwu-api = "=0.13.1"`, run the starter example in the repository linked from canwu.org. |
 | 1:31 | skills | `$canwu-game-create`, `$canwu-history-create`, `$canwu-engine-usage`. |
 | 1:38 | why | Strategy games, historical research, agent environments, education; Apache 2.0. |
-| 1:48 | outro | Logo, canwu.org, GitHub. |
+| 1:48 | outro | Logo and canwu.org. |
 
 The knowledge, command, and causality scenes use illustrative examples; the
 replay hash and terminal output come from running
@@ -53,7 +55,8 @@ node render.mjs
 ```
 
 Outputs land in `build/` (ignored by git): `canwu-promo-zh-cn.mp4` and
-`canwu-promo-zh-cn.srt`. Useful options:
+`canwu-promo-zh-cn.srt`. To update the published render, copy both next to
+this README; `.gitattributes` stores the MP4 with Git LFS. Useful options:
 
 - `node render.mjs --stills 12.5,40` writes PNG stills for quick inspection.
 - `node render.mjs --from 30 --to 40` re-renders only that range of frames;
@@ -65,7 +68,9 @@ Outputs land in `build/` (ignored by git): `canwu-promo-zh-cn.mp4` and
 
 When you change subtitles or scene timing, edit `timeline.json`; the scenes,
 the SRT, and the music's tempo all read it. Keep Chinese copy aligned with
-[`docs/terminology.md`](../../../docs/terminology.md).
+[`docs/terminology.md`](../../../docs/terminology.md). The video points viewers
+to canwu.org rather than to a repository URL, so it stays correct if the
+repository moves.
 
 ## Publishing on Bilibili
 
@@ -91,7 +96,6 @@ Description:
 
 开源许可：Apache License 2.0，商业使用免版税
 官网：https://canwu.org
-源码：https://github.com/PeiyuanQi/canwu
 配乐为原创，由代码合成。
 ```
 
