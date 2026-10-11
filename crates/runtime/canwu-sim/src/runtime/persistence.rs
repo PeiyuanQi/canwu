@@ -1763,7 +1763,9 @@ pub struct CheckpointJournal {
 /// commitments, idempotency, and continuation behavior while retaining only
 /// the evidence appended since the most recent seal. Every returned segment is
 /// part of the permanent replay record and must be stored contiguously by the
-/// caller.
+/// caller. A restored runtime retains its whole supplied prefix, so its first
+/// seal starts at the zero cut and replaces every earlier segment for later
+/// checkpoints.
 pub struct CompactedSimulation {
     simulation: Simulation,
     committed_seal_tokens: BTreeSet<String>,
@@ -1897,7 +1899,8 @@ impl CompactedSimulation {
     /// The runtime changes only after the segment is fully constructed and its
     /// continuation indexes are prepared. An empty retained tail returns
     /// `None`. The caller owns persistence and must keep all non-empty segments
-    /// in exact cursor order for save restoration or replay.
+    /// in exact cursor order for save restoration or replay. After a restore,
+    /// the first seal starts at the zero cut and replaces the restored prefix.
     pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
         if self
             .simulation
@@ -2341,6 +2344,7 @@ impl CompactedSimulation {
 
     /// Restores and validates a checkpoint plus its archive, then enters the
     /// compact interface with that evidence retained until the caller seals it.
+    /// The next seal starts at the zero cut and replaces the supplied segments.
     pub fn from_checkpoint_and_journal(
         checkpoint: SimulationCheckpoint,
         segments: Vec<EvidenceJournalSegment>,
@@ -2360,6 +2364,33 @@ impl CompactedSimulation {
         }
         simulation.ensure_runtime_ready()?;
         simulation.into_compacted()
+    }
+
+    /// Restores a paged checkpoint plus its contiguous evidence prefix, then
+    /// enters the compact interface with that evidence retained until the
+    /// caller seals it. The next seal starts at the zero cut and replaces the
+    /// supplied segments.
+    pub fn from_paged_checkpoint_and_journal(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Simulation::from_paged_checkpoint_and_journal(checkpoint, provider, segments)?
+            .into_compacted()
+    }
+
+    /// Restores a paged compact runtime and rehydrates its exact executable
+    /// plugins.
+    pub fn from_paged_checkpoint_and_journal_with_plugins(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Simulation::from_paged_checkpoint_and_journal_with_plugins(
+            checkpoint, provider, segments, plugins,
+        )?
+        .into_compacted()
     }
 }
 
@@ -3450,6 +3481,23 @@ impl Simulation {
         compact_checkpoint.state.decisions = decisions;
         let mut simulation = Self::from_checkpoint_and_journal(compact_checkpoint, segments)?;
         simulation.state.current.domain_records = domain_records;
+        Ok(simulation)
+    }
+
+    /// Restores a paged checkpoint and its contiguous evidence prefix, then
+    /// rehydrates its exact executable plugin contracts.
+    pub fn from_paged_checkpoint_and_journal_with_plugins(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        let mut simulation =
+            Self::from_paged_checkpoint_and_journal(checkpoint, provider, segments)?;
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        simulation.ensure_runtime_ready()?;
         Ok(simulation)
     }
 

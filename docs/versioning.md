@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.13.1`. A live `SimulationSnapshot` has:
+The workspace version is `0.13.2`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,24 @@ The workspace version is `0.13.1`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.13.2 is a patch release. It adds public API calls that write and
+restore the paged checkpoint, which `canwu-sim` already implemented:
+`Canwu::prepare_paged_checkpoint`, `Canwu::from_paged_checkpoint_and_journal`,
+and `Canwu::from_paged_checkpoint_and_journal_with_plugins`; the same three
+calls and `journal_segment_since` on `CompactedCanwu`; and in `canwu-sim`,
+`CompactedSimulation::from_paged_checkpoint_and_journal`, its `_with_plugins`
+form, and `Simulation::from_paged_checkpoint_and_journal_with_plugins`.
+[Format 8 state pages and decision history](#format-8-state-pages-and-decision-history)
+describes them. Every change is additive and source-compatible. Snapshot
+format 8, commitment format 4, checkpoint/evidence-journal format 4,
+paged-checkpoint envelope format 4, public type shapes, and the hash
+algorithms are unchanged. The engine version is part of every checkpoint hash,
+so every run's checkpoint hashes, and the paged roots that record them, differ
+from 0.13.1 exactly as they do across any version change, and first-party
+plugins that take their plugin version from the crate version report a new
+one. The exact engine-version check rejects 0.13.1 saves; retain the 0.13.1
+engine to read them.
 
 Version 0.13.1 is a patch release. Snapshot format 8, commitment format 4,
 checkpoint/evidence-journal format 4, and public type shapes are unchanged. It
@@ -397,6 +415,41 @@ The paged-checkpoint envelope format is `4`. It stores a compact
 checkpoint whose journal cut is non-empty requires the exact contiguous
 evidence prefix through `from_paged_checkpoint_and_journal`; the empty-journal
 shorthand is valid only for a zero cut.
+
+Hosts write and restore paged checkpoints through the public API.
+`Canwu::prepare_paged_checkpoint(source, provider)` returns a
+`PreparedPagedSimulationCheckpoint` whose delta leaves out the pages the
+provider already holds. A runtime restored from a paged checkpoint also
+leaves out the archived decision pages it never loaded, so its provider must
+already hold every page of the checkpoint it was restored from.
+`store_and_verify` stores the delta and checks only its new pages and the
+root; `StatePageRetentionLedger::prepare` and `verify` check a checkpoint's
+complete page set.
+`Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments)`
+and `from_paged_checkpoint_and_journal_with_plugins` restore it from the
+provider and the evidence prefix, which a host can collect as it goes with
+`journal_segment_since`. Every segment must advance at least one journal, so
+a host skips a segment whose start equals its end. Preparing changes nothing:
+the authoritative revision, the checkpoint hash, and every journal are
+unchanged. The checkpoint carries no evidence records; apart from compact
+continuation metadata, such as one archived-segment header per seal, its size
+follows current state rather than the length of the run, and each delta holds
+only the changed pages. Preparing can still read retained evidence, and a
+restore still validates the whole evidence prefix.
+
+`CompactedCanwu` offers the same calls. Its evidence prefix is the host's
+sealed segments in cursor order followed by `journal_segment_since` the end of
+the last one. A compact restore needs the `_with_plugins` form whenever the
+checkpoint names a plugin, and keeps the whole supplied prefix as retained
+evidence. Its next seal therefore returns one segment from the zero cut that
+replaces every earlier sealed segment: prefixes for later checkpoints start
+from that segment, and only checkpoints taken before it still need the
+earlier ones. The flat `CompactedCanwu::from_checkpoint_and_journal` behaves
+the same way. A paged root also commits to which evidence is sealed, so it is
+not a state identity: any restore from sealed segments, through `Canwu` or
+`CompactedCanwu`, keeps the original checkpoint hash but gets a different
+paged root, which a later seal does not bring back. A runtime that has never
+sealed evidence restores to the same paged root.
 
 Decision history is queried by `DecisionHistoryKey` (`Ticket`, `Attempt`, or
 `Trace`) and reports `Hot`, `Archived`, `Unresolved`, or `Absent` through

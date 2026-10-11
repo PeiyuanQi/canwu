@@ -545,6 +545,30 @@ impl Canwu {
         self.simulation.checkpoint_journal_json()
     }
 
+    /// Prepares a content-addressed paged checkpoint of current state without
+    /// changing authoritative state, the revision, or any journal.
+    ///
+    /// The checkpoint carries no append-only evidence; it names the evidence
+    /// cut that [`Self::evidence_cursor`] reports. Pages already readable
+    /// from `provider` are left out of the returned delta, so a provider that
+    /// holds an earlier checkpoint's pages receives only the changed ones. A
+    /// runtime restored from a paged checkpoint also leaves out the archived
+    /// decision pages it never loaded, whether or not `provider` holds them,
+    /// so `provider` must already hold every page of the checkpoint it was
+    /// restored from. `source`, when given, is the earlier checkpoint whose
+    /// root the delta continues and must be readable from `provider`.
+    /// [`PreparedPagedSimulationCheckpoint::store_and_verify`] stores the delta
+    /// but checks only its new pages and the root; check the checkpoint's
+    /// complete page set with [`StatePageRetentionLedger::prepare`] and
+    /// [`StatePageRetentionLedger::verify`] before relying on it.
+    pub fn prepare_paged_checkpoint(
+        &self,
+        source: Option<&PagedSimulationCheckpoint>,
+        provider: &dyn StatePageProvider,
+    ) -> Result<PreparedPagedSimulationCheckpoint, CanwuError> {
+        self.simulation.prepare_paged_checkpoint(source, provider)
+    }
+
     pub fn register_plugin<P: SimulationPlugin + ?Sized>(
         &mut self,
         plugin: &P,
@@ -803,6 +827,50 @@ impl Canwu {
         })
     }
 
+    /// Restores a paged checkpoint after proving the contiguous evidence
+    /// prefix it names.
+    ///
+    /// `segments` must start at the zero cut, stay contiguous, advance at least
+    /// one journal each, and end exactly at the checkpoint's evidence cut, so
+    /// skip a segment whose start equals its end; an empty list is valid only
+    /// for a checkpoint taken before any evidence was recorded. A page the
+    /// restore reads that is missing from `provider` fails with
+    /// [`ErrorCode::StatePageUnavailable`] instead of reading as absent state.
+    /// The restore reads only the archived decision bucket pages that hot
+    /// decision state depends on; history in any other bucket reports
+    /// [`DecisionHistoryLocation::Unresolved`] until
+    /// [`Self::decision_history_location_with_provider`] resolves it through a
+    /// [`DecisionArchiveProvider`] that serves the same bucket pages.
+    /// Continuation stays blocked until every plugin the checkpoint names is
+    /// registered; use [`Self::from_paged_checkpoint_and_journal_with_plugins`]
+    /// to do both.
+    pub fn from_paged_checkpoint_and_journal(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_paged_checkpoint_and_journal(
+                checkpoint, provider, segments,
+            )?,
+        })
+    }
+
+    /// Restores a paged checkpoint and its evidence prefix, then rehydrates
+    /// the exact executable plugins it names.
+    pub fn from_paged_checkpoint_and_journal_with_plugins(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: Simulation::from_paged_checkpoint_and_journal_with_plugins(
+                checkpoint, provider, segments, plugins,
+            )?,
+        })
+    }
+
     pub fn replay_from_journal(
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
@@ -1044,12 +1112,87 @@ impl CompactedCanwu {
         })
     }
 
+    /// Restores a paged checkpoint plus its contiguous evidence prefix and
+    /// enters the compact interface with that whole prefix retained as live
+    /// evidence.
+    ///
+    /// The prefix is the host's sealed segments in cursor order followed by
+    /// [`Self::journal_segment_since`] the end of the last one, omitted when
+    /// nothing was recorded after it; the page and prefix rules of
+    /// [`Canwu::from_paged_checkpoint_and_journal`] apply. Because the restored
+    /// runtime retains the whole prefix, its next seal returns one segment
+    /// from the zero cut that replaces every earlier sealed segment. Prefixes
+    /// for later checkpoints start from that segment; only checkpoints taken
+    /// before it still need the earlier ones. A compact runtime cannot
+    /// register plugins after it is built, so this fails with
+    /// [`ErrorCode::PluginNotActive`] when the checkpoint names any plugin; use
+    /// [`Self::from_paged_checkpoint_and_journal_with_plugins`].
+    /// A paged root also commits to which evidence is sealed, so any restore
+    /// from sealed segments, through this call or
+    /// [`Canwu::from_paged_checkpoint_and_journal`], keeps the original
+    /// checkpoint hash but gets a different paged root, which a later seal
+    /// does not bring back; compare checkpoint hashes instead. A runtime that
+    /// has never sealed evidence restores to the same paged root.
+    pub fn from_paged_checkpoint_and_journal(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_paged_checkpoint_and_journal(
+                checkpoint, provider, segments,
+            )?,
+        })
+    }
+
+    /// Restores a paged compact runtime and rehydrates the exact executable
+    /// plugins it names.
+    pub fn from_paged_checkpoint_and_journal_with_plugins(
+        checkpoint: &PagedSimulationCheckpoint,
+        provider: &dyn StatePageProvider,
+        segments: Vec<EvidenceJournalSegment>,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_paged_checkpoint_and_journal_with_plugins(
+                checkpoint, provider, segments, plugins,
+            )?,
+        })
+    }
+
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
     }
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
+    }
+
+    /// Clones the retained evidence after `start`, which must not precede this
+    /// runtime's last sealed cut.
+    ///
+    /// A checkpoint of current state restores from the host's prefix followed
+    /// by this segment from that prefix's end, omitted when it is empty. The
+    /// prefix is the segments this runtime has sealed, in cursor order. A
+    /// restored runtime that has not sealed yet uses the prefix it was
+    /// restored from; its first seal starts at the zero cut and replaces that
+    /// prefix.
+    pub fn journal_segment_since(
+        &self,
+        start: EvidenceCursor,
+    ) -> Result<EvidenceJournalSegment, CanwuError> {
+        self.simulation.journal_segment_since(start)
+    }
+
+    /// Prepares a content-addressed paged checkpoint of current state without
+    /// rehydrating sealed evidence or archived decision payloads. See
+    /// [`Canwu::prepare_paged_checkpoint`].
+    pub fn prepare_paged_checkpoint(
+        &self,
+        source: Option<&PagedSimulationCheckpoint>,
+        provider: &dyn StatePageProvider,
+    ) -> Result<PreparedPagedSimulationCheckpoint, CanwuError> {
+        self.simulation.prepare_paged_checkpoint(source, provider)
     }
 
     pub fn outbox_entries(&self) -> Result<Vec<OutboxEntry>, CanwuError> {

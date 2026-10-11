@@ -1596,17 +1596,27 @@ the checkpoint roots, boundary chain, IDs, authority, causal evidence, and exact
 replay contract bind the archived records as they bind a flat snapshot.
 `CheckpointJournal` is a portable full-save convenience envelope; incremental
 stores should persist the smaller current-state checkpoint and only newly
-appended segments.
+appended segments. The content-addressed form of that checkpoint is the paged
+checkpoint: `Canwu` and `CompactedCanwu` expose `prepare_paged_checkpoint`,
+which reads current state and emits only pages that are new to a
+`StatePageProvider` already holding the previous checkpoint's pages, and
+`from_paged_checkpoint_and_journal` with its `_with_plugins` variant, which
+restores from the provider and the contiguous evidence prefix through the
+same validation as a flat snapshot. A compact host's prefix is its sealed
+segments followed by `journal_segment_since` the end of the last one.
 
 `CompactedSimulation` and `CompactedCanwu` add the explicit live archive
 contract. Entering compact mode preserves the retained history;
 `seal_evidence` then moves one fully settled, contiguous tail into a caller-owned
 `EvidenceJournalSegment` and advances the private retained-window cursor. The
-caller keeps every returned segment in exact cursor order. Current-state
-checkpoints continue to carry the total cut, while full snapshot and replay
-materialization require the sealed prefix to be supplied again. Segment gaps,
-tampering, and checkpoint mismatches therefore reach the same validator as a
-flat snapshot.
+caller keeps every returned segment in exact cursor order. A compact restore,
+flat or paged, keeps its whole supplied prefix as retained evidence, so the
+restored runtime's next seal returns one segment from the zero cut that
+replaces every earlier sealed segment; prefixes for later checkpoints start
+from that segment. Current-state checkpoints continue to carry the total cut,
+while full snapshot and replay materialization require the sealed prefix to
+be supplied again. Segment gaps, tampering, and checkpoint mismatches
+therefore reach the same validator as a flat snapshot.
 
 Sealing is intentionally fail-closed. The canonical ingress queue must be
 empty and every retained command, attempt, ingress record, event, boundary,
