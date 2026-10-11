@@ -10,33 +10,20 @@ import { LinkButton } from "@astrojs/starlight/components";
 
 ## 场景
 
-明代一个财政衙门开出 100 单位的应征额，授权征收其中 70，然后等待这 70 实际入库的
-证明。资源适配器报告征收完成后，财政扩展记下一张凭证，户部尚书随即收到一份估计：
-应征多少、已征多少、还欠多少。三个起点在不同的历史背景下跑同一套流程：洪武 1391
-（江南的登记土地、徭役和漕粮负担）、万历 1581（一条鞭法在四个地区处于不同阶段）、
-弘光 1644（南明的五个独立财政权责方）。
+明代一个财政衙门开出 100 单位的应征额，授权征收其中 70，然后等待这 70 实际入库的证明。资源适配器报告征收完成后，财政扩展记下一张凭证，户部尚书随即收到一份估计：应征多少、已征多少、还欠多少。三个起点在不同的历史背景下跑同一套流程：洪武 1391（江南的登记土地、徭役和漕粮负担）、万历 1581（一条鞭法在四个地区处于不同阶段）、弘光 1644（南明的五个独立财政权责方）。
 
-这个示例回答的问题是：法规随时期和地区变化的税制，怎样在游戏里建模，同时让账目
-和实际流动的粮食、白银分开？
+这个示例回答的问题是：法规随时期和地区变化的税制，怎样在游戏里建模，同时让账目和实际流动的粮食、白银分开？
 
-法规、地区、时期和采纳阶段来自带出处的参考内容包。数量、人物和机构都是示意值，取自
-一个小型的合成参考世界。
+法规、地区、时期和采纳阶段来自带出处的参考内容包。数量、人物和机构都是示意值，取自一个小型的合成参考世界。
 
 ## 示例涉及的引擎部件
 
-- [财政模拟扩展](/reference/terminology/) `canwu-fiscal`（`FiscalPlugin`）：
-  财政法规及其地区采纳、核算、执行授权和凭证。资源余额和实际转移仍归资源或物流
-  领域管理。
-- [参考内容包](/reference/terminology/) `canwu-ming-fiscal`：`data/pack.json`
-  中的时期、地区、法规、改革转型和出处，以及作为 fixture 文件的三个起点。
-- [参考整合包](/reference/terminology/) `canwu-ming-fiscal-reference`：在
-  `canwu-reference-world` 上搭建每个起点，注册插件，运行示例流程并写出 trace。
-- 以[领域命令](/tutorials/command-plugin/)（`Command::Plugin`）提交的财政行动，
-  由 `FiscalAuthorityBinding` 校验权限。
-- [财政执行凭证](/reference/terminology/)（`FiscalExecutionReceiptPacket`）：
-  依据适配器写入的[领域记录](/developer/extensions/)的精确版本结算。
-- 户部尚书的报告：以[持有人相对知识](/developer/reading-state/)发布，每个总数都是
-  一个区间。
+- [财政模拟扩展](/reference/terminology/) `canwu-fiscal`（`FiscalPlugin`）：财政法规及其地区采纳、核算、执行授权和凭证。资源余额和实际转移仍归资源或物流领域管理。
+- [参考内容包](/reference/terminology/) `canwu-ming-fiscal`：`data/pack.json` 中的时期、地区、法规、改革转型和出处，以及作为 fixture 文件的三个起点。
+- [参考整合包](/reference/terminology/) `canwu-ming-fiscal-reference`：在 `canwu-reference-world` 上搭建每个起点，注册插件，运行示例流程并写出 trace。
+- 以[领域命令](/tutorials/command-plugin/)（`Command::Plugin`）提交的财政行动，由 `FiscalAuthorityBinding` 校验权限。
+- [财政执行凭证](/reference/terminology/)（`FiscalExecutionReceiptPacket`）：依据适配器写入的[领域记录](/developer/extensions/)的精确版本结算。
+- 户部尚书的报告：以[持有人相对知识](/developer/reading-state/)发布，每个总数都是一个区间。
 
 ## 运行
 
@@ -46,20 +33,15 @@ cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- wanli-
 cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter -- hongguang-1644
 ```
 
-第一个参数是 fixture ID，省略时运行 `hongwu-1391`。每次运行打印一行（trace 路径
-已删减）：
+第一个参数是 fixture ID，省略时运行 `hongwu-1391`。每次运行打印一行（trace 路径已删减）：
 
 ```text
-fixture=hongwu-1391 checkpoint=02fa72339b855af10464430523413b67d9d748be200eb0375d57b919d69aa72c frames=6 trace_manifest=... trace_steps=...
-fixture=wanli-1581 checkpoint=d1d6ebabd9b8b38f8fe1a73d4708dbee999b596990942299ae7b4ea2229d7d2d frames=6 trace_manifest=... trace_steps=...
-fixture=hongguang-1644 checkpoint=4c93454351280141b4709717b8cad275ceb853b89459115ef9d73392a4cff7b1 frames=6 trace_manifest=... trace_steps=...
+fixture=hongwu-1391 checkpoint=b282b58b82d8fbe7646fdb1cfbae1e64e1e2187a4bd84d014826351cb7ae5c0c frames=6 trace_manifest=... trace_steps=...
+fixture=wanli-1581 checkpoint=1c79fd79784d86ac285ad81e80e0f54dd7b0389edce99a8351012f0555f3255b frames=6 trace_manifest=... trace_steps=...
+fixture=hongguang-1644 checkpoint=8aa76890d6bdf198a8d1b620ee5db3597157b642f27e757bc9f120a5e451df50 frames=6 trace_manifest=... trace_steps=...
 ```
 
-种子固定为 `DEFAULT_SEED`，所以同一 fixture 每次运行打印的 checkpoint 哈希都相同。
-`frames=6` 是结算过的边界数：每个财政行动两个，适配器的证据记录一个，凭证一个。
-trace 写到工作区的 `artifacts/traces/ming-fiscal-reference/<fixture>/`：
-`manifest.json`，外加 `steps.jsonl` 中每个边界一行 JSON。洪武最后一行里，
-`fiscal.state.aggregates` 和 `fiscal.projections` 记录了结果（已删减）：
+种子固定为 `DEFAULT_SEED`，所以同一 fixture 每次运行打印的检查点哈希都相同。`frames=6` 是结算过的边界数：每个财政行动两个，适配器的证据记录一个，凭证一个。trace 写到工作区的 `artifacts/traces/ming-fiscal-reference/<fixture>/`：`manifest.json`，外加 `steps.jsonl` 中每个边界一行 JSON。洪武最后一行里，`fiscal.state.aggregates` 和 `fiscal.projections` 记录了结果（已删减）：
 
 ```text
 "aggregate.0000":{...,"assessed":100,"remission_granted":0,"collected":70,...,"outstanding":30}
@@ -84,23 +66,15 @@ trace 写到工作区的 `artifacts/traces/ming-fiscal-reference/<fixture>/`：
 | `--trace-dir <path>` / `CANWU_TRACE_DIR` | 改变 trace 根目录。 |
 | `--open-viewer` / `--viewer-port <N>` | 在示例流程开始前于 `127.0.0.1` 上启动 trace viewer 并打开默认浏览器。viewer 随 `steps.jsonl` 增长而加载新内容，进程一直提供服务，直到按下 `Ctrl+C`。端口默认为 `0`，即自动选择空闲端口。 |
 
-步进方式参见[连续时间游戏循环](/tutorials/continuous-game-loop/)。viewer 依赖工作区中的
-`tools/trace-viewer/`，在工作区外运行时需设置 `CANWU_WORKSPACE_ROOT`。
+步进方式参见[连续时间游戏循环](/tutorials/continuous-game-loop/)。viewer 依赖工作区中的 `tools/trace-viewer/`，在工作区外运行时需设置 `CANWU_WORKSPACE_ROOT`。
 
 ## 代码走读
 
-示例程序
-[`ming_fiscal_starter.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/examples/ming_fiscal_starter.rs)
-调用参考整合包
-[`lib.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/src/lib.rs)
-中的 `new_ming_fiscal_reference` 和 `run_ming_fiscal_sample_cycle_with_trace`，
-并为每张边界回执写一帧 trace。
+示例程序 [`ming_fiscal_starter.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/examples/ming_fiscal_starter.rs) 调用参考整合包 [`lib.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/integrations/canwu-ming-fiscal-reference/src/lib.rs) 中的 `new_ming_fiscal_reference` 和 `run_ming_fiscal_sample_cycle_with_trace`，并为每张边界回执写一帧 trace。
 
 ### 1. 为一个 fixture 编译目录
 
-`ming_fiscal_reference_scenario` 读取 fixture JSON，例如
-[`wanli-1581.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/fixtures/wanli-1581.json)。
-fixture 给出年份、历史模式、地区以及各条法规的采纳阶段。函数按这些地区编译内容包：
+`ming_fiscal_reference_scenario` 读取 fixture JSON，例如 [`wanli-1581.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/fixtures/wanli-1581.json)。fixture 给出年份、历史模式、地区以及各条法规的采纳阶段。函数按这些地区编译内容包：
 
 ```rust
 let catalog = compile_ming_fiscal(FiscalContentSelection {
@@ -110,15 +84,11 @@ let catalog = compile_ming_fiscal(FiscalContentSelection {
 })?;
 ```
 
-默认选择的机制集合为空，即选中全部 11 种机制。编译后的目录保留所选地区的全部时期和全部法规；
-年份只决定当前活动时期，例如 1391 年对应 `founding_reconstruction`。
+默认选择的机制集合为空，即选中全部 11 种机制。编译后的目录保留所选地区的全部时期和全部法规；年份只决定当前活动时期，例如 1391 年对应 `founding_reconstruction`。
 
 ### 2. 构造初始财政状态
 
-同一个函数创建 `FiscalState`。`reference_institutions` 给每个起点一个朝廷机构
-（参考世界中的政府），由 `authority.revenue-minister` 负责；`hongguang-1644` 另外
-加入前线将领、地区财库、盐务衙门和商人信用机构。每个机构得到一个只有一名常设角色的
-权限绑定：
+同一个函数创建 `FiscalState`。`reference_institutions` 给每个起点一个朝廷机构（参考世界中的政府），由 `authority.revenue-minister` 负责；`hongguang-1644` 另外加入前线将领、地区财库、盐务衙门和商人信用机构。每个机构得到一个只有一名常设角色的权限绑定：
 
 ```rust
 FiscalAuthorityBinding {
@@ -130,10 +100,7 @@ FiscalAuthorityBinding {
 },
 ```
 
-fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给
-某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳
-状态。观察者绑定 `observer.revenue-minister` 让户部尚书以
-`confidence_per_mille: 850` 看到这些机构的总数。
+fixture 中的每条采纳记录变成一个 `FiscalScopeBinding`（把一个辖区和一种机制交给某个机构，粒度为 `SimulationGranularity::Aggregate`）和一条带 fixture 阶段的采纳状态。观察者绑定 `observer.revenue-minister` 让户部尚书以 `confidence_per_mille: 850` 看到这些机构的总数。
 
 ### 3. 注册插件
 
@@ -142,16 +109,11 @@ let canwu = Canwu::new_with_plugins(seed, reference.scenario, &[&world, &adapter
 validate_ming_fiscal_reference(&canwu)?;
 ```
 
-`new_ming_fiscal_reference` 注册参考世界、执行适配器和 `ming_fiscal_plugin()`。
-后者是一个只接受一种证据的 `FiscalPlugin`，这种证据就是适配器的
-`fiscal_execution_evidence` 记录。`validate_ming_fiscal_reference` 是参考整合包的
-语义校验：重新计算聚合和改革候选，并把每张凭证与其证据重新核对一遍。
+`new_ming_fiscal_reference` 注册参考世界、执行适配器和 `ming_fiscal_plugin()`。后者是一个只接受一种证据的 `FiscalPlugin`，这种证据就是适配器的 `fiscal_execution_evidence` 记录。`validate_ming_fiscal_reference` 是参考整合包的语义校验：重新计算聚合和改革候选，并把每张凭证与其证据重新核对一遍。
 
 ### 4. 开立核算并授权征收
 
-`sample_cycle_plan` 按 ID 顺序取第一条满足条件的采纳记录：阶段可执行
-（`implemented`、`audited` 或 `entrenched`），且法规的法定年份范围包含当前年份。
-`hongguang-1644` 中太仓银库的法规止于 1643 年，所以流程改用盐务衙门。第一个行动：
+`sample_cycle_plan` 按 ID 顺序取第一条满足条件的采纳记录：阶段可执行（`implemented`、`audited` 或 `entrenched`），且法规的法定年份范围包含当前年份。`hongguang-1644` 中太仓银库的法规止于 1643 年，所以流程改用盐务衙门。第一个行动：
 
 ```rust
 action: FiscalAction::OpenAssessment {
@@ -166,19 +128,11 @@ action: FiscalAction::OpenAssessment {
 },
 ```
 
-`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装
-`FiscalActionRequest`，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与
-绑定、绑定机构与范围，以及 `expected_procedure_revision` 与财政状态是否一致；下一个
-边界把行动结算进 `action_outcomes`。核算周期 ID 由上层应用决定，与历史时期相互独立。
-第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色
-征收给机构，资源余额保持不变。
+`submit_reference_action_with_trace` 用 `fiscal_action_command` 包装 `FiscalActionRequest`，以绑定中的角色身份提交。第一个边界上，准入过程核对角色与绑定、绑定机构与范围；下一个边界核对 `expected_procedure_revision` 与财政状态是否一致，再把行动结算进 `action_outcomes`。核算周期 ID 由上层应用决定，与历史时期相互独立。第二个行动 `AuthorizeExecution` 允许把资源 `ResourceId::new(1)` 中的 70 从该角色征收给机构，资源余额保持不变。
 
 ### 5. 记录征收并结算凭证
 
-`settle_sample_execution_with_trace` 扮演资源一方。它通过
-`enqueue_reference_execution_result` 发出一条 `FiscalExecutionEvidence`（70 单位、
-`Fulfilled`，带 `external_operation_id`）。第 5 个边界上，适配器按已授权的请求核对
-这条结果，并写成一条只可创建的领域记录。随后函数提交该记录的精确版本：
+`settle_sample_execution_with_trace` 扮演资源一方。它通过 `enqueue_reference_execution_result` 发出一条 `FiscalExecutionEvidence`（70 单位、`Fulfilled`，带 `external_operation_id`）。第 5 个边界上，适配器按已授权的请求核对这条结果，并写成一条只可创建的领域记录。随后函数提交该记录的精确版本：
 
 ```rust
 enqueue_execution_receipt(
@@ -192,16 +146,11 @@ enqueue_execution_receipt(
 )?;
 ```
 
-第 6 个边界上，`FiscalPlugin` 解码每条被引用的记录，检查记录种类，并逐项核对请求、
-执行类型、支付形态、资源、来源、目标和单位是否与授权一致，再从证据推出凭证的数量
-（70）和处置结果（`fulfilled`）。
+第 6 个边界上，`FiscalPlugin` 解码每条被引用的记录，检查记录种类，并逐项核对请求、执行类型、支付形态、资源、来源、目标和单位是否与授权一致，再从证据推出凭证的数量（70）和处置结果（`fulfilled`）。
 
 ### 6. 读取聚合与报告
 
-此时聚合显示应征 100、已征 70、未结 30。每当某个边界写入新的财政状态版本，
-`FiscalPlugin` 就为每个观察者绑定发布一份报告，作为该观察者持有的知识记录。
-[`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs)
-里的 `estimate` 按观察者的置信度把每个总数归入一个区间：
+此时聚合显示应征 100、已征 70、未结 30。每当某个边界写入新的财政状态版本，`FiscalPlugin` 就为每个观察者绑定发布一份报告，作为该观察者持有的知识记录。[`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs) 里的 `estimate` 按观察者的置信度把每个总数归入一个区间：
 
 ```rust
 let precision_divisor = match confidence_per_mille {
@@ -214,48 +163,31 @@ let bucket_width = (magnitude / precision_divisor).max(2);
 let minimum = value / bucket_width * bucket_width;
 ```
 
-`magnitude` 是不超过该值的最大 10 的幂。置信度为 850‰ 时，100 的区间宽度为 10
-（100-109），70 取最小宽度 2（70-71）。trace 通过 `canwu.viewer_for_actor` 和针对
-`fiscal_report_knowledge_schema_id()` 的 `KnowledgeQuery`，以户部尚书的视角读回报告
-（见 `trace.rs` 中的 `collect_projections`）。
+`magnitude` 是不超过该值的最大 10 的幂。置信度为 850‰ 时，100 的区间宽度为 10（100-109），70 取最小宽度 2（70-71）。trace 通过 `canwu.viewer_for_actor` 和针对 `fiscal_report_knowledge_schema_id()` 的 `KnowledgeQuery`，以户部尚书的视角读回报告（见 `trace.rs` 中的 `collect_projections`）。
 
 ## 值得注意的地方
 
 - 已征数量只能经由适配器的证据记录进入财政状态，比授权晚两个边界。
-- 凭证的数量和处置结果来自所引用的证据。在同一份财政状态中，每个精确证据版本、每个
-  证据种类与 `external_operation_id` 的组合，最多结算一张凭证。
+- 凭证的数量和处置结果来自所引用的证据。在同一份财政状态中，每个精确证据版本、每个证据种类与 `external_operation_id` 的组合，最多结算一张凭证。
 - 三个起点共用一套代码，由 fixture JSON 决定流程使用的法规、范围和机构。
 - 户部尚书看到的是 100-109，权威状态中的值是 100。
-- `wanli-1581` 的 trace 把 `adopt_single_whip_north` 和
-  `adopt_single_whip_southwest` 列为转型候选；在 `ApplyTransition` 行动结算之前，
-  它们一直只是候选。
+- `wanli-1581` 的 trace 把 `adopt_single_whip_north` 和 `adopt_single_whip_southwest` 列为转型候选；在 `ApplyTransition` 行动结算之前，它们一直只是候选。
 
 ## 动手改一改
 
-- **报告精度。** 在 `ming_fiscal_reference_scenario` 中把观察者的
-  `confidence_per_mille` 改为 600。除数变为 2，应征区间变成 100-149，已征区间变成
-  70-74。
-- **部分征收。** 在 `settle_sample_execution_with_trace` 中把证据改为
-  `quantity: 40` 和 `disposition: FiscalReceiptDisposition::Partial`。聚合随之显示
-  已征 40、未结 60。
-- **实施改革。** 在 `wanli-1581` 中提交 `adopt_single_whip_north` 的
-  `ApplyTransition`，把 `single_whip_north` 绑定到 `scope.north.land`，写法可参照测试
-  `single_whip_transition_atomically_suspends_the_superseded_rule`。华北的折银采纳
-  变为 `suspended`，出现一条 `implemented` 的 `single_whip_north` 采纳，华北的候选
-  随之消失。
+- **报告精度。** 在 `ming_fiscal_reference_scenario` 中把观察者的 `confidence_per_mille` 改为 600。除数变为 2，应征区间变成 100-149，已征区间变成 70-74。
+- **部分征收。** 在 `settle_sample_execution_with_trace` 中把证据改为 `quantity: 40` 和 `disposition: FiscalReceiptDisposition::Partial`。聚合随之显示已征 40、未结 60。
+- **实施改革。** 在 `wanli-1581` 中提交 `adopt_single_whip_north` 的 `ApplyTransition`，把 `single_whip_north` 绑定到 `scope.north.land`，写法可参照测试 `single_whip_transition_atomically_suspends_the_superseded_rule`。华北的折银采纳变为 `suspended`，出现一条 `implemented` 的 `single_whip_north` 采纳，华北的候选随之消失。
 
 ## 示例之外
 
-真正的游戏还要补上一层：上层应用的适配器在自己的资源、市场、生产或物流领域执行实际
-操作，再像第 5 步那样提交证据。
+真正的游戏还要补上一层：上层应用的适配器在自己的资源、市场、生产或物流领域执行实际操作，再像第 5 步那样提交证据。
 
 模型的其余部分见[财政制度](/architecture/fiscal/)：覆盖单元及明代内容包 704 个单元的构成、历史语境与改革候选、代理角色，以及状态上限。
 
 ### 时期与出处
 
-内容包覆盖 1368 年至 1683 年的 8 个时期，引用 10 条出处，其中引用最多的是 Ray Huang
-（1974）；每条出处都列出它不支持的推断，例如把登记户数当作实际人口。
-[案例说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md)列出了各个时期，[`data/pack.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/pack.json)列出了全部法规和出处。
+内容包覆盖 1368 年至 1683 年的 8 个时期，引用 10 条出处，其中引用最多的是 Ray Huang（1974）；每条出处都列出它不支持的推断，例如把登记户数当作实际人口。[案例说明](https://github.com/PeiyuanQi/canwu/blob/main/docs/ming-fiscal-case.md)列出了各个时期，[`data/pack.json`](https://github.com/PeiyuanQi/canwu/blob/main/crates/reference-content/canwu-ming-fiscal/data/pack.json)列出了全部法规和出处。
 
 ## 源码
 

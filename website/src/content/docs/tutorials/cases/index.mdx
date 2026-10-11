@@ -8,9 +8,7 @@ sidebar:
 
 import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
-每个案例都是一个小场景，用一条 `cargo run` 命令就能运行。案例页面会介绍场景、列出用到的
-引擎部件、给出程序的输出，并逐步讲解代码。其中的历史背景仅作示意，数据为合成数据，
-或来自参考内容中注明出处的资料。
+每个案例都是一个小场景，用一条 `cargo run` 命令就能运行。案例页面会介绍场景、列出用到的引擎部件、给出程序的输出，并逐步讲解代码。其中的历史背景仅作示意，数据为合成数据，或来自参考内容中注明出处的资料。
 
 <CardGrid>
   <LinkCard
@@ -74,6 +72,4 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 | 明代财政 | `cargo run -p canwu-ming-fiscal-reference --example ming_fiscal_starter` | `canwu-fiscal`、`canwu-ming-fiscal`、`canwu-ming-fiscal-reference` |
 | 生产经济 | `cargo run -p canwu-economy-reference --example grain_loop` | `canwu-resource`、`canwu-production`、`canwu-economy-reference-content`、`canwu-economy-reference` |
 
-前三个案例只使用[对外 API](/developer/integration/)（`canwu-api`）。其余案例在此基础上
-加入一个可选的[模拟领域扩展](/developer/extensions/)，最后两个还用到参考内容包和参考
-整合包。具体的历史规则、人物性格和选项生成由应用或其插件定义。
+前三个案例只使用[对外 API](/developer/integration/)（`canwu-api`）。其余案例在此基础上加入一个可选的[模拟领域扩展](/developer/extensions/)，最后两个还用到参考内容包和参考整合包。具体的历史规则、人物性格和选项生成由应用或其插件定义。

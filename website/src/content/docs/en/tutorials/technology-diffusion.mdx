@@ -145,7 +145,7 @@ Detailed historical interpretation lives in `canwu-history-research`, outside th
 
 Each plugin stores assessments only; the source artifacts, base attempts, and runtime assets they discuss keep their own records. Every assessment records its assessor, method and version, as-of time, uncertainty, summary digest, and citations that existed no later than the as-of time. A contradiction or supersession may target only an earlier assessment of the same exact subject. A citation proves that the source exists; its relevance and truth remain the assessor's claim.
 
-Assessment commands are trusted-host input. If your players must first gain access to the information, enforce that in your own research-workflow plugin before you submit the command. `HistoricalAnalysis` is a read-only host query. Enable no plugin, one, or all three through `HistoricalResearchSuite`.
+Assessment commands are trusted-host input. If your players must first gain access to the information, enforce that in your own research-workflow plugin before you submit the command. `HistoricalAnalysis` is a read-only host query. Register any of the three plugins on its own, or none; `HistoricalResearchSuite::plugins()` returns all three when a run enables the full set.
 
 ## Limits
 

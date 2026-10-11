@@ -11,24 +11,17 @@ import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
 ## 场景
 
-南明风格的场景里，中央赈济机构签发一份赈粮令：国库拨出 600 单位粮食，县级粮务机构
-登记地方执行情况。中央机构可以读取两个机构的记录，但只能写自己的状态；它需要确认
-两边执行的是同一份赈粮令，结果也符合预期。
+南明风格的场景里，中央赈济机构签发一份赈粮令：国库拨出 600 单位粮食，县级粮务机构登记地方执行情况。中央机构可以读取两个机构的记录，但只能写自己的状态；它需要确认两边执行的是同一份赈粮令，结果也符合预期。
 
-这个示例回答的问题是：多个插件各自拥有状态，怎样共同执行一份赈粮令，做到要么全部
-提交、要么整步回滚？
+这个示例回答的问题是：多个插件各自拥有状态，怎样共同执行一份赈粮令，做到要么全部提交、要么整步回滚？
 
-机构名称只是示例代码里的标签。参伍没有内置朝廷、部院或州县类型，上层应用自行建模
-自己的机构。
+机构名称只是示例代码里的标签。参伍没有内置朝廷、部院或州县类型，上层应用自行建模自己的机构。
 
 ## 示例涉及的引擎部件
 
-- 三个[模拟插件](/developer/extensions/)（`SimulationPlugin`），各自拥有一种带类型的
-  [领域记录](/reference/terminology/)（`DomainRecordType`）。
-- 在同一边界的第 7、10、12 结算阶段运行的[边界系统](/architecture/settlement/)
-  （`BoundarySystemContract`）。
-- 插件之间通过[规范化输入](/architecture/events/)（canonical ingress）传递工作，
-  使用 `BoundaryDirective::SchedulePluginIngress`。
+- 三个[模拟插件](/developer/extensions/)（`SimulationPlugin`），各自拥有一种带类型的[领域记录](/reference/terminology/)（`DomainRecordType`）。
+- 在同一边界的第 7、10、12 结算阶段运行的[边界系统](/architecture/settlement/)（`BoundarySystemContract`）。
+- 插件之间通过[规范化输入](/architecture/events/)（canonical ingress）传递工作，使用 `BoundaryDirective::SchedulePluginIngress`。
 - [原子提交](/architecture/settlement/)：任一系统出错，本边界的所有写入一起回滚。
 - 使用同一组插件完成快照恢复和[精确重放](/developer/persistence/)。
 
@@ -44,8 +37,7 @@ cargo run -p canwu-api --example governance_transition
 relief_order=relief-order-1646 treasury_grain=600 county_grain=600 exact_replay=ok
 ```
 
-只有 `main` 中的断言全部通过后才会打印这一行：第一个边界生成两条输入，第二个边界
-提交两条记录，恢复的快照和重放的运行都与原运行一致。
+只有 `main` 中的断言全部通过后才会打印这一行：第一个边界生成两条输入，第二个边界提交两条记录，恢复的快照和重放的运行都与原运行一致。
 
 ## 赈粮令的流转
 
@@ -72,9 +64,7 @@ relief_order=relief-order-1646 treasury_grain=600 county_grain=600 exact_replay=
 
 ## 代码走读
 
-代码都在
-[`governance_transition.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs)
-中，只依赖 `canwu-api`。
+代码都在 [`governance_transition.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/api/canwu-api/examples/governance_transition.rs) 中，只依赖 `canwu-api`。
 
 ### 1. 三个插件，三种记录
 
@@ -84,9 +74,7 @@ relief_order=relief-order-1646 treasury_grain=600 county_grain=600 exact_replay=
 | `case-relief-treasury` | 国库 `ReliefAction`（`case.relief.treasury` / `action`） | `prepare-treasury` |
 | `case-relief-county` | 县级 `ReliefAction`（`case.relief.county` / `action`） | `prepare-county` |
 
-每个插件在 `register` 中调用 `registrar.register_record_schema` 注册自己的记录
-schema。清单为每个机构写明：应当执行的系统、应产生的记录版本、处置结果，以及预期
-载荷的哈希：
+每个插件在 `register` 中调用 `registrar.register_record_schema` 注册自己的记录 schema。清单为每个机构写明：应当执行的系统、应产生的记录版本、处置结果，以及预期载荷的哈希：
 
 ```rust
 struct ReliefOrder {
@@ -103,8 +91,7 @@ struct ReliefOrder {
 }
 ```
 
-`action_hash` 用 `canonical_hash` 对预期的 `ReliefAction` 载荷
-（`status: "committed"`、`grain_units: 600`）计算哈希。
+`action_hash` 用 `canonical_hash` 对预期的 `ReliefAction` 载荷（`status: "committed"`、`grain_units: 600`）计算哈希。
 
 ### 2. 签发赈粮令
 
@@ -124,9 +111,7 @@ assert_eq!(first.generated_ingress.len(), 2);
 
 ### 3. 发布清单（边界 1，第 7 阶段）
 
-`publish_order` 运行在 `BoundaryPhase::DomainDeltaProposal`。它用
-`DomainRecordMutation::Create` 创建清单，并为每个机构安排一条
-`execute-relief-order` 输入：
+`publish_order` 运行在 `BoundaryPhase::DomainDeltaProposal`。它用 `DomainRecordMutation::Create` 创建清单，并为每个机构安排一条 `execute-relief-order` 输入：
 
 ```rust
 BoundaryDirective::SchedulePluginIngress {
@@ -139,22 +124,15 @@ BoundaryDirective::SchedulePluginIngress {
 },
 ```
 
-系统契约在 `plugin_ingress_targets` 中声明了这两个目标。零延迟安排的输入在下一个
-边界准入，所以边界 1 结束时只有清单，两个机构的记录都还没有。
+系统契约在 `plugin_ingress_targets` 中声明了这两个目标。零延迟安排的输入在下一个边界准入，所以边界 1 结束时只有清单，两个机构的记录都还没有。
 
 ### 4. 各机构写自己的记录（边界 2，第 10 阶段）
 
-`prepare_treasury` 和 `prepare_county` 都调用 `prepare_owner`，运行在
-`BoundaryPhase::HistoricalCandidateEvaluation`。它只读取发给本插件的输入
-（`owned_order_ingress`），用 `validate_order` 核对清单，其中包括即将写入的载荷
-哈希，然后创建自己的记录。系统契约声明了 `StateVisibility::SameBoundary`，同一边界
-第 12 阶段的审计因此能读到新记录。
+`prepare_treasury` 和 `prepare_county` 都调用 `prepare_owner`，运行在 `BoundaryPhase::HistoricalCandidateEvaluation`。它只读取发给本插件的输入（`owned_order_ingress`），用 `validate_order` 核对清单，其中包括即将写入的载荷哈希，然后创建自己的记录。系统契约声明了 `StateVisibility::SameBoundary`，同一边界第 12 阶段的审计因此能读到新记录。
 
 ### 5. 中央审计（边界 2，第 12 阶段）
 
-`audit_order` 运行在 `BoundaryPhase::StrategicAggregation`，契约里只声明读取、没有
-写入。它逐个加载机构记录；记录缺失、版本不是 1、已失效、所属插件不对，或哈希与清单
-不一致时返回错误：
+`audit_order` 运行在 `BoundaryPhase::StrategicAggregation`，契约里只声明读取、没有写入。它逐个加载机构记录；记录缺失、版本不是 1、已失效、所属插件不对，或哈希与清单不一致时返回错误：
 
 ```rust
 if record.version != 1
@@ -170,8 +148,7 @@ if record.version != 1
 }
 ```
 
-任一系统返回错误，整个边界失败，两个机构的记录随之回滚。边界 1 中审计看到签发输入
-就直接返回，因为此时两个机构还没有行动。
+任一系统返回错误，整个边界失败，两个机构的记录随之回滚。边界 1 中审计看到签发输入就直接返回，因为此时两个机构还没有行动。
 
 ### 6. 恢复与重放
 
@@ -193,28 +170,17 @@ assert_eq!(replayed.snapshot(), canwu.snapshot());
 
 ## 动手改一改
 
-- **数量不对。** 在 `prepare_county` 中传入 `&action_payload(500)`。哈希与
-  `county_hash` 不一致，`validate_order` 返回错误，第二次 `settle_boundary` 失败，
-  `main` 以错误退出。
-- **机构缺席。** 让 `prepare_county` 直接返回 `Ok(BoundaryProposal::default())`。
-  审计报错 `central audit is missing the county relief disposition`，国库的记录
-  也一起回滚。
-- **换成自己的机构。** 把 `ReliefOrder` 换成自己的官署或政令 schema，并把签发输入
-  接到角色的[权限](/developer/integration/)和[角色知识](/developer/reading-state/)上。
+- **数量不对。** 在 `prepare_county` 中传入 `&action_payload(500)`。哈希与 `county_hash` 不一致，`validate_order` 返回错误，第二次 `settle_boundary` 失败，`main` 以错误退出。
+- **机构缺席。** 让 `prepare_county` 直接返回 `Ok(BoundaryProposal::default())`。审计报错 `central audit is missing the county relief disposition`，国库的记录也一起回滚。
+- **换成自己的机构。** 把 `ReliefOrder` 换成自己的官署或政令 schema，并把签发输入接到角色的[权限](/developer/integration/)和[角色知识](/developer/reading-state/)上。
 
 ## 示例之外：转移清单
 
-示例中手写的清单与审计是普通的应用层做法。参伍也把同样的保证做成了内置的
-[转移清单](/architecture/settlement/)（`TransitionManifest`）：
+示例中手写的清单与审计是普通的应用层做法。参伍也把同样的保证做成了内置的[转移清单](/architecture/settlement/)（`TransitionManifest`）：
 
-- 协调插件在第 7、10 或 12 阶段的系统中用
-  `BoundaryDirective::RegisterTransitionManifest` 登记清单。套用到本例，
-  `lineage_id` 是赈粮令 ID，参与者是国库和县级插件；每个参与者列出转移前
-  （`expected_pre`）和转移后（`expected_post`）应有的记录版本，取代载荷哈希。
-- 在就绪边界的第 10 阶段，每个参与者用 `BoundaryDirective::StageTransitionWrite`
-  暂存自己的写入。
-- 第 11 阶段，模拟内核先审计就绪的清单再提交：所有参与者都已暂存且版本相符则提交；只有部分
-  参与者暂存或版本不符，整个边界回滚；无人暂存则清单过期，协调者可以登记新的尝试。
+- 协调插件在第 7、10 或 12 阶段的系统中用 `BoundaryDirective::RegisterTransitionManifest` 登记清单。套用到本例，`lineage_id` 是赈粮令 ID，参与者是国库和县级插件；每个参与者列出转移前（`expected_pre`）和转移后（`expected_post`）应有的记录版本，取代载荷哈希。
+- 在就绪边界的第 10 阶段，每个参与者用 `BoundaryDirective::StageTransitionWrite` 暂存自己的写入。
+- 第 11 阶段，模拟内核先审计就绪的清单再提交：所有参与者都已暂存且版本相符则提交；只有部分参与者暂存或版本不符，整个边界回滚；无人暂存则清单过期，协调者可以登记新的尝试。
 - 第 12 阶段的系统以 `TransitionAuditRecord` 读取审计结果。
 
 无人暂存的清单只会过期，边界照常提交；只有其他参与者已暂存时才能发现缺席的机构，所以清单至少要有两个参与者。

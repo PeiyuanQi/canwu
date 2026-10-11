@@ -26,7 +26,7 @@ Canwu keeps what is true in the world apart from what each actor knows. `canwu-k
 
 | Crate | What it owns | Published |
 | --- | --- | --- |
-| `canwu-knowledge` | Holder ledgers (`KnowledgeRecord`), holder queries, read cuts (the ledger position a read saw), and cursors, plus each actor's older army observations, kept for compatibility (`ActorKnowledge`) | Published on crates.io |
+| `canwu-knowledge` | Holder ledgers (`KnowledgeRecord`), holder queries, read cuts (the ledger position a read saw), and cursors, plus each actor's legacy army observations, kept for compatibility (`ActorKnowledge`) | Published on crates.io |
 | `canwu-information` | The information lifecycle as domain records in the `canwu.information` namespace: channels, content, representations, instances, dispatches, delivery attempts, access, interpretation, audiences, releases, and operations; the simulation plugin `InformationPlugin` | Published on crates.io |
 | `canwu-correspondence` | Addressed correspondence in the `canwu.correspondence` namespace: operations, communication opportunities, knowledge seeds, and carrier delegations; the simulation plugin `CorrespondencePlugin`; the holder planning snapshot builders | Published on crates.io |
 
@@ -73,7 +73,7 @@ Publishing knowledge is a separate capability from owning state. A plugin that o
 | `KnowledgeRecordView` | The holder-facing copy of a record: it carries a holder-local ID (`HolderKnowledgeRecordId`) and omits `origin`. |
 | `KnowledgeQuery`, `KnowledgeQueryResult`, `KnowledgeCursor` | One page of one holder's ledger, filtered by schema, subject, and learned time, with a cursor for the next page. |
 | `KnowledgeReadCut` | The ledger position a read saw: the boundary and a hash of that holder's records. |
-| `KnowledgeSnapshot` | Every holder ledger, as stored in a snapshot or a scenario. It also carries `ActorKnowledge`: each actor's original observations of armies, each with a `KnowledgeSource` (direct observation, command responsibility, report, or scenario record). |
+| `KnowledgeSnapshot` | Every holder ledger, as stored in a snapshot or a scenario. It also carries `ActorKnowledge`: each actor's legacy observations of each army, kept for compatibility. Each entry has a `KnowledgeSource` (direct observation, command responsibility, report, or scenario record). |
 | `PluginKnowledgeSchema`, `KnowledgeWriteGrant` | A versioned knowledge schema that one plugin registers and owns, and one boundary system's permission to publish that schema with a given visibility. |
 
 ### Information and correspondence

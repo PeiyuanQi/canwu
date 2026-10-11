@@ -41,10 +41,10 @@ frame= 3390 speed=Paused wall= 55.900s visual_time=Day 0, 04:30 + 0.500m canwu_t
 frame= 5847 speed=20x    wall= 96.440s visual_time=Day 0, 18:01 + 0.300m canwu_time=Day 0, 18:01 army visual progress=100.0% (2 -> 3, authoritative_location=3)
 EVENT: at=Day 0, 18:01 type=army_arrived Army 1 arrived in territory 3
 
-FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=5fb68955f5b2..., checkpoint=826b0e164797...
+FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=3a402fa305de..., checkpoint=464e5881a9bc...
 ```
 
-`visual_time` is what the renderer draws; `canwu_time` is Canwu's time. The last line shows that the two runs rendered different numbers of frames and ended with the same state hash and checkpoint.
+`visual_time` is what the renderer draws; `canwu_time` is Canwu's time. The last line shows that the two runs rendered different numbers of frames and ended with the same state hash and checkpoint hash.
 
 ## Three clocks
 
@@ -133,6 +133,6 @@ const THIRTY_FPS_ISH: FrameProfile = FrameProfile {
 };
 ```
 
-The last line now reports `30 FPS-ish frames=2384` with the same `state_hash=5fb68955f5b2...` and `checkpoint=826b0e164797...`.
+The last line now reports `30 FPS-ish frames=2384` with the same `state_hash=3a402fa305de...` and `checkpoint=464e5881a9bc...`.
 
 For the host-side rules this loop follows, see [Integrate and drive the simulation](/en/developer/integration/).

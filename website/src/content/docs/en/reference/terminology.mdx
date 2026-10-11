@@ -35,7 +35,7 @@ this page mirrors it.
 | [ground truth](/en/developer/reading-state/) | 真值 | — | Facts present in authoritative state whether or not a particular actor knows them. |
 | [actor-relative view](/en/developer/reading-state/) | 角色相对视图 | `CanwuViewer`, `ViewerContext` | A read surface derived from one actor's knowledge and authority rather than omniscient state. |
 | [read-only snapshot](/en/developer/reading-state/) | 只读快照 | `WorldSnapshot` | A detached state value for trusted reads, not a mutable reference to the live runtime. |
-| simulation granularity | 模拟粒度 | `SimulationGranularity` | A domain-neutral engine level: `aggregate`, `group`, or `actor`. A Celestial Mandate integration may map them to Population, Special Group, and Character. |
+| simulation granularity | 模拟粒度 | `SimulationGranularity` | A domain-neutral engine level: `aggregate`, `group`, or `actor`. A host application may map them to its own categories, such as Population, Special Group, and Character. |
 | aggregate | 聚合层 | `SimulationGranularity::Aggregate` | Coarse population-, economy-, or region-scale state. A host application may map it to Population. |
 | group | 群体层 | `SimulationGranularity::Group` | A bounded social, institutional, military, or organizational group. A host application may map it to Special Group. |
 | actor | 角色层 | `SimulationGranularity::Actor` | A person or other principal with knowledge and authority. A host application may map it to Character. |
@@ -142,6 +142,7 @@ this page mirrors it.
 | [snapshot](/en/developer/persistence/) | 快照 | `SimulationSnapshot` | A complete persisted state image validated on restore. |
 | [checkpoint](/en/developer/persistence/) | 检查点 | `SimulationCheckpoint` | A validated compact base state from which later journal evidence can continue. |
 | [checkpoint journal](/en/developer/persistence/) | 检查点日志 | `CheckpointJournal` | A checkpoint bundled with subsequent evidence for compact persistence and restoration. |
+| [paged checkpoint](/en/developer/persistence/) | 分页检查点 | `PagedSimulationCheckpoint`, `prepare_paged_checkpoint` | The content-addressed form of a checkpoint, stored as state pages so that each new checkpoint adds only the pages that changed. Restoring it needs the contiguous evidence prefix up to it. Its paged root also commits to which evidence is sealed, so it is not a state identity: a restore from sealed segments keeps the checkpoint hash but gets a different paged root. Compare checkpoint hashes instead. |
 | [exact replay](/en/developer/persistence/) | 精确重放 | `replay_from_journal()` | Reconstructing and verifying the same run from recorded input and evidence without rerunning external choices. |
 | [alternative reality](/en/developer/persistence/) | 平行现实 | — | A new causal reality formed by choosing different inputs from a shared prior state; it is not exact replay. |
 | [fork](/en/developer/persistence/) | 派生分支 | `fork()` | An independent simulation copied from an existing point so it can advance with new input. |

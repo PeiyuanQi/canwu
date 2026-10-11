@@ -31,10 +31,10 @@ cargo run -p canwu-reference-world --example starter
 首次编译需要几分钟。程序只输出一行：
 
 ```text
-army_location=3 checkpoint=dd9796a606983d02eafd3495df11b20bb8423cec33f96c0eaddc24e44e4e2de1
+army_location=3 checkpoint=d94eea8fd39af597e254a73ad8c03cda35a38358c987b11a729d307a139bfc6e
 ```
 
-领地 `3` 是军队的目的地东望城（Eastwatch）。checkpoint 是整个模拟状态的哈希。运行过程是确定性的，再运行一次会得到同样的哈希。
+领地 `3` 是军队的目的地东望城（Eastwatch）。`checkpoint` 的值是检查点哈希，即整个模拟状态的哈希。运行过程是确定性的，再运行一次会得到同样的哈希。
 
 ## 工作原理
 

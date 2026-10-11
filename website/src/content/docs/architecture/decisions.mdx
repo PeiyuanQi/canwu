@@ -79,14 +79,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `Utility` | `WeightedUtilityPolicy` | 用 `UtilityProfile` 的权重乘以各选项的 `utility_inputs` 并求和，最高分胜出，同分取选项 ID 最小的选项；所有选项都被阻碍时推迟。 |
 | `Utility` | `GuardedUtilityPolicy`（[前置规则效用策略](/reference/terminology/)） | 先按顺序运行前置规则（`DecisionRule` 返回 `RuleChoice` 的 `Select`、`Defer`、`Exclude` 或 `NoMatch`），再为剩下的选项打分。开启 `random_tie_break` 且至少两个选项与最高分相差不超过 `near_equivalence_margin` 时，返回 `PendingRandom`。 |
 | `Rule` | `OrderedRulePolicy` | 按顺序运行规则，遇到第一条 `Select` 或 `Defer` 即结束；没有规则命中时推迟。 |
-| `Random` | 无宿主侧实现 | 由边界系统抽样结算，见下文。 |
+| `Random` | 无 | 由边界系统抽样结算，见下文。 |
 | `Human` | `QueuedHumanPolicy` | 提交 `HumanDecisionResponse` 之前返回 `Pending`。 |
 | `External` | `QueuedExternalPolicy` | 提交 `ExternalDecisionResponse` 之前返回 `Pending`。 |
 | `Llm` | `QueuedLlmPolicy` | 同上；回答中的 `provider` 还必须与 `LlmModelIdentity` 一致。 |
 
 人类、外部服务和 LLM 的答复都写明针对哪个票据版本。针对旧版本的答复返回 `VersionConflict`，同一版本重复提交返回 `DuplicateResponse`，针对更新版本的答复会替换旧答复。`GuardedUtilityPolicy` 的 `semantic_hash` 覆盖前置规则策略的身份、规则 ID、效用权重、容差和平局决胜开关；规则的具体行为属于应用代码，行为变化时要改规则 ID 或策略版本。
 
-`Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
+`Deferred` 也会写入决策轨迹并提升票据版本，票据保持开启，推迟不会延长截止时间。如果到那时仍未选定选项，票据会在截止时间之后的第一个结算边界到期（见第 8 步）；持续运行、从快照恢复和重放的运行都是如此。`Pending` 和 `PendingRandom` 只是中间结果，不能作为 `Resolve` 提交。
 
 ## 一个决策的生命周期
 
@@ -112,14 +112,14 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 />
 
 <Steps>
-1. 注册控制者。 上层应用用 `enqueue_decision` 排入 `RegisterController`。决策输入属于规范化输入的 `Decision` 类，到期时间相同时排在命令、通信、确认和信息之后，调度工作之前。控制者 ID 只能注册一次；权限和命令主体引用的实体必须存在。
-2. 开启票据。 `Open` 携带一份 `DecisionTicketDraft`。准入时，票据 ID 必须非零且未被使用，至少有一个选项且选项 ID 互不相同，指派的控制者已经注册，截止时间不早于准入时间，决策者存在且可用，控制者的权限人物也可用，前序票据（如有）符合接续规则。票据以版本 1、`Open` 状态保存，选项按 ID 排序。
-3. 更新票据。 局势变化时排入 `ReplaceOptions`，带上 `expected_version`，替换上下文和选项。版本号加一，为旧版本准备的答复随之作废。`Cancel` 带一个原因关闭票据。
-4. 求值。 上层应用调用 `prepare_decision`，把策略对象交给引擎。引擎确认票据开启、未过截止时间、决策者和权限人物可用、策略身份与绑定一致，然后调用 `DecisionController::evaluate`。结果为 `Pending` 时不入队任何内容；结果为权威答复时，返回一条 `Resolve` 请求。选中的选项带命令时，调用方必须给出 `CommandRequestId`，引擎用控制者绑定生成嵌套命令。`drive_decision` 把求值和入队合成一步。
-5. 准入。 下一个边界的第 1 阶段 `EventIngress` 准入到期的决策输入。引擎依次检查预期修订版本、嵌套命令的请求 ID 是否唯一、引用的实体是否存在、人物是否可用，再交给 `DecisionState::apply` 检查票据版本、票据是否关闭、提交者是否为指派的控制者、策略身份和选项。预期内的失败都记为 `Rejected` 决策尝试，队列接着处理后面的输入。
-6. 写入。 `Resolve` 通过后，引擎分配 `DecisionTraceId` 并写入决策轨迹。`Selected` 把票据改为 `Resolved`；`Deferred` 只提升版本。决策尝试记为 `Accepted`。
-7. 执行命令。 嵌套命令紧接着走常规命令准入，`CommandContext::decision_controller_id` 带上控制者 ID。命令处理器可以要求这个字段，以确认命令来自一张票据。预期内的命令拒绝记为命令尝试，票据仍是 `Resolved`。
-8. 到期。 准入完成后、各阶段运行之前，截止时间早于本边界时间的开启票据变为 `Expired`。
+1. 注册控制者。上层应用用 `enqueue_decision` 排入 `RegisterController`。决策输入属于规范化输入的 `Decision` 类，到期时间相同时排在命令、通信、确认和信息之后，调度工作之前。控制者 ID 只能注册一次；权限和命令主体引用的实体必须存在。
+2. 开启票据。`Open` 携带一份 `DecisionTicketDraft`。准入时，票据 ID 必须非零且未被使用，至少有一个选项且选项 ID 互不相同，指派的控制者已经注册，截止时间不早于准入时间，决策者存在且可用，控制者的权限人物也可用，前序票据（如有）符合接续规则。票据以版本 1、`Open` 状态保存，选项按 ID 排序。
+3. 更新票据。局势变化时排入 `ReplaceOptions`，带上 `expected_version`，替换上下文和选项。版本号加一，为旧版本准备的答复随之作废。`Cancel` 带一个原因关闭票据。
+4. 求值。上层应用调用 `prepare_decision`，把策略对象交给引擎。引擎确认票据开启、未过截止时间、决策者和权限人物可用、策略身份与绑定一致，然后调用 `DecisionController::evaluate`。结果为 `Pending` 时不入队任何内容；结果为权威答复时，返回一条 `Resolve` 请求。选中的选项带命令时，调用方必须给出 `CommandRequestId`，引擎用控制者绑定生成嵌套命令。`drive_decision` 把求值和入队合成一步。
+5. 准入。下一个边界的第 1 阶段 `EventIngress` 准入到期的决策输入。引擎依次检查预期修订版本、嵌套命令的请求 ID 是否唯一、引用的实体是否存在、人物是否可用，再交给 `DecisionState::apply` 检查票据版本、票据是否关闭、提交者是否为指派的控制者、策略身份和选项。预期内的失败都记为 `Rejected` 决策尝试，队列接着处理后面的输入。
+6. 写入。`Resolve` 通过后，引擎分配 `DecisionTraceId` 并写入决策轨迹。`Selected` 把票据改为 `Resolved`；`Deferred` 只提升版本。决策尝试记为 `Accepted`。
+7. 执行命令。嵌套命令紧接着走常规命令准入，`CommandContext::decision_controller_id` 带上控制者 ID。命令处理器可以要求这个字段，以确认命令来自一张票据。预期内的命令拒绝记为命令尝试，票据仍是 `Resolved`。
+8. 到期。准入完成后、各阶段运行之前，截止时间早于本边界时间的开启票据变为 `Expired`。
 </Steps>
 
 决策输入带着预期修订版本。入队时它必须等于当前修订版本；如果准入之前修订版本已经变化，例如又有别的边界提交，请求会以 `SimulationRevisionConflict` 记为被拒绝的尝试。同一请求 ID 再次入队时，内容、到期时间和优先级都相同就返回原来的回执，否则返回 `IdempotencyConflict`。声明为只读交互的运行拒绝新的决策输入（`InteractionReadOnly`）。

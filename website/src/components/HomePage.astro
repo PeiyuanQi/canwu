@@ -8,7 +8,7 @@ const { locale } = Astro.props;
 const isEnglish = locale === "en";
 const prefix = isEnglish ? "/en" : "";
 const installCommand = `[dependencies]
-canwu-api = "=0.13.0"`;
+canwu-api = "=0.13.2"`;
 const releaseUrl = "https://github.com/PeiyuanQi/canwu/releases";
 const cratesUrl = "https://crates.io/crates/canwu-api";
 const conformanceUrl = "https://github.com/PeiyuanQi/canwu/blob/main/docs/engine-conformance.md";
@@ -20,7 +20,7 @@ const cliExample = `git clone https://github.com/PeiyuanQi/canwu
 cd canwu
 cargo run -p canwu-reference-world --example starter`;
 
-const outputExample = `army_location=3 checkpoint=dd9796a606983d02eafd3495df11b20bb8423cec33f96c0eaddc24e44e4e2de1`;
+const outputExample = `army_location=3 checkpoint=d94eea8fd39af597e254a73ad8c03cda35a38358c987b11a729d307a139bfc6e`;
 
 const agentFlow = isEnglish
   ? `// 1. Read what this character knows
@@ -48,7 +48,7 @@ const c = isEnglish
   ? {
       title: "Canwu Engine — Replayable historical simulations in Rust",
       description: "A deterministic Rust engine for historical and strategy simulations. Clients change the world through validated commands, and each character sees only what it knows.",
-      status: "open source · 0.13.0 · pre-1.0",
+      status: "open source · 0.13.2 · pre-1.0",
       name: "Canwu Engine", nativeName: "参伍引擎",
       summary: "Build replayable historical simulations where each player sees only what their character knows.",
       intro: "Canwu is a headless simulation engine written in Rust. Your code sends it commands; it advances time, records what happened and why, and tracks what each character knows. Rendering, UI, and historical content stay in your game, research tool, or agent system.",
@@ -64,16 +64,16 @@ const c = isEnglish
         ["commands", "One API for every client", "Clients change the world only by submitting commands, and read it through snapshots, events, or a character's view. A game, a research notebook, and an AI agent use the same calls."],
       ],
       scopeLabel: "Scope", scopeTitle: "Any period, region, or renderer", scopeCopy: "The core has no built-in period or map. Scenario data and plugins define institutions, geography, population, trade, and conflict. The repository includes reusable extensions for resources, production, movement, military operations, fiscal procedure, technology, information and correspondence, social diffusion, culture, and law (experimental).",
-      installLabel: "Install", installTitle: "Add canwu-api 0.13.0", installIntro: "Requires Rust 1.88 or newer. Add canwu-api to your application's Cargo.toml. The reference world used by the examples lives in the repository; clone it to run the examples. The exact = pin matters because a save loads only in the engine version that wrote it.", installCommandLabel: "Cargo.toml", release: "View releases",
+      installLabel: "Install", installTitle: "Add canwu-api 0.13.2", installIntro: "Requires Rust 1.88 or newer. Add canwu-api to your application's Cargo.toml. The reference world used by the examples lives in the repository; clone it to run the examples. The exact = pin matters because a save loads only in the engine version that wrote it.", installCommandLabel: "Cargo.toml", release: "View releases",
       quickLabel: "Five-minute check", quickTitle: "Run the starter example", quickIntro: "The starter moves an army with a typed command and advances 19 hours. It then saves and reloads, forks, and replays the run, and checks that all three copies match the original's checkpoint hash.",
       clone: "Clone and run", output: "Expected output", quickTutorial: "Step-by-step tutorial",
       statusTitle: "What works today", statusCopy: "Canwu is pre-1.0, so a minor version can still change the API. Everything listed under “Implemented” has tests. Before you depend on an area that is still in progress, check the conformance profile.",
-      availableTitle: "Implemented", availableItems: ["Change state only through validated commands, built into the engine or defined by your plugins", "Advance time, run scheduled work, and record the cause of every event", "Give each character its own knowledge, including late reports", "Save snapshots and checkpoint journals, fork runs, and replay them exactly", "Track whether each person is alive, free, detained, or captive, and reject orders from people who cannot act", "Check a change that spans several plugins before it commits", "Show rule explanations only to characters allowed to see them", "Move goods and people with capacity limits, delegated carriers, and shared access to resources (extension plugins)", "Checked-in benchmarks for run time, memory allocation, and snapshot size"],
+      availableTitle: "Implemented", availableItems: ["Change state only through validated commands, built into the engine or defined by your plugins", "Advance time, run scheduled work, and record the cause of every event", "Give each character its own knowledge, including late reports", "Save snapshots, checkpoint journals, and paged checkpoints, fork runs, and replay them exactly", "Track whether each person is alive, free, detained, or captive, and reject orders from people who cannot act", "Check a change that spans several plugins before it commits", "Show rule explanations only to characters allowed to see them", "Move goods and people with capacity limits, delegated carriers, and shared access to resources (extension plugins)", "Checked-in benchmarks for run time, memory allocation, and snapshot size"],
       evolvingTitle: "In progress", evolvingItems: ["Bindings for other languages and network access", "Archive storage and indexed lookup of past history", "Larger runnable scenarios that combine several domains", "Ready-made client and renderer integrations"],
       platforms: "CI runs on Windows, macOS, and Linux.", conformance: "Conformance profile ↗",
       agentLabel: "AI agents", agentTitle: "Agents use the same API as players", agentCopy: "An agent reads a view limited to its character, submits the same typed commands a player would, and sees rule explanations only for what that character may know. Each domain plugin defines its own commands and views.", agentFlowLabel: "Agent loop",
       agentMethods: ["viewer_for_actor(actor)", "viewer.query_knowledge(query)", "viewer.visible_changes_since(time)", "viewer.evaluation_traces(subject, after)", "enqueue_command(...)", "advance_canonical(...)"],
-      usesLabel: "Use cases", usesTitle: "What you can build", uses: [["Grand strategy games", "Run the simulation behind any map or renderer."], ["Historical research", "Run repeatable scenarios, branch alternative histories, and compare the results."], ["Agent environments", "Give several agents different knowledge, authority, and commands."], ["Education and public history", "Build timelines, maps, and classroom tools on replayable state."]], allUses: "See integration patterns →",
+      usesLabel: "Use cases", usesTitle: "What you can build", uses: [["Grand strategy games", "Run the simulation behind any map or renderer."], ["Historical research", "Run repeatable scenarios, fork runs into alternative realities, and compare the results."], ["Agent environments", "Give several agents different knowledge, authority, and commands."], ["Education and public history", "Build timelines, maps, and classroom tools on replayable state."]], allUses: "See integration patterns →",
       projectLabel: "Contribute", projectTitle: "Help improve Canwu", projectCopy: "Start with the architecture guide and the contribution guide, then open an issue or a focused pull request. Improvements to the public API, docs, tests, and reference scenarios are all welcome.",
       licenseTitle: "Open-source license", licenseCopy: "Canwu uses the Apache License 2.0. You may use, modify, and redistribute it in commercial and proprietary products without royalties; include the license and NOTICE files with the copies you distribute.",
       projectLinks: [["Architecture", "/en/architecture/"], ["API examples", "https://github.com/PeiyuanQi/canwu/tree/main/crates/api/canwu-api/examples"], ["Contributing", "https://github.com/PeiyuanQi/canwu/blob/main/CONTRIBUTING.md"], ["License", "/LICENSE"]],
@@ -81,14 +81,14 @@ const c = isEnglish
   : {
       title: "参伍引擎 — 用 Rust 构建可重放的历史模拟",
       description: "用于历史与策略模拟的确定性 Rust 引擎。客户端通过经过验证的命令改变世界，每个角色只看到自己知道的内容。",
-      status: "开源 · 0.13.0 · 尚未到 1.0",
+      status: "开源 · 0.13.2 · 尚未到 1.0",
       name: "参伍引擎", nativeName: "Canwu Engine",
       summary: "构建可重放的历史模拟，让每个玩家只看到自己角色知道的世界。",
       intro: "参伍是用 Rust 编写的无界面模拟引擎。你的代码向它提交命令，它负责推进时间、记录发生了什么以及原因，并跟踪每个角色知道什么。渲染、界面和历史内容仍由你的游戏、研究工具或智能体系统负责。",
       getStarted: "运行示例", repository: "查看源码", docs: "阅读架构",
       facts: [["重放", "相同输入，相同结果"], ["知识", "每个角色一份视图"], ["渲染", "任选引擎或界面"], ["智能体", "与玩家共用 API"]],
       example: "starter 示例", source: "在 GitHub 打开 starter.rs",
-      architectureLabel: "架构", architectureTitle: "参伍在你的应用中的位置", architectureIntro: "上层应用在最上层，只与 canwu-api 交互。领域插件提供资源、移动、法律等规则。下方的运行时持有实时世界状态，只在结算命令和调度工作时修改它。你可以逐层查看，也可以跟随一条命令，从提交一路看到重放。",
+      architectureLabel: "架构", architectureTitle: "参伍在你的应用中的位置", architectureIntro: "最上层是你的上层应用，它只与 canwu-api 交互。领域插件提供资源、移动、法律等规则。下方的运行时持有实时世界状态，只在结算命令和调度工作时修改它。你可以逐层查看，也可以跟随一条命令，从提交一路看到重放。",
       architectureLink: "阅读架构指南 →",
       featuresLabel: "设计保证", featuresTitle: "引擎提供的三项保证", featuresIntro: "引擎负责时间、状态与历史，插件负责特定时代的规则。对所有客户端，以及只通过声明契约读写状态、抽取随机数的插件，下面三点都成立。",
       features: [
@@ -97,11 +97,11 @@ const c = isEnglish
         ["commands", "所有客户端共用一套 API", "客户端只通过提交命令改变世界，通过快照、事件或角色视图读取世界。游戏、研究笔记本和 AI 智能体调用的是同一组接口。"],
       ],
       scopeLabel: "适用范围", scopeTitle: "不限时代、地区与渲染器", scopeCopy: "内核没有内置任何时代或地图。制度、地理、人口、贸易和冲突都由场景数据和插件定义。仓库中提供可复用的资源、生产、移动、军事、财政程序、技术、信息与通信、社会传播、文化和法律（实验性）扩展。",
-      installLabel: "安装", installTitle: "添加 canwu-api 0.13.0", installIntro: "需要 Rust 1.88 或更新版本。在应用的 Cargo.toml 中添加 canwu-api。示例使用的参考世界位于仓库中，克隆仓库即可运行示例。使用 = 精确锁定版本，是因为存档只能由写入它的引擎版本加载。", installCommandLabel: "Cargo.toml", release: "查看发布版本",
+      installLabel: "安装", installTitle: "添加 canwu-api 0.13.2", installIntro: "需要 Rust 1.88 或更新版本。在应用的 Cargo.toml 中添加 canwu-api。示例使用的参考世界位于仓库中，克隆仓库即可运行示例。使用 = 精确锁定版本，是因为存档只能由写入它的引擎版本加载。", installCommandLabel: "Cargo.toml", release: "查看发布版本",
       quickLabel: "五分钟上手", quickTitle: "运行 starter 示例", quickIntro: "starter 用一条类型化命令让军队移动，并推进 19 小时。随后它对这次运行做存档与读档、派生分支和重放，并检查三份副本的检查点哈希都与原运行一致。",
       clone: "克隆并运行", output: "预期输出", quickTutorial: "查看分步教程",
       statusTitle: "目前可用的功能", statusCopy: "参伍仍处于 1.0 之前，次版本更新仍可能改变 API。“已实现”中列出的功能都有测试覆盖。依赖仍在推进的部分之前，请先查看契约符合性说明。",
-      availableTitle: "已实现", availableItems: ["只通过经验证的引擎命令或插件命令修改状态", "推进时间、运行调度工作，并记录每个事件的起因", "为每个角色维护独立的知识，包括迟到的报告", "保存快照和检查点日志，派生分支，并精确重放", "记录每个人物是否存活、自由、被拘押或被俘，拒绝无法行事的人物发出的命令", "在跨越多个插件的变更提交前进行审计", "只向有权查看的角色展示规则说明", "通过扩展插件支持带运力上限的移动、受托承运人和资源动用授权", "仓库中附带运行时间、内存分配和快照大小的基准测试"],
+      availableTitle: "已实现", availableItems: ["只通过经验证的引擎命令或插件命令修改状态", "推进时间、运行调度工作，并记录每个事件的起因", "为每个角色维护独立的知识，包括迟到的报告", "保存快照、检查点日志和分页检查点，派生分支，并精确重放", "记录每个人物是否存活、自由、被拘押或被俘，拒绝无法行事的人物发出的命令", "在跨越多个插件的变更提交前进行审计", "只向有权查看的角色展示规则说明", "通过扩展插件支持带运力上限的移动、受托承运人和资源动用授权", "仓库中附带运行时间、内存分配和快照大小的基准测试"],
       evolvingTitle: "仍在推进", evolvingItems: ["其他语言绑定与网络接口", "归档存储与历史索引查询", "组合多个领域的更大可运行场景", "现成的客户端与渲染器整合"],
       platforms: "持续集成覆盖 Windows、macOS 与 Linux。", conformance: "契约符合性说明 ↗",
       agentLabel: "AI 智能体", agentTitle: "智能体与玩家使用同一套 API", agentCopy: "智能体读取限定在其角色范围内的视图，提交与玩家相同的类型化命令，也只能看到该角色所知范围内的规则说明。每个领域插件定义自己的命令和视图。", agentFlowLabel: "智能体循环",

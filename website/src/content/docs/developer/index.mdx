@@ -26,8 +26,7 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
 
 <AgentDevelopmentNote locale="zh-CN" />
 
-这组指南写给在参伍之上开发游戏、研究工具或智能体系统的开发者。每一页讲一项任务，
-并给出其中需要的 `canwu-api` 调用。
+这组指南写给在参伍之上开发游戏、研究工具或智能体系统的开发者。每一页讲一项任务，并给出其中需要的 `canwu-api` 调用。
 
 ## 第一次接入
 
@@ -60,19 +59,15 @@ import AgentDevelopmentNote from "../../../components/AgentDevelopmentNote.astro
   />
 </CardGrid>
 
-只涉及某个领域系统的指南，例如[生产、资源与运输的职责划分](/developer/production-economy/)，
-与对应系统一起列在[领域系统](/architecture/systems/)下。
+只涉及某个领域系统的指南，例如[生产、资源与运输的职责划分](/developer/production-economy/)，与对应系统一起列在[领域系统](/architecture/systems/)下。
 
 ## 每个接入都要遵守的规则
 
-1. **以 `canwu-api` 和已发布的扩展为依赖。** 具体规则来自 `canwu-military` 等模拟领域扩展、
-   参考整合包或你自己编写的插件。不要直接依赖 `canwu-sim` 等内部 crate，它们不提供兼容性承诺。
+1. **以 `canwu-api` 和已发布的扩展为依赖。** 具体规则来自 `canwu-military` 等模拟领域扩展、参考整合包或你自己编写的插件。不要直接依赖 `canwu-sim` 等内部 crate，它们不提供兼容性承诺。
 2. **通过命令改变世界。** 使用引擎命令、领域命令或插件输入。
 3. **给玩家和智能体使用角色相对视图。** 完整快照只用于受信任的上层应用代码和调试工具。
-4. **时钟由上层应用掌管。** 渲染、输入和现实时间都留在上层应用；调用引擎前，先把经过的
-   现实时间换算成模拟时长。
-5. **需要存档时固定版本。** 固定引擎版本，并用相同的插件加载或重放。引擎会把它们与存档中
-   保存的插件描述逐一比对。
+4. **时钟由上层应用掌管。** 渲染、输入和现实时间都留在上层应用；调用引擎前，先把经过的现实时间换算成模拟时长。
+5. **需要存档时固定版本。** 固定引擎版本，并用相同的插件加载或重放。引擎会把它们与存档中保存的插件描述逐一比对。
 
 ## 其他资料
 

@@ -110,7 +110,7 @@ B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在
 大多数指令写入插件拥有的状态。下面三种指令修改内核拥有的状态，各有固定规则：
 
 - `SetPersonAvailability` 替换一个人物的生存状态和人身状态。只有声明写入 `StateKey::core_person_availability()` 的第 7 或第 10 阶段系统可以提出。同一边界内对同一人物写入两次，边界失败。边界结束时，在随机决策落地之后，内核取消决策者或控制者权限人物已不可用的未关闭票据，并列入边界记录。
-- `CreatePerson` 创建人物。只有声明写入 `StateKey::core_people()` 的第 7 阶段系统可以提出。ID 由引擎分配，回执中的 `created_persons` 把这个 ID 绑定到提出创建的插件、系统和关联字符串（correlation）。新人物从下一个边界起对系统可见。
+- `CreatePerson` 创建人物。只有声明写入 `StateKey::core_people()` 的第 7 阶段系统可以提出。ID 由引擎分配，回执中的 `created_persons` 把这个 ID 绑定到提出创建的插件、系统和相关标识（correlation）。新人物从下一个边界起对系统可见。
 - `CancelPluginIngress` 在输入到期之前撤回本系统所属插件安排的排队输入。撤回目标从 `SimulationView::cancellable_plugin_ingress` 获取，这个方法要求声明读取 `StateKey::core_ingress()`。如果目标属于其他插件，已经到期、已准入或已撤回，或者同一边界里另一个提案也在撤回它，整个边界都会失败。
 
 多个系统可以同时声明这两个人物核心键，所以内核在结算时按人物检查冲突写入。

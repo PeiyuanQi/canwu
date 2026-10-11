@@ -31,10 +31,10 @@ cargo run -p canwu-reference-world --example starter
 The first build takes a few minutes. The program prints one line:
 
 ```text
-army_location=3 checkpoint=dd9796a606983d02eafd3495df11b20bb8423cec33f96c0eaddc24e44e4e2de1
+army_location=3 checkpoint=d94eea8fd39af597e254a73ad8c03cda35a38358c987b11a729d307a139bfc6e
 ```
 
-Territory `3` is Eastwatch, the army's destination. The checkpoint is a hash of the whole simulation state. The run is deterministic, so running it again prints the same hash.
+Territory `3` is Eastwatch, the army's destination. The `checkpoint` value is the checkpoint hash, a hash of the whole simulation state. The run is deterministic, so running it again prints the same hash.
 
 ## How it works
 

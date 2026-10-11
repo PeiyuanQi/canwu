@@ -27,33 +27,24 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
   <a href="/en/architecture/">English architecture</a>
 </nav>
 
-参伍是一个无界面历史模拟引擎，自身不带渲染器和界面。上层应用（游戏、研究工具、
-调试客户端或 AI 智能体）把它当作 Rust 库链接进来，通过提交命令改变世界，通过快照、
-事件和角色相对视图读取世界。实时世界状态只由引擎的运行时持有，也只在结算命令和调度
-工作时发生变化。
+参伍是一个无界面历史模拟引擎，自身不带渲染器和界面。上层应用（游戏、研究工具、调试客户端或 AI 智能体）把它当作 Rust 库链接进来，通过提交命令改变世界，通过快照、事件和角色相对视图读取世界。实时世界状态只由引擎的运行时持有，也只在结算命令和调度工作时发生变化。
 
 ## 分层一览
 
-选择某一层可以查看其中的 crate；切换到“跟随一条命令”，可以一步步看到一条命令从提交到
-重放的全过程。
+选择某一层可以查看其中的 crate；切换到“跟随一条命令”，可以一步步看到一条命令从提交到重放的全过程。
 
 <ArchitectureMap locale="zh-CN" />
 
 - **上层应用**依赖 `canwu-api`，并注册自己需要的插件。
-- **领域插件**是建立在 `canwu-api` 之上的可选 crate。第一方扩展能调用的接口与你自己编写的
-  插件完全相同，因此任何一个都可以替换。
+- **领域插件**是建立在 `canwu-api` 之上的可选 crate。第一方扩展能调用的接口与你自己编写的插件完全相同，因此任何一个都可以替换。
 - **`canwu-api`** 是受支持的对外 API，下层 crate 中需要用到的类型都由它重新导出。
-- **`canwu-sim`** 是 `canwu-api` 背后的私有运行时，负责实时状态、输入队列、调度、
-  结算、持久化与重放。
-- **模型与机制**（`canwu-event`、`canwu-knowledge`、`canwu-decision`、
-  `canwu-routing`、`canwu-transport`）定义共用的数据类型，由 `canwu-api` 重新导出。
+- **`canwu-sim`** 是 `canwu-api` 背后的私有运行时，负责实时状态、输入队列、调度、结算、持久化与重放。
+- **模型与机制**（`canwu-event`、`canwu-knowledge`、`canwu-decision`、`canwu-routing`、`canwu-transport`）定义共用的数据类型，由 `canwu-api` 重新导出。
 - **基础层**（`canwu-core`、`canwu-time`）提供 ID、确定性随机数和模拟时间。
 
 ### 全部 crate 的依赖关系
 
-下图展示各 crate 在 `Cargo.toml` 中声明的直接依赖：`A → B` 表示 A 依赖 B，外部依赖和
-开发依赖未列出。依赖图默认放大到 250%；可以用按钮或在图内滚动鼠标滚轮，在 50% 到 600%
-之间缩放，拖动画布即可平移。
+下图展示各 crate 在 `Cargo.toml` 中声明的直接依赖：`A → B` 表示 A 依赖 B，外部依赖和开发依赖未列出。依赖图默认放大到 250%；可以用按钮或在图内滚动鼠标滚轮，在 50% 到 600% 之间缩放，拖动画布即可平移。
 
 <div class="crate-dependency-dag">
 <MermaidDiagram
@@ -203,14 +194,10 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 
 ## 四条设计规则
 
-1. **状态只通过命令改变。** 客户端提交命令，插件在边界系统中提交变更提议。运行时
-   验证两者，并在[结算边界](/architecture/settlement/)中统一提交。
-2. **每次运行都可复现。** 时间、调度工作、系统顺序和[随机抽样](/architecture/randomness/)
-   都遵循固定规则，所以按日志重放会得到相同的检查点哈希。
-3. **知识属于角色。** 运行时把真值与每个角色所知分开保存。玩家和智能体通过
-   [角色相对视图](/developer/reading-state/)读取。
-4. **历史连同原因一起记录。** 每个[事件](/architecture/events/)都保存起因、受众和
-   相关标识，因此可以向引擎查询某件事为什么发生。
+1. **状态只通过命令改变。** 客户端提交命令，插件在边界系统中提交变更提议。运行时验证两者，并在[结算边界](/architecture/settlement/)中统一提交。
+2. **每次运行都可复现。** 时间、调度工作、系统顺序和[随机抽样](/architecture/randomness/)都遵循固定规则，所以按日志重放会得到相同的检查点哈希。
+3. **知识属于角色。** 运行时把真值与每个角色所知分开保存。玩家和智能体通过[角色相对视图](/developer/reading-state/)读取。
+4. **历史连同原因一起记录。** 每个[事件](/architecture/events/)都保存起因、受众和相关标识，因此可以向引擎查询某件事为什么发生。
 
 ## 规则写在哪里
 
@@ -242,18 +229,11 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 
 下面几个例子说明职责如何划分：
 
-- **移动。** `canwu-transport` 只保存记录：命令、运输执行、行程修订、交接、预订和运力池。
-  `canwu-movement` 是运行这些记录的插件：它准入移动命令，在每个路段到期时结算，分配运力池，
-  并把移动报告发给应当收到的角色。事故、危险和敌对行为，以及决定它们的随机抽样，都留在你自己
-  的系统中。
-- **通信。** `canwu-correspondence` 负责信件从需求到投递的全过程：地址查询、路线、承运人、
-  遇灾与截取。它建立在 `canwu-information` 之上，后者负责文书、副本与解读。
-- **经济。** `canwu-resource` 负责守恒数量及其履约。`canwu-production` 消耗资源和技术证据，
-  驱动设施与工单。`canwu-economy-reference` 把两者与运输、军事补给组合成季节性粮食循环。
-  其中的稀缺度和价格压力只是只读投影；只有成交、报价、官价或合同价提供了价格时，它才会报告价格。
+- **移动。** `canwu-transport` 只保存记录：命令、运输执行、行程修订、交接、预订和运力池。`canwu-movement` 是运行这些记录的插件：它准入移动命令，在每个路段到期时结算，分配运力池，并把移动报告发给应当收到的角色。事故、危险和敌对行为，以及决定它们的随机抽样，都留在你自己的系统中。
+- **通信。** `canwu-correspondence` 负责信件从需求到投递的全过程：地址查询、路线、承运人、遇灾与截取。它建立在 `canwu-information` 之上，后者负责文书、副本与解读。
+- **经济。** `canwu-resource` 负责守恒数量及其履约。`canwu-production` 消耗资源和技术证据，驱动设施与工单。`canwu-economy-reference` 把两者与运输、军事补给组合成季节性粮食循环。其中的稀缺度和价格压力只是只读投影；只有成交、报价、官价或合同价提供了价格时，它才会报告价格。
 
-跨插件合同（转移清单、动用授权、受托承运人等）各由谁负责，见
-[模型归属](/architecture/model-ownership/#领域归属)。
+跨插件契约（转移清单、动用授权、受托承运人等）各由谁负责，见[模型归属](/architecture/model-ownership/#领域归属)。
 
 ## crate 一览
 
@@ -309,8 +289,7 @@ import ArchitectureMap from "../../../components/ArchitectureMap.astro";
 
 ## 领域系统
 
-知识、决策、资源、军事、财政等方面的具体规则由领域系统提供，每个系统都有单独的设计页面。
-[领域系统](/architecture/systems/)页面列出全部八个系统及提供它们的 crate。
+知识、决策、资源、军事、财政等方面的具体规则由领域系统提供，每个系统都有单独的设计页面。[领域系统](/architecture/systems/)页面列出全部八个系统及提供它们的 crate。
 
 ## 延伸阅读
 

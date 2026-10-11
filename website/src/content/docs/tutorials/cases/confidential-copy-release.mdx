@@ -10,28 +10,19 @@ import { LinkButton } from "@astrojs/starlight/components";
 
 ## 场景
 
-发件人把一份文书寄给一位收件人。中继经手人在途中读了文书，并摘抄了一份副本，原件照常送到
-收件人手中。之后，经手人把副本发布给两名指定读者，随后又撤回这次发布。撤回之后，其中一名读者
-再想打开副本，请求被拒绝。
+发件人把一份文书寄给一位收件人。中继经手人在途中读了文书，并摘抄了一份副本，原件照常送到收件人手中。之后，经手人把副本发布给两名指定读者，随后又撤回这次发布。撤回之后，其中一名读者再想打开副本，请求被拒绝。
 
-这个示例回答的问题是：副本、限定范围的发布和撤回应当怎样记录，才能让每个持有人只知道真正到达
-自己的信息，同时让撤回挡住之后的阅读，而此前的阅读仍留有记录？
+这个示例回答的问题是：副本、限定范围的发布和撤回应当怎样记录，才能让每个持有人只知道真正到达自己的信息，同时让撤回挡住之后的阅读，而此前的阅读仍留有记录？
 
 所有持有人、时间和内容代码都是合成的测试值。
 
 ## 示例涉及的引擎部件
 
-- `canwu-information`，负责信息流转的[模拟领域扩展](/developer/extensions/)。谁产生、发送、
-  阅读、发布了一份信息，都以类型化的领域记录保存。
-- `InformationLifecycle::plan`：按当前记录校验一条 `LifecycleRequest`，返回
-  `InformationMutationPlan`，其中包括记录变更和知识发布，每条知识发布只面向一个持有人
-  （[持有人相对知识](/reference/terminology/)）。
+- `canwu-information`，负责信息流转的[模拟领域扩展](/developer/extensions/)。谁产生、发送、阅读、发布了一份信息，都以类型化的领域记录保存。
+- `InformationLifecycle::plan`：按当前记录校验一条 `LifecycleRequest`，返回 `InformationMutationPlan`，其中包括记录变更和知识发布，每条知识发布只面向一个持有人（[持有人相对知识](/reference/terminology/)）。
 - 通过 `ContentDerivation` 和 `RepresentationSourceEdge` 记录副本的来源。
-- 由成员名单、成员数和成员根（membership root）固定下来的受众（`AudiencePayload`），以及从
-  `Active` 转为 `Withdrawn` 的发布（`ReleasePayload`）。
-- `InformationPlugin` 在 `Canwu` 中执行其中两条请求，即面向受众的发布激活和撤回，每次之后都
-  验证快照恢复、[精确重放](/developer/persistence/)和紧凑检查点恢复。其余步骤只在脱离运行时的
-  账本中执行。
+- 由成员名单、成员数和成员根（membership root）固定下来的受众（`AudiencePayload`），以及从 `Active` 转为 `Withdrawn` 的发布（`ReleasePayload`）。
+- `InformationPlugin` 在 `Canwu` 中执行其中两条请求，即面向受众的发布激活和撤回，每次之后都验证快照恢复、[精确重放](/developer/persistence/)和紧凑检查点恢复。其余步骤只在脱离运行时的账本中执行。
 
 ## 运行
 
@@ -45,17 +36,11 @@ cargo run -p canwu-information --example confidential_copy_release
 confidential_copy_release: hidden-operation holder isolation, derived copy, restricted release, withdrawal, retained knowledge, authoritative save/load, exact replay, and compact reconstruction verified
 ```
 
-每个短语对应源码中的一组检查。hidden-operation holder isolation（隐蔽操作的持有人隔离）是指：
-每次阅读只向阅读者本人发布知识，其他人不会得知经手人暗中的阅读；并且在权威运行中，只有
-`H-404` 和 `H-505` 从这次发布中得到知识。
+每个短语对应源码中的一组检查。hidden-operation holder isolation（隐蔽操作的持有人隔离）是指：每次阅读只向阅读者本人发布知识，其他人不会得知经手人暗中的阅读；并且在权威运行中，只有 `H-404` 和 `H-505` 从这次发布中得到知识。
 
 ## 代码走读
 
-场景代码在
-[`confidential_copy_release.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/confidential_copy_release.rs)，
-共用的辅助函数在
-[`support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs)。
-持有人都是 `KnowledgeHolderRef::Person`，时间由 `SimTime::from_minutes` 给出。
+场景代码在 [`confidential_copy_release.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/confidential_copy_release.rs)，共用的辅助函数在 [`support/mod.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/examples/support/mod.rs)。持有人都是 `KnowledgeHolderRef::Person`，时间由 `SimTime::from_minutes` 给出。
 
 | 持有人 | 角色 |
 | --- | --- |
@@ -84,16 +69,13 @@ Ok(plan)
 
 ### 2. 创建原件并开始投递（第 0–7 分钟）
 
-发件人创建内容代码为 `SYN-C4-17` 的 `Content` 记录、格式为 `sealed_text_v1` 的
-`Representation`（表现形式），以及 `Instance`（实物载体）。带有 `AddressedDelivery` 能力的
-`Channel` 承载一条发往收件人的 `Dispatch`：
+发件人创建内容代码为 `SYN-C4-17` 的 `Content` 记录、格式为 `sealed_text_v1` 的 `Representation`（表现形式），以及 `Instance`（实物载体）。带有 `AddressedDelivery` 能力的 `Channel` 承载一条发往收件人的 `Dispatch`：
 
 ```rust
 target: DispatchTarget::Addressed(vec![destination_holder.clone()]),
 ```
 
-发送记录从 `Prepared` 转为 `Active`，第一次 `DeliveryAttempt`（投递尝试）以 `relay` 引用角色
-记下 `H-303`。
+发送记录从 `Prepared` 转为 `Active`，第一次 `DeliveryAttempt`（投递尝试）以 `relay` 引用角色记下 `H-303`。
 
 ### 3. 经手人阅读并摘抄（第 12–14 分钟）
 
@@ -111,18 +93,11 @@ derivation: Some(ContentDerivation {
 }),
 ```
 
-副本的表现形式使用 `ContentRelation::DerivedContent`，并用 `RepresentationSourceEdge` 指向
-原始表现形式。生命周期校验要求 `source_content` 和 `parent_representation` 引用与这些来源边
-一一对应，衍生内容还必须把父表现形式的内容列为来源（见
-[`lifecycle.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/src/lifecycle.rs)
-中的 `validate_content_lineage` 和 `validate_representation_lineage`）。
+副本的表现形式使用 `ContentRelation::DerivedContent`，并用 `RepresentationSourceEdge` 指向原始表现形式。生命周期校验要求 `source_content` 和 `parent_representation` 引用与这些来源边一一对应，衍生内容还必须把父表现形式的内容列为来源（见 [`lifecycle.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-information/src/lifecycle.rs) 中的 `validate_content_lineage` 和 `validate_representation_lineage`）。
 
 ### 4. 原件送达收件人（第 25–27 分钟）
 
-投递尝试转为 `Delivered`，并向收件人发布 `RepresentationAvailable`。收件人的访问引用
-`delivery_attempt` 和 `dispatch`，随后发送记录转为 `Completed`。定向发送必须等每个收件人
-最近一次投递尝试进入终态才能完成（`validate_dispatch_completion`）。第 3 步的副本自成一条
-记录链。
+投递尝试转为 `Delivered`，并向收件人发布 `RepresentationAvailable`。收件人的访问引用 `delivery_attempt` 和 `dispatch`，随后发送记录转为 `Completed`。定向发送必须等每个收件人最近一次投递尝试进入终态才能完成（`validate_dispatch_completion`）。第 3 步的副本自成一条记录链。
 
 ### 5. 冻结受众并发布副本（第 40–43 分钟）
 
@@ -140,15 +115,9 @@ payload: AudiencePayload {
 },
 ```
 
-列出的成员必须与 `member_count` 和 `membership_root` 一致。`ReleaseScope::Audience` 的
-`Release` 指向这个受众和副本的表现形式，`publisher` 是经手人。发布转为 `Active` 时，每个成员
-各得到一条 `ReleaseAvailable`。成员 A 在第 43 分钟阅读副本，引用这次发布并附上
-`AudienceAccessEvidence::ListedMember`。
+列出的成员必须与 `member_count` 和 `membership_root` 一致。`ReleaseScope::Audience` 的 `Release` 指向这个受众和副本的表现形式，`publisher` 是经手人。发布转为 `Active` 时，每个成员各得到一条 `ReleaseAvailable`。成员 A 在第 43 分钟阅读副本，引用这次发布并附上 `AudienceAccessEvidence::ListedMember`。
 
-激活还会通过 `verify_authoritative_operation_roundtrip` 在 `Canwu` 中执行一遍。这个辅助函数
-把账本中的记录放进 `Scenario`，以插件命令的形式把请求交给 `InformationPlugin`，反复结算边界直到
-操作进入终态，再逐条比对记录与账本。之后，它用 `Canwu::admin_query_knowledge` 读取每个
-持有人的知识：
+激活还会通过 `verify_authoritative_operation_roundtrip` 在 `Canwu` 中执行一遍。这个辅助函数把账本中的记录放进 `Scenario`，以插件命令的形式把请求交给 `InformationPlugin`，反复结算边界直到操作进入终态，再逐条比对记录与账本。之后，它用 `Canwu::admin_query_knowledge` 读取每个持有人的知识：
 
 ```rust
 assert_authoritative_knowledge(canwu, &audience_member_a, &["release_available"])?;
@@ -158,10 +127,7 @@ assert_authoritative_knowledge(canwu, &unrelated_holder, &[])?;
 assert_authoritative_knowledge(canwu, &relay_holder, &[])
 ```
 
-这个模拟以账本中的记录为初始状态、知识库为空，所以这些检查只能看到这一次操作发布的知识。
-因此第 12 分钟读过原件的 `H-303` 在这里什么也没有。副本是经手人发布的，但他不在受众名单里，
-这次激活也不会给他任何知识。最后，辅助函数恢复快照、用 `Canwu::replay_from_journal` 重放日志、
-恢复紧凑检查点，并把每个结果与原快照比对。
+这个模拟以账本中的记录为初始状态、知识库为空，所以这些检查只能看到这一次操作发布的知识。因此第 12 分钟读过原件的 `H-303` 在这里什么也没有。副本是经手人发布的，但他不在受众名单里，这次激活也不会给他任何知识。最后，辅助函数恢复快照、用 `Canwu::replay_from_journal` 重放日志、恢复紧凑检查点，并把每个结果与原快照比对。
 
 ### 6. 撤回并拒绝迟到的阅读
 
@@ -173,9 +139,7 @@ proposed: ReleasePayload {
 },
 ```
 
-撤回同样经过 `verify_authoritative_operation_roundtrip`。撤回只更新发布记录，不产生任何
-知识发布，所以在它的权威运行中没有持有人拥有知识；这里要确认的是此前三条访问记录仍与账本一致。
-`Withdrawn` 是终态，而经由发布的阅读要求发布处于 `Active`，所以成员 B 在第 51 分钟的阅读失败：
+撤回同样经过 `verify_authoritative_operation_roundtrip`。撤回只更新发布记录，不产生任何知识发布，所以在它的权威运行中没有持有人拥有知识；这里要确认的是此前三条访问记录仍与账本一致。`Withdrawn` 是终态，而经由发布的阅读要求发布处于 `Active`，所以成员 B 在第 51 分钟的阅读失败：
 
 ```rust
 assert!(ledger.plan(&access_after_withdrawal).is_err());
@@ -187,28 +151,19 @@ assert!(ledger.plan(&access_after_withdrawal).is_err());
 - 每条知识发布只面向一个持有人：阅读者、收件人，或受众名单中的每个成员。
 - 发布者只有在自己也列入受众时，才会从这次发布中得到知识。
 - 撤回管的是之后的阅读。此前的访问记录，以及引用它们的知识，都保持原样。
-- 脱离运行时的账本和 `InformationPlugin` 都调用 `InformationLifecycle::plan`，同一请求得到
-  同样的记录。
+- 脱离运行时的账本和 `InformationPlugin` 都调用 `InformationLifecycle::plan`，同一请求得到同样的记录。
 
 ## 动手改一改
 
-- 把第 43 分钟那次阅读中的 `audience_member_a` 换成 `unrelated_holder`。规划会失败，报错
-  `access holder is not an explicit audience member`。
-- 删掉副本内容绑定中的 `source_content` 引用。规划会失败，报错
-  `content source references must exactly match derivation source edges`。
-- 撤回之后，用 `expected_version: 3` 规划一条把发布改回 `ReleaseStatus::Active` 的
-  `TransitionRelease`。它会失败，报错 `terminal release cannot reopen`。
+- 把第 43 分钟那次阅读中的 `audience_member_a` 换成 `unrelated_holder`。规划会失败，报错 `access holder is not an explicit audience member`。
+- 删掉副本内容绑定中的 `source_content` 引用。规划会失败，报错 `content source references must exactly match derivation source edges`。
+- 撤回之后，用 `expected_version: 3` 规划一条把发布改回 `ReleaseStatus::Active` 的 `TransitionRelease`。它会失败，报错 `terminal release cannot reopen`。
 
 ## 示例之外
 
-- `sealed_text_v1`、`bounded_carrier`、`select_and_copy`、`temporary_read` 这类标签都是
-  应用自定的字符串，扩展只检查它们是去掉首尾空白后的非空文本。时间安排、渠道行为和后果由你自己的
-  插件负责。
-- 由群组解析出的受众使用 `AudienceMembership::ResolvedGroupSnapshot`，读者可以用
-  `AudienceAccessEvidence::MembershipProof` 对照成员根证明自己的成员身份。发布也可以使用
-  `ReleaseScope::OpenAvailability`，处于 `Active` 的发布还可以转为 `Expired`。
-- [按路线投递的通信](/tutorials/cases/routed-correspondence/)在同样的发送记录和投递尝试
-  记录之上，构建沿路线传递的信件。
+- `sealed_text_v1`、`bounded_carrier`、`select_and_copy`、`temporary_read` 这类标签都是应用自定的字符串，扩展只检查它们是去掉首尾空白后的非空文本。时间安排、渠道行为和后果由你自己的插件负责。
+- 由群组解析出的受众使用 `AudienceMembership::ResolvedGroupSnapshot`，读者可以用 `AudienceAccessEvidence::MembershipProof` 对照成员根证明自己的成员身份。发布也可以使用 `ReleaseScope::OpenAvailability`，处于 `Active` 的发布还可以转为 `Expired`。
+- [按路线投递的通信](/tutorials/cases/routed-correspondence/)在同样的发送记录和投递尝试记录之上，构建沿路线传递的信件。
 
 ## 源码
 

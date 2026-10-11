@@ -60,9 +60,9 @@ The fixture ID is the first argument; without it the starter runs
 `hongwu-1391`. Each run prints one line (trace paths trimmed):
 
 ```text
-fixture=hongwu-1391 checkpoint=02fa72339b855af10464430523413b67d9d748be200eb0375d57b919d69aa72c frames=6 trace_manifest=... trace_steps=...
-fixture=wanli-1581 checkpoint=d1d6ebabd9b8b38f8fe1a73d4708dbee999b596990942299ae7b4ea2229d7d2d frames=6 trace_manifest=... trace_steps=...
-fixture=hongguang-1644 checkpoint=4c93454351280141b4709717b8cad275ceb853b89459115ef9d73392a4cff7b1 frames=6 trace_manifest=... trace_steps=...
+fixture=hongwu-1391 checkpoint=b282b58b82d8fbe7646fdb1cfbae1e64e1e2187a4bd84d014826351cb7ae5c0c frames=6 trace_manifest=... trace_steps=...
+fixture=wanli-1581 checkpoint=1c79fd79784d86ac285ad81e80e0f54dd7b0389edce99a8351012f0555f3255b frames=6 trace_manifest=... trace_steps=...
+fixture=hongguang-1644 checkpoint=8aa76890d6bdf198a8d1b620ee5db3597157b642f27e757bc9f120a5e451df50 frames=6 trace_manifest=... trace_steps=...
 ```
 
 The seed is fixed (`DEFAULT_SEED`), so each fixture prints the same checkpoint
@@ -189,11 +189,11 @@ action: FiscalAction::OpenAssessment {
 
 `submit_reference_action_with_trace` wraps the `FiscalActionRequest` with
 `fiscal_action_command` and issues it as the binding's actor. At the first
-boundary, admission checks the actor against the binding, the binding's
-institution against the scope, and `expected_procedure_revision` against the
-state. The next boundary settles the action into `action_outcomes`. The
-accounting cycle ID belongs to the host and is separate from the historical
-period. The second action, `AuthorizeExecution`, permits collecting 70 of
+boundary, admission checks the actor against the binding and the binding's
+institution against the scope. The next boundary checks
+`expected_procedure_revision` against the state and settles the action into
+`action_outcomes`. The accounting cycle ID belongs to the host and is separate
+from the historical period. The second action, `AuthorizeExecution`, permits collecting 70 of
 resource `ResourceId::new(1)` from the actor to the institution; resource
 balances stay as they are.
 

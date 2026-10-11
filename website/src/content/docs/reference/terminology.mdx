@@ -6,14 +6,9 @@ sidebar:
   label: 中英文术语表
 ---
 
-本页用于查询参伍术语：中英文名称、对应的代码标识及含义。带链接的术语另有专门页面
-详细说明，其余术语以本页和 API 文档中的定义为准。
+本页用于查询参伍术语：中英文名称、对应的代码标识及含义。带链接的术语另有专门页面详细说明，其余术语以本页和 API 文档中的定义为准。
 
-编写参伍文档时，请在中英文中分别使用表中的规范写法，代码标识保持原样，并避免使用最后
-一张表中标为已弃用的写法。首次出现时可以同时给出英文或代码名，例如**模拟插件**
-（simulation plugin）或**决策票据**（`DecisionTicket`）。仓库中的
-[`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md)
-是术语的权威来源，本页与之同步。
+编写参伍文档时，请在中英文中分别使用表中的规范写法，代码标识保持原样，并避免使用最后一张表中标为已弃用的写法。首次出现时可以同时给出英文或代码名，例如**模拟插件**（simulation plugin）或**决策票据**（`DecisionTicket`）。仓库中的 [`docs/terminology.md`](https://github.com/PeiyuanQi/canwu/blob/main/docs/terminology.md) 是术语的权威来源，本页与之同步。
 
 <div class="terminology-reference">
 
@@ -32,7 +27,7 @@ sidebar:
 | [真值](/developer/reading-state/) | ground truth | — | 权威状态中的事实，无论某个角色是否知道。 |
 | [角色相对视图](/developer/reading-state/) | actor-relative view | `CanwuViewer`, `ViewerContext` | 根据一个角色的知识和权限（authority）生成的读取结果，不会暴露全知状态。 |
 | [只读快照](/developer/reading-state/) | read-only snapshot | `WorldSnapshot` | 供受信任读取使用的脱离运行时状态值，不是实时可变引用。 |
-| 模拟粒度 | simulation granularity | `SimulationGranularity` | 内核的领域无关粒度：`aggregate`、`group`、`actor`。CM 应在自己的整合包中映射为 Population、Special Group、Character。 |
+| 模拟粒度 | simulation granularity | `SimulationGranularity` | 内核的领域无关粒度：`aggregate`、`group`、`actor`。上层应用可以把它们映射为自己的类别，例如 Population、Special Group、Character。 |
 | 聚合层 | aggregate | `SimulationGranularity::Aggregate` | 粗粒度的人口、经济或区域状态；上层应用可以将其映射为 Population。 |
 | 群体层 | group | `SimulationGranularity::Group` | 有边界的社会、制度、军事或组织群体；上层应用可以将其映射为 Special Group。 |
 | 角色层 | actor | `SimulationGranularity::Actor` | 具有知识和权限的个人或其他主体；上层应用可以将其映射为 Character。 |
@@ -45,7 +40,7 @@ sidebar:
 | [模拟时间](/tutorials/continuous-game-loop/) | simulation time | `SimTime`, `SimDuration` | 由参伍结算、可确定表示的时间。 |
 | [表现时间](/tutorials/continuous-game-loop/) | presentation time | — | 客户端动画与插值时间，可以是小数，但不属于权威状态。 |
 | [命令](/developer/integration/) | command | `Command`, `CommandEnvelope` | 经过结构、前置条件和权限校验后改变权威状态的类型化请求。 |
-| [领域命令](/tutorials/move-army/) | domain command | `Command::Plugin` | 由领域整合定义并经公开规范入口验证的类型化意图。 |
+| [领域命令](/tutorials/move-army/) | domain command | `Command::Plugin` | 由领域整合定义、经公开的规范化输入验证的类型化意图。 |
 | [规范化输入](/architecture/events/) | canonical ingress | `IngressRecord` | 命令、通信、信息和调度系统共用的持久化确定性输入路径。首次出现时可附英文。 |
 | [准入](/architecture/events/) | admission | — | 决定哪些待处理输入进入某个边界的过程和切点；它不是 ingress 的同义词。 |
 | [插件输入撤回](/developer/integration/) | plugin ingress cancellation | `cancel_plugin_ingress`, `IngressPayload::PluginCancellation` | 在到期之前终止撤回一项仍在排队的插件输入，并作为独立日志记录保存；被撤回的输入永远不会被准入，也不会发生回滚。 |
@@ -99,7 +94,7 @@ sidebar:
 | [财政模拟扩展](/tutorials/cases/ming-fiscal/) | fiscal simulation extension | `canwu-fiscal` | 通用财政程序领域扩展；负责法规、地区采纳、核算、授权、减免、凭证、审计、聚合与持有人相对知识报告，不负责资源余额与转移。 |
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
-| [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `（证据种类，外部操作 ID）` 组合最多结算一张凭证；凭证不拥有资源真值。 |
+| [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证；凭证不拥有资源真值。 |
 | [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
 | [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须由所属插件声明。它可以授予财政授权绑定中的代理角色权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
@@ -139,6 +134,7 @@ sidebar:
 | [快照](/developer/persistence/) | snapshot | `SimulationSnapshot` | 恢复时必须完整校验的持久化状态映像。 |
 | [检查点](/developer/persistence/) | checkpoint | `SimulationCheckpoint` | 可与后续日志证据衔接的已验证紧凑基础状态。 |
 | [检查点日志](/developer/persistence/) | checkpoint journal | `CheckpointJournal` | 检查点和后续证据的组合，用于紧凑持久化与恢复。代码相邻正文可直接使用类型名。 |
+| [分页检查点](/developer/persistence/) | paged checkpoint | `PagedSimulationCheckpoint`, `prepare_paged_checkpoint` | 检查点按内容寻址的形式，以状态页保存，每个新检查点只增加发生变化的页。恢复时需要截至该检查点的连续证据前缀。分页根还绑定了哪些证据已经封存，因此不是状态标识：从已封存日志段恢复后，检查点哈希不变，分页根却不同。判断状态是否相同应比较检查点哈希。 |
 | [精确重放](/developer/persistence/) | exact replay | `replay_from_journal()` | 从已记录输入与证据重建并验证同一次运行，不重新调用外部选择。 |
 | [平行现实](/developer/persistence/) | alternative reality | — | 从共同的先前状态选择不同的输入形成新的平行现实，不是精确重放。 |
 | [派生分支](/developer/persistence/) | fork | `fork()` | 从现有时点复制出的独立模拟，可接收新输入；指 API 时保留 `fork`。 |
@@ -201,7 +197,6 @@ sidebar:
 
 ## 维护规则
 
-新增或重命名公开概念时，应在同一改动中更新仓库术语表和本页的中英文版本。只有在
-对应的专题页面已经存在时才添加链接；在此之前，本术语表本身就是该词的公开定义。
+新增或重命名公开概念时，应在同一改动中更新仓库术语表和本页的中英文版本。只有在对应的专题页面已经存在时才添加链接；在此之前，本术语表本身就是该词的公开定义。
 
 </div>

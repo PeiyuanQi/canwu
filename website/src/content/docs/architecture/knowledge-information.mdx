@@ -73,7 +73,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | `KnowledgeRecordView` | 面向持有人的记录副本：带持有人本地 ID（`HolderKnowledgeRecordId`），不含 `origin`。 |
 | `KnowledgeQuery`、`KnowledgeQueryResult`、`KnowledgeCursor` | 某个持有人账本中的一页记录，可以按 schema、主体和得知时间过滤，并带有翻到下一页的游标。 |
 | `KnowledgeReadCut` | 一次读取所看到的账本位置：边界，加上该持有人全部记录的哈希。 |
-| `KnowledgeSnapshot` | 所有持有人账本，保存在快照或场景中。它还带有 `ActorKnowledge`，即每个角色最早对军队的观测，每条都有一个 `KnowledgeSource`（直接观察、指挥职责、报告或场景记录）。 |
+| `KnowledgeSnapshot` | 所有持有人账本，保存在快照或场景中。它还带有为兼容保留的 `ActorKnowledge`，即每个角色对各支军队的旧式观测；每条观测都带有一个 `KnowledgeSource`（直接观察、指挥职责、报告或场景记录）。 |
 | `PluginKnowledgeSchema`、`KnowledgeWriteGrant` | 某个插件注册并拥有的带版本知识 schema，以及某个边界系统以指定可见性发布这个 schema 的许可。 |
 
 ### 信息与通信

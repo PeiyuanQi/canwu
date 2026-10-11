@@ -38,6 +38,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- | --- | --- |
 | 普通存档或服务重启 | `snapshot_json()` | `Canwu::from_snapshot_json_with_plugins()` | 保存完整快照，加载时提供相同的插件集合 |
 | 长期运行的紧凑存储 | `checkpoint_journal_json()` | `Canwu::from_checkpoint_journal_json_with_plugins()` | 保存检查点及其后连续不断的日志 |
+| 只保存变化部分的增量存档 | `prepare_paged_checkpoint()` | `Canwu::from_paged_checkpoint_and_journal_with_plugins()` | 保留每个状态页和连续不断的证据前缀，见[分页检查点](#分页检查点) |
 | 审计或精确重建 | `replay_journal()` | `Canwu::replay_from_journal()` 或 `replay_from_journal_json()` | 保存完整日志，并保留匹配的插件集合 |
 | 向外部系统发送效果 | `outbox_entries()` | — | 至少投递一次，按 `delivery_id` 去重，并保存确认状态 |
 | 从同一时点尝试另一组输入 | `fork()` | — | 把派生分支当作新的平行现实 |
@@ -112,16 +113,51 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 - 为每个插件恢复相同的归档契约和语义哈希；
 - 删除冷数据前，先从已提交的根做可达性检查。
 
+### 分页检查点
+
+**分页检查点**是当前状态检查点按内容寻址的形式：它以状态页的形式保存在 `StatePageProvider` 中，之后每个新检查点只增加发生变化的页。从 0.13.2 起，可以通过对外 API 写出和恢复分页检查点：
+
+- **写出。** `Canwu::prepare_paged_checkpoint(source, provider)` 把当前状态整理成一个 `PreparedPagedSimulationCheckpoint`。其中的增量不包含提供方已经持有的页；`source` 是上一个检查点（如果有）。`store_and_verify` 负责保存这份增量。准备检查点不会改动模拟运行：状态修订号、检查点哈希和所有日志都保持不变。
+- **恢复。** `Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments)` 和 `from_paged_checkpoint_and_journal_with_plugins` 根据提供方和证据前缀重建模拟运行。证据前缀是从运行开始到该检查点为止、连续不断的日志段，可以在运行过程中用 `journal_segment_since` 逐段收集。每个日志段至少要包含一条新记录，所以起点与终点相同的日志段要跳过。恢复时执行的验证与加载快照相同。提供方只需持有恢复时实际读取的页；读取的页缺失时会以 `StatePageUnavailable` 失败，不会当作空数据。对已归档的决策历史，恢复只读取热决策状态所依赖的页；其他已归档历史会报告 `Unresolved`，直到通过提供相同页的 `DecisionArchiveProvider` 调用 `decision_history_location_with_provider` 查到它。
+- **紧凑模式。** `CompactedCanwu` 提供同样的调用。它的证据前缀是你已封存的日志段（按封存先后排列），再加上用 `journal_segment_since` 从最后一段的终点取得的日志段；如果封存之后没有记录任何内容，就跳过这最后一段。紧凑模式恢复之后，证据前缀会改变，见[重启紧凑模式的模拟运行](#重启紧凑模式的模拟运行)。
+
+检查点本身不携带证据记录。除了紧凑模式的接续信息（例如每次封存对应的一个归档日志段头），它的大小取决于当前状态，而不是运行持续了多久；每份增量只包含发生变化的页。准备检查点时仍可能读取保留的证据，恢复时也仍会验证完整的证据前缀。
+
+需要注意：
+
+- 提供方要一直保留之前检查点的页。从分页检查点恢复的模拟运行再准备检查点时，增量同样不包含它从未加载过的已归档决策页，所以它的提供方必须已经持有恢复所用检查点的全部页。`store_and_verify` 只检查新增的页和根；要检查一个检查点的完整页集合，请使用 `StatePageRetentionLedger::prepare` 和 `verify`。
+- 检查点列有插件时，紧凑模式的恢复必须使用 `_with_plugins` 形式。
+- 分页根不是状态标识，因为它还绑定了哪些证据已经封存。凡是从已封存日志段恢复，无论通过 `Canwu` 还是 `CompactedCanwu`，检查点哈希都与原运行相同，分页根却不同，之后再封存也不会变回原来的分页根。从未封存过证据的运行，恢复后的分页根与原来相同。判断状态是否相同，请比较检查点哈希，而不是分页根。
+
+### 重启紧凑模式的模拟运行
+
+紧凑模式的恢复，无论是从分页检查点恢复，还是通过 `CompactedCanwu::from_checkpoint_and_journal` 及其 `_with_plugins` 形式恢复，都会把你传入的整个证据前缀作为保留证据。这会改变之后恢复所需的日志段：
+
+1. 恢复后的模拟运行再次封存之前，它的检查点使用你恢复时传入的证据前缀，再加上用 `journal_segment_since` 从该前缀终点取得的日志段。
+2. 它下一次调用 `seal_evidence()` 时，会返回一个从运行开始处起算的日志段，取代之前封存的所有日志段。
+3. 从此以后，证据前缀以这个新日志段开头，再加上用 `journal_segment_since` 从它的终点取得的日志段。
+4. 之前的日志段只需为那次封存之前的检查点保留。
+
+如果证据前缀仍把之前的日志段放在新日志段前面，前缀就不连续，恢复会失败。
+
 格式编号、分页存储契约和归档不变量见仓库中的[版本与持久化契约](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md)。
 
 ## 版本与存档兼容
 
 :::note
-参伍 0.13.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4。存档还记录了精确的 `engine_version`，所以 0.13.0 的模拟运行只能加载 0.13.0 的存档。0.12.0 及更早版本的存档不能改标签，也不能加载；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.13.2 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.13.2 引擎只能加载 0.13.2 写出的存档。0.13.1 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
+参伍 0.13.2 是补丁版本。引擎内部早已实现[分页检查点](#分页检查点)的写出和恢复，这个版本把相关调用加入对外 API：`Canwu::prepare_paged_checkpoint`、`Canwu::from_paged_checkpoint_and_journal` 和 `Canwu::from_paged_checkpoint_and_journal_with_plugins`，`CompactedCanwu` 上同样的三个调用，以及 `CompactedCanwu::journal_segment_since`。所有改动都是新增，现有代码无需修改即可编译。各种格式、公开类型的结构和哈希算法都没有变化。每个检查点哈希都包含引擎版本，所以和任何一次版本变化一样，每次运行的检查点哈希，以及记录这些哈希的分页根，都与 0.13.1 不同。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.1 的存档；需要读取时，请保留 0.13.1 引擎。
+
+上一个补丁版本参伍 0.13.1 的格式和现有公开类型与 0.13.0 相同，另新增三个公开项：`SimulationView::replay_stable_domain_record_version`、`canwu_military::MILITARY_REJECTION_EVENT` 和 `OperationState::validate`。它的检查点哈希都与 0.13.0 不同，0.13.0 的存档也不能加载。生产、历史研究、财政、军事和资源插件的语义哈希也发生了变化，`canwu-economy-reference` 插件及其类型化证据适配器、`canwu-force-supply-reference` 插件同样如此。
+
+它修复了一个问题：在一直运行、未经存档恢复的模拟中，[推迟的决策票据](/architecture/decisions/)过了截止时间也不会到期，之后针对它的请求却都以 `ClosedTicket` 被拒绝。现在这类票据会在截止时间之后的第一个结算边界到期，与从快照恢复的模拟一致。
+
+它还修复了证据检查的一个问题：同一条命令在用 `seal_evidence` 封存过的模拟运行中可能被拒绝，在该运行的精确重放中却被接受。现在[生产](/developer/production-economy/)执行、设施项目和实际产出、[动用授权](/developer/production-economy/#动用授权)、财政折纳报价和[财政执行凭证](/architecture/fiscal/)，以及历史研究评估列出的精确记录版本，都必须是封存无法改变的版本，通常就是每条记录的当前版本。历史研究评估中事件、边界等通用引用仍按保留的证据检查，所以封存过的模拟运行仍可能拒绝其精确重放会接受的评估。此外，有问题的[军事](/architecture/military/)和财政命令不再让之后的每个结算边界都失败，而是记为被拒绝。
+
 - 需要保存存档的应用，请固定到确切的发布版本或 Git 修订。
-- 插件语义哈希变化意味着行为变化。次版本发布（例如 0.12 → 0.13）可能同时改变多个扩展的语义哈希，使用这些扩展的旧存档随之无法加载。
+- 插件语义哈希变化意味着行为变化。任何版本发布，即使是补丁版本（例如 0.13.0 → 0.13.1），都可能同时改变多个扩展的语义哈希，使用这些扩展的旧存档随之无法加载。
 - 参伍不迁移旧存档。要跨引擎版本保留历史，请运行自己的导出与导入流程，或保留写出这些数据的旧引擎。
 - 新版本会增加枚举变体和结构体字段，穷举 `match` 和结构体字面量可能需要随之修改。
 

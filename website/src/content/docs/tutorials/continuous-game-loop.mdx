@@ -41,10 +41,10 @@ frame= 3390 speed=Paused wall= 55.900s visual_time=Day 0, 04:30 + 0.500m canwu_t
 frame= 5847 speed=20x    wall= 96.440s visual_time=Day 0, 18:01 + 0.300m canwu_time=Day 0, 18:01 army visual progress=100.0% (2 -> 3, authoritative_location=3)
 EVENT: at=Day 0, 18:01 type=army_arrived Army 1 arrived in territory 3
 
-FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=5fb68955f5b2..., checkpoint=826b0e164797...
+FPS INVARIANT: 60 FPS-ish frames=5850 and 30 FPS-ish frames=2881 -> time=Day 0, 18:02, events=4, boundaries=2, state_hash=3a402fa305de..., checkpoint=464e5881a9bc...
 ```
 
-`visual_time` 是渲染器绘制时使用的时间，`canwu_time` 是参伍的时间。最后一行说明：两遍运行渲染的帧数不同，最终的状态哈希和检查点却一样。
+`visual_time` 是渲染器绘制时使用的时间，`canwu_time` 是参伍的时间。最后一行说明：两遍运行渲染的帧数不同，最终的状态哈希和检查点哈希却一样。
 
 ## 三种时间
 
@@ -133,6 +133,6 @@ const THIRTY_FPS_ISH: FrameProfile = FrameProfile {
 };
 ```
 
-最后一行会变成 `30 FPS-ish frames=2384`，`state_hash=5fb68955f5b2...` 和 `checkpoint=826b0e164797...` 保持不变。
+最后一行会变成 `30 FPS-ish frames=2384`，`state_hash=3a402fa305de...` 和 `checkpoint=464e5881a9bc...` 保持不变。
 
 这个循环遵循的上层应用接入规则见[接入并驱动模拟运行](/developer/integration/)。

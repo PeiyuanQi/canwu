@@ -1,6 +1,6 @@
 ---
 title: Save, replay, and fork
-description: Save and load a Canwu run, keep compact history for long runs, replay a run exactly, and branch into alternative realities.
+description: Save and load a Canwu run, keep compact history for long runs, replay a run exactly, and fork a run into an alternative reality.
 sidebar:
   order: 4
   label: Save, replay, and fork
@@ -8,7 +8,7 @@ sidebar:
 
 import MermaidDiagram from "../../../../components/MermaidDiagram.astro";
 
-Use this page to save and load a run, keep compact history for a long-running simulation, replay a run exactly, or branch from a saved point to try different inputs.
+Use this page to save and load a run, keep compact history for a long-running simulation, replay a run exactly, or fork from a saved point to try different inputs.
 
 A Canwu save holds more than world data. It also carries the commands, events, boundary records, random draws, plugin semantic environment, and state commitments that let a load verify the state. The **plugin semantic environment** is the name, version, and semantic hash of every plugin in the run; loading and replay need a plugin set that matches it.
 
@@ -38,6 +38,7 @@ A restored or replayed run has the same `checkpoint_hash()` as the original. A f
 | --- | --- | --- | --- |
 | Normal save or service restart | `snapshot_json()` | `Canwu::from_snapshot_json_with_plugins()` | Store the whole snapshot; pass the same plugin set when loading |
 | Compact storage for a long run | `checkpoint_journal_json()` | `Canwu::from_checkpoint_journal_json_with_plugins()` | Store the checkpoint and the unbroken journal after it |
+| Incremental saves that store only changed state | `prepare_paged_checkpoint()` | `Canwu::from_paged_checkpoint_and_journal_with_plugins()` | Keep every state page and the unbroken evidence prefix; see [paged checkpoints](#paged-checkpoints) |
 | Audit or exact reconstruction | `replay_journal()` | `Canwu::replay_from_journal()` or `replay_from_journal_json()` | Store the whole journal and keep a matching plugin set |
 | Send effects to outside systems | `outbox_entries()` | — | Deliver at least once, deduplicate by `delivery_id`, and store acknowledgement state |
 | Try different inputs from one point | `fork()` | — | Treat the fork as a new alternative reality |
@@ -112,16 +113,51 @@ Paged checkpoints, `StatePageProvider`, decision-history archives, and plugin ar
 - restore the same archive contracts and semantic hashes for every plugin; and
 - check reachability from committed roots before deleting cold data.
 
+### Paged checkpoints
+
+A **paged checkpoint** is the content-addressed form of the current-state checkpoint. It is stored as state pages in a `StatePageProvider`, and each new checkpoint adds only the pages that changed. Since 0.13.2, you can write and restore paged checkpoints through the public API:
+
+- **Write.** `Canwu::prepare_paged_checkpoint(source, provider)` captures current state as a `PreparedPagedSimulationCheckpoint`. Its delta leaves out every page the provider already holds; `source` is the earlier checkpoint, if there is one. `store_and_verify` stores the delta. Preparing changes nothing in the run: the state revision, the checkpoint hash, and every journal stay the same.
+- **Restore.** `Canwu::from_paged_checkpoint_and_journal(checkpoint, provider, segments)` and `from_paged_checkpoint_and_journal_with_plugins` rebuild the run from the provider and the evidence prefix: the unbroken journal segments from the start of the run up to the checkpoint. Collect them as the run goes with `journal_segment_since`. Each segment must contain at least one new record, so skip any segment whose start equals its end. A restore runs the same validation as loading a snapshot. Only the pages the restore reads must be in the provider, and a missing one fails with `StatePageUnavailable` instead of reading as empty. Of the archived decision history, the restore reads only the pages that hot decision state depends on; other archived history reports `Unresolved` until `decision_history_location_with_provider` looks it up through a `DecisionArchiveProvider` that serves the same pages.
+- **Compact mode.** `CompactedCanwu` offers the same calls. Its evidence prefix is the segments you have sealed, in order, followed by what `journal_segment_since` returns from the end of the last one. Skip that final segment when nothing was recorded after the seal. After a compact restore the prefix changes; see [Restart a compact run](#restart-a-compact-run).
+
+The checkpoint carries no evidence records. Its size follows current state rather than the length of the run, apart from compact-mode continuation data such as one archived-segment header per seal, and each delta holds only the pages that changed. Preparing can still read retained evidence, and a restore still validates the whole evidence prefix.
+
+Keep these caveats in mind:
+
+- Keep the earlier checkpoint's pages in the provider. When a run restored from a paged checkpoint prepares a new one, its delta also leaves out the archived decision pages the run never loaded, so its provider must already hold every page of the checkpoint it was restored from. `store_and_verify` checks only the new pages and the root; use `StatePageRetentionLedger::prepare` and `verify` to check a checkpoint's complete page set.
+- A compact restore needs the `_with_plugins` form whenever the checkpoint names a plugin.
+- A paged root is not a state identity, because it also commits to which evidence is sealed. Any restore from sealed segments, through `Canwu` or `CompactedCanwu`, keeps the original checkpoint hash but gets a different paged root, and a later seal does not bring the old root back. A run that has never sealed evidence restores to the same paged root. Compare checkpoint hashes, not paged roots.
+
+### Restart a compact run
+
+A compact restore, whether from a paged checkpoint or through `CompactedCanwu::from_checkpoint_and_journal` and its `_with_plugins` form, keeps the whole prefix you supplied as retained evidence. That changes which segments later restores need:
+
+1. Until the restored run seals again, a checkpoint of it uses the prefix you restored it from, followed by what `journal_segment_since` returns from that prefix's end.
+2. Its next `seal_evidence()` returns one segment that starts at the beginning of the run and replaces every segment sealed before it.
+3. From then on, the prefix starts with that new segment, followed by what `journal_segment_since` returns from its end.
+4. Keep the earlier segments only for checkpoints taken before that seal.
+
+A prefix that still lists the earlier segments in front of the new one is not contiguous, so restoring from it fails.
+
 The repository's [versioning and persistence contract](https://github.com/PeiyuanQi/canwu/blob/main/docs/versioning.md) lists format numbers, paged-storage contracts, and archive invariants.
 
 ## Version and save compatibility
 
 :::note
-Canwu 0.13.0 writes snapshot format 8, commitment format 4, and checkpoint/evidence-journal format 4. A save also records the exact `engine_version`, so a 0.13.0 run loads only 0.13.0 saves. A save from 0.12.0 or earlier cannot be relabeled or loaded; keep the older engine to read it, or export the data with your own tool.
+Canwu 0.13.2 writes snapshot format 8, commitment format 4, checkpoint/evidence-journal format 4, and paged-checkpoint envelope format 4. A save also records the exact `engine_version`, so a 0.13.2 run loads only 0.13.2 saves. A save from 0.13.1 or earlier cannot be loaded, and editing its recorded `engine_version` does not make it load; keep the older engine to read it, or export the data with your own tool.
 :::
 
+Canwu 0.13.2 is a patch release. It adds public API calls that write and restore [paged checkpoints](#paged-checkpoints), which the engine already implemented internally: `Canwu::prepare_paged_checkpoint`, `Canwu::from_paged_checkpoint_and_journal`, and `Canwu::from_paged_checkpoint_and_journal_with_plugins`, plus the same three calls and `journal_segment_since` on `CompactedCanwu`. Every change is additive, so existing code still compiles. The formats, public type shapes, and hash algorithms are unchanged. Each checkpoint hash includes the engine version, so every run's checkpoint hashes, and the paged roots that record them, differ from 0.13.1, as they do across any version change. First-party plugins that take their plugin version from the crate version report a new one. The exact engine-version check rejects 0.13.1 saves; keep the 0.13.1 engine to read them.
+
+Canwu 0.13.1, the previous patch release, kept the 0.13.0 formats and existing public types and added three public items: `SimulationView::replay_stable_domain_record_version`, `canwu_military::MILITARY_REJECTION_EVENT`, and `OperationState::validate`. Its checkpoint hashes all differ from 0.13.0, and 0.13.0 saves do not load. The semantic hashes of the production, historical research, fiscal, military, and resource plugins also changed, as did those of the `canwu-economy-reference` plugin, its typed-evidence adapter, and the `canwu-force-supply-reference` plugin.
+
+It fixed [deferred decision tickets](/en/architecture/decisions/) that never expired in a live run: such a ticket stayed open past its deadline, yet every later request on it was rejected as `ClosedTicket`. It now expires at the first boundary after its deadline, as it already did in a run restored from a snapshot.
+
+It also fixed evidence checks that could reject a command in a run sealed with `seal_evidence` yet accept it in the exact replay of that run. [Production](/en/developer/production-economy/) executions, facility projects, and realized output, [access grants](/en/developer/production-economy/#delegated-access-grants), fiscal commutation quotes and [execution receipts](/en/architecture/fiscal/), and the record versions a historical research assessment names must now be versions that a seal cannot change, normally the current version of each record. Generic research citations, such as events and boundaries, are still checked against retained evidence, so a sealed run can still reject an assessment that its exact replay accepts. Finally, bad [military](/en/architecture/military/) and fiscal commands no longer make every later boundary fail; they are recorded as rejected.
+
 - Pin an exact release or Git revision for any application that keeps saves.
-- Treat a plugin semantic-hash change as a behavior change. A minor release (for example, 0.12 → 0.13) can change the semantic hashes of several extensions at once, and older saves that use those extensions then fail to load.
+- Treat a plugin semantic-hash change as a behavior change. Any release, even a patch release such as 0.13.0 → 0.13.1, can change the semantic hashes of several extensions at once, and older saves that use those extensions then fail to load.
 - Canwu does not migrate old saves. To carry history across an engine upgrade, run your own export and import, or keep the engine that wrote the data.
 - New releases add enum variants and struct fields, so exhaustive `match` statements and struct literals may need updates.
 

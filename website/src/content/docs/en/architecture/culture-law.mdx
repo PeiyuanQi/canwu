@@ -79,9 +79,9 @@ The definition has no free-form trait or value map per population bucket. Expres
 
 A compiled plan is fixed for one scenario and run revision. Changing the definition or the compiled order produces a new plan with a new content hash.
 
-## Incremental settlement and scale
+## Incremental settlement (design target)
 
-Culture settlement works from a **dirty set**: the `(cohort, target)` pairs that something touched since the last settlement. An admitted exposure, a policy change, an organization change, or a reactivation marks the affected pairs. A settlement boundary then:
+Culture settlement works from a **dirty set**: the `(cohort, target)` pairs that something touched since the last settlement. An admitted exposure, a policy change, an organization change, or a reactivation marks the affected pairs. Then the boundary that settles culture:
 
 1. consumes admitted signals in canonical order;
 2. evaluates the dirty pairs and their bounded dependents;
@@ -90,6 +90,8 @@ Culture settlement works from a **dirty set**: the `(cohort, target)` pairs that
 5. emits bounded effect batches for the next consumer boundary.
 
 With `Delta` dirty pairs, `B` population buckets per pair, `E_delta` affected edges, and `V_delta` affected observer entries, the intended steady-state cost is about `O(Delta * B + E_delta + V_delta)`. Full rebuilds are for definition changes, migration, and explicit maintenance.
+
+Steps 3 and 4 are not implemented yet. `canwu-society` still recomputes its aggregates and projections from full state as a compatibility fallback, and no benchmark has measured the steady-state cost.
 
 ## Culture lifecycle
 

@@ -9,7 +9,7 @@ sidebar:
 
 import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
-当你的游戏或模型里有会耗尽的存量，比如粮食、布匹、弹药或建材，就读这一页。它说明每一步由哪个 crate 负责、各步骤的先后顺序，以及需求来源、动用授权、损耗、交换、本地交接、生产产出和自定义消费者的规则。
+当你的游戏或模型里有会耗尽的存量，比如粮食、布匹、弹药或建材，就读这一页。它说明每一步由哪个 crate 负责、各步骤的先后顺序，以及需求来源、动用授权、损耗、交换、本地验收、生产产出和自定义消费者的规则。
 
 这些能力由可选的 `canwu-resource` 和 `canwu-production` 扩展提供。模拟内核保持通用：粮食、工厂、价格、历史矿点和军队都放在扩展、内容和你的应用中。
 
@@ -80,7 +80,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 只有 `balance` 是存储值；可用量、预留量和受保护量都是派生出来的（`ResourceState::account_quantities`）。路线估算、到货验收和消费是三件独立的事，各自需要单独的步骤。
 
-可运行的十四个月粮食循环：执行 `cargo run -p canwu-economy-reference --example grain_loop`，并参阅[生产、资源与军事补给案例](/tutorials/cases/production-economy/)。
+可运行的十四个月粮食循环：执行 `cargo run -p canwu-economy-reference --example grain_loop`，并参阅[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)。
 
 ## 需求来源策略
 
@@ -142,7 +142,7 @@ canwu.enqueue_command(
 
 授权的使用过程：
 
-1. **签发。** 授权方保管人以带请求标识的命令提交 `IssueAccessGrant`。权限证据必须是可用的精确记录版本。适配器输入不能签发或撤销授权。
+1. **签发。** 授权方保管人以带请求标识的命令提交 `IssueAccessGrant`。权限证据必须是其记录的精确当前版本；较早的版本会被拒绝。适配器输入不能签发或撤销授权。
 2. **提出需求。** 被授权方提交来源策略为 `ResourceDemandSourcePolicyV1::Granted { grant_id, accounts }` 的需求。授权必须有效且被授权方就是申请者；资源和单位必须匹配；需求的到期和失效时间必须落在授权有效期内；列出的每个账户都必须开放并由授权方保管。
 3. **分配。** 分配在多个需求之间分摊紧缺存量之前，先检查授权。已撤销或不在有效期内的授权不提供任何供给，任何分配都不会超过剩余额度。供给只来自列出的账户。
 4. **扣减。** 被授权方在自己的完成租约下扣减分配结果，方式可以是消费，也可以是发起转移或交换的一条腿。其他任何人（包括授权方）持有的租约都不能扣减授权下的分配。扣减只在时间等于租约认证时间的结算边界结算，且该时间必须位于授权有效期内。
@@ -191,7 +191,8 @@ canwu.enqueue_command(
 
 `ProductionOperation::CompleteExecution` 可以携带 `realized_output_per_mille` 和 `realization_evidence`。比例以工艺名义产出的千分之一为单位，`None` 表示 1,000。执行完成时，每项产出结算数量按该比例缩放并向下取整，两个值都保存在生产执行上；资源入账和产出确认随后按缩放后的数量精确结算。
 
-- 比例不等于 1,000 时，需要一个精确证据记录版本，其种类必须列在工艺版本的 `realization_evidence_kinds` 中。该列表默认为空，所以默认工艺只接受名义产出。名义比例附带证据会被拒绝。
+- 比例不等于 1,000 时，需要一条证据记录，其种类必须列在工艺版本的 `realization_evidence_kinds` 中。该列表默认为空，所以默认工艺只接受名义产出。名义比例附带证据会被拒绝。
+- 证据必须是其记录的精确当前版本。较早的版本即使仍保留在模拟运行中也会被拒绝，因此用 `seal_evidence` 封存过的模拟运行与其精确重放接受相同的完成操作。
 - 比例必须为正，且不能把任何一条产出腿缩放为零。要记录完全损失，请取消工单。
 - 比例不能超过工艺版本的 `max_realized_per_mille`，默认值为 1,000；调高它即可接受有证据支持的超名义产出。
 - 持有人、生命周期、比例和种类规则都在查找证据记录之前检查，因此拒绝结果不会透露其他记录是否存在。
@@ -217,4 +218,4 @@ canwu.enqueue_command(
 
 请从同一发布线精确固定 `canwu-api`、`canwu-resource`、`canwu-production` 的版本和插件语义哈希。加载时恢复存档中的参伍快照，并按你传入的插件重新验证扩展记录。另见[存档兼容性](/developer/persistence/#版本与存档兼容)。
 
-继续阅读[生产、资源与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。
+继续阅读[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)与[机制决议](/proposals/production-economy-mechanism/)。
