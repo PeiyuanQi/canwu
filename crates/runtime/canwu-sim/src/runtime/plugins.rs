@@ -1810,6 +1810,12 @@ fn validate_system_contract(
             "canonical ingress can be read only by phased boundary systems",
         ));
     }
+    if contract.reads.contains(&StateKey::core_boundary_schedule()) {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "the boundary schedule can be read only by phased boundary systems",
+        ));
+    }
     Ok(())
 }
 
@@ -1839,6 +1845,15 @@ fn validate_action_descriptor(
         return Err(CanwuError::new(
             ErrorCode::InvalidPluginRegistration,
             "plugin commands cannot inspect the canonical ingress queue",
+        ));
+    }
+    if descriptor
+        .reads
+        .contains(&StateKey::core_boundary_schedule())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "plugin commands cannot inspect the boundary schedule",
         ));
     }
     Ok(())

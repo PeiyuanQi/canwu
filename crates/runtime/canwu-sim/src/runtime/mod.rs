@@ -1,4 +1,5 @@
 mod boundary;
+mod day_boundaries;
 mod decision;
 mod error;
 mod evaluation;
@@ -64,6 +65,10 @@ pub use canwu_decision::{
     RulePolicy, TraceLocatorScaleMetrics, UtilityEvaluator, UtilityPolicy, UtilityProfile,
     VerifiedDecisionArchiveCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
     format8_decision_locator_scale_probe, format8_trace_locator_scale_probe,
+};
+pub use day_boundaries::{
+    BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
+    DayBoundaries,
 };
 pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
@@ -818,6 +823,16 @@ impl StateKey {
     pub fn core_transitions() -> Self {
         Self::new(CORE_STATE_NAMESPACE, "transitions")
     }
+
+    /// The settled, settling, and queued boundaries of a simulated day, read
+    /// through [`SimulationView::boundaries_on_day`]. Only phased boundary
+    /// systems may declare it: it names other plugins' queued work, so plugin
+    /// commands and synchronous event-driven systems are refused at
+    /// registration, as for [`Self::core_ingress`].
+    #[must_use]
+    pub fn core_boundary_schedule() -> Self {
+        Self::new(CORE_STATE_NAMESPACE, "boundary_schedule")
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1548,6 +1563,7 @@ impl Simulation {
                     pending_ingress: BTreeSet::new(),
                     cancelled_ingress: BTreeSet::new(),
                     transition_manifests: BTreeMap::new(),
+                    day_boundaries: Vec::new(),
                 },
                 counters: RuntimeCounters {
                     next_event_id: 1,
@@ -2553,6 +2569,7 @@ impl Simulation {
                         .into_iter()
                         .map(|manifest| (manifest.id(), manifest))
                         .collect(),
+                    day_boundaries: Vec::new(),
                 },
                 counters: RuntimeCounters {
                     next_event_id: snapshot.next_event_id,
@@ -2615,6 +2632,8 @@ impl Simulation {
             plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
         };
+        simulation.state.scheduler.day_boundaries =
+            day_boundaries::rebuild_day_boundaries(&simulation.state.evidence)?;
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
     }

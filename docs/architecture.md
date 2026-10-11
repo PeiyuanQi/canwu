@@ -1522,6 +1522,38 @@ phase execute by `(plugin name, system name)`. The boundary builds one sparse,
 non-iterated admission index from the packets admitted at that boundary, so
 repeated lookups neither rescan the queue nor allocate against total history.
 
+A system that carries work into a later boundary can budget the boundaries its
+simulated day opens. After declaring `canwu.core.boundary_schedule` read
+access, a phased boundary system calls `SimulationView::boundaries_on_day(day)`,
+where `SimTime::day` numbers 1,440-minute days from time zero. `DayBoundaries`
+lists the boundaries settled earlier on the day, the boundary being settled,
+and each distinct due time still queued on the day in the canonical ingress and
+scheduled-work queues. Each `BoundarySummary` carries the boundary's time,
+canonical cadences, and admitted or queued ingress counted by class, kind
+(command, plugin packet type, calendar, decision, or maintenance), and origin
+(`BoundaryIngressOrigin`: ordinary host ingress, work a boundary system or
+command handler scheduled, work recorded with an event as its cause, or engine
+and host-labelled work by name), without
+payloads, so a host application can count sources it does not own and
+classify them by its own rules. Grouping by the kind of cause rather than the
+exact causing boundary or command keeps a summary's groups bounded by the
+registered packet types. Because the read names other plugins' queued work,
+it is a deliberate exception to the reader-scoped `canwu.core.ingress` view:
+only phased boundary systems may declare it, and plugin commands and
+synchronous event-driven systems are refused at registration. The queued list
+is a lower bound: a boundary's own proposals are queued at commit, and work
+not yet queued or a boundary the host settles directly is not listed. Settled
+summaries are kept from the current simulated day on; an earlier day returns
+`EvidenceUnavailable`. The settled ledger is an index derived from the
+boundary and ingress journals: it is updated at commit, rolled back with a
+failed boundary, kept across a seal, and rebuilt from the full journal on
+restore and by exact replay, so live, sealed, restored, and replayed runs read
+the same list, and it adds nothing to snapshots or commitments. Boundary
+evidence does not record legacy scheduled actions, so only queued summaries
+count them. Hosts read the ledger through `Canwu::boundaries_on_day` and
+`CompactedCanwu::boundaries_on_day` and must not pass it to player, agent,
+observer, or remote clients.
+
 The kernel owns ingress, snapshot, ordinary commit, and conditional-transition
 commit. Phase-six systems publish resource capacity and competing claims.
 Allocation sorts by pool, descending priority, explicit tie-break key, and

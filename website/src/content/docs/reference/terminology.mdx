@@ -52,6 +52,7 @@ sidebar:
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
 | [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
 | [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
+| [日边界账](/architecture/settlement/#统计一天的边界) | day boundary ledger | `SimulationView::boundaries_on_day`、`DayBoundaries`、`BoundarySummary`、`BoundaryIngressOrigin` | 一个模拟日的边界：这一天已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清当天的边界。已结算的边界从当前模拟日起保留，并且在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
 
 ## 插件与扩展
 

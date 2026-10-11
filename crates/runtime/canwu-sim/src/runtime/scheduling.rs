@@ -947,6 +947,7 @@ impl Simulation {
             random_session: None,
             plugin_archive_provider: self.plugin_archive_provider.as_ref(),
             transitions: None,
+            current_boundary: None,
         }
     }
 }

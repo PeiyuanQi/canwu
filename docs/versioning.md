@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.13.2`. A live `SimulationSnapshot` has:
+The workspace version is `0.13.3`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,29 @@ The workspace version is `0.13.2`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.13.3 is a patch release. It adds a read of the boundaries of one
+simulated day, so a boundary system can count the boundaries its day has
+settled, is settling, and still has queued, including those other sources
+open, before it carries work into another boundary:
+`SimulationView::boundaries_on_day` behind the new
+`StateKey::core_boundary_schedule` read; the host forms
+`Simulation::boundaries_on_day`, `CompactedSimulation::boundaries_on_day`,
+`Canwu::boundaries_on_day`, and `CompactedCanwu::boundaries_on_day`; the types
+`DayBoundaries`, `BoundarySummary`, `BoundaryIngressCount`,
+`BoundaryIngressKind`, and `BoundaryIngressOrigin`; and in `canwu-time`,
+`SimTime::day` and `SimTime::MINUTES_PER_DAY`. Only phased boundary systems
+may declare the read: like `canwu.core.ingress`, it is refused for plugin
+commands and synchronous event-driven systems, because it names other
+plugins' queued work. The settled ledger is a runtime index derived from
+the boundary and ingress journals and rebuilt on restore, so snapshot format 8,
+commitment format 4, checkpoint/evidence-journal format 4, paged-checkpoint
+envelope format 4, public type shapes, and the hash algorithms are unchanged,
+and every change is additive and source-compatible. As with any version
+change, the engine version in every checkpoint hash changes, first-party
+plugins that take their plugin version from the crate version report a new
+one, and the exact engine-version check rejects 0.13.2 saves; retain the
+0.13.2 engine to read them.
 
 Version 0.13.2 is a patch release. It adds public API calls that write and
 restore the paged checkpoint, which `canwu-sim` already implemented:

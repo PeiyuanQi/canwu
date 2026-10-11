@@ -73,6 +73,8 @@ pub struct SimulationView<'a> {
     pub(super) random_session: Option<RefCell<random::RandomSession>>,
     pub(super) plugin_archive_provider: &'a dyn super::PluginArchiveObjectProvider,
     pub(super) transitions: Option<&'a super::transitions::BoundaryTransitionLedger>,
+    /// Summary of the boundary being settled, for boundary-system views.
+    pub(super) current_boundary: Option<&'a super::BoundarySummary>,
 }
 
 impl SimulationView<'_> {
@@ -355,6 +357,40 @@ impl SimulationView<'_> {
         }
         records.sort_by_key(|record| record.id);
         Ok(records)
+    }
+
+    /// Returns the boundaries of simulated day `day` ([`SimTime::day`]) after
+    /// an explicit `canwu.core.boundary_schedule` read: those settled earlier
+    /// on the day, the boundary being settled when this view belongs to a
+    /// boundary system, and those still queued, so a system can count the
+    /// day's boundaries before it carries work into one more.
+    ///
+    /// The settled list is replay-stable: it is the same in a live run, a
+    /// sealed run, a restored run, and its exact replay. Queued boundaries are
+    /// the distinct due times on `day` in the canonical queues at or after the
+    /// view time, so they are a lower bound (see [`super::DayBoundaries`]).
+    /// Work proposed by the current boundary is queued when the boundary
+    /// commits and is listed from the next boundary on; ingress queued by a
+    /// command handler is listed as soon as it is queued. A later day lists
+    /// only its queued boundaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EvidenceUnavailable` for a day before the view time's day,
+    /// whose settled boundaries are no longer kept.
+    ///
+    /// Only phased boundary systems may declare the read. It names other
+    /// plugins' queued packet types, classes, and origins, never payloads, so
+    /// a system can count sources it does not own; `canwu.core.ingress`
+    /// resolves only the reader's own admitted packets.
+    pub fn boundaries_on_day(&self, day: i64) -> Result<super::DayBoundaries, CanwuError> {
+        self.require_read(&StateKey::core_boundary_schedule())?;
+        super::day_boundaries::day_boundaries(
+            self.state.runtime(),
+            day,
+            self.state.now(),
+            self.current_boundary,
+        )
     }
 
     /// Lists the pending transition manifests that this boundary system's

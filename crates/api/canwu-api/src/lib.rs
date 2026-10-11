@@ -108,6 +108,11 @@ pub use canwu_sim::{
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
     prepare_state_delta, state_page_id, verify_state_delta,
 };
+// The boundaries of a simulated day (gap G-60).
+pub use canwu_sim::{
+    BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
+    DayBoundaries,
+};
 // Transition manifests and their audit (gap G-04).
 pub use canwu_sim::{
     MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
@@ -326,6 +331,18 @@ impl Canwu {
     /// manifests leave their audit on the boundary record and receipt.
     pub fn pending_transition_manifests(&self) -> impl Iterator<Item = &PendingTransitionManifest> {
         self.simulation.pending_transition_manifests()
+    }
+
+    /// Trusted host access to the boundaries of simulated day `day`
+    /// ([`SimTime::day`]): those settled on the day and those still queued on
+    /// it. Boundary systems read the same ledger through
+    /// [`SimulationView::boundaries_on_day`] after declaring
+    /// [`StateKey::core_boundary_schedule`].
+    ///
+    /// The result names every plugin's queued packet types. Do not expose it
+    /// to player, agent, observer, or remote clients.
+    pub fn boundaries_on_day(&self, day: i64) -> Result<DayBoundaries, CanwuError> {
+        self.simulation.boundaries_on_day(day)
     }
 
     /// Trusted host/admin access to the complete knowledge snapshot.
@@ -1306,6 +1323,18 @@ impl CompactedCanwu {
     /// manifests leave their audit on the boundary record and receipt.
     pub fn pending_transition_manifests(&self) -> impl Iterator<Item = &PendingTransitionManifest> {
         self.simulation.pending_transition_manifests()
+    }
+
+    /// Trusted host access to the boundaries of simulated day `day`
+    /// ([`SimTime::day`]): those settled on the day and those still queued on
+    /// it. Boundary systems read the same ledger through
+    /// [`SimulationView::boundaries_on_day`] after declaring
+    /// [`StateKey::core_boundary_schedule`].
+    ///
+    /// The result names every plugin's queued packet types. Do not expose it
+    /// to player, agent, observer, or remote clients.
+    pub fn boundaries_on_day(&self, day: i64) -> Result<DayBoundaries, CanwuError> {
+        self.simulation.boundaries_on_day(day)
     }
 
     #[must_use]

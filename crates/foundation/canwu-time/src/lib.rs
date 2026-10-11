@@ -85,6 +85,8 @@ pub struct SimTime(i64);
 
 impl SimTime {
     pub const EPOCH: Self = Self(0);
+    /// Minutes in one simulated day.
+    pub const MINUTES_PER_DAY: i64 = 24 * 60;
 
     #[must_use]
     pub const fn from_minutes(minutes_from_epoch: i64) -> Self {
@@ -94,6 +96,14 @@ impl SimTime {
     #[must_use]
     pub const fn as_minutes(self) -> i64 {
         self.0
+    }
+
+    /// The zero-based simulated day containing this instant: whole days of
+    /// [`Self::MINUTES_PER_DAY`] minutes since the epoch, rounded toward
+    /// negative infinity, so the day starts at minute 0 (00:00).
+    #[must_use]
+    pub const fn day(self) -> i64 {
+        self.0.div_euclid(Self::MINUTES_PER_DAY)
     }
 
     #[must_use]
@@ -148,8 +158,8 @@ impl Sub for SimTime {
 
 impl Display for SimTime {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
-        let day = self.0.div_euclid(24 * 60);
-        let within_day = self.0.rem_euclid(24 * 60);
+        let day = self.day();
+        let within_day = self.0.rem_euclid(Self::MINUTES_PER_DAY);
         let hour = within_day / 60;
         let minute = within_day % 60;
         write!(formatter, "Day {day}, {hour:02}:{minute:02}")

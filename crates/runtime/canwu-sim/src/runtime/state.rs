@@ -446,6 +446,10 @@ pub(super) struct RuntimeScheduler {
     /// committed under the scheduler root.
     pub(super) transition_manifests:
         BTreeMap<super::TransitionManifestId, super::PendingTransitionManifest>,
+    /// Derived ledger of the boundaries settled on the latest boundary's
+    /// simulated day, in settlement order. Maintained at boundary commit,
+    /// rebuilt from the full journal on restore, and kept across a seal.
+    pub(super) day_boundaries: Vec<std::sync::Arc<super::BoundarySummary>>,
 }
 
 #[derive(Clone)]
