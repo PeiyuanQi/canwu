@@ -172,6 +172,10 @@ Claude 兼容入口位于 `.claude/skills`。这些工具不是运行时模拟�
    cargo check -p canwu-debug
    ```
 
+   `rust-toolchain.toml` 固定了这些检查和持续集成所用的开发工具链，因此只应
+   作为一项有意的改动来升级它：更新固定版本，修复新出现的 lint，然后运行这些
+   检查。
+
 5. 公开 API 或文档发生变化时，运行受影响的公开示例和
    `cargo doc --workspace --no-deps`。
 6. 架构、持久化、重放、权限、确定性或性能改动必须经过独立审查；只提交范围

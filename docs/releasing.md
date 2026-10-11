@@ -37,7 +37,7 @@ cargo +1.88.0 check --locked --workspace --all-targets
 
 The workspace declares Rust 1.88 as its minimum supported version. A release
 must verify that claim explicitly rather than treating a successful build on
-the latest stable toolchain as MSRV proof.
+the development toolchain pinned in `rust-toolchain.toml` as MSRV proof.
 
 Inspect every source package with `cargo package --locked --list -p <crate>`.
 Each package must contain `LICENSE`, `NOTICE`, and `README.md`. Regenerate and

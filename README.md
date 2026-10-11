@@ -201,6 +201,10 @@ for local setup and contribution terms. Coding agents must also follow
    cargo check -p canwu-debug
    ```
 
+   `rust-toolchain.toml` pins the development toolchain for these checks and
+   CI, so bump it only as a deliberate change: update the pin, fix any new
+   lints, and run the checks.
+
 5. Run affected public examples and `cargo doc --workspace --no-deps` when APIs
    or documentation change.
 6. Obtain independent review for architectural, persistence, replay, authority,

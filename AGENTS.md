@@ -169,6 +169,9 @@ contracts, never the reverse.
 - Test: `cargo test --workspace`
 - Build debug client: `cargo check -p canwu-debug`
 - Cross-platform CI: `.github/workflows/ci.yml` runs on Windows, macOS, and Linux.
+- Toolchain: `rust-toolchain.toml` pins the development toolchain for these
+  checks and CI, so bump it only as a deliberate change: update the pin, fix any
+  new lints, and run the checks.
 - Public examples when APIs or behavior change:
   `cargo run -p canwu-reference-world --example starter`,
   `cargo run -p canwu-api --example phased_boundary`, and

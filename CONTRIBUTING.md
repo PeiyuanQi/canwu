@@ -32,7 +32,10 @@ below before submitting work.
 ## Local development
 
 Install a Rust toolchain that meets the `rust-version` requirement in the root
-`Cargo.toml`. Cargo will download the Rust dependencies.
+`Cargo.toml`. Cargo will download the Rust dependencies. Inside the repository,
+rustup uses the development toolchain pinned in `rust-toolchain.toml`, as CI
+does, so bump it only as a deliberate change: update the pin, fix any new
+lints, and run the checks below.
 
 Run the small headless example:
 

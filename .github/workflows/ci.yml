@@ -16,10 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install stable Rust
+      # With no toolchain argument, rustup (1.28 or newer) installs the toolchain
+      # pinned in rust-toolchain.toml, with its profile and components.
+      - name: Install pinned Rust toolchain
+        shell: bash
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install --no-self-update
+          rustup show active-toolchain
+          rustc --version
 
       - name: Install Linux window-system headers
         if: runner.os == 'Linux'
