@@ -52,7 +52,7 @@ sidebar:
 | [回滚](/architecture/settlement/) | rollback | — | 边界失败时同时恢复状态、证据、计数器和随机位置。 |
 | [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
 | [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
-| [日边界账](/architecture/settlement/#统计一天的边界) | day boundary ledger | `SimulationView::boundaries_on_day`、`DayBoundaries`、`BoundarySummary`、`BoundaryIngressOrigin` | 一个模拟日的边界：这一天已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清当天的边界。已结算的边界从当前模拟日起保留，并且在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
+| [边界账](/architecture/settlement/#统计一段时间内的边界) | boundary ledger | `SimulationView::boundaries_between`、`BoundaryWindow`、`BoundarySummary`、`BoundaryIngressOrigin`、`boundary_schedule_horizon` | 一段模拟时间内的边界：其中已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清这段时间的边界；它用 `boundary_schedule_horizon` 声明要往回读多远。已结算的边界在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
 
 ## 插件与扩展
 
@@ -193,6 +193,7 @@ sidebar:
 | [对外 API](/developer/integration/) / public API | public facade | 已弃用：接入边界和整体 API 表面统一使用 **public API**。 |
 | [模拟插件](/developer/extensions/) / simulation plugin | 运行时模拟插件 / runtime simulation plugin；模拟规则插件 / domain plugin | 受限：仅在区分运行时插件与 Agent 工具，或说明插件领域角色时使用长写法；它们不是独立插件类别。 |
 | [结算边界](/architecture/settlement/) / boundary | transaction, settlement boundary | 已弃用：参伍的验证单元英文统一使用 **boundary**，与 `settle_boundary` 和 `BoundaryPhase` 一致；中文规范写法仍为 **结算边界**。 |
+| [边界账](/architecture/settlement/#统计一段时间内的边界) / boundary ledger | 日边界账 / day boundary ledger | 已弃用：0.14.0 把 0.13.3 按天读取的 `boundaries_on_day` 换成了按时间窗口读取；请使用 **边界账** 和 `boundaries_between`。 |
 | [平行现实](/developer/persistence/) / alternative reality | 反事实分支 / counterfactual branch；branch（因不同输入形成新因果运行时） | 已弃用：不同输入形成的新因果现实统一使用 **平行现实** 与 **alternative reality**；API 操作和复制出的模拟继续使用 **fork**。 |
 | [权限](/developer/integration/) / authority | permission（指 `CommandAuthority` 时） | 受限：已验证的行动权统一称为 **权限** 与 **authority**；独立的运行策略上下文继续使用 **permission profile**。 |
 

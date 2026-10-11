@@ -8,7 +8,7 @@ outside the Canwu runtime.
 
 ## Current contract
 
-The workspace version is `0.13.3`. A live `SimulationSnapshot` has:
+The workspace version is `0.14.0`. A live `SimulationSnapshot` has:
 
 - snapshot format `8`;
 - commitment format `4`;
@@ -24,6 +24,32 @@ The workspace version is `0.13.3`. A live `SimulationSnapshot` has:
 Typed loading and strict JSON loading reject any other engine or contract
 version. Strict JSON loading also rejects unknown fields at every nested
 object and rejects a wire value whose canonical re-encoding changes shape.
+
+Version 0.14.0 is a pre-1.0 minor release. It replaces 0.13.3's day read with
+a read of any window of simulated time (see the
+[boundary window proposal](proposals/boundary-window.md)):
+`SimulationView::boundaries_between(from, to)` returns `BoundaryWindow`, and
+the host forms are `Simulation::boundaries_between`,
+`CompactedSimulation::boundaries_between`, `Canwu::boundaries_between`, and
+`CompactedCanwu::boundaries_between`. A boundary system declares how far back
+it reads settled boundaries as the new public field
+`BoundarySystemContract::boundary_schedule_horizon` (zero by default, at most
+`MAX_BOUNDARY_SCHEDULE_HORIZON`, and only with the `canwu.core.boundary_schedule`
+read); each system may look back only as far as its own horizon, the run keeps
+settled boundaries for the longest declared one, and
+`boundary_schedule_horizon` on `Canwu`, `CompactedCanwu`, `Simulation`, and
+`CompactedSimulation` reports it. `boundaries_on_day` and
+`DayBoundaries` are removed. The new contract field and the removal are
+source-incompatible, so the release is a minor version. The field is omitted
+from a serialized contract while it is zero, so plugin descriptors and semantic
+hashes of systems that do not declare a horizon are unchanged. Snapshot format
+8, commitment format 4, checkpoint/evidence-journal format 4, paged-checkpoint
+envelope format 4, and the hash algorithms are unchanged; the ledger adds
+nothing to saves or commitments. As with any version change, the engine
+version in every checkpoint hash changes, first-party plugins that take their
+plugin version from the crate version report a new one, and the exact
+engine-version check rejects 0.13.3 saves; retain the 0.13.3 engine to read
+them.
 
 Version 0.13.3 is a patch release. It adds a read of the boundaries of one
 simulated day, so a boundary system can count the boundaries its day has

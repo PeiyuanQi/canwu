@@ -948,6 +948,7 @@ impl Simulation {
             plugin_archive_provider: self.plugin_archive_provider.as_ref(),
             transitions: None,
             current_boundary: None,
+            boundary_schedule_horizon: SimDuration::ZERO,
         }
     }
 }

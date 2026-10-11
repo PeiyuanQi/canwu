@@ -255,7 +255,8 @@ impl Simulation {
         self.state.counters.next_boundary_id = next_boundary_id;
         self.state.counters.next_correlation_id = next_correlation_id;
         let boundary_id = BoundaryId::new(boundary_id_value);
-        let current_boundary = super::day_boundaries::summarize_boundary(
+        let boundary_schedule_horizon = self.plugins.boundary_schedule_horizon();
+        let current_boundary = super::boundary_window::summarize_boundary(
             &self.state.evidence,
             boundary_id,
             request.at,
@@ -418,6 +419,7 @@ impl Simulation {
                     plugin_archive_provider: self.plugin_archive_provider.as_ref(),
                     transitions: Some(&transition_ledger),
                     current_boundary: Some(&current_boundary),
+                    boundary_schedule_horizon: registered.contract.boundary_schedule_horizon,
                 };
                 let context = BoundaryContext {
                     boundary_id,
@@ -801,7 +803,11 @@ impl Simulation {
         record.hash = compute_boundary_hash(&record)?;
         let boundary_hash = record.hash.clone();
         self.state.evidence.boundaries.push(record);
-        super::day_boundaries::record_settled_boundary(&mut self.state.scheduler, current_boundary);
+        super::boundary_window::record_settled_boundary(
+            &mut self.state.scheduler,
+            current_boundary,
+            boundary_schedule_horizon,
+        );
         self.state.counters.admitted_attempt_count = admitted_attempt_count;
         self.state.counters.admitted_command_count = admitted_command_count;
         self.state.counters.admitted_event_count = admitted_event_count;

@@ -1,5 +1,6 @@
-//! Gap G-60: a boundary system can count the boundaries its simulated day has
-//! settled, is settling, and still has queued, and the settled ledger is the
+//! Gap G-60: a boundary system can count the boundaries a window of simulated
+//! time has settled, is settling, and still has queued, the run keeps settled
+//! boundaries as far back as a system declares, and the settled ledger is the
 //! same in a live, sealed, restored, and replayed run.
 
 #![allow(clippy::too_many_lines, clippy::unnecessary_wraps)]
@@ -7,18 +8,20 @@
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryIngressCount, BoundaryIngressKind,
     BoundaryIngressOrigin, BoundaryPhase, BoundaryProposal, BoundaryRequest,
-    BoundarySystemContract, Canwu, CanwuError, CommandContext, DayBoundaries, ErrorCode,
-    IngressClass, IngressPayload, PayloadSchema, PluginActionDescriptor, PluginIngressDescriptor,
-    PluginIngressRequest, PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin,
-    SimulationView, StateKey, SystemCadence, SystemDirective,
+    BoundarySystemContract, BoundaryWindow, Canwu, CanwuError, CommandContext, ErrorCode,
+    IngressClass, IngressPayload, MAX_BOUNDARY_SCHEDULE_HORIZON, PayloadSchema,
+    PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar,
+    Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey, SystemCadence,
+    SystemDirective,
 };
 use serde_json::json;
 
 const CLOCK_PLUGIN: &str = "fixture-clock";
 
-/// Records what `boundaries_on_day` shows inside each boundary that admits
-/// ingress, and turns a `work` packet that asks for a follow-on into a packet
-/// one hour later. A boundary that only admits events exits early.
+/// Records what `boundaries_between` shows for the boundary's day inside each
+/// boundary that admits ingress, and turns a `work` packet that asks for a
+/// follow-on into a packet one hour later. A boundary that only admits events
+/// exits early.
 fn observe_day(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -26,7 +29,8 @@ fn observe_day(
     if context.admitted_ingress.is_empty() {
         return Ok(BoundaryProposal::default());
     }
-    let day = view.boundaries_on_day(context.at.day())?;
+    let (from, to) = day_window(context.at.day());
+    let day = view.boundaries_between(from, to)?;
     let current = day
         .current
         .as_ref()
@@ -94,9 +98,42 @@ impl SimulationPlugin for ClockPlugin {
         );
         contract.reads = vec![StateKey::core_boundary_schedule(), StateKey::core_ingress()];
         contract.reads.sort();
+        contract.boundary_schedule_horizon = SimDuration::days(1);
         contract.emits = vec!["observed".to_owned()];
-        registrar.register_boundary_system(contract, observe_day)
+        registrar.register_boundary_system(contract, observe_day)?;
+        let mut peek = BoundarySystemContract::new(
+            "peek-back",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        peek.reads = vec![StateKey::core_boundary_schedule()];
+        peek.emits = vec!["peeked".to_owned()];
+        registrar.register_boundary_system(peek, peek_back)
     }
+}
+
+/// Declares the read with no horizon and records whether it may look one
+/// minute back: a system is held to its own horizon, not the run's.
+fn peek_back(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    if context.admitted_ingress.is_empty() {
+        return Ok(BoundaryProposal::default());
+    }
+    let one_minute_back = SimTime::from_minutes(context.at.as_minutes() - 1);
+    let summary = match view.boundaries_between(one_minute_back, context.at) {
+        Ok(_) => "allowed",
+        Err(error) if error.code == ErrorCode::EvidenceUnavailable => "refused",
+        Err(error) => return Err(error),
+    };
+    let mut proposal = BoundaryProposal::default();
+    proposal.directives.push(BoundaryDirective::Emit {
+        event_type: "peeked".to_owned(),
+        summary: summary.to_owned(),
+        affected: Vec::new(),
+    });
+    Ok(proposal)
 }
 
 fn at(day: i64, hour: i64) -> SimTime {
@@ -118,10 +155,14 @@ fn enqueue_work(canwu: &mut Canwu, due: SimTime, follow_on: bool) {
 }
 
 fn observations(canwu: &Canwu) -> Vec<String> {
+    events_of(canwu, "observed")
+}
+
+fn events_of(canwu: &Canwu, event_type: &str) -> Vec<String> {
     canwu
         .events()
         .iter()
-        .filter(|event| event.kind.field("event_type") == Some(json!("observed")))
+        .filter(|event| event.kind.field("event_type") == Some(json!(event_type)))
         .map(|event| event.summary.clone())
         .collect()
 }
@@ -138,12 +179,17 @@ fn host_work(count: u64) -> BoundaryIngressCount {
     }
 }
 
-fn settled_times(day: &DayBoundaries) -> Vec<SimTime> {
+/// The window of simulated day `day`.
+fn day_window(day: i64) -> (SimTime, SimTime) {
+    (at(day, 0), at(day + 1, 0))
+}
+
+fn settled_times(day: &BoundaryWindow) -> Vec<SimTime> {
     day.settled.iter().map(|summary| summary.at).collect()
 }
 
 #[test]
-fn gap_g60_sim_day_boundaries() {
+fn gap_g60_sim_boundary_window() {
     let clock = ClockPlugin;
     let plugins: [&dyn SimulationPlugin; 1] = [&clock];
     let mut canwu =
@@ -159,7 +205,9 @@ fn gap_g60_sim_day_boundaries() {
     enqueue_work(&mut canwu, at(0, 0), false);
     enqueue_work(&mut canwu, at(0, 12), false);
 
-    let planned = canwu.boundaries_on_day(0).expect("today's plan");
+    let planned = canwu
+        .boundaries_between(at(0, 0), at(1, 0))
+        .expect("today's plan");
     assert!(planned.settled.is_empty() && planned.current.is_none());
     assert_eq!(
         planned
@@ -188,12 +236,25 @@ fn gap_g60_sim_day_boundaries() {
             "settled=2 current=1 scheduled=0",
         ]
     );
+    // The run keeps a day, but the zero-horizon system may not look back at
+    // all; the host reads the same minute with the run's horizon.
+    let peeked = events_of(&canwu, "peeked");
+    assert_eq!(peeked.len(), 3);
+    assert!(peeked.iter().all(|summary| summary == "refused"));
+    assert_eq!(canwu.boundary_schedule_horizon(), SimDuration::days(1));
+    assert!(
+        canwu
+            .boundaries_between(SimTime::from_minutes(at(0, 12).as_minutes() - 1), at(0, 12))
+            .is_ok()
+    );
     // The host settles one more boundary directly, which admits the day's
     // observations so the evidence can be sealed; it admits no ingress.
     canwu
         .settle_boundary(BoundaryRequest::at(at(0, 23)))
         .expect("a direct boundary should settle");
-    let day0 = canwu.boundaries_on_day(0).expect("day 0 ledger");
+    let day0 = canwu
+        .boundaries_between(at(0, 0), at(1, 0))
+        .expect("day 0 ledger");
     assert_eq!(
         settled_times(&day0),
         vec![at(0, 0), at(0, 1), at(0, 12), at(0, 23)]
@@ -222,13 +283,20 @@ fn gap_g60_sim_day_boundaries() {
         .seal_evidence()
         .expect("an empty queue should seal")
         .expect("the retained tail should seal");
-    assert_eq!(compacted.boundaries_on_day(0).expect("sealed ledger"), day0);
+    assert_eq!(
+        compacted
+            .boundaries_between(at(0, 0), at(1, 0))
+            .expect("sealed ledger"),
+        day0
+    );
     // One more day-0 boundary after the seal: the ledger then spans sealed and
     // retained boundaries, and a restore from both segments rebuilds it.
     compacted
         .settle_boundary(BoundaryRequest::at(at(0, 23) + SimDuration::minutes(30)))
         .expect("a boundary after the seal should settle");
-    let continued = compacted.boundaries_on_day(0).expect("continued ledger");
+    let continued = compacted
+        .boundaries_between(at(0, 0), at(1, 0))
+        .expect("continued ledger");
     assert_eq!(continued.settled.len(), 5);
     assert_eq!(continued.settled[..4], day0.settled[..]);
     let tail = compacted
@@ -240,42 +308,73 @@ fn gap_g60_sim_day_boundaries() {
     )
     .expect("the sealed run should restore");
     assert_eq!(
-        resumed.boundaries_on_day(0).expect("resumed ledger"),
+        resumed
+            .boundaries_between(at(0, 0), at(1, 0))
+            .expect("resumed ledger"),
         continued
     );
 
-    // Day 1 starts a new ledger; day 0 is no longer kept.
+    // The run keeps one day of settled boundaries, the longest horizon its
+    // system declares: on day 1 a window may still reach back one day, not
+    // to the start of day 0.
     enqueue_work(&mut canwu, at(1, 0), false);
-    let tomorrow = canwu.boundaries_on_day(1).expect("tomorrow's queue");
+    let tomorrow = canwu
+        .boundaries_between(at(1, 0), at(2, 0))
+        .expect("tomorrow's queue");
     assert!(tomorrow.settled.is_empty());
     assert_eq!(tomorrow.queued.len(), 1);
     canwu
         .advance_canonical(SimDuration::hours(2))
         .expect("day 1 should open");
+    let last_day = canwu
+        .boundaries_between(at(0, 1), at(1, 1))
+        .expect("one day back is kept");
+    assert_eq!(
+        settled_times(&last_day),
+        vec![at(0, 1), at(0, 12), at(0, 23), at(1, 0)]
+    );
     assert_eq!(
         canwu
-            .boundaries_on_day(0)
-            .expect_err("day 0 has passed")
+            .boundaries_between(at(0, 0), at(1, 0))
+            .expect_err("the start of day 0 is beyond the horizon")
             .code,
         ErrorCode::EvidenceUnavailable
     );
-    let day1 = canwu.boundaries_on_day(1).expect("day 1 ledger");
+    let day1 = canwu
+        .boundaries_between(at(1, 0), at(2, 0))
+        .expect("day 1 ledger");
     assert_eq!(settled_times(&day1), vec![at(1, 0)]);
 
-    // Save/load and exact replay rebuild the same ledger.
+    // Save/load and exact replay rebuild the same ledger, a day back.
     let saved = canwu.snapshot_json().expect("the run should serialize");
     let restored =
         Canwu::from_snapshot_json_with_plugins(&saved, &plugins).expect("the run should load");
     assert_eq!(
-        restored.boundaries_on_day(1).expect("restored ledger"),
+        restored
+            .boundaries_between(at(1, 0), at(2, 0))
+            .expect("restored ledger"),
         day1
+    );
+    assert_eq!(
+        restored
+            .boundaries_between(at(0, 1), at(1, 1))
+            .expect("restored day back"),
+        last_day
     );
     let journal = serde_json::to_string(&canwu.replay_journal()).expect("journal json");
     let replayed =
         Canwu::replay_from_journal_json(&plugins, &journal).expect("the run should replay");
     assert_eq!(
-        replayed.boundaries_on_day(1).expect("replayed ledger"),
+        replayed
+            .boundaries_between(at(1, 0), at(2, 0))
+            .expect("replayed ledger"),
         day1
+    );
+    assert_eq!(
+        replayed
+            .boundaries_between(at(0, 1), at(1, 1))
+            .expect("replayed day back"),
+        last_day
     );
     assert_eq!(observations(&replayed), observations(&canwu));
     assert_eq!(canwu.checkpoint_hash(), replayed.checkpoint_hash());
@@ -328,4 +427,68 @@ fn gap_g60_plugin_commands_cannot_read_the_boundary_schedule() {
         .err()
         .expect("the registration should be refused");
     assert_eq!(error.code, ErrorCode::InvalidPluginRegistration);
+}
+
+struct HorizonPlugin {
+    horizon: SimDuration,
+    reads_schedule: bool,
+}
+
+impl SimulationPlugin for HorizonPlugin {
+    fn name(&self) -> &'static str {
+        "fixture-horizon"
+    }
+
+    fn version(&self) -> &'static str {
+        "1"
+    }
+
+    fn semantic_hash(&self) -> &'static str {
+        "0000000000000000000000000000000000000000000000000000000000000a62"
+    }
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        let mut contract = BoundarySystemContract::new(
+            "look-back",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::EventDriven,
+        );
+        if self.reads_schedule {
+            contract.reads = vec![StateKey::core_boundary_schedule()];
+        }
+        contract.boundary_schedule_horizon = self.horizon;
+        registrar.register_boundary_system(contract, observe_day)
+    }
+}
+
+/// A horizon is bounded and needs the read it serves.
+#[test]
+fn gap_g60_boundary_schedule_horizon_is_declared_with_its_read() {
+    for (horizon, reads_schedule) in [
+        (SimDuration::days(1), false),
+        (
+            MAX_BOUNDARY_SCHEDULE_HORIZON + SimDuration::minutes(1),
+            true,
+        ),
+        (SimDuration::minutes(-1), true),
+    ] {
+        let plugin = HorizonPlugin {
+            horizon,
+            reads_schedule,
+        };
+        let plugins: [&dyn SimulationPlugin; 1] = [&plugin];
+        let error =
+            Canwu::new_with_plugins(62, Scenario::new(SimTime::EPOCH, Vec::new()), &plugins)
+                .err()
+                .expect("the registration should be refused");
+        assert_eq!(error.code, ErrorCode::InvalidPluginRegistration);
+    }
+    let plugin = HorizonPlugin {
+        horizon: MAX_BOUNDARY_SCHEDULE_HORIZON,
+        reads_schedule: true,
+    };
+    let plugins: [&dyn SimulationPlugin; 1] = [&plugin];
+    assert!(
+        Canwu::new_with_plugins(62, Scenario::new(SimTime::EPOCH, Vec::new()), &plugins).is_ok()
+    );
 }

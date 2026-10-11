@@ -108,10 +108,10 @@ pub use canwu_sim::{
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
     prepare_state_delta, state_page_id, verify_state_delta,
 };
-// The boundaries of a simulated day (gap G-60).
+// The boundaries of a window of simulated time (gap G-60).
 pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
-    DayBoundaries,
+    BoundaryWindow, MAX_BOUNDARY_SCHEDULE_HORIZON,
 };
 // Transition manifests and their audit (gap G-04).
 pub use canwu_sim::{
@@ -333,16 +333,29 @@ impl Canwu {
         self.simulation.pending_transition_manifests()
     }
 
-    /// Trusted host access to the boundaries of simulated day `day`
-    /// ([`SimTime::day`]): those settled on the day and those still queued on
-    /// it. Boundary systems read the same ledger through
-    /// [`SimulationView::boundaries_on_day`] after declaring
+    /// Trusted host access to the boundaries of the half-open window
+    /// `from..to`: those settled in it and those still queued in it. Settled
+    /// boundaries are kept for the longest horizon a registered boundary
+    /// system declares. Boundary systems read the same ledger through
+    /// [`SimulationView::boundaries_between`] after declaring
     /// [`StateKey::core_boundary_schedule`].
     ///
     /// The result names every plugin's queued packet types. Do not expose it
     /// to player, agent, observer, or remote clients.
-    pub fn boundaries_on_day(&self, day: i64) -> Result<DayBoundaries, CanwuError> {
-        self.simulation.boundaries_on_day(day)
+    pub fn boundaries_between(
+        &self,
+        from: SimTime,
+        to: SimTime,
+    ) -> Result<BoundaryWindow, CanwuError> {
+        self.simulation.boundaries_between(from, to)
+    }
+
+    /// How far back the run keeps settled boundaries: the longest
+    /// [`BoundarySystemContract::boundary_schedule_horizon`] a registered
+    /// boundary system declares, or zero.
+    #[must_use]
+    pub fn boundary_schedule_horizon(&self) -> SimDuration {
+        self.simulation.boundary_schedule_horizon()
     }
 
     /// Trusted host/admin access to the complete knowledge snapshot.
@@ -1325,16 +1338,29 @@ impl CompactedCanwu {
         self.simulation.pending_transition_manifests()
     }
 
-    /// Trusted host access to the boundaries of simulated day `day`
-    /// ([`SimTime::day`]): those settled on the day and those still queued on
-    /// it. Boundary systems read the same ledger through
-    /// [`SimulationView::boundaries_on_day`] after declaring
+    /// Trusted host access to the boundaries of the half-open window
+    /// `from..to`: those settled in it and those still queued in it. Settled
+    /// boundaries are kept for the longest horizon a registered boundary
+    /// system declares. Boundary systems read the same ledger through
+    /// [`SimulationView::boundaries_between`] after declaring
     /// [`StateKey::core_boundary_schedule`].
     ///
     /// The result names every plugin's queued packet types. Do not expose it
     /// to player, agent, observer, or remote clients.
-    pub fn boundaries_on_day(&self, day: i64) -> Result<DayBoundaries, CanwuError> {
-        self.simulation.boundaries_on_day(day)
+    pub fn boundaries_between(
+        &self,
+        from: SimTime,
+        to: SimTime,
+    ) -> Result<BoundaryWindow, CanwuError> {
+        self.simulation.boundaries_between(from, to)
+    }
+
+    /// How far back the run keeps settled boundaries: the longest
+    /// [`BoundarySystemContract::boundary_schedule_horizon`] a registered
+    /// boundary system declares, or zero.
+    #[must_use]
+    pub fn boundary_schedule_horizon(&self) -> SimDuration {
+        self.simulation.boundary_schedule_horizon()
     }
 
     #[must_use]

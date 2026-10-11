@@ -75,6 +75,9 @@ pub struct SimulationView<'a> {
     pub(super) transitions: Option<&'a super::transitions::BoundaryTransitionLedger>,
     /// Summary of the boundary being settled, for boundary-system views.
     pub(super) current_boundary: Option<&'a super::BoundarySummary>,
+    /// How far back this reader may look: the boundary system's own declared
+    /// horizon, or zero for views that cannot declare the read.
+    pub(super) boundary_schedule_horizon: canwu_time::SimDuration,
 }
 
 impl SimulationView<'_> {
@@ -359,35 +362,45 @@ impl SimulationView<'_> {
         Ok(records)
     }
 
-    /// Returns the boundaries of simulated day `day` ([`SimTime::day`]) after
-    /// an explicit `canwu.core.boundary_schedule` read: those settled earlier
-    /// on the day, the boundary being settled when this view belongs to a
-    /// boundary system, and those still queued, so a system can count the
-    /// day's boundaries before it carries work into one more.
+    /// Returns the boundaries of the half-open window `from..to` after an
+    /// explicit `canwu.core.boundary_schedule` read: those settled in it, the
+    /// boundary being settled when this view belongs to a boundary system and
+    /// its time is in the window, and those still queued in it, so a system
+    /// can count a period's boundaries before it carries work into one more.
     ///
     /// The settled list is replay-stable: it is the same in a live run, a
-    /// sealed run, a restored run, and its exact replay. Queued boundaries are
-    /// the distinct due times on `day` in the canonical queues at or after the
-    /// view time, so they are a lower bound (see [`super::DayBoundaries`]).
-    /// Work proposed by the current boundary is queued when the boundary
-    /// commits and is listed from the next boundary on; ingress queued by a
-    /// command handler is listed as soon as it is queued. A later day lists
-    /// only its queued boundaries.
+    /// sealed run, a restored run, and its exact replay. A system may look
+    /// back only as far as its own
+    /// [`super::BoundarySystemContract::boundary_schedule_horizon`]; the run
+    /// keeps settled boundaries for the longest horizon any system declares.
+    /// Queued boundaries are the distinct due times in the window in the
+    /// canonical queues at or after the view time, so they are a lower bound
+    /// (see [`super::BoundaryWindow`]). Work proposed by the current boundary
+    /// is queued when the boundary commits and is listed from the next
+    /// boundary on; ingress queued by a command handler is listed as soon as
+    /// it is queued.
     ///
     /// # Errors
     ///
-    /// Returns `EvidenceUnavailable` for a day before the view time's day,
-    /// whose settled boundaries are no longer kept.
+    /// Returns `ValueOutOfRange` when `to` precedes `from`, and
+    /// `EvidenceUnavailable` when `from` lies further back from the view time
+    /// than this system's declared horizon.
     ///
     /// Only phased boundary systems may declare the read. It names other
     /// plugins' queued packet types, classes, and origins, never payloads, so
     /// a system can count sources it does not own; `canwu.core.ingress`
     /// resolves only the reader's own admitted packets.
-    pub fn boundaries_on_day(&self, day: i64) -> Result<super::DayBoundaries, CanwuError> {
+    pub fn boundaries_between(
+        &self,
+        from: SimTime,
+        to: SimTime,
+    ) -> Result<super::BoundaryWindow, CanwuError> {
         self.require_read(&StateKey::core_boundary_schedule())?;
-        super::day_boundaries::day_boundaries(
+        super::boundary_window::boundary_window(
             self.state.runtime(),
-            day,
+            self.boundary_schedule_horizon,
+            from,
+            to,
             self.state.now(),
             self.current_boundary,
         )

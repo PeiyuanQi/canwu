@@ -18,6 +18,7 @@ coding agents.
 - [Uncertainty, random decisions, and external selectors](uncertainty-resolution.md)
 - [Culture and legal institutional systems](architecture-culture-law.md)
 - [World and event ownership audit](proposals/world-event-ownership-audit.md)
+- [Boundary window](proposals/boundary-window.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)

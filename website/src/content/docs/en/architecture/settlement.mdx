@@ -153,22 +153,24 @@ Manifests are bounded, and any rule violation fails the boundary:
 - Pending manifests are saved in the snapshot and roll back with a failed boundary. Snapshot validation rebuilds them from the registration and audit evidence. A run that never registers a manifest hashes the same as a run without this feature.
 - Phase-10 directives outside any manifest are unaffected. To catch a missing participant, a manifest needs at least two participants; with only one, silence just expires it.
 
-## Counting a day's boundaries
+## Counting the boundaries of a period
 
-Some systems carry work into a later boundary: they re-send a packet to a later time, or resolve something whose result settles in a follow-on boundary at the same instant. To keep a simulated day within a boundary budget, such a system has to count the boundaries that other sources open as well as its own. A boundary system that declares the `canwu.core.boundary_schedule` read calls `SimulationView::boundaries_on_day(day)`. `SimTime::day` numbers days of 1,440 minutes from time zero. The returned `DayBoundaries` has three lists:
+Some systems carry work into a later boundary: they re-send a packet to a later time, or resolve something whose result settles in a follow-on boundary at the same instant. To keep a period of simulated time within a boundary budget, such a system has to count the boundaries that other sources open as well as its own. A boundary system that declares the `canwu.core.boundary_schedule` read calls `SimulationView::boundaries_between(from, to)` for the half-open window `from..to`. The returned `BoundaryWindow` has three lists:
 
-- `settled`: the boundaries already settled on that day.
-- `current`: the boundary being settled, when the reader is a boundary system running on that day.
-- `queued`: each distinct due time still queued on that day, from the canonical ingress queue and the scheduled-work queue.
+- `settled`: the boundaries already settled in the window.
+- `current`: the boundary being settled, when the reader is a boundary system and that boundary's time is in the window.
+- `queued`: each distinct due time still queued in the window, from the canonical ingress queue and the scheduled-work queue.
 
 Each `BoundarySummary` gives the boundary's time, its cadences, and its ingress counted by class, kind, and origin. The kind is a command, a plugin packet type, calendar work, a decision, or maintenance. The origin (`BoundaryIngressOrigin`) tells apart ordinary host ingress (`Host`), work that a boundary system or a command handler scheduled (`BoundarySystem`, `CommandHandler`), work recorded with an event as its cause (`Event`), and engine or host-labelled work such as a calendar request (`System`, with its name). Payloads are never included. The host application classifies boundaries by its own rules, for example to leave out a boundary that only a player's command opened.
 
+- A system declares how far back it reads settled boundaries as `boundary_schedule_horizon` on its `BoundarySystemContract`, the way it declares its reads and random streams. It may look back only that far. A window that starts earlier than the boundary time minus that horizon returns `EvidenceUnavailable`. Other plugins' declarations do not widen it, so no plugin depends on another plugin's horizon. A window whose `to` precedes `from` returns `ValueOutOfRange`. A non-zero horizon requires the `canwu.core.boundary_schedule` read.
+- The run keeps settled boundaries as far back as the longest horizon any registered system declares, at most `MAX_BOUNDARY_SCHEDULE_HORIZON` (366 days); with no horizon declared, it keeps none before the current time. The host reads back that far; `Canwu::boundary_schedule_horizon` reports it.
+- The engine keeps no calendar. `SimTime::day` numbers days of 1,440 minutes from time zero, which gives you a day window directly; a turn, a week, or a day that starts at another hour is the application's to compute.
 - Only phased boundary systems may declare the read. The read names other plugins' queued packet types, never payloads, so a plugin command or a synchronous event-driven system that declares it is refused at registration, as it is for `canwu.core.ingress`.
 - The queued list is a lower bound. Work the current boundary proposes is queued only when the boundary commits, so a zero-delay follow-on that will open a second boundary at the same instant is listed from the next boundary on. Work not yet queued, and a boundary the host settles directly, are not listed either.
-- Settled boundaries are kept from the current simulated day on. Asking for a day before the current one returns `EvidenceUnavailable`. A later day lists only queued boundaries.
-- The settled list is the same in a live run, a sealed run, a restored run, and its exact replay. The engine keeps it as an index derived from the boundary and ingress journals: it is updated when a boundary commits, kept when evidence is sealed, and rebuilt from the full journal on restore. It adds nothing to snapshots or hashes.
+- The settled list is the same in a live run, a sealed run, a restored run, and its exact replay. The engine keeps it as an index derived from the boundary and ingress journals and the saved plugin descriptors: it is updated when a boundary commits, kept when evidence is sealed, and rebuilt from the full journal on restore. It adds nothing to snapshots or hashes.
 - Settled summaries come from boundary evidence, which does not record legacy scheduled actions, so only queued summaries count them (`scheduled_actions`).
-- The host application reads the same ledger, without a current boundary, through `Canwu::boundaries_on_day` and `CompactedCanwu::boundaries_on_day`. Because the result names every plugin's queued packet types, do not pass it to player, agent, observer, or remote clients.
+- The host application reads the same ledger, without a current boundary, through `Canwu::boundaries_between` and `CompactedCanwu::boundaries_between`. Because the result names every plugin's queued packet types, do not pass it to player, agent, observer, or remote clients.
 
 ## Evaluation traces
 

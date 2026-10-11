@@ -43,7 +43,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "0.13.3", optional = true }
+canwu-resource = { version = "0.14.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]

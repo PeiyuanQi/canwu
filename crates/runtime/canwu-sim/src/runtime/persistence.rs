@@ -2109,13 +2109,24 @@ impl CompactedSimulation {
         self.simulation.pending_transition_manifests()
     }
 
-    /// Returns the settled and queued boundaries of simulated day `day`. A
-    /// seal keeps the settled ledger, so the result does not depend on how
-    /// much evidence is retained. The result names every plugin's queued
-    /// packet types, so do not expose it to player, agent, observer, or
-    /// remote clients.
-    pub fn boundaries_on_day(&self, day: i64) -> Result<super::DayBoundaries, CanwuError> {
-        self.simulation.boundaries_on_day(day)
+    /// Returns the settled and queued boundaries of the half-open window
+    /// `from..to`. A seal keeps the settled ledger, so the result does not
+    /// depend on how much evidence is retained. The result names every
+    /// plugin's queued packet types, so do not expose it to player, agent,
+    /// observer, or remote clients.
+    pub fn boundaries_between(
+        &self,
+        from: SimTime,
+        to: SimTime,
+    ) -> Result<super::BoundaryWindow, CanwuError> {
+        self.simulation.boundaries_between(from, to)
+    }
+
+    /// How far back the run keeps settled boundaries: the longest horizon a
+    /// registered boundary system declares, or zero.
+    #[must_use]
+    pub fn boundary_schedule_horizon(&self) -> super::SimDuration {
+        self.simulation.boundary_schedule_horizon()
     }
 
     #[must_use]

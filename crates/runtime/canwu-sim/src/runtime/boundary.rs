@@ -331,6 +331,19 @@ pub struct BoundarySystemContract {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plugin_ingress_targets: Vec<PluginIngressTarget>,
     pub visibility: StateVisibility,
+    /// How far back before the boundary time this system reads settled
+    /// boundaries through [`SimulationView::boundaries_between`]; a window
+    /// that starts further back is refused, whatever other systems declare.
+    /// The run keeps settled boundaries for the longest horizon any registered
+    /// system declares, at most [`crate::MAX_BOUNDARY_SCHEDULE_HORIZON`]; a
+    /// non-zero horizon requires the `canwu.core.boundary_schedule` read.
+    #[serde(default, skip_serializing_if = "is_zero_duration")]
+    pub boundary_schedule_horizon: SimDuration,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_duration(value: &SimDuration) -> bool {
+    *value == SimDuration::ZERO
 }
 
 impl BoundarySystemContract {
@@ -354,6 +367,7 @@ impl BoundarySystemContract {
             knowledge_writes: Vec::new(),
             plugin_ingress_targets: Vec::new(),
             visibility: StateVisibility::NextBoundary,
+            boundary_schedule_horizon: SimDuration::ZERO,
         }
     }
 }

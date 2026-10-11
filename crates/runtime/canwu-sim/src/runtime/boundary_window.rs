@@ -1,15 +1,18 @@
-//! The boundaries of one simulated day: those settled earlier on the day, the
-//! one being settled, and those still queued.
+//! The boundaries of a window of simulated time: those settled in it, the one
+//! being settled, and those still queued.
 //!
 //! A boundary system that carries work into a later boundary can budget the
-//! boundaries its day opens only if it can count the day's other boundaries,
-//! including those caused by sources it does not own. Retained boundary
-//! evidence cannot answer that, because a seal removes it, so the scheduler
-//! keeps a summary of every boundary settled on the day of the latest
-//! boundary. The ledger is a derived index: it is a pure function of the
-//! boundary and ingress journals, maintained at boundary commit, rebuilt from
-//! the full journal on restore, and kept across a seal. Queued boundaries are
-//! read from the canonical ingress queue and the scheduled-action queue.
+//! boundaries a period opens only if it can count the period's other
+//! boundaries, including those caused by sources it does not own. Retained
+//! boundary evidence cannot answer that, because a seal removes it, so the
+//! scheduler keeps a ledger of settled boundaries reaching back the longest
+//! [`crate::BoundarySystemContract::boundary_schedule_horizon`] any registered
+//! boundary system declares, while each system may look back only as far as
+//! its own declaration. The ledger is a derived index: it is a pure
+//! function of the boundary and ingress journals and of the persisted plugin
+//! descriptors, maintained at boundary commit, rebuilt from the full journal on
+//! restore, and kept across a seal. Queued boundaries are read from the
+//! canonical ingress queue and the scheduled-action queue.
 //!
 //! The read names other plugins' queued packet types and their timing, which
 //! is future ground truth, so only phased boundary systems may declare it;
@@ -19,12 +22,16 @@
 use super::{
     BoundaryId, BoundaryRecord, CanwuError, CauseRef, ErrorCode, IngressClass, IngressId,
     IngressPayload, IngressQueueKey, IngressRecord, RuntimeEvidence, RuntimeScheduler,
-    RuntimeState, ScheduleKey, SimTime, Simulation, SystemCadence,
+    RuntimeState, ScheduleKey, SimDuration, SimTime, Simulation, SystemCadence,
 };
+use im::Vector;
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// The longest settled-boundary horizon a boundary system may declare.
+pub const MAX_BOUNDARY_SCHEDULE_HORIZON: SimDuration = SimDuration::days(366);
 
 /// The kind of queued work a boundary admitted or will admit, without its
 /// payload.
@@ -85,7 +92,7 @@ pub struct BoundaryIngressCount {
     pub count: u64,
 }
 
-/// One settled, settling, or queued boundary of a simulated day.
+/// One settled, settling, or queued boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BoundarySummary {
     /// The boundary's identity once it is being settled or has settled;
@@ -172,8 +179,8 @@ impl BoundarySummary {
     }
 }
 
-/// The boundaries of one simulated day, as
-/// [`crate::SimulationView::boundaries_on_day`] returns them.
+/// The boundaries of the half-open window `from..to`, as
+/// [`crate::SimulationView::boundaries_between`] returns them.
 ///
 /// Every list is in settlement order. A queued boundary is one distinct due
 /// time in the canonical ingress or scheduled-action queue, so `queued` is a
@@ -181,19 +188,21 @@ impl BoundarySummary {
 /// second boundary at the same instant, and a boundary the host settles
 /// directly are not listed until they exist.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct DayBoundaries {
-    /// The zero-based simulated day ([`SimTime::day`]).
-    pub day: i64,
-    /// Boundaries settled earlier on this day.
+pub struct BoundaryWindow {
+    /// The window's first instant (inclusive).
+    pub from: SimTime,
+    /// The instant after the window (exclusive).
+    pub to: SimTime,
+    /// Boundaries settled in the window.
     pub settled: Vec<BoundarySummary>,
     /// The boundary being settled, when the view belongs to a boundary system
-    /// on this day.
+    /// and its time is in the window.
     pub current: Option<BoundarySummary>,
-    /// Boundaries still queued on this day, by due time.
+    /// Boundaries still queued in the window, by due time.
     pub queued: Vec<BoundarySummary>,
 }
 
-impl DayBoundaries {
+impl BoundaryWindow {
     /// The settled, current, and queued boundaries together.
     #[must_use]
     pub fn boundary_count(&self) -> usize {
@@ -202,49 +211,95 @@ impl DayBoundaries {
 }
 
 impl Simulation {
-    /// Trusted host read of the boundaries of simulated day `day`
-    /// ([`SimTime::day`]): those settled on the day and those still queued on
-    /// it at or after the committed time. Boundary systems read the same
-    /// ledger, with the boundary being settled, through
-    /// [`crate::SimulationView::boundaries_on_day`]. The result names every
+    /// Trusted host read of the boundaries of the half-open window `from..to`:
+    /// those settled in it and those still queued in it at or after the
+    /// committed time. Boundary systems read the same ledger, with the
+    /// boundary being settled, through
+    /// [`crate::SimulationView::boundaries_between`]. The result names every
     /// plugin's queued packet types, so do not expose it to player, agent,
     /// observer, or remote clients.
     ///
     /// # Errors
     ///
-    /// Returns `EvidenceUnavailable` for a day before the current simulated
-    /// day, whose settled boundaries are no longer kept.
-    pub fn boundaries_on_day(&self, day: i64) -> Result<DayBoundaries, CanwuError> {
-        day_boundaries(&self.state, day, self.state.scheduler.now, None)
+    /// Returns `ValueOutOfRange` when `to` precedes `from`, and
+    /// `EvidenceUnavailable` when `from` lies further back from the committed
+    /// time than the run keeps settled boundaries (see
+    /// [`Self::boundary_schedule_horizon`]).
+    pub fn boundaries_between(
+        &self,
+        from: SimTime,
+        to: SimTime,
+    ) -> Result<BoundaryWindow, CanwuError> {
+        boundary_window(
+            &self.state,
+            self.boundary_schedule_horizon(),
+            from,
+            to,
+            self.state.scheduler.now,
+            None,
+        )
+    }
+
+    /// How far back the run keeps settled boundaries: the longest
+    /// [`crate::BoundarySystemContract::boundary_schedule_horizon`] any
+    /// registered boundary system declares, or zero.
+    #[must_use]
+    pub fn boundary_schedule_horizon(&self) -> SimDuration {
+        self.plugins.boundary_schedule_horizon()
     }
 }
 
-/// Builds the day's boundaries as seen at `now`, with the boundary being
-/// settled when the reader is a boundary system.
-pub(super) fn day_boundaries(
+/// Builds the window as seen at `now` by a reader that may look back
+/// `horizon`, with the boundary being settled when the reader is a boundary
+/// system.
+pub(super) fn boundary_window(
     state: &RuntimeState,
-    day: i64,
+    horizon: SimDuration,
+    from: SimTime,
+    to: SimTime,
     now: SimTime,
     current: Option<&BoundarySummary>,
-) -> Result<DayBoundaries, CanwuError> {
-    if day < now.day() {
+) -> Result<BoundaryWindow, CanwuError> {
+    if to < from {
         return Err(CanwuError::new(
-            ErrorCode::EvidenceUnavailable,
-            "settled boundaries are kept only from the current simulated day on",
+            ErrorCode::ValueOutOfRange,
+            "a boundary window cannot end before it starts",
         ));
     }
-    Ok(DayBoundaries {
-        day,
-        settled: state
-            .scheduler
-            .day_boundaries
-            .iter()
-            .filter(|summary| summary.at.day() == day)
-            .map(|summary| summary.as_ref().clone())
-            .collect(),
-        current: current.filter(|summary| summary.at.day() == day).cloned(),
-        queued: queued_boundaries(&state.scheduler, &state.evidence, day, now)?,
+    if from < kept_from(now, horizon) {
+        return Err(CanwuError::new(
+            ErrorCode::EvidenceUnavailable,
+            "a boundary window reaches further back than the reader's declared horizon",
+        ));
+    }
+    let in_window = |at: SimTime| from <= at && at < to;
+    let ledger = &state.scheduler.settled_boundaries;
+    let start = ledger
+        .binary_search_by(|kept| {
+            if kept.at < from {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Greater
+            }
+        })
+        .unwrap_or_else(|index| index);
+    let settled = (start..ledger.len())
+        .filter_map(|index| ledger.get(index))
+        .take_while(|summary| summary.at < to)
+        .map(|summary| summary.as_ref().clone())
+        .collect();
+    Ok(BoundaryWindow {
+        from,
+        to,
+        settled,
+        current: current.filter(|summary| in_window(summary.at)).cloned(),
+        queued: queued_boundaries(&state.scheduler, &state.evidence, from.max(now), to)?,
     })
+}
+
+/// The earliest instant whose settled boundaries are kept at `now`.
+fn kept_from(now: SimTime, horizon: SimDuration) -> SimTime {
+    SimTime::from_minutes(now.as_minutes().saturating_sub(horizon.as_minutes()))
 }
 
 /// Summarizes a settled or settling boundary from its identity, time,
@@ -286,51 +341,52 @@ fn summarize_record(
     )
 }
 
-/// Adds a boundary to the ledger at commit, starting a new day's ledger when
-/// the boundary falls on a later day than the ledger's. Entries are shared,
-/// so the boundary transaction checkpoint copies pointers, not summaries.
-pub(super) fn record_settled_boundary(scheduler: &mut RuntimeScheduler, summary: BoundarySummary) {
-    if scheduler
-        .day_boundaries
-        .last()
-        .is_some_and(|last| last.at.day() != summary.at.day())
+/// Adds a boundary to the ledger at commit and drops the boundaries that fall
+/// outside the run's `horizon` before it. The ledger is a persistent vector of
+/// shared entries, so the boundary transaction checkpoint copies it in
+/// constant time.
+pub(super) fn record_settled_boundary(
+    scheduler: &mut RuntimeScheduler,
+    summary: BoundarySummary,
+    horizon: SimDuration,
+) {
+    let keep_from = kept_from(summary.at, horizon);
+    while scheduler
+        .settled_boundaries
+        .front()
+        .is_some_and(|kept| kept.at < keep_from)
     {
-        scheduler.day_boundaries.clear();
+        scheduler.settled_boundaries.pop_front();
     }
-    scheduler.day_boundaries.push(Arc::new(summary));
+    scheduler.settled_boundaries.push_back(Arc::new(summary));
 }
 
 /// Rebuilds the ledger from a fully retained boundary journal: the boundaries
-/// that share the latest boundary's day.
-pub(super) fn rebuild_day_boundaries(
+/// within `horizon` of the latest boundary.
+pub(super) fn rebuild_settled_boundaries(
     evidence: &RuntimeEvidence,
-) -> Result<Vec<Arc<BoundarySummary>>, CanwuError> {
+    horizon: SimDuration,
+) -> Result<Vector<Arc<BoundarySummary>>, CanwuError> {
     let Some(last) = evidence.boundaries.last() else {
-        return Ok(Vec::new());
+        return Ok(Vector::new());
     };
-    let day = last.at.day();
+    let keep_from = kept_from(last.at, horizon);
     let first = evidence
         .boundaries
-        .iter()
-        .rposition(|record| record.at.day() != day)
-        .map_or(0, |index| index + 1);
+        .partition_point(|record| record.at < keep_from);
     evidence.boundaries[first..]
         .iter()
         .map(|record| summarize_record(evidence, record).map(Arc::new))
         .collect()
 }
 
-/// Groups the queued work due on `day`, at or after `now`, by due time.
+/// Groups the queued work due in `from..to` by due time.
 fn queued_boundaries(
     scheduler: &RuntimeScheduler,
     evidence: &RuntimeEvidence,
-    day: i64,
-    now: SimTime,
+    from: SimTime,
+    to: SimTime,
 ) -> Result<Vec<BoundarySummary>, CanwuError> {
-    let Some(day_start) = day.checked_mul(SimTime::MINUTES_PER_DAY) else {
-        return Ok(Vec::new());
-    };
-    let from = now.max(SimTime::from_minutes(day_start));
     let first_ingress = IngressQueueKey {
         due_at: from,
         class: IngressClass::Command,
@@ -342,7 +398,7 @@ fn queued_boundaries(
     for key in scheduler
         .pending_ingress
         .range(first_ingress..)
-        .take_while(|key| key.due_at.day() == day)
+        .take_while(|key| key.due_at < to)
     {
         let record = evidence.retained_ingress(key.id).ok_or_else(|| {
             CanwuError::new(
@@ -366,7 +422,7 @@ fn queued_boundaries(
         .actions
         .range(first_action..)
         .map(|(key, _)| key)
-        .take_while(|key| key.at.day() == day)
+        .take_while(|key| key.at < to)
     {
         let summary = queued
             .entry(key.at)

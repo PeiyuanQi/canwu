@@ -145,10 +145,12 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 ## 版本与存档兼容
 
 :::note
-参伍 0.13.3 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.13.3 引擎只能加载 0.13.3 写出的存档。0.13.2 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.14.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.14.0 引擎只能加载 0.14.0 写出的存档。0.13.3 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.13.3 是补丁版本。它新增了对[一个模拟日的边界](/architecture/settlement/#统计一天的边界)的读取：边界系统声明新的 `StateKey::core_boundary_schedule` 读取后可调用的 `SimulationView::boundaries_on_day`，供上层应用调用的 `Canwu::boundaries_on_day` 和 `CompactedCanwu::boundaries_on_day`，类型 `DayBoundaries`、`BoundarySummary`、`BoundaryIngressCount`、`BoundaryIngressKind` 和 `BoundaryIngressOrigin`，以及 `SimTime::day` 和 `SimTime::MINUTES_PER_DAY`。恢复时，引擎根据日志重建当天已结算的边界，所以存档没有新增字段。所有改动都是新增，现有代码无需修改即可编译，各种格式、公开类型的结构和哈希算法都没有变化。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.2 的存档；需要读取时，请保留 0.13.2 引擎。
+参伍 0.14.0 是次版本。它把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
+
+此前的补丁版本参伍 0.13.3 首次加入了这项读取，当时按天读取：边界系统声明新的 `StateKey::core_boundary_schedule` 读取后可调用的 `SimulationView::boundaries_on_day`，供上层应用调用的 `Canwu::boundaries_on_day` 和 `CompactedCanwu::boundaries_on_day`，类型 `DayBoundaries`、`BoundarySummary`、`BoundaryIngressCount`、`BoundaryIngressKind` 和 `BoundaryIngressOrigin`，以及 `SimTime::day` 和 `SimTime::MINUTES_PER_DAY`。恢复时，引擎根据日志重建当天已结算的边界，所以存档没有新增字段。所有改动都是新增，现有代码无需修改即可编译，各种格式、公开类型的结构和哈希算法都没有变化。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.2 的存档；需要读取时，请保留 0.13.2 引擎。
 
 参伍 0.13.2 是补丁版本。引擎内部早已实现[分页检查点](#分页检查点)的写出和恢复，这个版本把相关调用加入对外 API：`Canwu::prepare_paged_checkpoint`、`Canwu::from_paged_checkpoint_and_journal` 和 `Canwu::from_paged_checkpoint_and_journal_with_plugins`，`CompactedCanwu` 上同样的三个调用，以及 `CompactedCanwu::journal_segment_since`。所有改动都是新增，现有代码无需修改即可编译。各种格式、公开类型的结构和哈希算法都没有变化。每个检查点哈希都包含引擎版本，所以和任何一次版本变化一样，每次运行的检查点哈希，以及记录这些哈希的分页根，都与 0.13.1 不同。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.1 的存档；需要读取时，请保留 0.13.1 引擎。
 

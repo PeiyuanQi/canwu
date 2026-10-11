@@ -342,6 +342,20 @@ pub trait SimulationPlugin {
     }
 }
 
+impl PluginRegistry {
+    /// The longest settled-boundary horizon any registered boundary system
+    /// declares. It is read from the persisted descriptors, so a restored run
+    /// keeps the same ledger as the live one.
+    pub(super) fn boundary_schedule_horizon(&self) -> super::SimDuration {
+        self.descriptors
+            .values()
+            .flat_map(|descriptor| &descriptor.boundary_systems)
+            .map(|contract| contract.boundary_schedule_horizon)
+            .max()
+            .unwrap_or(super::SimDuration::ZERO)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct PluginRegistry {
     pub(super) descriptors: BTreeMap<String, PluginDescriptor>,
@@ -1891,6 +1905,22 @@ fn validate_boundary_system_contract(
         return Err(CanwuError::new(
             ErrorCode::InvalidPluginRegistration,
             "boundary system name must be non-empty and canonical",
+        ));
+    }
+    if contract.boundary_schedule_horizon.is_negative()
+        || contract.boundary_schedule_horizon > super::MAX_BOUNDARY_SCHEDULE_HORIZON
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "a boundary schedule horizon must lie between zero and the maximum horizon",
+        ));
+    }
+    if contract.boundary_schedule_horizon != super::SimDuration::ZERO
+        && !contract.reads.contains(&StateKey::core_boundary_schedule())
+    {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPluginRegistration,
+            "a boundary schedule horizon requires the canwu.core.boundary_schedule read",
         ));
     }
     validate_state_keys(&mut contract.reads)?;
