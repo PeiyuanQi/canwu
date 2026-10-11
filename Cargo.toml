@@ -86,5 +86,7 @@ semver = "1"
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
-all = "warn"
-pedantic = "warn"
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# `assert!(value.is_empty())` is clearer here than `assert_eq!(value, [] as [T; 0])`.
+assert_is_empty = "allow"

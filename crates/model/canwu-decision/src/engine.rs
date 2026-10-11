@@ -655,7 +655,7 @@ impl<T: Clone> PersistentDecisionLog<T> {
         self.entries.get_max().map(|(_, value)| value.as_ref())
     }
 
-    #[must_use]
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.entries.values().map(Arc::as_ref)
     }
@@ -684,7 +684,7 @@ impl<T: Clone> PersistentDecisionLog<T> {
         self.entries.remove(&ordinal).map(Arc::unwrap_or_clone)
     }
 
-    #[must_use]
+    #[must_use = "iterators are lazy and do nothing unless consumed"]
     pub fn ordinals(&self) -> impl DoubleEndedIterator<Item = u64> + ExactSizeIterator + '_ {
         self.entries.keys().copied()
     }
