@@ -3,6 +3,14 @@
 Status: implemented in 0.15.0. It closes downstream gaps G-52 and G-54 in
 `canwu-resource`.
 
+The release entry is in [Versioning and Persistence](../versioning.md). The
+other 0.15.0 proposals are
+[society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),
+[keyed-draw index, draw ID, and boundary profile](keyed-draw-index-and-settlement-profile.md),
+[single-step completion lease and runtime protected-floor install](resource-single-step-lease-and-floor-install.md),
+and [fiscal throughput and authority](fiscal-throughput-and-authority.md).
+
 ## Background
 
 The resource simulation extension keeps its terminal records (operation
@@ -234,10 +242,16 @@ lifecycles. The budget must therefore cover the backlog plus every terminal
 record the operations due at one boundary can produce. An operation that does
 not fit fails its boundary and stays queued; it is not a recorded rejection,
 and the boundary keeps failing until an archive commit makes room. That commit
-may be queued behind the operation, because archive commits settle first. No
-commit helps when the operations due at one boundary do not fit even with an
-empty backlog: such a boundary cannot settle under its budget, and this change
-does not alter that.
+may be queued behind the operation, because archive commits settle first.
+
+When a boundary fails for this backpressure, the host application queues one
+commit that selects every candidate. Several smaller commits do not help:
+they are all prepared from the same root, so once the first applies, every
+commit queued behind it is stale. An applied commit also leaves one candidate
+behind, its own maintenance receipt, so the most room a commit can make is the
+budget minus one. No commit helps when the operations due at one boundary need
+more than that: such a boundary cannot settle under its budget, and this
+change does not alter that.
 
 A ceiling of 16,384, twice the hard maximum of hot operation outcomes, was
 considered and rejected. The numbers above do not support it: by the same

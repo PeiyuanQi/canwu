@@ -110,6 +110,7 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 
 - 按内容标识保存每个状态页，并原样返回相同字节；缺页必须报错，不能当作空数据；
 - 保留每个检查点所需的连续日志前缀和归档保留根；
+- 保留资源归档的查找页：恢复、精确重放或派生分支沿途经过的每个归档头都需要它们（见[归档终态记录](/architecture/resources-production/#归档终态记录)）；
 - 为每个插件恢复相同的归档契约和语义哈希；
 - 删除冷数据前，先从已提交的根做可达性检查。
 
@@ -145,10 +146,22 @@ assert_eq!(replayed.checkpoint_hash(), canwu.checkpoint_hash());
 ## 版本与存档兼容
 
 :::note
-参伍 0.14.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.14.0 引擎只能加载 0.14.0 写出的存档。0.13.3 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
+参伍 0.15.0 写出快照格式 8、承诺格式 4、检查点/证据日志格式 4 和分页检查点封装格式 4。存档还记录了精确的 `engine_version`，所以 0.15.0 引擎只能加载 0.15.0 写出的存档。0.14.0 及更早版本的存档不能加载，改写其中记录的版本号也不行；需要读取时，请保留旧引擎，或用自己的工具导出数据。
 :::
 
-参伍 0.14.0 是次版本。它把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
+参伍 0.15.0 是次版本。各种格式和哈希算法都没有变化，引擎也没有往存档里多写任何东西：回答[操作定址随机抽样](/architecture/randomness/#抽样之后还有哪些开销)的索引在恢复时重建，[边界耗时剖面](/architecture/settlement/#边界耗时剖面)从不保存。与存档和代码有关的变化如下：
+
+- **修正了一种写出后无法加载的存档。** 知识记录可以[取代或标为矛盾](/architecture/knowledge-information/#取代先前的记录)哪些记录，加载存档时现在使用与结算相同的规则。在 0.14.0 中，如果插件在同一时刻的两个边界里先后取代某位持有人的记录，写出的存档就无法加载。
+- **封存过的模拟运行与重放的行为一致。** 完全相同的[操作定址随机抽样](/architecture/randomness/#封存证据之后的重试)重试，即使它引用的证据已被 `seal_evidence` 移走，也能拿回已记录的抽样；0.14.0 会以 `InvalidRandomOperationEvidence` 拒绝。封存之后发布的[财政报告](/architecture/fiscal/#报告如何发布)会取代封存之前发布的那一份；在 0.14.0 中，持有人会同时留着两份当前报告，封存过的模拟运行也无法通过精确重放。
+- **需要修改的代码。** `PersonDraft` 用可选的 `PersonPlacement` 取代了 `government` 和 `current_location` 两个字段，`BoundaryPersonCreation::person` 的类型变为 `BoundaryCreatedPerson`。`SocietyPlugin` 不再是单元结构体，请写 `SocietyPlugin::DAILY`。`ResourceState::prepare_resource_archive` 多了一个归档存储参数。`ResourceCompletionOperationV1` 和 `FiscalAction` 新增了变体。`SocietyCohortExchangeLedger`、`ResourceArchiveIndexDirectoryV1`、`PreparedResourceArchiveBatchV1`、`ResourceProtectedFloorRequestV1`、`FiscalAuthorityBinding`、`FiscalAuditFinding` 和 `FiscalState` 新增了公开字段，所以底线请求的结构体字面量要加上 `install: None`，权限绑定的字面量要加上 `rebound_by: None`。`MAX_RESOURCE_ARCHIVE_LOOKUP_DIRECTORIES` 已移除。读取财政报告请用 `fiscal_reports`；单独一条 `fiscal_report` 记录不再能解码成完整的 `FiscalProjection`。
+- **插件身份。** society 插件、资源插件和财政插件的语义哈希改变。使用 society 的模拟运行，只能用注册了相同[结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏)的插件恢复和重放。
+- **资源归档。** 请保留资源归档的查找页：恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，见[归档终态记录](/architecture/resources-production/#归档终态记录)。0.14.0 写出的归档目录无法解码，不过 0.15.0 的模拟运行不可能读到它们。
+- **财政记录在进入时校验。** 无效的财政目录或状态，在创建或恢复模拟运行时就会被拒绝；在 0.14.0 中，要到第一个准入了内容的边界才失败。财政状态记录现在引用每个观察者指向的人物，所以请用 `FiscalState::into_record` 构造它；写到了不存在的观察者的状态会被拒绝。`fiscal_report` 知识 schema 升到版本 2，场景的知识里如果带有版本 1 的报告记录，也会被拒绝。
+- **拒绝不再卡住模拟运行。** 被拒绝的 society 命令和有缺陷的 society 输入现在记录为拒绝；候选预算已满时，失效的资源归档提交也不再让之后的每个边界失败。带请求标识的资源命令如果用已有的操作键提交内容不同的请求，会被拒绝或不予结算。同一个边界可以结算多个财政行动，连结果都记不下的行动会被丢弃并留下一个事件。
+
+和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.14.0 的存档；需要读取时，请保留 0.14.0 引擎。
+
+上一个次版本参伍 0.14.0 把 0.13.3 按天读取边界的方式，换成了可以读取[任意一段模拟时间](/architecture/settlement/#统计一段时间内的边界)的方式：`SimulationView::boundaries_between(from, to)` 返回 `BoundaryWindow`，供上层应用调用的是 `Canwu::boundaries_between` 和 `CompactedCanwu::boundaries_between`。边界系统用新的契约字段 `BoundarySystemContract::boundary_schedule_horizon` 声明要往回读多远（最长 `MAX_BOUNDARY_SCHEDULE_HORIZON`，即 366 天）。`boundaries_on_day` 和 `DayBoundaries` 已移除，所以用到它们的代码，以及用结构体字面量构造 `BoundarySystemContract` 的代码，都需要修改。这个字段为零时不会写入保存的契约，所以其他插件的描述和语义哈希不变，各种格式和哈希算法也不变。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.3 的存档；需要读取时，请保留 0.13.3 引擎。
 
 此前的补丁版本参伍 0.13.3 首次加入了这项读取，当时按天读取：边界系统声明新的 `StateKey::core_boundary_schedule` 读取后可调用的 `SimulationView::boundaries_on_day`，供上层应用调用的 `Canwu::boundaries_on_day` 和 `CompactedCanwu::boundaries_on_day`，类型 `DayBoundaries`、`BoundarySummary`、`BoundaryIngressCount`、`BoundaryIngressKind` 和 `BoundaryIngressOrigin`，以及 `SimTime::day` 和 `SimTime::MINUTES_PER_DAY`。恢复时，引擎根据日志重建当天已结算的边界，所以存档没有新增字段。所有改动都是新增，现有代码无需修改即可编译，各种格式、公开类型的结构和哈希算法都没有变化。和任何一次版本变化一样，每个检查点哈希中的引擎版本都会改变。从 crate 版本取得插件版本的第一方插件，也会报告新的插件版本。精确的引擎版本检查会拒绝 0.13.2 的存档；需要读取时，请保留 0.13.2 引擎。
 

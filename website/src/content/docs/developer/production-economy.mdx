@@ -31,11 +31,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 术语 | 含义 |
 | --- | --- |
 | 账户 | 某一确切资源与单位版本的一份库存余额（`balance`），由**保管人**持有；保管人即对这份库存负责的持有人。 |
-| 受保护存量底线 | 账户不参与普通分配的保留量，例如种粮（`ProtectedFloorPolicyRevision`）。需求的 `protection_override_class` 若列在该策略中，可以动用底线以下的存量。 |
+| 受保护存量底线 | 账户不参与普通分配的保留量，例如种粮（`ProtectedFloorPolicyRevision`）。需求的 `protection_override_class` 若列在该政策中，可以动用底线以下的存量。底线可以由场景预先编写，也可以由账户的保管人在运行中设定，见[受保护存量底线](#受保护存量底线)。 |
 | 需求 | 申请者对一定数量的请求，带有最低有用量、部分履约策略、到期和失效时间、优先级以及来源策略。 |
 | 资源预留与分配腿 | 分配的结果：在某个账户中为某项需求留出的数量。预留被释放或过期后，这部分数量重新可用。 |
 | 转移托管量 | 已离开来源账户、正在途中的存量。在被验收、损耗或退回之前，它一直计入总量。 |
-| 完成租约 | 持有人执行一项不可逆操作的权利，以操作键标识。激活租约得到 `CompletionLeaseActivationCertificateV1`，它固定操作键、时间和操作所依赖的精确记录。不可逆请求都要携带这份凭证。 |
+| 完成租约 | 持有人执行一项不可逆操作的权利，以操作键标识。激活租约得到 `CompletionLeaseActivationCertificateV1`，它固定操作键、时间和操作所依赖的精确记录。不可逆请求都要携带这份凭证。取得租约要四个操作；资源插件是唯一参与方时，一个操作即可，见[完成租约](#完成租约)。 |
 | 适配器输入 | 提供方插件使用的输入路径（`enqueue_resource_adapter_operation`）。每项操作都要引用证明其合法的提供方精确记录版本。 |
 
 **带请求标识的命令**指通过 `CommandRequest`（含请求标识和预期修订号）提交的命令。资源命令用 `resource_command(&ResourceCommandV1 { subject, request })` 构建，签发者必须能代表 `subject`。
@@ -70,6 +70,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 转移的每一步都要给出 `expected_transfer_revision`，过期或重复的步骤会被拒绝，同一次到货不会入账两次。守恒、版本或权限校验任一失败，该操作的全部变化一起回滚。
 
+每个操作都有一个操作键。用同一个键重发同一个请求，会拿回已记录的结果。带请求标识的命令如果用已有的键提交内容不同的请求，会在准入时以 `IdempotencyConflict` 被拒绝；如果它在第一个请求结算之前就已准入，则不会被结算，该键之下的操作结果会写明键属于哪个请求。两种情况都不会让边界失败。
+
 `canwu-resource` 用 `ResourceState::validate_conservation` 按 `ConservationTotalsV1` 检查守恒：
 
 ```text
@@ -81,6 +83,77 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 只有 `balance` 是存储值；可用量、预留量和受保护量都是派生出来的（`ResourceState::account_quantities`）。路线估算、到货验收和消费是三件独立的事，各自需要单独的步骤。
 
 可运行的十四个月粮食循环：执行 `cargo run -p canwu-economy-reference --example grain_loop`，并参阅[粮食、生产与军事补给案例](/tutorials/cases/production-economy/)。
+
+## 完成租约
+
+每个不可逆请求（消费、发起转移、转移的终态处置、入账、对外流出、账户损耗）都要携带一份完成租约的激活凭证。租约操作用 `enqueue_resource_completion_operation` 排入队列。
+
+一份租约可以有多个参与方，各自授权、各自准备，所以通用路径要四个操作：`Acquire`、`Grant`、`Prepare` 和 `Activate`，每个操作都留下一条操作结果和一条租约凭证。租约需要其他插件拥有的授权时（例如适配器操作），或者租约由其他插件协调时（例如 `canwu-production` 和军事补给参考消费者），走这条路径。
+
+如果资源插件是唯一的参与方，一个操作就够了，这就是[单步完成租约](/reference/terminology/)：
+
+```rust
+ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1 {
+    lease,            // RequestCompletionLeaseV1, as for Acquire
+    grant_id,         // the one grant, owned by canwu-resource
+    target_versions,  // every exact target the lease locks
+    current_boundary,
+})
+```
+
+- **适用场合。** “唯一的参与方”的确切含义是：`lease.expected_participants` 正好是 `{"canwu-resource"}`。带请求标识的 `BeginTransfer`、交换的一条腿、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`ExternalOutflow` 和 `RecordLoss`，背后都是这种租约。写了其他参与方的单步请求会以 `invalid_lifecycle` 被拒绝。
+- **检查相同，凭证相同。** 这个操作依次执行四个步骤，每一步的检查与单独执行时一样。对同一个申请、同一份授权和同一组目标，只要激活发生在同一个边界，它得到的凭证与四步路径完全相同，所以携带凭证的请求不需要任何改动。
+- **记录更少。** 它只留下一条 `CompletionLease` 操作结果（键为 `resource:completion:lease:{acquisition}`）和一条凭证，四步路径则各留四条。在仓库的测试用例中，一次同地转移留下 15 条终态记录、做 9 次归档查找，而四步路径是 27 条和 15 次。
+- **进入方式。** 带请求标识的持有人命令不能携带它，因为已激活的租约不会过期，并且一直锁着目标。它由上层应用排入队列，或者由声明了资源完成租约输入的插件安排。
+- **拒绝会被记录。** 领域层面的拒绝记为这个操作的被拒绝结果，不会留下任何申请、授权、锁或已消耗的请求额度。被拒绝的请求已经用掉了它的操作键，重试时要换一个新的申请 ID。重发同一个请求会拿回已记录的结果，不会产生第二份租约。两条路径都不会接着处理资源记录里已有的申请：单步请求或 `Acquire` 如果写了已有的申请 ID，会记为一条 `idempotency_conflict` 拒绝。
+
+有三种情况不会被记录，而是让结算单步租约的边界失败，其他资源操作也是如此：
+
+- **空间不够。** 在记录任何内容之前，检查就按整份租约计算所需空间：`2 + 16` 个归档候选名额和 `1 + 16` 个热操作结果名额，此外每份已激活的租约还各自预留着 16 个。默认预算 256、没有积压时，同时处于激活状态的租约最多 15 份。即使请求本来会被拒绝，这项检查也照样要求有这些空间，所以预算已满时，连拒绝也记录不下来。
+- **归档查找失败。** 归档对象缺失或损坏属于错误，不会被当成“没有归档过”。
+- **状态字节上限。**
+
+所以排入单步租约之前要先确认余量。归档提交可以腾出热终态记录占用的空间，也可以排在单步租约后面；但它腾不出已激活租约预留的名额。
+
+还有两点需要留意：
+
+- 已激活的租约不会过期，而单步租约一结算就处于激活状态。如果它授权的操作一直没有发出，或者被拒绝了，租约会一直占着目标锁和 16 个预留名额，直到上层应用发送 `Release`。
+- 持有人仍然可以用带请求标识的命令发送 `Acquire`。这样的申请在等待第一份授权期间，公平排序中排在它后面的所有单步请求都会以 `invalid_lifecycle` 被拒绝。只使用单步租约的上层应用要留意这种申请，并把它中止。如果持有人自己那条被拒绝的 `Abort` 已经占用了中止操作的键，就改为给这份申请授权，再释放该授权。
+
+普通请求不能使用以保留前缀 `resource:completion:` 开头的操作键。持有人仍然可以通过它能以带请求标识的命令发送的两种完成操作占用完成操作的键：`Acquire`，以及对自己持有的租约的 `Abort`。上层应用排入完成入口的包，如果它的键已被另一个请求占用，就什么也不结算，所在边界照常提交；比较 `request_digest` 与该键下的操作结果，就能判断这个结果属于谁。
+
+## 受保护存量底线
+
+账户的受保护存量底线，就是它的 `protected_floor_policy` 指向的那个 `ProtectedFloorPolicyRevision`。政策版本不可变，分为两种：
+
+| 种类 | 身份 | 由谁安装 | 保留多久 |
+| --- | --- | --- | --- |
+| 预先编写 | 由编写者指定 | 场景，通过 `ResourceState::install_protected_floor_policy` | 始终保留 |
+| 按内容寻址 | 由内容推导，形如 `resource:protected-floor:{digest}` | 账户的保管人在运行中安装，场景也可以安装 | 只在仍有账户或需求引用它时保留 |
+
+要在运行中设定任意数量的底线，保管人先构造一个按内容寻址的版本，把版本本体放进 `install`，把它的 ID 放进 `policy`。`SetProtectedFloor` 会在资源记录里还没有这个版本时安装它，并让账户指向它，两件事要么都发生，要么都不发生：
+
+```rust
+let floor = ProtectedFloorPolicyRevision::content_addressed(
+    ResourceRevision::INITIAL,
+    180,
+    BTreeSet::new(),
+)?;
+ResourceOperationRequestV1::SetProtectedFloor(ResourceProtectedFloorRequestV1 {
+    operation_key,
+    account,
+    expected_account_revision,
+    policy: Some(floor.id.clone()),
+    install: Some(floor),
+})
+```
+
+- **每次都要带上本体。** 按内容寻址的版本每次都必须连同本体一起给出。只给 ID 会以 `invalid_definition` 被拒绝，不管资源记录里有没有这个版本，这样保管人就无法借此探知别的账户保护了多少。只填 `policy` 表示指向一个预先编写的版本；填 `None` 则取消底线。
+- **权限。** 这个操作不需要完成租约，只留下一条 `SetProtectedFloor` 操作结果，并让账户修订号前进一次。带请求标识的命令必须来自账户的保管人。[动用授权](#动用授权)只是同意对方动用存量，并不转移保管权，所以被授权方不能替授权方设定底线。
+- **名额是共用的。** 资源记录最多保存 4,096 个政策版本，两种合计（`MAX_PROTECTED_FLOOR_POLICY_REVISIONS`）。运行中的安装如果超出上限，会结算为一条被记录的 `limit_exceeded` 拒绝。这个名额由所有保管人共用，而且低于默认的 8,192 个账户上限，所以如果你的游戏允许持有人自行设定底线，要限制每个持有人能保有多少种不同的底线。
+- **没人引用的版本会被退役。** 每次成功应用 `SetProtectedFloor`，都会移除没有任何账户或需求引用的按内容寻址版本。每天都改的底线，资源记录里始终只留一个版本；内容相同的账户共用一个版本。需求引用的版本会一直保留到需求被归档。
+- **以后还要用，就自己留一份本体。** 退役会移除引擎手里唯一的一份本体。已归档的需求只保留它准入时所依据的底线的 ID。
+- **未结的需求要跟着修订。** 改动底线会让账户修订号前进。未结的需求引用的还是它准入时的底线，所以它的分配会结算为 `version_conflict` 拒绝，直到把需求修订为当前生效的底线。
 
 ## 需求来源策略
 

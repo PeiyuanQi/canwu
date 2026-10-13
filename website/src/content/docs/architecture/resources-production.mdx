@@ -97,8 +97,8 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 类型 | 表示什么 |
 | --- | --- |
 | `ResourceDefinitionRevision`、`ResourceUnitRevision` | 带品质和范围的不可变资源定义，以及带比例系数的单位 |
-| `ResourceAccount` | 某一确切资源与单位的一份余额，由保管人（一个 `KnowledgeHolderRef`）持有，可带容量上限、受保护存量底线策略和 `place_scope` |
-| `ProtectedFloorPolicyRevision` | 不参与普通分配的保留量，例如种粮，以及允许动用底线以下存量的需求类别 |
+| `ResourceAccount` | 某一确切资源与单位的一份余额，由保管人（一个 `KnowledgeHolderRef`）持有，可带容量上限、受保护存量底线政策和 `place_scope` |
+| `ProtectedFloorPolicyRevision` | 不参与普通分配的保留量，例如种粮，以及允许动用底线以下存量的需求类别。政策版本可以由场景预先编写，也可以由账户的保管人在运行中安装 |
 | `ResourceDemand` | 申请者提出的需求：数量、最低有用量、`PartialFulfillmentPolicy`、到期与失效时间、优先级、平局决胜键和 `source_policy` |
 | `ResourceReservation`、`ResourceAllocationLeg` | 某个账户为某项需求分出的一份数量；消费者引用分配腿作为精确证据 |
 | `ResourceTransfer` | 两个账户之间处于托管中的存量，带 `ResourceTransferState` 和可选的 `TransportExecutionLink` |
@@ -149,13 +149,13 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | --- | --- | --- |
 | 带请求标识的命令 `apply_resource_operation_v1` | 对自己掌控的存量采取行动的持有人。命令主体必须是掌控目标记录的持有人。 | `CreateAccount`、`SubmitDemand`、`AmendDemand`、`CancelDemand`、`BeginTransfer`、`BeginExchange`、`CancelTransfer`、以 `AcceptLocal`、`Lose` 或 `Return` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、`SetProtectedFloor`、`IssueAccessGrant`、`RevokeAccessGrant`，以及租约的申请和放弃 |
 | 适配器输入 `resource_adapter_operation_v1` | 提供方插件。请求中的证据字段必须等于数据包引用的精确记录版本，带时间的请求只能在它写明的时间结算。 | `Consume`、`AdvanceTransfer`、以 `Accept`、`AcceptLocal` 或 `ExternalOutflow` 处置的 `CompleteTransfer`、`RecordLoss`、`ExternalOutflow`、外部流入的 `Credit`，以及观察记录 |
-| 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`）和生产产出批次（`resource_production_output_batch_v1`） |
+| 插件自有的数据包 | 上层应用通过辅助函数发送，或由 `canwu-production` 发送 | 分配请求（`resource_authorized_allocation_v1`）、租约状态转移（`resource_completion_operation_v1`，包括单步完成租约）和生产产出批次（`resource_production_output_batch_v1`） |
 
 <Steps>
-1. 准备。上层应用在 `ResourceState` 中安装资源定义、单位、期初账户、底线策略和报告授权，用 `ResourceState::into_record` 转成场景中的领域记录，再注册 `ResourcePlugin::new(adapter_evidence_kinds)`。这个列表写明哪些记录种类可以为适配器操作提供证明。生产状态以同样的方式通过 `ProductionState::into_initial_record` 和 `ProductionPlugin` 进入。
+1. 准备。上层应用在 `ResourceState` 中安装资源定义、单位、期初账户、底线政策和报告授权，用 `ResourceState::into_record` 转成场景中的领域记录，再注册 `ResourcePlugin::new(adapter_evidence_kinds)`。这个列表写明哪些记录种类可以为适配器操作提供证明。生产状态以同样的方式通过 `ProductionState::into_initial_record` 和 `ProductionPlugin` 进入。
 2. 需求。申请者发送带请求标识的[领域命令](/reference/terminology/) `apply_resource_operation_v1`，命令用 `resource_command` 构建。命令处理器检查签发者能否代表命令的 `subject`、`subject` 是否掌控每个目标，然后排入一条 `resource_command_v1` 输入。
 3. 分配。上层应用用 `enqueue_resource_allocation` 为一个申请者排入一次分配。边界准入这条输入后，第 7 阶段的写入系统先让过期的需求失效，再收集该申请者已到期或有变化的需求；需求数超过请求中的 `candidate_limit` 时，这次分配失败。随后按优先级从高到低依次满足这些需求，优先级相同时再依次比较到期时间、平局决胜键、准入序号和需求 ID。每分出一份，就写入一条资源预留和一条分配腿。
-4. 租约。执行任何不可逆步骤之前，行动的持有人先通过 `enqueue_resource_completion_operation` 激活一份完成租约。对于生产执行，由 `canwu-production` 协调租约，`canwu-resource` 作为参与方加入。凭证锁定该步骤依赖的精确账户、分配腿和记录。每次消费、转移发起、转移处置、入账、损耗和流出都必须携带这份凭证。
+4. 租约。执行任何不可逆步骤之前，行动的持有人需要一份已激活的完成租约，通过 `enqueue_resource_completion_operation` 取得。租约要经过四个操作（申请、授权、准备、激活）才会激活，因为每个参与方各自授权、各自准备：对于生产执行，由 `canwu-production` 协调租约，`canwu-resource` 作为参与方加入。如果资源插件是唯一的参与方（例如发起转移、本地验收、损耗或流出），一个 `SingleStepLease` 操作就能完成全部四步，检查相同，得到的凭证也相同，见[完成租约](/developer/production-economy/#完成租约)。凭证锁定该步骤依赖的精确账户、分配腿和记录。每次消费、转移发起、转移处置、入账、损耗和流出都必须携带这份凭证。
 5. 扣减。消费者插件用 `enqueue_resource_adapter_operation` 经适配器输入发送 `Consume`，并引用授权这次扣减的自有记录的精确版本。另一种方式是来源保管人用 `BeginTransfer` 发起转移，相应数量移入托管。转移进度和 `Accept` 以适配器操作的形式到达，并引用运输证据。`AcceptLocal`、`Lose` 和 `Return` 以其他方式结束转移。转移的每一步都写明预期的转移修订号，所以同一次到货不会入账两次。
 6. 生产。生产命令（`apply_production_operation_v1`）创建并批准工单。`StartExecution` 引用 `canwu-resource` 已经消费的投入：每个 `ResourceInputBinding` 写明分配腿、消费记录和对应结果。它还带上产能分配，由第 7 阶段标为 `Consumed`。`AdvanceExecution` 推进在制品，`CompleteExecution` 让生产执行进入 `CompletedPendingOutputSettlement`，其产出数量可以按实际产出比例缩放。
 7. 产出。在第 12 阶段，生产插件把当前的生产记录版本固定为该执行的 `output_source`，并安排一条 `resource_production_output_batch_v1` 输入。在之后的某个边界，资源写入系统要么为批次中的全部产出入账，要么一项也不入账，然后安排一条 `production_output_ack_v1`。生产插件的第 7 阶段保存这些结果，释放产能，并把生产执行标为 `Settled`。
@@ -216,11 +216,28 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 - 资源：`from_resource_snapshot_json`、`from_resource_checkpoint_journal`、`replay_resource_from_journal`，用其他方式加载后调用 `validate_resource_runtime`；
 - 生产：存在归档状态时，使用 `from_production_snapshot_json_with_archives`、`from_production_checkpoint_journal_with_archives`、`replay_production_from_journal_with_archives` 和 `validate_production_runtime_with_archives`。
 
-终态记录分批移入扩展自有的归档，每批都有上限，流程为 `prepare_resource_archive`、`store_and_verify`、`enqueue_resource_archive` 和 `finalize_resource_archive_retention`，生产扩展有对应的函数。普通结算从不扫描冷历史。精确重放读取已记录的命令和输入，所以排入它们的上层应用代码和决策控制者都不会再次运行。详见[存档、重放与派生分支](/developer/persistence/)。
+精确重放读取已记录的命令和输入，所以排入它们的上层应用代码和决策控制者都不会再次运行。详见[存档、重放与派生分支](/developer/persistence/)。
+
+### 归档终态记录
+
+完成的工作会在资源记录里留下终态记录：操作结果、已关闭的需求和预留、已结算的转移，以及各种凭证。每个改动资源记录的边界都要把整条记录重写一遍，所以上层应用要把终态记录移到按内容寻址的归档里，每次做一次归档提交：
+
+1. `ResourceState::prepare_resource_archive(candidate_limit, store)` 选出热终态记录，并准备好对应的归档对象。它要读取归档存储来续写查找索引，所以要传入你用来归档的存储。模拟运行的第一次提交还没有索引可读，这一步传 `()` 就够了。
+2. `enqueue_resource_archive` 写入这些对象，通过批次的 `store_and_verify` 校验，然后把这次提交排入队列，由下一个边界应用。
+3. 提交结算之后，用 `finalize_resource_archive_retention` 确认。每次提交都要在下一次提交把它的凭证归档之前完成确认。
+
+生产扩展为自己的归档提供了对应的函数。这个归档在本版本中没有变化：它没有查找索引，一次提交只带一页、最多 512 条记录，一次模拟运行最多做 8,192 次生产归档提交。
+
+- **容量。** 一次提交最多带 16 页、4,096 条记录；一次模拟运行可以做任意多次归档提交。
+- **查找。** 每个资源操作都要问归档：自己的操作键以前用过没有。这样，即使操作结果已经移出记录，重发的操作也不会再次生效。每次提交都会续写一份累积的归档查找索引，这项检查只读归档头目录，再沿索引每层读一个经过认证的页。在记录的测量中，已归档约一千条记录时，一次未命中读 4 个对象，约一百万条时读 7 个，与提交次数无关。归档对象缺失或损坏属于错误，会让边界失败，绝不会被当成“没有归档过”。
+- **顺序与容量。** 同一个边界里，归档提交和保留确认（即 `finalize_resource_archive_retention` 排入的输入）先于资源插件的其他输入结算。归档提交不会因为空间不够而失败。如果别的提交或操作先结算，使某次提交失效，这次提交什么也不改变，它的凭证在你确认之后移除。
+- **保留好查找页。** 恢复、精确重放或派生分支会读取沿途每个归档头的查找索引，引擎从不删除查找页。每个准备好的批次都列出 `superseded_lookup_pages`，即新索引不再用到的页。只有当你放弃从这次提交之前的时间点恢复、重放和派生分支时才能删除它们，而且要等这次提交以 `Applied` 结算，并且已经有一份在它之后保存的持久快照或检查点。`live_resource_archive_lookup_pages` 可以重新算出实时运行仍会读取的页。
+
+普通结算从不扫描冷历史。
 
 ## 上层应用需要提供什么
 
-- 内容：资源与单位版本；期初账户及其保管人、容量和 `place_scope`；底线策略；工艺版本；生产地点；设施及其事故风险。`canwu-economy-reference-content` 展示了一个内容包，其中的 `ResourceCapabilityRevision` 把矿点放在从 `Potential` 到 `DeliveredAccepted` 的某个 `ResourceCapabilityStage` 上。
+- 内容：资源与单位版本；期初账户及其保管人、容量和 `place_scope`；底线政策；工艺版本；生产地点；设施及其事故风险。`canwu-economy-reference-content` 展示了一个内容包，其中的 `ResourceCapabilityRevision` 把矿点放在从 `Potential` 到 `DeliveredAccepted` 的某个 `ResourceCapabilityStage` 上。
 - 权限：谁可以创建账户，谁可以以哪个申请者的名义提交需求，谁可以签发动用授权。`Pooled` 或 `ExactAccounts` 来源策略只负责选择账户；要动用其他保管人的存量，需要动用授权和 `Granted` 策略。
 - 时机与顺序：何时为每个申请者排入一次分配，以及每项需求的优先级和平局决胜键。粮食循环示例从决策票据中取得优先级。
 - 证据种类：传给 `ResourcePlugin::new` 的记录种类、每个工艺版本的 `realization_evidence_kinds`，以及动用授权和流出所引用的权限记录。
@@ -232,16 +249,21 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 | 限制 | 取值 |
 | --- | --- |
-| `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144）；每次分配 2,048 个候选；2,048 个待处理需求；每个边界 4,096 次变更、256 份报告；8,192 条热操作结果；状态 256 MiB |
+| `ResourceLimitsV1::canonical()` | 账户、需求、转移各 8,192 个（硬上限 262,144）；每次分配 2,048 个候选；2,048 个待处理需求；每个边界 4,096 次变更、256 份报告；8,192 条热操作结果；256 条热终态归档候选（硬上限 4,096；维护凭证预算不得小于它）；状态 256 MiB |
 | `MAX_DEMAND_SOURCE_ACCOUNTS` | `ExactAccounts` 或 `Granted` 列表最多 256 个账户 |
 | `MAX_RESOURCE_ACCESS_GRANTS` | 每个资源状态最多 4,096 份动用授权，已撤销的也计入 |
-| 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`） |
+| 完成租约 | 每个生命周期 16 条终态凭证（`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`）；每个权限主体 16 个、全局 1,024 个待处理申请；始终未激活的授权在 8 个边界后过期（`PREACTIVATION_LEASE_TTL_BOUNDARIES`）；单步完成租约结算时需要 `2 + 16` 个归档候选名额和 `1 + 16` 个热操作结果名额 |
+| 受保护存量底线 | 一条资源记录最多 4,096 个政策版本，预先编写的和按内容寻址的合计（`MAX_PROTECTED_FLOOR_POLICY_REVISIONS`）；按内容寻址的版本最多 16 个覆盖类别，每个 1 到 160 字节 |
 | 生产产出批次 | 同一份凭证下 1 到 64 笔入账 |
 | `ProductionLimitsV1::canonical()` | 工艺版本和生产地点各 2,048 个；设施、工单、生产执行、产能分配和设施项目各 4,096 个；每个边界 512 次事故检查、64 份报告；状态 256 MiB |
 | 工艺与报告规模 | 64 个要求组（`MAX_REQUIREMENT_GROUPS`），每组 16 个备选（`MAX_REQUIREMENT_ALTERNATIVES`），每份报告 256 条事实和阻塞项（`MAX_REPORT_FACTS`） |
 | 投影 | 8 个来源适配器（`MAX_TYPED_SOURCE_ADAPTERS`），256 条观察事实（`MAX_OBSERVATION_FACTS`），32 个价格因素（`MAX_PRICE_FACTORS`） |
 
-触及上限时返回错误或被拒绝的结果，存量不会改变。热归档已满时，下一次租约申请会在任何扣减发生前被拒绝，因此已被接受的工作仍能完成。
+触及上限时返回错误或被拒绝的结果，存量不会改变。每份租约都在任何扣减发生之前预留好自己的终态记录名额，所以热归档已满时，已被接受的工作仍能完成；下一份租约（四步或单步）则要等一次归档提交腾出空间后才能取得。
+
+最需要留意的是归档候选预算 `max_archive_candidates`。如果一个操作会产生的终态记录放不下，它所在的边界会失败，操作留在队列里，直到一次归档提交腾出空间；它不会被记录为拒绝。预算要能容纳你保留的积压，再加上同一个边界到期的操作可能产生的全部终态记录（每个操作 1 到 8 条，视种类而定）。边界因为预算已满而失败时，请排入一次选中全部候选的提交：从同一份记录准备的第二次提交，会在第一次提交应用后失效。一次提交最多腾出“预算减一”个名额，因为它自己的维护凭证仍占一个候选名额。如果同一个边界到期的操作需要的名额比这还多，任何提交都无济于事，这个边界在该预算下无法结算。
+
+4,096 这个上限是为突发留的余量，不是日常的工作规模。每个改动资源记录的边界，都要重写其中全部热终态记录并写入日志；在记录的测量中，每条热记录约占 1.1 KB 日志和 50 到 95 微秒。归档要勤，积压要小。
 
 ## 动手试试
 

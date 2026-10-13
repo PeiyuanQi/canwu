@@ -31,11 +31,11 @@ The optional `canwu-resource` and `canwu-production` extensions handle this. The
 | Term | Meaning |
 | --- | --- |
 | Account | One stock balance (`balance`) of one exact resource and unit revision, held by a **custodian**: the holder responsible for that stock. |
-| Protected floor | An amount an account holds back from ordinary allocation, such as seed grain (`ProtectedFloorPolicyRevision`). A demand whose `protection_override_class` the policy lists may draw below it. |
+| Protected floor | An amount an account holds back from ordinary allocation, such as seed grain (`ProtectedFloorPolicyRevision`). A demand whose `protection_override_class` the policy lists may draw below it. The scenario authors floors, and an account's custodian can also set one at runtime; see [protected floors](#protected-floors). |
 | Demand | A requester's request for a quantity, with a minimum useful amount, a partial-fulfillment policy, due and expiry times, a priority, and a source policy. |
 | Reservation and allocation leg | The result of allocation: a quantity set aside for one demand in one account. A released or expired reservation frees the quantity again. |
 | Transfer escrow | Stock that has left its source account and is in transit. It stays counted until it is accepted, lost, or returned. |
-| Completion lease | A holder's right to perform one irreversible operation, named by its operation key. Activating the lease yields a `CompletionLeaseActivationCertificateV1`, which pins the operation key, the time, and the exact records the operation depends on. Irreversible requests carry this certificate. |
+| Completion lease | A holder's right to perform one irreversible operation, named by its operation key. Activating the lease yields a `CompletionLeaseActivationCertificateV1`, which pins the operation key, the time, and the exact records the operation depends on. Irreversible requests carry this certificate. A lease takes four operations, or one when the resource plugin is its only participant; see [completion leases](#completion-leases). |
 | Adapter ingress | The path provider plugins use (`enqueue_resource_adapter_operation`). Each operation cites the exact provider record version that justifies it. |
 
 A **tracked command** is a command sent with a `CommandRequest` (request ID and expected revision). Build the resource command with `resource_command(&ResourceCommandV1 { subject, request })`; the issuer must control `subject`.
@@ -70,6 +70,8 @@ A **tracked command** is a command sent with a `CommandRequest` (request ID and 
 
 Every transfer step names the transfer's `expected_transfer_revision`, so a stale or repeated step is rejected and one arrival cannot be credited twice. If a conservation, revision, or authority check fails, the operation's changes roll back together.
 
+Each operation has an operation key. Sending the same request again under its key returns the recorded outcome. A tracked command that reuses a key for a different request is refused at admission with `IdempotencyConflict`; if it was admitted before the first request settled, it is left unsettled and the outcome under the key names the request that owns it. Neither fails a boundary.
+
 `canwu-resource` checks conservation with `ResourceState::validate_conservation` over `ConservationTotalsV1`:
 
 ```text
@@ -81,6 +83,77 @@ closing balances + closing transfer escrow
 Only `balance` is stored. Available, reserved, and protected amounts are derived (`ResourceState::account_quantities`). A route estimate, an accepted arrival, and a consumption are three separate facts, and each needs its own step.
 
 For a runnable fourteen-month grain loop, run `cargo run -p canwu-economy-reference --example grain_loop` and read the [grain, production, and military supply case](/en/tutorials/cases/production-economy/).
+
+## Completion leases
+
+Every irreversible request (a consumption, a transfer start, a terminal transfer disposition, a credit, an external outflow, an account-level loss) carries the activation certificate of a completion lease. Queue lease operations with `enqueue_resource_completion_operation`.
+
+A lease can have several participants, each of which grants and prepares on its own, so the general path takes four operations: `Acquire`, `Grant`, `Prepare`, and `Activate`. Each leaves an operation outcome and a lease receipt. Use it when the lease needs a grant owned by another plugin, as an adapter operation does, or when another plugin coordinates the lease, as `canwu-production` and the force-supply reference do.
+
+When the resource plugin is the only participant, take the lease in one operation, a [single-step completion lease](/en/reference/terminology/):
+
+```rust
+ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1 {
+    lease,            // RequestCompletionLeaseV1, as for Acquire
+    grant_id,         // the one grant, owned by canwu-resource
+    target_versions,  // every exact target the lease locks
+    current_boundary,
+})
+```
+
+- **When it applies.** "Only participant" means exactly that `lease.expected_participants` is `{"canwu-resource"}`. That is the lease behind a tracked `BeginTransfer`, an exchange leg, `CompleteTransfer` with `AcceptLocal`, `Lose`, or `Return`, `ExternalOutflow`, and `RecordLoss`. A single-step request that names any other participant set is refused with `invalid_lifecycle`.
+- **Same checks, same certificate.** The operation runs the four steps in order with the checks each has on its own. Its certificate equals the one the four steps produce for the same acquisition, grant, and targets at the same boundary, so the request that carries the certificate is unchanged.
+- **Fewer records.** It leaves one `CompletionLease` outcome, keyed `resource:completion:lease:{acquisition}`, and one receipt, where the four steps leave four of each. In the committed fixture, a same-place transfer leaves 15 terminal records and makes 9 archive lookups instead of 27 and 15.
+- **How it enters.** A tracked holder command cannot carry it, because an active lease does not expire and holds its target locks. Your host queues it, or a plugin that declares the resource completion ingress schedules it.
+- **Refusals are recorded.** A domain refusal is the operation's rejected outcome, and it leaves no acquisition, grant, lock, or spent request token behind. A refused request has used its operation key, so retry under a new acquisition ID. A resend of the same request returns its recorded outcome and is not a second lease. Neither path resumes an acquisition the resource record already holds: a single-step request or an `Acquire` that names one is a recorded `idempotency_conflict` rejection.
+
+Three things are not recorded and fail the boundary that settles a single-step lease, as they do for any resource operation:
+
+- **No room.** The check asks for the whole lease before anything is recorded: `2 + 16` archive candidate slots and `1 + 16` hot outcome slots, beside the 16 of each that every active lease already reserves. With the canonical budget of 256 and no backlog, the fifteenth concurrently active lease is the last that fits. The room is asked for even when the request would be refused, so under a full budget a refusal is not recorded either.
+- **A failed archive lookup.** A missing or damaged archive object is an error, never a miss.
+- **The state byte cap.**
+
+So check headroom before you queue a single-step lease. An archive commit frees the room taken by hot terminal records and may be queued behind it. It frees nothing held by the reservations of active leases.
+
+Two things to watch:
+
+- An active lease never expires, and a single-step lease is active at once. If its operation is never issued, or is rejected, the lease keeps its target locks and its 16 reserved slots until your host sends `Release`.
+- A holder may still send a tracked `Acquire`. While that acquisition waits for its first grant, every single-step request that sorts after it in the fairness order is refused with `invalid_lifecycle`. A host that uses only single-step leases watches for such acquisitions and aborts them. If the holder's own rejected `Abort` has already used the abort key, grant the stray acquisition and release that grant instead.
+
+An ordinary request cannot use an operation key under the reserved `resource:completion:` prefix. A holder can still take a completion key with the two completion operations it may send as tracked commands: an `Acquire`, and an `Abort` of a lease it holds. A packet your host queues on the completion ingress whose key a different request already holds settles nothing, and its boundary commits; compare `request_digest` with the outcome under the key to tell whose it is.
+
+## Protected floors
+
+An account's protected floor is the `ProtectedFloorPolicyRevision` that its `protected_floor_policy` names. A revision is immutable and is one of two kinds:
+
+| Kind | Identity | Who installs it | How long it stays |
+| --- | --- | --- | --- |
+| Authored | Chosen by the author | The scenario, with `ResourceState::install_protected_floor_policy` | Always |
+| Content-addressed | Derived from the content, as `resource:protected-floor:{digest}` | The account's custodian at runtime, or the scenario | Only while an account or a demand refers to it |
+
+To set a floor of any quantity during a run, the custodian builds a content-addressed revision and sends its body in `install` and its ID in `policy`. `SetProtectedFloor` installs the revision, if the resource record does not hold it yet, and points the account at it, together or not at all:
+
+```rust
+let floor = ProtectedFloorPolicyRevision::content_addressed(
+    ResourceRevision::INITIAL,
+    180,
+    BTreeSet::new(),
+)?;
+ResourceOperationRequestV1::SetProtectedFloor(ResourceProtectedFloorRequestV1 {
+    operation_key,
+    account,
+    expected_account_revision,
+    policy: Some(floor.id.clone()),
+    install: Some(floor),
+})
+```
+
+- **Always send the body.** A content-addressed revision is named with its body every time. Its ID alone is refused with `invalid_definition`, whether or not the record holds the revision, so the answer tells a custodian nothing about what other accounts protect. `policy` alone names an authored revision, or `None` to clear the floor.
+- **Authority.** The operation needs no completion lease, leaves one `SetProtectedFloor` outcome, and advances the account revision. A tracked command must come from the account's custodian. An [access grant](#delegated-access-grants) is consent to draw on stock, not custody, so a grantee cannot set the grantor's floor.
+- **One shared quota.** The record holds at most 4,096 revisions of both kinds (`MAX_PROTECTED_FLOOR_POLICY_REVISIONS`). A runtime install past it settles as a recorded `limit_exceeded` rejection. The quota is shared by every custodian and is below the canonical 8,192 accounts, so if your game lets holders set floors, limit how many distinct floors each may hold.
+- **Unused revisions are retired.** Every applied `SetProtectedFloor` removes the content-addressed revisions that no account and no demand refers to. A floor that changes every day keeps one revision. Accounts that set equal content share one. A demand keeps the revision it cites until the demand is archived.
+- **Keep the body if you need it later.** Retirement removes the only copy of the body the engine holds. An archived demand keeps the ID of the floor it was admitted under and nothing else.
+- **Open demands go stale.** A floor change advances the account revision. An open demand cites the floor it was admitted under, so its allocation pass settles as a `version_conflict` rejection until the demand is amended to the floor in force.
 
 ## Demand source policy
 

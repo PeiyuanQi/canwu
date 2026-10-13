@@ -5,6 +5,14 @@ Status: implemented in 0.15.0. It closes downstream gaps G-53 and G-56 in
 types. The kernel, the archive, and the shape of the resource root are
 unchanged.
 
+The release entry is in [Versioning and Persistence](../versioning.md). The
+other 0.15.0 proposals are
+[society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),
+[keyed-draw index, draw ID, and boundary profile](keyed-draw-index-and-settlement-profile.md),
+[resource archive lookup and volume](resource-archive-lookup-and-volume.md),
+and [fiscal throughput and authority](fiscal-throughput-and-authority.md).
+
 ## Single-step completion lease (downstream gap G-53)
 
 ### Problem

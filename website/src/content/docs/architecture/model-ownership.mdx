@@ -65,6 +65,9 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 | 加权、表决单元与征询程序阶段 | `canwu-law` 编译后的程序 | 席位权重、表决单元和平局规则 |
 | 引擎内文化结算 | `canwu-culture` 的 `CultureBoundaryPlugin` 结算生命周期并产生变化；`canwu-society` 始终是 `canwu.society:state` 的唯一写入者 | 接触信号和文化定义 |
 | 政策压力来源与 cohort 人口校准 | `canwu-society` | 人口校准所引用的外部存量记录 |
+| 财政权限改绑、审计绑定与分段发布的报告 | `canwu-fiscal` | 由谁任命绑定中的角色和审计人、权限依据记录，以及客户端如何呈现尚不完整的报告 |
+| 单步完成租约与运行中设定的受保护存量底线 | `canwu-resource` | 何时取得和释放租约、归档余量，以及每个保管人可以设定多少种不同的底线 |
+| society 结算节奏与运行中的压力修订 | `canwu-society` | 哪些边界带这个节奏、按这个节奏设定的速率，以及机构要修订哪些政策压力、影响边和组织节点条目 |
 | 外部传播来源 | `canwu-technology` | 所引用的内容记录及其声明的可靠度 |
 
 有两个移动相关的 crate 名字相近。`canwu-reference-world` 带有一个移动插件，用 `order_movement_v1` 命令移动示例世界中的军队和人物，属于可替换的示例代码；`canwu-movement` 则是面向 `canwu-transport` 记录的通用移动生命周期扩展，与参考世界无关。

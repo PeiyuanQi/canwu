@@ -138,13 +138,36 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 5. 模拟内核校验并提交。内核只接受满足以下全部条件的 `PublishKnowledge` 指令：
    - 来自第 4 或第 13 阶段的系统，且该系统在 `knowledge_writes` 中以相应的可见性声明了这个 schema；
    - schema 可写，并由同一个插件注册；
-   - 持有人符合资格，证据引用有效。
+   - 持有人符合资格，证据引用有效；
+   - 它取代或标为矛盾的每条记录，都是同一持有人、同一 schema 种类下可见的记录（见[取代先前的记录](#取代先前的记录)）。
 
    随后内核分配全局记录 ID，设定 `learned_at`，让同一边界中后续运行的系统读到 `SameBoundary` 记录，并在边界结束时把所有批次写入账本。
 6. 产出结果。每个批次成为 `BoundaryRecord::knowledge_changes` 中的一条 `BoundaryKnowledgeChange`，并产生一个以该持有人为受众的 `KnowledgePublished` 事件。此后该持有人读取账本时就能看到新记录。
 </Steps>
 
 [结算系统](/architecture/settlement/)列出了全部十四个阶段。[从无锡发出、按路线投递的通信](/tutorials/cases/routed-correspondence/)逐步讲解了意外事件和恢复：灾害让同一次尝试改道，截取让截取者得到一条 `Access` 记录、投递照常继续，承运人扣押则结束这次尝试。
+
+### 取代先前的记录
+
+插件为持有人发布某件事的新版本（例如一份新的报告）时，新记录在 `supersedes` 中写明它取代的旧记录。此后，持有人的默认查询只显示新记录。
+
+被取代或被标为矛盾的目标，必须是同一持有人、同一 schema 种类的记录，并且在发布者的读取切面上可见：要么已由更早的边界提交（不论它的 `learned_at` 是哪个时刻），要么由同一个边界在更早的阶段以 `SameBoundary` 可见性发布。同一时刻可以结算两个边界，后一个边界可以取代前一个边界发布的记录。加载存档时使用的是同一条规则，所以只要写出存档的模拟运行能够继续，这份存档就能加载。
+
+要找到该取代哪些记录，声明了 `StateKey::core_knowledge()` 读取的边界系统可以调用 `SimulationView::knowledge_heads`：
+
+```rust
+let heads = view.knowledge_heads(&holder, &schema.kind, &[subject])?;
+draft.supersedes = heads.records;
+```
+
+- 它返回该持有人在这一 schema 种类下当前记录的全局 ID，也就是没有被该持有人其他记录取代的记录（知识头记录）。只有带有所列全部主体的记录才算匹配，空列表则选中整个种类。如果你的插件为同一持有人维护多条记录线，要给每条线一个其他线没有的主体。
+- 返回的每个 ID，都可以作为该系统向同一持有人发布同种类记录时的有效目标，并且已经按草稿要求的升序排列。
+- 最多返回 64 个 ID，这也是一条记录最多能取代的数量。匹配的记录更多时，返回最新的那些，并设置 `truncated`。这不是错误：其余较旧的当前记录会在之后的发布中陆续被取代。
+- 结果来自已提交状态和正在结算的边界，所以实时运行、封存过证据的运行、恢复后的运行和精确重放得到的 ID 相同。
+
+:::caution
+`SimulationView::knowledge_changes_by_correlation` 和 `knowledge_changes_by_correlation_prefix` 扫描的是仍然保留的边界证据。`seal_evidence` 移走发布边界之后，它们对这个边界什么也读不到，而精确重放仍然读得到。不要用它们挑选要取代的记录，也不要用它们做任何必须能精确重放的判断。
+:::
 
 ## 知识与可见性
 

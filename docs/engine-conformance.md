@@ -349,7 +349,10 @@ inputs, and derived state. Since 0.13.0, `CultureBoundaryPlugin` registers the
 lifecycle as a Monthly boundary system, persists culture state and lifecycle
 transitions inside the engine, and admits exposure and signal batches through
 canonical ingress while the society plugin remains the only society writer.
-Incremental society aggregate / projection refreshes are not yet implemented. A dedicated benchmark must
+Incremental society aggregate / projection refreshes are not yet implemented:
+since 0.15.0 a society settlement that changes nothing writes nothing and an
+observer whose estimate did not change keeps its projection, but a view that a
+change clears is still recomputed from full state. A dedicated benchmark must
 measure active/dirty pairs, cross-extension signal batches, observers, retired
 catalog size, snapshot bytes, validation, replay, and peak resident memory
 before the SDK is described as scalable.

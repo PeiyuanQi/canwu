@@ -111,6 +111,9 @@ B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在
 
 - `SetPersonAvailability` 替换一个人物的生存状态和人身状态。只有声明写入 `StateKey::core_person_availability()` 的第 7 或第 10 阶段系统可以提出。同一边界内对同一人物写入两次，边界失败。边界结束时，在随机决策落地之后，内核取消决策者或控制者权限人物已不可用的未关闭票据，并列入边界记录。
 - `CreatePerson` 创建人物。只有声明写入 `StateKey::core_people()` 的第 7 阶段系统可以提出。ID 由引擎分配，回执中的 `created_persons` 把这个 ID 绑定到提出创建的插件、系统和相关标识（correlation）。新人物从下一个边界起对系统可见。
+  - `PersonDraft` 可以带一个 `PersonPlacement`，即人物的落位：一个政府和一个地域，两者都必须已经存在于 `WorldSnapshot` 投影中。这样创建的人物在投影中有一条 `Person` 记录。
+  - 不带落位的草稿创建的是**未落位人物**：它在实体注册表（模拟运行的实体身份列表）中有身份，有人物可用性和创建回执，但没有 `Person` 记录，`SimulationView::person` 和 `Canwu::world` 里都查不到它。如果你的应用把政府和地点保存在自己的领域记录里，就用这种方式。草稿中的 `name` 和 `roles` 只保留在创建证据上，人物的属性请保存在你自己的记录里。
+  - 在命令权限、决策票据、人身状态和持有人知识这些方面，未落位人物与其他人物没有区别。内置的移动命令、信件和军队到达报告只读投影，所以不会涉及它。
 - `CancelPluginIngress` 在输入到期之前撤回本系统所属插件安排的排队输入。撤回目标从 `SimulationView::cancellable_plugin_ingress` 获取，这个方法要求声明读取 `StateKey::core_ingress()`。如果目标属于其他插件，已经到期、已准入或已撤回，或者同一边界里另一个提案也在撤回它，整个边界都会失败。
 
 多个系统可以同时声明这两个人物核心键，所以内核在结算时按人物检查冲突写入。
@@ -181,6 +184,50 @@ B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在
 - 第 13 阶段不能记录轨迹，应由算出该值的第 7 或第 12 阶段系统记录。轨迹计入日志大小。
 - 玩家和智能体通过 `CanwuViewer::evaluation_traces` 读取轨迹。这个视图不含证据，并受持有人知识范围限制，详见[读取状态](/developer/reading-state/#解释规则结果)。
 
+## 边界耗时剖面
+
+上层应用可以自己给整个 `settle_boundary` 调用计时，但看不到这段时间在各个插件之间是怎么分的。边界耗时剖面（boundary profile）给出的正是这一点，方便你按时间预算检查每个插件。
+
+剖面默认关闭。在 `Canwu` 或 `CompactedCanwu` 上调用 `set_boundary_profiling(true)` 开启后，每个成功结算的边界都会留下一份 `BoundaryProfile`；`take_boundary_profiles()` 取走上次调用以来积累的全部剖面：
+
+```rust
+canwu.set_boundary_profiling(true);
+canwu.settle_boundary(BoundaryRequest::at(canwu.time()).with_cadence(SystemCadence::Daily))?;
+
+let batch = canwu.take_boundary_profiles();
+for profile in &batch.profiles {
+    println!(
+        "boundary at {:?}: {} µs in total, {} µs in my-plugin, {} µs in the engine",
+        profile.settled_at,
+        profile.total_micros,
+        profile.plugin_micros("my-plugin"),
+        profile.remaining_micros(),
+    );
+}
+```
+
+一份剖面包含：
+
+- `boundary_id` 和 `settled_at`：是哪个边界，以及它的模拟时间。
+- `total_micros`：整个结算花费的现实时间，单位为微秒。
+- `handlers`：边界每调用一次插件处理器，就有一条 `BoundaryHandlerTiming`，按调用顺序排列，带有 `kind`、`phase`、`plugin`、`name` 和 `elapsed_micros`。
+
+边界会运行三种插件处理器，各对应一个 `BoundaryHandlerKind`：
+
+| 种类 | 计时对象 | `phase` |
+| --- | --- | --- |
+| `BoundarySystem` | 边界系统 | 它所在的阶段 |
+| `CommandHandler` | 本边界准入的排队插件命令的处理器 | 无 |
+| `EventSystem` | 由这类命令或本边界到期的已调度动作触发的同步事件驱动插件系统 | 无 |
+
+命令处理器和事件系统在边界准入输入时运行，早于第一个阶段，所以没有阶段。`plugin_micros(plugin)` 把某个插件所有处理器的耗时加起来；`remaining_micros()` 是剩下的部分，也就是引擎自身用于准入、校验、提交和计算哈希的时间。
+
+- 剖面是给上层应用看的诊断数据，不进入模拟。它不属于权威状态、证据、快照、检查点或重放日志，插件也读不到它。开启剖面的运行与不开启的运行，回执、证据和哈希完全相同。同样的输入运行两次，剖面数值也会不同，所以不要把这些数值再写回命令或插件输入。
+- 新建、恢复、重放得到的模拟运行和派生分支，剖面都是关闭的；加载存档之后需要重新开启。精确重放在重放调用内部结算各个边界，这些边界不会被计时。进入紧凑模式和封存证据都不会改变开关，也不会丢掉尚未取走的剖面。
+- 失败的边界不留下剖面。
+- 模拟运行最多保留 `MAX_RETAINED_BOUNDARY_PROFILES`（1,024）份尚未取走的剖面。如果在你取走之前又结算了更多边界，最旧的会被丢弃，`BoundaryProfileBatch::dropped` 给出丢弃的数量。
+- 插件归档维护由上层应用另行安排，在结算之外运行，不出现在任何剖面里。边界只负责应用维护产生的提交，这部分时间算作引擎耗时。
+
 ## 扩展系统的运行位置
 
 下列第一方扩展也使用同样的阶段。对照这张表，可以判断它们的状态相对于你自己的系统何时变化。
@@ -192,12 +239,14 @@ B 和 C 优先级相同，由平局决胜键决定先后；这里 B 的键排在
 | `canwu-movement` | 第 13 阶段，事件驱动 | `movement_report_publish_v1` 发布有变化的移动报告，每份报告只发给有权看到它的持有人。 |
 | `canwu-culture`（`CultureBoundaryPlugin`） | 第 12 阶段，事件驱动 | `culture_exposure_intake_v1` 把已准入的 `culture_exposure_v1` 批次排入队列。 |
 | `canwu-culture`（`CultureBoundaryPlugin`） | 第 7 阶段，每月 | `culture_lifecycle_settle_v1` 消费队列和已接受的制度决策，基于 `canwu-society` 状态的边界快照结算生命周期，保存文化状态，并把 `canwu-society` 变化和信号批次安排为下一边界的输入。 |
-| `canwu-society` | 第 12 阶段，事件驱动 | `intake-society-ingress` 把已准入的 `cohort_headcount_rebase_v1` 和 `society_lifecycle_delta_v1` 输入排入队列。 |
-| `canwu-society` | 第 7 阶段，每日 | `settle-social-transitions` 在 cohort 转移之后、制度决策与转移规则之前应用队列。 |
+| `canwu-society` | 第 12 阶段，事件驱动 | `intake-society-ingress` 把已准入的 `cohort_headcount_rebase_v1`、`society_lifecycle_delta_v1` 和 `society_pressure_revision_v1` 输入排入队列。 |
+| `canwu-society` | 第 7 阶段，society 结算节奏（默认每日） | `settle-social-transitions` 在 cohort 转移之后、制度决策与转移规则之前应用队列。 |
 
 移动路段的时序由内部调度输入 `movement_leg_due_v1` 驱动：移动命令安排首次出发，出发按路段计划时长安排到达，到达再安排下一次出发。到期输入只有与移动命令上保存的到期时间一致时才生效，因此显式操作会让旧的到期输入失效。到期工作不会让边界失败。
 
-文化和 `canwu-society` 之所以使用输入队列，是因为同一阶段里一个状态键只能有一个写入系统，而它们的写入系统按更粗的节奏运行。所有第 7 阶段系统读的是同一份边界快照，所以文化的每次交接都落在之后的边界：信号批次在下一个边界准入，`canwu-society` 变化在准入后的第一次每日结算时应用。从文化步骤到它影响 `canwu-society`，以及从人口校准输入到 cohort 完成校准，最多都相差两个边界。society 插件始终是 `canwu.society:state` 的唯一写入者。
+文化和 `canwu-society` 之所以使用输入队列，是因为同一阶段里一个状态键只能有一个写入系统，而它们的写入系统按更粗的节奏运行。所有第 7 阶段系统读的是同一份边界快照，所以文化的每次交接都落在之后的边界：信号批次在下一个边界准入，`canwu-society` 变化在准入后的第一次 society 结算时应用。因此，文化步骤最早要到两个边界之后才影响 `canwu-society` 状态；人口校准则在准入它的边界之后的第一次 society 结算时生效。society 插件始终是 `canwu.society:state` 的唯一写入者。
+
+society 默认在带 `Daily` 节奏的边界结算；上层应用也可以用 `SocietyPlugin::with_settlement_cadence` 注册成别的节奏。节奏更粗时，队列里的一切都要等到下一个带这个节奏的边界，见[换一种结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏)。
 
 ## 插件契约
 

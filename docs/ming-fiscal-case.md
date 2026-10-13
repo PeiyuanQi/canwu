@@ -45,15 +45,17 @@ ledgers.
 物流账本的存档、归档或分片仍由上层应用负责。
 
 Runtime fiscal state is bounded to 4,096 assessments, 8,192 execution requests,
-8,192 receipts, 32 evidence versions per receipt, and a 32 MiB serialized-state
-budget. Aggregate rebuilds use single-pass indexes. For campaigns beyond these
+8,192 receipts, 32 evidence versions per receipt, 16,384 action outcomes, and a
+32 MiB serialized-state budget. These are lifetime caps, and one boundary
+applies at most 64 fiscal actions. Aggregate rebuilds use single-pass indexes. For campaigns beyond these
 experimental limits, the host must create separate simulation runs or shards;
 the fiscal extension has no in-place partition or archive API, and the host is
 responsible for cross-shard operation-ID deduplication.
 
-运行时财政状态最多分别容纳 4,096 条核算、8,192 条执行请求和 8,192 张凭证；
-每张凭证最多引用 32 个证据版本，序列化状态上限为 32 MiB。聚合重建使用单遍
-索引。超过这些实验性边界时，上层应用必须拆成独立模拟运行或分片；财政扩展
+运行时财政状态最多分别容纳 4,096 条核算、8,192 条执行请求、8,192 张凭证和
+16,384 条行动结果；每张凭证最多引用 32 个证据版本，序列化状态上限为 32 MiB。
+这些都是整个运行期内的总量上限；一个边界最多应用 64 个财政行动。聚合重建使用
+单遍索引。超过这些实验性边界时，上层应用必须拆成独立模拟运行或分片；财政扩展
 没有原地分区或归档 API，跨分片外部操作 ID 去重也由上层应用负责。
 
 The pack divides the chronology into eight playable periods:
@@ -134,15 +136,20 @@ admitted only while that basis is the current version of its record, and
 settlement checks it again. Once the record advances or retires, the acting
 actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`, while the authorized
 actor is still admitted. Who may appoint an acting actor, and for how long, is
-host content recorded in that basis record.
+host content recorded in that basis record. Since 0.15.0
+`FiscalAction::RebindAuthority` replaces a binding's actors and basis at
+runtime, and a `FiscalAuditBinding` admits an outside auditor for `RecordAudit`
+only; the reference starts use neither.
 
 `FiscalAuthorityBinding` 除常设的 `authorized_actor` 外，还可以
 指定一个代理角色，并附带精确的 `authority_basis` 权限依据记录版本，例如种类
 已通过 `FiscalPlugin::with_authority_basis_kinds` 声明的上层应用授权记录。只有
 当该依据仍是其记录的当前版本时，代理角色的行动才会被准入，结算时还会再次
 检查。记录出现新版本或退役后，代理角色会以 `FISCAL_ACTING_BASIS_NOT_CURRENT`
-被拒绝，常设授权角色仍可准入。谁可以任命代理角色、任期多久，属于记录在该
-权限依据中的上层应用内容。
+被拒绝，常设角色仍可准入。谁可以任命代理角色、任期多久，属于记录在该
+权限依据中的上层应用内容。自 0.15.0 起，`FiscalAction::RebindAuthority` 可以在
+运行中更换绑定的角色和权限依据，`FiscalAuditBinding` 则只为 `RecordAudit` 准入
+机构之外的审计人；参考起点没有用到这两项。
 
 Historical content periods and host-defined accounting cycles are separate.
 Aggregates are partitioned by institution, mechanism, scope, accounting cycle,
@@ -150,13 +157,16 @@ unit, and payment form. They keep assessed and remission-granted quantities
 separate from collected, remitted, disbursed, reserved, and returned execution.
 Only remission and collection reduce assessment outstanding. Actor reports are
 holder-relative knowledge records with non-invertible quantized ranges,
-confidence, and evidence, not exact truth copied into `FiscalState`.
+confidence, and evidence, not exact truth copied into `FiscalState`. A report
+is one summary record and parts of 16 facts; read it with
+`fiscal_reports(&viewer)` rather than from single records.
 
 历史内容时期与上层应用定义的核算周期彼此独立。聚合按机构、机制、范围、核算
 周期、单位和支付形态分区；应征、减免与征收、汇解、支出、储备、退还分别记录，
 只有减免和征收会减少应征未结量。角色报告是带范围、置信度和证据的持有人相对
 知识记录；估计值使用不可反推精确真值的量化区间，不会把精确真值复制进
-`FiscalState`。
+`FiscalState`。一份报告由一条摘要记录和若干分段组成，每段 16 条事实；请用
+`fiscal_reports(&viewer)` 读取整份报告，不要逐条解读单条记录。
 
 ## Playable fixtures / 可玩起点
 

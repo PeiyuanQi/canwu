@@ -94,7 +94,7 @@ The issuer of a queued plugin item can withdraw it before it is due. The withdra
 
 **Admission** decides which queued items belong to a boundary. Input due earlier than the committed simulation time is rejected with `LateIngress`, so nothing is inserted behind a boundary that has already committed. A zero-delay packet that a boundary generates waits for the current admission cut to close, then enters the next boundary at the same simulation time.
 
-Some plugins admit input in one phase and apply it later, because their writer runs on a coarser cadence. `canwu-society` and the culture boundary plugin queue packets in event-driven phase-12 intake systems and apply them at their next Daily or Monthly settlement. `canwu-movement` settles each leg through the internal scheduled ingress `movement_leg_due_v1`. See [where extension systems run](/en/architecture/settlement/#where-extension-systems-run).
+Some plugins admit input in one phase and apply it later, because their writer runs on a coarser cadence. `canwu-society` and the culture boundary plugin queue packets in event-driven phase-12 intake systems and apply them at their next settlement: Monthly for culture, and for society the settlement cadence its plugin was registered with, Daily by default. `canwu-movement` settles each leg through the internal scheduled ingress `movement_leg_due_v1`. See [where extension systems run](/en/architecture/settlement/#where-extension-systems-run).
 
 ## Event opportunities and expiry settlement
 

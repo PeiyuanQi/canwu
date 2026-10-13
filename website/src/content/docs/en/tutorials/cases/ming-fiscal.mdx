@@ -144,8 +144,12 @@ FiscalAuthorityBinding {
     authorized_actor: Some(institution.actor),
     acting_actor: None,
     authority_basis: None,
+    rebound_by: None,
 },
 ```
+
+`rebound_by` stays `None` until a `RebindAuthority` action replaces the
+binding's actors during a run; the starts never do that.
 
 Each fixture adoption becomes a `FiscalScopeBinding` (one jurisdiction and
 mechanism assigned to an institution at `SimulationGranularity::Aggregate`)
@@ -191,8 +195,10 @@ action: FiscalAction::OpenAssessment {
 `fiscal_action_command` and issues it as the binding's actor. At the first
 boundary, admission checks the actor against the binding and the binding's
 institution against the scope. The next boundary checks
-`expected_procedure_revision` against the state and settles the action into
-`action_outcomes`. The accounting cycle ID belongs to the host and is separate
+`expected_procedure_revision` against the revision the state had when that
+boundary began and settles the action into `action_outcomes`. The sample
+submits one action at a time, but several actions built against the same
+revision would settle in that one boundary, in admission order. The accounting cycle ID belongs to the host and is separate
 from the historical period. The second action, `AuthorizeExecution`, permits collecting 70 of
 resource `ResourceId::new(1)` from the actor to the institution; resource
 balances stay as they are.
@@ -225,10 +231,11 @@ disposition (`fulfilled`) from it.
 
 ### 6. Read the aggregate and the report
 
-The aggregate now shows 100 assessed, 70 collected, and 30 outstanding. At
-each boundary that writes a new fiscal state version, `FiscalPlugin` publishes
-one report per observer binding as a knowledge record held by that observer.
-`estimate` in
+The aggregate now shows 100 assessed, 70 collected, and 30 outstanding. When
+a boundary changes something an observer can see, `FiscalPlugin` publishes
+that observer's report as knowledge records held by the observer: one summary
+record, and the parts of 16 facts that changed. The minister's report has one
+fact here, so it is a summary and one part. `estimate` in
 [`derive.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/derive.rs)
 rounds each total into a bucket sized by the observer's confidence:
 
@@ -245,9 +252,16 @@ let minimum = value / bucket_width * bucket_width;
 
 `magnitude` is the largest power of ten at or below the value. At 850 per
 mille, 100 gets width 10 (100-109) and 70 gets the minimum width 2 (70-71).
-The trace reads the report back through `canwu.viewer_for_actor` with a
-`KnowledgeQuery` for `fiscal_report_knowledge_schema_id()`
-(`collect_projections` in `trace.rs`).
+The trace reads the report back as the minister would: `collect_projections`
+in `trace.rs` opens `canwu.viewer_for_actor` and calls
+`fiscal_reports(&viewer)`, which puts the summary and parts back together
+into one `FiscalReport` per observer binding:
+
+```rust
+let viewer = canwu.viewer_for_actor(binding.actor).ok()?;
+let report = fiscal_reports(&viewer).ok()?.remove(observer_id)?;
+Some((observer_id.clone(), report.projection))
+```
 
 ## What to notice
 

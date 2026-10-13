@@ -78,9 +78,11 @@ The vocabularies are closed Rust enums in `canwu-fiscal`: 11 `FiscalMechanism` v
 | `CompiledFiscalCatalog` | The immutable run catalog, stored as the create-only record `canwu.fiscal:catalog` |
 | `FiscalRuleDefinition` | One rule: mechanism, legal window, jurisdictions, assessment basis, payment forms, commutation policy, provenance, confidence |
 | `FiscalTransitionDefinition` | A reform: source and target rules, observed and eligibility windows, jurisdictions, rules it supersedes or suspends, prerequisites |
-| `FiscalState` | The runtime record `canwu.fiscal:state`: bindings, adoptions, assessments, remissions, requests, receipts, audits, outcomes, candidates, aggregates |
+| `FiscalState` | The runtime record `canwu.fiscal:state`: bindings, adoptions, assessments, remissions, requests, receipts, audits, outcomes, candidates, aggregates, and the report plan |
 | `FiscalHistoricalContext` | The current historical year and `FiscalHistoricalMode` |
 | `FiscalAuthorityBinding` | Who may act for one institution |
+| `FiscalAuditBinding` | One outside auditor who may record audit findings on one institution |
+| `FiscalActionIssuer`, `FiscalRebinding` | Who issued a settled action, under which binding and role; the action that last rebound a binding |
 | `FiscalScopeBinding` | One institution's responsibility for one jurisdiction, subject scope, and mechanism |
 | `FiscalObserverBinding` | Who receives reports, about which institutions, at what confidence |
 | `FiscalAdoptionState` | The stage of one rule in one scope, with a generation that counts changes |
@@ -89,7 +91,8 @@ The vocabularies are closed Rust enums in `canwu-fiscal`: 11 `FiscalMechanism` v
 | `FiscalExecutionEvidence` | The typed result an adapter writes after the real operation |
 | `FiscalExecutionReceiptPacket`, `FiscalExecutionReceipt` | A receipt request citing exact evidence versions, and the settled receipt |
 | `FiscalStrategicAggregate` | Totals for one accounting partition |
-| `FiscalProjection`, `FiscalReportFact` | One holder's report, with each total as a range |
+| `FiscalReport`, `FiscalProjection`, `FiscalReportFact` | One observer's report as a reader gets it, with each total as a range |
+| `FiscalReportRecord` | One published knowledge record: a report's summary, or one part of 16 facts |
 
 `FiscalAdoptionStage` runs `Promulgated`, `Communicated`, `Accepted`, `Implemented`, `Audited`, `Entrenched`, `Suspended`, and `Repealed`. Only `Implemented`, `Audited`, and `Entrenched` are operational (`is_operational`), and an assessment can open only under an operational adoption. A rule can be promulgated for a province and still not be operational there.
 
@@ -132,21 +135,23 @@ Coverage, provenance, confidence, and commutation policy are catalog metadata fo
 
 A rule adopted in a scope is the liability; an assessment fixes how much is owed for one accounting cycle. The engine runs the flow like this:
 
-1. **Install.** The scenario carries the compiled catalog (`CompiledFiscalCatalog::into_record`) and the starting state (`FiscalState::into_record`). Register `FiscalPlugin::new(evidence_kinds)`, adding `.with_authority_basis_kinds(kinds)` when bindings use acting actors. Activation rejects a binding whose basis kind is undeclared.
-2. **Submit.** Wrap a `FiscalActionRequest` with `fiscal_action_command` to get a [domain command](/en/tutorials/command-plugin/) for `apply_fiscal_action_v1`, and queue it with `Canwu::enqueue_command`; the legacy direct command path fails with `MixedCommandIngress`. The request carries an action ID, an authority binding ID, and the `expected_procedure_revision` it was built against.
+1. **Install.** The scenario carries the compiled catalog (`CompiledFiscalCatalog::into_record`) and the starting state (`FiscalState::into_record`). Register `FiscalPlugin::new(evidence_kinds)`, adding `.with_authority_basis_kinds(kinds)` when bindings use acting actors or auditors. Activation validates the catalog and the state, so a run with an invalid fiscal record is refused when it is created or restored, before any boundary runs. Activation also rejects a binding whose authority basis is of a kind the plugin does not read.
+2. **Submit.** Wrap a `FiscalActionRequest` with `fiscal_action_command` to get a [domain command](/en/tutorials/command-plugin/) for `apply_fiscal_action_v1`, and queue it with `Canwu::enqueue_command`; the legacy direct command path fails with `MixedCommandIngress`. The request carries an action ID, a binding ID, and the `expected_procedure_revision` it was built against. Several requests may be built against the same revision.
 3. **Admit.** At the [boundary](/en/architecture/settlement/) that admits the command, the handler rejects:
-   - a non-canonical action or binding ID (`InvalidPayload`);
+   - a request larger than 32 KiB, a non-canonical action ID, binding ID, or ID of a new entry, free text longer than 2,048 bytes, or a unit or referenced ID longer than 160 bytes (`InvalidPayload`);
    - a reused action ID (`IdempotencyConflict`) or a full outcome log (`ValueOutOfRange`);
-   - an issuer outside the binding, or a scope the binding does not own, including an unknown `ApplyTransition` target scope (`InvalidAuthority`);
-   - an assessment, action scope, audit target, or commutation quote that does not exist (`EntityNotFound`). A quote must be the current exact version of its record, or a version from the initial scenario, and of a kind the plugin reads, such as a kind passed to `FiscalPlugin::new`. A superseded version that the initial scenario did not provide, or a quote of any other kind, counts as missing, so a run sealed with `seal_evidence` admits the same quotes as its exact replay.
+   - an issuer who holds no role under the binding, an action that role does not admit, a scope the binding's institution does not own, including an unknown `ApplyTransition` target scope, or an authority basis that is no longer the current version of its record (`InvalidAuthority`);
+   - an assessment, action scope, audit target, or commutation quote that does not exist, a person that a rebind names but the run does not hold, or a new authority basis of a kind the plugin does not read (`EntityNotFound`). A quote must be the current exact version of its record, or a version from the initial scenario, and of a kind the plugin reads, such as a kind passed to `FiscalPlugin::new`. A superseded version that the initial scenario did not provide, or a quote of any other kind, counts as missing, so a run sealed with `seal_evidence` admits the same quotes as its exact replay.
 
-   The engine records each rejection as a rejected attempt in `Canwu::command_attempts`, the boundary commits, and the rejection does not use up the action ID. Admission does not check `expected_procedure_revision`; settlement does. The handler then schedules one internal `fiscal_action_v1` item of [canonical ingress](/en/reference/terminology/) (class `Decision`).
-4. **Settle (phase 7).** At the next boundary, `settle-fiscal-ingress-v1` runs in `DomainDeltaProposal`. It confirms the ingress came from that exact admitted command, rejects the action as stale if its `expected_procedure_revision` no longer matches the state (`DomainRecordVersionConflict`), re-checks an acting actor's basis, applies the action to a copy of the state, and validates the copy against the catalog. It records a `FiscalActionOutcome`, `Applied` or `Rejected` with a reason, and emits `canwu.fiscal.action_settled.v1`. A rejected action is kept as an outcome that uses up its action ID, and the boundary still commits.
-5. **Receipts and context.** The same system settles `fiscal_execution_receipt_v1` (sent with `enqueue_execution_receipt`, class `Acknowledgement`, event `canwu.fiscal.execution_receipt_recorded.v1`) and `fiscal_historical_context_v1` (built with `fiscal_historical_context_ingress` and queued with `enqueue_plugin_ingress`, event `canwu.fiscal.historical_context_changed.v1`). A receipt whose evidence fails validation, or an action ingress with no admitted command behind it, fails the whole boundary.
-6. **Derive.** In phase 10 (`HistoricalCandidateEvaluation`), `evaluate-fiscal-transition-candidates-v1` recomputes reform candidates. In phase 12 (`StrategicAggregation`), `aggregate-fiscal-state-v1` recomputes aggregates. Each writes the state only when its result changed.
-7. **Report (phase 13).** `materialize-fiscal-reports-v1` runs in `PerspectiveAndReportMaterialization` and publishes one report per observer at every boundary that writes a new state version.
+   The engine records each rejection as a rejected attempt in `Canwu::command_attempts`, the boundary commits, and the rejection does not use up the action ID. Admission does not check `expected_procedure_revision`; settlement does. The handler then schedules one internal `fiscal_action_v1` item of [canonical ingress](/en/reference/terminology/) (class `Decision`), which records the role the issuer held.
+4. **Settle (phase 7).** At the next boundary, `settle-fiscal-ingress-v1` runs in `DomainDeltaProposal` and settles every admitted action in admission order. For each action it confirms that the ingress came from that exact admitted command, decides whether the action is stale (see [procedure revision](#procedure-revision-and-actions-in-one-boundary)), re-checks the issuer's role and authority basis, applies the action to a copy of the state the previous action left, and validates the copy against the catalog. It records a `FiscalActionOutcome`, `Applied` or `Rejected` with a reason, and emits `canwu.fiscal.action_settled.v1`. A rejected action is kept as an outcome that uses up its action ID. The next action starts from the last good state, and the boundary still commits.
+5. **Receipts and context.** The same system settles `fiscal_execution_receipt_v1` (sent with `enqueue_execution_receipt`, class `Acknowledgement`, event `canwu.fiscal.execution_receipt_recorded.v1`) and `fiscal_historical_context_v1` (built with `fiscal_historical_context_ingress` and queued with `enqueue_plugin_ingress`, event `canwu.fiscal.historical_context_changed.v1`). A receipt whose evidence fails validation, a historical year outside the pack, an action ingress with no admitted command behind it, or a receipt or context change that does not fit the state's byte budget fails the whole boundary.
+6. **Derive.** In phase 10 (`HistoricalCandidateEvaluation`), `evaluate-fiscal-transition-candidates-v1` recomputes reform candidates. In phase 12 (`StrategicAggregation`), `aggregate-fiscal-state-v1` recomputes aggregates and records which parts of each observer's report changed. Each writes the state only when its result changed.
+7. **Report (phase 13).** `materialize-fiscal-reports-v1` runs in `PerspectiveAndReportMaterialization`. For each observer whose report changed in this boundary, it publishes the report's summary and the parts that changed; see [knowledge and visibility](#knowledge-and-visibility).
 
-All four systems are event-driven. In the Ming starter, the assessment command is admitted at boundary 1 and settles at boundary 2, the authorization takes boundaries 3 and 4, the adapter writes its evidence at boundary 5, and the receipt settles at boundary 6.
+All four systems are event-driven, so they run in every boundary that admits an event or any ingress. Each one first checks cheaply whether it has work and returns before it decodes the fiscal records when it has none: settlement when the boundary admitted no fiscal ingress, the two derived systems when an earlier boundary already established the state's current version, and the report system when no earlier phase of the boundary changed the state. A boundary that has nothing to do with fiscal procedure therefore costs no fiscal decode once any boundary has written the state.
+
+In the Ming starter, the assessment command is admitted at boundary 1 and settles at boundary 2, the authorization takes boundaries 3 and 4, the adapter writes its evidence at boundary 5, and the receipt settles at boundary 6.
 
 ### Actions
 
@@ -157,7 +162,9 @@ All four systems are event-driven. In the Ming starter, the assessment command i
 | `OpenAssessment` | Records a quantity, unit, payment form, accounting cycle, and optional commutation quote | The year is in the rule's legal window; the adoption is operational; the rule allows the payment form; one assessment per scope, cycle, unit, and payment form |
 | `GrantRemission` | Lowers what is owed | Total remission stays within the assessed quantity |
 | `AuthorizeExecution` | Creates a `FiscalExecutionRequest` of kind `Collect`, `Remit`, `Disburse`, `Reserve`, or `Return` | The unit matches the assessment; source and target differ; the institution is one of them; `Collect` requests stay within the assessed quantity minus remissions |
-| `RecordAudit` | Records a finding with a `FiscalAuditSeverity` and evidence | The target is an assessment, request, or receipt |
+| `RecordAudit` | Records a finding with a `FiscalAuditSeverity` and evidence; the finding names who entered it in `entered_by` | The target is an assessment, request, or receipt; issued under an authority binding of the institution that owns the target's scope, or under an [audit binding](#audit-bindings) on it |
+| `RebindAuthority` | Replaces an authority binding's authorized actor, acting actor, and authority basis together | See [rebinding authority](#rebinding-authority) |
+| `RebindAudit` | Installs an audit binding, replaces its auditor and basis, or removes it | See [audit bindings](#audit-bindings) |
 
 ### Receipts
 
@@ -165,9 +172,24 @@ A `FiscalExecutionReceiptPacket` holds only a receipt ID, a request ID, and 1 to
 
 `FiscalStrategicAggregate` partitions totals by institution, mechanism, scope, accounting cycle, unit, and payment form. Accounting cycle IDs belong to your host and are separate from historical periods. It keeps `assessed`, `remission_granted`, `collected`, `remitted`, `disbursed`, `reserved`, and `returned` apart, and computes `outstanding` as assessed minus remission minus collected.
 
-### Procedure revision
+### Procedure revision and actions in one boundary
 
-`FiscalState::procedure_revision` rises by one for every settled action (applied or rejected), every newly recorded receipt, and every context change. Candidate and aggregate refreshes leave it alone, so they never make a pending decision stale. Within one boundary, the first input that changes the revision consumes it, and any later fiscal action in that boundary settles as a stale rejection. Submit one fiscal action per boundary, and build the next request from the revision after it settles. A request built against an older revision settles as a stale rejection (see step 4); send it again under a new action ID with the current revision.
+`FiscalState::procedure_revision` rises by one for every settled action (applied or rejected), every newly recorded receipt, and every context change. Candidate and aggregate refreshes leave it alone, so they never make a pending decision stale.
+
+Several actions settle in one boundary, in the order their commands were admitted. Every action a boundary settles is compared with one revision: the revision the state had when that boundary began. Requests built against the same revision therefore settle together, each validated against the state the previous one left. An institution that assesses many scopes in one accounting step submits all of them at once.
+
+An action is stale, and settles as a `Rejected` outcome, in two cases:
+
+- Its `expected_procedure_revision` is not the revision the state had when the settling boundary began. That happens when a receipt, a context change, or another action settled in the boundary that admitted its command, because an action settles one boundary after its command is admitted.
+- It would overwrite an adoption, authority binding, or audit binding that an earlier action of the same boundary created or changed. Its issuer decided against the object as it stood before the boundary. Building on an earlier action is fine: an assessment may rely on an adoption that the action before it made operational.
+
+Actions that only create something (assessments, remissions, execution authorizations, audit findings) do not conflict with each other. Two remissions on one assessment both apply when their sum still validates. A receipt or a context change that settles in the same boundary does not make an action stale either; the action is validated against the state they left.
+
+Send a stale request again under a new action ID with the current revision.
+
+- **A boundary applies at most 64 actions** (`MAX_FISCAL_ACTIONS_PER_BOUNDARY`). Only an action that is current and authorized counts toward the limit. A further one is `Rejected` with the reason `FISCAL_BOUNDARY_ACTION_LIMIT`; reissue it under a new action ID.
+- **No action fails the boundary for the others.** An action whose result would not fit the state's byte budget, less a 16 KiB reserve, is rejected as its own outcome with `FISCAL_STATE_BUDGET_EXHAUSTED`.
+- **An action that can get no outcome is dropped.** This happens when no outcome slot is left, or when the byte budget cannot hold even the rejection. A dropped action changes nothing and does not use up its action ID. Its only record is one `canwu.fiscal.action_dropped.v1` event, whose summary names the action and whose affected entities name the institution it was issued for, unless that institution is a domain record. If an accepted command has no outcome after the next boundary, its action was dropped.
 
 ### Historical context and reform
 
@@ -182,15 +204,56 @@ The [fiscal historical context](/en/reference/terminology/) holds `year` and `mo
 | `Issuer::Actor(actor)`, no decision controller | `actor` is the binding's authorized or acting actor |
 | `Issuer::Human` or `Issuer::Ai`, equal to the validated `decision_controller_id` | The command subject in `CommandAuthority` is the binding's institution, and the decision origin is `DecisionOrigin::Actor` naming a bound actor, or `DecisionOrigin::Institution` for that institution with a bound responsible actor |
 
-The binding's institution must also own the action's scope; for `ApplyTransition` it must own every target scope. An [acting actor](/en/reference/terminology/) needs an exact [authority basis](/en/reference/terminology/) version, of a kind declared with `with_authority_basis_kinds`, and must differ from the authorized actor. The acting actor is admitted while that version is still the current version of its record, and settlement checks it again in phase 7. Once the record advances or retires, the acting actor fails with `FISCAL_ACTING_BASIS_NOT_CURRENT` (`InvalidAuthority`) and the authorized actor is still admitted.
+The binding's institution must also own the action's scope; for `ApplyTransition` it must own every target scope. An [acting actor](/en/reference/terminology/) needs an exact [authority basis](/en/reference/terminology/) version and must differ from the authorized actor. The basis is a record of an external kind the plugin reads: a kind declared with `with_authority_basis_kinds`, or an evidence kind passed to `FiscalPlugin::new`. The acting actor is admitted while that version is still the current version of its record. Once the record advances or retires, the acting actor fails with `FISCAL_ACTING_BASIS_NOT_CURRENT` (`InvalidAuthority`) and the authorized actor is still admitted.
 
-Authority, scope, and observer bindings come from the starting scenario; no fiscal action edits them. For institutions that decide through seats, votes, and procedure stages, see [Society, culture, and law](/en/architecture/culture-law/).
+Every admitted action records the role its issuer held (`FiscalIssuerRole`: `Principal`, `Acting`, `Institution`, or `Auditor`). Settlement checks that role again against the state the action settles on. An action of an actor who has since been replaced is rejected with `FISCAL_ISSUER_NOT_BOUND`, and an action of an acting actor whose basis is no longer current with `FISCAL_ACTING_BASIS_NOT_CURRENT`. Currentness is read from an index of current record versions that sealing evidence does not change, so a sealed run decides exactly as its replay does.
+
+Scope and observer bindings come from the starting scenario, and no fiscal action edits them. Authority and audit bindings also start there, and change during a run only through the two rebind actions below.
+
+### Rebinding authority
+
+When a grant is renewed or an office changes hands, `FiscalAction::RebindAuthority` replaces a binding's authorized actor, acting actor, and authority basis in one commit:
+
+```rust
+FiscalAction::RebindAuthority {
+    authority_binding_id,
+    authorized_actor,
+    acting_actor,
+    authority_basis,
+}
+```
+
+- **Who may issue it.** The request is issued under the binding it replaces, by one of two issuers. The first is the binding's authorized actor, directly or as a decision origin. The second is the institution deciding as a body: a decision controller whose command subject and decision origin are the binding's institution, with no responsible actor. An acting actor cannot rebind, and neither can any other person.
+- **The institution role is the power to appoint.** A controller of that shape can name any actors, or none, and on a binding with no authorized actor it then acts as principal itself. Register such a controller only for the body that appoints the binding's actors.
+- **Persons and basis.** Every person the action names must exist; a missing one rejects the command as `EntityNotFound`. `acting_actor` and `authority_basis` are set together. The basis must be the current version of its record when the command is admitted and again in the state the settling boundary began with; otherwise the action is rejected with `FISCAL_AUTHORITY_BASIS_NOT_CURRENT`.
+- **The hand-over is one commit.** Actions admitted earlier settle in admission order around the rebind: those before it under the previous actors, those after it rejected. The new actors are admitted from the first admission after the commit. No committed state admits both the old and the new actors, and none admits neither.
+- **Evidence.** The binding records the rebind in `rebound_by` (`FiscalRebinding`): the action ID, the time, and the issuer's binding, role, and person.
+
+### Audit bindings
+
+A [`FiscalAuditBinding`](/en/reference/terminology/) lets an auditor from outside an institution record findings on it. It lives in `FiscalState::audit_bindings`, beside the authority bindings, and names the audited `institution`, the `auditor`, and the auditor's own `authority_basis`. A request names an audit binding in the same `authority_binding_id` field; the two ID spaces are disjoint.
+
+Under an audit binding:
+
+- only `RecordAudit` is admitted, and only for a target whose scope the audited institution owns;
+- the issuer must be the auditor, directly or as the deciding or responsible actor of a validated decision on the audited institution;
+- the basis must be the current version of its record at admission and in the state the settling boundary began with (`FISCAL_AUTHORITY_BASIS_NOT_CURRENT` otherwise).
+
+An auditor gains no other fiscal authority, because no check of who may act for the institution ever looks at audit bindings. Every settled finding names who entered it in `FiscalAuditFinding::entered_by`: the binding, the role, the person, and the basis.
+
+`FiscalAction::RebindAudit { audit_binding_id, auditor, authority_basis }` installs an audit binding, replaces its auditor and basis, or, with both set to `None`, removes it. It follows the rules of an authority rebind: it is issued under an authority binding of the audited institution, by its authorized actor or by the institution deciding as a body. A finding of the previous auditor that settles after the rebind is rejected with `FISCAL_ISSUER_NOT_BOUND`. An auditor's authority also ends, with no fiscal action, when the basis record advances or retires.
+
+:::caution
+An audit binding establishes who entered a finding. It does not establish that the auditor is independent. The audited institution installs, replaces, and removes its own auditors, and can remove one before a finding admitted under that binding settles. The basis only has to be the current version of an application record the plugin reads; whether that record really commissions this auditor is for your application to decide.
+:::
+
+For institutions that decide through seats, votes, and procedure stages, see [Society, culture, and law](/en/architecture/culture-law/).
 
 ## Knowledge and visibility
 
 `FiscalState` is authoritative state. Your host can read it with trusted reads such as `typed_domain_record(&fiscal_state_reference())`. Players and agents should read the fiscal report, which is [holder-relative knowledge](/en/developer/reading-state/).
 
-A `FiscalObserverBinding` names an actor, its person holder (`KnowledgeHolderRef::Person` for the same actor), the institutions it can see, and a `confidence_per_mille` up to 1,000. For each observer, phase 13 publishes one knowledge record with schema `fiscal_report_knowledge_schema_id()` (kind `canwu-fiscal` / `fiscal_report`, version 1). The record's subject is the fiscal state record, its origin method is `fiscal_authority_report_v1` citing the exact new state version, and it supersedes that observer's previous report. Its payload is a `FiscalProjection` with one `FiscalReportFact` per visible aggregate, where assessed, collected, and outstanding are each a `FiscalAmountEstimate` range.
+A `FiscalObserverBinding` names an actor, its person holder (`KnowledgeHolderRef::Person` for the same actor), the institutions it can see, and a `confidence_per_mille` up to 1,000. The observer's report has one `FiscalReportFact` for each aggregate the binding lets it see, where assessed, collected, and outstanding are each a `FiscalAmountEstimate` range.
 
 | `confidence_per_mille` | Bucket width for a value whose magnitude is M |
 | --- | --- |
@@ -199,23 +262,57 @@ A `FiscalObserverBinding` names an actor, its person holder (`KnowledgeHolderRef
 | 500 to 749 | M / 2 |
 | below 500 | M |
 
-M is the largest power of ten at or below the value, and every width is at least 2, so each total reads as a range. At 850, an assessed 100 reads as 100–109 and a collected 70 as 70–71. An actor reads its report with `canwu.viewer_for_actor(actor)` and a `KnowledgeQuery` for `fiscal_report_knowledge_schema_id()`.
+M is the largest power of ten at or below the value, and every width is at least 2, so each total reads as a range. At 850, an assessed 100 reads as 100–109 and a collected 70 as 70–71.
+
+### Reading a report
+
+Read reports with `fiscal_reports`. It returns one `FiscalReport` for each observer binding that names the viewer's actor, keyed by binding ID:
+
+```rust
+let viewer = canwu.viewer_for_actor(actor)?;
+for (binding_id, report) in fiscal_reports(&viewer)? {
+    for (fact_id, fact) in &report.projection.facts {
+        // fact.assessed.minimum ..= fact.assessed.maximum, and so on.
+        let may_be_older = report.is_stale(fact_id);
+    }
+}
+```
+
+`report.projection` is a `FiscalProjection`: the actor, `as_of`, the confidence, and the facts labelled `fact.NNNN`. For a complete report it equals what `compute_projections` derives from the fiscal state the report was published from. `assemble_fiscal_reports` does the same from record payloads you already hold.
+
+### How a report is published
+
+A report is stored as several knowledge records of schema `fiscal_report_knowledge_schema_id()` (kind `canwu-fiscal` / `fiscal_report`, version 2): one summary record and parts of 16 facts each (`FiscalReportRecord`). A single record is one summary or one part, so read whole reports through `fiscal_reports`.
+
+- **Only what changed is published.** A boundary publishes the parts whose facts changed, together with the observer's summary. A boundary that changes nothing an observer can see publishes nothing to that observer, so `as_of` is the time the report last changed.
+- **Parts are stable.** An aggregate keeps the ID it was first given and a new aggregate takes the next one. New facts fill the last part, and earlier parts keep their members and go quiet as their accounting cycles close.
+- **Each record supersedes the one before it.** The summary and each part form a line of their own, and a new record supersedes the current record of its line. The report system finds that record in the committed knowledge ledger with [`SimulationView::knowledge_heads`](/en/architecture/knowledge-information/#superseding-an-earlier-record), so a run that sealed its evidence supersedes exactly what its replay does.
+- **Origin.** Each record's subject is the fiscal state record, and its origin method is `fiscal_authority_report_v2`, citing the exact state version its facts were computed from.
+- **Size.** A report can hold everything the state allows: 4,096 facts in 256 parts. No report size fails a boundary.
+
+One boundary publishes at most 1,024 report records over all observers (`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`). When more parts changed than that, the boundary still commits. Every observer with a changed part gets its summary, and the parts that did not fit are deferred. The summary names them in `pending_parts`, `FiscalReport::is_complete` is false, and `is_stale(fact_id)` tells you that a fact belongs to a pending part and may be older than `as_of` or missing. The next boundary that changes the fiscal state publishes the deferred parts, whatever that change is; a boundary without fiscal ingress does not.
+
+Deferral leaks a little beyond what an observer's binding grants. The boundary's records are shared in the order of the observer bindings, so which parts are pending depends on the size of other observers' reports, and the arrival of pending parts says that the fiscal state changed, whoever changed it.
+
+The engine publishes no knowledge to a dead person. While an observer's actor is dead, nothing is published to that observer and the report stays as it was. What changes in it is kept in the report plan, and the first fiscal change after the person is alive again publishes it. An observer binding that names a person who does not exist is refused when the run is created.
+
+The report plan in `FiscalState::report_plan` is the engine's own bookkeeping of which parts to publish. A plan that arrives with a scenario, for example in a state exported from another run, is ignored: the first boundary that writes the state publishes every report whole.
 
 ## Randomness, persistence, and replay
 
 The fiscal extension draws no random numbers and declares no random streams. Report ranges come from integer bucketing, and outcomes such as partial collection arrive as evidence from your adapter.
 
-Fiscal state lives in two domain records, reached with `fiscal_catalog_reference()` and `fiscal_state_reference()`. The catalog record is create-only. The state record references the catalog and marks the exact evidence versions, created during the run, that its receipts and commutation quotes cite as payload-required, so the engine keeps those payloads loadable. Each read through `load_fiscal_catalog` or `load_fiscal_state` validates the catalog, the state, and the match between the stored record and its decoded payload.
+Fiscal state lives in two domain records, reached with `fiscal_catalog_reference()` and `fiscal_state_reference()`. The catalog record is create-only. The state record references the catalog and marks the exact evidence versions, created during the run, that its receipts and commutation quotes cite as payload-required, so the engine keeps those payloads loadable. It also references the person of every observer binding, so the engine refuses a state that names an observer who does not exist. The record versions that a rebind, an audit binding, or a finding's `entered_by` names are not kept this way: no decision reads them again, and after `seal_evidence` a superseded one may no longer be provable. Each read through `load_fiscal_catalog` or `load_fiscal_state` validates the catalog, the state, and the match between the stored record and its decoded payload.
 
 Snapshots and [exact replay](/en/developer/persistence/) need the same plugin identity: name `canwu-fiscal`, version `0.1.0-experimental`, and its semantic hash. Replay consumes the recorded commands and ingress, so it never reruns a player or AI choice. The reference integration's `restore_ming_fiscal_reference` and `replay_ming_fiscal_reference` register the same three plugins and then run `validate_ming_fiscal_reference`, which recomputes aggregates and candidates and re-matches every receipt against its evidence.
 
 ## What your application supplies
 
 - A content pack: your own `FiscalContentPack` (serde JSON works) or the Ming pack, plus the `FiscalContentSelection`.
-- The starting `FiscalState`: year and mode, evidence kinds, authority, scope, and observer bindings, and the starting adoption stages.
+- The starting `FiscalState`: year and mode, evidence kinds, authority, audit, scope, and observer bindings, and the starting adoption stages.
 - Institution entities and actors in the scenario, such as a government, an army, or organizations.
 - An execution adapter that performs the real transfer in your resource, market, production, or logistics domain, writes a typed evidence record, and calls `enqueue_execution_receipt`.
-- Authority basis records and their kinds, if you use acting actors.
+- Authority basis records and their kinds, if you use acting actors or auditors, and a decision controller for the body that appoints a binding's actors, if an institution should be able to rebind.
 - The decisions: which actions to submit and when, quantities, units, accounting cycle IDs, and when to change the historical context.
 - A semantic validator for restore, if you want the checks `validate_ming_fiscal_reference` performs, and the UI that shows reports.
 
@@ -227,15 +324,26 @@ Snapshots and [exact replay](/en/developer/persistence/) need the same plugin id
 | `MAX_FISCAL_EXECUTION_REQUESTS` | 8,192 | Execution requests; also adoptions |
 | `MAX_FISCAL_EXECUTION_RECEIPTS` | 8,192 | Receipts |
 | `MAX_FISCAL_ACTION_OUTCOMES` | 16,384 | Settled action outcomes; admission rejects new actions when full |
-| `MAX_FISCAL_RUNTIME_BINDINGS` | 4,096 | Authority bindings and scope bindings |
+| `MAX_FISCAL_ACTIONS_PER_BOUNDARY` | 64 | Actions one boundary applies |
+| `MAX_FISCAL_RUNTIME_BINDINGS` | 4,096 | Authority bindings, audit bindings, and scope bindings, each counted on its own |
 | `MAX_FISCAL_OBSERVERS` | 64 | Observer bindings |
 | `MAX_FISCAL_EVIDENCE_KINDS` | 32 | Approved evidence kinds |
 | `MAX_FISCAL_EVIDENCE_PER_RECORD` | 32 | Evidence versions per receipt or audit |
-| `MAX_FISCAL_STATE_JSON_BYTES` | 32 MiB | Serialized fiscal state |
+| `MAX_FISCAL_ACTION_JSON_BYTES` | 32 KiB | One serialized action request |
+| `MAX_FISCAL_ACTION_TEXT_BYTES` | 2,048 bytes | An audit `finding`, remission `reason`, or execution `purpose` |
+| `MAX_FISCAL_IDENTIFIER_BYTES` | 160 bytes | A unit or referenced ID in an action; also an assessment's unit and accounting cycle, and a domain-record institution's namespace, name, and ID together |
+| `FISCAL_REPORT_FACTS_PER_PART` | 16 | Facts in one report part |
+| `MAX_FISCAL_REPORT_PARTS` | 256 | Parts in one observer's report |
+| `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` | 1,024 | Report records one boundary publishes, over all observers |
+| `MAX_FISCAL_STATE_JSON_BYTES` | 32 MiB | Serialized fiscal state; actions are held to it less a 16 KiB reserve |
 
 Catalog caps (periods, regions, definitions, coverage cells, references per definition, pack size) are listed in [`model.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-fiscal/src/model.rs).
 
+The state caps are lifetime caps, because the crate has no archive. At 64 actions a boundary, the outcome cap is 256 full boundaries away, and rejected actions use it up too; a full state rejects every further command at admission. The assessment cap is 64 full boundaries of assessments away, after which each assessment is rejected as its own outcome. A receipt or a context change that does not fit the byte budget still fails its boundary.
+
 Aggregate rebuilds use single-pass indexes. A larger campaign needs separate runs or shards; the crate has no partition or archive API, and your host owns operation-ID deduplication across shards.
+
+Two costs grow with what a run has published, and both belong to the engine. Finding the record a part supersedes reads the holder's whole ledger, twice for each record published. And the engine carries all held knowledge, superseded records included, through every boundary. The [fiscal throughput proposal](https://github.com/PeiyuanQi/canwu/blob/main/docs/proposals/fiscal-throughput-and-authority.md) gives the measured rate.
 
 ## Try it
 
@@ -251,10 +359,10 @@ Each run prints its checkpoint hash and writes a trace under `artifacts/traces/m
 ```shell
 cargo test -p canwu-ming-fiscal-reference --test reference
 cargo test -p canwu-ming-fiscal --test pack
-cargo test -p canwu-fiscal --test gap_g13_fiscal_acting_actor
+cargo test -p canwu-fiscal
 ```
 
-The `reference` tests cover stale rejection, the Single Whip transition, holder reports, forged ingress, receipt reuse, and snapshot and replay; `pack` covers coverage and compilation; `gap_g13_fiscal_acting_actor` covers acting actors.
+The `reference` tests cover stale rejection, the Single Whip transition, holder reports, forged ingress, receipt reuse, and snapshot and replay; `pack` covers coverage and compilation. In `canwu-fiscal`, `gap_g13_fiscal_acting_actor` covers acting actors, `gap_g44_fiscal_actions_per_settlement` several actions in one boundary, `gap_g48_fiscal_rebind_authority` and `gap_g57_fiscal_audit_binding` the two rebind actions, `gap_g41_fiscal_idle_early_exit` idle boundaries, and `fiscal_report_parts` with `fiscal_reports_after_seal` the report records.
 
 ## Further reading
 

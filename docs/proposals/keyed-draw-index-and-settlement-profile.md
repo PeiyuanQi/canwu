@@ -4,6 +4,14 @@ Status: implemented in 0.15.0. Three changes to random draws and settlement
 timing in `canwu-sim`, reached through `canwu-api` (downstream gaps G-50,
 G-51, and G-47). None changes a persisted format or a committed hash.
 
+The release entry is in [Versioning and Persistence](../versioning.md). The
+other 0.15.0 proposals are
+[society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),
+[resource archive lookup and volume](resource-archive-lookup-and-volume.md),
+[single-step completion lease and runtime protected-floor install](resource-single-step-lease-and-floor-install.md),
+and [fiscal throughput and authority](fiscal-throughput-and-authority.md).
+
 ## Keyed-draw index (G-50)
 
 ### Problem
@@ -234,6 +242,11 @@ a boundary that the run's own exact replay rejects, because the replay retains
 the evidence and makes the draw. A run restored from its sealed segments
 retains that evidence again as well, so it accepts the draw the live sealed
 run refused.
+
+Knowledge supersession has the matching read: `SimulationView::knowledge_heads`
+finds a publisher's supersession targets in committed state instead of retained
+evidence (see
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md#finding-the-records-to-supersede)).
 
 ### Invariants
 

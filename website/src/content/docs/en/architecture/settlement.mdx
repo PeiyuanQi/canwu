@@ -111,6 +111,9 @@ Most directives write state that a plugin owns. Three directives change state th
 
 - `SetPersonAvailability` replaces one person's life and custody state. A system in phase 7 or 10 that declares a write to `StateKey::core_person_availability()` may propose it. Two writes for the same person in one boundary fail the boundary. At the end of the boundary, after random decisions are applied, the kernel cancels open decision tickets whose decision maker or controller authority person became unavailable, and lists them in the boundary record.
 - `CreatePerson` creates a person. A phase-7 system that declares a write to `StateKey::core_people()` may propose it. The engine allocates the ID, and the receipt's `created_persons` binds that ID to the proposing plugin, system, and correlation string. Systems can see the new person from the next boundary.
+  - The `PersonDraft` may carry a `PersonPlacement`: a government and a territory that both exist in the `WorldSnapshot` projection. The person then gets a `Person` record there.
+  - A draft without a placement creates an **unplaced person**: an identity in the entity registry (the run's list of entity identities) with person availability and a creation receipt, and no `Person` record. `SimulationView::person` and `Canwu::world` hold nothing for it. Use this when your application keeps governments and places in its own domain records. The draft's name and roles are kept only on the creation evidence, so store the person's attributes in your own records.
+  - For command authority, decision tickets, custody, and holder knowledge, an unplaced person is a person like any other. The built-in movement command, letters, and army-arrival reports read the projection and do not reach it.
 - `CancelPluginIngress` withdraws a queued plugin ingress item that the system's own plugin scheduled, strictly before the item is due. Get targets from `SimulationView::cancellable_plugin_ingress`, which requires a `StateKey::core_ingress()` read. The whole boundary fails if the target belongs to another plugin, is already due, admitted, or withdrawn, or if another proposal in the same boundary withdraws it too.
 
 Several systems may declare the two core person keys. The kernel therefore checks for conflicting writes per person during settlement.
@@ -181,6 +184,50 @@ An evaluation trace explains how an application rule produced one number for one
 - Phase 13 cannot record traces, so record the trace from the phase-7 or phase-12 system that computed the value. Traces count toward journal size.
 - Players and agents read traces through `CanwuViewer::evaluation_traces`. That view omits evidence and follows what the holder knows; see [reading state](/en/developer/reading-state/#explain-a-rule-result).
 
+## Profiling a boundary
+
+Your host can time a whole `settle_boundary` call itself. What it cannot see is how that time divides among plugins. A boundary profile reports that, so you can check each plugin against a time budget.
+
+Profiling is off by default. Turn it on with `set_boundary_profiling(true)` on `Canwu` or `CompactedCanwu`. From then on, every boundary that settles leaves one `BoundaryProfile`, and `take_boundary_profiles()` hands over the profiles collected since the last call:
+
+```rust
+canwu.set_boundary_profiling(true);
+canwu.settle_boundary(BoundaryRequest::at(canwu.time()).with_cadence(SystemCadence::Daily))?;
+
+let batch = canwu.take_boundary_profiles();
+for profile in &batch.profiles {
+    println!(
+        "boundary at {:?}: {} µs in total, {} µs in my-plugin, {} µs in the engine",
+        profile.settled_at,
+        profile.total_micros,
+        profile.plugin_micros("my-plugin"),
+        profile.remaining_micros(),
+    );
+}
+```
+
+A profile holds:
+
+- `boundary_id` and `settled_at`: which boundary it is, and its simulation time.
+- `total_micros`: the wall time of the whole settlement, in microseconds.
+- `handlers`: one `BoundaryHandlerTiming` for each plugin handler call, in call order, with its `kind`, `phase`, `plugin`, `name`, and `elapsed_micros`.
+
+A boundary runs three kinds of plugin handler, and each has a `BoundaryHandlerKind`:
+
+| Kind | What was timed | `phase` |
+| --- | --- | --- |
+| `BoundarySystem` | A boundary system | The phase it ran in |
+| `CommandHandler` | The handler of a queued plugin command the boundary admitted | None |
+| `EventSystem` | A synchronous event-driven plugin system that such a command, or a scheduled action due at the boundary, triggered | None |
+
+Command handlers and event systems run while the boundary admits its input, before the first phase, so they have no phase. `plugin_micros(plugin)` adds up every handler of one plugin. `remaining_micros()` is what is left: the engine's own admission, validation, commit, and hashing.
+
+- A profile is a host diagnostic and stays outside the simulation. It is not part of authoritative state, evidence, a snapshot, a checkpoint, or a replay journal, and no plugin can read it. A profiled run produces the same receipts, evidence, and hashes as an unprofiled one. Profile values differ between two runs of the same input, so do not feed them back into commands or plugin input.
+- Profiling is off in a new, restored, replayed, or forked run; turn it on again after a load. An exact replay settles its boundaries inside the replay call and is not profiled. Entering compact mode and sealing evidence keep the setting and the profiles not yet taken.
+- A boundary that fails leaves no profile.
+- The run keeps at most `MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles. If more boundaries settle before you take them, the oldest are dropped, and `BoundaryProfileBatch::dropped` reports how many.
+- Plugin archive maintenance runs when the host schedules it, outside settlement, and appears in no profile. The boundary only applies the commit it produced, which counts as engine time.
+
 ## Where extension systems run
 
 The first-party extensions below use the same phases. The table helps you predict when their state changes relative to your own systems.
@@ -192,12 +239,14 @@ The first-party extensions below use the same phases. The table helps you predic
 | `canwu-movement` | 13, event-driven | `movement_report_publish_v1` publishes movement reports that changed, each addressed to the holder allowed to see it. |
 | `canwu-culture` (`CultureBoundaryPlugin`) | 12, event-driven | `culture_exposure_intake_v1` queues admitted `culture_exposure_v1` batches. |
 | `canwu-culture` (`CultureBoundaryPlugin`) | 7, Monthly | `culture_lifecycle_settle_v1` consumes the queue and accepted institutional decisions, settles the lifecycle against the boundary snapshot of society state, saves culture state, and schedules society deltas and signal batches as next-boundary ingress. |
-| `canwu-society` | 12, event-driven | `intake-society-ingress` queues admitted `cohort_headcount_rebase_v1` and `society_lifecycle_delta_v1` packets. |
-| `canwu-society` | 7, Daily | `settle-social-transitions` applies the queue after cohort transfers and before institutional decisions and transitions. |
+| `canwu-society` | 12, event-driven | `intake-society-ingress` queues admitted `cohort_headcount_rebase_v1`, `society_lifecycle_delta_v1`, and `society_pressure_revision_v1` packets. |
+| `canwu-society` | 7, society settlement cadence (Daily by default) | `settle-social-transitions` applies the queue after cohort transfers and before institutional decisions and transitions. |
 
 Movement legs are timed with the internal scheduled ingress `movement_leg_due_v1`. An order schedules its first departure, a departure schedules its arrival after the leg's planned duration, and an arrival schedules the next departure. A due packet takes effect only if it matches the due time saved on the order, so an explicit operation makes older packets stale. Due work never fails a boundary.
 
-Culture and society use intake queues because only one system may write a given state key in a given phase, and their writers run on a coarser cadence. All phase-7 systems read the same boundary snapshot, so every culture hand-off lands in a later boundary: signal batches are admitted at the next boundary, and a society delta is applied at the first Daily settlement after it is admitted. Expect up to two boundaries between a culture step and its effect on society, and between a headcount rebase packet and the rebased cohort. The society plugin stays the only writer of `canwu.society:state`.
+Culture and society use intake queues because only one system may write a given state key in a given phase, and their writers run on a coarser cadence. All phase-7 systems read the same boundary snapshot, so every culture hand-off lands in a later boundary: signal batches are admitted at the next boundary, and a society delta is applied at the first society settlement after it is admitted. A culture step therefore reaches society state two boundaries later at the earliest, and a headcount rebase takes effect at the first society settlement after the boundary that admits its packet. The society plugin stays the only writer of `canwu.society:state`.
+
+Society settles on `Daily` boundaries unless the host registers the plugin with `SocietyPlugin::with_settlement_cadence`. On a coarser cadence, everything in the queue waits for the next boundary that carries it; see [settle on another cadence](/en/tutorials/cases/local-community-diffusion/#settle-on-another-cadence).
 
 ## Plugin contract
 

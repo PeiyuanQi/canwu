@@ -53,6 +53,7 @@ sidebar:
 | [转移清单](/architecture/settlement/) | transition manifest | `TransitionManifest`, `BoundaryDirective::RegisterTransitionManifest` | 协调插件为一次多所有者转移作出的声明，列出参与插件、预期记录版本和唯一的就绪边界。参与者在该边界第 10 阶段用 `StageTransitionWrite` 暂存写入；清单之外的第 10 阶段指令不受影响。 |
 | [转移审计](/architecture/settlement/) | transition audit | `TransitionAuditRecord` | 内核在第 11 阶段对本边界就绪的每份清单所做的检查。清单仅被部分参与者暂存，或预期版本不符，都会使整个边界失败；没有任何参与者暂存的清单则过期。提交或过期的结果作为只读边界证据，供第 12 阶段系统读取。 |
 | [边界账](/architecture/settlement/#统计一段时间内的边界) | boundary ledger | `SimulationView::boundaries_between`、`BoundaryWindow`、`BoundarySummary`、`BoundaryIngressOrigin`、`boundary_schedule_horizon` | 一段模拟时间内的边界：其中已经结算的、正在结算的和仍在排队的边界，每个都带有时间、节奏，以及按类别、种类和来源计数的输入。只有分阶段的边界系统可以在声明 `canwu.core.boundary_schedule` 读取后读它，在把工作带到另一个边界之前先数清这段时间的边界；它用 `boundary_schedule_horizon` 声明要往回读多远。已结算的边界在实时、封存、恢复和重放的运行中完全相同；排队列表只是下限。 |
+| [边界耗时剖面](/architecture/settlement/#边界耗时剖面) | boundary profile | `BoundaryProfile`、`set_boundary_profiling`、`take_boundary_profiles` | 上层应用按需开启的诊断数据：一个已结算边界的现实耗时，以及它运行的每个插件处理器的现实耗时，按种类、阶段、插件和名称列出。它不属于权威状态、证据、快照或重放，插件也读不到它。 |
 
 ## 插件与扩展
 
@@ -74,7 +75,9 @@ sidebar:
 | [退休目标](/architecture/culture-law/) | retired target | `Retired` | 从动态热状态移除的文化目标；历史身份和证据仍通过墓碑与归档契约保留。 |
 | [文化结算插件](/architecture/culture-law/) | culture boundary plugin | `CultureBoundaryPlugin` | 在引擎内完成文化结算的插件形式：每月第 7 阶段系统消费已准入的接触信号批次，保存文化状态，并把 society 生命周期变化交给 society 插件；society 插件仍是唯一写入者。一次运行只能在它与由上层应用驱动的 `CulturePlugin` 流程之间二选一。 |
 | [接触信号批次](/architecture/culture-law/) | exposure signal batch | `CultureExposureSignalBatch`, `culture_exposure_v1` | 信息或通信提供方在解决访问与解释之后产生的有界、带证据的报告，说明哪些 cohort 接触了某一文化目标代际；它在之后的边界准入。 |
-| [cohort 人口校准](/tutorials/cases/local-community-diffusion/) | cohort headcount rebase | `CohortHeadcountRebaseV1`, `cohort_headcount_rebase_v1` | 把 cohort 人口重置为所引用外部存量记录的规范化输入；输入准入时，该记录必须是当前版本。下一次 Daily society 结算会按确定性的整数最大余数法，按比例重算每个分布。 |
+| [cohort 人口校准](/tutorials/cases/local-community-diffusion/) | cohort headcount rebase | `CohortHeadcountRebaseV1`, `cohort_headcount_rebase_v1` | 把 cohort 人口重置为所引用外部存量记录的规范化输入；输入准入时，该记录必须是当前版本。下一次 society 结算会按确定性的整数最大余数法，按比例重算每个分布。 |
+| [society 结算节奏](/tutorials/cases/local-community-diffusion/#换一种结算节奏) | society settlement cadence | `SocietyPlugin::with_settlement_cadence`, `SocietyPlugin::DAILY` | 决定 society 在哪些边界结算的 `SystemCadence` 类别：默认是 `Daily`，也可以由上层应用指定。转化速率每次结算生效一次，society 写入系统要应用的一切变化都等到带这个节奏的边界。节奏记录在插件描述中，所以恢复和重放必须使用同一节奏的插件。 |
+| [压力修订](/tutorials/cases/local-community-diffusion/#运行中修订压力) | pressure revision | `PressureRevisionDecision`, `revise_society_pressure`, `society_pressure_revision_v1` | 制度立场（`InstitutionalAlignment`）背后的机构作出的一项带版本的决定：在该立场影响的 cohort 范围内，修订由它签发的政策压力条目，以及其目标下影响边和组织节点的启用状态与触达范围。决定由 society 结算应用，不会新增或删除条目。 |
 | [表决权重](/architecture/culture-law/) | vote weight | `ProcedureStageDefinition::seat_weights` | 某席位的选票在程序阶段中所占的整数权重；未列出的席位权重为 1。quorum 与 threshold 都按权重合计；否决是席位权力，从不加权。 |
 | [表决单元](/architecture/culture-law/) | unit block | `ProcedureStageDefinition::block_of_seat` | 程序阶段中作为一个整体表态的一组席位，其立场取组内席位的加权多数；双方加权票数相等或没有计入选票的单元不表态。 |
 | [单元门槛](/architecture/culture-law/) | block threshold | `ProcedureStageDefinition::block_threshold` | 带表决单元的阶段除满足加权席位规则外，还须有多少个表决单元取 `For` 立场才能通过。 |
@@ -96,17 +99,21 @@ sidebar:
 | [历史财政语境](/architecture/fiscal/) | fiscal historical context | `FiscalHistoricalContext` | 用于判断活动时期和改革候选的显式历史年份与模式；只通过规范化输入改变，不会自动实施改革。 |
 | [财政覆盖单元](/architecture/fiscal/) | fiscal coverage cell | `FiscalCoverageCell` | 一个“时期 × 地区 × 机制”单元，通过确定性优先级解析为有支持、原型回退、明确未知或不适用。 |
 | [财政执行凭证](/tutorials/cases/ming-fiscal/) | fiscal execution receipt | `FiscalExecutionReceiptPacket` | 引用精确类型化适配结果版本的结算请求；准入后的凭证从这些结果派生外部观察到的数量与处置。在单个财政运行时状态内，每个精确版本和每个 `(evidence kind, external_operation_id)` 组合最多结算一张凭证；凭证不拥有资源真值。 |
-| [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个授权绑定执行财政行动的第二个角色；常设授权角色不受影响。 |
-| [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须由所属插件声明。它可以授予财政授权绑定中的代理角色权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束。 |
+| [代理角色](/architecture/fiscal/) | acting actor | `FiscalAuthorityBinding::acting_actor` | 只有当权限依据仍是其记录的当前版本时，才可为某个权限绑定执行财政行动的第二个角色；常设角色不受影响。代理角色不能发起权限改绑；权限改绑可以更换或撤下它。 |
+| [权限依据](/architecture/fiscal/) | authority basis | `FiscalAuthorityBinding::authority_basis`, `FiscalAuditBinding::authority_basis`, `MovementOrderRequestV1::authority_basis` | 授予权限的精确应用记录版本，其记录种类须是所属插件会读取的种类。它可以授予财政权限绑定中的代理角色权限，可以授予审计绑定中的审计人权限，也可以授权一条移动命令（`MovementOrderRequestV1`）移动所有者以外的对象。核验时它必须是其记录的当前版本；该记录出现新版本或退役后，财政授权随之结束，直到一次改绑换上当前版本。 |
+| [权限改绑](/architecture/fiscal/#权限改绑) | authority rebinding | `FiscalAction::RebindAuthority`, `FiscalRebinding` | 一项已结算的财政行动，在一次提交内同时更换权限绑定的常设角色、代理角色和权限依据。它必须在被更换的绑定之下发起，发起者是该绑定的常设角色，或者以整体名义作决定的机构，代理角色不能发起。绑定会记下这次行动及其签发者。 |
+| [审计绑定](/architecture/fiscal/#审计绑定) | audit binding | `FiscalAuditBinding`, `FiscalAction::RebindAudit` | 为某个机构准入一名机构之外的审计人的财政绑定：审计人只能对该机构负责范围内的对象记录审计结论，不能发起其他财政行动，并且只在绑定自身的权限依据仍是当前版本时有效。审计绑定由被审计机构自己安装、更换和移除，所以它说明的是结论由谁录入，而不是审计人的独立性。 |
 | [资源模拟扩展](/tutorials/cases/production-economy/) | resource simulation extension | `canwu-resource` | 可选的守恒数量扩展，负责精确资源/单位版本、账户、受保护底线、需求、预留、分配、转移、验收交付、消费、损耗、履约和确定性凭证；不拥有货币或市场。 |
 | [生产模拟扩展](/tutorials/cases/production-economy/) | production simulation extension | `canwu-production` | 可选的生产资产扩展，负责工艺、地点、设施、产能、工单、在制品、执行、项目和产出结算；生产地点形态与要求是版本化数据，不是统一建筑等级。 |
 | [资源能力阶段](/tutorials/cases/production-economy/) | resource capability stage | `ResourceCapabilityStage`, `ResourceCapabilityRevision` | 带生效期的修订记录，把某项资源放在从潜在储量到交付验收之间的某个阶段：潜在、已观测或勘查、已探明、技术上可开采、在产地点、路线可达、已交付验收。每条修订都引用其模型卡。 |
-| [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevision` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。 |
+| [受保护存量底线](/tutorials/cases/production-economy/) | protected stock floor | `ProtectedFloorPolicyRevision`, `ResourceProtectedFloorRequestV1::install` | 把种子、口粮或应急库存排除在普通分配之外的版本化政策；只有另行授权的行动才能突破。政策版本可以由场景预先编写，也可以由账户的保管人在运行中以按内容寻址的版本安装；没有任何账户或需求引用的按内容寻址版本会被退役。 |
+| [单步完成租约](/developer/production-economy/#完成租约) | single-step completion lease | `ResourceCompletionOperationV1::SingleStepLease`, `SingleStepCompletionLeaseV1` | 只有资源插件一个参与方的完成租约，用一个操作从无到激活：检查和激活凭证与四步路径相同，只留下一条操作结果和一条凭证。它只能通过完成租约输入进入，持有人命令不能携带它。 |
 | [账户损耗](/developer/production-economy/) | account-level loss | `ResourceOperationRequestV1::RecordLoss` | 不经转移、直接从单个账户扣减并引用原因的损耗；计入守恒中的已准入损耗，不动用已预留存量，除非明确允许，否则遵守受保护底线。 |
 | [原子交换](/developer/production-economy/) | atomic exchange | `ResourceOperationRequestV1::BeginExchange`, `ResourceExchangeTermsV1` | 两项转移的发起在同一个结果下一起准入或一起拒绝。每条交换腿的完成租约由其来源保管人持有，并绑定到双方约定条款的摘要；之后两项转移独立结算。 |
 | [本地验收](/developer/production-economy/) | local acceptance | `ResourceTransferDispositionV1::AcceptLocal` | 当两个账户声明相同的地点范围时，不经运输执行即可结算尚未发运的转移，并引用精确的交接记录。 |
 | [地点范围](/developer/production-economy/) | place scope | `ResourceAccount::place_scope` | 由上层应用在场景安装账户时声明、不可更改的账户存量地点标识；引擎从不推断它，未声明时不能本地验收。 |
 | [动用授权](/developer/production-economy/) | access grant | `ResourceAccessGrantV1`, `ResourceDemandSourcePolicyV1::Granted` | 授权保管人引用精确权限证据作出的记录化同意：被授权方可在有效期内、在上限以内动用授权方某一精确资源与单位版本的存量。每次扣减都由被授权方自己的完成租约授权，不会回退到其他账户。 |
+| [归档查找索引](/architecture/resources-production/#归档终态记录) | archive lookup index | `ResourceArchiveLookupPageV1`, `ResourceArchiveIndexDirectoryV1::lookup_root` | 每次资源归档提交都会续写的累积索引，按内容寻址。检查某个操作键是否已归档时，只需读取归档头目录，再沿索引每层读一个经过认证的页，与模拟运行已经做过多少次归档提交无关。恢复、精确重放或派生分支需要沿途每个归档头的索引页。 |
 | [在制品](/tutorials/cases/production-economy/) | work in progress | `WorkInProgress` | 已进入尚未完成的生产执行，并绑定精确工艺、设施、资源和证据的投入；既不是可用库存，也不是已结算产出。 |
 | [实际产出](/developer/production-economy/) | realized output | `realized_output_per_mille`, `realization_evidence` | 生产执行完成时以工艺名义产出的千分比表示的产出，按向下取整缩放后进入产出结算；任何非名义比例都需要工艺版本声明种类的精确证据记录。 |
 | [移动生命周期扩展](/tutorials/routing-transport/) | movement lifecycle extension | `canwu-movement`, `MovementPlugin` | 负责运输记录生命周期的可选扩展：准入移动命令、在到期时结算路段、分配运力池，并发布持有人相对的移动报告。事故、危险及其随机抽样仍属于应用系统。 |
@@ -126,7 +133,7 @@ sidebar:
 | [抽样证据](/architecture/randomness/) | draw evidence | `RandomDrawRecord` | 一次确定性随机抽样所记录的流、范围、操作和结果。 |
 | [随机决策策略](/tutorials/cases/uncertainty-resolution/) | random decision policy | `DecisionPolicyKind::Random` | 由声明过的边界系统使用可重放抽样证据结算的有界票据选择器，不是通用世界事件生成器。 |
 | [决策选项权重](/tutorials/cases/uncertainty-resolution/) | decision option weight | `DecisionOptionWeight` | 将一个有界抽样映射到票据既有选项的规范 option ID 与非负整数权重。 |
-| [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。 |
+| [操作定址随机抽样](/architecture/randomness/) | operation-keyed random draw | `random_sample_for_operation`, `random_draw_for_operation`, `RandomOperationDraw` | 按稳定 cause、operation ID、目标、occurrence、purpose 和随机流身份定址的抽样，使重试与重放不会消费另一份结果。`random_draw_for_operation` 还会返回这次抽样的证据 ID；完全相同的重试总能拿回已记录的抽样，不论当初引用的证据是否仍被保留。 |
 | [评估轨迹](/architecture/settlement/) | evaluation trace | `EvaluationTraceRecord`, `BoundaryDirective::RecordEvaluationTrace` | 有界的边界证据，逐项说明某条应用规则如何为一个对象得出一个整数结果。它不属于状态；持有人只能通过 `CanwuViewer::evaluation_traces` 读取关于自身实体的轨迹，或者在轨迹评估之前其账本就已得知的对象的轨迹。 |
 | [资源预留](/tutorials/phased-boundary/) | reservation | `ReservationRequest` | 分配前对守恒资源池提出的声明式申请。 |
 | 需求来源策略 | demand source policy | `ResourceDemandSourcePolicyV1` | 在稀缺资源分配前选择合格供给账户：匹配资源池中的账户、由申请者保管的有界精确账户列表，或在动用授权下列出的授权方账户。只有 `Granted` 形式带有跨保管人的权限，且仅限于该授权。 |
@@ -151,10 +158,12 @@ sidebar:
 | [人物可用性](/developer/integration/) | person availability | `PersonAvailability` | 某个人物的核心生存状态与人身状态，只能由声明过的边界系统修改。未存活、被拘押或被俘的人物不能签发命令、作出决策，也不能作为控制者的权限人物；没有记录时视为存活且自由。 |
 | [生存状态](/developer/integration/) | life state | `LifeState` | `Alive`、`Dead` 或 `Missing`；人物可用性的一部分。 |
 | [人身状态](/developer/integration/) | custody state | `CustodyState` | `Free`、`Detained`、`Hostage`、`Captive`、`Hiding` 或 `Exile`；人物可用性的另一部分。默认只有 `Detained` 和 `Captive` 会阻止准入。 |
-| [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
+| [人物创建](/architecture/settlement/) | person creation | `BoundaryDirective::CreatePerson`, `PersonDraft`, `PersonPlacement`, `BoundaryCreatedPerson` | 第 7 阶段根据应用草稿和来源证据创建人物、由引擎分配 ID 的指令。草稿可以带一个在 `WorldSnapshot` 投影中的落位（所属政府和所在地域），也可以不带。回执把该 ID 绑定到提出创建的插件、系统和相关标识；新人物从下一边界起可见。 |
+| [未落位人物](/architecture/settlement/#人物与输入指令) | unplaced person | `PersonDraft::placement`, `PersonPlacement` | 创建时不带落位的人物：它在实体注册表中有身份，有人物可用性和创建回执，但在 `WorldSnapshot` 投影中没有 `Person` 记录。它的属性由上层应用保存在自己的记录里；内置的移动、信件和军队报告路径只读投影，所以不会涉及它。 |
 | [角色知识](/developer/reading-state/) | actor knowledge | `ActorKnowledge` | 某一角色知道的内容及来源、可信度和时间，与真值分开保存。 |
 | [报告](/architecture/events/) | report | `EventKind` type `"report_dispatched"` | 在更新角色知识前，在角色之间签发或送达的信息。 |
 | [持有人相对知识](/tutorials/cases/routed-correspondence/) | holder-relative knowledge | `KnowledgeHolderRef`, `KnowledgeReadCut` | 在精确读取切面上从某个人、机构、官署或其他持有人账本读取的事实，不能改读全知状态。 |
+| [知识头记录](/architecture/knowledge-information/#取代先前的记录) | knowledge heads | `SimulationView::knowledge_heads`, `KnowledgeHeads` | 持有人在某一 schema 种类下的当前记录，即没有被该持有人其他记录取代的记录。发布知识的系统按类型化主体筛选，读取它们的全局 ID，用来指明下一条记录要取代哪些记录。读取来自已提交状态和正在结算的边界，所以实时、封存、恢复和重放的运行结果一致。 |
 | [持有人规划快照](/developer/reading-state/) | holder planning snapshot | `planning_snapshot_from_holder_knowledge`, `KnowledgeReadCutDigest` | 只用某个持有人账本在读取切面上声明的端点和连接构建的路由 `PlanningSnapshot`，同时返回读取集摘要，证明规划读取了什么。 |
 | [通信](/tutorials/cases/routed-correspondence/) | correspondence | `CorrespondenceOperation` | 把定向通信需求与信息投递，以及必要的物理或信号运输组合起来的流程。 |
 | [受托承运人](/tutorials/cases/routed-correspondence/) | delegated carrier | `delegate_carrier_v1`, `InitiateCorrespondenceRequest::carrier_delegation` | 发送者以外、以自己的委托命令接受承运的承运人；其声明指明发送者，并覆盖每次派发。规划读取承运人的账本，引擎不会把承运人的任何知识发布给发送者。 |

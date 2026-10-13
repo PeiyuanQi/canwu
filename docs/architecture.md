@@ -589,11 +589,56 @@ Its authoritative root record contains ordered, sparse state for:
 - stable integer transition remainders, aggregates, mobilization candidates,
   and authorized observer estimates.
 
-Daily transition rules execute in canonical key order with integer rates and
+Transition rules execute on the plugin's settlement cadence (`Daily` by
+default) in canonical key order with integer per-settlement rates and
 persisted per-rule remainders. Every active cohort/target distribution must
 conserve the cohort headcount. Missing pairs are materialized only when a rule
 actually addresses them, so runtime state grows with active relationships and
 edges rather than a dense territory/cohort/target/channel product.
+
+The settlement cadence is an option of the plugin.
+`SocietyPlugin::with_settlement_cadence(cadence)` runs the four settlement
+systems (transitions in phase 7, mobilization candidates in phase 10,
+aggregates in phase 12, and projections in phase 13) on a host-chosen
+`SystemCadence` category; `SocietyPlugin::DAILY` and
+`SocietyPlugin::default()` keep `Daily`, and `EventDriven` is refused at
+registration. Canwu keeps no calendar, so a cadence is a category the host
+attaches to boundaries, not a length of time: a `Monthly` society settles
+whenever the host settles a `Monthly` boundary. A rate applies once per
+settlement and the remainder is carried exactly, so elapsed simulated time
+never enters the arithmetic and an application authors each rate for the
+cadence it registers. The cadence is part of the persisted plugin descriptor;
+a run is restored and replayed only with a plugin of the same cadence.
+
+Everything the phase-7 system writes waits for the cadence: due cohort
+transfers, queued rebases, lifecycle deltas and pressure revisions,
+institutional decisions, and transitions. An application that needs such a
+change within a day registers a `Daily` society. A coarser cadence has three
+further consequences. Of the due transfers that share a cohort, one completes
+per settlement and the others settle as `stale_source`, which is also the rule
+for transfers due on one day of a `Daily` society. The owner-side queue is one
+record that every admitting boundary rewrites whole, so the evidence of a
+queue that waits a period grows with the square of the packets it collects.
+And the queue holds at most `MAX_SOCIETY_INGRESS_QUEUE` (4,096) packets; one
+that arrives while it is full is dropped with only a
+`society_ingress_rejected_v1` event.
+
+A settlement that changes nothing writes nothing. `last_transition_at` is the
+time of the last settlement in which a transition changed a distribution or a
+carried remainder. `last_mobilization_at`, `last_aggregation_at`, and
+`last_projection_at` are the times those derived views were last
+materialized: while one is set its view matches the authoritative state, a
+change the view depends on clears it, and the next settlement materializes the
+view once and sets it again, also when the view comes out empty. An idle
+society therefore writes no root version and emits no record-change event.
+
+An observer's projection changes only with that observer's estimate. After
+its phase-7 changes the plugin recomputes each observer's entries and keeps
+the projection, `observed_at` included, of every observer whose entries are
+the same. `observed_at` is therefore the time that observer's own estimate
+last changed, and it tells the observer nothing about cohorts outside its
+scope or about changes it cannot detect. It is recorded history: the rest of
+the root does not determine it, and validation only bounds it from above.
 
 The social diffusion simulation module deliberately separates this chain:
 
@@ -604,16 +649,48 @@ information exposure != awareness != private assent != public alignment
 
 Institutional choices use ordinary `DecisionTicket` controllers and a
 validated plugin command. The command records a pending policy component; the
-next social boundary applies it to institutional alignment before proposing
+next society settlement applies it to institutional alignment before proposing
 population transitions. A ruler or policy therefore cannot directly set a
 population belief percentage. Phase 10 produces mobilization candidates only;
 downstream political or conflict packages decide what, if anything, follows.
 
+An institution revises pressure at runtime with the `revise_society_pressure`
+command, whose payload is a `PressureRevisionDecision` and whose authority is
+that of `set_institutional_policy`: a validated `DecisionTicket` controller,
+the alignment's institution as command subject, and a decision origin that
+matches the alignment's authorized actor. A decision changes nothing for a
+cohort outside its alignment's affected cohorts. Through the alignment the
+institution may revise the pressure fields of a `PolicyPressure` row of the
+alignment's target that it issued and whose affected cohorts lie within the
+alignment's; the `active` flag and reach of an influence edge of the target
+whose target cohort lies within the alignment's; and the `active` flag and
+base reach of an organization node of the target, only through an alignment
+that covers every cohort, because an organization acts on every cohort of its
+target. The rule bounds cohorts, not relations: through
+`organization_relations` an organization revision also changes the strength of
+related organizations, which may belong to other targets. A decision never
+creates or removes a row and never changes a transition rule; it revises at
+most `MAX_PRESSURE_REVISION_ROWS` (256) rows and applies as a whole or not at
+all. The command queues the internal `society_pressure_revision_v1` packet,
+which the settlement applies in admission order before its transitions, so a
+revision takes effect at the first society settlement after the boundary that
+admits the packet. Each alignment has its own revision version sequence,
+guarded by the decision's `expected_version`; a resend of the applied decision
+changes nothing. `SocietyCohortExchangeLedger::pressure_revisions` keeps the
+latest applied and the latest rejected decision of each alignment, and every
+outcome is also emitted as an event.
+
+An expected refusal of a society command is a recorded command rejection, and
+a defective society packet is skipped with a `society_ingress_rejected_v1`
+event or settles as a rejected outcome. Only an invalid society record fails a
+boundary.
+
 A `PolicyPressure` may record its provenance: an optional `issuer` (a
 government, organization, or person, bound into the record's core references)
 and a `decision_version`, which requires an issuer when non-zero. Both fields
-are omitted when unused. Two canonical ingress types reach the society owner
-through one queue. The public `cohort_headcount_rebase_v1` packet
+are omitted when unused. Besides pressure revisions, two canonical ingress
+types reach the society owner through the same queue. The public
+`cohort_headcount_rebase_v1` packet
 (`CohortHeadcountRebaseV1` with a `RebaseReason`) rebases a cohort to an
 external conserved stock: the cited stock must be a record outside
 `canwu.society`, or the rebase is rejected as `invalid_external_stock`, and it
@@ -624,10 +701,11 @@ rule, alignment, and release changes, one packet per target, for example from
 the culture boundary plugin. The event-driven phase-12 system
 `intake-society-ingress` queues admitted packets in the
 `canwu.society:ingress-queue` record, because the society writer runs only on
-Daily boundaries and only one system may write the state in a phase. The next
-Daily phase-7 settlement applies the queue after cohort transfers and before
-institutional decisions and transitions, and records each outcome in the cohort
-exchange ledger (`rebases`, `lifecycle_deltas`). A rebase re-proportions every
+boundaries that carry its settlement cadence and only one system may write the
+state in a phase. The next phase-7 settlement applies the queue after cohort
+transfers and before institutional decisions and transitions, and records each
+outcome in the cohort exchange ledger (`rebases`, `lifecycle_deltas`,
+`pressure_revisions`). A rebase re-proportions every
 distribution of the cohort with integer largest-remainder allocation, so each
 distribution totals the new headcount and every bucket stays within one unit of
 its exact share. Only the intake writes the queue: an initial scenario that
@@ -646,7 +724,8 @@ previously materialized projection for that actor. Absence is an authorization
 error, never a request to decode the authoritative society record. Generic
 snapshot validation checks the plugin manifest, record schema, commitments,
 and referenced core-entity existence. The module-level
-`from_society_snapshot_json` boundary additionally recomputes the society
+`from_society_snapshot_json` boundary (`from_society_snapshot_json_with_plugin`
+for a run on another settlement cadence) additionally recomputes the society
 payload-to-reference binding and every persisted aggregate, mobilization
 candidate, actor projection, and pending institutional-policy component before
 the restored simulation is returned. Optional materialization timestamps keep
@@ -777,6 +856,64 @@ amended. The policy participates in request digests, snapshot identity, replay
 and terminal demand archives. Retained reservations must match the policy while
 their demand is retained; active reservations require that demand. Archive
 payloads retain canonical policy shape and authenticated demand digests.
+
+Terminal resource records leave the root in archive commits that the host
+application prepares with `prepare_resource_archive`, stores, and queues. One
+commit carries up to 16 pages (4,096 records), and a run may make any number
+of commits. Each commit directory commits to a cumulative lookup index, so the
+per-operation check for an archived operation key reads the head directory and
+one authenticated lookup page per index level, however many commits the run
+has made. A boundary only reads archive objects, by content id, and a missing
+or malformed object is an error, never a miss. Within one boundary the
+resource plugin settles archive commits and retention acknowledgements before
+its other packets, and an archive commit never fails for capacity. An
+operation whose terminal records do not fit `max_archive_candidates` (256 by
+default, at most 4,096) fails its boundary and stays queued until a commit
+makes room; it is not a recorded rejection. A restore, an exact replay, or a
+fork reads the lookup index of each archive head it passes, so the archive
+store keeps those pages. See the
+[resource archive lookup and volume proposal](proposals/resource-archive-lookup-and-volume.md).
+
+A completion lease becomes active through four operations (acquire, grant,
+prepare, activate) because a lease may have several participants, each of
+which grants and prepares on its own. When the resource plugin is the only
+participant, which means exactly that the lease's `expected_participants` is
+`{"canwu-resource"}`,
+`ResourceCompletionOperationV1::SingleStepLease` takes the lease from nothing
+to active in one operation. It runs the four steps with the checks each has on
+its own and yields the same activation certificate, so the operation the lease
+authorizes cannot tell which path produced it, and it leaves one outcome and
+one receipt instead of four of each. It enters only through the completion
+ingress (`enqueue_resource_completion_operation`, or a plugin that declares
+that ingress), never as a tracked holder command, because an activated lease
+does not expire and holds its exact target locks. A domain refusal is the
+operation's recorded rejection and leaves no acquisition, grant, or lock
+behind; what can still fail the settling boundary is a request that does not
+fit the archive-candidate or hot-outcome budget, a failed archive lookup, and
+the state byte cap. The four-step path remains for a lease that needs a grant
+owned by another plugin or that another plugin coordinates. Operation keys
+under `resource:completion:` are reserved for completion operations.
+
+A protected floor is an immutable `ProtectedFloorPolicyRevision` of one of two
+kinds. An authored revision has an identity its author chose; the scenario
+installs it with `ResourceState::install_protected_floor_policy`, it stays in
+the root, and an account is pointed at it by id. A content-addressed revision
+(`ProtectedFloorPolicyRevision::content_addressed`) derives its identity from
+its content, so one id names one content for the whole run. An account's
+custodian installs one at runtime by sending its body in
+`ResourceProtectedFloorRequestV1::install`: `SetProtectedFloor` installs the
+revision and points the account at it together or not at all, and a
+content-addressed revision is always named with its body. A root holds at most
+`MAX_PROTECTED_FLOOR_POLICY_REVISIONS` (4,096) revisions of both kinds, one
+quota shared by every custodian, and an install at the bound is a recorded
+rejection. Every applied `SetProtectedFloor` retires the content-addressed
+revisions that no account and no demand in the root refers to. See the
+[single-step lease and floor install proposal](proposals/resource-single-step-lease-and-floor-install.md).
+
+A tracked resource command that reuses an operation key for a different
+request never fails a boundary: it is refused at admission when the key's
+outcome is in the root or the archive, and is left unsettled when it was
+admitted before the first request settled.
 
 A `Pooled` or `ExactAccounts` source policy selects accounts; it does not prove
 cross-custodian delegation, which only a `Granted` policy backed by an access
@@ -976,15 +1113,78 @@ semantic workload; see
 institution and may also name an `acting_actor` together with an exact
 `authority_basis` record version, such as a host grant record. Both fields are
 set together, the acting actor must differ from the authorized actor, and the
-basis kind must be declared with `FiscalPlugin::with_authority_basis_kinds`,
-which becomes the plugin's exact read set for those kinds; activation rejects a
-binding that cites an undeclared kind. A command from the acting actor,
-directly or as a decision-ticket origin, is admitted only while the basis is
-the current version of its record, and the fiscal settlement system checks it
-again in the domain-delta phase. Once the basis record advances or retires, the
+basis must be of an external record kind the plugin reads: one declared with
+`FiscalPlugin::with_authority_basis_kinds` or an external evidence kind passed
+to `FiscalPlugin::new`. Activation rejects a binding that cites any other
+kind. A command from the acting actor, directly or as a decision-ticket
+origin, is admitted only while the basis is the current version of its record,
+and the fiscal settlement system checks it again against the state the
+settling boundary began with. Once the basis record advances or retires, the
 acting actor is rejected with `FISCAL_ACTING_BASIS_NOT_CURRENT`
-(`InvalidAuthority`), while the authorized actor is still admitted. Bindings are
-set in the starting scenario.
+(`InvalidAuthority`), while the authorized actor is still admitted. Every
+basis check reads the current-version provenance index
+(`SimulationView::current_domain_record_version`), whose answer a seal cannot
+change.
+
+Bindings start in the scenario and change at runtime only through a settled
+rebind. `FiscalAction::RebindAuthority` replaces a binding's authorized actor,
+acting actor, and authority basis in one commit, so a renewed grant or a new
+office holder does not strand the binding. It is issued under the binding it
+replaces, by the authorized actor or by the institution deciding as a body: a
+decision controller whose command subject and decision origin are the
+binding's institution, with no responsible actor. An acting actor cannot
+rebind, and neither can any other person. The institution role is the power to
+appoint, so a host registers a controller of that shape only for the body that
+appoints the binding's actors. Every action carries the role its issuer held
+at admission, and settlement re-checks that role against the state the action
+settles on: an action of a replaced actor is rejected with
+`FISCAL_ISSUER_NOT_BOUND`. The binding records the rebind in `rebound_by`.
+
+A `FiscalAuditBinding`, held in `FiscalState::audit_bindings` beside the
+authority bindings, admits an auditor from outside an institution. Under it
+only `RecordAudit` is admitted, only on targets whose scope the audited
+institution owns, and only while the binding's own authority basis is current
+(`FISCAL_AUTHORITY_BASIS_NOT_CURRENT` otherwise). `FiscalAction::RebindAudit`
+installs, replaces, or removes one under the rules of an authority rebind, and
+every settled finding names who entered it in
+`FiscalAuditFinding::entered_by`. The audited institution installs and removes
+its own auditors, so an audit binding establishes attribution, not
+independence; who appoints an auditor stays an application decision.
+
+Several fiscal actions settle in one boundary, in admission order. Each is
+compared with the procedure revision the state had when the boundary began and
+is validated against the state the previous action left. A later action is
+stale only when it would overwrite an adoption, authority binding, or audit
+binding that an earlier action of the same boundary created or changed. One
+boundary applies at most `MAX_FISCAL_ACTIONS_PER_BOUNDARY` (64) actions, and no
+action fails the boundary for the others: an action is applied, rejected as
+its own outcome, or, when no outcome can be recorded for it, dropped with a
+`canwu.fiscal.action_dropped.v1` event. A receipt whose evidence does not
+validate, or a receipt or historical-context change past the state byte
+budget, still fails its boundary.
+
+The four fiscal boundary systems are event-driven and return before they
+decode the fiscal records on a boundary that has nothing for them: settlement
+when the boundary admitted no fiscal ingress, the transition-candidate and
+aggregate systems when an earlier boundary established the state's current
+version, and the report system when no earlier phase of the boundary changed
+the state. Plugin activation validates the fiscal catalog and state instead,
+so an invalid record is refused when a run is created or restored.
+
+An observer's report is one summary record and parts of 16 facts, published as
+version 2 of the `fiscal_report` knowledge schema. Aggregate IDs are stable, so
+new facts fill the last part and earlier parts keep their members. The
+aggregate system records which parts changed in `FiscalState::report_plan`, and
+the report system publishes only those, each superseding the current record of
+its own line, found with `SimulationView::knowledge_heads`. Report supersession
+therefore never depends on retained evidence. One boundary publishes at most
+`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` (1,024) report records; the parts that
+are left are named in the summary's `pending_parts` and go out with the next
+boundary that changes the fiscal state. Nothing is published to an observer
+whose actor is dead, and the state record references each observer's person so
+that a state naming a person who does not exist is refused where it enters a
+run. Hosts and clients read reports with `fiscal_reports(&viewer)`. See the
+[fiscal throughput and authority proposal](proposals/fiscal-throughput-and-authority.md).
 
 ### Reference content and starter kits / 参考内容与入门套件
 
@@ -1201,6 +1401,20 @@ is a message, report, intercepted copy, sensor observation, rumor, or analysis;
 transport, interception, audience expansion, interpretation, belief change,
 and presentation policy remain extension concerns.
 
+A record may supersede or contradict only records of the same holder and
+schema kind that are visible at the publisher's cut: records committed by an
+earlier boundary, whatever their learned time, and records the same boundary
+published with `SameBoundary` visibility in an earlier phase. Settlement and
+snapshot validation share this rule, so a load accepts a relation exactly when
+settlement admits it. A publishing system finds those records with
+`SimulationView::knowledge_heads`, which returns the global IDs of a holder's
+current records of one schema kind, selected by typed subjects, from committed
+state and the boundary being settled. It returns at most 64 IDs, the newest
+when more match, and does not depend on retained evidence, so a sealed run
+supersedes the same records as its exact replay.
+`knowledge_changes_by_correlation` and its prefix form scan retained boundary
+evidence and must not drive a decision that has to replay exactly.
+
 Holder queries are owned, bounded, and deterministically ordered. Current-head
 and full-history views can filter by schema, subject, and learned-time cuts.
 Pagination cursors bind the holder, canonical query hash, holder-relative read
@@ -1248,9 +1462,17 @@ snapshot validation recomputes both lists.
 
 `BoundaryDirective::CreatePerson` creates a person at runtime from a phase-7
 system that declares `StateKey::core_people()`. The `PersonDraft` supplies name,
-government, location, roles, initial availability, and committed provenance;
-the kernel allocates the `PersonId` from a persisted monotonic counter that
-starts past every scenario person. The person commits at the end of the
+roles, initial availability, committed provenance, and an optional
+`PersonPlacement` (a government and a location in the `WorldSnapshot`
+projection). A placed draft creates a `Person` record there. An unplaced draft
+creates only an identity in the entity registry with availability and a
+creation receipt: `SimulationView::person` and `Canwu::world` hold no record
+for it, its name and roles are kept on the creation evidence only, and the
+application keeps the person's attributes in its own records. The built-in
+movement, letter, and army-arrival report paths read the projection, so they
+do not reach an unplaced person. In both cases the kernel allocates the
+`PersonId` from a persisted monotonic counter that starts past every scenario
+person. The person commits at the end of the
 boundary and is visible to systems from the next boundary. The correlation must
 be unique per plugin, system, and boundary. `BoundaryReceipt::created_persons`
 and the persisted created-person registry bind it to the allocated ID, which a
@@ -1265,7 +1487,9 @@ after declaring the read. The snapshot's `person_availability` map,
 so a run that never uses these contracts serializes and hashes the same as a run
 without them. When present, they become optional sub-roots of the world
 commitment and a counter in the control root. Validation rebuilds availability,
-the registry, and the counter from boundary evidence.
+the registry, and the counter from boundary evidence, and checks that the
+projection's `Person` records are exactly the scenario's and the placed
+creations'.
 
 ## Routing and transport execution
 
@@ -1563,6 +1787,21 @@ count them. Hosts read the ledger through `Canwu::boundaries_between` and
 observer, or remote clients. See the [boundary window
 proposal](proposals/boundary-window.md).
 
+A host can turn on a wall-time profile of settled boundaries with
+`set_boundary_profiling(true)` and take the profiles with
+`take_boundary_profiles()`, on `Canwu` and `CompactedCanwu`. Each
+`BoundaryProfile` gives the wall time of one settled boundary and of each
+plugin handler it ran (boundary systems, plugin command handlers, and
+event-driven plugin systems) by kind, phase, plugin, and name, so a host can
+check a plugin against a time budget. The profiler is host context outside
+authoritative state: it is never persisted, committed, or replayed, no plugin
+can read it, and a profiled run produces the same receipts, evidence, and
+hashes. It is off in a new, restored, replayed, and forked runtime, a failed
+boundary leaves no profile, and the runtime keeps at most
+`MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles that were not taken yet.
+Owner-authorized maintenance participants run outside settlement and appear in
+no profile.
+
 The kernel owns ingress, snapshot, ordinary commit, and conditional-transition
 commit. Phase-six systems publish resource capacity and competing claims.
 Allocation sorts by pool, descending priority, explicit tie-break key, and
@@ -1782,6 +2021,22 @@ recipient, army, dispatch event, and arrival time they produced, and loading
 recomputes that time from the recorded value. Validation also requires every
 report-dispatch event to have exactly one such draw, so removing both draw and
 stream progress cannot preserve an apparently coherent report history.
+
+Operation-keyed draws are answered from an index of drawn addresses that the
+runtime keeps as derived state beside the draw journal: a boundary commit
+extends it, a failed boundary restores it, a seal leaves it unchanged, and a
+restore rebuilds it from the retained draws and the keyed reservations. It is
+not persisted or committed, and settling a boundary does no work in proportion
+to the draws a run has kept. `random_draw_for_operation` returns the sample
+with the `RandomDrawId` of its draw evidence, so a record can cite the draw it
+was computed from. An exact retry, with the same evidence reference, bound,
+and purpose, is answered from the index whatever has become of its evidence,
+so a sealed run answers as its unsealed replay does; a request that differs
+from the recorded draw is refused with `RandomOperationConflict`. Only a fresh
+draw needs evidence that is retained or was produced earlier in the boundary.
+A system that may draw an address for the first time after a seal therefore
+cites evidence that survives one, such as the initial-scenario version of a
+record or evidence newer than the seal, and lets a refusal fail the boundary.
 
 The legacy immediate command/event path remains for the movement slice and
 compatibility examples. It is atomic, but it is not a substitute for the

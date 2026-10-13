@@ -8,6 +8,15 @@ that the first two can be used. The public fixtures are
 `fiscal_report_parts`, and `fiscal_reports_after_seal` under
 `crates/extensions/canwu-fiscal/tests/`.
 
+The release entry is in [Versioning and Persistence](../versioning.md). The
+other 0.15.0 proposals are
+[society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),
+[keyed-draw index, draw ID, and boundary profile](keyed-draw-index-and-settlement-profile.md),
+[resource archive lookup and volume](resource-archive-lookup-and-volume.md),
+and
+[single-step completion lease and runtime protected-floor install](resource-single-step-lease-and-floor-install.md).
+
 `canwu-fiscal` keeps its catalog and its state in one domain record each. Four
 event-driven boundary systems work on the state: `settle-fiscal-ingress-v1`
 (phase 7), `evaluate-fiscal-transition-candidates-v1` (phase 10),
@@ -715,7 +724,11 @@ boundary. Under 0.14.0 either ended the run at the observer's next report.
   numbers, it cannot grow past the report's 256 parts. The dead observer's
   report stays as it was last published. If the person is alive again, the
   next plan takes those parts first, and they are published with a new summary
-  by the next boundary that changes the fiscal state. The report system asks
+  by the next boundary that changes the fiscal state. Between the revival and
+  that change the revived observer holds his old report unchanged: its
+  summary names none of the parts deferred while he was dead and carries the
+  old `as_of`, so a report whose `pending_parts` was empty when he died looks
+  complete until then. The report system asks
   the same question before it publishes and skips an observer the engine would
   refuse. Both systems run after the last phase that can change availability,
   so they read the answer the engine checks the publication against.
@@ -826,9 +839,13 @@ declare the `canwu.core.person_availability` read.
 - **Formats.** Snapshot, commitment, checkpoint, and evidence-journal formats
   are unchanged. `FISCAL_RUNTIME_SCHEMA_VERSION` stays 2: every new field is
   optional and omitted while unused, as the acting-actor fields were when they
-  were added. A fiscal state written by 0.14.0 decodes unchanged, with no
-  audit bindings, no `rebound_by`, no `entered_by`, and no report plan, and
-  encodes back to the same bytes; a unit test holds a 0.14.0 state to that.
+  were added. The payload of a fiscal state written by 0.14.0 decodes
+  unchanged, with no audit bindings, no `rebound_by`, no `entered_by`, and no
+  report plan, and encodes back to the same bytes; a unit test holds a 0.14.0
+  state to that. The state record around the payload is not the same: its
+  references now carry an `observer` entry for each observer's person, so a
+  record that 0.14.0 encoded with observers is refused when the run is
+  created, and is built again with `FiscalState::into_record`.
   The `fiscal_report` knowledge schema is at version 2.
 - **Plugin identity.** The `canwu-fiscal` semantic hash changes, because
   settlement, admission, activation, and reports behave differently. The

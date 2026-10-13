@@ -6,6 +6,14 @@ policy pressure and of influence edge and organization activity and reach),
 and it makes sure that a refused society command or a defective society packet
 never fails a boundary.
 
+The release entry is in [Versioning and Persistence](../versioning.md). The
+other 0.15.0 proposals are
+[same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),
+[keyed-draw index, draw ID, and boundary profile](keyed-draw-index-and-settlement-profile.md),
+[resource archive lookup and volume](resource-archive-lookup-and-volume.md),
+[single-step completion lease and runtime protected-floor install](resource-single-step-lease-and-floor-install.md),
+and [fiscal throughput and authority](fiscal-throughput-and-authority.md).
+
 ## Settlement cadence and idle settlements (downstream gap G-40)
 
 ### Problem

@@ -1,6 +1,12 @@
 # Same-Instant Supersession and Unplaced Persons
 
-Status: implemented in 0.15.0.
+Status: implemented in 0.15.0. The release entry is in
+[Versioning and Persistence](../versioning.md). The other 0.15.0 proposals are
+[society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
+[keyed-draw index, draw ID, and boundary profile](keyed-draw-index-and-settlement-profile.md),
+[resource archive lookup and volume](resource-archive-lookup-and-volume.md),
+[single-step completion lease and runtime protected-floor install](resource-single-step-lease-and-floor-install.md),
+and [fiscal throughput and authority](fiscal-throughput-and-authority.md).
 
 Two contracts of `canwu-sim` that applications reach through `canwu-api`:
 which records a published knowledge record may supersede or contradict, and
@@ -139,7 +145,9 @@ Because the answer comes from committed state and the boundary being settled,
 a live run, a run that sealed its evidence, a restored run, and exact replay
 return the same IDs. The rustdoc of the two correlation reads now says that
 they depend on retained evidence and must not drive a decision that has to
-replay exactly.
+replay exactly. Operation-keyed draws follow the same principle in 0.15.0: an
+exact retry is answered from derived state, whatever a seal removed (see the
+[keyed-draw index proposal](keyed-draw-index-and-settlement-profile.md#an-exact-retry-after-a-seal)).
 
 ### Persistence, replay, and format
 

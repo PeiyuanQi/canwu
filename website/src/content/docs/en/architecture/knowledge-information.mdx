@@ -138,13 +138,36 @@ Each information record type below has a matching payload type, such as `Content
 5. The simulation core checks and commits. It accepts `PublishKnowledge` only when:
    - it comes from a phase-4 or phase-13 system that lists the schema in `knowledge_writes` with that visibility;
    - the schema is writable and registered by the same plugin;
-   - the holder is eligible and the evidence references are valid.
+   - the holder is eligible and the evidence references are valid;
+   - every record it supersedes or contradicts is a visible record of the same holder and schema kind (see [superseding an earlier record](#superseding-an-earlier-record)).
 
    It then assigns global record IDs, sets `learned_at`, lets later systems in the same boundary read `SameBoundary` records, and commits every batch to the ledger at the end of the boundary.
 6. Results come out. Each batch becomes a `BoundaryKnowledgeChange` in `BoundaryRecord::knowledge_changes` and one `KnowledgePublished` event whose audience is that holder. The holder can read the new records from the next read of its ledger.
 </Steps>
 
 The [settlement system](/en/architecture/settlement/) page lists all fourteen phases. The [routed correspondence case](/en/tutorials/cases/routed-correspondence/) walks through incidents and recovery: a disaster reroutes the same attempt, an interception gives the interceptor an `Access` record while delivery continues, and a carrier seizure ends the attempt.
+
+### Superseding an earlier record
+
+When a plugin publishes a newer version of something a holder already knows, such as a fresh report, the new record names the old one in `supersedes`. The holder's default query then shows only the new one.
+
+A record may supersede or contradict only a record of the same holder and schema kind that is visible at the publisher's cut. That means the target was committed by an earlier boundary, whatever its learned time, or was published by the same boundary with `SameBoundary` visibility in an earlier phase. Two boundaries can settle at one instant, and the second may supersede what the first published. A load applies the same rule as settlement, so a save loads exactly when the run that wrote it could continue.
+
+To find the records to supersede, a boundary system that declares the `StateKey::core_knowledge()` read calls `SimulationView::knowledge_heads`:
+
+```rust
+let heads = view.knowledge_heads(&holder, &schema.kind, &[subject])?;
+draft.supersedes = heads.records;
+```
+
+- It returns the global IDs of the holder's current records of that schema kind, that is, the records no record of the holder supersedes. A record matches when it carries every listed subject, and an empty list selects the whole kind. If your plugin keeps several lines of records for one holder, give each line a subject the others lack.
+- Every returned ID is a valid target for a record the system publishes to the same holder with the same kind, and the IDs are already in the ascending order a draft requires.
+- At most 64 IDs come back, the number one record may supersede. When more records match, the newest are returned and `truncated` is set. That is not an error: the older current records are superseded by later publications.
+- The answer comes from committed state and the boundary being settled. A live run, a run that sealed its evidence, a restored run, and an exact replay therefore return the same IDs.
+
+:::caution
+`SimulationView::knowledge_changes_by_correlation` and `knowledge_changes_by_correlation_prefix` scan retained boundary evidence. After `seal_evidence` removes the publishing boundary they return nothing for it, while an exact replay still sees it. Do not use them to choose supersession targets, or for any other decision that has to replay exactly.
+:::
 
 ## Knowledge and visibility
 

@@ -22,7 +22,7 @@ import { LinkButton } from "@astrojs/starlight/components";
 - 稀疏的人口状态：每个 cohort（`SocietyCohort`，某一地区内的人口群体）有一个整数人数。每个 cohort 与目标（`AffiliationTarget`，人们对其持有立场的观念或群体）的组合有一个 `DispositionDistribution`，把人数拆分到若干 `DispositionBucket` 中。
 - 传播：`SocialInfluenceEdge` 和 `OrganizationNode` 产生信号，`TransitionRule` 以整人为单位在倾向组合之间迁移人口，`TransitionRemainder` 保存不足一人的零头。
 - 由 `institutional_policy_ticket` 构造的[决策票据](/tutorials/cases/warlord-aid-decision/)，选中的选项会执行[领域命令](/reference/terminology/) `set_institutional_policy`。
-- 每日（Daily）边界系统：各自位于固定的[结算阶段](/architecture/settlement/)，负责应用政策、结算转化、汇总和物化投影。
+- 按 society 结算节奏运行的边界系统（本示例为每日，即 Daily）：各自位于固定的[结算阶段](/architecture/settlement/)，负责应用政策、结算转化、汇总和物化投影。
 - `projection_for_viewer` 返回的[角色相对](/developer/reading-state/)估计。
 - 用 `from_society_snapshot_json` 恢复快照，以及 `fork` 和[精确重放](/developer/persistence/)。
 
@@ -46,7 +46,7 @@ snapshot restore, fork, and exact replay reproduced the same authoritative state
 
 ## 代码走读
 
-代码都在 [`local_community_diffusion.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs) 中。`main` 复用已标记为 deprecated 的兼容场景 `Canwu::demo(42)` 中的实体、世界和知识，加入由 `tutorial_state()` 构造的一条 society 记录，注册 `SocietyPlugin`，然后结算四个边界：
+代码都在 [`local_community_diffusion.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs) 中。`main` 复用已标记为 deprecated 的兼容场景 `Canwu::demo(42)` 中的实体、世界和知识，加入由 `tutorial_state()` 构造的一条 society 记录，注册 `SocietyPlugin::DAILY`，然后结算四个边界：
 
 | 边界 | 调用位置 | 发生了什么 |
 | --- | --- | --- |
@@ -141,7 +141,7 @@ assert_eq!(
 
 ### 4. 在下一个每日边界应用政策
 
-`settle_day` 结算一个带 `SystemCadence::Daily` 的边界，society 插件的每日系统随之运行：
+`settle_day` 结算一个带 `SystemCadence::Daily` 的边界。`Daily` 正是本示例注册的结算节奏，所以 society 插件的结算系统随之运行：
 
 - 阶段 7，`settle-social-transitions`：`apply_pending_policies` 先把待应用的决策写到 `council-alignment` 上，再执行转化规则。
 - 阶段 10，`evaluate-mobilization-candidates`：本次运行没有候选。
@@ -182,7 +182,7 @@ assert_eq!(replayed.snapshot(), canwu.snapshot());
 
 ## 值得注意的地方
 
-- 政策决策在下一个每日边界改变制度立场的信号；人口随后只通过转化规则迁移，因此制度执行力度对公开顺从和私下认同各有多大影响，由你写的规则权重决定。
+- 政策决策在下一次 society 结算（本示例中即下一个每日边界）改变制度立场的信号；人口随后只通过转化规则迁移，因此制度执行力度对公开顺从和私下认同各有多大影响，由你写的规则权重决定。
 - 不足一人的零头保存在 `TransitionRemainder` 中，随状态一起存档，并在下一个边界继续累计。
 - 观察者读到的投影既有漏报，也有误报。客户端展示给玩家的就是这个估计。
 
@@ -199,10 +199,56 @@ assert_eq!(replayed.snapshot(), canwu.snapshot());
 
 当某个 bucket 达到 `mobilization: MobilizationBand::Active` 时，阶段 10 的系统会为该分布记录一个 `MobilizationCandidate`，其中包括动员人数、该目标的组织能力，以及作用于该 cohort 的政策强制。候选最终算作抗议、暴乱、迁徙还是别的情况，由你的政治或安全扩展判断。
 
+### 换一种结算节奏
+
+示例注册的是 `SocietyPlugin::DAILY`，所以 society 在每个带 `SystemCadence::Daily` 的边界结算。要换成别的节奏，注册插件时指定即可：
+
+```rust
+let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
+```
+
+- **节奏只是一个类别。** 参伍不内置历法。`Monthly` 的 society 会在上层应用每次结算 `Monthly` 边界时结算，不管你的“月”有多长。想按周或其他周期结算，就挑一个别处用不到的类别（例如 `EraScheduled`），按这个周期安排边界。`EventDriven` 在注册时会被拒绝。
+- **速率每次结算生效一次。** 速率要按你注册的节奏来写：一条速率算下来是百万分之 59,200 的规则（如上文的 `01-awareness`），不管两次结算相隔一天还是一个月，每次结算都迁移来源人数的这个比例。零头精确结转，舍入误差不会累积。
+- **一切都等这个节奏。** 政策决策、压力修订、到期的 cohort 转移、人口校准和文化生命周期变化，都只在结算时应用。如果这类变化必须在一天之内生效，就保留 `Daily` 节奏。
+- **每次结算，每个 cohort 只完成一笔到期转移。** 每笔到期转移都按同一次结算中更早的转移留下的状态检查。来源或目的地涉及同一个 cohort 的到期转移，每次结算只有一笔完成，其余的结算为 `stale_source`，需要按新状态重新提交。`Daily` 的 society 对同一天到期的转移也是这条规则，但节奏越粗，一次结算攒下的到期转移就越多。
+- **什么都没改变的结算不写入任何内容。** 闲置的 society 不会写出新的记录版本，也不会留下记录变更证据。观察者的投影及其 `observed_at` 时间，只在这位观察者自己的估计发生变化时才会改变。
+- **节奏随模拟运行一起保存。** 它是插件描述的一部分，所以恢复和重放必须使用同一节奏的插件。`from_society_snapshot_json` 按 `Daily` 恢复；其他节奏要调用 `from_society_snapshot_json_with_plugin(&saved, &plugin)`。
+- **节奏越粗，输入队列等得越久。** 队列最多容纳 4,096 条输入（`MAX_SOCIETY_INGRESS_QUEUE`）。队列已满时到达的输入会被丢弃，只留下一个 `society_ingress_rejected_v1` 事件，需要重新发送。每个准入输入的边界都会把整条队列记录重写一遍，所以队列等得越久，它产生的证据就按输入数量的平方增长。
+
+### 运行中修订压力
+
+`set_institutional_policy` 只改一个制度立场上的三个字段。要在模拟运行期间调整压力本身，机构使用 `revise_society_pressure` 命令。命令的载荷是一个 `PressureRevisionDecision`；`pressure_revision_ticket` 负责构造决策票据，用法与构造政策票据的 `institutional_policy_ticket` 相同。在这个示例里，议事会可以这样切断组织与村庄的接触：
+
+```rust
+PressureRevisionDecision {
+    alignment_id: "council-alignment".to_owned(),
+    decision_version: 1,
+    expected_version: 0,
+    policies: Vec::new(),
+    influence_edges: vec![InfluenceEdgeRevision {
+        edge_id: "network-contact".to_owned(),
+        active: false,
+        reach_per_mille: 700,
+    }],
+    organizations: Vec::new(),
+}
+```
+
+机构通过某个制度立场，只能修订作用在该立场所影响 cohort 上的内容：
+
+- 同一目标下由这个机构自己签发（`issuer`）、且影响的 cohort 都在该立场范围之内的 `PolicyPressure` 条目，可以修订它的八个压力字段。没有签发者的条目（例如本示例中的 `local-policy`）不能修订；
+- 同一目标下、目标 cohort 在该立场范围之内的影响边，可以修订 `active` 和 `reach_per_mille`；
+- 同一目标下的组织节点可以修订 `active` 和 `base_reach_per_mille`，但只能通过覆盖全部 cohort 的立场，因为组织会作用于其目标下的每一个 cohort。
+
+一项决定要写明它所修订的每个条目的全部字段，最多修订 256 个条目，要么整体生效，要么完全不生效。它不会新增或删除条目，也不会改动转化规则。每个制度立场有自己的修订版本序列：决定的 `decision_version` 比上一次已应用的版本新，且 `expected_version` 等于上一次已应用的版本（第一次之前为 0）时，决定才会应用。
+
+命令把决定作为一条内部输入排入队列。下一个边界准入这条输入，此后的第一次 society 结算在执行转化规则之前应用它；`set_institutional_policy` 则要早一个边界生效。结果保存在 `SocietyCohortExchangeLedger::pressure_revisions` 中，同时发出 `society_pressure_revised_v1` 或 `society_pressure_revision_rejected_v1` 事件。各种情形见[压力修订测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g45_society_policy_pressure_revision.rs)。
+
 ### 其他功能
 
 - **政策来源。** `PolicyPressure` 可以记录签发者 `issuer` 和产生这项压力的决策版本 `decision_version`，见[人口校准与政策来源测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs)中的 `gap_g31_society_policy_pressure_provenance`。
-- **cohort 人口校准。** 这种输入（`cohort_headcount_rebase_v1`）按所引用的、由另一个插件拥有的人口记录重置某个 cohort 的人数，并在下一个每日边界按比例重算它的分布，见[同一组测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs)中的 `gap_g32_society_cohort_rebase`。
+- **cohort 人口校准。** 这种输入（`cohort_headcount_rebase_v1`）按所引用的、由另一个插件拥有的人口记录重置某个 cohort 的人数，并在下一次 society 结算时按比例重算它的分布，见[同一组测试](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs)中的 `gap_g32_society_cohort_rebase`。
+- **被拒绝的命令。** society 命令在预期之内的拒绝，会记录为一次被拒绝的命令尝试，所在边界照常提交。例如，重发的政策决策会以 `IdempotencyConflict` 被拒绝，指向不存在的 cohort 的转移会以 `EntityNotFound` 被拒绝。重发的转移或压力修订会被接受，但不产生任何变化。
 - **文化生命周期。** `canwu-culture` 把文化目标装入 society 状态，并让目标在 `Active`、`Dormant`、`Retired` 之间转换，详见[社会、文化与法律](/architecture/culture-law/)。
 
 ## 源码

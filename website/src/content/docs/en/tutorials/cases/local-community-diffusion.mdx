@@ -40,9 +40,10 @@ or event.
 - A [decision ticket](/en/tutorials/cases/warlord-aid-decision/) built by
   `institutional_policy_ticket`, whose chosen option runs the
   [domain command](/en/reference/terminology/) `set_institutional_policy`.
-- Daily boundary systems, each in a fixed
-  [settlement phase](/en/architecture/settlement/), that apply the policy,
-  settle transitions, aggregate, and materialize projections.
+- Boundary systems on the society settlement cadence, which is Daily in this
+  example. Each runs in a fixed
+  [settlement phase](/en/architecture/settlement/); together they apply the
+  policy, settle transitions, aggregate, and materialize projections.
 - An [actor-relative](/en/developer/reading-state/) estimate from
   `projection_for_viewer`.
 - Snapshot restore with `from_society_snapshot_json`, `fork`, and
@@ -75,7 +76,8 @@ All code is in
 [`local_community_diffusion.rs`](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/examples/local_community_diffusion.rs).
 `main` reuses the entities, world, and knowledge of the deprecated
 compatibility scenario `Canwu::demo(42)`, adds one society record built by
-`tutorial_state()`, registers `SocietyPlugin`, and settles four boundaries:
+`tutorial_state()`, registers `SocietyPlugin::DAILY`, and settles four
+boundaries:
 
 | Boundary | Called from | What happens |
 | --- | --- | --- |
@@ -206,8 +208,9 @@ assert_eq!(
 
 ### 4. Apply the policy at the next Daily boundary
 
-`settle_day` settles a boundary with `SystemCadence::Daily`, which runs the
-society plugin's Daily systems:
+`settle_day` settles a boundary with `SystemCadence::Daily`, the settlement
+cadence this example registers, which runs the society plugin's settlement
+systems:
 
 - Phase 7, `settle-social-transitions`: `apply_pending_policies` copies the
   pending decision onto `council-alignment`, then the transition rules run.
@@ -264,8 +267,9 @@ part of the record, so a restored run carries the same fractions forward.
 
 ## What to notice
 
-- A policy decision changes an alignment's signals at the next Daily boundary.
-  People then move only through transition rules, so your rule weights decide
+- A policy decision changes an alignment's signals at the next society
+  settlement, here the next Daily boundary. People then move only through
+  transition rules, so your rule weights decide
   how enforcement affects public conformity and private assent.
 - Fractions of a person are kept in `TransitionRemainder`, saved with the
   state, and added in at the next boundary.
@@ -296,6 +300,106 @@ mobilized headcount, the target's organization capacity, and the policy
 coercion on the cohort. Your political or security extension decides whether a
 candidate becomes a protest, a riot, a migration, or something else.
 
+### Settle on another cadence
+
+The example registers `SocietyPlugin::DAILY`, so society settles at every
+boundary that carries `SystemCadence::Daily`. To settle on another cadence,
+register the plugin with it:
+
+```rust
+let plugin = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
+```
+
+- **A cadence is a category.** Canwu keeps no calendar. A `Monthly` society
+  settles whenever your host settles a `Monthly` boundary, however long your
+  months are. For a week or another period, pick a category you do not
+  otherwise use, such as `EraScheduled`, and settle a boundary of that
+  category once per period. `EventDriven` is refused at registration.
+- **A rate applies once per settlement.** Author each rate for the cadence you
+  register: a rule whose rate comes to 59,200 per million, as `01-awareness`
+  does above, moves that share of its source at every settlement, whether
+  settlements are a day or a month apart. The remainder is carried exactly,
+  so rounding never accumulates.
+- **Everything waits for the cadence.** Policy decisions, pressure revisions,
+  due cohort transfers, rebases, and culture lifecycle changes are applied
+  only at a settlement. If such a change must take effect within a day, keep
+  the `Daily` cadence.
+- **One due transfer per cohort completes per settlement.** Each due transfer
+  is checked against the state that the earlier transfers of the same
+  settlement left. Of the due transfers that share a cohort, as source or
+  destination, one completes; the others settle as `stale_source` and must be
+  reissued against the new state. A `Daily` society applies the same rule to
+  transfers due on one day, but a coarse cadence collects a whole period of
+  them.
+- **A settlement that changes nothing writes nothing.** An idle society writes
+  no new record version and no record-change evidence. An observer's
+  projection, with its `observed_at` time, changes only when that observer's
+  own estimate changes.
+- **The cadence is saved with the run.** It is part of the plugin descriptor,
+  so restore and replay the run with a plugin of the same cadence.
+  `from_society_snapshot_json` expects `Daily`; for another cadence, call
+  `from_society_snapshot_json_with_plugin(&saved, &plugin)`.
+- **A coarse cadence makes the intake queue wait.** The queue holds at most
+  4,096 packets (`MAX_SOCIETY_INGRESS_QUEUE`). A packet that arrives while it
+  is full is dropped with only a `society_ingress_rejected_v1` event and must
+  be sent again. Every boundary that admits a packet rewrites the whole queue
+  record, so the evidence of a queue that waits a long period grows with the
+  square of the packets it collects.
+
+### Revise pressure at runtime
+
+`set_institutional_policy` changes three fields of one alignment. To change
+the pressure itself during a run, an institution uses the
+`revise_society_pressure` command. Its payload is a
+`PressureRevisionDecision`, and `pressure_revision_ticket` builds the decision
+ticket the way `institutional_policy_ticket` does for a policy. In this
+example the council could cut the network's contact with the village:
+
+```rust
+PressureRevisionDecision {
+    alignment_id: "council-alignment".to_owned(),
+    decision_version: 1,
+    expected_version: 0,
+    policies: Vec::new(),
+    influence_edges: vec![InfluenceEdgeRevision {
+        edge_id: "network-contact".to_owned(),
+        active: false,
+        reach_per_mille: 700,
+    }],
+    organizations: Vec::new(),
+}
+```
+
+Through an alignment, the institution may revise only what acts on the
+alignment's affected cohorts:
+
+- the eight pressure fields of a `PolicyPressure` row of the same target that
+  the institution itself issued (its `issuer`) and whose affected cohorts lie
+  within the alignment's. A row without an issuer, such as `local-policy` in
+  this example, cannot be revised;
+- `active` and `reach_per_mille` of an influence edge of that target whose
+  target cohort lies within the alignment's;
+- `active` and `base_reach_per_mille` of an organization node of that target,
+  only through an alignment that covers every cohort, because an organization
+  acts on every cohort of its target.
+
+A decision states every field of each row it revises, revises at most 256
+rows, and applies as a whole or not at all. It never adds or removes a row and
+never changes a transition rule. Each alignment has its own sequence of
+revision versions: a decision applies when its `decision_version` is newer
+than the last applied one and its `expected_version` equals that last applied
+version, which is 0 before the first.
+
+The command queues the decision as an internal packet. The next boundary
+admits the packet, and the first society settlement after that applies it,
+before that settlement's transitions; `set_institutional_policy` takes effect
+one boundary sooner. The outcome is kept in
+`SocietyCohortExchangeLedger::pressure_revisions` and emitted as a
+`society_pressure_revised_v1` or `society_pressure_revision_rejected_v1`
+event. The
+[pressure revision tests](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g45_society_policy_pressure_revision.rs)
+show each case.
+
 ### Other features
 
 - **Policy provenance.** A `PolicyPressure` can record its `issuer` and the
@@ -304,8 +408,13 @@ candidate becomes a protest, a riot, a migration, or something else.
   [rebase and policy provenance tests](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs) shows.
 - **Cohort headcount rebase.** This ingress (`cohort_headcount_rebase_v1`)
   resets a cohort's headcount to a cited population record owned by another
-  plugin and rescales its distributions at the next Daily boundary, as `gap_g32_society_cohort_rebase` in the
+  plugin and rescales its distributions at the next society settlement, as `gap_g32_society_cohort_rebase` in the
   [same tests](https://github.com/PeiyuanQi/canwu/blob/main/crates/extensions/canwu-society/tests/gap_g31_g32_society.rs) shows.
+- **Refused commands.** An expected refusal of a society command is recorded
+  as a rejected command attempt, and its boundary still commits. For example,
+  a resent policy decision is rejected as `IdempotencyConflict`, and a transfer
+  that names an unknown cohort as `EntityNotFound`. A resent transfer or
+  pressure revision is accepted and changes nothing.
 - **Culture lifecycle.** `canwu-culture` installs culture targets into society
   state and moves them between `Active`, `Dormant`, and `Retired`; see
   [Society, culture, and law](/en/architecture/culture-law/).

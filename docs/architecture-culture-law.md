@@ -127,7 +127,10 @@ affected edges, and `V_delta` affected observer entries, the intended steady
 state cost is approximately `O(Delta * B + E_delta + V_delta)`. A full plan
 rebuild is reserved for definition changes, migration, or explicit
 maintenance. The current full-state society path remains a compatibility
-fallback while incremental aggregate and projection refreshes are introduced.
+fallback while incremental aggregate and projection refreshes are introduced:
+since 0.15.0 a society settlement that changes nothing writes nothing and an
+observer whose estimate did not change keeps its projection, but a view that a
+change clears is still recomputed from full state.
 
 ## Culture lifecycle
 
@@ -213,11 +216,12 @@ is unchanged.
 4. For each transitioned target, the plugin schedules one internal
    `society_lifecycle_delta_v1` packet (`SocietyLifecycleDeltaV1`, built by
    `society_lifecycle_delta`). The society plugin queues it in phase 12 and
-   applies it at its next Daily settlement, so it remains the only writer of
-   `canwu.society:state`. A delta the society refuses is recorded and not
-   applied. At each later Monthly settlement the plugin compares society state
-   with the committed culture lifecycle and re-sends any delta that is still
-   missing; society applies deltas idempotently.
+   applies it at its next society settlement (`Daily` unless the society
+   plugin is registered on another settlement cadence), so it remains the only
+   writer of `canwu.society:state`. A delta the society refuses is recorded
+   and not applied. At each later Monthly settlement the plugin compares
+   society state with the committed culture lifecycle and re-sends any delta
+   that is still missing; society applies deltas idempotently.
 5. Each due compiled effect becomes a self-addressed `cultural_signal_batch_v1`
    ingress, which consumers such as the law plugin admit at the next boundary
    and verify by its producer.
@@ -226,8 +230,10 @@ A rejected lifecycle step emits `culture_lifecycle_rejected_v1` and leaves
 culture state unchanged, each settled transition emits
 `culture_lifecycle_transition_v1`, and a retired culture state is inert.
 Because all phase-7 systems read the same boundary snapshot, every hand-off is
-next-boundary, and a culture step reaches society state up to two boundaries
-later.
+next-boundary: the society delta is admitted at the next boundary and applied
+at the first society settlement after that, so a culture step reaches society
+state two boundaries later at the earliest, and later still when the society
+settles on a coarser cadence.
 
 ## Signal bridge from culture to law
 

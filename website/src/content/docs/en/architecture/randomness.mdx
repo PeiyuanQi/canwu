@@ -54,13 +54,34 @@ The system receives a bounded integer; the generator state stays inside the kern
 
 ## Operation-keyed random draws
 
-A sequential draw, `SimulationView::random_range`, takes the next value from the stream. That is enough when a system draws in a fixed order. A mechanic that may retry, roll back, or continue across phases should use `random_sample_for_operation` (or `random_range_for_operation`, which returns only the value) instead.
+A sequential draw, `SimulationView::random_range`, takes the next value from the stream. That is enough when a system draws in a fixed order. A mechanic that may retry, roll back, or continue across phases should use an operation-keyed draw instead: `random_sample_for_operation`, `random_range_for_operation`, which returns only the value, or `random_draw_for_operation`, which also returns the ID of the draw's evidence.
 
 An operation-keyed draw is addressed by the operation it serves. Its address combines the producing plugin, an operation kind, the application's operation ID, a target, and a draw slot. The target is a `RandomOperationTarget`: an entity, an exact decision ticket version, an exact domain record version, a knowledge holder, or a canonical key. The draw also cites the evidence that caused it. The kernel computes the value from the root seed, the stream, the address, the bound, and the purpose, so the result is the same however many draws came before. Asking again with the same address, evidence, bound, and purpose returns the same value. Reusing an address with different evidence, bound, or purpose fails with `RandomOperationConflict`.
 
 Random decision policy uses this path. `RandomOperationTarget::DecisionTicket` binds the draw to an exact ticket version, `DecisionOptionWeight` maps the drawn value to one of the ticket's existing options, and the `ResolveDecisionRandomly` directive makes the kernel generate an ordinary decision for the next boundary. A guarded utility policy's random tie-break uses the same path and draws only among the near-equal top options.
 
 A controller's policy kind (`Utility`, `Rule`, `Random`, `Human`, `External`, or `Llm`) is fixed when the controller is registered; registering the same controller ID again fails. Random decision policy only chooses among a ticket's options. Weather, breakdowns, epidemics, and similar world events belong in domain systems that draw from their own streams.
+
+### Cite the draw you computed from
+
+`SimulationView::random_draw_for_operation` takes the same arguments as `random_sample_for_operation` and returns a `RandomOperationDraw { draw_id, sample }`. The `draw_id` is the `RandomDrawId` of the draw's evidence, so a record or event your system writes can cite the exact draw it was computed from.
+
+- For an address drawn at an earlier boundary, `draw_id` is the ID of that draw, whether its record is still retained or has been sealed.
+- For a fresh draw, `draw_id` is the ID the draw's record gets when the boundary commits. A boundary that fails commits neither the draw nor anything your system proposed, so an ID is only ever saved together with the draw it names. Exact replay hands out the same IDs.
+
+A draw made in the current boundary becomes retained evidence only when that boundary commits. In the same boundary you can write its ID into a record payload or an event, and name it among a record's identity-evidence dependencies. Until the next boundary, though, `evidence_exists` is false for it, the positions the engine checks as evidence (knowledge origins, evaluation-trace terms, and person provenance) refuse it, and it cannot be the operation evidence of another operation-keyed draw.
+
+### Retries after evidence is sealed
+
+An exact retry, with the same address, evidence reference, bound, and purpose, returns the recorded draw whatever has become of the evidence it cites. A run that sealed its evidence with `seal_evidence` therefore answers a retry exactly as its unsealed replay does. A request that differs from the recorded draw fails with `RandomOperationConflict`.
+
+Only a fresh draw needs its operation evidence to exist at the reader's cut: retained evidence, or evidence produced earlier in the same boundary. If your system may draw an address for the first time after a seal, cite evidence that survives one, such as the initial-scenario version of a record or evidence newer than the seal. When a fresh draw is refused with `InvalidRandomOperationEvidence`, return the error so that the boundary fails. A handler that swallows the error settles a boundary that the run's own exact replay rejects, because the replay still holds the evidence and makes the draw.
+
+### What a keyed draw costs later
+
+The engine answers operation-keyed requests from an index of drawn addresses. It keeps the index in memory, extends it when a boundary commits, and rebuilds it on restore; the index is never saved or hashed. The work of settling a boundary therefore does not grow with the draws the run has already made, so a mechanic that draws by operation key every simulated day does not slow later boundaries down.
+
+Two costs remain. The index holds one entry for each address the run has drawn, for as long as the run lives: 522 bytes each in the recorded measurement, and more with longer stream names, operation IDs, and targets. And a checkpoint, a paged checkpoint, a seal, a fork, and a restore still do work for every keyed draw the run has made.
 
 ## Draw evidence
 

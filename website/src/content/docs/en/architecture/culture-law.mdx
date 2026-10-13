@@ -69,7 +69,7 @@ Build a `CultureDefinition` with `CultureDefinition::builder(id)`, or deserializ
 
 A definition also carries its `budgets` and one `RetirementPolicy`, which sets how many quiet boundaries pass before a target goes dormant and before it may retire.
 
-A disposition profile places a cohort on seven dimensions: awareness, assent, practice, public alignment, organizational tie, mobilization, and visibility (`DispositionProfile` in `canwu-society`). Institutions act on cohorts through `canwu-society` policy pressure (`PolicyPressure`), which covers support, legal access, surveillance, censorship, coercion, material penalty, disruption, and migration pressure. No policy field sets private assent directly.
+A disposition profile places a cohort on seven dimensions: awareness, assent, practice, public alignment, organizational tie, mobilization, and visibility (`DispositionProfile` in `canwu-society`). Institutions act on cohorts through `canwu-society` policy pressure (`PolicyPressure`), which covers support, legal access, surveillance, censorship, coercion, material penalty, disruption, and migration pressure. No policy field sets private assent directly. An institution can revise the pressure rows it issued while the run is under way; see [revise pressure at runtime](/en/tutorials/cases/local-community-diffusion/#revise-pressure-at-runtime).
 
 The definition has no free-form trait or value map per population bucket. Express traits and affinities through transition weights and channel settings, so the runtime stays bounded and works per cohort.
 
@@ -91,7 +91,7 @@ Culture settlement works from a **dirty set**: the `(cohort, target)` pairs that
 
 With `Delta` dirty pairs, `B` population buckets per pair, `E_delta` affected edges, and `V_delta` affected observer entries, the intended steady-state cost is about `O(Delta * B + E_delta + V_delta)`. Full rebuilds are for definition changes, migration, and explicit maintenance.
 
-Steps 3 and 4 are not implemented yet. `canwu-society` still recomputes its aggregates and projections from full state as a compatibility fallback, and no benchmark has measured the steady-state cost.
+Steps 3 and 4 are not implemented yet. A society settlement that changes nothing writes nothing, and an observer whose estimate did not change keeps its projection. But when a change does clear a view, `canwu-society` still recomputes its aggregates and projections from full state as a compatibility fallback, and no benchmark has measured the steady-state cost.
 
 ## Culture lifecycle
 
@@ -143,11 +143,11 @@ A run that registers `CultureBoundaryPlugin` must not also call `settle_culture_
 1. The scenario installs the culture definition record built with `culture_definition_record`, the culture state record, and a society state prepared with `install_into_society`. Boundary handlers are plain function pointers, so the plugin recompiles the definition record each month instead of holding a compiled plan.
 2. Information or correspondence providers submit resolved exposure as public `culture_exposure_v1` ingress. Each exposure signal batch (`CultureExposureSignalBatch`) names the target ID and generation, the cohort scope, the interpretation fidelity, the evidence, and the earliest boundary it may be settled in. An event-driven phase-12 intake system queues admitted batches. A batch for a different generation is rejected with the `culture_exposure_rejected_v1` event.
 3. The Monthly phase-7 system `culture_lifecycle_settle_v1` consumes the queue and the accepted institutional decisions on culture alignments. It derives engagement and live dependencies from the society snapshot, calls `settle_culture_society_boundary` on that snapshot, and saves `canwu.culture:state`. A target that an institution has decided on counts as a live dependency, so it neither goes dormant nor retires.
-4. For each target that changed state, the plugin schedules one internal `society_lifecycle_delta_v1` packet. The society plugin queues it in phase 12 and applies it at its next Daily settlement, so it stays the only writer of `canwu.society:state`. If society refuses a delta, the refusal is recorded and the delta is not forced. At each later Monthly settlement, the plugin compares society state with the committed culture lifecycle and re-sends any delta that is still missing; society applies deltas idempotently.
+4. For each target that changed state, the plugin schedules one internal `society_lifecycle_delta_v1` packet. The society plugin queues it in phase 12 and applies it at its next settlement (Daily unless the society plugin is registered on another settlement cadence), so it stays the only writer of `canwu.society:state`. If society refuses a delta, the refusal is recorded and the delta is not forced. At each later Monthly settlement, the plugin compares society state with the committed culture lifecycle and re-sends any delta that is still missing; society applies deltas idempotently.
 5. Each due compiled effect becomes a `cultural_signal_batch_v1` ingress addressed to the culture plugin itself. Consumers such as the law plugin admit it at the next boundary and check which plugin produced it.
 </Steps>
 
-A rejected lifecycle step emits `culture_lifecycle_rejected_v1` and leaves culture state unchanged. Each settled transition emits `culture_lifecycle_transition_v1`. All phase-7 systems read the same boundary snapshot, so a culture step reaches society state up to two boundaries later.
+A rejected lifecycle step emits `culture_lifecycle_rejected_v1` and leaves culture state unchanged. Each settled transition emits `culture_lifecycle_transition_v1`. All phase-7 systems read the same boundary snapshot, so a culture step reaches society state two boundaries later at the earliest: the delta is admitted at the next boundary and applied at the first society settlement after that.
 
 ## From cultural signal to law
 

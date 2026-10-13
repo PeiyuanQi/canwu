@@ -69,7 +69,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 定义还带有自己的 `budgets` 和一份 `RetirementPolicy`，后者规定目标经过多少个平静的边界后进入休眠，以及多少个边界后可以退休。
 
-倾向配置从七个维度描述一个 cohort：知晓（awareness）、认同（assent）、实践（practice）、公开表态（public alignment）、组织联系（organizational tie）、动员（mobilization）和可见度（visibility），对应 `canwu-society` 中的 `DispositionProfile`。机构通过 `canwu-society` 的政策压力（`PolicyPressure`）作用于 cohort，涵盖支持、合法渠道、监视、审查、强制、物质惩罚、干扰和迁移压力。没有哪个政策字段能直接设定私下认同。
+倾向配置从七个维度描述一个 cohort：知晓（awareness）、认同（assent）、实践（practice）、公开表态（public alignment）、组织联系（organizational tie）、动员（mobilization）和可见度（visibility），对应 `canwu-society` 中的 `DispositionProfile`。机构通过 `canwu-society` 的政策压力（`PolicyPressure`）作用于 cohort，涵盖支持、合法渠道、监视、审查、强制、物质惩罚、干扰和迁移压力。没有哪个政策字段能直接设定私下认同。模拟运行期间，机构还可以修订自己签发的政策压力条目，见[运行中修订压力](/tutorials/cases/local-community-diffusion/#运行中修订压力)。
 
 定义中没有按人口分桶存放的自由特质或价值映射。特质和亲和关系应通过转移权重和渠道设置表达，这样运行时保持有界，并始终以 cohort 为单位计算。
 
@@ -91,7 +91,7 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 
 设脏对数量为 `Delta`，每对的人口分桶数为 `B`，受影响的边为 `E_delta`，受影响的观察者条目为 `V_delta`，预期稳态成本约为 `O(Delta * B + E_delta + V_delta)`。只有定义变更、迁移和显式维护才需要完整重建。
 
-第 3、4 步尚未实现：`canwu-society` 目前仍基于完整状态重算聚合计数和投影，作为兼容回退；也还没有基准测试测量过稳态成本。
+第 3、4 步尚未实现。什么都没有改变的 society 结算不会写入任何内容，估计没有变化的观察者也会保留原来的投影；但只要有变化清掉了某个派生视图，`canwu-society` 目前仍基于完整状态重算聚合计数和投影，作为兼容回退。也还没有基准测试测量过稳态成本。
 
 ## 文化生命周期
 
@@ -143,11 +143,11 @@ import MermaidDiagram from "../../../components/MermaidDiagram.astro";
 1. 场景安装用 `culture_definition_record` 构建的文化定义记录、文化状态记录，以及经 `install_into_society` 准备好的 `canwu-society` 状态。边界处理器只是普通函数指针，所以插件每月重新编译定义记录，而不是持有一份编译好的计划。
 2. 信息或通信提供方以公开的 `culture_exposure_v1` 输入提交已解决的接触结果。每个接触信号批次（`CultureExposureSignalBatch`）写明目标 ID 与代际、cohort 范围、解释保真度、证据，以及最早可以结算它的边界。事件驱动的第 12 阶段系统把已准入的批次排入队列；针对其他代际的批次会被拒绝，并发出 `culture_exposure_rejected_v1` 事件。
 3. 每月第 7 阶段系统 `culture_lifecycle_settle_v1` 消费队列，以及针对文化立场的已接受制度决策。它从 `canwu-society` 快照推导参与情况和仍有效的依赖，基于这份快照调用 `settle_culture_society_boundary`，并保存 `canwu.culture:state`。某个机构已经作出决策的目标算作仍有效的依赖，因此不会休眠，也不会退休。
-4. 对每个状态发生变化的目标，插件安排一条内部 `society_lifecycle_delta_v1` 输入。society 插件在第 12 阶段把它排入队列，并在下一次每日结算时应用，因此 society 插件始终是 `canwu.society:state` 的唯一写入者。`canwu-society` 拒绝某项变化时，拒绝会被记录，变化不会被强行应用。此后每次每月结算，插件都会比较 `canwu-society` 状态与已提交的文化生命周期，重新发送仍然缺失的变化；`canwu-society` 以幂等方式应用这些变化。
+4. 对每个状态发生变化的目标，插件安排一条内部 `society_lifecycle_delta_v1` 输入。society 插件在第 12 阶段把它排入队列，并在自己的下一次结算时应用（默认每日结算，除非 society 插件注册了别的结算节奏），因此 society 插件始终是 `canwu.society:state` 的唯一写入者。`canwu-society` 拒绝某项变化时，拒绝会被记录，变化不会被强行应用。此后每次每月结算，插件都会比较 `canwu-society` 状态与已提交的文化生命周期，重新发送仍然缺失的变化；`canwu-society` 以幂等方式应用这些变化。
 5. 每个到期的编译效果都会变成一条发给文化插件自身的 `cultural_signal_batch_v1` 输入。法律插件等消费者在下一个边界准入它，并核验它由哪个插件产生。
 </Steps>
 
-被拒绝的生命周期步骤会发出 `culture_lifecycle_rejected_v1`，文化状态保持不变；每次结算完成的转移都会发出 `culture_lifecycle_transition_v1`。所有第 7 阶段系统读取同一份边界快照，所以文化步骤最多要经过两个边界才会反映到 `canwu-society` 状态。
+被拒绝的生命周期步骤会发出 `culture_lifecycle_rejected_v1`，文化状态保持不变；每次结算完成的转移都会发出 `culture_lifecycle_transition_v1`。所有第 7 阶段系统读取同一份边界快照，所以文化步骤最早要到两个边界之后才会反映到 `canwu-society` 状态：变化在下一个边界准入，再在此后的第一次 society 结算时应用。
 
 ## 从文化信号到法律制度
 

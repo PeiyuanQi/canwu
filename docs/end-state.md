@@ -75,11 +75,15 @@ successor, which may name the cancelled one as its parent when the successor's
 controller is bound to the same seat.
 
 Persons can also enter the world at runtime. A phase-7 `CreatePerson`
-directive supplies an application draft and provenance; the kernel allocates
+directive supplies an application draft and provenance, with or without a
+placement in the `WorldSnapshot` projection; the kernel allocates
 the `PersonId` from a persisted counter, commits the person at the end of the
 boundary, and returns the ID in a receipt keyed by the proposing plugin,
 system, and correlation. The person is visible from the next boundary, and
-exact replay reproduces the same identities.
+exact replay reproduces the same identities. A person created without a
+placement is an identity with availability and a creation receipt and has no
+projection record, so an application that keeps governments and places in its
+own domain records needs none in the projection.
 
 Queued input is likewise not a promise to settle. Before a plugin ingress item
 is due, its issuer (the host, the owning plugin's registration permit, or a
@@ -415,6 +419,14 @@ balance owner. The force-supply reference retains its specialized adapter.
 See `docs/architecture.md` and the production/resource developer guide for the
 source, registration and version requirements.
 
+Since 0.15.0, a completion lease whose only participant is the resource plugin
+is taken in one operation with the checks and certificate of the four-step
+path, and an account's custodian can set a protected floor of any quantity at
+runtime as a content-addressed policy revision. Terminal records leave the
+resource root in archive commits of up to 4,096 records, and a cumulative
+lookup index keeps the per-operation check for an archived operation key
+independent of the number of commits.
+
 `canwu-production` consumes that public resource boundary and exact
 `canwu-technology` evidence. It owns process, site, facility, capacity, work
 order, work-in-progress, execution, project, and output-settlement lifecycles.
@@ -495,8 +507,12 @@ that its current types are stable public Canwu primitives. Since 0.13.0 a
 policy pressure can record its issuer and decision version, and a cohort can be
 rebased to a cited external stock record, such as a population owned by
 another domain, with deterministic integer re-proportioning. Rebase and
-lifecycle-delta packets are queued at admission and applied at the next Daily
+lifecycle-delta packets are queued at admission and applied at the next
 society settlement, so the society plugin stays the only writer of its state.
+Since 0.15.0 the host chooses the cadence category on which society settles
+(`Daily` by default), a settlement that changes nothing writes nothing, and an
+institution can revise, within its alignment's cohorts, the policy pressure it
+issued and the activity and reach of influence edges and organization nodes.
 
 Promotion from this domain extension into core requires an independently
 implemented second domain system needing the same primitive, evidence that the
@@ -595,7 +611,12 @@ evidence. Since 0.12.0 a fiscal authority binding may also name an acting actor
 next to its standing authorized actor. The acting actor is admitted only while
 the binding's authority basis, an exact application record version of a
 declared kind, is still current, and settlement checks it again; appointment,
-delegation, and their records remain application content.
+delegation, and their records remain application content. Since 0.15.0 a
+settled rebind replaces a binding's actors and basis at runtime, a separate
+audit binding admits an outside auditor for audit findings only, several
+fiscal actions settle in one boundary in admission order, and an observer's
+report is published as a summary and parts so that only what changed is
+republished.
 
 ## Debug client
 

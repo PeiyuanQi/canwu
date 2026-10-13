@@ -19,6 +19,8 @@ coding agents.
 - [Culture and legal institutional systems](architecture-culture-law.md)
 - [World and event ownership audit](proposals/world-event-ownership-audit.md)
 - [Boundary window](proposals/boundary-window.md)
+- [Same-instant supersession and unplaced persons](proposals/same-instant-supersession-and-unplaced-persons.md)
+- [Keyed-draw index, draw ID, and boundary profile](proposals/keyed-draw-index-and-settlement-profile.md)
 - [End-state design](end-state.md)
 - [Reusable-engine conformance](engine-conformance.md)
 - [Versioning and compatibility](versioning.md)
@@ -36,11 +38,15 @@ current published **social diffusion simulation module**
 
 - [Social diffusion simulation module design](proposals/social-belief-framework.md)
 - [Social framework implementation checklist](proposals/social-belief-framework-todo.md)
+- [Society settlement cadence and runtime revision](proposals/society-cadence-and-runtime-revision.md)
 - [Culture authoring SDK and lifecycle design](proposals/culture-authoring-sdk-and-lifecycle.md)
 - [Legal institutionalization framework](proposals/legal-institutionalization-framework.md)
 - [Legal storage sharding, COW, delta persistence, and cold archive](proposals/legal-storage-sharding-compaction.md)
 - [Legal institutionalization consensus review](proposals/legal-institutionalization-review.md)
 - [Military domain extension design](proposals/military-domain-design.md)
+- [Resource archive lookup and volume](proposals/resource-archive-lookup-and-volume.md)
+- [Single-step completion lease and runtime protected-floor install](proposals/resource-single-step-lease-and-floor-install.md)
+- [Fiscal throughput and authority](proposals/fiscal-throughput-and-authority.md)
 - [Downstream grand-strategy gap set](proposals/downstream-grand-strategy-gap-set.md)
 
 ## Runnable cases, reference content, and starter kits

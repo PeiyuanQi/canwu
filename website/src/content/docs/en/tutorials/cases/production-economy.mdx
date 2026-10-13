@@ -250,6 +250,11 @@ account is credited only when `CompleteTransfer` settles it with
 consume, credit) carries a completion lease certificate (proof that the
 holder activated its one-time right to perform that operation); see
 [Production, resources, and transport: who owns what](/en/developer/production-economy/).
+The lease behind the transfer start locks only resource records, so the loop
+takes it in one operation, a
+[single-step completion lease](/en/developer/production-economy/#completion-leases).
+The leases for consumption, the harvest credit, and acceptance also lock a
+record the economy plugin owns, so they keep the four-step path.
 
 ### 5. Feed civilians, relief, and the garrison
 
@@ -354,7 +359,10 @@ totals.
   end of month 8. Adding a
   [protected stock floor](/en/reference/terminology/)
   (`ProtectedFloorPolicyRevision`) here takes more than pointing the granary
-  at one. Allocation fails with `VersionConflict` whenever a demand's
+  at one, whether the scenario authors the policy revision or the granary's
+  custodian installs it at runtime with `SetProtectedFloor` (see
+  [protected floors](/en/developer/production-economy/#protected-floors)).
+  Allocation fails with `VersionConflict` whenever a demand's
   `protected_floor_policy` differs from that of an account it draws on. The
   demands in this loop use the default `Pooled` source policy (step 3), so
   they draw on both grain accounts, and `submit_demand` in `grain.rs` always

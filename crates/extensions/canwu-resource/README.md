@@ -46,7 +46,7 @@ resource simulation:
 
 ```toml
 [dependencies]
-canwu-resource = { version = "0.14.0", optional = true }
+canwu-resource = { version = "0.15.0", optional = true }
 
 [features]
 resource = ["dep:canwu-resource"]
@@ -464,7 +464,12 @@ produce, between one and eight per operation by its kind, besides the slots
 reserved for admitted completion lifecycles. An operation that does not fit
 fails its boundary and stays queued until an archive commit makes room; it is
 not a recorded rejection. That commit may be queued behind the operation,
-because archive commits settle first.
+because archive commits settle first. When a boundary fails for this
+backpressure, queue one commit that selects every candidate: a commit queued
+behind another that was prepared from the same root goes stale once the first
+applies. An applied commit leaves its own maintenance receipt as a candidate,
+so the most room a commit can make is the budget minus one, and operations due
+at one boundary that need more than that cannot settle under the budget.
 
 Every operation asks the archive whether its operation key was used before.
 Each commit directory commits to a cumulative lookup index
