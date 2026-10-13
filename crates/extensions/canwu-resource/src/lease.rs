@@ -430,6 +430,57 @@ pub struct RequestCompletionLeaseV1 {
     pub policy_class: CompletionPolicyClassV1,
 }
 
+/// One request that takes a completion lease from nothing to active.
+///
+/// It is the acquire, grant, prepare, and activate steps of a lease whose
+/// only participant is the resource plugin. That means exactly this:
+/// `lease.expected_participants` holds [`crate::PLUGIN_NAME`] and nothing
+/// else. The one grant is owned by the resource plugin and locks every
+/// target in `target_versions`. Participants are not derived from the
+/// targets, so that grant may lock a record version another plugin owns, as
+/// a resource grant may on the four-step path. A lease that names another
+/// participant, or that another plugin coordinates, keeps the four-step
+/// path.
+///
+/// The four steps run with the checks they have as separate operations, all
+/// at `current_boundary`, and settle together or not at all. A domain
+/// refusal is the operation's recorded rejection and leaves no acquisition,
+/// grant, lock, or spent request token. The activation certificate equals
+/// the one the four steps produce for the same `lease`, `grant_id`, and
+/// `target_versions` when their activation runs at `current_boundary`.
+///
+/// Like every resource operation, the request must first fit the budgets of
+/// the root, and that is checked before anything is recorded. Without room
+/// for its outcome, its receipt, and the
+/// [`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`] terminal records the lease
+/// reserves, the request is an error, not a rejection, and the plugin fails
+/// the boundary that settles it. The room is asked for even when the
+/// request would be refused.
+///
+/// The lease is active as soon as the request settles, and an active lease
+/// never expires. Until the operation it authorizes completes it, or a
+/// `Release` gives it up, it holds its target locks, its completion units,
+/// and its reserved terminal records.
+///
+/// The acquisition identity is unique among the acquisitions in the root,
+/// not for the run: a single step never resumes an acquisition the root
+/// holds, and after a lease has left the root with its archived records the
+/// four-step `Acquire`, whose operation key differs, can create a new
+/// acquisition under the same identity.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SingleStepCompletionLeaseV1 {
+    /// The acquisition, exactly as [`RequestCompletionLeaseV1`] names it for
+    /// the four-step path.
+    pub lease: RequestCompletionLeaseV1,
+    /// Identity of the one grant, owned by the resource plugin.
+    pub grant_id: CompletionCapacityGrantId,
+    /// Every exact target the lease locks.
+    pub target_versions: Vec<CompletionLockedTargetV1>,
+    /// Boundary the grant's expiry is counted from and the certificate
+    /// records as its activation boundary.
+    pub current_boundary: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GrantCompletionCapacityV1 {
     pub grant_id: CompletionCapacityGrantId,

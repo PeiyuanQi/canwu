@@ -329,6 +329,7 @@ fn touch_account(state: &mut ResourceState, account: &ResourceAccountId, operati
             account: account.clone(),
             expected_account_revision,
             policy,
+            install: None,
         }),
     );
 }

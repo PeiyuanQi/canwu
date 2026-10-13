@@ -3088,32 +3088,62 @@ impl GrainHarness {
             participants.insert(canwu_force_supply_reference::PLUGIN_NAME.to_owned());
         }
         let resource_targets_snapshot = resource_targets.clone();
-        self.completion(ResourceOperationRequestV1::Completion(
-            canwu_resource::ResourceCompletionOperationV1::Acquire(
-                canwu_resource::RequestCompletionLeaseV1 {
-                    id: acquisition.clone(),
-                    operation_key,
-                    holder: authority,
-                    operation_namespace: namespace.to_owned(),
-                    eligibility_time,
-                    eligibility_envelope: EligibilityEnvelopeV1::new(
-                        exact_evidence,
-                        BTreeMap::new(),
-                        BTreeSet::new(),
-                        Vec::new(),
-                        Vec::new(),
-                    )?,
-                    recipe: CompletionCapacityRecipeV1 {
-                        receipts: canwu_resource::MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
-                        mutations: 4,
-                        reports_per_holder: 0,
-                        holders: 0,
-                        bytes: 2_048,
+        let lease = canwu_resource::RequestCompletionLeaseV1 {
+            id: acquisition.clone(),
+            operation_key,
+            holder: authority,
+            operation_namespace: namespace.to_owned(),
+            eligibility_time,
+            eligibility_envelope: EligibilityEnvelopeV1::new(
+                exact_evidence,
+                BTreeMap::new(),
+                BTreeSet::new(),
+                Vec::new(),
+                Vec::new(),
+            )?,
+            recipe: CompletionCapacityRecipeV1 {
+                receipts: canwu_resource::MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE,
+                mutations: 4,
+                reports_per_holder: 0,
+                holders: 0,
+                bytes: 2_048,
+            },
+            expected_participants: participants,
+            policy_class: CompletionPolicyClassV1::Guaranteed,
+        };
+        if economy_grant.is_none() && force_grant.is_none() {
+            // The resource plugin is the lease's only participant, so one
+            // operation takes it from nothing to active.
+            let current_boundary = self.current_boundary();
+            self.completion(ResourceOperationRequestV1::Completion(
+                canwu_resource::ResourceCompletionOperationV1::SingleStepLease(
+                    canwu_resource::SingleStepCompletionLeaseV1 {
+                        lease,
+                        grant_id: resource_grant,
+                        target_versions: resource_targets,
+                        current_boundary,
                     },
-                    expected_participants: participants,
-                    policy_class: CompletionPolicyClassV1::Guaranteed,
-                },
-            ),
+                ),
+            ))?;
+            let (_, state) = resource_state(&self.canwu)?
+                .ok_or_else(|| GrainLoopError::Missing("resource runtime".to_owned()))?;
+            return state
+                .completion_leases
+                .certificates
+                .get(&acquisition)
+                .cloned()
+                .ok_or_else(|| {
+                    GrainLoopError::Missing(format!(
+                        "single-step completion lease {acquisition} was not activated; latest outcome: {:?}",
+                        state
+                            .outcomes
+                            .values()
+                            .max_by_key(|outcome| outcome.sequence)
+                    ))
+                });
+        }
+        self.completion(ResourceOperationRequestV1::Completion(
+            canwu_resource::ResourceCompletionOperationV1::Acquire(lease),
         ))?;
         let (_, state) = resource_state(&self.canwu)?
             .ok_or_else(|| GrainLoopError::Missing("resource runtime".to_owned()))?;

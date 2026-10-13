@@ -284,7 +284,62 @@ pub struct ResourceUnitRevision {
     pub semantic_digest: String,
 }
 
+/// Most protected-floor policy revisions one resource root may hold, whether
+/// a scenario installed them or a custodian installed them at runtime.
+///
+/// [`ResourceState::install_protected_floor_policy`] refuses a revision past
+/// the bound, and a runtime install past it settles as a recorded
+/// `limit_exceeded` rejection. Every revision in the root is re-encoded with
+/// it at each boundary that changes the root, so a host application keeps the
+/// count small rather than near the bound.
+///
+/// The bound is one quota shared by every custodian, and it is below the
+/// canonical account limit: more than this many accounts cannot each hold a
+/// floor of different content at once. A custodian's demands keep the
+/// revisions they cite in the root, so one custodian can fill the quota, and
+/// every other custodian's install is then refused until revisions are
+/// retired. A host application that lets holders set floors limits how many
+/// distinct floors each may hold.
+pub const MAX_PROTECTED_FLOOR_POLICY_REVISIONS: usize = 4_096;
+
+/// Most override classes a content-addressed protected-floor policy revision
+/// may name. Each class is 1 to 160 bytes.
+pub const MAX_PROTECTED_FLOOR_OVERRIDE_CLASSES: usize = 16;
+
+/// Identity prefix of a content-addressed protected-floor policy revision:
+/// the id is this prefix followed by the revision's semantic digest.
+pub const PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX: &str = "resource:protected-floor:";
+
+const PROTECTED_FLOOR_POLICY_CONTENT_DOMAIN: &str = "canwu.resource.protected-floor-policy.v1";
+const MAX_PROTECTED_FLOOR_OVERRIDE_CLASS_BYTES: usize = 160;
+
+/// What a content-addressed protected-floor policy revision commits to.
+#[derive(Serialize)]
+struct ProtectedFloorPolicyContentV1<'a> {
+    revision: ResourceRevision,
+    floor: u64,
+    override_classes: &'a BTreeSet<String>,
+}
+
 /// Immutable policy that protects a floor in one account.
+///
+/// A revision is either authored or content-addressed. An authored revision
+/// carries an identity and a digest its author chose, outside
+/// [`PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX`]; only
+/// [`ResourceState::install_protected_floor_policy`] installs it, and it
+/// stays in the root. A content-addressed revision, built by
+/// [`Self::content_addressed`], derives both from `revision`, `floor`, and
+/// `override_classes`, so its identity names exactly one content for the
+/// whole run. That is the only kind a custodian installs at runtime, through
+/// [`crate::ResourceProtectedFloorRequestV1::install`], and the only kind the
+/// root retires, whoever installed it: it is removed once no account and no
+/// demand in the root refers to it, and the same body installs it again.
+///
+/// Retirement removes the only copy of the body the engine holds. A demand
+/// in the archive keeps the identity of the revision it cited, which names
+/// one content but does not contain it. A host application that needs the
+/// floor quantity and override classes an archived demand was admitted under
+/// keeps the body itself.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ProtectedFloorPolicyRevision {
     pub id: ProtectedFloorPolicyRevisionId,
@@ -292,6 +347,61 @@ pub struct ProtectedFloorPolicyRevision {
     pub floor: u64,
     pub override_classes: BTreeSet<String>,
     pub semantic_digest: String,
+}
+
+impl ProtectedFloorPolicyRevision {
+    /// Builds the content-addressed revision for one floor quantity.
+    ///
+    /// `semantic_digest` is the canonical digest of `revision`, `floor`, and
+    /// `override_classes`, and `id` is
+    /// [`PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX`] followed by that digest.
+    /// Equal content gives the equal revision, so accounts may share one, and
+    /// a different floor is always a different revision. `revision` is part
+    /// of the content and otherwise free: a host application may number the
+    /// floors it sets or keep [`ResourceRevision::INITIAL`].
+    pub fn content_addressed(
+        revision: ResourceRevision,
+        floor: u64,
+        override_classes: BTreeSet<String>,
+    ) -> Result<Self, ResourceError> {
+        if override_classes.len() > MAX_PROTECTED_FLOOR_OVERRIDE_CLASSES
+            || override_classes.iter().any(|class| {
+                class.is_empty() || class.len() > MAX_PROTECTED_FLOOR_OVERRIDE_CLASS_BYTES
+            })
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "protected-floor policy override classes exceed their bounds".to_owned(),
+            ));
+        }
+        let semantic_digest = canonical_digest(
+            PROTECTED_FLOOR_POLICY_CONTENT_DOMAIN,
+            &ProtectedFloorPolicyContentV1 {
+                revision,
+                floor,
+                override_classes: &override_classes,
+            },
+        )?;
+        Ok(Self {
+            id: ProtectedFloorPolicyRevisionId::new(format!(
+                "{PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX}{semantic_digest}"
+            ))?,
+            revision,
+            floor,
+            override_classes,
+            semantic_digest,
+        })
+    }
+
+    /// Whether this revision's identity and digest are derived from its
+    /// content, as [`Self::content_addressed`] builds them.
+    #[must_use]
+    pub fn is_content_addressed(&self) -> bool {
+        self.id
+            .as_str()
+            .starts_with(PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX)
+            && Self::content_addressed(self.revision, self.floor, self.override_classes.clone())
+                .is_ok_and(|canonical| &canonical == self)
+    }
 }
 
 /// One authoritative balance. Available, reserved, and protected quantities
@@ -1067,6 +1177,7 @@ fn result_ref_matches_kind(
                     result_ref.is_none_or(|value| matches!(value, ResourceRecordRefV1::Lease(_)))
                 }
                 "acquire"
+                | "lease"
                 | "activate"
                 | "abort"
                 | "release"
@@ -1100,7 +1211,8 @@ fn completion_evidence_shape(operation_key: &str, evidence_count: usize) -> bool
     };
     let operation = suffix.split(':').next().unwrap_or_default();
     match operation {
-        "acquire" => true,
+        // Both keep the eligibility envelope's exact evidence, of any size.
+        "acquire" | "lease" => true,
         "participant-grant"
         | "participant-prepare"
         | "participant-consume"

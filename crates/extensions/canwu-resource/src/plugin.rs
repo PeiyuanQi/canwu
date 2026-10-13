@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "9b1c6d3f1341d0c9ffeb90948a9d60469d2925c219657f708e4f0f5308dd2e28";
+    "282f0f175c84e786a74d7e5c8bbdcb00035bbc96821cd4220a11281f5d49a440";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -227,6 +227,78 @@ fn archived_operation_outcome(
         ));
     }
     Ok(Some(outcome))
+}
+
+/// Who holds a request's operation key when its packet settles.
+enum OperationKeyHolder {
+    Nobody,
+    /// The outcome of this request is in the root.
+    ThisRequestInRoot,
+    /// The outcome of this request is in the archive.
+    ThisRequestInArchive,
+    /// The key belongs to a different request, in the root or the archive.
+    AnotherRequest,
+}
+
+/// Resolves the holder of a request's operation key from the root and, when
+/// the root has one, the archive. Unlike [`archived_operation_outcome`] a key
+/// held by a different request is an answer, not an error, so the caller can
+/// leave the packet unsettled without failing its boundary.
+fn operation_key_holder(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    request: &ResourceOperationRequestV1,
+    request_digest: &str,
+) -> Result<OperationKeyHolder, CanwuError> {
+    let operation_key = request.operation_key();
+    if let Some(outcome) = state.outcomes.get(&operation_key) {
+        return Ok(if outcome.request_digest == request_digest {
+            OperationKeyHolder::ThisRequestInRoot
+        } else {
+            OperationKeyHolder::AnotherRequest
+        });
+    }
+    if state.archive_head.directory_root.is_none() {
+        return Ok(OperationKeyHolder::Nobody);
+    }
+    let provider = ViewResourceArchiveProvider(view);
+    Ok(
+        match crate::archived_resource_operation_outcome(state, &provider, &operation_key)
+            .map_err(resource_canwu_error)?
+        {
+            None => OperationKeyHolder::Nobody,
+            Some(outcome) if outcome.request_digest == request_digest => {
+                OperationKeyHolder::ThisRequestInArchive
+            }
+            Some(_) => OperationKeyHolder::AnotherRequest,
+        },
+    )
+}
+
+/// Refuses a request that names an operation key reserved for completion
+/// operations, before it can be queued.
+fn reject_reserved_operation_key(request: &ResourceOperationRequestV1) -> Result<(), CanwuError> {
+    if request.names_reserved_operation_key() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "operation keys under `resource:completion:` are reserved for completion operations",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses a completion operation whose identities do not form a valid
+/// operation key, before it can be queued.
+fn reject_invalid_completion_identity(
+    operation: &crate::ResourceCompletionOperationV1,
+) -> Result<(), CanwuError> {
+    if !operation.has_canonical_operation_key() {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidPayload,
+            "completion operation identities do not form a valid operation key",
+        ));
+    }
+    Ok(())
 }
 
 fn resource_archive_reachability(
@@ -585,6 +657,13 @@ fn admit_resource_command(
     }
     let value: ResourceCommandV1 = decode(payload, "resource command")?;
     validate_resource_subject_issuer(context, &value.subject)?;
+    // Both are refused before any key is looked up: a key under the
+    // completion prefix belongs to the completion operation that derives it,
+    // and a completion operation whose identities form no key cannot settle.
+    reject_reserved_operation_key(&value.request)?;
+    if let ResourceOperationRequestV1::Completion(operation) = &value.request {
+        reject_invalid_completion_identity(operation)?;
+    }
     let record = view
         .typed_domain_record(&resource_runtime_reference())?
         .ok_or_else(|| invalid("resource runtime is unavailable"))?;
@@ -596,6 +675,22 @@ fn admit_resource_command(
         return Ok(Vec::new());
     }
     validate_resource_authority(view, context, &value)?;
+    // A key whose outcome is still in the root belongs to the request that
+    // settled it. Refusing a different request here records the refusal on
+    // the command, as for an archived key. Authority is checked first, so
+    // only a holder who may issue the operation learns that its key is taken.
+    // A command admitted before the request that takes its key has settled
+    // passes this check; its packet is then left unsettled at settlement.
+    if state
+        .outcomes
+        .get(&value.request.operation_key())
+        .is_some_and(|outcome| outcome.request_digest != request_digest)
+    {
+        return Err(CanwuError::new(
+            ErrorCode::IdempotencyConflict,
+            "resource operation key was reused with a different request",
+        ));
+    }
     Ok(vec![SystemDirective::EnqueuePluginIngress {
         after: canwu_api::SimDuration::ZERO,
         packet_type: RESOURCE_COMMAND_INGRESS.to_owned(),
@@ -644,20 +739,24 @@ fn settle_resource_lifecycle(
                 let admitted: AdmittedResourceCommandV1 =
                     decode(payload, "admitted resource command")?;
                 validate_admitted_command(view, ingress.cause.as_ref(), &admitted)?;
-                let request_digest = crate::canonical_digest(
-                    "canwu.resource.operation-request.v1",
-                    &admitted.value.request,
-                )
-                .map_err(resource_canwu_error)?;
-                if archived_operation_outcome(
-                    view,
-                    &state,
-                    &admitted.value.request,
-                    &request_digest,
-                )?
-                .is_some()
-                {
+                if admitted.value.request.names_reserved_operation_key() {
                     continue;
+                }
+                let request_digest = admitted
+                    .value
+                    .request
+                    .request_digest()
+                    .map_err(resource_canwu_error)?;
+                // An operation key belongs to the first request that settles
+                // under it. A command whose key another request holds, in the
+                // root or the archive, settles nothing: its packet is left
+                // out, as an archived resend is, and the boundary goes on.
+                // The outcome under the key names the request that owns it.
+                match operation_key_holder(view, &state, &admitted.value.request, &request_digest)?
+                {
+                    OperationKeyHolder::ThisRequestInArchive
+                    | OperationKeyHolder::AnotherRequest => continue,
+                    OperationKeyHolder::Nobody | OperationKeyHolder::ThisRequestInRoot => {}
                 }
                 state
                     .apply_operation_at(&admitted.value.request, context.at)
@@ -668,6 +767,11 @@ fn settle_resource_lifecycle(
             RESOURCE_ADAPTER_INGRESS => {
                 let packet: ResourceAdapterOperationV1 =
                     decode(payload, "resource adapter operation")?;
+                // `resource_adapter_ingress` refuses such a packet. One
+                // queued around it settles nothing and takes no key.
+                if packet.request.names_reserved_operation_key() {
+                    continue;
+                }
                 let request_digest =
                     crate::canonical_digest("canwu.resource.operation-request.v1", &packet.request)
                         .map_err(resource_canwu_error)?;
@@ -685,6 +789,16 @@ fn settle_resource_lifecycle(
             RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
                 let packet: ResourceProductionOutputBatchV1 =
                     decode(payload, "production output batch")?;
+                // A credit may not take a completion operation's key. A
+                // batch that names one settles nothing.
+                if packet.requests.iter().any(|request| {
+                    request
+                        .operation_key
+                        .as_str()
+                        .starts_with(crate::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
+                }) {
+                    continue;
+                }
                 let execution =
                     validate_production_output_batch(view, context.at, &packet, &state)?;
                 let mut candidate = state.clone();
@@ -710,6 +824,9 @@ fn settle_resource_lifecycle(
                 let packet: ResourceAuthorizedAllocationV1 =
                     decode(payload, "authorized resource allocation")?;
                 let operation = ResourceOperationRequestV1::Allocate(packet.request.clone());
+                if operation.names_reserved_operation_key() {
+                    continue;
+                }
                 let request_digest = crate::canonical_digest(
                     "canwu.resource.authorized-allocation-request.v1",
                     &(&packet.requester, &packet.request),
@@ -732,7 +849,26 @@ fn settle_resource_lifecycle(
                 let request_digest =
                     crate::canonical_digest("canwu.resource.operation-request.v1", &request)
                         .map_err(resource_canwu_error)?;
-                if archived_operation_outcome(view, &state, &request, &request_digest)?.is_some() {
+                // A resend answered by the archive, and a packet whose key
+                // a different request holds, settle nothing. A holder's
+                // tracked `Acquire`, or `Abort` of its own lease, can take a
+                // key first, and that must not fail this boundary.
+                match operation_key_holder(view, &state, &request, &request_digest)? {
+                    OperationKeyHolder::ThisRequestInArchive
+                    | OperationKeyHolder::AnotherRequest => continue,
+                    OperationKeyHolder::Nobody | OperationKeyHolder::ThisRequestInRoot => {}
+                }
+                if let crate::ResourceCompletionOperationV1::SingleStepLease(lease) = &operation {
+                    // Every domain refusal of a single-step lease is its
+                    // recorded rejection. A request that does not fit the
+                    // outcome or archive budgets of the root is not one: it
+                    // is an error below. The step leaves an activated lease
+                    // or nothing, so it starts no expiry clock.
+                    let refusal = single_step_lease_refusal(view, context.at, lease, &state)?;
+                    state
+                        .apply_single_step_lease_with_external_validation(lease, refusal.as_ref())
+                        .map_err(resource_canwu_error)?;
+                    changed = true;
                     continue;
                 }
                 validate_completion_ingress(view, context.at, &operation, &state)?;
@@ -1982,9 +2118,12 @@ fn validate_completion_ingress(
                 ));
             }
         }
+        // A single-step lease is checked by `single_step_lease_refusal`,
+        // whose findings settle as a recorded rejection.
         crate::ResourceCompletionOperationV1::Abort(_)
         | crate::ResourceCompletionOperationV1::Release(_)
-        | crate::ResourceCompletionOperationV1::CompleteExternalParticipant(_) => {}
+        | crate::ResourceCompletionOperationV1::CompleteExternalParticipant(_)
+        | crate::ResourceCompletionOperationV1::SingleStepLease(_) => {}
         crate::ResourceCompletionOperationV1::GrantExternalParticipant(request) => {
             if request.eligibility_time != at {
                 return Err(CanwuError::new(
@@ -2082,14 +2221,23 @@ fn validate_completion_report_reservation(
     state: &crate::ResourceState,
     recipe: &crate::CompletionCapacityRecipeV1,
 ) -> Result<(), CanwuError> {
-    let requested = usize::from(recipe.reports_per_holder)
-        .checked_mul(usize::from(recipe.holders))
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "completion report reservation overflowed",
-            )
-        })?;
+    if !completion_report_reservation_fits(view, state, recipe)? {
+        return Err(CanwuError::new(
+            ErrorCode::KnowledgeLimitExceeded,
+            "completion admission cannot reserve its bounded terminal report path",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the hot report capacity has room for the reports `recipe`
+/// reserves, beside those already published and reserved.
+fn completion_report_reservation_fits(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    recipe: &crate::CompletionCapacityRecipeV1,
+) -> Result<bool, CanwuError> {
+    let requested = usize::from(recipe.reports_per_holder).checked_mul(usize::from(recipe.holders));
     let projected = view
         .knowledge_record_count_in_namespace(PLUGIN_NAMESPACE)?
         .checked_add(
@@ -2097,20 +2245,78 @@ fn validate_completion_report_reservation(
                 .reserved_knowledge_report_slots()
                 .map_err(resource_canwu_error)?,
         )
-        .and_then(|value| value.checked_add(requested))
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::KnowledgeLimitExceeded,
-                "completion report reservation overflowed",
-            )
-        })?;
-    if projected > RESOURCE_REPORT_HOT_CAPACITY {
-        return Err(CanwuError::new(
-            ErrorCode::KnowledgeLimitExceeded,
-            "completion admission cannot reserve its bounded terminal report path",
-        ));
+        .zip(requested)
+        .and_then(|(held, requested)| held.checked_add(requested));
+    Ok(projected.is_some_and(|projected| projected <= RESOURCE_REPORT_HOT_CAPACITY))
+}
+
+/// What the simulation view holds against one single-step lease, or `None`.
+///
+/// These are the checks the acquire, grant, prepare, and activate steps make
+/// against the view: the eligibility time is the boundary time, the reserved
+/// reports fit, and every external record version the lease persists or
+/// locks is its record's current version. The four-step path fails the
+/// boundary on some of them. For a single step each finding becomes the
+/// operation's recorded rejection instead. Only live state and
+/// current-version provenance are read, never retained evidence, so a sealed
+/// run and its exact replay find the same.
+///
+/// A finding is recorded only if the request fits the outcome and archive
+/// budgets of the root. That is checked first and for the whole lease, and a
+/// request that does not fit is an error that fails the boundary.
+fn single_step_lease_refusal(
+    view: &SimulationView<'_>,
+    at: SimTime,
+    request: &crate::SingleStepCompletionLeaseV1,
+    state: &crate::ResourceState,
+) -> Result<Option<crate::ResourceError>, CanwuError> {
+    let lease = &request.lease;
+    if lease.eligibility_time != at {
+        return Ok(Some(crate::ResourceError::Authority(
+            "single-step completion lease eligibility time must equal its canonical boundary"
+                .to_owned(),
+        )));
     }
-    Ok(())
+    if !completion_report_reservation_fits(view, state, &lease.recipe)? {
+        return Ok(Some(crate::ResourceError::LimitExceeded(
+            "completion admission cannot reserve its bounded terminal report path".to_owned(),
+        )));
+    }
+    let envelope = &lease.eligibility_envelope;
+    let locked = request
+        .target_versions
+        .iter()
+        .filter_map(|target| match target {
+            crate::CompletionLockedTargetV1::ExternalRecord { version } => Some(version),
+            _ => None,
+        });
+    for version in envelope
+        .exact_evidence
+        .iter()
+        .chain(&envelope.capability_bindings)
+        .chain(&envelope.route_evidence)
+        .chain(locked)
+    {
+        match is_current_version(view, version) {
+            Ok(true) => {}
+            Ok(false) => {
+                return Ok(Some(crate::ResourceError::VersionConflict(
+                    "single-step completion lease cites an external record version that is not current"
+                        .to_owned(),
+                )));
+            }
+            // The plugin reads only the record kinds it was configured
+            // with, so a version of any other kind cannot be proven.
+            Err(error) if error.code == ErrorCode::UndeclaredStateRead => {
+                return Ok(Some(crate::ResourceError::Authority(
+                    "single-step completion lease cites a record kind the resource plugin does not read"
+                        .to_owned(),
+                )));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 fn require_external_coordinator_source(
@@ -2694,9 +2900,16 @@ fn validate_resource_authority(
         ResourceOperationRequestV1::Completion(crate::ResourceCompletionOperationV1::Acquire(
             request,
         )) => Some(request.holder.clone()),
+        // The holder of the lease in the root, not the holder the request
+        // names: an abort leaves an outcome under the lease's abort key, so
+        // only the lease's own holder may send one.
         ResourceOperationRequestV1::Completion(crate::ResourceCompletionOperationV1::Abort(
             request,
-        )) => Some(request.holder.clone()),
+        )) => state
+            .completion_leases
+            .acquisitions
+            .get(&request.acquisition)
+            .map(|acquisition| acquisition.holder.clone()),
         ResourceOperationRequestV1::Allocate(_)
         | ResourceOperationRequestV1::Consume(_)
         | ResourceOperationRequestV1::AdvanceTransfer(_)
@@ -2804,6 +3017,7 @@ pub fn resource_adapter_ingress(
     packet: &ResourceAdapterOperationV1,
 ) -> Result<PluginIngressRequest, CanwuError> {
     reject_adapter_production_credit(&packet.request)?;
+    reject_reserved_operation_key(&packet.request)?;
     Ok(PluginIngressRequest::new(
         PLUGIN_NAME,
         RESOURCE_ADAPTER_INGRESS,
@@ -2836,6 +3050,7 @@ pub fn enqueue_resource_allocation(
     requester: &canwu_api::KnowledgeHolderRef,
     request: &crate::ResourceAllocationRequestV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    reject_reserved_operation_key(&ResourceOperationRequestV1::Allocate(request.clone()))?;
     let permit = RESOURCE_ALLOCATION_INGRESS_PERMIT.get().ok_or_else(|| {
         CanwuError::new(
             ErrorCode::PluginNotActive,
@@ -2857,13 +3072,26 @@ pub fn enqueue_resource_allocation(
 }
 
 /// Queue one persisted completion lease transition through the plugin-owned
-/// canonical ingress. This is the only public non-command path for grant,
-/// prepare, activate, expiry, and release operations.
+/// canonical ingress. This is the host application's path for the grant,
+/// prepare, activate, expiry, and release operations and for the single-step
+/// lease, none of which a tracked command can carry.
+///
+/// It is not the only source of such packets. A plugin whose boundary system
+/// declares this ingress among its `plugin_ingress_targets`, as
+/// `canwu-production` does, can schedule the same operations, the single step
+/// included. The resource plugin trusts those packets as it trusts the host
+/// application's.
+///
+/// An operation whose identities do not form a valid operation key
+/// ([`crate::ResourceCompletionOperationV1::has_canonical_operation_key`]) is
+/// refused here. One scheduled around this call settles as a recorded
+/// rejection.
 pub fn enqueue_resource_completion_operation(
     canwu: &mut Canwu,
     due_at: SimTime,
     operation: &crate::ResourceCompletionOperationV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    reject_invalid_completion_identity(operation)?;
     let permit = RESOURCE_COMPLETION_INGRESS_PERMIT.get().ok_or_else(|| {
         CanwuError::new(
             ErrorCode::PluginNotActive,

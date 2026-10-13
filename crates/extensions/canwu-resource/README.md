@@ -29,7 +29,10 @@ consumptions, fulfillments, and outcomes carry exact typed identities and
 revisions. Implicit unit conversion is forbidden. Every operation has a stable
 `ResourceOperationKey`; replaying the same request returns the original
 terminal `ResourceOperationOutcome`, while reusing the key with different
-content fails.
+content fails. A tracked command that does so is refused at admission, or,
+when it was admitted before the first request settled, is left unsettled
+without failing its boundary. Keys under `resource:completion:` are reserved
+for completion operations.
 
 Allocation is deterministic by descending priority, due time, domain-provided
 tie-break key, admitted sequence, and demand ID. Protected floors, minimum
@@ -170,6 +173,235 @@ active reservations in archive backpressure, while grant/prepare/activate and
 already-certified debit or terminal settlement consume those reserved slots.
 Consequently a full hot archive rejects the next lifecycle before player cost
 but cannot strand an accepted transfer or certified consumption.
+
+### Single-step lease
+
+A lease whose only participant is the resource plugin takes one operation:
+`ResourceCompletionOperationV1::SingleStepLease(SingleStepCompletionLeaseV1)`
+carries the acquisition (`RequestCompletionLeaseV1`), the id of its one grant,
+the exact targets, and the boundary, and it acquires, grants, prepares, and
+activates together or not at all. "Only participant" means exactly that
+`expected_participants` is `{"canwu-resource"}`: the one grant is owned by the
+resource plugin and locks every target. The plugin does not derive
+participants from the targets, so a resource grant may lock a record version
+another plugin owns, on this path as on the four-step path; whether that
+plugin should hold a grant of its own is the host application's decision. The
+single step is the lease of a tracked `BeginTransfer`, exchange leg,
+`CompleteTransfer` (`AcceptLocal`, `Lose`, `Return`), `ExternalOutflow`, or
+`RecordLoss`. A lease that needs a grant owned by another plugin (an adapter
+operation, whose provider holds its own participant grant) or that another
+plugin coordinates (production, force supply) is refused with
+`invalid_lifecycle` and keeps the four operations.
+
+The single step applies the checks of the four steps: the holder's run-budget
+partition, pending slots, request tokens, cooldown and same-time cap, the full
+receipt reservation, the deterministic fairness order, exact current targets,
+no conflicting target lock, and the activation guard. Its certificate equals
+the one the four steps produce for the same acquisition, grant, and targets
+when their activation runs at the same boundary, so the operation it
+authorizes is unchanged. It leaves one `CompletionLease` outcome, keyed
+`resource:completion:lease:{acquisition}`, and one `Activated` receipt, where
+the four steps leave four of each; completion still adds its one receipt. A
+same-place transfer therefore leaves 15 terminal records and makes 9 archive
+lookups instead of 27 and 15.
+
+A tracked command cannot carry the single step. The host application queues
+it with `enqueue_resource_completion_operation`, as it queues the grant,
+prepare, and activate steps. A plugin whose boundary system declares the
+resource completion ingress among its `plugin_ingress_targets`, as
+`canwu-production` does, can schedule it too; the resource plugin trusts such
+a packet as it trusts the host application's, which is the trust the
+four-step operations already have.
+
+A domain refusal is the operation's recorded rejection and leaves no
+acquisition, grant, lock, or spent request token behind. That includes what
+the plugin finds against the simulation view, which fails the boundary on the
+four-step path: an eligibility time that is not the boundary time, an
+external record version that is not current, or a record kind the plugin was
+not configured to read. A single step never resumes an acquisition or grant
+that exists, and the four-step `Acquire` never resumes one either: both are
+`idempotency_conflict`. Identities that do not form the operation key of the
+step, or of the `Release` that may have to give the lease up, are
+`invalid_identifier`. A resend of the same request returns its outcome,
+before and after that outcome is archived, and is not a second lease. A
+single step whose key belongs to a different request settles nothing, as
+described under operation keys below. A refused request has used its
+operation key, so a retry names a new acquisition id. An archive commit in
+the same boundary settles first, so the commit applies to the root it was
+prepared from and the lease is taken on the root the commit left.
+
+Three things are not recorded and fail the boundary that settles a single
+step, as they do for any resource operation:
+
+- **No room.** The check asks for the whole lease before anything is
+  recorded: `2 + 16` archive candidate slots and `1 + 16` hot outcome slots,
+  beside the 16 of each that every active lease reserves. A single step fits
+  while `hot terminal records + 16 x active leases + 18 <=
+  max_archive_candidates`; with the canonical 256 and no backlog the
+  fifteenth concurrently active lease is the last. The room is asked for
+  even when the request would be refused.
+- **An archive lookup that fails.** A missing, forged, or unreadable archive
+  object is an error, never a miss.
+- **The state byte cap.**
+
+A host application checks headroom before it queues a single step. An archive
+commit frees room taken by hot terminal records and may be queued behind the
+step. It frees nothing held by the reservations of active leases.
+
+What a host application has to watch:
+
+- An active lease does not expire, and a single-step lease is active at once.
+  If its operation is never issued, or is rejected, the lease holds its
+  target locks, its completion units, and its 16 reserved slots until the
+  host application sends `Release`.
+- A holder may still send a tracked `Acquire`. While that acquisition waits
+  for its first grant, every single step that sorts after it in the fairness
+  order is refused with `invalid_lifecycle`, until the acquisition is granted
+  or aborted. A host application that uses only single steps watches for
+  stray `Requested` acquisitions and removes them: it sends `Abort`, and if
+  the holder's own rejected abort has already taken the abort key, so that
+  the packet settles nothing, it grants the stray acquisition and releases
+  that grant.
+- An acquisition id is unique among the acquisitions in the root, not for
+  the run. After a lease has left the root with its archived records, the
+  other path's first step with the same id creates a new acquisition, because
+  the two paths derive different operation keys. A host application that
+  needs ids unique for the run keeps them unique itself.
+
+### Operation keys of completion operations
+
+Every completion operation derives its key from the identities it names, as
+`resource:completion:{step}:{identities}`. A key under `resource:completion:`
+(`RESOURCE_COMPLETION_OPERATION_KEY_PREFIX`) is reserved for them: a tracked
+command that names one on any other request is refused at admission,
+`resource_adapter_ingress` and `enqueue_resource_allocation` refuse to queue
+one, a packet queued around them settles nothing, and
+`ResourceState::apply_operation` returns an error without recording an
+outcome. A holder can therefore take a completion key only with a completion
+operation it may send as a tracked command:
+
+- A holder cannot take the key of a single step (`lease`), nor of a `grant`,
+  `prepare`, `activate`, `release`, `expire`, or `participant-*` step.
+- A holder can take `acquire:{id}` for any id, by acquiring a lease under it.
+  The host application's `Acquire` with that id then settles nothing, and a
+  single step with that id is refused with `idempotency_conflict` while the
+  holder's acquisition is in the root. The host application uses another id.
+- A holder can take `abort:{id}` of a lease it holds, since its own `Abort`
+  leaves an outcome under that key whether applied or rejected. It cannot
+  take the abort key of another holder's lease or of an id the root does not
+  hold: admission resolves the holder of a tracked `Abort` from the
+  acquisition in the root and refuses anyone else.
+
+A packet on the completion ingress whose key belongs to a different request,
+in the root or the archive, settles nothing, and its boundary commits. The
+same holds for a tracked command admitted before the request that takes its
+key had settled. Such a skip leaves no record of its own, and a skipped
+command stays `Accepted`. The outcome under the key is the other request's:
+a host application compares `ResourceOperationRequestV1::request_digest` of
+what it sent with the outcome's `request_digest` and does not read that
+outcome as its own.
+
+Identities that are valid by themselves may still be too long for the key of
+a step (`has_canonical_operation_key`). For a single step that includes the
+key of the `Release` that may have to give the lease up, which names the
+acquisition and the grant. Such an operation is refused at admission or at
+`enqueue_resource_completion_operation`, and one that reaches settlement is a
+recorded `invalid_identifier` rejection.
+
+Two limits remain. `canwu-production` does not yet refuse an output request
+whose operation key lies under the reserved prefix when an execution starts:
+the output batch of such an execution is skipped, its boundary commits and
+nothing is credited, so the execution never receives its acknowledgement and
+its resource participant grant stays `Consumed`, holding its completion
+units, target locks, and 16 reserved outcome slots. And outside the reserved
+prefix, an allocation, adapter, or production output packet whose free-form
+operation key another issuer used first for a different request still fails
+its boundary, as on 0.14.0.
+
+## Protected floors
+
+An account's protected floor is the `ProtectedFloorPolicyRevision` its
+`protected_floor_policy` names. `account_quantities` derives the protected and
+available quantities from it, allocation never reserves protected stock for a
+demand outside the revision's `override_classes`, and `RecordLoss` and
+`ExternalOutflow` take protected stock only with `allow_protected`.
+
+A revision is immutable and is one of two kinds:
+
+- **Authored.** `ResourceState::install_protected_floor_policy` installs a
+  revision with an identity and digest of the author's choosing while the
+  scenario is built. It stays in the root whether or not an account points at
+  it, and an account is pointed at it by id.
+- **Content-addressed.**
+  `ProtectedFloorPolicyRevision::content_addressed(revision, floor,
+  override_classes)` derives the digest from the content and the id from the
+  digest (`resource:protected-floor:{digest}`), so one id names one content
+  for the whole run. Only this kind is installed at runtime, and the root
+  keeps it only while something refers to it, whoever installed it: a
+  scenario that installs one no account points at loses it at the first
+  applied `SetProtectedFloor`. An identity under the prefix must be the one
+  its content derives.
+
+`ResourceOperationRequestV1::SetProtectedFloor(ResourceProtectedFloorRequestV1)`
+points an account at a revision, or at none. To set a floor of any quantity,
+the custodian sends the content-addressed revision in `install` and its id in
+`policy`: the operation installs the revision if the root does not hold it and
+points the account at it, together or not at all. A content-addressed
+revision is always named with its body; its id alone is refused with
+`invalid_definition` whether or not the root holds it, so the answer tells a
+custodian nothing about what other accounts protect. The operation is
+token-only: it needs no completion lease, leaves one `SetProtectedFloor`
+outcome, and advances the account revision. A tracked command must come from
+the account's custodian. An access grant is consent to draw on stock, not
+custody, so a grantee cannot set the grantor's floor; adapter ingress cannot
+either.
+
+A root holds at most `MAX_PROTECTED_FLOOR_POLICY_REVISIONS` (4,096) revisions
+of both kinds. A scenario install past the bound is refused, and a runtime
+install past it settles as a recorded `limit_exceeded` rejection. The bound is
+one quota shared by every custodian and is below the canonical `max_accounts`
+(8,192): floors of different content on more than 4,096 accounts cannot
+coexist, and a custodian whose demands cite many different floors can fill
+the quota, after which every other custodian's install is refused until
+revisions are retired. A host application that lets holders set floors limits
+how many distinct floors each may hold.
+
+Every applied `SetProtectedFloor` retires the content-addressed revisions
+that no account and no demand in the root refers to, before the bound is
+checked, so a floor that changes every day keeps one revision in the root. A
+demand keeps the revision it cites until the demand is archived; the next
+floor change then retires it, which may be a change in the boundary of the
+archive commit itself, because commits settle first. Accounts that set equal
+content share one revision. A retired revision is installed again by sending
+its body. Retirement removes the only copy of the body the engine holds: an
+archived demand keeps the id of the floor it was admitted under and nothing
+else, so a host application that needs that floor's quantity and override
+classes later keeps the body itself.
+
+A floor change advances the account revision like any other account change.
+A reservation made before it stays reserved and is debited under a lease that
+locks the new revision. An open demand cites the floor it was admitted under,
+so its allocation pass settles as a `version_conflict` rejection until the
+demand is amended to the floor in force; a granted demand in that position is
+supplied nothing instead. An operation whose lease locked the earlier account
+revision settles as a `version_conflict` rejection. A `SubmitDemand` that was
+admitted citing a floor and settles after that floor was replaced depends on
+the kind of revision: an authored one is still in the root, so the demand is
+applied and then stale; a content-addressed one that the change retired is
+gone, so the demand is a recorded `invalid_definition` rejection, unless
+another account or demand still refers to it.
+
+A refusal of `SetProtectedFloor` is recorded: as the operation's rejected
+outcome, or on the command when authority or the operation key refuses it at
+admission. A command admitted before the request that takes its key has
+settled is left unsettled: its packet settles nothing and the boundary does
+not fail. The skip leaves no record of its own and the command stays
+`Accepted`; the outcome under the key is the other request's, which a host
+application tells by comparing `ResourceOperationRequestV1::request_digest`.
+This holds for every tracked resource command. What still fails the
+boundary, as for any resource operation, is a request that does not fit the
+outcome and archive budgets of the root, an archive lookup that fails, and
+the state byte cap.
 
 ## Reports and restore
 

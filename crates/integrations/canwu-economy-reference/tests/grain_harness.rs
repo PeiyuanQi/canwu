@@ -12,8 +12,57 @@ use canwu_force_supply_reference::{
     ExternalityOutcomeDisposition, ForceSupplyRuntimeRecord, force_supply_runtime_reference,
 };
 use canwu_resource::{
-    RESOURCE_ARCHIVE_BLOB_NAMESPACE, ResourceOperationStatus, ResourceReportDtoV1, resource_state,
+    RESOURCE_ARCHIVE_BLOB_NAMESPACE, ResourceArchiveRetentionHandleV1,
+    ResourceArchiveRetentionPhaseV1, ResourceArchiveStore, ResourceError, ResourceOperationKey,
+    ResourceOperationKind, ResourceOperationStatus, ResourceReportDtoV1,
+    ResourceTerminalArchivePayloadV1, ResourceTerminalRecordKeyV1, ResourceTransferId,
+    archived_resource_operation_outcome, archived_resource_terminal_record, resource_state,
 };
+
+/// Reads the resource archive through the archive provider the runtime holds.
+struct RuntimeArchive<'a>(&'a canwu_api::Canwu);
+
+impl ResourceArchiveStore for RuntimeArchive<'_> {
+    fn store_resource_archive_object(
+        &self,
+        _namespace: &str,
+        _object_id: &str,
+        _bytes: &[u8],
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the runtime archive view is read-only".to_owned(),
+        ))
+    }
+
+    fn load_resource_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, ResourceError> {
+        self.0
+            .plugin_archive_object(namespace, object_id)
+            .map_err(|error| ResourceError::InvalidDefinition(error.to_string()))
+    }
+
+    fn persist_resource_archive_retention(
+        &self,
+        _handle: &ResourceArchiveRetentionHandleV1,
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the runtime archive view is read-only".to_owned(),
+        ))
+    }
+
+    fn finalize_resource_archive_retention(
+        &self,
+        _handle_id: &str,
+        _phase: ResourceArchiveRetentionPhaseV1,
+    ) -> Result<(), ResourceError> {
+        Err(ResourceError::InvalidLifecycle(
+            "the runtime archive view is read-only".to_owned(),
+        ))
+    }
+}
 
 fn decisions() -> [GrainDecision; 14] {
     [
@@ -219,11 +268,51 @@ fn canonical_resource_history_contains_real_leases_and_accepted_transport() {
             .all(|unit| unit.symbol == "synthetic-basket")
     );
     state.validate_conservation().expect("conservation");
-    assert!(state.completion_leases.certificates.len() >= 3);
-    assert!(state.transfers.values().any(|transfer| {
-        transfer.state == canwu_resource::ResourceTransferState::Accepted
-            && !transfer.exact_evidence.is_empty()
-    }));
+    // A completed lease and a settled transfer leave the root with their
+    // archived records, so what the root still holds follows the archive
+    // cadence, not the lease or transfer contract. The lease of the month's
+    // delivery and the delivery itself are read from wherever they now are.
+    // The resource plugin is the only participant of the lease that starts
+    // the delivery, so the loop takes it in a single step.
+    let archive = RuntimeArchive(harness.canwu());
+    let start_lease =
+        ResourceOperationKey::new("resource:completion:lease:grain:lease:transfer-begin:03")
+            .expect("single-step lease key");
+    let leased = state
+        .outcomes
+        .get(&start_lease)
+        .cloned()
+        .or_else(|| {
+            archived_resource_operation_outcome(&state, &archive, &start_lease)
+                .expect("authenticated archive lookup")
+        })
+        .expect("the delivery's start lease is in the root or in its archive");
+    assert_eq!(leased.kind, ResourceOperationKind::CompletionLease);
+    assert_eq!(leased.status, ResourceOperationStatus::Applied);
+    let delivery = ResourceTransferId::new("canwu.economy-reference:transfer:month-03")
+        .expect("delivery transfer");
+    let transfer = state
+        .transfers
+        .get(&delivery)
+        .cloned()
+        .or_else(|| {
+            let archived = archived_resource_terminal_record(
+                &state,
+                &archive,
+                &ResourceTerminalRecordKeyV1::Transfer(delivery.clone()),
+            )
+            .expect("authenticated archive lookup")?;
+            match archived.payload {
+                ResourceTerminalArchivePayloadV1::Transfer(transfer) => Some(transfer),
+                _ => None,
+            }
+        })
+        .expect("the delivery is in the root or in its archive");
+    assert_eq!(
+        transfer.state,
+        canwu_resource::ResourceTransferState::Accepted
+    );
+    assert!(!transfer.exact_evidence.is_empty());
     assert!(state.outcomes.values().all(|outcome| {
         outcome.status == ResourceOperationStatus::Applied || outcome.rejection_reason.is_some()
     }));

@@ -312,12 +312,45 @@ pub struct ResourceAccountLossRequestV1 {
     pub completion_certificate: CompletionLeaseActivationCertificateV1,
 }
 
+/// Points one account at a protected-floor policy revision, or at none.
+///
+/// A tracked command must come from the account's custodian; an access grant
+/// gives its grantee no authority over the grantor's floors. The operation is
+/// token-only: it needs no completion lease, leaves one operation outcome,
+/// and advances the account revision.
+///
+/// `policy` names an authored revision in the root by its id, or `None` to
+/// clear the floor. To set a floor of any quantity, the custodian sends the
+/// body of a content-addressed revision in `install` and names its id in
+/// `policy`: the operation installs the revision if the root does not hold
+/// it and points the account at it, together or not at all. A
+/// content-addressed revision is always named with its body. Its id alone is
+/// refused whether or not the root holds it, because that depends on what
+/// other accounts and demands refer to.
+///
+/// Every applied request then retires the content-addressed revisions that no
+/// account and no demand in the root refers to, so a floor that changes often
+/// does not accumulate revisions. A retired revision is installed again by
+/// sending its body. Retirement removes the body from the root: an archived
+/// demand keeps the identity of the floor it was admitted under and nothing
+/// else.
+///
+/// A refusal of the request is its recorded rejection, with two exceptions
+/// it shares with every resource operation: a request that does not fit the
+/// outcome and archive budgets of the root, or whose settlement would pass
+/// the state byte cap, is an error that fails its boundary.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceProtectedFloorRequestV1 {
     pub operation_key: ResourceOperationKey,
     pub account: ResourceAccountId,
     pub expected_account_revision: ResourceRevision,
     pub policy: Option<ProtectedFloorPolicyRevisionId>,
+    /// Body of the revision `policy` names, to install it with this request.
+    /// It must be content-addressed
+    /// ([`ProtectedFloorPolicyRevision::content_addressed`]). Omitted from
+    /// the canonical encoding while `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<ProtectedFloorPolicyRevision>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -368,82 +401,120 @@ pub enum ResourceCompletionOperationV1 {
     CompleteExternalParticipant(crate::CompleteExternalCompletionParticipantGrantV1),
     ReleaseExternalParticipant(crate::ReleaseExternalCompletionParticipantGrantV1),
     ExpireExternalParticipants(crate::ExpireExternalCompletionParticipantGrantsV1),
+    /// Acquires, grants, prepares, and activates a lease whose only
+    /// participant is the resource plugin, leaving one outcome and one
+    /// receipt. Its operation key is
+    /// `resource:completion:lease:{acquisition}`.
+    SingleStepLease(crate::SingleStepCompletionLeaseV1),
 }
 
+/// Prefix of every completion operation's key. An operation key under it is
+/// reserved for [`ResourceCompletionOperationV1`]: any other request that
+/// names one is refused.
+///
+/// A holder can therefore take a completion key only with a completion
+/// operation it may send as a tracked command: an `Acquire`, and an `Abort`
+/// of a lease it holds. No holder can take the key of a single step, a
+/// grant, a prepare, an activation, a release, an expiry, or an external
+/// participant step. A packet on the completion ingress whose key a
+/// different request holds settles nothing and does not fail its boundary.
+pub const RESOURCE_COMPLETION_OPERATION_KEY_PREFIX: &str = "resource:completion:";
+
 impl ResourceCompletionOperationV1 {
-    #[must_use]
-    pub fn operation_key(&self) -> ResourceOperationKey {
+    /// The key this operation derives from its identities, which is valid
+    /// only when [`Self::has_canonical_operation_key`].
+    fn derived_operation_key(&self) -> String {
+        let prefix = RESOURCE_COMPLETION_OPERATION_KEY_PREFIX;
         match self {
-            Self::Acquire(value) => ResourceOperationKey::new(format!(
-                "resource:completion:acquire:{}",
-                value.id.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::Grant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:grant:{}",
+            Self::Acquire(value) => format!("{prefix}acquire:{}", value.id.as_str()),
+            Self::Grant(value) => format!("{prefix}grant:{}", value.grant_id.as_str()),
+            Self::Prepare(value) => format!(
+                "{prefix}prepare:{}:{}",
+                value.acquisition.as_str(),
+                value.grant.as_str()
+            ),
+            Self::Activate(value) => {
+                format!("{prefix}activate:{}", value.acquisition.as_str())
+            }
+            Self::Abort(value) => format!("{prefix}abort:{}", value.acquisition.as_str()),
+            Self::Expire(value) => format!(
+                "{prefix}expire:{}:{}",
+                value.at.as_minutes(),
+                value.current_boundary
+            ),
+            Self::Release(value) => format!(
+                "{prefix}release:{}:{}",
+                value.acquisition.as_str(),
+                value.grant.as_str()
+            ),
+            Self::GrantExternalParticipant(value) => {
+                format!("{prefix}participant-grant:{}", value.acquisition.as_str())
+            }
+            Self::PrepareExternalParticipant(value) => {
+                format!("{prefix}participant-prepare:{}", value.acquisition.as_str())
+            }
+            Self::ConsumeExternalParticipant(value) => format!(
+                "{prefix}participant-consume:{}",
+                value.certificate.acquisition.as_str()
+            ),
+            Self::CompleteExternalParticipant(value) => {
+                format!(
+                    "{prefix}participant-complete:{}",
+                    value.acquisition.as_str()
+                )
+            }
+            Self::ReleaseExternalParticipant(value) => {
+                format!("{prefix}participant-release:{}", value.acquisition.as_str())
+            }
+            Self::ExpireExternalParticipants(value) => format!(
+                "{prefix}participant-expire:{}:{}",
+                value.at.as_minutes(),
+                value.current_boundary
+            ),
+            Self::SingleStepLease(value) => format!("{prefix}lease:{}", value.lease.id.as_str()),
+        }
+    }
+
+    /// Whether the identities this operation names form a valid operation
+    /// key: `resource:completion:{step}:{identities}` within the 160-byte
+    /// bound of [`ResourceOperationKey`]. An acquisition or grant identity
+    /// may be valid by itself and still too long for the key of a step.
+    ///
+    /// A single step must also be releasable: its key names only the
+    /// acquisition, but the `Release` that may have to give the lease up
+    /// names the acquisition and the grant, so both identities must form
+    /// that key too.
+    #[must_use]
+    pub fn has_canonical_operation_key(&self) -> bool {
+        let releasable = match self {
+            Self::SingleStepLease(value) => ResourceOperationKey::new(format!(
+                "{RESOURCE_COMPLETION_OPERATION_KEY_PREFIX}release:{}:{}",
+                value.lease.id.as_str(),
                 value.grant_id.as_str()
             ))
-            .expect("grant ID always produces a valid namespaced operation key"),
-            Self::Prepare(value) => ResourceOperationKey::new(format!(
-                "resource:completion:prepare:{}:{}",
-                value.acquisition.as_str(),
-                value.grant.as_str()
+            .is_ok(),
+            _ => true,
+        };
+        releasable && ResourceOperationKey::new(self.derived_operation_key()).is_ok()
+    }
+
+    /// The operation key of this completion operation.
+    ///
+    /// It is derived from the identities the operation names. When they do
+    /// not form a valid key, the key is `resource:completion:invalid:{digest}`
+    /// over what would have been derived. Such an operation is refused, as is
+    /// every operation for which [`Self::has_canonical_operation_key`] is
+    /// false, so the refusal is recorded like any other and nothing panics.
+    #[must_use]
+    pub fn operation_key(&self) -> ResourceOperationKey {
+        let derived = self.derived_operation_key();
+        ResourceOperationKey::new(derived.clone()).unwrap_or_else(|_| {
+            let digest = blake3::hash(derived.as_bytes()).to_hex();
+            ResourceOperationKey::new(format!(
+                "{RESOURCE_COMPLETION_OPERATION_KEY_PREFIX}invalid:{digest}"
             ))
-            .expect("completion IDs always produce a valid namespaced operation key"),
-            Self::Activate(value) => ResourceOperationKey::new(format!(
-                "resource:completion:activate:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::Abort(value) => ResourceOperationKey::new(format!(
-                "resource:completion:abort:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::Expire(value) => ResourceOperationKey::new(format!(
-                "resource:completion:expire:{}:{}",
-                value.at.as_minutes(),
-                value.current_boundary
-            ))
-            .expect("completion expiry always produces a valid namespaced operation key"),
-            Self::Release(value) => ResourceOperationKey::new(format!(
-                "resource:completion:release:{}:{}",
-                value.acquisition.as_str(),
-                value.grant.as_str()
-            ))
-            .expect("completion IDs always produce a valid namespaced operation key"),
-            Self::GrantExternalParticipant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-grant:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::PrepareExternalParticipant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-prepare:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::ConsumeExternalParticipant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-consume:{}",
-                value.certificate.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::CompleteExternalParticipant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-complete:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::ReleaseExternalParticipant(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-release:{}",
-                value.acquisition.as_str()
-            ))
-            .expect("completion ID always produces a valid namespaced operation key"),
-            Self::ExpireExternalParticipants(value) => ResourceOperationKey::new(format!(
-                "resource:completion:participant-expire:{}:{}",
-                value.at.as_minutes(),
-                value.current_boundary
-            ))
-            .expect("completion expiry always produces a valid namespaced operation key"),
-        }
+            .expect("a digest always forms a valid operation key")
+        })
     }
 }
 
@@ -520,6 +591,28 @@ impl ResourceOperationRequestV1 {
             Self::IssueAccessGrant(_) => ResourceOperationKind::IssueAccessGrant,
             Self::RevokeAccessGrant(_) => ResourceOperationKind::RevokeAccessGrant,
         }
+    }
+
+    /// The digest an outcome records as `request_digest` for this request
+    /// when it settles as a tracked command, an adapter packet, or a
+    /// completion operation. An operation key belongs to the first request
+    /// that settles under it: a host application compares this digest with
+    /// the outcome's to tell whether its request is the one that settled.
+    pub fn request_digest(&self) -> Result<String, ResourceError> {
+        canonical_digest("canwu.resource.operation-request.v1", self)
+    }
+
+    /// Whether this request names an operation key it may not use: a key
+    /// under [`RESOURCE_COMPLETION_OPERATION_KEY_PREFIX`] on a request that is
+    /// not a completion operation. Such a request is refused wherever it
+    /// enters and never settles.
+    #[must_use]
+    pub fn names_reserved_operation_key(&self) -> bool {
+        !matches!(self, Self::Completion(_))
+            && self
+                .operation_key()
+                .as_str()
+                .starts_with(RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
     }
 
     /// Transfer identities an outcome of this request must cite. Only an
@@ -656,6 +749,18 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Installs one protected-floor policy revision while a scenario is
+    /// built. The root holds at most
+    /// [`crate::MAX_PROTECTED_FLOOR_POLICY_REVISIONS`]. At runtime a custodian
+    /// installs a content-addressed revision with
+    /// [`ResourceProtectedFloorRequestV1::install`] instead.
+    ///
+    /// An authored revision stays in the root. A content-addressed one does
+    /// not stay for having been installed here: the first applied
+    /// `SetProtectedFloor` retires it unless an account or a demand refers to
+    /// it. An identity under
+    /// [`crate::PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX`] must be the one its
+    /// content derives.
     pub fn install_protected_floor_policy(
         &mut self,
         policy: ProtectedFloorPolicyRevision,
@@ -665,6 +770,22 @@ impl ResourceState {
         {
             return Err(ResourceError::InvalidDefinition(
                 "protected-floor policy is invalid or duplicated".to_owned(),
+            ));
+        }
+        if policy
+            .id
+            .as_str()
+            .starts_with(crate::PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX)
+            && !policy.is_content_addressed()
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "a protected-floor policy identity under the content prefix must be derived from its content"
+                    .to_owned(),
+            ));
+        }
+        if self.protected_floor_policies.len() >= crate::MAX_PROTECTED_FLOOR_POLICY_REVISIONS {
+            return Err(ResourceError::LimitExceeded(
+                "protected-floor policy revision capacity is exhausted".to_owned(),
             ));
         }
         self.protected_floor_policies
@@ -1239,13 +1360,28 @@ impl ResourceState {
             ResourceCompletionOperationV1::Prepare(request.clone()),
         );
         let request_digest = canonical_digest("canwu.resource.operation-request.v1", &operation)?;
-        self.apply_operation_with_context(
-            &operation,
-            request_digest,
-            None,
-            Some(external_targets_current),
-            None,
-        )
+        let refusal = (!external_targets_current).then(|| {
+            ResourceError::VersionConflict("completion prepare external target is stale".to_owned())
+        });
+        self.apply_operation_with_context(&operation, request_digest, None, refusal.as_ref(), None)
+    }
+
+    /// Applies one single-step lease that the plugin settles in a boundary.
+    /// `external_refusal` is what the plugin found against the simulation
+    /// view, which the detached state cannot read: a cited external record
+    /// version that is not current, an eligibility time that is not the
+    /// boundary time, or no room for the reserved reports. A refusal settles
+    /// as the operation's recorded rejection, like one the state finds.
+    pub(crate) fn apply_single_step_lease_with_external_validation(
+        &mut self,
+        request: &crate::SingleStepCompletionLeaseV1,
+        external_refusal: Option<&ResourceError>,
+    ) -> Result<ResourceOperationOutcome, ResourceError> {
+        let operation = ResourceOperationRequestV1::Completion(
+            ResourceCompletionOperationV1::SingleStepLease(request.clone()),
+        );
+        let request_digest = canonical_digest("canwu.resource.operation-request.v1", &operation)?;
+        self.apply_operation_with_context(&operation, request_digest, None, external_refusal, None)
     }
 
     /// Applies one requester-scoped allocation that the plugin settles in a
@@ -1270,14 +1406,26 @@ impl ResourceState {
         )
     }
 
+    /// `external_refusal` carries what the plugin established against the
+    /// simulation view for a `Prepare` or a `SingleStepLease`; see
+    /// [`Self::apply_prepare_with_external_revalidation`] and
+    /// [`Self::apply_single_step_lease_with_external_validation`].
     fn apply_operation_with_context(
         &mut self,
         request: &ResourceOperationRequestV1,
         request_digest: String,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
-        prepare_external_targets_current: Option<bool>,
+        external_refusal: Option<&ResourceError>,
         settled_at: Option<SimTime>,
     ) -> Result<ResourceOperationOutcome, ResourceError> {
+        // Not recorded: an outcome under the key would itself take it from
+        // the completion operation that derives it.
+        if request.names_reserved_operation_key() {
+            return Err(ResourceError::Authority(
+                "operation keys under `resource:completion:` are reserved for completion operations"
+                    .to_owned(),
+            ));
+        }
         let operation_key = request.operation_key();
         if let Some(existing) = self.outcomes.get(&operation_key) {
             if existing.request_digest == request_digest {
@@ -1288,10 +1436,15 @@ impl ResourceState {
             ));
         }
         let terminal_work_is_reserved = self.terminal_work_is_reserved(request);
+        // A single-step lease admits an acquisition exactly as `Acquire`
+        // does, so it reserves the same bounded terminal receipt path.
         let newly_reserved_outcomes = match request {
             ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
                 request,
             )) => usize::from(request.recipe.receipts),
+            ResourceOperationRequestV1::Completion(
+                ResourceCompletionOperationV1::SingleStepLease(request),
+            ) => usize::from(request.lease.recipe.receipts),
             ResourceOperationRequestV1::Completion(
                 ResourceCompletionOperationV1::GrantExternalParticipant(request),
             ) => usize::from(request.recipe.receipts),
@@ -1349,6 +1502,9 @@ impl ResourceState {
                 ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
                     request,
                 )) => usize::from(request.recipe.receipts),
+                ResourceOperationRequestV1::Completion(
+                    ResourceCompletionOperationV1::SingleStepLease(request),
+                ) => usize::from(request.lease.recipe.receipts),
                 _ => 0,
             };
             projected = projected
@@ -1362,12 +1518,7 @@ impl ResourceState {
             ));
         }
         let before = self.clone();
-        let applied = self.apply_inner(
-            request,
-            allocation_requester,
-            prepare_external_targets_current,
-            settled_at,
-        );
+        let applied = self.apply_inner(request, allocation_requester, external_refusal, settled_at);
         let (
             status,
             quantity,
@@ -1441,7 +1592,7 @@ impl ResourceState {
         &mut self,
         request: &ResourceOperationRequestV1,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
-        prepare_external_targets_current: Option<bool>,
+        external_refusal: Option<&ResourceError>,
         settled_at: Option<SimTime>,
     ) -> Result<AppliedOperation, ResourceError> {
         match request {
@@ -1472,7 +1623,7 @@ impl ResourceState {
                 })
             }
             ResourceOperationRequestV1::Completion(value) => {
-                self.apply_completion(value, prepare_external_targets_current)
+                self.apply_completion(value, external_refusal)
             }
             ResourceOperationRequestV1::RecordLoss(value) => self.record_account_loss(value),
             ResourceOperationRequestV1::BeginExchange(value) => {
@@ -1486,8 +1637,13 @@ impl ResourceState {
     fn apply_completion(
         &mut self,
         operation: &ResourceCompletionOperationV1,
-        prepare_external_targets_current: Option<bool>,
+        external_refusal: Option<&ResourceError>,
     ) -> Result<AppliedOperation, ResourceError> {
+        if !operation.has_canonical_operation_key() {
+            return Err(ResourceError::InvalidIdentifier(
+                "completion operation identities do not form a valid operation key".to_owned(),
+            ));
+        }
         if matches!(
             operation,
             ResourceCompletionOperationV1::GrantExternalParticipant(_)
@@ -1506,6 +1662,20 @@ impl ResourceState {
                     return Err(ResourceError::LimitExceeded(
                         "resource completion acquisition must reserve the full bounded terminal receipt path"
                             .to_owned(),
+                    ));
+                }
+                // A resend is answered by the outcome under this key. An
+                // acquisition the root already holds was therefore created
+                // by another operation, a single step, and is never resumed:
+                // the lease book would hand back a matching acquisition
+                // whatever its state.
+                if self
+                    .completion_leases
+                    .acquisitions
+                    .contains_key(&request.id)
+                {
+                    return Err(ResourceError::IdempotencyConflict(
+                        "completion lease acquisition already exists".to_owned(),
                     ));
                 }
                 let exact_evidence = request.eligibility_envelope.exact_evidence.clone();
@@ -1561,15 +1731,7 @@ impl ResourceState {
                             .target_versions;
                         self.validate_completion_locked_targets(targets)
                     })
-                    .and_then(|()| {
-                        if prepare_external_targets_current == Some(false) {
-                            Err(ResourceError::VersionConflict(
-                                "completion prepare external target is stale".to_owned(),
-                            ))
-                        } else {
-                            Ok(())
-                        }
-                    });
+                    .and_then(|()| external_refusal.map_or(Ok(()), |refusal| Err(refusal.clone())));
                 let grant = if exact.is_ok() {
                     self.completion_leases.prepare_capacity(request.clone())?
                 } else {
@@ -1673,6 +1835,20 @@ impl ResourceState {
                     Some(request.reason.clone()),
                     Vec::new(),
                     Some(ResourceRecordRefV1::Lease(request.acquisition.clone())),
+                )
+            }
+            ResourceCompletionOperationV1::SingleStepLease(request) => {
+                if let Some(refusal) = external_refusal {
+                    return Err(refusal.clone());
+                }
+                let certificate = self.lease_single_step(request)?;
+                (
+                    certificate.acquisition.clone(),
+                    Some(request.grant_id.clone()),
+                    CompletionLeaseReceiptActionV1::Activated,
+                    None,
+                    request.lease.eligibility_envelope.exact_evidence.clone(),
+                    Some(ResourceRecordRefV1::Lease(certificate.acquisition)),
                 )
             }
             ResourceCompletionOperationV1::GrantExternalParticipant(_)
@@ -1821,10 +1997,91 @@ impl ResourceState {
             | ResourceCompletionOperationV1::Activate(_)
             | ResourceCompletionOperationV1::Abort(_)
             | ResourceCompletionOperationV1::Expire(_)
-            | ResourceCompletionOperationV1::Release(_) => unreachable!(
+            | ResourceCompletionOperationV1::Release(_)
+            | ResourceCompletionOperationV1::SingleStepLease(_) => unreachable!(
                 "local completion operations are handled by the regular lease coordinator"
             ),
         }
+    }
+
+    /// Runs the acquire, grant, prepare, and activate steps of one lease
+    /// whose only participant is the resource plugin, each with the checks it
+    /// has as a separate operation. Any error leaves the caller to restore
+    /// the state it held before, so the lease exists whole or not at all.
+    fn lease_single_step(
+        &mut self,
+        request: &crate::SingleStepCompletionLeaseV1,
+    ) -> Result<CompletionLeaseActivationCertificateV1, ResourceError> {
+        let lease = &request.lease;
+        if lease.expected_participants.len() != 1
+            || !lease.expected_participants.contains(PLUGIN_NAME)
+        {
+            return Err(ResourceError::InvalidLifecycle(
+                "a single-step completion lease has the resource plugin as its only participant; a lease with another participant uses the acquire, grant, prepare, and activate operations"
+                    .to_owned(),
+            ));
+        }
+        if lease.recipe.receipts != crate::MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE {
+            return Err(ResourceError::LimitExceeded(
+                "resource completion acquisition must reserve the full bounded terminal receipt path"
+                    .to_owned(),
+            ));
+        }
+        // The four-step path resumes an acquisition or a grant that already
+        // exists. A single step never does: it creates both or is refused.
+        if self.completion_leases.acquisitions.contains_key(&lease.id)
+            || self
+                .completion_leases
+                .grants
+                .contains_key(&request.grant_id)
+        {
+            return Err(ResourceError::IdempotencyConflict(
+                "single-step completion lease names an acquisition or grant that already exists"
+                    .to_owned(),
+            ));
+        }
+        // Acquire.
+        let acquisition = self
+            .completion_leases
+            .request_acquisition(&self.run_budget, lease.clone())?;
+        self.reserve_completion_reports(&acquisition.id, &lease.holder, &lease.recipe)?;
+        // Grant.
+        self.validate_completion_locked_targets(&request.target_versions)?;
+        let grant = self.completion_leases.grant_capacity(
+            &self.run_budget,
+            crate::GrantCompletionCapacityV1 {
+                grant_id: request.grant_id.clone(),
+                acquisition: acquisition.id.clone(),
+                expected_acquisition_revision: acquisition.revision,
+                owner_plugin: PLUGIN_NAME.to_owned(),
+                target_versions: request.target_versions.clone(),
+                current_boundary: request.current_boundary,
+            },
+        )?;
+        // Prepare. The targets were validated above against this same state.
+        let granted_revision = self.completion_leases.acquisitions[&acquisition.id].revision;
+        let prepared =
+            self.completion_leases
+                .prepare_capacity(crate::PrepareCompletionCapacityV1 {
+                    acquisition: acquisition.id.clone(),
+                    expected_acquisition_revision: granted_revision,
+                    grant: grant.id.clone(),
+                    expected_grant_revision: grant.revision,
+                    current_boundary: request.current_boundary,
+                    eligibility_envelope_digest: lease.eligibility_envelope.digest.clone(),
+                })?;
+        if prepared.state != CompletionGrantStateV1::Prepared {
+            return Err(ResourceError::VersionConflict(format!(
+                "single-step completion lease could not prepare its grant: {}",
+                prepared.rejection.as_deref().unwrap_or("prepare_rejected")
+            )));
+        }
+        // Activate.
+        self.completion_leases.activate_single_owner(
+            &acquisition.id,
+            &prepared.id,
+            request.current_boundary,
+        )
     }
 
     fn create_account(
@@ -3182,16 +3439,61 @@ impl ResourceState {
         })
     }
 
+    /// Points the account at `request.policy`, first installing
+    /// `request.install` when the root does not hold it, then retires the
+    /// content-addressed revisions nothing refers to any more. Any error
+    /// leaves the caller to restore the state it held before.
     fn set_protected_floor(
         &mut self,
         request: &ResourceProtectedFloorRequestV1,
     ) -> Result<AppliedOperation, ResourceError> {
-        if let Some(policy) = &request.policy
-            && !self.protected_floor_policies.contains_key(policy)
-        {
-            return Err(ResourceError::NotFound(
-                "protected-floor policy revision is unavailable".to_owned(),
-            ));
+        if let Some(install) = &request.install {
+            if request.policy.as_ref() != Some(&install.id) {
+                return Err(ResourceError::InvalidDefinition(
+                    "protected-floor request must point the account at the revision it installs"
+                        .to_owned(),
+                ));
+            }
+            if !install.is_content_addressed() {
+                return Err(ResourceError::InvalidDefinition(
+                    "a protected-floor policy revision installed at runtime must be content-addressed"
+                        .to_owned(),
+                ));
+            }
+            // The identity commits to the content, so a revision the root
+            // already holds under it is this one. The comparison guards a
+            // root assembled by hand.
+            match self.protected_floor_policies.get(&install.id) {
+                Some(existing) if existing == install => {}
+                Some(_) => {
+                    return Err(ResourceError::IdempotencyConflict(
+                        "protected-floor policy revision identity is held with other content"
+                            .to_owned(),
+                    ));
+                }
+                None => {
+                    self.protected_floor_policies
+                        .insert(install.id.clone(), install.clone());
+                }
+            }
+        } else if let Some(policy) = &request.policy {
+            // Whether the root holds a content-addressed revision depends on
+            // what other accounts and demands refer to. Naming one by id
+            // alone would let a custodian test that, so it needs its body.
+            if policy
+                .as_str()
+                .starts_with(crate::PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX)
+            {
+                return Err(ResourceError::InvalidDefinition(
+                    "a content-addressed protected-floor policy revision is named with its body"
+                        .to_owned(),
+                ));
+            }
+            if !self.protected_floor_policies.contains_key(policy) {
+                return Err(ResourceError::NotFound(
+                    "protected-floor policy revision is unavailable".to_owned(),
+                ));
+            }
         }
         let account = self.accounts.get_mut(&request.account).ok_or_else(|| {
             ResourceError::NotFound("protected-floor account is unavailable".to_owned())
@@ -3203,12 +3505,71 @@ impl ResourceState {
         }
         account.protected_floor_policy.clone_from(&request.policy);
         account.revision = account.revision.next()?;
+        self.retire_unreferenced_protected_floor_policies();
+        // Checked after retirement, so replacing a floor at the bound frees
+        // the revision it replaces before the new one is counted.
+        if self.protected_floor_policies.len() > crate::MAX_PROTECTED_FLOOR_POLICY_REVISIONS {
+            return Err(ResourceError::LimitExceeded(
+                "protected-floor policy revision capacity is exhausted".to_owned(),
+            ));
+        }
         Ok(AppliedOperation {
             quantity: self.account_quantities(&request.account)?.protected,
             remainder: 0,
             result_ref: None,
             exact_evidence: Vec::new(),
         })
+    }
+
+    /// Removes every content-addressed protected-floor policy revision that
+    /// no account and no demand in the root refers to.
+    ///
+    /// Only a content-addressed revision is retired: its identity commits to
+    /// its content, so an archived record that names it stays exact and the
+    /// same body installs it again. An authored revision stays, referenced or
+    /// not. A demand keeps the revision it cites until the demand leaves the
+    /// root, so a revision an archived demand released is retired by the next
+    /// floor change.
+    fn retire_unreferenced_protected_floor_policies(&mut self) {
+        // Identities are ordered, so the content-addressed ones are one
+        // contiguous range and authored revisions are never visited.
+        let prefix = crate::PROTECTED_FLOOR_POLICY_CONTENT_ID_PREFIX;
+        let Ok(first) = ProtectedFloorPolicyRevisionId::new(prefix) else {
+            return;
+        };
+        let candidates: Vec<_> = self
+            .protected_floor_policies
+            .range(first..)
+            .map(|(id, _)| id)
+            .take_while(|id| id.as_str().starts_with(prefix))
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let referenced: BTreeSet<_> = self
+            .accounts
+            .values()
+            .filter_map(|account| account.protected_floor_policy.as_ref())
+            .chain(
+                self.demands
+                    .values()
+                    .filter_map(|demand| demand.protected_floor_policy.as_ref()),
+            )
+            .collect();
+        let retired: Vec<_> = candidates
+            .into_iter()
+            .filter(|id| {
+                !referenced.contains(id)
+                    && self
+                        .protected_floor_policies
+                        .get(id)
+                        .is_some_and(ProtectedFloorPolicyRevision::is_content_addressed)
+            })
+            .collect();
+        for id in retired {
+            self.protected_floor_policies.remove(&id);
+        }
     }
 
     fn cancel_demand(
@@ -3585,9 +3946,10 @@ impl ResourceState {
                         .certificate(&request.completion_certificate.acquisition)
                         == Some(&request.completion_certificate)
             }
-            ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(_)) => {
-                false
-            }
+            ResourceOperationRequestV1::Completion(
+                ResourceCompletionOperationV1::Acquire(_)
+                | ResourceCompletionOperationV1::SingleStepLease(_),
+            ) => false,
             ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Grant(
                 request,
             )) => self
@@ -4525,6 +4887,7 @@ impl ResourceState {
             .count();
         if self.definitions.len() > self.limits.max_definitions
             || self.units.len() > self.limits.max_unit_revisions
+            || self.protected_floor_policies.len() > crate::MAX_PROTECTED_FLOOR_POLICY_REVISIONS
             || self.accounts.len() > self.limits.max_accounts
             || active_demands > self.limits.max_demands
             || active_reservations > self.limits.max_demands
