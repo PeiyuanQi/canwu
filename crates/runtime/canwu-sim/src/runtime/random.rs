@@ -7,6 +7,7 @@ use canwu_event::CauseRef;
 use canwu_time::SimTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 const STREAM_DERIVATION_DOMAIN: &[u8] = b"canwu.random-stream.v1";
 const OPERATION_DOMAIN: &[u8] = b"canwu.random.operation.v1";
@@ -145,6 +146,33 @@ pub struct RandomSample {
     pub value: u64,
 }
 
+/// An operation-keyed random draw: its sample and the ID of its draw
+/// evidence, as [`crate::SimulationView::random_draw_for_operation`] returns
+/// them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RandomOperationDraw {
+    /// ID of the [`RandomDrawRecord`] that holds this draw.
+    ///
+    /// For an address drawn at an earlier boundary it is the ID of that
+    /// draw, whether its record is still retained or has been sealed. For a
+    /// fresh draw it is the ID the draw's record has once the boundary
+    /// being settled commits. A boundary that fails commits neither the draw
+    /// nor anything its systems proposed, so the ID can only be
+    /// persisted together with the draw it names, and exact replay assigns
+    /// the same one.
+    ///
+    /// A fresh draw is not retained evidence until its boundary commits.
+    /// Its ID can be written into a record payload or an event at once, and
+    /// can be named among a record's identity-evidence dependencies. Until
+    /// the next boundary, though, `SimulationView::evidence_exists` is false
+    /// for it, a position the engine checks as evidence (a knowledge origin,
+    /// an evaluation-trace term, person provenance) refuses it, and it
+    /// cannot be the operation evidence of another operation-keyed draw.
+    pub draw_id: RandomDrawId,
+    /// The stream, address, bound, and value of the draw.
+    pub sample: RandomSample,
+}
+
 impl RandomDrawAddress {
     #[must_use]
     pub const fn sequential_position(&self) -> Option<u64> {
@@ -186,6 +214,9 @@ pub struct KeyedDrawReservation {
 
 #[derive(Clone, Debug)]
 pub(crate) struct PendingRandomDraw {
+    /// The ID an operation-keyed draw was handed out with, which its
+    /// boundary must commit it under. `None` for a sequential draw.
+    pub promised_id: Option<RandomDrawId>,
     pub stream: RandomStreamKey,
     pub address: RandomDrawAddress,
     pub operation_evidence: Option<EvidenceRef>,
@@ -196,18 +227,70 @@ pub(crate) struct PendingRandomDraw {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct KeyedDrawMemo {
+    pub draw_id: RandomDrawId,
     pub operation_evidence: EvidenceRef,
     pub upper_exclusive: u64,
     pub value: u64,
-    pub purpose_hash: String,
+    /// The V1 purpose hash as raw bytes. A keyed reservation persists the
+    /// same hash as lowercase hexadecimal; the memo is never persisted.
+    pub purpose_hash: [u8; 32],
 }
 
-pub(crate) type KeyedDrawIndex =
-    BTreeMap<(RandomStreamKey, RandomOperationAddressV1), KeyedDrawMemo>;
+type KeyedDrawKey = (RandomStreamKey, RandomOperationAddressV1);
+
+/// Every operation-keyed address the run has drawn, with what was drawn.
+///
+/// The index is derived: it equals [`keyed_draws_with_reservations`] of the
+/// retained draw journal and the keyed reservations of sealed draws. The
+/// runtime keeps it with its evidence, extends it when a boundary commits,
+/// and rebuilds it on restore, so settling a boundary does no work that grows
+/// with the number of addresses. It is a persistent map of shared entries: a
+/// copy shares structure with its source, and adding an address copies one
+/// path of the tree.
+///
+/// Work outside settlement still grows with every keyed draw the run has
+/// made: a checkpoint and a seal walk every keyed reservation, a fork copies
+/// the draw journal and the reservations, and a restore builds this index
+/// from all of them. The index holds one entry per address for the life of
+/// the runtime.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct KeyedDrawIndex {
+    entries: im::OrdMap<Arc<KeyedDrawKey>, Arc<KeyedDrawMemo>>,
+}
+
+impl KeyedDrawIndex {
+    fn get(&self, key: &KeyedDrawKey) -> Option<&KeyedDrawMemo> {
+        self.entries.get(key).map(Arc::as_ref)
+    }
+
+    /// Adds an address, or returns `false` and changes nothing when the
+    /// index already holds it.
+    fn insert_new(&mut self, key: KeyedDrawKey, memo: KeyedDrawMemo) -> bool {
+        if self.entries.contains_key(&key) {
+            return false;
+        }
+        self.entries.insert(Arc::new(key), Arc::new(memo));
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the two indexes are one tree in memory, which a copy is until
+    /// either side adds an address.
+    #[cfg(test)]
+    pub(crate) fn shares_root_with(&self, other: &Self) -> bool {
+        self.entries.ptr_eq(&other.entries)
+    }
+}
 
 pub(crate) struct RandomExecution {
     pub states: BTreeMap<RandomStreamKey, RandomStreamState>,
     pub draws: Vec<PendingRandomDraw>,
+    /// The index the session started from, with its own keyed draws added.
+    pub keyed: KeyedDrawIndex,
 }
 
 pub(crate) struct RandomSession {
@@ -216,6 +299,8 @@ pub(crate) struct RandomSession {
     root_seed: u64,
     producer_plugin: String,
     keyed: KeyedDrawIndex,
+    /// The ID the boundary gives this session's first draw.
+    first_draw_id: u64,
 }
 
 impl RandomSession {
@@ -244,8 +329,35 @@ impl RandomSession {
             draws: Vec::new(),
             root_seed,
             producer_plugin: producer_plugin.to_owned(),
+            // Shares structure with the caller's index; nothing is copied.
             keyed: keyed.clone(),
+            first_draw_id: 1,
         })
+    }
+
+    /// Sets the ID the boundary gives this session's first draw: its
+    /// next draw ID plus the draws its earlier systems already made. A
+    /// boundary commits its draws in the order its systems made them, so the
+    /// session can name the ID of each draw it makes.
+    pub(crate) fn with_first_draw_id(mut self, first_draw_id: u64) -> Self {
+        self.first_draw_id = first_draw_id;
+        self
+    }
+
+    /// The ID the boundary gives this session's next draw. The last
+    /// counter value is never an ID, as in `claim_counter`.
+    fn next_draw_id(&self) -> Result<RandomDrawId, CanwuError> {
+        u64::try_from(self.draws.len())
+            .ok()
+            .and_then(|made| self.first_draw_id.checked_add(made))
+            .filter(|id| *id != u64::MAX)
+            .map(RandomDrawId::new)
+            .ok_or_else(|| {
+                CanwuError::new(
+                    ErrorCode::IdentifierExhausted,
+                    "random draw ID space is exhausted",
+                )
+            })
     }
 
     pub(crate) fn range(
@@ -284,6 +396,7 @@ impl RandomSession {
         state.position = next_position;
         state.generator_state = generator.state();
         self.draws.push(PendingRandomDraw {
+            promised_id: None,
             stream: key.clone(),
             address: RandomDrawAddress::Sequential { position },
             operation_evidence: None,
@@ -307,7 +420,7 @@ impl RandomSession {
         upper_exclusive: u64,
         purpose: &str,
     ) -> Result<u64, CanwuError> {
-        self.sample_for_operation(
+        self.draw_for_operation(
             key,
             evidence,
             operation_kind,
@@ -316,12 +429,21 @@ impl RandomSession {
             draw_slot,
             upper_exclusive,
             purpose,
+            &|_| true,
         )
-        .map(|sample| sample.value)
+        .map(|draw| draw.sample.value)
     }
 
+    /// Answers an address the index holds from its entry, and draws a new
+    /// address.
+    ///
+    /// `fresh_evidence_available` says whether a reference may serve as the
+    /// operation evidence of a new draw. It is asked only for an address the
+    /// index does not hold: an exact retry is answered from its entry
+    /// whatever has since become of the evidence it was drawn with, so a run
+    /// whose evidence was sealed answers as its unsealed replay does.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn sample_for_operation(
+    pub(crate) fn draw_for_operation(
         &mut self,
         key: &RandomStreamKey,
         evidence: EvidenceRef,
@@ -331,7 +453,8 @@ impl RandomSession {
         draw_slot: u32,
         upper_exclusive: u64,
         purpose: &str,
-    ) -> Result<RandomSample, CanwuError> {
+        fresh_evidence_available: &dyn Fn(&EvidenceRef) -> bool,
+    ) -> Result<RandomOperationDraw, CanwuError> {
         if !self.states.contains_key(key) {
             return Err(CanwuError::new(
                 ErrorCode::UndeclaredRandomStream,
@@ -350,17 +473,20 @@ impl RandomSession {
         };
         validate_operation_inputs(key, &address, upper_exclusive, purpose)?;
         let index_key = (key.clone(), address.clone());
-        let purpose_hash = purpose_hash_hex_v1(purpose)?;
+        let purpose_hash = purpose_hash_v1(purpose)?;
         if let Some(existing) = self.keyed.get(&index_key) {
             if existing.operation_evidence == evidence
                 && existing.upper_exclusive == upper_exclusive
                 && existing.purpose_hash == purpose_hash
             {
-                return Ok(RandomSample {
-                    stream: key.clone(),
-                    address: RandomDrawAddress::OperationV1(address),
-                    upper_exclusive,
-                    value: existing.value,
+                return Ok(RandomOperationDraw {
+                    draw_id: existing.draw_id,
+                    sample: RandomSample {
+                        stream: key.clone(),
+                        address: RandomDrawAddress::OperationV1(address),
+                        upper_exclusive,
+                        value: existing.value,
+                    },
                 });
             }
             return Err(CanwuError::new(
@@ -368,15 +494,24 @@ impl RandomSession {
                 "operation-keyed random address was reused with different evidence, bound, or purpose",
             ));
         }
+        if !fresh_evidence_available(&evidence) {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidRandomOperationEvidence,
+                "operation-keyed random draw references unavailable evidence",
+            ));
+        }
         let value = operation_value_v1(self.root_seed, key, &address, upper_exclusive, purpose)?;
+        let draw_id = self.next_draw_id()?;
         let memo = KeyedDrawMemo {
+            draw_id,
             operation_evidence: evidence.clone(),
             upper_exclusive,
             value,
             purpose_hash,
         };
-        self.keyed.insert(index_key, memo);
+        self.keyed.insert_new(index_key, memo);
         self.draws.push(PendingRandomDraw {
+            promised_id: Some(draw_id),
             stream: key.clone(),
             address: RandomDrawAddress::OperationV1(address.clone()),
             operation_evidence: Some(evidence),
@@ -384,11 +519,14 @@ impl RandomSession {
             value,
             purpose: purpose.to_owned(),
         });
-        Ok(RandomSample {
-            stream: key.clone(),
-            address: RandomDrawAddress::OperationV1(address),
-            upper_exclusive,
-            value,
+        Ok(RandomOperationDraw {
+            draw_id,
+            sample: RandomSample {
+                stream: key.clone(),
+                address: RandomDrawAddress::OperationV1(address),
+                upper_exclusive,
+                value,
+            },
         })
     }
 
@@ -396,14 +534,17 @@ impl RandomSession {
         RandomExecution {
             states: self.states,
             draws: self.draws,
+            keyed: self.keyed,
         }
     }
 }
 
+/// Indexes the operation-keyed draws of a retained draw journal, refusing a
+/// malformed draw and an address drawn twice.
 pub(crate) fn retained_keyed_draws(
     draws: &[RandomDrawRecord],
 ) -> Result<KeyedDrawIndex, CanwuError> {
-    let mut index = BTreeMap::new();
+    let mut index = KeyedDrawIndex::default();
     for draw in draws {
         let RandomDrawAddress::OperationV1(address) = &draw.address else {
             continue;
@@ -417,12 +558,13 @@ pub(crate) fn retained_keyed_draws(
         validate_operation_inputs(&draw.stream, address, draw.upper_exclusive, &draw.purpose)?;
         let key = (draw.stream.clone(), address.clone());
         let memo = KeyedDrawMemo {
+            draw_id: draw.id,
             operation_evidence: evidence,
             upper_exclusive: draw.upper_exclusive,
             value: draw.value,
-            purpose_hash: purpose_hash_hex_v1(&draw.purpose)?,
+            purpose_hash: purpose_hash_v1(&draw.purpose)?,
         };
-        if index.insert(key, memo).is_some() {
+        if !index.insert_new(key, memo) {
             return Err(CanwuError::new(
                 ErrorCode::RandomOperationConflict,
                 "random journal contains a duplicate operation-keyed address",
@@ -432,6 +574,11 @@ pub(crate) fn retained_keyed_draws(
     Ok(index)
 }
 
+/// Builds the keyed-draw index from what a runtime holds: the retained draw
+/// journal and the keyed reservations of sealed draws. This is the definition
+/// the index kept in `RuntimeEvidence` must always equal, and what a restore
+/// rebuilds it with. It refuses a malformed draw or reservation and an
+/// address held twice.
 pub(crate) fn keyed_draws_with_reservations(
     draws: &[RandomDrawRecord],
     reservations: &[KeyedDrawReservation],
@@ -455,14 +602,22 @@ pub(crate) fn keyed_draws_with_reservations(
                 "keyed draw reservation has an invalid purpose hash or draw receipt",
             ));
         }
+        // The check above admits only 64 lowercase hexadecimal digits.
+        let purpose_hash = blake3::Hash::from_hex(&reservation.purpose_hash).map_err(|_| {
+            CanwuError::new(
+                ErrorCode::InvalidRandomDraw,
+                "keyed draw reservation has an invalid purpose hash or draw receipt",
+            )
+        })?;
         let key = (reservation.stream.clone(), reservation.address.clone());
         let memo = KeyedDrawMemo {
+            draw_id: reservation.draw_id,
             operation_evidence: reservation.operation_evidence.clone(),
             upper_exclusive: reservation.upper_exclusive,
             value: reservation.result,
-            purpose_hash: reservation.purpose_hash.clone(),
+            purpose_hash: *purpose_hash.as_bytes(),
         };
-        if index.insert(key, memo).is_some() {
+        if !index.insert_new(key, memo) {
             return Err(CanwuError::new(
                 ErrorCode::RandomOperationConflict,
                 "keyed draw reservation overlaps retained or reserved evidence",
@@ -470,39 +625,6 @@ pub(crate) fn keyed_draws_with_reservations(
         }
     }
     Ok(index)
-}
-
-pub(crate) fn extend_keyed_draws(
-    index: &mut KeyedDrawIndex,
-    draws: &[PendingRandomDraw],
-) -> Result<(), CanwuError> {
-    for draw in draws {
-        let RandomDrawAddress::OperationV1(address) = &draw.address else {
-            continue;
-        };
-        let evidence = draw.operation_evidence.clone().ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidRandomDraw,
-                "pending operation-keyed draw is missing evidence",
-            )
-        })?;
-        let memo = KeyedDrawMemo {
-            operation_evidence: evidence,
-            upper_exclusive: draw.upper_exclusive,
-            value: draw.value,
-            purpose_hash: purpose_hash_hex_v1(&draw.purpose)?,
-        };
-        if index
-            .insert((draw.stream.clone(), address.clone()), memo)
-            .is_some()
-        {
-            return Err(CanwuError::new(
-                ErrorCode::RandomOperationConflict,
-                "pending random execution duplicated an operation-keyed address",
-            ));
-        }
-    }
-    Ok(())
 }
 
 pub(crate) fn validate_operation_draw(
@@ -932,7 +1054,7 @@ mod tests {
             std::slice::from_ref(&stream),
             41,
             "fixture-random",
-            &BTreeMap::new(),
+            &KeyedDrawIndex::default(),
         )
         .expect("session should initialize");
         let evidence = EvidenceRef::Ingress(canwu_core::IngressId::new(2));
@@ -1002,7 +1124,7 @@ mod tests {
                 std::slice::from_ref(&stream),
                 91,
                 "fixture-random",
-                &BTreeMap::new(),
+                &KeyedDrawIndex::default(),
             )
             .expect("session should initialize");
             if include_unrelated {
@@ -1092,7 +1214,7 @@ mod tests {
             std::slice::from_ref(&stream),
             root_seed,
             "fixture-random",
-            &BTreeMap::new(),
+            &KeyedDrawIndex::default(),
         )
         .expect("session should initialize");
         let value = session

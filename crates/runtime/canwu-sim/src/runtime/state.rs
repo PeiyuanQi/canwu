@@ -31,6 +31,13 @@ pub(super) struct RuntimeEvidence {
     pub(super) archived_segment_headers: Vec<ArchivedSegmentHeader>,
     pub(super) archived_evidence_receipts: BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
     pub(super) keyed_draw_reservations: Vec<KeyedDrawReservation>,
+    /// Derived index of every operation-keyed address in `random_draws` and
+    /// `keyed_draw_reservations`. Extended when a boundary commits its draws,
+    /// restored with a failed boundary, unchanged by a seal (the reservation
+    /// of a sealed draw records what its draw record did), and rebuilt on
+    /// restore. It is never persisted or committed. Only boundary systems
+    /// make keyed draws, so no other transaction changes it.
+    pub(super) keyed_draws: super::random::KeyedDrawIndex,
 }
 
 #[derive(Clone)]
@@ -90,6 +97,21 @@ impl RuntimeEvidence {
         self.random_draws
             .get(index)
             .filter(|record| record.id == id)
+    }
+
+    /// Rebuilds the keyed-draw index from the retained draws and the keyed
+    /// reservations, which is everything a restore holds of it. Every restore
+    /// path must call this after it has set both. A malformed draw or
+    /// reservation, or an address held twice, is an invalid snapshot.
+    pub(super) fn rebuild_keyed_draws(&mut self) -> Result<(), CanwuError> {
+        self.keyed_draws = super::random::keyed_draws_with_reservations(
+            &self.random_draws,
+            &self.keyed_draw_reservations,
+        )
+        .map_err(|error| {
+            super::invalid_snapshot_error(format!("invalid operation-keyed random index: {error}"))
+        })?;
+        Ok(())
     }
 
     pub(super) fn boundary_head_hash(&self) -> Option<&str> {

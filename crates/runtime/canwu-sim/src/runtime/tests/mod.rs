@@ -2550,6 +2550,7 @@ fn run_keyed_fixture(operations: &[&str]) -> (BTreeMap<String, u64>, u64, Simula
 
 mod core;
 mod ingress;
+mod keyed_draw_index;
 mod knowledge;
 mod persistence_contracts;
 mod plugins;

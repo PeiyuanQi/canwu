@@ -1772,6 +1772,12 @@ pub struct CompactedSimulation {
 }
 
 impl CompactedSimulation {
+    /// The wrapped runtime, for in-crate tests of derived runtime state.
+    #[cfg(test)]
+    pub(super) const fn runtime(&self) -> &Simulation {
+        &self.simulation
+    }
+
     /// Returns the monotonic cut through sealed and retained evidence.
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
@@ -1917,7 +1923,7 @@ impl CompactedSimulation {
         match self.simulation.seal_retained_evidence() {
             Ok(segment) => Ok(segment),
             Err(error) => {
-                self.simulation = before;
+                self.simulation.restore_from_fork(before);
                 Err(error)
             }
         }
@@ -2044,7 +2050,7 @@ impl CompactedSimulation {
             Ok(())
         })();
         if let Err(error) = result {
-            self.simulation = before;
+            self.simulation.restore_from_fork(before);
             return Err(error);
         }
         self.committed_seal_tokens.insert(token.token_hash.clone());
@@ -2332,6 +2338,23 @@ impl CompactedSimulation {
         request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.simulation.settle_boundary(request)
+    }
+
+    /// See [`Simulation::set_boundary_profiling`]. Sealing evidence neither
+    /// changes the setting nor drops profiles that were not taken yet.
+    pub fn set_boundary_profiling(&mut self, enabled: bool) {
+        self.simulation.set_boundary_profiling(enabled);
+    }
+
+    /// See [`Simulation::boundary_profiling`].
+    #[must_use]
+    pub const fn boundary_profiling(&self) -> bool {
+        self.simulation.boundary_profiling()
+    }
+
+    /// See [`Simulation::take_boundary_profiles`].
+    pub fn take_boundary_profiles(&mut self) -> super::BoundaryProfileBatch {
+        self.simulation.take_boundary_profiles()
     }
 
     /// Reconstructs a validated full snapshot from the supplied sealed prefix

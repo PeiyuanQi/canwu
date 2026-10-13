@@ -1327,7 +1327,12 @@ impl Simulation {
             expected_revision: admission.expected_revision,
             expected_time: envelope.expected_time,
         };
-        let prepared = match self.prepare_command(&envelope, &context) {
+        // `prepare_command` borrows the runtime immutably, so the recorder of
+        // a profiled boundary is lent to it for the call.
+        let mut recorder = self.boundary_profiler.lend_recorder();
+        let prepared = self.prepare_command(&envelope, &context, recorder.as_mut());
+        self.boundary_profiler.return_recorder(recorder);
+        let prepared = match prepared {
             Ok(prepared) => prepared,
             Err(error) if is_expected_command_rejection(&error.code) && record_attempt => {
                 return self.record_command_rejection(attempt_id, admission, envelope, error);

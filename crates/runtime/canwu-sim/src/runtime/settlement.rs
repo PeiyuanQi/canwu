@@ -38,6 +38,20 @@ impl Simulation {
 
     pub(super) fn settle_boundary_with_state_hash_format(
         &mut self,
+        request: BoundaryRequest,
+        state_hash_format: BoundaryStateHashFormat,
+    ) -> Result<BoundaryReceipt, CanwuError> {
+        // Times the boundary when the host turned profiling on. The readings
+        // stay in the profiler; settlement never branches on them, and a
+        // boundary that fails leaves none.
+        self.boundary_profiler.begin();
+        let result = self.settle_boundary_transaction(request, state_hash_format);
+        self.boundary_profiler.end(result.as_ref().ok());
+        result
+    }
+
+    fn settle_boundary_transaction(
+        &mut self,
         mut request: BoundaryRequest,
         state_hash_format: BoundaryStateHashFormat,
     ) -> Result<BoundaryReceipt, CanwuError> {
@@ -277,10 +291,11 @@ impl Simulation {
         let mut requests = Vec::new();
         let mut random_overlay = boundary_snapshot.random_streams.clone();
         let mut pending_random_draws = Vec::new();
-        let mut keyed_random_draws = random::keyed_draws_with_reservations(
-            &self.state.evidence.random_draws,
-            &self.state.evidence.keyed_draw_reservations,
-        )?;
+        // The working copy of the keyed-draw index for this boundary: it
+        // shares structure with the committed index, gains the draws of each
+        // system in turn, and replaces the committed index when the draws
+        // commit.
+        let mut keyed_random_draws = self.state.evidence.keyed_draws.clone();
         let mut visible_overlay = BTreeMap::new();
         let mut candidate_overlay = BTreeMap::new();
         let mut visible_record_overlay = BTreeMap::new();
@@ -385,13 +400,21 @@ impl Simulation {
                 } else {
                     (&self.state.current, self.state.scheduler.now)
                 };
+                // Nothing claims a draw ID between here and the commit
+                // of the draws of this boundary, which follow in the order
+                // they were made.
+                let first_draw_id = u64::try_from(pending_random_draws.len())
+                    .ok()
+                    .and_then(|made| self.state.counters.next_random_draw_id.checked_add(made))
+                    .unwrap_or(u64::MAX);
                 let random_session = random::RandomSession::new(
                     &random_overlay,
                     &registered.contract.random_streams,
                     boundary_snapshot.root_seed,
                     &registered.plugin,
                     &keyed_random_draws,
-                )?;
+                )?
+                .with_first_draw_id(first_draw_id);
                 let proposal_evidence = proposal_evidence_refs(boundary_id, &evidence);
                 let view = SimulationView {
                     state: SimulationViewState::Boundary {
@@ -437,17 +460,25 @@ impl Simulation {
                         .map(|emission| emission.event)
                         .collect(),
                 };
-                let proposal =
-                    catch_unwind(AssertUnwindSafe(|| (registered.handler)(&view, &context)))
-                        .map_err(|_| {
-                            CanwuError::new(
-                                ErrorCode::PluginPanicked,
-                                format!(
-                                    "boundary system {}.{} panicked",
-                                    registered.plugin, registered.contract.name
-                                ),
-                            )
-                        })??;
+                let handler_started = self.boundary_profiler.handler_started();
+                let outcome =
+                    catch_unwind(AssertUnwindSafe(|| (registered.handler)(&view, &context)));
+                self.boundary_profiler.record_handler(
+                    handler_started,
+                    super::BoundaryHandlerKind::BoundarySystem,
+                    Some(phase),
+                    &registered.plugin,
+                    &registered.contract.name,
+                );
+                let proposal = outcome.map_err(|_| {
+                    CanwuError::new(
+                        ErrorCode::PluginPanicked,
+                        format!(
+                            "boundary system {}.{} panicked",
+                            registered.plugin, registered.contract.name
+                        ),
+                    )
+                })??;
                 let random_execution = view
                     .finish_random_session()
                     .expect("boundary views always have a random session");
@@ -484,7 +515,7 @@ impl Simulation {
                     &registered.contract.name,
                     &proposal.directives,
                 )?;
-                random::extend_keyed_draws(&mut keyed_random_draws, &random_execution.draws)?;
+                keyed_random_draws = random_execution.keyed;
                 random_overlay.extend(random_execution.states);
                 pending_random_draws.extend(random_execution.draws.into_iter().map(|draw| {
                     PendingBoundaryRandomDraw {
@@ -730,6 +761,7 @@ impl Simulation {
             pending_random_draws,
             random_outcomes,
         )?;
+        self.state.evidence.keyed_draws = keyed_random_draws;
         self.materialize_boundary_random_decisions(
             boundary_id,
             &random_decisions,

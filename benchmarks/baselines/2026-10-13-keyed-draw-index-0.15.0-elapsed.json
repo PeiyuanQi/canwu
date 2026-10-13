@@ -1,0 +1,1163 @@
+{
+  "benchmark": "canwu-keyed-draw-retention",
+  "engine_version": "0.14.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "machine": "Ryzen-7-7800X3D-32GB-Windows",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "boundary_samples": 31,
+    "due_systems": [
+      1,
+      8,
+      32
+    ],
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "fresh_keyed_draws_per_system": 1,
+    "keyed_draws_per_filling_boundary": 1000,
+    "live_boundary": "one Daily boundary on a fork of the run, after one unmeasured boundary on that fork",
+    "restore_samples": 3,
+    "run_heap_bytes": "allocation build only: bytes allocated while building the run and still held by it",
+    "sealed_boundary": "one Daily boundary on the sealed run; before each sample the evidence is sealed again and one unmeasured boundary settles",
+    "snapshot_restore": "Canwu::from_snapshot_json_with_plugins of the run's snapshot JSON",
+    "warmup_iterations": 3
+  },
+  "metric_mode": "elapsed",
+  "recorded_on": "2026-10-13",
+  "scales": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            46100,
+            46100,
+            45800,
+            45700,
+            45600,
+            47000,
+            45100,
+            45500,
+            44900,
+            48300,
+            45100,
+            54900,
+            44700,
+            44300,
+            44200,
+            44300,
+            44100,
+            44600,
+            44500,
+            44300,
+            43600,
+            44600,
+            44300,
+            45300,
+            44900,
+            50000,
+            44700,
+            45000,
+            43800,
+            43900,
+            44300
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 54900,
+            "elapsed_ns_median": 44900,
+            "elapsed_ns_min": 43600,
+            "elapsed_ns_p95": 50000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1026600,
+            454400,
+            435100
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 1026600,
+            "elapsed_ns_median": 454400,
+            "elapsed_ns_min": 435100,
+            "elapsed_ns_p95": 1026600
+          }
+        }
+      ],
+      "due_systems": 1,
+      "retained_keyed_draws": 0
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            49800,
+            49800,
+            49400,
+            49400,
+            49900,
+            49100,
+            48400,
+            60900,
+            49100,
+            48900,
+            48800,
+            48700,
+            49200,
+            48300,
+            48800,
+            49400,
+            49800,
+            48800,
+            48700,
+            49000,
+            49000,
+            48300,
+            49400,
+            48200,
+            48700,
+            49300,
+            48900,
+            48400,
+            49100,
+            48700,
+            48900
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 60900,
+            "elapsed_ns_median": 49000,
+            "elapsed_ns_min": 48200,
+            "elapsed_ns_p95": 49900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            56176300,
+            45422600,
+            50555500
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 56176300,
+            "elapsed_ns_median": 50555500,
+            "elapsed_ns_min": 45422600,
+            "elapsed_ns_p95": 56176300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            66800,
+            49800,
+            48200,
+            49000,
+            49800,
+            49400,
+            49200,
+            48500,
+            87500,
+            49600,
+            49600,
+            50900,
+            50000,
+            52100,
+            49600,
+            45900,
+            54400,
+            84600,
+            73700,
+            42900,
+            34500,
+            34000,
+            33900,
+            52200,
+            35600,
+            34500,
+            50000,
+            37300,
+            34300,
+            47800,
+            50300
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 87500,
+            "elapsed_ns_median": 49600,
+            "elapsed_ns_min": 33900,
+            "elapsed_ns_p95": 84600
+          }
+        }
+      ],
+      "due_systems": 1,
+      "retained_keyed_draws": 1000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            57700,
+            58700,
+            64200,
+            59800,
+            60100,
+            61000,
+            58800,
+            58800,
+            58900,
+            56000,
+            66300,
+            61600,
+            60900,
+            60500,
+            45100,
+            41000,
+            42600,
+            63900,
+            60900,
+            61300,
+            56700,
+            58600,
+            59200,
+            67600,
+            68500,
+            60600,
+            63800,
+            53500,
+            49600,
+            43400,
+            39900
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 68500,
+            "elapsed_ns_median": 59200,
+            "elapsed_ns_min": 39900,
+            "elapsed_ns_p95": 67600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            475766800,
+            470030700,
+            486595300
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 486595300,
+            "elapsed_ns_median": 475766800,
+            "elapsed_ns_min": 470030700,
+            "elapsed_ns_p95": 486595300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            62800,
+            59300,
+            56500,
+            41300,
+            57600,
+            58200,
+            57000,
+            59400,
+            46300,
+            47200,
+            67800,
+            64000,
+            58300,
+            61500,
+            56600,
+            44000,
+            40700,
+            49700,
+            39700,
+            43300,
+            40600,
+            42700,
+            59200,
+            57400,
+            60200,
+            43800,
+            40900,
+            76800,
+            64500,
+            59900,
+            55100
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 76800,
+            "elapsed_ns_median": 57000,
+            "elapsed_ns_min": 39700,
+            "elapsed_ns_p95": 67800
+          }
+        }
+      ],
+      "due_systems": 1,
+      "retained_keyed_draws": 10000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            91200,
+            97400,
+            94500,
+            59000,
+            92800,
+            88400,
+            66400,
+            94900,
+            86900,
+            94600,
+            87400,
+            73500,
+            82800,
+            92800,
+            97800,
+            76000,
+            84500,
+            83400,
+            84900,
+            84500,
+            92100,
+            102200,
+            91500,
+            88600,
+            94600,
+            73800,
+            88900,
+            88600,
+            84900,
+            85400,
+            78100
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 102200,
+            "elapsed_ns_median": 88400,
+            "elapsed_ns_min": 59000,
+            "elapsed_ns_p95": 97800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            5142544400,
+            5120838800,
+            5032062600
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 5142544400,
+            "elapsed_ns_median": 5120838800,
+            "elapsed_ns_min": 5032062600,
+            "elapsed_ns_p95": 5142544400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            42600,
+            43300,
+            43200,
+            44300,
+            64400,
+            42800,
+            43600,
+            50300,
+            48700,
+            50500,
+            44300,
+            47300,
+            64100,
+            43000,
+            59000,
+            46000,
+            55300,
+            42100,
+            42700,
+            42800,
+            43100,
+            43400,
+            57600,
+            43300,
+            42600,
+            41900,
+            42900,
+            42800,
+            44000,
+            60800,
+            44900
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 64400,
+            "elapsed_ns_median": 43600,
+            "elapsed_ns_min": 41900,
+            "elapsed_ns_p95": 64100
+          }
+        }
+      ],
+      "due_systems": 1,
+      "retained_keyed_draws": 100000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            73100,
+            73000,
+            76600,
+            72700,
+            73800,
+            72000,
+            72200,
+            72600,
+            72300,
+            78400,
+            72500,
+            72700,
+            72800,
+            72500,
+            72500,
+            72700,
+            72600,
+            72800,
+            72700,
+            73700,
+            72900,
+            72500,
+            72600,
+            74400,
+            72300,
+            75600,
+            72000,
+            71500,
+            71600,
+            71800,
+            71800
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 78400,
+            "elapsed_ns_median": 72600,
+            "elapsed_ns_min": 71500,
+            "elapsed_ns_p95": 76600
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            527000,
+            412800,
+            409900
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 527000,
+            "elapsed_ns_median": 412800,
+            "elapsed_ns_min": 409900,
+            "elapsed_ns_p95": 527000
+          }
+        }
+      ],
+      "due_systems": 8,
+      "retained_keyed_draws": 0
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            85200,
+            84600,
+            85400,
+            89500,
+            84900,
+            84500,
+            85100,
+            84600,
+            84900,
+            85200,
+            85000,
+            97100,
+            83800,
+            84400,
+            85400,
+            84600,
+            85000,
+            84300,
+            88700,
+            85100,
+            89700,
+            84600,
+            83600,
+            96700,
+            83700,
+            84100,
+            88900,
+            84100,
+            84200,
+            84100,
+            88400
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 97100,
+            "elapsed_ns_median": 84900,
+            "elapsed_ns_min": 83600,
+            "elapsed_ns_p95": 96700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            29459000,
+            21436100,
+            20357200
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 29459000,
+            "elapsed_ns_median": 21436100,
+            "elapsed_ns_min": 20357200,
+            "elapsed_ns_p95": 29459000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            123200,
+            93000,
+            93600,
+            89600,
+            89600,
+            89900,
+            89800,
+            88700,
+            90600,
+            89300,
+            96800,
+            90100,
+            92900,
+            90600,
+            91100,
+            92700,
+            90600,
+            91300,
+            132700,
+            92600,
+            91800,
+            100300,
+            93800,
+            94400,
+            93900,
+            91800,
+            94300,
+            94300,
+            158300,
+            141800,
+            104700
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 158300,
+            "elapsed_ns_median": 92700,
+            "elapsed_ns_min": 88700,
+            "elapsed_ns_p95": 141800
+          }
+        }
+      ],
+      "due_systems": 8,
+      "retained_keyed_draws": 1000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            100900,
+            98900,
+            101400,
+            98400,
+            98000,
+            98900,
+            105600,
+            143500,
+            140800,
+            104600,
+            111600,
+            131000,
+            105500,
+            99800,
+            164500,
+            145400,
+            103700,
+            102800,
+            102200,
+            105700,
+            99000,
+            97300,
+            100000,
+            97800,
+            97900,
+            98100,
+            98700,
+            97800,
+            99900,
+            135000,
+            101400
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 164500,
+            "elapsed_ns_median": 101400,
+            "elapsed_ns_min": 97300,
+            "elapsed_ns_p95": 145400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            388810400,
+            366141900,
+            357254800
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 388810400,
+            "elapsed_ns_median": 366141900,
+            "elapsed_ns_min": 357254800,
+            "elapsed_ns_p95": 388810400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            150100,
+            96500,
+            96300,
+            98400,
+            98400,
+            99200,
+            100600,
+            148100,
+            104000,
+            133500,
+            103700,
+            99000,
+            103000,
+            102600,
+            105600,
+            104000,
+            103700,
+            150500,
+            107700,
+            100200,
+            102300,
+            102700,
+            105600,
+            103600,
+            103900,
+            127700,
+            102800,
+            100200,
+            110700,
+            100900,
+            109000
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 150500,
+            "elapsed_ns_median": 103600,
+            "elapsed_ns_min": 96300,
+            "elapsed_ns_p95": 150100
+          }
+        }
+      ],
+      "due_systems": 8,
+      "retained_keyed_draws": 10000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            144100,
+            169600,
+            120500,
+            181100,
+            136500,
+            161700,
+            174900,
+            174400,
+            153500,
+            240300,
+            165300,
+            141800,
+            136300,
+            132300,
+            135100,
+            141900,
+            147100,
+            178400,
+            171400,
+            132900,
+            131900,
+            134400,
+            132000,
+            191500,
+            148300,
+            163600,
+            145900,
+            147000,
+            168300,
+            146800,
+            185900
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 240300,
+            "elapsed_ns_median": 147100,
+            "elapsed_ns_min": 120500,
+            "elapsed_ns_p95": 191500
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4930251700,
+            4746607600,
+            4607136400
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 4930251700,
+            "elapsed_ns_median": 4746607600,
+            "elapsed_ns_min": 4607136400,
+            "elapsed_ns_p95": 4930251700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            120100,
+            111900,
+            128100,
+            116000,
+            118700,
+            161300,
+            155800,
+            121800,
+            121100,
+            132200,
+            122100,
+            116900,
+            128500,
+            118900,
+            122000,
+            192000,
+            116900,
+            172300,
+            118300,
+            118000,
+            117900,
+            149300,
+            134000,
+            118600,
+            116800,
+            122200,
+            119400,
+            119300,
+            131700,
+            118400,
+            123800
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 192000,
+            "elapsed_ns_median": 121100,
+            "elapsed_ns_min": 111900,
+            "elapsed_ns_p95": 172300
+          }
+        }
+      ],
+      "due_systems": 8,
+      "retained_keyed_draws": 100000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            237400,
+            237500,
+            234900,
+            232300,
+            233500,
+            233100,
+            233800,
+            234100,
+            233300,
+            234300,
+            233500,
+            236800,
+            234300,
+            241100,
+            235200,
+            234100,
+            233400,
+            234800,
+            233700,
+            234400,
+            234600,
+            234200,
+            241300,
+            235300,
+            233500,
+            232900,
+            234300,
+            234700,
+            235000,
+            235100,
+            234300
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 241300,
+            "elapsed_ns_median": 234300,
+            "elapsed_ns_min": 232300,
+            "elapsed_ns_p95": 241100
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            1338100,
+            1253400,
+            1326700
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 1338100,
+            "elapsed_ns_median": 1326700,
+            "elapsed_ns_min": 1253400,
+            "elapsed_ns_p95": 1338100
+          }
+        }
+      ],
+      "due_systems": 32,
+      "retained_keyed_draws": 0
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            272300,
+            274800,
+            271500,
+            272400,
+            269100,
+            277800,
+            266500,
+            271800,
+            265800,
+            271800,
+            267500,
+            271100,
+            266300,
+            271500,
+            268400,
+            271800,
+            268100,
+            267600,
+            294600,
+            269100,
+            265600,
+            267200,
+            266100,
+            273100,
+            266600,
+            272300,
+            264700,
+            276500,
+            265300,
+            271700,
+            266800
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 294600,
+            "elapsed_ns_median": 269100,
+            "elapsed_ns_min": 264700,
+            "elapsed_ns_p95": 277800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            39573300,
+            24557700,
+            32291500
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 39573300,
+            "elapsed_ns_median": 32291500,
+            "elapsed_ns_min": 24557700,
+            "elapsed_ns_p95": 39573300
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            288200,
+            283400,
+            292200,
+            286500,
+            288600,
+            283900,
+            291400,
+            294600,
+            290000,
+            291900,
+            297400,
+            294800,
+            307500,
+            299600,
+            295200,
+            301500,
+            468500,
+            313700,
+            321000,
+            315000,
+            307900,
+            311100,
+            313400,
+            312100,
+            302000,
+            304100,
+            450600,
+            397500,
+            351500,
+            317100,
+            332300
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 468500,
+            "elapsed_ns_median": 302000,
+            "elapsed_ns_min": 283400,
+            "elapsed_ns_p95": 450600
+          }
+        }
+      ],
+      "due_systems": 32,
+      "retained_keyed_draws": 1000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            324100,
+            310400,
+            313300,
+            347100,
+            310900,
+            333000,
+            309100,
+            313100,
+            321900,
+            315800,
+            318900,
+            328600,
+            315300,
+            393400,
+            322400,
+            310000,
+            321100,
+            319100,
+            313800,
+            318400,
+            318600,
+            315600,
+            339500,
+            316500,
+            312400,
+            330300,
+            315000,
+            332400,
+            309300,
+            507500,
+            324400
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 507500,
+            "elapsed_ns_median": 318600,
+            "elapsed_ns_min": 309100,
+            "elapsed_ns_p95": 393400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            424894700,
+            394068200,
+            372661100
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 424894700,
+            "elapsed_ns_median": 394068200,
+            "elapsed_ns_min": 372661100,
+            "elapsed_ns_p95": 424894700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            325000,
+            324700,
+            325700,
+            332900,
+            478700,
+            331400,
+            322900,
+            333100,
+            359600,
+            338300,
+            367000,
+            331700,
+            360700,
+            327000,
+            335600,
+            363400,
+            359800,
+            543300,
+            367400,
+            381600,
+            350500,
+            520500,
+            350200,
+            342600,
+            333800,
+            358500,
+            537700,
+            440400,
+            373700,
+            392500,
+            368700
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 543300,
+            "elapsed_ns_median": 358500,
+            "elapsed_ns_min": 322900,
+            "elapsed_ns_p95": 537700
+          }
+        }
+      ],
+      "due_systems": 32,
+      "retained_keyed_draws": 10000
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            384200,
+            374500,
+            521700,
+            396100,
+            376000,
+            393800,
+            385100,
+            395800,
+            379800,
+            377900,
+            378500,
+            370100,
+            399700,
+            437500,
+            363700,
+            370600,
+            513800,
+            393200,
+            428100,
+            434300,
+            380400,
+            379000,
+            368200,
+            444700,
+            357400,
+            391700,
+            412000,
+            372500,
+            452600,
+            395100,
+            430300
+          ],
+          "name": "live_boundary",
+          "summary": {
+            "elapsed_ns_max": 521700,
+            "elapsed_ns_median": 391700,
+            "elapsed_ns_min": 357400,
+            "elapsed_ns_p95": 513800
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            4524565400,
+            5570175900,
+            5946235400
+          ],
+          "name": "snapshot_restore",
+          "summary": {
+            "elapsed_ns_max": 5946235400,
+            "elapsed_ns_median": 5570175900,
+            "elapsed_ns_min": 4524565400,
+            "elapsed_ns_p95": 5946235400
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            523400,
+            380400,
+            724400,
+            512300,
+            384900,
+            682600,
+            430600,
+            379100,
+            365400,
+            536000,
+            518900,
+            518300,
+            544200,
+            512200,
+            591100,
+            529300,
+            412700,
+            546500,
+            381600,
+            378900,
+            388700,
+            381700,
+            393400,
+            391200,
+            382400,
+            400400,
+            394700,
+            394600,
+            392700,
+            413700,
+            370700
+          ],
+          "name": "sealed_boundary",
+          "summary": {
+            "elapsed_ns_max": 724400,
+            "elapsed_ns_median": 400400,
+            "elapsed_ns_min": 365400,
+            "elapsed_ns_p95": 682600
+          }
+        }
+      ],
+      "due_systems": 32,
+      "retained_keyed_draws": 100000
+    }
+  ],
+  "schema_version": 1,
+  "source": {
+    "content_hash": "54f5e44c86b8392165b588d117a6118decaf0425d15e04e09d63d46564f2bbfd",
+    "label": "0.15.0 development: branch gap/g50-g51-g47-sim-random on 6617f54, before the version bump"
+  }
+}

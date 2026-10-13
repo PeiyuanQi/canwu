@@ -151,6 +151,78 @@ cargo run --release \
   --output benchmarks/baselines/YYYY-MM-DD-technology-interactive-elapsed.json
 ```
 
+## Keyed-draw retention profile
+
+The standalone `keyed-draw-profile` binary measures what a run pays as it
+keeps more operation-keyed random draws. For each `--systems` count and each
+`--retained` count it measures:
+
+- `live_boundary`: one Daily boundary in which that many boundary systems are
+  due and each makes `--draws` fresh keyed draws, on a run that still retains
+  every draw record;
+- `sealed_boundary`: the same boundary after the evidence was sealed, when
+  each earlier draw is a keyed reservation (skipped when nothing is retained);
+- `snapshot_restore`: loading the run from its snapshot JSON.
+
+It follows the conventions of the main harness. Elapsed time and allocation
+traffic come from separate release builds; allocation counts do not depend on
+machine load, and the allocation build also records `run_heap_bytes`, the
+bytes the built run holds. `--samples` and `--restore-samples` must be
+positive odd integers. The binary uses only the public API, so the same source
+measures any engine version it compiles against.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin keyed-draw-profile -- \
+  --mode elapsed \
+  --retained 0,1000,10000,100000 \
+  --systems 1,8,32 \
+  --draws 1 \
+  --samples 31 \
+  --warmup 3 \
+  --restore-samples 3 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-keyed-draw-index-VERSION-elapsed.json
+
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --features allocation-counting \
+  --bin keyed-draw-profile -- \
+  --mode allocations \
+  --retained 0,1000,10000,100000 \
+  --systems 1,8,32 \
+  --draws 1 \
+  --samples 3 \
+  --warmup 1 \
+  --restore-samples 1 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-keyed-draw-index-VERSION-allocations.json
+```
+
+The 2026-10-13 baselines compare 0.14.0 with the 0.15.0 change that keeps the
+keyed-draw index as runtime state:
+[`0.14.0 elapsed`](baselines/2026-10-13-keyed-draw-index-0.14.0-elapsed.json),
+[`0.15.0 elapsed`](baselines/2026-10-13-keyed-draw-index-0.15.0-elapsed.json),
+[`0.14.0 allocations`](baselines/2026-10-13-keyed-draw-index-0.14.0-allocations.json), and
+[`0.15.0 allocations`](baselines/2026-10-13-keyed-draw-index-0.15.0-allocations.json).
+The 0.14.0 files were produced from an export of the release tag: `git archive
+v0.14.0` into an empty directory, this binary's source copied into the
+export's `benchmarks/performance-harness/src/bin`, and the same two commands
+run there. The 0.15.0 files were recorded on the development branch before the
+version bump, so their `engine_version` field still reads `0.14.0`;
+`source.label` and `source.content_hash` identify what was built, and
+`environment.rustc` is asked from the binary's own manifest directory, so it
+names the toolchain the measured tree pins (Rust 1.99.0 for both). Other builds
+ran on the machine during the elapsed runs, so compare the elapsed files for
+growth and the allocation files for exact counts. The figures are interpreted
+in
+[`docs/proposals/keyed-draw-index-and-settlement-profile.md`](../docs/proposals/keyed-draw-index-and-settlement-profile.md).
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

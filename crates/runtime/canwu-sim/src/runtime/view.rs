@@ -1159,6 +1159,9 @@ impl SimulationView<'_> {
         .map(|sample| sample.value)
     }
 
+    /// Makes an operation-keyed random draw and returns its sample. Use
+    /// [`Self::random_draw_for_operation`] when the caller also needs the
+    /// ID of the draw's evidence.
     #[allow(clippy::too_many_arguments)]
     pub fn random_sample_for_operation(
         &self,
@@ -1171,29 +1174,7 @@ impl SimulationView<'_> {
         upper_exclusive: u64,
         purpose: &str,
     ) -> Result<super::RandomSample, CanwuError> {
-        let available = self
-            .proposal_evidence
-            .is_some_and(|values| values.contains(&evidence))
-            || validation::resolve_evidence_reference(
-                &validation::RuntimeValidationContext::new(self.state.runtime()),
-                &evidence,
-            ) == validation::EvidenceAvailability::Retained;
-        if !available {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidRandomOperationEvidence,
-                "operation-keyed random draw references unavailable evidence",
-            ));
-        }
-        let Some(session) = &self.random_session else {
-            return Err(CanwuError::new(
-                ErrorCode::UndeclaredRandomStream,
-                format!(
-                    "system {} has no declared random streams",
-                    self.reader.unwrap_or("unscoped caller")
-                ),
-            ));
-        };
-        session.borrow_mut().sample_for_operation(
+        self.random_draw_for_operation(
             stream,
             evidence,
             operation_kind,
@@ -1202,6 +1183,106 @@ impl SimulationView<'_> {
             draw_slot,
             upper_exclusive,
             purpose,
+        )
+        .map(|draw| draw.sample)
+    }
+
+    /// Makes an operation-keyed random draw and returns its sample with the
+    /// ID of its draw evidence, so a record the system writes can cite
+    /// the draw it was computed from.
+    ///
+    /// The draw is addressed by the system's plugin, `operation_kind`,
+    /// `application_operation_id`, `target`, and `draw_slot` on `stream`.
+    ///
+    /// An address the run has already drawn returns the recorded value and
+    /// the ID of that draw without drawing again, when `evidence`,
+    /// `upper_exclusive`, and `purpose` are the ones it was drawn with. Only
+    /// the evidence reference has to be the same: the answer does not depend
+    /// on whether the draw's record or its evidence is still retained, so a
+    /// run whose evidence was sealed answers as its unsealed replay does.
+    ///
+    /// An address that has not been drawn is drawn now, and returns the ID
+    /// its record has once the boundary being settled commits; see
+    /// [`super::RandomOperationDraw::draw_id`]. A fresh draw needs operation
+    /// evidence that exists at the reader's cut: retained evidence, or
+    /// evidence produced earlier in this boundary. Evidence that a seal has
+    /// archived is refused, although an unsealed run with the same history
+    /// would accept it. A system that may draw an address for the first time
+    /// after a seal, and must then behave as its unsealed replay, cites
+    /// evidence that survives a seal, such as the initial-scenario version
+    /// of a record, or evidence newer than the seal.
+    ///
+    /// A handler whose fresh draw is refused for sealed evidence must return
+    /// the error, which fails the boundary. A handler that swallows
+    /// `InvalidRandomOperationEvidence` and carries on settles a boundary
+    /// that the run's own exact replay rejects, because the replay retains
+    /// the evidence and makes the draw. A run restored from its sealed
+    /// segments retains that evidence again too, so it accepts the draw the
+    /// live sealed run refused.
+    ///
+    /// # Errors
+    ///
+    /// In a view with a random session, which a boundary system's view has,
+    /// the errors are checked in this order: `UndeclaredRandomStream` when
+    /// the system did not declare `stream`; `InvalidRandomDraw` for a
+    /// malformed address, bound, or purpose; `RandomOperationConflict` when
+    /// the address was already drawn with different evidence, bound, or
+    /// purpose; `InvalidRandomOperationEvidence` when the address has not
+    /// been drawn and `evidence` is neither retained nor produced earlier in
+    /// this boundary; and `IdentifierExhausted` when the run has no draw ID
+    /// left for a fresh draw.
+    ///
+    /// A view without a random session, such as a command handler's, never
+    /// draws. There the evidence is still checked first: the call returns
+    /// `InvalidRandomOperationEvidence` when `evidence` is not retained, and
+    /// `UndeclaredRandomStream` otherwise.
+    #[allow(clippy::too_many_arguments)]
+    pub fn random_draw_for_operation(
+        &self,
+        stream: &RandomStreamKey,
+        evidence: EvidenceRef,
+        operation_kind: &str,
+        application_operation_id: &str,
+        target: RandomOperationTarget,
+        draw_slot: u32,
+        upper_exclusive: u64,
+        purpose: &str,
+    ) -> Result<super::RandomOperationDraw, CanwuError> {
+        // Evidence a new draw may cite: retained, or produced earlier in this
+        // boundary.
+        let available = |evidence: &EvidenceRef| {
+            self.proposal_evidence
+                .is_some_and(|values| values.contains(evidence))
+                || validation::resolve_evidence_reference(
+                    &validation::RuntimeValidationContext::new(self.state.runtime()),
+                    evidence,
+                ) == validation::EvidenceAvailability::Retained
+        };
+        let Some(session) = &self.random_session else {
+            if !available(&evidence) {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomOperationEvidence,
+                    "operation-keyed random draw references unavailable evidence",
+                ));
+            }
+            return Err(CanwuError::new(
+                ErrorCode::UndeclaredRandomStream,
+                format!(
+                    "system {} has no declared random streams",
+                    self.reader.unwrap_or("unscoped caller")
+                ),
+            ));
+        };
+        session.borrow_mut().draw_for_operation(
+            stream,
+            evidence,
+            operation_kind,
+            application_operation_id,
+            target,
+            draw_slot,
+            upper_exclusive,
+            purpose,
+            &available,
         )
     }
 

@@ -685,13 +685,22 @@ impl Simulation {
         let systems = self.plugins.systems.clone();
         for registered in systems {
             let reader = format!("{}.{}", registered.plugin, registered.contract.name);
-            let directives = catch_unwind(AssertUnwindSafe(|| {
+            // Timed only while a profiled boundary is being settled.
+            let handler_started = self.boundary_profiler.handler_started();
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
                 (registered.handler)(
                     &self.plugin_view(&reader, &registered.contract.reads),
                     &event,
                 )
-            }))
-            .map_err(|_| {
+            }));
+            self.boundary_profiler.record_handler(
+                handler_started,
+                super::BoundaryHandlerKind::EventSystem,
+                None,
+                &registered.plugin,
+                &registered.contract.name,
+            );
+            let directives = outcome.map_err(|_| {
                 CanwuError::new(
                     ErrorCode::PluginPanicked,
                     format!(
@@ -857,6 +866,19 @@ impl Simulation {
             let (draw_id, next_random_draw_id) =
                 claim_counter(self.state.counters.next_random_draw_id, "random draw ID")?;
             let id = RandomDrawId::new(draw_id);
+            // An operation-keyed draw was handed to its system with the
+            // ID it would be committed under; committing it under
+            // another would leave that ID naming a different draw.
+            if pending
+                .draw
+                .promised_id
+                .is_some_and(|promised| promised != id)
+            {
+                return Err(CanwuError::new(
+                    ErrorCode::InvalidRandomDraw,
+                    "an operation-keyed draw cannot be committed under an ID other than the one it was handed out with",
+                ));
+            }
             self.state.counters.next_random_draw_id = next_random_draw_id;
             let stream = pending.draw.stream;
             let address = pending.draw.address;

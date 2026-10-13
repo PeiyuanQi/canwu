@@ -166,6 +166,8 @@ pub(super) struct BoundaryTransactionCheckpoint {
     ingress_count: usize,
     boundary_count: usize,
     random_draw_count: usize,
+    /// Shares structure with the live index, so the capture copies nothing.
+    keyed_draws: super::random::KeyedDrawIndex,
     plugin_registration_closed: bool,
     current_domain_record_versions: BTreeMap<DomainRecordRef, super::CurrentDomainRecordVersion>,
     checkpoint_hash: String,
@@ -195,6 +197,7 @@ impl BoundaryTransactionCheckpoint {
             ingress_count: state.evidence.ingress.len(),
             boundary_count: state.evidence.boundaries.len(),
             random_draw_count: state.evidence.random_draws.len(),
+            keyed_draws: state.evidence.keyed_draws.clone(),
             plugin_registration_closed: state.metadata.plugin_registration_closed,
             current_domain_record_versions: state.metadata.current_domain_record_versions.clone(),
             checkpoint_hash: state.metadata.checkpoint_hash.clone(),
@@ -226,6 +229,7 @@ impl BoundaryTransactionCheckpoint {
         state.evidence.ingress.truncate(self.ingress_count);
         state.evidence.boundaries.truncate(self.boundary_count);
         state.evidence.random_draws.truncate(self.random_draw_count);
+        state.evidence.keyed_draws = self.keyed_draws;
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.current_domain_record_versions = self.current_domain_record_versions;
         state.metadata.checkpoint_hash = self.checkpoint_hash;

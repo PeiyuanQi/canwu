@@ -15,6 +15,7 @@ mod persistence;
 mod persons;
 mod plugins;
 mod policy;
+mod profile;
 mod random;
 mod records;
 mod replay;
@@ -129,10 +130,14 @@ pub use policy::{
     RUN_CONFIGURATION_FORMAT_VERSION, RunConfiguration, RunConfigurationSnapshot, RunPurpose,
     SeatBinding, SeatPolicy, TracePolicy,
 };
+pub use profile::{
+    BoundaryHandlerKind, BoundaryHandlerTiming, BoundaryProfile, BoundaryProfileBatch,
+    MAX_RETAINED_BOUNDARY_PROFILES,
+};
 pub use random::{
     KeyedDrawReservation, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationTarget,
-    RandomSample, RandomStreamKey, RandomStreamState,
+    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationDraw,
+    RandomOperationTarget, RandomSample, RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,
@@ -1326,6 +1331,8 @@ pub struct Simulation {
     plugins: PluginRegistry,
     plugin_archive_provider: Rc<dyn PluginArchiveObjectProvider>,
     sync_reaction_depth: usize,
+    /// Host diagnostics outside the runtime state; see [`profile`].
+    boundary_profiler: profile::BoundaryProfiler,
 }
 
 impl Simulation {
@@ -1616,12 +1623,14 @@ impl Simulation {
                     archived_segment_headers: Vec::new(),
                     archived_evidence_receipts: BTreeMap::new(),
                     keyed_draw_reservations: Vec::new(),
+                    keyed_draws: random::KeyedDrawIndex::default(),
                 },
             },
             schema,
             plugins,
             plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
+            boundary_profiler: profile::BoundaryProfiler::default(),
         };
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
@@ -2626,18 +2635,21 @@ impl Simulation {
                     archived_segment_headers: Vec::new(),
                     archived_evidence_receipts: BTreeMap::new(),
                     keyed_draw_reservations: Vec::new(),
+                    keyed_draws: random::KeyedDrawIndex::default(),
                 },
             },
             schema: snapshot.schema,
             plugins,
             plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
+            boundary_profiler: profile::BoundaryProfiler::default(),
         };
         simulation.state.scheduler.settled_boundaries =
             boundary_window::rebuild_settled_boundaries(
                 &simulation.state.evidence,
                 simulation.plugins.boundary_schedule_horizon(),
             )?;
+        simulation.state.evidence.rebuild_keyed_draws()?;
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
     }
@@ -2675,6 +2687,7 @@ impl Simulation {
             plugins: self.plugins.clone(),
             plugin_archive_provider: Rc::clone(&self.plugin_archive_provider),
             sync_reaction_depth: 0,
+            boundary_profiler: profile::BoundaryProfiler::default(),
         }
     }
 
@@ -2701,10 +2714,14 @@ impl Simulation {
             .load_plugin_archive_object(namespace, object_id)
     }
 
+    /// `profile` is the recorder of the boundary being settled, when the
+    /// command is admitted by a profiled boundary; a plugin command handler is
+    /// timed into it.
     fn prepare_command(
         &self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
+        profile: Option<&mut profile::BoundaryProfileRecorder>,
     ) -> Result<PreparedCommand, CanwuError> {
         match &envelope.command {
             Command::OrderMovement {
@@ -2908,14 +2925,23 @@ impl Simulation {
                 let descriptor = registered.descriptor.clone();
                 descriptor.payload_schema.validate(payload)?;
                 let reader = format!("{plugin}.{command}");
-                let directives = catch_unwind(AssertUnwindSafe(|| {
+                let handler_started = profile::handler_started(profile.as_deref());
+                let outcome = catch_unwind(AssertUnwindSafe(|| {
                     handler(
                         &self.plugin_view(&reader, &descriptor.reads),
                         context,
                         payload,
                     )
-                }))
-                .map_err(|_| {
+                }));
+                profile::record_handler(
+                    profile,
+                    handler_started,
+                    BoundaryHandlerKind::CommandHandler,
+                    None,
+                    plugin,
+                    command,
+                );
+                let directives = outcome.map_err(|_| {
                     CanwuError::new(
                         ErrorCode::PluginPanicked,
                         format!("plugin command {plugin}.{command} panicked"),

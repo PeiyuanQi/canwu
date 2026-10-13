@@ -113,6 +113,13 @@ pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
     BoundaryWindow, MAX_BOUNDARY_SCHEDULE_HORIZON,
 };
+// The opt-in wall-time profile of settled boundaries (gap G-47).
+pub use canwu_sim::{
+    BoundaryHandlerKind, BoundaryHandlerTiming, BoundaryProfile, BoundaryProfileBatch,
+    MAX_RETAINED_BOUNDARY_PROFILES,
+};
+// An operation-keyed draw with the ID of its draw evidence (gap G-51).
+pub use canwu_sim::RandomOperationDraw;
 // Transition manifests and their audit (gap G-04).
 pub use canwu_sim::{
     MAX_PENDING_TRANSITION_MANIFESTS, MAX_PENDING_TRANSITION_MANIFESTS_PER_COORDINATOR,
@@ -789,6 +796,47 @@ impl Canwu {
         request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.simulation.settle_boundary(request)
+    }
+
+    /// Turns the wall-time profile of settled boundaries on or off. It is off
+    /// in a new, restored, replayed, or forked runtime.
+    ///
+    /// While it is on, every boundary that settles leaves one
+    /// [`BoundaryProfile`] for [`Self::take_boundary_profiles`]: the wall
+    /// time of the settlement and of each plugin handler it ran, which are
+    /// its boundary systems by phase, the plugin command handlers of the
+    /// queued commands it admitted, and the event-driven plugin systems those
+    /// commands and the scheduled actions due at the boundary triggered. A
+    /// boundary that fails leaves none. Owner-authorized maintenance
+    /// participants run when the host schedules the maintenance, outside
+    /// settlement, and are in no profile.
+    ///
+    /// An exact replay settles its boundaries inside the replay call, on a
+    /// runtime that starts with profiling off, so a replay is not profiled;
+    /// the runtime it returns can be profiled from then on.
+    ///
+    /// Profiling is a host diagnostic. It reads the wall clock and changes
+    /// nothing else: receipts, evidence, hashes, snapshots, checkpoints, and
+    /// exact replay are the same with it on or off, and no plugin can read a
+    /// profile. While it is off, settlement reads no clock. Do not feed
+    /// profile values back into the simulation.
+    pub fn set_boundary_profiling(&mut self, enabled: bool) {
+        self.simulation.set_boundary_profiling(enabled);
+    }
+
+    /// Whether settled boundaries are being profiled.
+    #[must_use]
+    pub const fn boundary_profiling(&self) -> bool {
+        self.simulation.boundary_profiling()
+    }
+
+    /// Takes the profiles of the boundaries settled since the last call, in
+    /// settlement order. The runtime keeps at most
+    /// [`MAX_RETAINED_BOUNDARY_PROFILES`] profiles that were not taken yet;
+    /// [`BoundaryProfileBatch::dropped`] counts the older ones it dropped
+    /// since the last call.
+    pub fn take_boundary_profiles(&mut self) -> BoundaryProfileBatch {
+        self.simulation.take_boundary_profiles()
     }
 
     pub fn wait(&mut self, duration: SimDuration) -> Result<Vec<SimEvent>, CanwuError> {
@@ -1583,6 +1631,50 @@ impl CompactedCanwu {
         request: BoundaryRequest,
     ) -> Result<BoundaryReceipt, CanwuError> {
         self.simulation.settle_boundary(request)
+    }
+
+    /// Turns the wall-time profile of settled boundaries on or off. It is off
+    /// in a new, restored, replayed, or forked runtime;
+    /// [`Canwu::into_compacted`] keeps the setting and the profiles not yet
+    /// taken.
+    ///
+    /// While it is on, every boundary that settles leaves one
+    /// [`BoundaryProfile`] for [`Self::take_boundary_profiles`]: the wall
+    /// time of the settlement and of each plugin handler it ran, which are
+    /// its boundary systems by phase, the plugin command handlers of the
+    /// queued commands it admitted, and the event-driven plugin systems those
+    /// commands and the scheduled actions due at the boundary triggered. A
+    /// boundary that fails leaves none. Sealing evidence neither changes the
+    /// setting nor drops profiles. Owner-authorized maintenance
+    /// participants run when the host schedules the maintenance, outside
+    /// settlement, and are in no profile.
+    ///
+    /// An exact replay settles its boundaries inside the replay call, on a
+    /// runtime that starts with profiling off, so a replay is not profiled;
+    /// the runtime it returns can be profiled from then on.
+    ///
+    /// Profiling is a host diagnostic. It reads the wall clock and changes
+    /// nothing else: receipts, evidence, hashes, snapshots, checkpoints, and
+    /// exact replay are the same with it on or off, and no plugin can read a
+    /// profile. While it is off, settlement reads no clock. Do not feed
+    /// profile values back into the simulation.
+    pub fn set_boundary_profiling(&mut self, enabled: bool) {
+        self.simulation.set_boundary_profiling(enabled);
+    }
+
+    /// Whether settled boundaries are being profiled.
+    #[must_use]
+    pub const fn boundary_profiling(&self) -> bool {
+        self.simulation.boundary_profiling()
+    }
+
+    /// Takes the profiles of the boundaries settled since the last call, in
+    /// settlement order. The runtime keeps at most
+    /// [`MAX_RETAINED_BOUNDARY_PROFILES`] profiles that were not taken yet;
+    /// [`BoundaryProfileBatch::dropped`] counts the older ones it dropped
+    /// since the last call.
+    pub fn take_boundary_profiles(&mut self) -> BoundaryProfileBatch {
+        self.simulation.take_boundary_profiles()
     }
 }
 
