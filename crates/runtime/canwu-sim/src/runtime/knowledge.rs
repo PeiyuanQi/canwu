@@ -5,7 +5,7 @@ use super::{
 };
 use canwu_core::{
     CoreEntityKind, DomainRecordKind, EntityRef, KnowledgeHolderPolicy, KnowledgeHolderRef,
-    KnowledgeRecordKind, KnowledgeSchemaId,
+    KnowledgeRecordId, KnowledgeRecordKind, KnowledgeSchemaId,
 };
 use canwu_knowledge::{
     DEFAULT_KNOWLEDGE_PAGE_SIZE, KnowledgeRecord, KnowledgeRecordDraft, KnowledgeSubject,
@@ -125,6 +125,127 @@ impl PluginKnowledgeSchema {
 
 pub(crate) type KnowledgeSchemas = BTreeMap<KnowledgeSchemaId, (String, PluginKnowledgeSchema)>;
 pub(crate) type KnowledgeKindOwners = BTreeMap<KnowledgeRecordKind, String>;
+
+/// Knowledge records keyed by holder, then by global record ID.
+pub(crate) type HolderKnowledgeRecords =
+    BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>;
+
+/// Why a record may not supersede or contradict a named target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum KnowledgeRelationError {
+    /// The target is not in the holder's ledger at the publisher's cut.
+    Unresolved,
+    /// The target has a different schema kind from the record naming it.
+    CrossKind,
+}
+
+/// The one rule for the records a published record may supersede or
+/// contradict, shared by settlement and by snapshot validation.
+///
+/// Every target must be a record of the same `holder`, of the same schema
+/// `kind`, that is visible at the publisher's cut:
+///
+/// - `committed`: the ledger committed by earlier boundaries, whatever the
+///   target's learned time, so a target learned at the same instant in an
+///   earlier boundary resolves; or
+/// - `visible`: the records the settling boundary staged with same-boundary
+///   visibility in a phase before the publisher's.
+///
+/// A record of the publisher's own phase, a record staged for the next
+/// boundary, a record that does not exist yet, and a record of another holder
+/// are in neither set. Record IDs are allocated in staging order, so every
+/// admitted target has a lower ID than the record naming it: a relation can
+/// never point forward, at itself, or around a cycle.
+pub(crate) fn validate_relation_targets<'a>(
+    holder: &KnowledgeHolderRef,
+    kind: &KnowledgeRecordKind,
+    related: impl IntoIterator<Item = &'a KnowledgeRecordId>,
+    committed: &HolderKnowledgeRecords,
+    visible: &HolderKnowledgeRecords,
+) -> Result<(), KnowledgeRelationError> {
+    let committed = committed.get(holder);
+    let visible = visible.get(holder);
+    for id in related {
+        let Some(target) = committed
+            .and_then(|records| records.get(id))
+            .or_else(|| visible.and_then(|records| records.get(id)))
+        else {
+            return Err(KnowledgeRelationError::Unresolved);
+        };
+        if target.schema.kind != *kind {
+            return Err(KnowledgeRelationError::CrossKind);
+        }
+    }
+    Ok(())
+}
+
+/// A holder's current records of one schema kind at a read cut, as returned
+/// by [`crate::SimulationView::knowledge_heads`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KnowledgeHeads {
+    /// Global record IDs in ascending order. When more than
+    /// [`KnowledgeLimitsV1::relations_per_record`] records match, the number
+    /// one record may supersede, these are the newest of them.
+    pub records: Vec<KnowledgeRecordId>,
+    /// Whether more current records matched than `records` holds. The older
+    /// ones that were left out stay current.
+    pub truncated: bool,
+}
+
+/// Returns the holder's records of `kind` that carry every one of `subjects`
+/// and that no record of the holder supersedes, over the same two sets the
+/// relation rule reads: the ledger `committed` by earlier boundaries and the
+/// records `visible` at the reader's cut. Every returned ID is therefore a
+/// target [`validate_relation_targets`] admits for the same holder and kind.
+///
+/// The newest `limit` matches are returned, in ascending ID order. Records of
+/// the settling boundary have higher IDs than committed ones, so both sets
+/// are walked from the highest ID down and the result is reversed.
+///
+/// The holder's records are read in place, twice: once to collect the IDs
+/// that records of `kind` supersede (a relation never crosses kinds, so no
+/// other record can supersede one of them), and once to select. The second
+/// pass stops as soon as it has `limit + 1` matches.
+pub(crate) fn current_heads_at_cut(
+    holder: &KnowledgeHolderRef,
+    kind: &KnowledgeRecordKind,
+    subjects: &[KnowledgeSubject],
+    committed: &HolderKnowledgeRecords,
+    visible: Option<&HolderKnowledgeRecords>,
+    limit: usize,
+) -> KnowledgeHeads {
+    let ledgers = [
+        visible.and_then(|records| records.get(holder)),
+        committed.get(holder),
+    ];
+    let newest_first_of_kind = || {
+        ledgers
+            .iter()
+            .flatten()
+            .flat_map(|ledger| ledger.values().rev())
+            .filter(|record| record.schema.kind == *kind)
+    };
+    let superseded: std::collections::BTreeSet<KnowledgeRecordId> = newest_first_of_kind()
+        .flat_map(|record| record.supersedes.iter().copied())
+        .collect();
+    let mut heads: Vec<KnowledgeRecordId> = newest_first_of_kind()
+        .filter(|record| {
+            !superseded.contains(&record.id)
+                && subjects
+                    .iter()
+                    .all(|subject| record.subjects.contains(subject))
+        })
+        .map(|record| record.id)
+        .take(limit.saturating_add(1))
+        .collect();
+    let truncated = heads.len() > limit;
+    heads.truncate(limit);
+    heads.reverse();
+    KnowledgeHeads {
+        records: heads,
+        truncated,
+    }
+}
 
 pub(crate) fn validate_schema_set(
     schemas: &KnowledgeSchemas,
@@ -914,6 +1035,124 @@ mod tests {
             ),
         ]);
         assert!(validate_schema_set(&two_writable, &owners).is_err());
+    }
+
+    #[test]
+    fn current_heads_follow_the_cut_the_selection_and_the_bound() {
+        let kind = knowledge_kind();
+        let other_kind = KnowledgeRecordKind::new("fixture.knowledge", "rumour");
+        let holder = KnowledgeHolderRef::Person(PersonId::new(1));
+        let neighbour = KnowledgeHolderRef::Person(PersonId::new(2));
+        let subject = |event: u64| KnowledgeSubject {
+            role: "subject".to_owned(),
+            target: KnowledgeSubjectTarget::Event(EventId::new(event)),
+        };
+        let record = |id: u64,
+                      holder: &KnowledgeHolderRef,
+                      kind: &KnowledgeRecordKind,
+                      event: u64,
+                      supersedes: &[u64]| {
+            let draft = base_draft();
+            let stored = KnowledgeRecord {
+                id: KnowledgeRecordId::new(id),
+                holder: holder.clone(),
+                schema: KnowledgeSchemaId::new(kind.clone(), 1),
+                subjects: vec![subject(event)],
+                payload: draft.payload,
+                as_of: None,
+                learned_at: SimTime::EPOCH,
+                confidence_per_mille: 1_000,
+                origin: draft.origin,
+                supersedes: supersedes
+                    .iter()
+                    .copied()
+                    .map(KnowledgeRecordId::new)
+                    .collect(),
+                contradicts: Vec::new(),
+            };
+            (stored.id, stored)
+        };
+        let committed: HolderKnowledgeRecords = BTreeMap::from([
+            (
+                holder.clone(),
+                BTreeMap::from([
+                    record(1, &holder, &kind, 7, &[]),
+                    record(2, &holder, &kind, 7, &[1]),
+                    record(3, &holder, &kind, 8, &[]),
+                    record(4, &holder, &other_kind, 7, &[]),
+                ]),
+            ),
+            (
+                neighbour.clone(),
+                BTreeMap::from([record(5, &neighbour, &kind, 7, &[])]),
+            ),
+        ]);
+        // Records the settling boundary staged for the same boundary.
+        let visible: HolderKnowledgeRecords = BTreeMap::from([(
+            holder.clone(),
+            BTreeMap::from([
+                record(6, &holder, &kind, 8, &[3]),
+                record(7, &holder, &kind, 9, &[]),
+            ]),
+        )]);
+        let heads = |holder: &KnowledgeHolderRef,
+                     kind: &KnowledgeRecordKind,
+                     subjects: &[KnowledgeSubject],
+                     visible: Option<&HolderKnowledgeRecords>,
+                     limit: usize| {
+            let heads = current_heads_at_cut(holder, kind, subjects, &committed, visible, limit);
+            (
+                heads.records.iter().map(|id| id.get()).collect::<Vec<_>>(),
+                heads.truncated,
+            )
+        };
+
+        // Committed state alone: the superseded record is not current.
+        assert_eq!(heads(&holder, &kind, &[], None, 64), (vec![2, 3], false));
+        // A visible record of the boundary replaces the record it supersedes.
+        assert_eq!(
+            heads(&holder, &kind, &[], Some(&visible), 64),
+            (vec![2, 6, 7], false)
+        );
+        // Subjects, kind, and holder select; none of them leaks across.
+        assert_eq!(
+            heads(&holder, &kind, &[subject(8)], Some(&visible), 64),
+            (vec![6], false)
+        );
+        assert_eq!(
+            heads(&holder, &kind, &[subject(7), subject(8)], None, 64),
+            (vec![], false)
+        );
+        assert_eq!(heads(&holder, &other_kind, &[], None, 64), (vec![4], false));
+        assert_eq!(
+            heads(&neighbour, &kind, &[], Some(&visible), 64),
+            (vec![5], false)
+        );
+        assert_eq!(
+            heads(
+                &KnowledgeHolderRef::Person(PersonId::new(3)),
+                &kind,
+                &[],
+                None,
+                64
+            ),
+            (vec![], false)
+        );
+        // The result is bounded: it keeps the newest records, in ascending
+        // order, and says when older current records were left out.
+        assert_eq!(
+            heads(&holder, &kind, &[], Some(&visible), 3),
+            (vec![2, 6, 7], false)
+        );
+        assert_eq!(
+            heads(&holder, &kind, &[], Some(&visible), 2),
+            (vec![6, 7], true)
+        );
+        assert_eq!(
+            heads(&holder, &kind, &[], Some(&visible), 1),
+            (vec![7], true)
+        );
+        assert_eq!(heads(&holder, &kind, &[], None, 1), (vec![3], true));
     }
 
     #[test]

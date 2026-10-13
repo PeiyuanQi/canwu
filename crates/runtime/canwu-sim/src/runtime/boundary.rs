@@ -162,6 +162,23 @@ pub enum BoundaryDirective {
     ResolveDecisionRandomly {
         resolution: RandomDecisionResolution,
     },
+    /// Publishes knowledge records to one holder's ledger. Accepted from a
+    /// phase-4 or phase-13 system that lists each record's schema in its
+    /// `knowledge_writes` with this `visibility`. The records are committed
+    /// at the end of the boundary; `SameBoundary` records are also readable
+    /// by systems of later phases of the same boundary.
+    ///
+    /// A record may name in `supersedes` or `contradicts` only records of the
+    /// same holder and schema kind that are visible at the publisher's cut:
+    /// records committed by an earlier boundary, whatever their learned time,
+    /// and records the same boundary published with `SameBoundary` visibility
+    /// in an earlier phase. A record of the publisher's own phase, or one
+    /// published with `NextBoundary` visibility in the same boundary, is not
+    /// visible. A target that does not resolve fails the boundary with
+    /// [`crate::ErrorCode::KnowledgeRecordNotFound`], and a target of another
+    /// schema kind with [`crate::ErrorCode::InvalidKnowledgeRecord`].
+    /// Snapshot validation applies the same rule, so a load accepts exactly
+    /// the relations that settlement admitted.
     PublishKnowledge {
         holder: KnowledgeHolderRef,
         visibility: StateVisibility,
@@ -196,6 +213,11 @@ pub enum BoundaryDirective {
     /// is committed at the end of the boundary and becomes visible to systems
     /// at the next boundary; `correlation` is unique per plugin, system, and
     /// boundary and binds the receipt's allocated ID.
+    ///
+    /// A draft with a [`crate::PersonPlacement`] creates a [`crate::Person`]
+    /// record in the `WorldSnapshot` projection. A draft without one creates
+    /// an identity in the entity registry with core availability and no
+    /// `Person` record; see [`PersonDraft`].
     CreatePerson {
         draft: PersonDraft,
         correlation: String,

@@ -82,7 +82,8 @@ pub use ingress::{
     PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
 };
 pub use knowledge::{
-    KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind, PluginKnowledgeSchema,
+    KnowledgeHeads, KnowledgeLimitsV1, KnowledgeSubjectSchema, KnowledgeSubjectTargetKind,
+    PluginKnowledgeSchema,
 };
 pub use maintenance::{
     MAX_OWNER_AUTHORIZED_MUTATIONS, MAX_OWNER_AUTHORIZED_PARTICIPANTS,
@@ -115,9 +116,9 @@ pub use persistence::{
     identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
 };
 pub use persons::{
-    BoundaryPersonAvailabilityChange, BoundaryPersonCreation,
+    BoundaryCreatedPerson, BoundaryPersonAvailabilityChange, BoundaryPersonCreation,
     CONTROLLER_AUTHORITY_UNAVAILABLE_REASON, CreatedPerson, CustodyState,
-    DECISION_MAKER_UNAVAILABLE_REASON, LifeState, PersonAvailability, PersonDraft,
+    DECISION_MAKER_UNAVAILABLE_REASON, LifeState, PersonAvailability, PersonDraft, PersonPlacement,
 };
 pub use plugins::{
     MaintenanceDependencyResolverDescriptor, OwnerAuthorizedMaintenanceParticipant,

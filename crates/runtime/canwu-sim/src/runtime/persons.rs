@@ -113,17 +113,109 @@ impl PersonAvailability {
     }
 }
 
-/// Application-supplied content for a person created at a boundary.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PersonDraft {
-    pub name: String,
+/// A person's placement in the [`WorldSnapshot`](super::WorldSnapshot)
+/// projection: the government it belongs to and the territory it is in.
+///
+/// The two always travel together, so a person is either placed or not: a
+/// value with only one of them cannot be built or decoded.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonPlacement {
     pub government: GovernmentId,
     pub current_location: TerritoryId,
+}
+
+/// Application-supplied content for a person created at a boundary.
+///
+/// - A placed draft carries a [`PersonPlacement`] whose government and
+///   territory exist in the `WorldSnapshot` projection. The created person
+///   gets a [`Person`] record there.
+/// - An unplaced draft carries none. The created person is an identity in
+///   the entity registry with core availability and a creation receipt, like
+///   a person that a scenario lists only in [`Scenario::entities`]. It has no
+///   [`Person`] record, so the projection needs no government or territory
+///   for it and an application keeps the person's attributes in its own
+///   records. The draft's name and roles are recorded on the creation
+///   evidence only.
+///
+/// A draft decoded on its own, or as a field of another value, rejects
+/// unknown fields. A draft written in the 0.14.0 shape, with `government` and
+/// `current_location` beside `name`, then fails to decode instead of silently
+/// becoming an unplaced draft. A draft flattened into another struct with
+/// `#[serde(flatten)]` is not protected: the old shape decodes there with no
+/// placement, so an application must not flatten a `PersonDraft`.
+///
+/// [`Scenario::entities`]: super::Scenario::entities
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PersonDraft {
+    pub name: String,
+    /// Where a placed person belongs and is; `None` for an unplaced person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PersonPlacement>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
     pub availability: PersonAvailability,
     /// Committed evidence that justifies the creation.
     pub provenance: EvidenceRef,
+}
+
+/// The person a boundary created, as recorded on its creation evidence.
+///
+/// The record stays flat: a placed person serializes exactly as its
+/// [`Person`] record does at creation, so evidence written for placed persons
+/// keeps its canonical bytes and hashes. An unplaced person omits
+/// `government` and `current_location`. Settlement writes both fields or
+/// neither, and a load refuses evidence that carries only one.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryCreatedPerson {
+    /// Engine-allocated identity.
+    pub id: PersonId,
+    pub name: String,
+    /// Government of a placed person; `None` for an unplaced person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub government: Option<GovernmentId>,
+    /// Territory of a placed person; `None` for an unplaced person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_location: Option<TerritoryId>,
+    pub roles: Vec<String>,
+}
+
+impl BoundaryCreatedPerson {
+    /// Returns the placement the person was created with, or `None` for an
+    /// unplaced person.
+    #[must_use]
+    pub const fn placement(&self) -> Option<PersonPlacement> {
+        match (self.government, self.current_location) {
+            (Some(government), Some(current_location)) => Some(PersonPlacement {
+                government,
+                current_location,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Returns whether the person was created with a [`Person`] record in the
+    /// `WorldSnapshot` projection.
+    #[must_use]
+    pub const fn is_placed(&self) -> bool {
+        self.placement().is_some()
+    }
+
+    /// Returns the [`Person`] record a placed person was created with, or
+    /// `None` for an unplaced person.
+    #[must_use]
+    pub fn person_record(&self) -> Option<Person> {
+        let placement = self.placement()?;
+        Some(Person {
+            id: self.id,
+            name: self.name.clone(),
+            government: placement.government,
+            current_location: placement.current_location,
+            roles: self.roles.clone(),
+            transit: None,
+        })
+    }
 }
 
 /// Committed availability change evidence in a boundary record.
@@ -157,7 +249,9 @@ pub struct BoundaryPersonCreation {
     pub plugin: String,
     pub system: String,
     pub correlation: String,
-    pub person: Person,
+    /// The created person: its allocated ID with the draft's name, roles,
+    /// and placement, if any.
+    pub person: BoundaryCreatedPerson,
     pub availability: PersonAvailability,
     pub provenance: EvidenceRef,
     pub summary: String,
@@ -358,8 +452,9 @@ pub(super) fn validate_person_draft(
             "person drafts require canonical name, roles, correlation, and summary",
         ));
     }
-    if !(context.government_exists)(draft.government)
-        || !(context.territory_exists)(draft.current_location)
+    if let Some(placement) = draft.placement
+        && (!(context.government_exists)(placement.government)
+            || !(context.territory_exists)(placement.current_location))
     {
         return Err(CanwuError::new(
             ErrorCode::EntityNotFound,
@@ -765,16 +860,17 @@ impl Simulation {
         summary: String,
     ) -> Result<BoundaryPersonCreation, CanwuError> {
         let now = self.state.scheduler.now;
-        if !self
-            .state
-            .current
-            .governments
-            .contains_key(&draft.government)
-            || !self
+        if let Some(placement) = draft.placement
+            && (!self
                 .state
                 .current
-                .territories
-                .contains_key(&draft.current_location)
+                .governments
+                .contains_key(&placement.government)
+                || !self
+                    .state
+                    .current
+                    .territories
+                    .contains_key(&placement.current_location))
         {
             return Err(CanwuError::new(
                 ErrorCode::EntityNotFound,
@@ -811,18 +907,21 @@ impl Simulation {
         validate_availability_value(id, &draft.availability, now, &|entity| {
             runtime_entity_exists(&self.state, entity)
         })?;
-        let person = Person {
+        let person = BoundaryCreatedPerson {
             id,
             name: draft.name,
-            government: draft.government,
-            current_location: draft.current_location,
+            government: draft.placement.map(|placement| placement.government),
+            current_location: draft.placement.map(|placement| placement.current_location),
             roles: draft.roles,
-            transit: None,
         };
         self.invalidate_commitments(super::CommitmentDomains::WORLD);
         self.state.counters.next_person_id = next_id;
         self.state.current.entities.insert(entity);
-        self.state.current.people.insert(id, person.clone());
+        // Only a placed person joins the `WorldSnapshot` projection; an
+        // unplaced person stays a registry identity.
+        if let Some(record) = person.person_record() {
+            self.state.current.people.insert(id, record);
+        }
         self.state
             .current
             .person_availability
@@ -903,7 +1002,8 @@ impl PersonReplayCut {
 }
 
 /// Checks the persisted entity registry: the initial scenario registry plus
-/// exactly the persons created by committed boundaries.
+/// exactly the persons created by committed boundaries. Only placed creations
+/// add a `Person` record to the `WorldSnapshot` projection.
 pub(super) fn validate_snapshot_entity_registry(
     snapshot: &SimulationSnapshot,
 ) -> Result<(), CanwuError> {
@@ -923,7 +1023,9 @@ pub(super) fn validate_snapshot_entity_registry(
         .flat_map(|boundary| &boundary.created_persons)
     {
         let person = creation.person.id;
-        if !expected_entities.insert(EntityRef::Person(person)) || !expected_people.insert(person) {
+        if !expected_entities.insert(EntityRef::Person(person))
+            || (creation.person.is_placed() && !expected_people.insert(person))
+        {
             return invalid_snapshot("runtime-created person reuses an existing identity");
         }
     }
@@ -1041,9 +1143,22 @@ pub(super) fn validate_snapshot_persons(
                 &[BoundaryPhase::DomainDeltaProposal],
             )
             .is_some();
+            // A placed person has a `Person` record and names a government
+            // and a territory of the scenario; an unplaced person has none of
+            // the three. `validate_snapshot_entity_registry` compares the
+            // full sets of identities and records.
+            let valid_placement = match (person.government, person.current_location) {
+                (Some(government), Some(location)) => {
+                    snapshot.world.person(person.id).is_some()
+                        && initial.world.government(government).is_some()
+                        && initial.world.territory(location).is_some()
+                }
+                (None, None) => snapshot.world.person(person.id).is_none(),
+                _ => false,
+            };
             if !valid_writer
+                || !valid_placement
                 || person.id.get() != next_id
-                || person.transit.is_some()
                 || !canonical_text(&person.name)
                 || person.roles.iter().any(|role| !canonical_text(role))
                 || !canonical_text(&creation.summary)
@@ -1055,9 +1170,6 @@ pub(super) fn validate_snapshot_persons(
                     creation.correlation.as_str(),
                 ))
                 || touched.contains(&person.id)
-                || snapshot.world.person(person.id).is_none()
-                || initial.world.government(person.government).is_none()
-                || initial.world.territory(person.current_location).is_none()
                 || !snapshot_availability_is_valid(
                     snapshot,
                     person.id,

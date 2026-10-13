@@ -2194,33 +2194,26 @@ fn validate_boundary_proposal(
                             reference,
                         )?;
                     }
-                    let existing = current
-                        .knowledge
-                        .records
-                        .get(holder)
-                        .into_iter()
-                        .flat_map(|records| records.iter())
-                        .chain(
-                            knowledge_overlay
-                                .get(holder)
-                                .into_iter()
-                                .flat_map(|records| records.iter()),
-                        )
-                        .collect::<BTreeMap<_, _>>();
-                    for related in draft.supersedes.iter().chain(&draft.contradicts) {
-                        let Some(related_record) = existing.get(related) else {
-                            return Err(CanwuError::new(
-                                ErrorCode::KnowledgeRecordNotFound,
-                                "knowledge relation does not resolve for the same holder at this cut",
-                            ));
-                        };
-                        if related_record.schema.kind != draft.schema.kind {
-                            return Err(CanwuError::new(
-                                ErrorCode::InvalidKnowledgeRecord,
-                                "knowledge supersession and contradiction cannot cross schema kinds",
-                            ));
-                        }
-                    }
+                    // Snapshot validation applies the same rule to the same
+                    // two sets, so a load accepts exactly what is admitted
+                    // here.
+                    super::knowledge::validate_relation_targets(
+                        holder,
+                        &draft.schema.kind,
+                        draft.supersedes.iter().chain(&draft.contradicts),
+                        &current.knowledge.records,
+                        knowledge_overlay,
+                    )
+                    .map_err(|error| match error {
+                        super::knowledge::KnowledgeRelationError::Unresolved => CanwuError::new(
+                            ErrorCode::KnowledgeRecordNotFound,
+                            "knowledge relation does not resolve for the same holder at this cut",
+                        ),
+                        super::knowledge::KnowledgeRelationError::CrossKind => CanwuError::new(
+                            ErrorCode::InvalidKnowledgeRecord,
+                            "knowledge supersession and contradiction cannot cross schema kinds",
+                        ),
+                    })?;
                     let encoded = serde_json::to_vec(&(holder, draft)).map_err(|error| {
                         CanwuError::new(
                             ErrorCode::InvalidKnowledgeRecord,

@@ -103,6 +103,13 @@ impl SimulationView<'_> {
         Ok(self.state.current().armies.get(&id))
     }
 
+    /// Returns a person's record in the `WorldSnapshot` projection.
+    ///
+    /// `None` means the projection holds no record for the ID. A person that
+    /// exists only in the entity registry, such as one created from an
+    /// unplaced [`crate::PersonDraft`], has none; bind its identity with
+    /// [`Self::persons_created_by_correlation`] and read its availability
+    /// with [`Self::person_availability`].
     pub fn person(&self, id: PersonId) -> Result<Option<&Person>, CanwuError> {
         self.require_read(&StateKey::core_people())?;
         Ok(self.state.current().people.get(&id))
@@ -223,6 +230,69 @@ impl SimulationView<'_> {
                 "knowledge query, cursor, or ledger is invalid",
             ),
         })
+    }
+
+    /// Returns the global IDs of a holder's current records of one schema
+    /// kind, after an explicit `canwu.core.knowledge` read, so a publishing
+    /// system can name the records its next record supersedes.
+    ///
+    /// A record is current when no record of the holder supersedes it. Only
+    /// records of `kind` are returned, and an empty `subjects` selects every
+    /// one of them. A record matches when it carries every listed subject,
+    /// not when its subjects equal the list. A publisher that keeps several
+    /// lines of records for one holder therefore gives each line a subject
+    /// the others lack: a line whose subjects are a subset of another line's
+    /// cannot be selected apart from it. Subjects are committed state;
+    /// producer and correlation are recorded only on boundary evidence and
+    /// are not keys. A schema kind has one owner plugin, so lines need
+    /// telling apart only between systems or schema versions of one plugin.
+    ///
+    /// The read sees what the relation rule of
+    /// [`crate::BoundaryDirective::PublishKnowledge`] admits: records committed
+    /// by an earlier boundary, whatever their learned time, and records the
+    /// settling boundary published with `SameBoundary` visibility in an
+    /// earlier phase. Every returned ID is therefore a valid `supersedes` or
+    /// `contradicts` target for a record this system publishes to the same
+    /// holder with the same kind, and the IDs are already in the ascending
+    /// order a draft requires.
+    ///
+    /// The answer comes from the committed knowledge ledger and the boundary
+    /// being settled, never from retained evidence, so a live run, a run that
+    /// sealed its evidence, a restored run, and exact replay return the same
+    /// IDs.
+    ///
+    /// At most [`crate::KnowledgeLimitsV1::relations_per_record`] IDs are
+    /// returned, the number one record may supersede. When more records
+    /// match, the newest are returned, so a publisher always sees its own
+    /// latest record, and [`crate::KnowledgeHeads::truncated`] is set. That is
+    /// not an error: the publisher supersedes what was returned, and the
+    /// older current records drain over its later publications. The cost is
+    /// two passes over the holder's records.
+    ///
+    /// The IDs are global ledger IDs for boundary systems. Actor-facing reads
+    /// keep using holder-local IDs.
+    pub fn knowledge_heads(
+        &self,
+        holder: &KnowledgeHolderRef,
+        kind: &canwu_core::KnowledgeRecordKind,
+        subjects: &[canwu_knowledge::KnowledgeSubject],
+    ) -> Result<super::KnowledgeHeads, CanwuError> {
+        self.require_read(&StateKey::core_knowledge())?;
+        let limit = super::KnowledgeLimitsV1::CURRENT.relations_per_record;
+        if subjects.len() > limit {
+            return Err(CanwuError::new(
+                ErrorCode::KnowledgeLimitExceeded,
+                "knowledge head subject filter exceeds the record relation limit",
+            ));
+        }
+        Ok(super::knowledge::current_heads_at_cut(
+            holder,
+            kind,
+            subjects,
+            &self.state.current().knowledge.records,
+            self.knowledge_overlay,
+            limit,
+        ))
     }
 
     /// Resolves an exact command ID from the retained runtime journal in O(1).
@@ -963,6 +1033,14 @@ impl SimulationView<'_> {
     ///
     /// This supports next-boundary operation finalization without granting a
     /// plugin unrestricted access to unrelated knowledge payloads.
+    ///
+    /// The read scans retained boundary evidence. After `seal_evidence`
+    /// removes the publishing boundary it returns nothing for that boundary,
+    /// while exact replay, which retains every boundary, still returns the
+    /// change. It must not drive a decision that has to replay exactly once
+    /// the publishing boundary may have been sealed. To find the records a
+    /// new record supersedes, use [`Self::knowledge_heads`], which reads
+    /// committed state.
     pub fn knowledge_changes_by_correlation(
         &self,
         plugin: &str,
@@ -989,6 +1067,12 @@ impl SimulationView<'_> {
     /// The prefix remains plugin-scoped. This is intended for bounded
     /// multi-holder operation finalization where every holder batch must keep
     /// a unique full correlation value.
+    ///
+    /// Like [`Self::knowledge_changes_by_correlation`], the read scans
+    /// retained boundary evidence and returns nothing for a sealed boundary,
+    /// so it must not drive a decision that has to replay exactly once the
+    /// publishing boundary may have been sealed. To find the records a new
+    /// record supersedes, use [`Self::knowledge_heads`].
     pub fn knowledge_changes_by_correlation_prefix(
         &self,
         plugin: &str,

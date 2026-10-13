@@ -3796,7 +3796,14 @@ fn validate_boundary_knowledge_changes(
 ) -> Result<(), CanwuError> {
     let mut previous_order = None;
     let mut correlations = BTreeSet::new();
-    let mut visible_current_boundary = BTreeSet::new();
+    // Settlement resolves a relation against the ledger earlier boundaries
+    // committed (`values`, which this boundary joins only at its end) and the
+    // records this boundary staged with same-boundary visibility in an earlier
+    // phase. `visible` rebuilds that overlay: a phase's records enter it when
+    // the next phase begins, as settlement stages a phase after its systems ran.
+    let mut visible = super::knowledge::HolderKnowledgeRecords::new();
+    let mut staged_phase = None;
+    let mut staged: Vec<&KnowledgeRecord> = Vec::new();
     for change in &record.knowledge_changes {
         let Some(contract) = snapshot_boundary_contract(plugins, &change.plugin, &change.system)
         else {
@@ -3850,6 +3857,15 @@ fn validate_boundary_knowledge_changes(
                 "boundary knowledge holder was unavailable at its proposal cut",
             );
         }
+        if staged_phase != Some(change.phase) {
+            for stored in staged.drain(..) {
+                visible
+                    .entry(stored.holder.clone())
+                    .or_default()
+                    .insert(stored.id, stored.clone());
+            }
+            staged_phase = Some(change.phase);
+        }
         for stored in &change.records {
             if stored.id.get() != *next_id
                 || stored.holder != change.holder
@@ -3874,34 +3890,39 @@ fn validate_boundary_knowledge_changes(
             {
                 return invalid_snapshot("boundary knowledge schema ownership is inconsistent");
             }
-            let holder_records = values.entry(change.holder.clone()).or_default();
-            for related in stored.supersedes.iter().chain(&stored.contradicts) {
-                let Some(related_record) = holder_records.get(related) else {
-                    return invalid_snapshot(
-                        "boundary knowledge relation targets unavailable history",
-                    );
-                };
-                if related.get() >= stored.id.get()
-                    || related_record.schema.kind != stored.schema.kind
-                    || (related_record.learned_at == record.at
-                        && !visible_current_boundary.contains(related))
-                {
-                    return invalid_snapshot(
-                        "boundary knowledge relation is forward, cross-kind, or hidden at its cut",
-                    );
-                }
-            }
-            if holder_records.insert(stored.id, stored.clone()).is_some() {
-                return invalid_snapshot("boundary knowledge record ID is duplicated");
-            }
-            if change.phase == BoundaryPhase::PerceptionAndAttentionRefresh
-                && change.visibility == StateVisibility::SameBoundary
-            {
-                visible_current_boundary.insert(stored.id);
+            super::knowledge::validate_relation_targets(
+                &change.holder,
+                &stored.schema.kind,
+                stored.supersedes.iter().chain(&stored.contradicts),
+                values,
+                &visible,
+            )
+            .map_err(|error| {
+                invalid_snapshot_error(match error {
+                    super::knowledge::KnowledgeRelationError::Unresolved => {
+                        "boundary knowledge relation target is not in its holder's ledger at the publisher's cut"
+                    }
+                    super::knowledge::KnowledgeRelationError::CrossKind => {
+                        "boundary knowledge relation crosses schema kinds"
+                    }
+                })
+            })?;
+            if change.visibility == StateVisibility::SameBoundary {
+                staged.push(stored);
             }
             *next_id = next_id.checked_add(1).ok_or_else(|| {
                 invalid_snapshot_error("knowledge record identifier space is exhausted")
             })?;
+        }
+    }
+    // Commit, as settlement does at the end of the boundary: later boundaries
+    // resolve relations against these records, whatever their learned time.
+    for change in &record.knowledge_changes {
+        let holder_records = values.entry(change.holder.clone()).or_default();
+        for stored in &change.records {
+            if holder_records.insert(stored.id, stored.clone()).is_some() {
+                return invalid_snapshot("boundary knowledge record ID is duplicated");
+            }
         }
     }
     Ok(())

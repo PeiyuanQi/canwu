@@ -5,9 +5,9 @@
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryId, BoundaryPhase, BoundaryProposal,
     BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CreatedPerson, CustodyState,
-    EntityRef, EvidenceRef, LifeState, PersonAvailability, PersonDraft, PersonId, PluginRegistrar,
-    SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence,
+    EntityRef, EvidenceRef, LifeState, PersonAvailability, PersonDraft, PersonId, PersonPlacement,
+    PluginRegistrar, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence,
 };
 use serde_json::{Value, json};
 
@@ -39,8 +39,10 @@ fn propose_births(
         directives: vec![BoundaryDirective::CreatePerson {
             draft: PersonDraft {
                 name: format!("Child of the house ({correlation})"),
-                government: ids.government,
-                current_location: ids.central_territory,
+                placement: Some(PersonPlacement {
+                    government: ids.government,
+                    current_location: ids.central_territory,
+                }),
                 roles: vec!["heir".to_owned()],
                 availability: PersonAvailability::new(
                     LifeState::Alive,

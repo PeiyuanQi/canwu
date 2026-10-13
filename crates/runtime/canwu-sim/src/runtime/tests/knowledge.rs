@@ -177,6 +177,56 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
     });
     reject("forward relation", forward_relation);
 
+    // The fixture publishes record 1 in phase 4 for the same boundary, record
+    // 2 in phase 4 for the next boundary, and record 3 in phase 13. Each
+    // relation below is written to the ledger and to its boundary evidence,
+    // and every commitment over them is recomputed, so only the relation rule
+    // can refuse the snapshot: a load admits exactly the targets that were
+    // visible at the publisher's cut.
+    let relate = |record: u64, target: u64| {
+        let mut tampered = snapshot.clone();
+        let record = KnowledgeRecordId::new(record);
+        let target = vec![KnowledgeRecordId::new(target)];
+        tampered
+            .knowledge
+            .records
+            .get_mut(&holder)
+            .and_then(|records| records.get_mut(&record))
+            .expect("fixture ledger record should exist")
+            .supersedes
+            .clone_from(&target);
+        tampered.boundaries[0]
+            .knowledge_changes
+            .iter_mut()
+            .flat_map(|change| &mut change.records)
+            .find(|stored| stored.id == record)
+            .expect("fixture boundary record should exist")
+            .supersedes = target;
+        refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+        tampered.boundaries[0].state_hash = Some(
+            snapshot_boundary_head_state_hash(&tampered)
+                .expect("tampered boundary head should have a state commitment"),
+        );
+        rehash_tampered_snapshot(&mut tampered);
+        Simulation::from_snapshot_with_plugins(tampered, &[&plugin])
+    };
+    relate(3, 1).expect("phase 13 may relate to a same-boundary phase-4 record");
+    for (label, record, target) in [
+        ("a record deferred to the next boundary", 3, 2),
+        ("a record of the publisher's own phase", 2, 1),
+        ("a later record", 1, 3),
+    ] {
+        let error = relate(record, target)
+            .err()
+            .unwrap_or_else(|| panic!("a relation to {label} unexpectedly loaded"));
+        assert_eq!(error.code, ErrorCode::InvalidSnapshot, "{label}");
+        assert!(
+            error.message.contains("publisher's cut"),
+            "{label}: {}",
+            error.message
+        );
+    }
+
     let mut evidence = snapshot.clone();
     mutate_first_record(&mut evidence, &|record| {
         record.origin.evidence = vec![EvidenceRef::Event(EventId::new(999))];

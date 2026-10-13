@@ -121,6 +121,10 @@ pub use canwu_sim::{
     TransitionAuditRecord, TransitionManifest, TransitionManifestId, TransitionParticipant,
     TransitionParticipantAudit, TransitionRecordVersion,
 };
+// Persons created with or without a placement (gap G-49).
+pub use canwu_sim::{BoundaryCreatedPerson, PersonPlacement};
+// A holder's current records, for naming supersession targets (gap G-58).
+pub use canwu_sim::KnowledgeHeads;
 pub use canwu_time::{SimDuration, SimTime};
 pub use canwu_transport::{
     BookingAllocationV1, CAPACITY_BOOKING_ALLOCATION_DIGEST_DOMAIN, CapacityAllocationFailureV1,
