@@ -1,18 +1,19 @@
 use canwu_api::{
     Canwu, CommandAttemptOutcome, CommandEnvelope, CommandId, CommandRequest, CommandRequestId,
     DomainRecordKind, DomainRecordRef, DomainRecordVersionRef, DomainRecordVersionSource,
-    EntityRef, ErrorCode, IngressId, Issuer, KnowledgeQuery, PluginIngressRequest, ResourceId,
-    SimDuration, SimTime,
+    EntityRef, ErrorCode, IngressId, Issuer, PluginIngressRequest, ResourceId, SimDuration,
+    SimTime,
 };
 use canwu_fiscal::{
     FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FiscalAction, FiscalActionDisposition,
-    FiscalActionRequest, FiscalAdoptionStage, FiscalAssessment, FiscalCatalogRecord,
-    FiscalExecutionKind, FiscalExecutionReceipt, FiscalExecutionReceiptPacket,
+    FiscalActionIssuer, FiscalActionRequest, FiscalAdoptionStage, FiscalAssessment,
+    FiscalCatalogRecord, FiscalExecutionKind, FiscalExecutionReceipt, FiscalExecutionReceiptPacket,
     FiscalExecutionRequest, FiscalExternalOperationRef, FiscalHistoricalContextPacket,
-    FiscalHistoricalMode, FiscalPaymentForm, FiscalProjection, FiscalReceiptDisposition,
-    FiscalStateRecord, MAX_FISCAL_ASSESSMENTS, MAX_FISCAL_EVIDENCE_PER_RECORD, PLUGIN_NAME,
-    compute_aggregates, enqueue_execution_receipt, fiscal_action_command, fiscal_catalog_reference,
-    fiscal_historical_context_ingress, fiscal_report_knowledge_schema_id, fiscal_state_reference,
+    FiscalHistoricalMode, FiscalIssuerRole, FiscalPaymentForm, FiscalProjection,
+    FiscalReceiptDisposition, FiscalStateRecord, MAX_FISCAL_ASSESSMENTS,
+    MAX_FISCAL_EVIDENCE_PER_RECORD, PLUGIN_NAME, compute_aggregates, enqueue_execution_receipt,
+    fiscal_action_command, fiscal_catalog_reference, fiscal_historical_context_ingress,
+    fiscal_reports, fiscal_state_reference,
 };
 use canwu_ming_fiscal_reference::{
     DEFAULT_SEED, ReferenceFiscalExecutionEvidence, enqueue_reference_execution_result,
@@ -589,17 +590,12 @@ fn fiscal_reports_are_imperfect_holder_relative_knowledge() {
     canwu
         .advance_canonical(SimDuration::minutes(1))
         .expect("assessment and report");
-    let result = canwu
-        .viewer_for_actor(actor)
-        .expect("actor viewer")
-        .query_knowledge(&KnowledgeQuery {
-            schemas: vec![fiscal_report_knowledge_schema_id()],
-            ..KnowledgeQuery::default()
-        })
-        .expect("actor-visible holder report");
-    assert_eq!(result.records.len(), 1);
-    let report: FiscalProjection =
-        serde_json::from_value(result.records[0].payload.clone()).expect("typed fiscal report");
+    let viewer = canwu.viewer_for_actor(actor).expect("actor viewer");
+    let reports = fiscal_reports(&viewer).expect("actor-visible holder report");
+    assert_eq!(reports.len(), 1);
+    let report = reports.values().next().expect("the actor's report");
+    assert!(report.is_complete());
+    let report: &FiscalProjection = &report.projection;
     let fact = report.facts.values().next().expect("reported fact");
     assert!(fact.assessed.minimum <= 800);
     assert!(fact.assessed.maximum >= 800);
@@ -672,6 +668,12 @@ fn forged_action_ingress_without_an_admitted_command_is_rejected() {
     let payload = serde_json::json!({
         "request": request,
         "command": CommandId::new(999),
+        "issuer": FiscalActionIssuer {
+            binding_id: "authority.revenue-minister".to_owned(),
+            role: FiscalIssuerRole::Principal,
+            actor: None,
+            authority_basis: None,
+        },
     });
     let now = canwu.time();
     canwu

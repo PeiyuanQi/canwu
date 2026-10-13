@@ -1,7 +1,8 @@
 //! Gap G-58, as the fiscal extension meets it: two boundaries at one instant
-//! each change the fiscal state, so the observer's second report supersedes
-//! a report learned at the same instant in the earlier boundary. The run
-//! continues, and a save taken after it restores and replays exactly.
+//! each change the fiscal state, so the records of the observer's second
+//! report supersede records learned at the same instant in the earlier
+//! boundary. The run continues, and a save taken after it restores and
+//! replays exactly.
 
 use canwu_api::{
     Canwu, CommandEnvelope, CommandRequest, CommandRequestId, EntityRef, Government, GovernmentId,
@@ -137,6 +138,7 @@ fn scenario() -> Scenario {
             authorized_actor: Some(TREASURER),
             acting_actor: None,
             authority_basis: None,
+            rebound_by: None,
         },
     );
     state.scope_bindings.insert(
@@ -237,7 +239,8 @@ fn assess_now(canwu: &mut Canwu, action_id: &str) {
     );
 }
 
-/// The auditor's reports, in the order the run published them.
+/// The auditor's report records, in the order the run published them. Each
+/// report here is a summary followed by its one part.
 fn reports(canwu: &Canwu) -> Vec<KnowledgeRecord> {
     canwu
         .boundaries()
@@ -254,20 +257,29 @@ fn gap_g58_fiscal_same_instant_reports() {
     let mut canwu = Canwu::new_with_plugins(58, scenario(), &[&fiscal]).expect("fiscal run");
 
     // Two fiscal boundaries at one instant: each changes the fiscal state and
-    // publishes the auditor's report, and the second supersedes the first.
+    // publishes the auditor's report, and each record of the second supersedes
+    // the record of the same line in the first.
     assess_now(&mut canwu, "action.first");
     assess_now(&mut canwu, "action.second");
     let published = reports(&canwu);
-    assert_eq!(published.len(), 2);
-    assert_eq!(published[0].learned_at, published[1].learned_at);
-    assert_eq!(published[1].supersedes, vec![published[0].id]);
+    assert_eq!(published.len(), 4);
+    assert!(
+        published
+            .iter()
+            .all(|record| record.learned_at == published[0].learned_at)
+    );
+    assert_eq!(published[2].supersedes, vec![published[0].id]);
+    assert_eq!(published[3].supersedes, vec![published[1].id]);
 
     // The run continues past that instant.
     canwu
         .advance_canonical(SimDuration::days(1))
         .expect("the run continues");
     assess_now(&mut canwu, "action.third");
-    assert_eq!(reports(&canwu)[2].supersedes, vec![published[1].id]);
+    let published = reports(&canwu);
+    assert_eq!(published.len(), 6);
+    assert_eq!(published[4].supersedes, vec![published[2].id]);
+    assert_eq!(published[5].supersedes, vec![published[3].id]);
 
     // A save taken after it restores, and the restored run settles a further
     // same-instant fiscal boundary exactly as the live run does.

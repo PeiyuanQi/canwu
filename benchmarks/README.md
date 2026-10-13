@@ -267,6 +267,61 @@ cargo run --release \
   --output benchmarks/baselines/YYYY-MM-DD-resource-archive-full.json
 ```
 
+## Fiscal boundary profile
+
+The standalone `fiscal-profile` binary measures what `canwu-fiscal` adds to a
+boundary. It installs a fiscal state with a history of settled assessments and
+execution requests (48 institutions and 40 settled cycles by default, about
+2 MiB of JSON) and times, through the public API:
+
+- a boundary that admits one ingress item of another plugin and no fiscal
+  ingress, in a run without fiscal records, with a fiscal state no boundary has
+  written yet, and with one a boundary has written;
+- the boundary that admits a batch of fiscal action commands, one per
+  institution, and the boundary that settles them; and
+- decoding, copying, validating, and encoding the state itself, so a boundary
+  time can be read as a count of those operations.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin fiscal-profile -- \
+  --samples 31 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-fiscal-boundary-elapsed.json
+```
+
+`--observers 0` installs no observer, so no report is published. That
+separates the plugin's own cost on an idle boundary from the engine's cost of
+carrying published report records through every boundary. Each observer sees
+`--observed-institutions` institutions of its own, two by default, which is
+what one 0.14.0 report record could hold; `--observers 1
+--observed-institutions 48` gives one observer a report of every institution.
+`--institutions`, `--cycles`, and `--batch` change the state size and the
+batch. The report also gives the records and payload bytes of one observer's
+report as first published, and of what the settling boundary publishes.
+
+The source uses only API that `canwu-fiscal` 0.14.0 also has, so the same file
+builds against both releases. 0.14.0 cannot run the wide-observer case: the
+boundary that publishes its first report fails. Every recorded run is kept:
+
+| Run | 0.14.0 | 0.15.0 | 0.15.0, one observer of 48 institutions |
+| --- | --- | --- | --- |
+| Round 1 | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.14.0-round1-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-round1-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-wide-observer-round1-elapsed.json) |
+| Round 2 | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.14.0-round2-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-round2-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-wide-observer-round2-elapsed.json) |
+| Round 3 | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.14.0-round3-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-round3-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-wide-observer-round3-elapsed.json) |
+| No observer | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.14.0-no-observers-elapsed.json) | [`elapsed`](baselines/2026-10-13-fiscal-boundary-0.15.0-no-observers-elapsed.json) | |
+
+The 0.14.0 runs were recorded first, alternately with an earlier state of the
+0.15.0 change. The 0.15.0 runs were recorded later the same day from the
+release branch with the change on it, before the version bump, so the two
+columns were not interleaved. The 0.14.0 files predate the report-size fields
+and do not have them. The tables in
+[`docs/proposals/fiscal-throughput-and-authority.md`](../docs/proposals/fiscal-throughput-and-authority.md)
+are computed from these files: each figure is the median of the three rounds'
+`median` values, with the lowest and highest of them beside it.
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

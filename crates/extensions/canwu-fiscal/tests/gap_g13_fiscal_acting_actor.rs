@@ -254,6 +254,7 @@ fn scenario() -> Scenario {
             authorized_actor: Some(PRINCIPAL),
             acting_actor: Some(ACTING),
             authority_basis: Some(initial_basis()),
+            rebound_by: None,
         },
     );
     state.scope_bindings.insert(

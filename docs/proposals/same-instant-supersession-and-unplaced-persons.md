@@ -159,9 +159,9 @@ says that the target is not in its holder's ledger at the publisher's cut, or
 that the relation crosses schema kinds.
 
 Not covered: plugins that still take their supersession targets from the
-correlation reads. `canwu-fiscal` is such a plugin until it adopts
-`knowledge_heads`: after `seal_evidence` its next report supersedes nothing,
-and the sealed run fails exact replay.
+correlation reads. `canwu-fiscal` was such a plugin and now takes them from
+`knowledge_heads`; see
+[Fiscal Throughput and Authority](fiscal-throughput-and-authority.md#reports).
 
 ## Persons without a placement (G-49)
 

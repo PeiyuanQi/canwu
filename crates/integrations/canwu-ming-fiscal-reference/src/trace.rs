@@ -1,12 +1,10 @@
 //! Human-readable, replay-friendly trace capture for the Ming fiscal reference.
 
 use crate::invalid_reference;
-use canwu_api::{
-    BoundaryReceipt, BoundaryRecord, Canwu, CanwuError, ErrorCode, KnowledgeQuery, SimTime,
-};
+use canwu_api::{BoundaryReceipt, BoundaryRecord, Canwu, CanwuError, ErrorCode, SimTime};
 use canwu_fiscal::{
-    FiscalHistoricalMode, FiscalProjection, FiscalState, FiscalStateRecord,
-    fiscal_report_knowledge_schema_id, fiscal_state_reference,
+    FiscalHistoricalMode, FiscalProjection, FiscalState, FiscalStateRecord, fiscal_reports,
+    fiscal_state_reference,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -297,22 +295,16 @@ pub fn default_trace_directory() -> PathBuf {
     PathBuf::from(DEFAULT_TRACE_DIRECTORY)
 }
 
+/// The report each observer currently holds, reassembled from its parts. An
+/// observer the run has published no report to is left out.
 fn collect_projections(canwu: &Canwu, state: &FiscalState) -> BTreeMap<String, FiscalProjection> {
-    let query = KnowledgeQuery {
-        schemas: vec![fiscal_report_knowledge_schema_id()],
-        ..KnowledgeQuery::default()
-    };
     state
         .observer_bindings
         .iter()
         .filter_map(|(observer_id, binding)| {
             let viewer = canwu.viewer_for_actor(binding.actor).ok()?;
-            let result = viewer.query_knowledge(&query).ok()?;
-            result.records.into_iter().find_map(|record| {
-                serde_json::from_value::<FiscalProjection>(record.payload)
-                    .ok()
-                    .map(|projection| (observer_id.clone(), projection))
-            })
+            let report = fiscal_reports(&viewer).ok()?.remove(observer_id)?;
+            Some((observer_id.clone(), report.projection))
         })
         .collect()
 }
