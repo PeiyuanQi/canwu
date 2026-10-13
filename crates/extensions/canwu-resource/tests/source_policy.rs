@@ -901,7 +901,7 @@ fn source_policy_restore_archive_and_tamper_validation_preserve_selection() {
     simulation.step_canonical().unwrap().unwrap();
     let terminal = state(&simulation);
     let archive = terminal
-        .prepare_resource_archive(terminal.terminal_archive_candidates.len())
+        .prepare_resource_archive(terminal.terminal_archive_candidates.len(), &())
         .unwrap();
     archive.validate().unwrap();
     let ordinal = archive.blob.records.iter().position(|record| matches!(&record.payload, ResourceTerminalArchivePayloadV1::Demand(demand) if demand.id == demand_id)).unwrap();

@@ -26,7 +26,18 @@ pub struct ResourceLimitsV1 {
     pub max_operation_outcomes: usize,
     pub max_reports_per_boundary: usize,
     pub max_observation_heads: usize,
+    /// Hot terminal records the root may hold, and the most one archive
+    /// commit selects. An operation whose terminal records would not fit
+    /// fails its boundary and stays queued until an archive commit makes
+    /// room; it is not recorded as a rejection. The budget therefore has to
+    /// cover the backlog plus every terminal record the operations due at one
+    /// boundary can produce. At most [`Self::MAX_ARCHIVE_CANDIDATES`]. Size
+    /// it from the cost of a boundary at that backlog, not from the ceiling.
     pub max_archive_candidates: usize,
+    /// Hot maintenance receipts of applied archive commits. Each of them is
+    /// an archive candidate, so this must be at least
+    /// `max_archive_candidates`; an archive commit then never fails for want
+    /// of a receipt slot. The receipt of a stale commit is not counted.
     pub max_archive_maintenance_receipts: usize,
     pub max_dirty_demands: usize,
     pub max_due_entries: usize,
@@ -41,6 +52,19 @@ impl ResourceLimitsV1 {
     pub const MAX_HOLDERS: usize = 1_024;
     pub const MAX_QUERY_PAGE: usize = 256;
     pub const MAX_HOT_RECEIPTS: usize = 8_192;
+    /// Hard maximum of `max_archive_candidates` and of
+    /// `max_archive_maintenance_receipts`: the hot terminal records the
+    /// resource root may hold between two archive commits. It is what one
+    /// archive commit carries ([`crate::MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS`]).
+    ///
+    /// The ceiling is headroom for a burst, not a working size. Every
+    /// boundary that changes the root decodes, validates, re-encodes, and
+    /// journals the whole root, hot terminal records included, so each such
+    /// boundary costs time and journal bytes in proportion to the backlog.
+    /// A host application chooses its budget from that cost at the backlog
+    /// it accepts and keeps the backlog small by archiving often; the
+    /// canonical value stays 256.
+    pub const MAX_ARCHIVE_CANDIDATES: usize = 4_096;
     pub const MAX_HOT_RECORD_BYTES: usize = 65_536;
     pub const MAX_AUTHORITATIVE_STATE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -87,9 +111,9 @@ impl ResourceLimitsV1 {
             || self.max_observation_heads == 0
             || self.max_observation_heads > Self::MAX_HOLDERS * 4
             || self.max_archive_candidates == 0
-            || self.max_archive_candidates > 256
+            || self.max_archive_candidates > Self::MAX_ARCHIVE_CANDIDATES
             || self.max_archive_maintenance_receipts == 0
-            || self.max_archive_maintenance_receipts > 1_024
+            || self.max_archive_maintenance_receipts > Self::MAX_ARCHIVE_CANDIDATES
             || self.max_dirty_demands == 0
             || self.max_dirty_demands > 2_048
             || self.max_due_entries == 0
@@ -99,6 +123,12 @@ impl ResourceLimitsV1 {
         {
             return Err(ResourceError::LimitExceeded(
                 "resource limits exceed the V1 hard maxima".to_owned(),
+            ));
+        }
+        if self.max_archive_maintenance_receipts < self.max_archive_candidates {
+            return Err(ResourceError::LimitExceeded(
+                "resource archive maintenance receipt budget is below the archive candidate budget"
+                    .to_owned(),
             ));
         }
         Ok(())

@@ -183,17 +183,94 @@ persisted observation head is the only report source, so materialization never
 backdates current balances into an older observation cut.
 
 Terminal resource records are moved through the bounded package-owned archive:
-`prepare_resource_archive` selects only hot terminal candidates within the
-configured budget, `PreparedResourceArchiveBatchV1::store_and_verify` verifies
-content-addressed objects, exact membership/temporal closure, and retention.
+`prepare_resource_archive(candidate_limit, store)` selects only hot terminal
+candidates within the configured budget,
+`PreparedResourceArchiveBatchV1::store_and_verify` verifies content-addressed
+objects, exact membership/temporal closure, and retention.
 `enqueue_resource_archive` additionally requires the batch to equal the exact
 current terminal candidates before committing the authenticated directory
 through the plugin's permitted internal ingress.
 `finalize_resource_archive_retention` acknowledges store-side retention after
 restart or stale-source rejection. Archive roots, retention handles, receipts,
-and candidate indexes are persisted in `ResourceState`. Maintenance receipts
-become bounded terminal candidates and can themselves move cold; ordinary
-lifecycle work does not scan cold history.
+and candidate indexes are persisted in `ResourceState`. The maintenance
+receipt of an applied commit becomes a terminal candidate and can itself move
+cold; ordinary lifecycle work does not scan cold history.
+
+An archive commit never fails for capacity. A commit that went stale because
+another commit or an operation settled first is a terminal no-op: its receipt
+is not a candidate, stays in the root outside the budgets until
+`finalize_resource_archive_retention` acknowledges it, and is then removed.
+A commit queued beside it against a full root still applies. An
+acknowledgement retires the retention handle it names and every stale receipt
+recorded under that handle, so the same batch queued twice leaves no stale
+receipt behind. Finalize each commit before the next commit archives its
+receipt: a call made later fails, and the state-side handle and the store-side
+handle in `DurableIngress` then stay permanently. Within one boundary, archive
+commits and retention acknowledgements settle before every other packet of
+the resource plugin, so a commit prepared from the root the boundary started
+from applies even when an operation was admitted ahead of it. Releasing a
+retention handle removes its protection and never deletes an object: two
+batches prepared from one root share their leading blobs, pages, and lookup
+pages, so an object named by a rejected or abandoned handle may belong to an
+applied commit. Deletion is by reachability only.
+
+One commit carries up to `MAX_RESOURCE_ARCHIVE_COMMIT_RECORDS` (4,096) records
+as blobs of at most 256, each with its own membership and temporal page, and a
+run may make any number of commits. `max_archive_candidates` defaults to 256
+and may be raised to `ResourceLimitsV1::MAX_ARCHIVE_CANDIDATES` (4,096);
+`max_archive_maintenance_receipts` must be at least as large. The ceiling is
+headroom for a burst, not a working size. Every boundary that changes the
+resource root decodes, validates, re-encodes, and journals the whole root, so
+one boundary costs time and journal bytes in proportion to the hot terminal
+records: in the recorded baseline about 13 ms and 0.3 MB at 256 records,
+52 ms and 1.2 MB at 1,024, and 246 ms and 4.6 MB at 4,000
+(`benchmarks/baselines/2026-10-13-resource-archive-full.json`). Choose the
+budget from that cost at the backlog you accept, and archive often rather than
+run with a large backlog. The budget also has a floor: it must cover the
+backlog plus every terminal record the operations due at one boundary can
+produce, between one and eight per operation by its kind, besides the slots
+reserved for admitted completion lifecycles. An operation that does not fit
+fails its boundary and stays queued until an archive commit makes room; it is
+not a recorded rejection. That commit may be queued behind the operation,
+because archive commits settle first.
+
+Every operation asks the archive whether its operation key was used before.
+Each commit directory commits to a cumulative lookup index
+(`ResourceArchiveLookupPageV1`, a 16-way trie over key digests), and
+`archived_resource_terminal_record` reads the head directory and one lookup
+page per index level, each authenticated by its content id: the cost follows
+the logarithm of the archived records and does not depend on the number of
+commits. A hit also reads and authenticates the one blob that holds the
+record. `prepare_resource_archive` reads the lookup pages on the paths of the
+new keys from the store and prepares their replacements. A lookup trusts the
+head directory to name a faithful index: `enqueue_resource_archive` and the
+checked restore wrappers establish that, and a root assembled by hand is not
+checked.
+
+A restore, an exact replay, or a fork reads the index of every head it passes
+through, so the store must keep the lookup pages those heads reach. The
+archive reachability participant marks every lookup page reachable from a
+chain, queued, or unacknowledged directory; the index of the head and of each
+queued commit must be complete, and any other is marked as far as the store
+still holds it.
+
+`superseded_lookup_pages` of a prepared batch names the lookup pages of the
+previous head's index that the batch's index no longer reaches. The list may
+be used only after the batch's commit settled as `Applied`. A batch whose
+commit was rejected as stale carries a list too, and that list names pages of
+the live head. Deleting the pages of an applied commit is safe only after a
+durable snapshot or checkpoint taken after that commit exists, and it gives up
+every earlier point of the run that reads one of those pages: a snapshot or
+checkpoint taken before the commit no longer restores, a journal no longer
+replays across it, and a fork whose head precedes it no longer continues. This
+reaches back as far as the commit that wrote each page, not only to the commit
+before, because consecutive heads share pages. A host application that needs
+any of those keeps the pages. `live_resource_archive_lookup_pages` recomputes
+what a live run reads when a list was lost: the pages reachable from the head
+and from each queued commit, whose directory roots the host application
+passes. A commit is queued when its store-side retention handle is in
+`DurableIngress` and the root holds no handle with its id. A queued commit the
+host application does not name is not covered.
 
 Use `validate_resource_runtime` after activation and the checked wrappers
 `from_resource_snapshot_json`, `from_resource_checkpoint_journal`, and

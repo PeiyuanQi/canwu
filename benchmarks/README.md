@@ -223,6 +223,50 @@ growth and the allocation files for exact counts. The figures are interpreted
 in
 [`docs/proposals/keyed-draw-index-and-settlement-profile.md`](../docs/proposals/keyed-draw-index-and-settlement-profile.md).
 
+## Resource archive profile
+
+The standalone `resource-archive-profile` binary measures the terminal archive
+of `canwu-resource`: what a cold lookup reads and costs as archived records and
+archive commits grow, what preparing and storing one commit costs and how many
+lookup-index bytes it writes, the restore audit, and what one boundary costs
+against a hot terminal backlog. Every archived record is a copy of one rejected
+operation outcome under its own key; commits go through
+`prepare_resource_archive` and `store_and_verify` on an in-memory store that
+copies the bytes of every object it serves. Each backlog case settles real
+boundaries through the resource plugin: one requester-scoped allocation per
+boundary, timing `settle_boundary` only and measuring the evidence that
+boundary appends as encoded JSON (`boundary_ms`, `journal_bytes_per_boundary`).
+`state_operation_ms` is the same operation applied to a detached copy of the
+root, the state-level share of that boundary. The `smoke` preset finishes in
+seconds; the `full` preset archives up to one million records and 120,000
+commits and takes several minutes.
+
+The recorded 2026-10-13 results are in
+[`baselines/2026-10-13-resource-archive-full.json`](baselines/2026-10-13-resource-archive-full.json).
+`source.content_hash` identifies the measured sources: a BLAKE3 hash over
+`crates/extensions/canwu-resource/src` and the profile binary.
+`source.git_commit` is only the commit that was checked out when the profile
+ran, and `source.git_dirty` says whether the tree had uncommitted changes. That
+baseline was recorded together with the change it measures, so it names the
+parent commit and is dirty.
+
+The [resource archive proposal](../docs/proposals/resource-archive-lookup-and-volume.md)
+compares those results with 0.14.0. The binary does not compile against
+0.14.0, where `prepare_resource_archive` takes no store and a batch has no
+lookup pages. The 0.14.0 numbers came from a copy of its lookup case with
+those two differences, built at commit `6617f54`, with each hot record produced
+by a real rejected operation; that copy is not kept in the tree.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin resource-archive-profile -- \
+  --preset full \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-resource-archive-full.json
+```
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

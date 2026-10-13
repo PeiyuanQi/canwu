@@ -1764,8 +1764,10 @@ impl GrainHarness {
         if state.terminal_archive_candidates.len() < ARCHIVE_TRIGGER {
             return Ok(());
         }
-        let prepared = state
-            .prepare_resource_archive(state.terminal_archive_candidates.len().min(ARCHIVE_BATCH))?;
+        let prepared = state.prepare_resource_archive(
+            state.terminal_archive_candidates.len().min(ARCHIVE_BATCH),
+            self.archive_store.as_ref(),
+        )?;
         let receipt =
             enqueue_resource_archive(&mut self.canwu, &prepared, self.archive_store.as_ref())?;
         self.settle_current(&[])?;

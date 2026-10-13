@@ -32,7 +32,7 @@ pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_e
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "59a8d41ebd57073b96d6694957d30f0c0ea69a3be897d293cf7604c940532b84";
+    "9b1c6d3f1341d0c9ffeb90948a9d60469d2925c219657f708e4f0f5308dd2e28";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -240,10 +240,20 @@ fn resource_archive_reachability(
         .get(crate::RESOURCE_ARCHIVE_INDEX_DIRECTORY_NAMESPACE)
         .cloned()
         .unwrap_or_default();
+    // Every lookup page reachable from a chain, queued, or unacknowledged
+    // directory is marked. The head and every queued commit need their whole
+    // index: a queued commit may become the head. The index of any other
+    // directory (an earlier commit, or one settled and waiting for its
+    // retention acknowledgement) is marked as far as the store still holds
+    // it, so a collection never drops a page that a restore, a replay, or a
+    // fork through that commit could read, and a host application that
+    // deleted superseded pages is not refused.
+    let mut live = roots.clone();
     if let Some(record) = view.typed_domain_record(&resource_runtime_reference())? {
         let state = record.decode_payload::<ResourceRuntimeRecord>()?;
         if let Some(root) = &state.archive_head.directory_root {
             roots.insert(root.clone());
+            live.insert(root.clone());
         }
         roots.extend(
             state
@@ -252,6 +262,7 @@ fn resource_archive_reachability(
                 .map(|handle| handle.directory_root.clone()),
         );
     }
+    let mut lookup_roots = Vec::new();
     let mut visited = std::collections::BTreeSet::new();
     while let Some(root) = roots.pop_first() {
         if !visited.insert(root.clone()) {
@@ -278,6 +289,7 @@ fn resource_archive_reachability(
             })?;
         crate::authenticate_resource_archive_directory(&provider, &directory)
             .map_err(resource_canwu_error)?;
+        lookup_roots.push((!live.contains(&root), directory.lookup_root.clone()));
         manifest.insert_plugin_object(crate::RESOURCE_ARCHIVE_INDEX_DIRECTORY_NAMESPACE, root);
         for page in &directory.membership_pages {
             manifest.insert_plugin_object(
@@ -297,6 +309,23 @@ fn resource_archive_reachability(
         if let Some(previous) = directory.previous_root {
             roots.insert(previous);
         }
+    }
+    // Complete indexes first: a page they share with another index is then
+    // already known to be whole.
+    lookup_roots.sort();
+    let mut lookup_pages = std::collections::BTreeSet::new();
+    for (earlier, lookup_root) in &lookup_roots {
+        crate::collect_resource_archive_lookup_pages(
+            &provider,
+            lookup_root,
+            "",
+            !earlier,
+            &mut lookup_pages,
+        )
+        .map_err(resource_canwu_error)?;
+    }
+    for page in lookup_pages {
+        manifest.insert_plugin_object(crate::RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE, page);
     }
     Ok(())
 }
@@ -593,7 +622,8 @@ fn settle_resource_lifecycle(
     let mut changed = false;
     let mut affected = Vec::new();
     let mut directives = Vec::new();
-    for ingress_id in &context.admitted_ingress {
+    let admitted = archive_maintenance_first(view, &context.admitted_ingress)?;
+    for ingress_id in &admitted {
         let Some(ingress) = view.ingress(*ingress_id)? else {
             continue;
         };
@@ -883,24 +913,11 @@ fn settle_resource_lifecycle(
             RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS => {
                 let acknowledgement: ResourceArchiveRetentionAcknowledgementV1 =
                     decode(payload, "resource archive retention acknowledgement")?;
-                let persisted = state
-                    .archive_maintenance_receipts
-                    .get(&acknowledgement.receipt.sequence)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidArchive,
-                            "resource archive terminal receipt is unavailable",
-                        )
-                    })?;
-                if persisted != &acknowledgement.receipt {
-                    return Err(CanwuError::new(
-                        ErrorCode::InvalidArchive,
-                        "resource archive acknowledgement receipt is forged",
-                    ));
-                }
                 state
-                    .archive_retention_handles
-                    .remove(&acknowledgement.receipt.retention_handle_id);
+                    .acknowledge_archive_retention(&acknowledgement.receipt)
+                    .map_err(|error| {
+                        CanwuError::new(ErrorCode::InvalidArchive, error.to_string())
+                    })?;
                 changed = true;
             }
             _ => {}
@@ -937,6 +954,47 @@ fn settle_resource_lifecycle(
         directives,
         ..BoundaryProposal::default()
     })
+}
+
+/// Orders the ingress one boundary admitted so that archive commits and
+/// retention acknowledgements settle before every other packet, each group in
+/// its admitted order.
+///
+/// A full candidate budget fails the boundary of the next operation, and the
+/// remedy is an archive commit. Settling the commit first lets it apply
+/// against the root the boundary started from, the root it was prepared
+/// from, instead of failing behind the operation or going stale after it. A
+/// boundary that admitted no archive packet, or nothing else, keeps its
+/// order.
+fn archive_maintenance_first(
+    view: &SimulationView<'_>,
+    admitted: &[canwu_api::IngressId],
+) -> Result<Vec<canwu_api::IngressId>, CanwuError> {
+    let mut maintenance = Vec::new();
+    let mut others = Vec::new();
+    for ingress_id in admitted {
+        let is_maintenance = match view.ingress(*ingress_id)?.map(|ingress| &ingress.payload) {
+            Some(IngressPayload::Plugin {
+                plugin,
+                packet_type,
+                ..
+            }) => {
+                plugin == PLUGIN_NAME
+                    && matches!(
+                        packet_type.as_str(),
+                        RESOURCE_ARCHIVE_COMMIT_INGRESS | RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS
+                    )
+            }
+            _ => false,
+        };
+        if is_maintenance {
+            maintenance.push(*ingress_id);
+        } else {
+            others.push(*ingress_id);
+        }
+    }
+    maintenance.extend(others);
+    Ok(maintenance)
 }
 
 fn completion_expiry_tick_directive() -> BoundaryDirective {
@@ -2824,7 +2882,9 @@ pub fn enqueue_resource_completion_operation(
 }
 
 /// Stores, reads back, verifies, and enqueues a bounded terminal archive batch
-/// with one host-retained authenticated directory root.
+/// with one host-retained authenticated directory root. The batch must equal
+/// what [`crate::ResourceState::prepare_resource_archive`] derives from the
+/// current resource root and `store`, including its lookup index pages.
 pub fn enqueue_resource_archive(
     canwu: &mut Canwu,
     prepared: &crate::PreparedResourceArchiveBatchV1,
@@ -2833,7 +2893,7 @@ pub fn enqueue_resource_archive(
     let (_, state) = crate::resource_state(canwu)?
         .ok_or_else(|| CanwuError::new(ErrorCode::PluginNotActive, "resource runtime is absent"))?;
     let canonical = state
-        .prepare_resource_archive(prepared.selected.len())
+        .prepare_resource_archive(prepared.selected.len(), store)
         .map_err(resource_canwu_error)?;
     if &canonical != prepared {
         return Err(CanwuError::new(
@@ -2887,7 +2947,18 @@ pub fn enqueue_resource_archive(
 }
 
 /// Finalizes the store-side retention handle after the authoritative resource
-/// state records an applied or stale terminal archive disposition.
+/// state records an applied or stale terminal archive disposition, and queues
+/// the acknowledgement that retires the state-side handle and every stale
+/// receipt recorded under it. The same batch queued twice has one handle:
+/// either of its ingress receipts finalizes the settlement recorded first.
+///
+/// The disposition is read from the commit's maintenance receipt, so
+/// finalize each commit before the next commit archives its receipt. A call
+/// made after that fails here, and nothing retires what it leaves: the
+/// state-side handle stays in `archive_retention_handles` and the store-side
+/// handle stays in `DurableIngress`, both permanently. Once this call has
+/// succeeded, its acknowledgement may settle behind a commit that archives
+/// the receipt, or twice, without harm.
 pub fn finalize_resource_archive_retention(
     canwu: &mut Canwu,
     store: &dyn crate::ResourceArchiveStore,

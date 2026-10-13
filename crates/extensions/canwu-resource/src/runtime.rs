@@ -4534,7 +4534,7 @@ impl ResourceState {
             || self.observation_heads.len() > self.limits.max_observation_heads
             || self.dirty_demands.len() > self.limits.max_dirty_demands
             || self.terminal_archive_candidates.len() > self.limits.max_archive_candidates
-            || self.archive_maintenance_receipts.len()
+            || self.applied_archive_maintenance_receipts()
                 > self.limits.max_archive_maintenance_receipts
         {
             return Err(ResourceError::LimitExceeded(
@@ -4870,6 +4870,7 @@ impl ResourceState {
                 ));
             }
         }
+        self.validate_archive_maintenance_candidacy()?;
         for (sequence, receipt) in &self.archive_maintenance_receipts {
             let mut detached = receipt.clone();
             let digest = std::mem::take(&mut detached.semantic_digest);

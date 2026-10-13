@@ -1495,9 +1495,9 @@ impl canwu_resource::ResourceArchiveStore for ViewResourceArchive<'_> {
 }
 
 /// One resource terminal record from live state, or from the resource package
-/// archive once archiving has moved it out. An unreadable archive is a
-/// boundary error, never a durable rejection; exceeding the lookup's bounded
-/// directory walk depends only on persisted state, so it may be one.
+/// archive once archiving has moved it out. The archive lookup is bounded and
+/// fails only when the archive cannot be read, which is a boundary error,
+/// never a durable rejection.
 fn resource_terminal_record<T: Clone>(
     view: &SimulationView<'_>,
     state: &canwu_resource::ResourceState,
@@ -1511,12 +1511,10 @@ fn resource_terminal_record<T: Clone>(
     canwu_resource::archived_resource_terminal_record(state, &ViewResourceArchive(view), key)
         .map(|record| record.and_then(|record| archived(record.payload)))
         .map_err(|error| {
-            let code = if matches!(error, canwu_resource::ResourceError::LimitExceeded(_)) {
-                ErrorCode::QueryBudgetExceeded
-            } else {
-                ErrorCode::InvalidArchive
-            };
-            CanwuError::new(code, format!("resource archive lookup failed: {error}"))
+            CanwuError::new(
+                ErrorCode::InvalidArchive,
+                format!("resource archive lookup failed: {error}"),
+            )
         })
 }
 

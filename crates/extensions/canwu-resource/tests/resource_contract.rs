@@ -2123,8 +2123,10 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
         )),
         Err(ResourceError::LimitExceeded(_))
     ));
-    let prepared = state.prepare_resource_archive(1).expect("prepared archive");
     let store = MemoryArchiveStore::default();
+    let prepared = state
+        .prepare_resource_archive(1, &store)
+        .expect("prepared archive");
     let verified = prepared
         .store_and_verify(&store)
         .expect("verified archive commit");
@@ -2221,7 +2223,7 @@ fn bounded_archive_backpressure_restart_and_forgery_are_explicit() {
             })
     );
     let next_archive = restored
-        .prepare_resource_archive(2)
+        .prepare_resource_archive(2, &store)
         .expect("maintenance receipt can move cold");
     assert!(next_archive.selected.iter().any(|candidate| {
         matches!(
@@ -2294,7 +2296,7 @@ fn rehashed_terminal_summaries_cannot_override_typed_archive_payloads() {
         .expect("cancel demand");
     let prepared = value
         .state
-        .prepare_resource_archive(value.state.terminal_archive_candidates.len())
+        .prepare_resource_archive(value.state.terminal_archive_candidates.len(), &())
         .expect("prepare typed archive records");
     assert!(
         prepared
@@ -2362,7 +2364,7 @@ fn archived_operation_identity_controls_exact_retry_after_target_retirement() {
         .expect("cancel demand");
     let prepared = value
         .state
-        .prepare_resource_archive(value.state.terminal_archive_candidates.len())
+        .prepare_resource_archive(value.state.terminal_archive_candidates.len(), &())
         .expect("prepare cold identity archive");
     let store = Rc::new(MemoryArchiveStore::default());
     let plugin = ResourcePlugin::default();
@@ -2489,7 +2491,7 @@ fn terminal_demand_allocation_closure_retires_and_releases_active_capacity() {
         .expect("active capacity was released");
     let prepared = value
         .state
-        .prepare_resource_archive(value.state.terminal_archive_candidates.len())
+        .prepare_resource_archive(value.state.terminal_archive_candidates.len(), &())
         .expect("prepare terminal closure archive");
     for key in [
         ResourceTerminalRecordKeyV1::AllocationLeg(allocation.id.clone()),
@@ -3257,7 +3259,7 @@ fn completed_external_participant_archives_and_restores_authoritatively() {
 
     let prepared = value
         .state
-        .prepare_resource_archive(value.state.terminal_archive_candidates.len())
+        .prepare_resource_archive(value.state.terminal_archive_candidates.len(), &())
         .expect("archive completed participant");
     let archived_participant = prepared
         .blob

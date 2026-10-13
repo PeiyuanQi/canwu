@@ -1942,6 +1942,9 @@ fn archive_resource_input(
         canwu_resource::canonical_digest("canwu.resource.archive-temporal-page.v1", &temporal)
             .expect("temporal digest");
     temporal.id = temporal.semantic_digest.clone();
+    let lookup =
+        canwu_resource::prepare_resource_archive_lookup(&(), None, &membership.memberships)
+            .expect("resource archive lookup index");
     let mut directory = canwu_resource::ResourceArchiveIndexDirectoryV1 {
         id: String::new(),
         previous_root: None,
@@ -1949,6 +1952,7 @@ fn archive_resource_input(
         temporal_pages: vec![temporal.id.clone()],
         blob_ids: vec![blob.content_id.clone()],
         archived_record_count: 2,
+        lookup_root: lookup.root.clone(),
         semantic_digest: String::new(),
     };
     directory.semantic_digest =
@@ -1980,6 +1984,15 @@ fn archive_resource_input(
         store
             .store_resource_archive_object(namespace, object_id, &bytes)
             .expect("store resource archive object");
+    }
+    for (id, page) in &lookup.pages {
+        store
+            .store_resource_archive_object(
+                canwu_resource::RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE,
+                id,
+                &serde_json::to_vec(page).expect("lookup page bytes"),
+            )
+            .expect("store resource archive lookup page");
     }
     resource.archive_head.revision = 1;
     resource.archive_head.directory_root = Some(directory.id);
@@ -4072,6 +4085,9 @@ fn active_production_continuation_resolves_compacted_resource_evidence_from_arch
         canwu_resource::canonical_digest("canwu.resource.archive-temporal-page.v1", &temporal)
             .expect("temporal digest");
     temporal.id = temporal.semantic_digest.clone();
+    let lookup =
+        canwu_resource::prepare_resource_archive_lookup(&(), None, &membership.memberships)
+            .expect("resource archive lookup index");
     let mut directory = canwu_resource::ResourceArchiveIndexDirectoryV1 {
         id: String::new(),
         previous_root: None,
@@ -4079,6 +4095,7 @@ fn active_production_continuation_resolves_compacted_resource_evidence_from_arch
         temporal_pages: vec![temporal.id.clone()],
         blob_ids: vec![blob.content_id.clone()],
         archived_record_count: 2,
+        lookup_root: lookup.root.clone(),
         semantic_digest: String::new(),
     };
     directory.semantic_digest =
@@ -4111,6 +4128,15 @@ fn active_production_continuation_resolves_compacted_resource_evidence_from_arch
         store
             .store_resource_archive_object(namespace, object_id, &bytes)
             .expect("store resource archive object");
+    }
+    for (id, page) in &lookup.pages {
+        store
+            .store_resource_archive_object(
+                canwu_resource::RESOURCE_ARCHIVE_LOOKUP_PAGE_NAMESPACE,
+                id,
+                &serde_json::to_vec(page).expect("lookup page bytes"),
+            )
+            .expect("store resource archive lookup page");
     }
     resource.archive_head.directory_root = Some(directory.id);
     resource.archive_head.archived_record_count = 2;
@@ -4347,7 +4373,7 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
         .expect("resource state query before later archive")
         .expect("resource state before later archive");
     let later_resource_archive = resource_before_later_archive
-        .prepare_resource_archive(1)
+        .prepare_resource_archive(1, &store)
         .expect("unrelated later resource archive batch");
     canwu_resource::enqueue_resource_archive(&mut restored, &later_resource_archive, &store)
         .expect("enqueue unrelated later resource archive");
@@ -4495,6 +4521,7 @@ fn restored_active_project_advances_through_canonical_ingress_with_resource_arch
             resource_before_participant_archive
                 .terminal_archive_candidates
                 .len(),
+            &store,
         )
         .expect("prepare completed resource participant archive");
     assert!(
