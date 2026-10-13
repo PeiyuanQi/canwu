@@ -1,5 +1,6 @@
 use crate::PLUGIN_NAME;
 use crate::ingress::CohortHeadcountRebaseV1;
+use crate::revision::PressureRevisionOutcomes;
 use canwu_api::{
     BoundaryId, CanwuError, CoreEntityKind, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordLifecycle, DomainRecordType, DomainReference, DomainReferenceTarget,
@@ -151,6 +152,11 @@ pub struct SocietyCohortExchangeLedger {
     /// Lifecycle delta outcomes keyed by the decimal ingress ID.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub lifecycle_deltas: BTreeMap<String, SocietyLifecycleDeltaOutcome>,
+    /// The latest applied and the latest rejected pressure revision of each
+    /// alignment, keyed by alignment ID. The entry outlives its alignment, so
+    /// a reinstalled alignment continues its revision version sequence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pressure_revisions: BTreeMap<String, PressureRevisionOutcomes>,
 }
 
 impl SocietyCohortExchangeLedger {
@@ -219,6 +225,13 @@ impl SocietyCohortExchangeLedger {
             if key != &outcome.ingress.get().to_string() || !consistent {
                 return Err(invalid(
                     "society cohort exchange ledger contains an invalid lifecycle delta outcome",
+                ));
+            }
+        }
+        for (key, outcomes) in &self.pressure_revisions {
+            if key.is_empty() || !outcomes.is_valid() {
+                return Err(invalid(
+                    "society cohort exchange ledger contains an invalid pressure revision outcome",
                 ));
             }
         }
@@ -514,9 +527,15 @@ pub struct ProjectionEntry {
     pub confidence_per_mille: u16,
 }
 
+/// One observer's materialized estimate of the cohorts and targets in its
+/// scope.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SocietyProjection {
     pub actor: PersonId,
+    /// Time of the settlement in which this observer's estimate last changed.
+    /// A settlement that leaves the entries as they are keeps it, whatever
+    /// happened outside the observer's scope or beyond what it can detect, so
+    /// the time tells the observer nothing its entries do not.
     pub observed_at: SimTime,
     pub entries: BTreeMap<String, ProjectionEntry>,
 }
@@ -548,12 +567,31 @@ pub struct SocietyState {
     pub aggregates: BTreeMap<String, SocietyAggregate>,
     pub mobilization_candidates: BTreeMap<String, MobilizationCandidate>,
     pub projections: BTreeMap<String, SocietyProjection>,
+    /// Time of the last settlement in which a transition changed a
+    /// distribution or a carried remainder. A settlement that changes
+    /// neither leaves it untouched, so it is not the time transitions last
+    /// ran. Transition state changes at most once per instant: a settlement
+    /// at or before this time moves nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_transition_at: Option<SimTime>,
+    /// Time the mobilization candidates were last materialized. While it is
+    /// set the candidates are current: they match the authoritative state
+    /// now, not only as of this time. A change they depend on clears it, and
+    /// the next settlement materializes them again and sets it, also when
+    /// the state yields no candidate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_mobilization_at: Option<SimTime>,
+    /// Time the aggregates were last materialized, with the same meaning as
+    /// `last_mobilization_at`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_aggregation_at: Option<SimTime>,
+    /// Time the projections were last completed. While it is set every
+    /// observer has a projection that matches the authoritative state. A
+    /// change that alters an observer's estimate clears it and that
+    /// observer's projection; the next settlement materializes the missing
+    /// projections and sets it. A projection that is present always matches
+    /// the authoritative state, and its own `observed_at` may be earlier
+    /// than this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_projection_at: Option<SimTime>,
 }
@@ -590,9 +628,9 @@ impl SocietyState {
     /// projections with their timestamps.
     ///
     /// Every owner-side change to cohort headcounts or distributions (a
-    /// cohort transfer or a rebase) calls this, so the derived state is
-    /// rematerialized by the next phase-10, phase-12, and phase-13 systems
-    /// instead of failing exact derived-state validation.
+    /// cohort transfer, a rebase, or a transition) calls this, so the derived
+    /// state is rematerialized by the next phase-10, phase-12, and phase-13
+    /// systems instead of failing exact derived-state validation.
     pub(crate) fn invalidate_derived_state(&mut self) {
         self.aggregates.clear();
         self.mobilization_candidates.clear();
@@ -987,6 +1025,11 @@ impl SocietyState {
         ]
         .into_iter()
         .flatten()
+        .chain(
+            self.projections
+                .values()
+                .map(|projection| projection.observed_at),
+        )
         .any(|at| at > current_time)
         {
             return Err(invalid(
@@ -1220,7 +1263,7 @@ fn validate_derived_state(state: &SocietyState) -> Result<(), CanwuError> {
         if key != &projection.actor.get().to_string()
             || state
                 .last_projection_at
-                .is_none_or(|at| projection.observed_at > at)
+                .is_some_and(|at| projection.observed_at > at)
         {
             return Err(invalid(format!("society projection {key} is malformed")));
         }
@@ -1268,13 +1311,23 @@ fn validate_exact_derived_state(state: &SocietyState) -> Result<(), CanwuError> 
             "materialized mobilization candidates do not match authoritative state",
         ));
     }
-    let expected_projections = state.last_projection_at.map_or_else(BTreeMap::new, |at| {
-        crate::solver::compute_projections(state, at)
-    });
-    if state.projections != expected_projections {
-        return Err(invalid(
-            "materialized society projections do not match authoritative state",
-        ));
+    // A projection that is present matches the authoritative state exactly,
+    // whenever its estimate last changed; a set timestamp means every
+    // observer has one.
+    if state.last_projection_at.is_some() || !state.projections.is_empty() {
+        let expected = crate::solver::compute_projections(state, SimTime::EPOCH);
+        let exact = state.projections.iter().all(|(key, projection)| {
+            expected.get(key).is_some_and(|estimate| {
+                estimate.actor == projection.actor && estimate.entries == projection.entries
+            })
+        });
+        let complete =
+            state.last_projection_at.is_none() || state.projections.len() == expected.len();
+        if !exact || !complete {
+            return Err(invalid(
+                "materialized society projections do not match authoritative state",
+            ));
+        }
     }
     Ok(())
 }

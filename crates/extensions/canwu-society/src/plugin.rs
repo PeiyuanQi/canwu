@@ -14,23 +14,110 @@ use crate::model::{
     society_cohort_exchange_ledger_reference, society_cohort_transfer_pending_reference,
     society_state_reference,
 };
+use crate::revision::{
+    PRESSURE_REVISION_AUTHORITY_REJECTION, PRESSURE_REVISION_COMMAND,
+    PRESSURE_REVISION_ORIGIN_REJECTION, PRESSURE_REVISION_SCOPE_REJECTION,
+    PRESSURE_REVISION_STALE_REJECTION, PRESSURE_REVISION_SUPERSEDED_REJECTION,
+    PressureRevisionDecision, PressureRevisionOutcome, RevisionScopeError,
+    SOCIETY_PRESSURE_REVISED_EVENT, SOCIETY_PRESSURE_REVISION_INGRESS,
+    SOCIETY_PRESSURE_REVISION_REJECTED_EVENT, SocietyPressureRevisionV1,
+    pressure_revision_admission_rejection,
+};
 use crate::settle_transitions;
 use crate::solver::{compute_aggregates, compute_mobilization_candidates, compute_projections};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    CanwuError, Command, CommandId, DecisionOrigin, DomainRecord, DomainRecordDraft,
-    DomainRecordMutation, DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass,
-    IngressPayload, Issuer, PayloadProperty, PayloadSchema, PayloadValueType,
-    PluginActionDescriptor, PluginIngressDescriptor, PluginRegistrar, SimTime, SimulationPlugin,
-    SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    CanwuError, CommandId, DecisionOrigin, DomainRecord, DomainRecordDraft, DomainRecordMutation,
+    DomainRecordSchema, DomainRecordType, ErrorCode, IngressClass, IngressPayload, Issuer,
+    PayloadProperty, PayloadSchema, PayloadValueType, PluginActionDescriptor,
+    PluginIngressDescriptor, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
+    StateVisibility, SystemCadence, SystemDirective,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const PLUGIN_NAME: &str = "canwu-society";
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SocietyPlugin;
+/// The society plugin: the only writer of `canwu.society:state`.
+///
+/// # Settlement cadence
+///
+/// Society settles in the boundaries that carry the plugin's settlement
+/// cadence, a [`SystemCadence`] category: `Daily` for [`Self::DAILY`] and
+/// [`Self::default`], or the category given to
+/// [`Self::with_settlement_cadence`]. Canwu keeps no calendar, so the host
+/// decides which boundaries carry the category: a `Monthly` cadence settles
+/// society whenever the host settles a `Monthly` boundary, whatever the
+/// length of its months, and a host that wants a week or another declared
+/// period schedules a category it does not otherwise use, for example
+/// `EraScheduled`, at that period.
+///
+/// The four settlement systems (`settle-social-transitions` in phase 7,
+/// `evaluate-mobilization-candidates` in phase 10, `aggregate-social-state`
+/// in phase 12, and `materialize-society-projections` in phase 13) run on
+/// that cadence. The two event-driven intakes do not: they queue admitted
+/// work at any boundary, and the next settlement applies it.
+///
+/// A transition rate is **per settlement**, not per unit of simulated time
+/// (see [`crate::settle_transitions`]), so an application authors each rate
+/// for the cadence it registers. The cadence is recorded in the plugin
+/// descriptor that every snapshot persists: a run is restored and replayed
+/// only with a plugin of the same cadence, and any other is refused with
+/// `PluginManifestMismatch`.
+///
+/// Everything the phase-7 system applies waits for the cadence: due cohort
+/// transfers, queued rebases, lifecycle deltas and pressure revisions,
+/// institutional decisions, and transitions. Under a coarse cadence that
+/// has three costs. A due transfer is checked against the state the earlier
+/// transfers of the same settlement left, so of the due transfers that share
+/// a cohort, as source or destination, one completes per settlement and the
+/// others settle as `stale_source` and must be reissued.
+/// The queue record is rewritten whole by every boundary that admits a
+/// packet, so the evidence of a queue that waits a period grows with the
+/// square of the packets it collects. And the intake drops a packet that
+/// arrives while [`crate::MAX_SOCIETY_INGRESS_QUEUE`] wait, with only a
+/// [`SOCIETY_INGRESS_REJECTED_EVENT`]: a dropped rebase leaves its cohort
+/// behind its stock until the provider sends another, and a dropped pressure
+/// revision never settles and must be decided again.
+///
+/// A settlement that changes nothing writes nothing. The first settlement
+/// after a change materializes each derived view that the change cleared
+/// (see the `last_*_at` fields of [`crate::SocietyState`]).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SocietyPlugin {
+    settlement_cadence: SystemCadence,
+}
+
+impl SocietyPlugin {
+    /// The society plugin on the default `Daily` settlement cadence.
+    pub const DAILY: Self = Self {
+        settlement_cadence: SystemCadence::Daily,
+    };
+
+    /// Returns the society plugin whose settlement systems run on `cadence`.
+    ///
+    /// Registration fails with `InvalidPluginRegistration` for
+    /// `SystemCadence::EventDriven`, which is not a category a host
+    /// schedules.
+    #[must_use]
+    pub const fn with_settlement_cadence(cadence: SystemCadence) -> Self {
+        Self {
+            settlement_cadence: cadence,
+        }
+    }
+
+    /// The cadence category whose boundaries settle society.
+    #[must_use]
+    pub fn settlement_cadence(&self) -> SystemCadence {
+        self.settlement_cadence.clone()
+    }
+}
+
+impl Default for SocietyPlugin {
+    fn default() -> Self {
+        Self::DAILY
+    }
+}
 
 impl SimulationPlugin for SocietyPlugin {
     fn name(&self) -> &'static str {
@@ -42,7 +129,9 @@ impl SimulationPlugin for SocietyPlugin {
     }
 
     fn semantic_hash(&self) -> &'static str {
-        "23cf74dbfc68789336bbab5c8fbb04227d765673b887f1d7dc8bc6734d6bba38"
+        // The handlers are the same for every settlement cadence; the cadence
+        // itself is part of the descriptor's boundary-system contracts.
+        "be25498655752ecfa41d681679cda37021792b273840f6c68b933835f3086521"
     }
 
     fn validate_activation(&self, records: &[DomainRecord]) -> Result<(), CanwuError> {
@@ -63,6 +152,13 @@ impl SimulationPlugin for SocietyPlugin {
 
     #[allow(clippy::too_many_lines)]
     fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        let cadence = || self.settlement_cadence();
+        if cadence() == SystemCadence::EventDriven {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidPluginRegistration,
+                "the society settlement cadence must be a scheduled cadence category",
+            ));
+        }
         let mut schema = DomainRecordSchema::for_record::<SocietyStateRecord>();
         schema.payload_schema = society_payload_schema();
         schema.references = core_reference_schemas();
@@ -113,6 +209,21 @@ impl SimulationPlugin for SocietyPlugin {
                 allow_additional: false,
             },
         })?;
+        // Only the revision command queues an admissible pressure revision;
+        // the host cannot author one.
+        let _revision_permit = registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: SOCIETY_PRESSURE_REVISION_INGRESS.to_owned(),
+            description: "Apply one authority-checked pressure revision decision".to_owned(),
+            class: IngressClass::Decision,
+            payload_schema: PayloadSchema::Object {
+                properties: BTreeMap::from([
+                    ("decision".to_owned(), required(PayloadValueType::Object)),
+                    ("issuer".to_owned(), required(PayloadValueType::Object)),
+                    ("command".to_owned(), required(PayloadValueType::Integer)),
+                ]),
+                allow_additional: false,
+            },
+        })?;
 
         let mut ingress_intake = BoundarySystemContract::new(
             "intake-society-ingress",
@@ -135,7 +246,11 @@ impl SimulationPlugin for SocietyPlugin {
                 description: "Execute an authority-checked owner-side cohort population transfer"
                     .to_owned(),
                 payload_schema: cohort_transfer_payload_schema(),
-                reads: vec![society_state_key(), cohort_exchange_ledger_key()],
+                reads: vec![
+                    society_state_key(),
+                    cohort_exchange_ledger_key(),
+                    pending_transfer_key(),
+                ],
                 writes: Vec::new(),
             },
             transfer_cohort_population,
@@ -150,9 +265,9 @@ impl SimulationPlugin for SocietyPlugin {
             society_state_key(),
             pending_transfer_key(),
             StateKey::core_ingress(),
-            StateKey::core_commands(),
         ];
         transfer_intake.writes = vec![pending_transfer_key()];
+        transfer_intake.emits = vec![SOCIETY_INGRESS_REJECTED_EVENT.to_owned()];
         transfer_intake.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(transfer_intake, intake_cohort_transfer)?;
 
@@ -172,11 +287,23 @@ impl SimulationPlugin for SocietyPlugin {
             },
             set_institutional_policy,
         )?;
+        registrar.register_command(
+            PluginActionDescriptor {
+                name: PRESSURE_REVISION_COMMAND.to_owned(),
+                description: "Queue a versioned institutional revision of policy pressure and \
+                              of influence edge and organization activity and reach"
+                    .to_owned(),
+                payload_schema: pressure_revision_payload_schema(),
+                reads: vec![society_state_key(), cohort_exchange_ledger_key()],
+                writes: Vec::new(),
+            },
+            revise_society_pressure,
+        )?;
 
         let mut transition = BoundarySystemContract::new(
             "settle-social-transitions",
             BoundaryPhase::DomainDeltaProposal,
-            SystemCadence::Daily,
+            cadence(),
         );
         transition.reads = vec![
             society_state_key(),
@@ -191,13 +318,17 @@ impl SimulationPlugin for SocietyPlugin {
             cohort_exchange_ledger_key(),
             ingress_queue_key(),
         ];
+        transition.emits = vec![
+            SOCIETY_PRESSURE_REVISED_EVENT.to_owned(),
+            SOCIETY_PRESSURE_REVISION_REJECTED_EVENT.to_owned(),
+        ];
         transition.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(transition, settle_social_transitions)?;
 
         let mut mobilization = BoundarySystemContract::new(
             "evaluate-mobilization-candidates",
             BoundaryPhase::HistoricalCandidateEvaluation,
-            SystemCadence::Daily,
+            cadence(),
         );
         mobilization.reads = vec![society_state_key()];
         mobilization.writes = vec![society_state_key()];
@@ -207,7 +338,7 @@ impl SimulationPlugin for SocietyPlugin {
         let mut aggregate = BoundarySystemContract::new(
             "aggregate-social-state",
             BoundaryPhase::StrategicAggregation,
-            SystemCadence::Daily,
+            cadence(),
         );
         aggregate.reads = vec![society_state_key()];
         aggregate.writes = vec![society_state_key()];
@@ -217,7 +348,7 @@ impl SimulationPlugin for SocietyPlugin {
         let mut project = BoundarySystemContract::new(
             "materialize-society-projections",
             BoundaryPhase::PerspectiveAndReportMaterialization,
-            SystemCadence::Daily,
+            cadence(),
         );
         project.reads = vec![society_state_key()];
         project.writes = vec![society_state_key()];
@@ -226,6 +357,20 @@ impl SimulationPlugin for SocietyPlugin {
     }
 }
 
+/// Admits one cohort transfer and queues it for its due time.
+///
+/// Every expected refusal uses an error code the engine records as a
+/// rejected command attempt, so a refused transfer never fails its boundary
+/// or blocks the commands queued behind it: `InvalidPayload` for a malformed
+/// intent, `InvalidAuthority` for a missing or mismatched authority (a run
+/// without a society root has no alignment and so no authority),
+/// `EntityNotFound` for an unknown source or destination cohort,
+/// `InvalidDuration` for a due time in the past, `ValueOutOfRange` for an
+/// expected source version that is not the root's current version, and
+/// `IdempotencyConflict` for an operation ID bound to another settled or
+/// pending transfer. A resend of a settled or pending transfer is accepted
+/// and queues nothing. An invalid society record is not a refusal and still
+/// fails the boundary.
 fn transfer_cohort_population(
     view: &SimulationView<'_>,
     context: &canwu_api::CommandContext,
@@ -241,8 +386,8 @@ fn transfer_cohort_population(
     validate_transfer_intent(&intent)?;
     let Some((record, state)) = load_state(view)? else {
         return Err(CanwuError::new(
-            ErrorCode::DomainRecordNotFound,
-            "the society state record is not configured",
+            ErrorCode::InvalidAuthority,
+            "the society state record is not configured, so no alignment grants authority",
         ));
     };
     let alignment = state
@@ -273,9 +418,17 @@ fn transfer_cohort_population(
             "transfer command subject does not own the authority alignment",
         ));
     }
+    for cohort_id in [&intent.source_cohort_id, &intent.destination_cohort_id] {
+        if !state.cohorts.contains_key(cohort_id) {
+            return Err(CanwuError::new(
+                ErrorCode::EntityNotFound,
+                format!("cohort transfer names unknown cohort {cohort_id}"),
+            ));
+        }
+    }
     if intent.due_time < view.time() {
         return Err(CanwuError::new(
-            ErrorCode::InvalidDecision,
+            ErrorCode::InvalidDuration,
             "cohort transfer due time is stale",
         ));
     }
@@ -293,9 +446,21 @@ fn transfer_cohort_population(
             "operation id is already bound to a different transfer",
         ));
     }
+    // A transfer that was admitted and has not settled yet holds its
+    // operation ID as well. One whose packet is still in flight is not
+    // visible here; the intake settles that case.
+    if let Some(existing) = load_pending(view)?.0.transfers.get(&intent.operation_id) {
+        if existing.intent == intent {
+            return Ok(Vec::new());
+        }
+        return Err(CanwuError::new(
+            ErrorCode::IdempotencyConflict,
+            "operation id is already bound to a different pending transfer",
+        ));
+    }
     if record.version != intent.expected_source_version {
         return Err(CanwuError::new(
-            ErrorCode::DomainRecordVersionConflict,
+            ErrorCode::ValueOutOfRange,
             format!(
                 "society record version {} does not match expected {}",
                 record.version, intent.expected_source_version
@@ -312,8 +477,15 @@ fn transfer_cohort_population(
 }
 
 const COHORT_TRANSFER_INGRESS: &str = "cohort-transfer";
-/// Event the society intake emits for an admitted packet it cannot queue.
+/// Event a society intake emits for an admitted packet it does not queue:
+/// a rebase, lifecycle delta, or pressure revision that arrives while the
+/// ingress queue is full, and a cohort transfer packet that is malformed,
+/// was not produced by the transfer command, names an unknown cohort, has
+/// lost its authority, or reuses an operation ID with other data. The
+/// summary names the ingress and the reason; the boundary commits.
 pub const SOCIETY_INGRESS_REJECTED_EVENT: &str = "society_ingress_rejected_v1";
+const TRANSFER_UNKNOWN_COHORT: &str = "unknown_cohort";
+const TRANSFER_OPERATION_CONFLICT: &str = "operation_id_conflict";
 const TRANSFER_COMPLETED: &str = "completed";
 const TRANSFER_STALE_SOURCE: &str = "stale_source";
 const TRANSFER_REJECTED: &str = "rejected";
@@ -325,125 +497,146 @@ fn pending_transfer_key() -> StateKey {
     )
 }
 
-#[allow(clippy::too_many_lines)]
+/// Queues every admitted cohort transfer packet in the pending record.
+///
+/// The system is total over what a packet can carry: a defective packet is
+/// skipped with a [`SOCIETY_INGRESS_REJECTED_EVENT`] and the boundary
+/// commits. Only an invalid society root or pending record is an error.
 fn intake_cohort_transfer(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
-    let Some((_, state)) = load_state(view)? else {
-        return Ok(BoundaryProposal::default());
-    };
-    let pending_ref = society_cohort_transfer_pending_reference();
-    let (mut pending, pending_record) = load_pending(view)?;
-    let mut changed = false;
+    // This system runs in every boundary that admits an event or ingress of
+    // any plugin; it decodes the society root only when one of them is a
+    // cohort transfer.
+    let mut packets = Vec::new();
     for ingress_id in &context.admitted_ingress {
-        let Some(ingress) = view.ingress(*ingress_id)? else {
-            continue;
-        };
-        let IngressPayload::Plugin {
-            plugin,
-            packet_type,
-            payload,
-            ..
-        } = &ingress.payload
-        else {
-            continue;
-        };
-        if plugin != PLUGIN_NAME || packet_type != COHORT_TRANSFER_INGRESS {
-            continue;
-        }
-        let intent: CohortTransferIntent = serde_json::from_value(payload["intent"].clone())
-            .map_err(|e| invalid(format!("admitted cohort transfer malformed: {e}")))?;
-        validate_transfer_intent(&intent)?;
-        let actor = canwu_api::PersonId::new(
-            payload["actor"]
-                .as_u64()
-                .ok_or_else(|| invalid("admitted transfer actor missing"))?,
-        );
-        let command_id = CommandId::new(
-            payload["command_id"]
-                .as_u64()
-                .ok_or_else(|| invalid("admitted transfer command evidence missing"))?,
-        );
-        let command = view.command(command_id)?.ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "cohort transfer command evidence is unavailable",
+        if let Some(ingress) = view.ingress(*ingress_id)?
+            && matches!(
+                &ingress.payload,
+                IngressPayload::Plugin { plugin, packet_type, .. }
+                    if plugin == PLUGIN_NAME && packet_type == COHORT_TRANSFER_INGRESS
             )
-        })?;
-        let Command::Plugin {
-            plugin: command_plugin,
-            command: command_name,
-            payload: command_payload,
-        } = &command.envelope.command
-        else {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "cohort transfer evidence is not a society command",
-            ));
-        };
-        if command_plugin != PLUGIN_NAME
-            || command_name != "transfer_cohort_population"
-            || command_payload["operation_id"] != serde_json::json!(intent.operation_id)
-            || command
-                .envelope
-                .authority
-                .as_ref()
-                .and_then(|a| a.command_subject.as_ref())
-                != state
-                    .institutional_alignments
-                    .get(&intent.authority_alignment_id)
-                    .map(|a| &a.institution)
         {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "cohort transfer ingress is not backed by the original authorized command",
-            ));
+            packets.push(ingress);
         }
-        let source_digest = cohort_transfer_digest(&state, &intent)?;
-        if let Some(existing) = pending.transfers.get(&intent.operation_id) {
-            if existing.intent == intent
-                && existing.actor == actor
-                && existing.command_id == command_id.get()
-                && existing.source_digest == source_digest
-            {
-                continue;
-            }
-            return Err(CanwuError::new(
-                ErrorCode::IdempotencyConflict,
-                "operation id was reused with different transfer data",
-            ));
-        }
-        pending.transfers.insert(
-            intent.operation_id.clone(),
-            PendingCohortTransfer {
-                intent,
-                actor,
-                command_id: command_id.get(),
-                source_digest,
-            },
-        );
-        changed = true;
     }
-    if !changed {
+    if packets.is_empty() {
         return Ok(BoundaryProposal::default());
     }
-    let mutation = match pending_record {
-        Some(record) => DomainRecordMutation::Update {
-            record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
-            expected_version: record.version,
-        },
-        None => DomainRecordMutation::Create {
-            record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
-        },
-    };
-    Ok(BoundaryProposal {
-        directives: vec![BoundaryDirective::MutateRecord {
+    let state = load_state(view)?.map(|(_, state)| state);
+    let (mut pending, pending_record) = load_pending(view)?;
+    let mut directives = Vec::new();
+    let mut changed = false;
+    for ingress in packets {
+        match admitted_cohort_transfer(state.as_ref(), &pending, ingress) {
+            Ok(Some(transfer)) => {
+                pending
+                    .transfers
+                    .insert(transfer.intent.operation_id.clone(), transfer);
+                changed = true;
+            }
+            // A second delivery of a transfer that is already pending.
+            Ok(None) => {}
+            Err(reason) => directives.push(BoundaryDirective::Emit {
+                event_type: SOCIETY_INGRESS_REJECTED_EVENT.to_owned(),
+                summary: format!(
+                    "Rejected cohort transfer ingress {}: {reason}",
+                    ingress.id.get()
+                ),
+                affected: Vec::new(),
+            }),
+        }
+    }
+    if changed {
+        let pending_ref = society_cohort_transfer_pending_reference();
+        let mutation = match pending_record {
+            Some(record) => DomainRecordMutation::Update {
+                record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
+                expected_version: record.version,
+            },
+            None => DomainRecordMutation::Create {
+                record: DomainRecordDraft::from_typed(pending_ref, &pending)?,
+            },
+        };
+        directives.push(BoundaryDirective::MutateRecord {
             mutation,
             summary: "Persist admitted society cohort transfer".to_owned(),
-        }],
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
         ..BoundaryProposal::default()
     })
+}
+
+/// Decides one admitted cohort transfer packet: the pending transfer to
+/// queue, `None` for a second delivery of a pending one, or the reason the
+/// packet is rejected.
+///
+/// A packet is authentic exactly when its ingress record names, as its
+/// cause, the command its payload carries. Only the transfer command's
+/// handler produces that, after checking the issuer's authority; a host
+/// cannot give a packet a command cause. The check reads the ingress record
+/// in the boundary that admits it and no retained command evidence, so a
+/// sealed run and its exact replay decide alike. Authority is then checked
+/// again against the current root: the alignment must still authorize the
+/// actor for the institution the packet was queued for.
+fn admitted_cohort_transfer(
+    state: Option<&SocietyState>,
+    pending: &SocietyCohortTransferPending,
+    ingress: &canwu_api::IngressRecord,
+) -> Result<Option<PendingCohortTransfer>, &'static str> {
+    let IngressPayload::Plugin {
+        payload,
+        affected_entities,
+        ..
+    } = &ingress.payload
+    else {
+        return Err(SOCIETY_INGRESS_MALFORMED_REJECTION);
+    };
+    let (Some(intent), Some(actor), Some(command_id)) = (
+        payload
+            .get("intent")
+            .and_then(|value| serde_json::from_value::<CohortTransferIntent>(value.clone()).ok())
+            .filter(|intent| validate_transfer_intent(intent).is_ok()),
+        payload.get("actor").and_then(Value::as_u64),
+        payload.get("command_id").and_then(Value::as_u64),
+    ) else {
+        return Err(SOCIETY_INGRESS_MALFORMED_REJECTION);
+    };
+    if ingress.cause != Some(canwu_api::CauseRef::Command(CommandId::new(command_id))) {
+        return Err(PRESSURE_REVISION_ORIGIN_REJECTION);
+    }
+    let actor = canwu_api::PersonId::new(actor);
+    let Some(state) = state else {
+        return Err(PRESSURE_REVISION_AUTHORITY_REJECTION);
+    };
+    if !state
+        .institutional_alignments
+        .get(&intent.authority_alignment_id)
+        .is_some_and(|alignment| {
+            alignment.authorized_actor == Some(actor)
+                && affected_entities.contains(&alignment.institution)
+        })
+    {
+        return Err(PRESSURE_REVISION_AUTHORITY_REJECTION);
+    }
+    let Ok(source_digest) = cohort_transfer_digest(state, &intent) else {
+        return Err(TRANSFER_UNKNOWN_COHORT);
+    };
+    let transfer = PendingCohortTransfer {
+        intent,
+        actor,
+        command_id,
+        source_digest,
+    };
+    match pending.transfers.get(&transfer.intent.operation_id) {
+        None => Ok(Some(transfer)),
+        // The same transfer delivered again, by the same or a resent command.
+        Some(existing) if existing.intent == transfer.intent && existing.actor == actor => Ok(None),
+        Some(_) => Err(TRANSFER_OPERATION_CONFLICT),
+    }
 }
 
 fn load_pending(
@@ -502,7 +695,7 @@ fn validate_transfer_intent(intent: &CohortTransferIntent) -> Result<(), CanwuEr
     }
     if intent.source_cohort_id == intent.destination_cohort_id {
         return Err(CanwuError::new(
-            ErrorCode::InvalidDecision,
+            ErrorCode::InvalidPayload,
             "source and destination cohorts must differ",
         ));
     }
@@ -577,11 +770,14 @@ fn apply_cohort_transfer(
         .get_mut(&intent.source_cohort_id)
         .expect("source exists")
         .headcount -= intent.quantity;
-    state
+    let destination = state
         .cohorts
         .get_mut(&intent.destination_cohort_id)
-        .expect("destination exists")
-        .headcount += intent.quantity;
+        .expect("destination exists");
+    destination.headcount = destination
+        .headcount
+        .checked_add(intent.quantity)
+        .ok_or_else(|| invalid("cohort transfer would overflow the destination cohort"))?;
     state.invalidate_derived_state();
     Ok(())
 }
@@ -626,6 +822,17 @@ fn load_ledger(
     Ok((ledger, Some(record.clone())))
 }
 
+/// Admits one institutional policy decision as the alignment's pending
+/// decision.
+///
+/// Every expected refusal uses an error code the engine records as a
+/// rejected command attempt, so a refused decision never fails its boundary
+/// or blocks the commands queued behind it: `InvalidPayload` for a malformed
+/// decision, `InvalidAuthority` for a missing or mismatched authority (an
+/// unknown alignment, or a run without a society root, grants none), and
+/// `IdempotencyConflict` for a version that is not newer than the applied or
+/// the pending one, which includes a resend. An invalid society record or
+/// stored decision is not a refusal and still fails the boundary.
 fn set_institutional_policy(
     view: &SimulationView<'_>,
     context: &canwu_api::CommandContext,
@@ -637,26 +844,25 @@ fn set_institutional_policy(
             format!("institutional policy payload could not be decoded: {error}"),
         )
     })?;
-    validate_policy_decision(&decision)?;
-    let Some((_, state)) = load_state(view)? else {
-        return Err(CanwuError::new(
-            ErrorCode::DomainRecordNotFound,
-            "the society state record is not configured",
-        ));
-    };
+    validate_policy_decision(&decision)
+        .map_err(|error| CanwuError::new(ErrorCode::InvalidPayload, error.message))?;
+    let state = load_state(view)?.map(|(_, state)| state);
     let alignment = state
-        .institutional_alignments
-        .get(&decision.alignment_id)
+        .as_ref()
+        .and_then(|state| state.institutional_alignments.get(&decision.alignment_id))
         .ok_or_else(|| {
             CanwuError::new(
-                ErrorCode::InvalidDecision,
-                format!("unknown institutional alignment {}", decision.alignment_id),
+                ErrorCode::InvalidAuthority,
+                format!(
+                    "unknown institutional policy authority alignment {}",
+                    decision.alignment_id
+                ),
             )
         })?;
     validate_policy_authority(context, alignment)?;
     if decision.decision_version <= alignment.last_decision_version {
         return Err(CanwuError::new(
-            ErrorCode::InvalidDecision,
+            ErrorCode::IdempotencyConflict,
             format!(
                 "institutional decision version {} is not newer than applied version {}",
                 decision.decision_version, alignment.last_decision_version
@@ -675,7 +881,7 @@ fn set_institutional_policy(
         })?;
         if decision.decision_version <= pending.decision_version {
             return Err(CanwuError::new(
-                ErrorCode::InvalidDecision,
+                ErrorCode::IdempotencyConflict,
                 format!(
                     "institutional decision version {} is not newer than pending version {}",
                     decision.decision_version, pending.decision_version
@@ -761,6 +967,99 @@ fn validate_policy_authority(
     Ok(())
 }
 
+/// Admits one pressure revision decision and queues it for the next society
+/// settlement.
+///
+/// The decision is authorized exactly as `set_institutional_policy` is: a
+/// validated `DecisionTicket` controller, the alignment's institution as
+/// command subject, and a decision origin that matches the alignment's
+/// authorized actor. Every named row must exist and lie within the
+/// alignment's authority now, and is checked again when the decision settles.
+/// A resend of the alignment's applied decision is accepted and queues
+/// nothing; the same version with other content is an `IdempotencyConflict`.
+/// The decision's place in the alignment's version sequence is settled by
+/// the owner in admission order, because an earlier decision may still be
+/// queued.
+///
+/// Every refusal uses an error code the engine records as a rejected command
+/// attempt (`InvalidPayload`, `InvalidAuthority`, `EntityNotFound`, or
+/// `IdempotencyConflict`), so a refused decision never fails its boundary.
+fn revise_society_pressure(
+    view: &SimulationView<'_>,
+    context: &canwu_api::CommandContext,
+    payload: &Value,
+) -> Result<Vec<SystemDirective>, CanwuError> {
+    let decision: PressureRevisionDecision =
+        serde_json::from_value(payload.clone()).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!("pressure revision payload could not be decoded: {error}"),
+            )
+        })?;
+    decision
+        .validate()
+        .map_err(|error| CanwuError::new(ErrorCode::InvalidPayload, error.message))?;
+    // Without a society root there is no alignment and so no authority.
+    let state = load_state(view)?.map(|(_, state)| state);
+    let alignment = state
+        .as_ref()
+        .and_then(|state| state.institutional_alignments.get(&decision.alignment_id))
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                format!(
+                    "unknown pressure revision authority alignment {}",
+                    decision.alignment_id
+                ),
+            )
+        })?;
+    validate_policy_authority(context, alignment)?;
+    state
+        .as_ref()
+        .map_or(Ok(()), |state| {
+            state.pressure_revision_scope(&decision, alignment)
+        })
+        .map_err(RevisionScopeError::into_error)?;
+
+    let (ledger, _) = load_ledger(view)?;
+    if let Some(applied) = ledger
+        .pressure_revisions
+        .get(&alignment.id)
+        .and_then(|outcomes| outcomes.applied.as_ref())
+        && applied.decision_version == decision.decision_version
+    {
+        if applied.digest == decision.digest()? {
+            return Ok(Vec::new());
+        }
+        return Err(CanwuError::new(
+            ErrorCode::IdempotencyConflict,
+            format!(
+                "pressure revision version {} of alignment {} is already applied with other \
+                 content",
+                decision.decision_version, alignment.id
+            ),
+        ));
+    }
+    let issuer = alignment.institution.clone();
+    let packet = SocietyPressureRevisionV1 {
+        decision,
+        issuer: issuer.clone(),
+        command: context.command_id,
+    };
+    Ok(vec![SystemDirective::EnqueuePluginIngress {
+        after: canwu_api::SimDuration::ZERO,
+        packet_type: SOCIETY_PRESSURE_REVISION_INGRESS.to_owned(),
+        priority: 0,
+        payload: serde_json::to_value(&packet).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidPayload,
+                format!("pressure revision could not be encoded: {error}"),
+            )
+        })?,
+        affected: vec![issuer],
+    }])
+}
+
 #[allow(clippy::too_many_lines)]
 fn settle_social_transitions(
     view: &SimulationView<'_>,
@@ -791,18 +1090,30 @@ fn settle_social_transitions(
         }
         // A source that changed after intake (for example through a rebase
         // or lifecycle delta) or a transfer that no longer fits settles as a
-        // terminal rejection instead of failing every later Daily boundary.
-        let result = if cohort_transfer_digest(&state, &transfer.intent)? == transfer.source_digest
-        {
-            let mut draft = state.clone();
-            if apply_cohort_transfer(&mut draft, &transfer.intent).is_ok() {
-                state = draft;
-                TRANSFER_COMPLETED
-            } else {
-                TRANSFER_REJECTED
+        // terminal rejection instead of failing every later settlement. The
+        // digest is compared with the in-progress state, so an earlier
+        // transfer of this settlement that moved either cohort makes this
+        // one stale: of the due transfers that share a cohort, one settles
+        // per settlement, and the others must be reissued against the new
+        // state.
+        let result = match cohort_transfer_digest(&state, &transfer.intent) {
+            Ok(digest) if digest == transfer.source_digest => {
+                // A transfer that does not fit, or whose result is not a
+                // valid society state, is a terminal rejection.
+                let mut draft = state.clone();
+                if apply_cohort_transfer(&mut draft, &transfer.intent).is_ok()
+                    && draft.canonicalize().is_ok()
+                    && draft.validate().is_ok()
+                {
+                    state = draft;
+                    TRANSFER_COMPLETED
+                } else {
+                    TRANSFER_REJECTED
+                }
             }
-        } else {
-            TRANSFER_STALE_SOURCE
+            Ok(_) => TRANSFER_STALE_SOURCE,
+            // A cohort the pending transfer names no longer exists.
+            Err(_) => TRANSFER_REJECTED,
         };
         ledger.outcomes.insert(
             operation_id.clone(),
@@ -822,15 +1133,28 @@ fn settle_social_transitions(
         pending.transfers.remove(&operation_id);
         transfer_changed = true;
     }
-    // Queued rebases and lifecycle deltas apply in admission order, after
-    // transfers and before institutional decisions and transitions.
+    // Queued rebases, lifecycle deltas, and pressure revisions apply in
+    // admission order, after transfers and before institutional decisions
+    // and transitions.
     let (queue, queue_record) = load_ingress_queue(view)?;
     let queue_consumed = !queue.entries.is_empty();
+    let mut ledger_changed = transfer_changed;
+    let mut events = Vec::new();
     for entry in &queue.entries {
-        settle_queued_ingress(view, &mut state, &mut ledger, entry, context.at)?;
+        ledger_changed |= settle_queued_ingress(
+            view,
+            &mut state,
+            &mut ledger,
+            entry,
+            context.at,
+            &mut events,
+        )?;
     }
     apply_pending_policies(view, &mut state)?;
+    // A settlement that changes nothing leaves the state, and so the root
+    // record, untouched.
     settle_transitions(&mut state, context.at)?;
+    carry_unchanged_projections(&before, &mut state, context.at);
     if state == before
         && !transfer_changed
         && !queue_consumed
@@ -859,7 +1183,8 @@ fn settle_social_transitions(
             summary: "Consumed queued society ingress".to_owned(),
         });
     }
-    if transfer_changed || queue_consumed {
+    proposal.directives.extend(events);
+    if ledger_changed {
         ledger.validate()?;
         let mutation = match ledger_record {
             Some(record) => DomainRecordMutation::Update {
@@ -885,20 +1210,25 @@ fn settle_social_transitions(
     Ok(proposal)
 }
 
-/// Applies one queued packet to the in-progress state and records its
-/// terminal outcome. A rejected packet leaves the state unchanged.
+/// Applies one queued packet to the in-progress state, records its terminal
+/// outcome, and returns whether the ledger changed. A rejected packet leaves
+/// the state unchanged.
 fn settle_queued_ingress(
     view: &SimulationView<'_>,
     state: &mut SocietyState,
     ledger: &mut SocietyCohortExchangeLedger,
     entry: &QueuedSocietyIngress,
     at: SimTime,
-) -> Result<(), CanwuError> {
+    events: &mut Vec<BoundaryDirective>,
+) -> Result<bool, CanwuError> {
     let key = entry.ingress.get().to_string();
     match entry.packet_type.as_str() {
+        SOCIETY_PRESSURE_REVISION_INGRESS => {
+            return settle_pressure_revision(state, ledger, entry, at, events);
+        }
         COHORT_REBASE_INGRESS => {
             if ledger.rebases.contains_key(&key) {
-                return Ok(());
+                return Ok(false);
             }
             let rebase =
                 serde_json::from_value::<CohortHeadcountRebaseV1>(entry.payload.clone()).ok();
@@ -928,7 +1258,7 @@ fn settle_queued_ingress(
         }
         SOCIETY_LIFECYCLE_DELTA_INGRESS => {
             if ledger.lifecycle_deltas.contains_key(&key) {
-                return Ok(());
+                return Ok(false);
             }
             let (status, rejection, blocked_releases) = match &entry.admission_rejection {
                 Some(reason) => (
@@ -965,7 +1295,117 @@ fn settle_queued_ingress(
             )));
         }
     }
-    Ok(())
+    Ok(true)
+}
+
+/// Settles one queued pressure revision and returns whether the ledger
+/// changed.
+///
+/// The decision applies when its alignment is still bound to the deciding
+/// institution, its version is newer than the alignment's applied revision
+/// version, its expected version is that applied version, and every row it
+/// names still lies within the alignment's authority. A resend of the
+/// applied decision changes nothing and records nothing. Every other packet
+/// is rejected without changing society state. An applied or rejected
+/// decision replaces the alignment's ledger outcome of that kind and is
+/// emitted as an event naming the decision.
+fn settle_pressure_revision(
+    state: &mut SocietyState,
+    ledger: &mut SocietyCohortExchangeLedger,
+    entry: &QueuedSocietyIngress,
+    at: SimTime,
+    events: &mut Vec<BoundaryDirective>,
+) -> Result<bool, CanwuError> {
+    let packet = match &entry.admission_rejection {
+        Some(_) => None,
+        None => serde_json::from_value::<SocietyPressureRevisionV1>(entry.payload.clone()).ok(),
+    };
+    let Some(packet) = packet else {
+        // The packet did not come from the revision command, so it names no
+        // decision an alignment's ledger entry could record.
+        let reason = entry
+            .admission_rejection
+            .as_deref()
+            .unwrap_or(SOCIETY_INGRESS_MALFORMED_REJECTION);
+        events.push(BoundaryDirective::Emit {
+            event_type: SOCIETY_PRESSURE_REVISION_REJECTED_EVENT.to_owned(),
+            summary: format!(
+                "Rejected pressure revision ingress {}: {reason}",
+                entry.ingress.get()
+            ),
+            affected: Vec::new(),
+        });
+        return Ok(false);
+    };
+    let decision = &packet.decision;
+    let digest = decision.digest()?;
+    let applied = ledger
+        .pressure_revisions
+        .get(&decision.alignment_id)
+        .and_then(|outcomes| outcomes.applied.as_ref());
+    if applied.is_some_and(|outcome| {
+        outcome.decision_version == decision.decision_version && outcome.digest == digest
+    }) {
+        return Ok(false);
+    }
+    let applied_version = applied.map_or(0, |outcome| outcome.decision_version);
+    let authority_holds = state
+        .institutional_alignments
+        .get(&decision.alignment_id)
+        .is_some_and(|alignment| alignment.institution == packet.issuer);
+    let rejection = if !authority_holds {
+        Some(PRESSURE_REVISION_AUTHORITY_REJECTION)
+    } else if decision.decision_version <= applied_version {
+        Some(PRESSURE_REVISION_SUPERSEDED_REJECTION)
+    } else if decision.expected_version != applied_version {
+        Some(PRESSURE_REVISION_STALE_REJECTION)
+    } else if state.apply_pressure_revision(decision).is_err() {
+        Some(PRESSURE_REVISION_SCOPE_REJECTION)
+    } else {
+        None
+    };
+    let outcome = PressureRevisionOutcome {
+        decision_version: decision.decision_version,
+        digest,
+        issuer: packet.issuer.clone(),
+        command: packet.command,
+        ingress: entry.ingress,
+        settled_at: at,
+        rejection: rejection.map(str::to_owned),
+    };
+    let outcomes = ledger
+        .pressure_revisions
+        .entry(decision.alignment_id.clone())
+        .or_default();
+    let identity = format!(
+        "pressure revision {} of alignment {} (command {}, ingress {})",
+        decision.decision_version,
+        decision.alignment_id,
+        packet.command.get(),
+        entry.ingress.get()
+    );
+    let (event_type, summary) = match rejection {
+        None => {
+            outcomes.applied = Some(outcome);
+            (
+                SOCIETY_PRESSURE_REVISED_EVENT,
+                format!("Applied {identity}"),
+            )
+        }
+        Some(reason) => {
+            outcomes.rejected = Some(outcome);
+            (
+                SOCIETY_PRESSURE_REVISION_REJECTED_EVENT,
+                format!("Rejected {identity}: {reason}"),
+            )
+        }
+    };
+    events.push(BoundaryDirective::Emit {
+        event_type: event_type.to_owned(),
+        summary,
+        affected: Vec::new(),
+    });
+    Ok(true)
 }
 
 /// Applies one delivered lifecycle delta. A release is blocked, while the
@@ -1013,11 +1453,14 @@ fn apply_queued_lifecycle_delta(
     })
 }
 
-/// Appends every admitted rebase and lifecycle delta to the owner-side queue.
+/// Appends every admitted rebase, lifecycle delta, and pressure revision to
+/// the owner-side queue.
 ///
 /// Runs in phase 12 of any boundary that admits ingress, so the rebase stock
 /// check sees the state committed through phase 11 of the admitting boundary.
-/// The next Daily phase-7 settlement consumes the queue.
+/// A pressure revision is admissible only when its ingress record names the
+/// revision command it carries as its cause. The next phase-7 settlement
+/// consumes the queue.
 fn intake_society_ingress(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -1061,6 +1504,8 @@ fn intake_society_ingress(
                     rebase_admission_rejection(&rebase, current)
                 }
             }
+        } else if packet_type == SOCIETY_PRESSURE_REVISION_INGRESS {
+            pressure_revision_admission_rejection(payload, ingress.cause.as_ref())
         } else {
             None
         };
@@ -1125,49 +1570,85 @@ fn load_ingress_queue(
     Ok((queue, Some(record.clone())))
 }
 
+/// Returns whether the visible society root carries the named
+/// materialization timestamp, without decoding the root.
+///
+/// A set timestamp means the materialized view is current: every change a
+/// view depends on clears its timestamp in the same write, and a root whose
+/// timestamped view does not match its authoritative state fails validation
+/// before it is written and whenever it is loaded. The phase-7 settlement
+/// loads and validates the root in every boundary these systems run in.
+fn materialization_is_current(
+    view: &SimulationView<'_>,
+    timestamp: &str,
+) -> Result<bool, CanwuError> {
+    Ok(view
+        .typed_domain_record(&society_state_reference())?
+        .is_some_and(|record| {
+            record
+                .payload
+                .get(timestamp)
+                .is_some_and(|value| !value.is_null())
+        }))
+}
+
+/// Materializes the mobilization candidates once after a change they depend
+/// on cleared their timestamp, and sets it, also when the state yields no
+/// candidate. A boundary in which they are current writes nothing.
 fn evaluate_mobilization(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
+    if materialization_is_current(view, "last_mobilization_at")? {
+        return Ok(BoundaryProposal::default());
+    }
     let Some((record, mut state)) = load_state(view)? else {
         return Ok(BoundaryProposal::default());
     };
-    let candidates = compute_mobilization_candidates(&state, context.at);
-    if state.mobilization_candidates == candidates && state.last_mobilization_at == Some(context.at)
-    {
-        return Ok(BoundaryProposal::default());
-    }
-    state.mobilization_candidates = candidates;
+    state.mobilization_candidates = compute_mobilization_candidates(&state, context.at);
     state.last_mobilization_at = Some(context.at);
     update_state(&record, state, "Evaluated social mobilization candidates")
 }
 
+/// Materializes the aggregates under the rule of [`evaluate_mobilization`].
 fn aggregate_social_state(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
+    if materialization_is_current(view, "last_aggregation_at")? {
+        return Ok(BoundaryProposal::default());
+    }
     let Some((record, mut state)) = load_state(view)? else {
         return Ok(BoundaryProposal::default());
     };
-    let aggregates = compute_aggregates(&state);
-    if state.aggregates == aggregates && state.last_aggregation_at == Some(context.at) {
-        return Ok(BoundaryProposal::default());
-    }
-    state.aggregates = aggregates;
+    state.aggregates = compute_aggregates(&state);
     state.last_aggregation_at = Some(context.at);
     update_state(&record, state, "Aggregated social state")
 }
 
+/// Completes the projections under the rule of [`evaluate_mobilization`].
+///
+/// An observer whose projection the phase-7 settlement kept, because its
+/// estimate did not change, keeps that projection and its `observed_at`;
+/// every other observer receives a projection observed at this boundary.
 fn materialize_projections(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
 ) -> Result<BoundaryProposal, CanwuError> {
+    if materialization_is_current(view, "last_projection_at")? {
+        return Ok(BoundaryProposal::default());
+    }
     let Some((record, mut state)) = load_state(view)? else {
         return Ok(BoundaryProposal::default());
     };
-    let projections = compute_projections(&state, context.at);
-    if state.projections == projections && state.last_projection_at == Some(context.at) {
-        return Ok(BoundaryProposal::default());
+    let mut projections = compute_projections(&state, context.at);
+    for (key, projection) in &mut projections {
+        if let Some(kept) = state.projections.get(key)
+            && kept.actor == projection.actor
+            && kept.entries == projection.entries
+        {
+            projection.observed_at = kept.observed_at;
+        }
     }
     state.projections = projections;
     state.last_projection_at = Some(context.at);
@@ -1176,6 +1657,45 @@ fn materialize_projections(
         state,
         "Materialized actor-relative society projections",
     )
+}
+
+/// Restores, after the phase-7 changes, the projection of every observer
+/// whose estimate those changes left as it was, and leaves the projections
+/// of the others cleared for the phase-13 system.
+///
+/// An observer's `observed_at` therefore moves only in a settlement that
+/// changes that observer's own entries. Clearing every projection whenever
+/// any distribution moved would stamp every observer in that settlement and
+/// so tell an observer that something outside its scope, or beyond what it
+/// can detect, had changed.
+fn carry_unchanged_projections(before: &SocietyState, state: &mut SocietyState, at: SimTime) {
+    if before.projections.is_empty() {
+        return;
+    }
+    // An estimate reads the distributions, the organizations, and the
+    // observer profiles, and nothing else.
+    if state.distributions == before.distributions
+        && state.organizations == before.organizations
+        && state.observer_profiles == before.observer_profiles
+    {
+        state.projections.clone_from(&before.projections);
+        state.last_projection_at = before.last_projection_at;
+        return;
+    }
+    let estimates = compute_projections(state, at);
+    state.projections = before
+        .projections
+        .iter()
+        .filter(|(key, kept)| {
+            estimates.get(*key).is_some_and(|estimate| {
+                estimate.actor == kept.actor && estimate.entries == kept.entries
+            })
+        })
+        .map(|(key, kept)| (key.clone(), kept.clone()))
+        .collect();
+    state.last_projection_at = before
+        .last_projection_at
+        .filter(|_| state.projections.len() == estimates.len());
 }
 
 fn apply_pending_policies(
@@ -1277,7 +1797,7 @@ pub(crate) fn policy_decision_key() -> StateKey {
 }
 
 /// Component state holding versioned institutional policy decisions that the
-/// society plugin applies at its next Daily settlement. A reader (for example
+/// society plugin applies at its next settlement. A reader (for example
 /// a lifecycle provider) declares this key to observe accepted decisions.
 #[must_use]
 pub fn society_policy_decision_state_key() -> StateKey {
@@ -1351,6 +1871,39 @@ fn exchange_ledger_payload_schema() -> PayloadSchema {
             (
                 "lifecycle_deltas".to_owned(),
                 optional(PayloadValueType::Object),
+            ),
+            (
+                "pressure_revisions".to_owned(),
+                optional(PayloadValueType::Object),
+            ),
+        ]),
+        allow_additional: false,
+    }
+}
+
+fn pressure_revision_payload_schema() -> PayloadSchema {
+    PayloadSchema::Object {
+        properties: BTreeMap::from([
+            (
+                "alignment_id".to_owned(),
+                required(PayloadValueType::String),
+            ),
+            (
+                "decision_version".to_owned(),
+                required(PayloadValueType::Integer),
+            ),
+            (
+                "expected_version".to_owned(),
+                required(PayloadValueType::Integer),
+            ),
+            ("policies".to_owned(), optional(PayloadValueType::Array)),
+            (
+                "influence_edges".to_owned(),
+                optional(PayloadValueType::Array),
+            ),
+            (
+                "organizations".to_owned(),
+                optional(PayloadValueType::Array),
             ),
         ]),
         allow_additional: false,

@@ -93,15 +93,15 @@ fn gap_g31_society_policy_pressure_provenance() {
         Canwu::new_with_plugins(
             42,
             scenario(vec![missing.into_record().expect("missing-issuer record")]),
-            &[&SocietyPlugin],
+            &[&SocietyPlugin::DAILY],
         )
         .is_err(),
         "an issuer that is not a live entity must not be admitted"
     );
 
     // Provenance round-trips through settlement, save/load, and exact replay.
-    let mut canwu =
-        Canwu::new_with_plugins(42, scenario(vec![record]), &[&SocietyPlugin]).expect("society");
+    let mut canwu = Canwu::new_with_plugins(42, scenario(vec![record]), &[&SocietyPlugin::DAILY])
+        .expect("society");
     canwu
         .settle_boundary(
             BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(1))
@@ -115,7 +115,7 @@ fn gap_g31_society_policy_pressure_provenance() {
     let snapshot = canwu.snapshot();
     let restored = Canwu::from_snapshot_json_with_plugins(
         &serde_json::to_string(&snapshot).expect("encode snapshot"),
-        &[&SocietyPlugin],
+        &[&SocietyPlugin::DAILY],
     )
     .expect("restore provenance snapshot");
     assert_eq!(restored.snapshot(), snapshot);
@@ -125,7 +125,7 @@ fn gap_g31_society_policy_pressure_provenance() {
             .policies["issued-policy"],
         issued
     );
-    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin], &canwu.replay_journal())
+    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin::DAILY], &canwu.replay_journal())
         .expect("replay provenance history");
     assert_eq!(replayed.snapshot(), snapshot);
 }
@@ -134,7 +134,7 @@ fn gap_g31_society_policy_pressure_provenance() {
 #[allow(clippy::too_many_lines)]
 fn gap_g32_society_cohort_rebase() {
     let stock = StockPlugin(StateVisibility::SameBoundary);
-    let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin, &stock];
+    let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin::DAILY, &stock];
     let mut canwu = Canwu::new_with_plugins(
         42,
         scenario(vec![
@@ -303,7 +303,7 @@ fn gap_g32_society_transfer_and_queue_authority() {
     // A deferred transfer settles after a Daily boundary has materialized
     // aggregates and while a transition keeps changing the destination's
     // dispositions; later Daily boundaries keep settling.
-    let plugins: [&dyn SimulationPlugin; 1] = [&SocietyPlugin];
+    let plugins: [&dyn SimulationPlugin; 1] = [&SocietyPlugin::DAILY];
     let neutral = DispositionProfile::neutral();
     let mut state = society_state();
     state.transition_rules.insert(
@@ -415,7 +415,7 @@ fn gap_g32_society_transfer_and_queue_authority() {
         (StateVisibility::NextBoundary, None),
     ] {
         let stock = StockPlugin(visibility);
-        let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin, &stock];
+        let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin::DAILY, &stock];
         let mut canwu = Canwu::new_with_plugins(
             42,
             scenario(vec![

@@ -1,19 +1,20 @@
 use canwu_api::{
-    Canwu, Command, CommandAuthority, CommandEnvelope, CommandRequest, CommandRequestId,
-    DecisionAuthority, DecisionControllerBinding, DecisionEvaluation, DecisionIngressRequest,
-    DecisionMutation, DecisionOrigin, DecisionPolicyIdentity, DecisionPolicyKind,
-    DecisionRequestId, DecisionTicketId, EntityRef, ErrorCode, Issuer, KnowledgeSnapshot, Scenario,
-    SimDuration, SimTime, UtilityProfile, WeightedUtilityPolicy,
+    Canwu, Command, CommandAttemptOutcome, CommandAuthority, CommandEnvelope, CommandRequest,
+    CommandRequestId, DecisionAuthority, DecisionControllerBinding, DecisionEvaluation,
+    DecisionIngressRequest, DecisionMutation, DecisionOrigin, DecisionPolicyIdentity,
+    DecisionPolicyKind, DecisionRequestId, DecisionTicketId, EntityRef, ErrorCode, Issuer,
+    KnowledgeSnapshot, Scenario, SimDuration, SimTime, UtilityProfile, WeightedUtilityPolicy,
 };
 use canwu_society::{
     AffiliationTarget, AssentBand, AwarenessBand, CohortTransferIntent, DispositionBucket,
     DispositionDistribution, DispositionProfile, InfluenceSource, InstitutionalAlignment,
     MobilizationBand, ObserverProfile, OrganizationNode, OrganizationRelation,
     OrganizationalTieBand, PolicyChoice, PolicyDecision, PolicyPressure, PracticeBand,
-    PublicAlignmentBand, SocialInfluenceEdge, SocietyCohort, SocietyCohortExchangeLedgerRecord,
-    SocietyPlugin, SocietyState, TransitionRule, TransitionWeights, VisibilityBand,
-    distribution_id, from_society_snapshot_json, institutional_policy_ticket, load_society_state,
-    projection_for_viewer, settle_transitions, society_cohort_exchange_ledger_reference,
+    PublicAlignmentBand, SOCIETY_INGRESS_REJECTED_EVENT, SocialInfluenceEdge, SocietyCohort,
+    SocietyCohortExchangeLedgerRecord, SocietyPlugin, SocietyState, TransitionRule,
+    TransitionWeights, VisibilityBand, distribution_id, from_society_snapshot_json,
+    institutional_policy_ticket, load_society_state, projection_for_viewer, settle_transitions,
+    society_cohort_exchange_ledger_reference,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -111,17 +112,18 @@ fn owner_side_cohort_transfer_is_conservative_idempotent_stale_checked_and_repla
             CommandRequest::new(CommandRequestId::new(3), canwu.revision(), stale_envelope),
         )
         .expect("queue stale transfer");
-    let stale_error = canwu
+    canwu
         .advance_canonical(SimDuration::minutes(1))
-        .expect_err("stale transfer must reject");
-    assert!(matches!(
-        stale_error.code,
-        ErrorCode::DomainRecordVersionConflict | ErrorCode::InvalidDecision
-    ));
+        .expect("a stale transfer is a recorded rejection, not a failed boundary");
+    assert_eq!(
+        rejection_code(&canwu, 3),
+        Some(ErrorCode::InvalidDuration),
+        "the stale transfer, due in the past, is refused"
+    );
     let snapshot = canwu.snapshot();
     let restored = from_society_snapshot_json(&serde_json::to_string(&snapshot).expect("snapshot"))
         .expect("restore transfer snapshot");
-    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin], &canwu.replay_journal())
+    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin::DAILY], &canwu.replay_journal())
         .expect("replay transfer history");
     assert_eq!(restored.snapshot(), snapshot);
     assert_eq!(replayed.snapshot(), snapshot);
@@ -131,7 +133,7 @@ fn owner_side_cohort_transfer_is_conservative_idempotent_stale_checked_and_repla
 #[allow(clippy::too_many_lines)]
 fn aggregate_diffusion_decision_projection_and_replay_share_one_contract() {
     let (mut canwu, _initial_scenario) = tutorial_simulation();
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let ids = Canwu::demo_ids();
 
     canwu
@@ -244,10 +246,315 @@ fn aggregate_diffusion_decision_projection_and_replay_share_one_contract() {
     assert_eq!(replayed.snapshot(), final_snapshot);
 }
 
+/// An expected refusal of a society command is a recorded command rejection,
+/// and a defective cohort transfer packet is skipped with an event: neither
+/// fails its boundary, so the commands queued behind it and every later
+/// canonical step still settle.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn refused_society_commands_are_recorded_and_the_run_steps_on() {
+    let (mut canwu, _) = tutorial_simulation();
+    let ids = Canwu::demo_ids();
+    let policy = WeightedUtilityPolicy::new(
+        "institutional-policy",
+        "1",
+        UtilityProfile {
+            weights: BTreeMap::from([("control".to_owned(), 1)]),
+        },
+    );
+    let daily = |canwu: &mut Canwu, days: i64| {
+        canwu
+            .advance_canonical(SimTime::EPOCH + SimDuration::days(days) - canwu.time())
+            .expect("settle due canonical ingress");
+        canwu
+            .settle_boundary(
+                canwu_api::BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(days))
+                    .with_cadence(canwu_api::SystemCadence::Daily),
+            )
+            .expect("daily social boundary");
+    };
+
+    // Decision version 1 is taken through its ticket and applied.
+    register_policy_decision(&mut canwu);
+    canwu
+        .drive_decision(
+            canwu.time(),
+            0,
+            DecisionRequestId::new(3),
+            Some(CommandRequestId::new(1)),
+            DecisionTicketId::new(1),
+            &policy,
+        )
+        .expect("prepare the first resolution");
+    canwu
+        .step_canonical()
+        .expect("resolve the first ticket")
+        .expect("resolution boundary");
+    assert_eq!(rejection_code(&canwu, 1), None);
+    daily(&mut canwu, 1);
+    let applied = load_society_state(&canwu).expect("applied policy");
+    assert_eq!(
+        applied.institutional_alignments["council-alignment"].last_decision_version,
+        1
+    );
+
+    // A second ticket resends version 1. The command is refused, and the
+    // boundary that resolves the ticket still commits.
+    let resend = institutional_policy_ticket(
+        DecisionTicketId::new(2),
+        "tutorial.institutional-policy",
+        EntityRef::Person(ids.commander),
+        "council-controller",
+        "Resend the institution's public response",
+        vec![PolicyChoice {
+            id: "public-conformity".to_owned(),
+            label: "Require public conformity".to_owned(),
+            decision: PolicyDecision {
+                alignment_id: "council-alignment".to_owned(),
+                decision_version: 1,
+                support_per_mille: 300,
+                enforcement_per_mille: 800,
+                access_grant_per_mille: 700,
+            },
+            utility_inputs: BTreeMap::from([("control".to_owned(), 100)]),
+        }],
+        None,
+    )
+    .expect("build the resent ticket");
+    canwu
+        .enqueue_decision(
+            canwu.time(),
+            0,
+            DecisionIngressRequest::new(
+                DecisionRequestId::new(4),
+                canwu.revision(),
+                DecisionMutation::Open { ticket: resend },
+            ),
+        )
+        .expect("open the resent ticket");
+    canwu
+        .step_canonical()
+        .expect("admit the resent ticket")
+        .expect("ticket boundary");
+    canwu
+        .drive_decision(
+            canwu.time(),
+            0,
+            DecisionRequestId::new(5),
+            Some(CommandRequestId::new(2)),
+            DecisionTicketId::new(2),
+            &policy,
+        )
+        .expect("prepare the resent resolution");
+    canwu
+        .step_canonical()
+        .expect("a refused resend does not fail its boundary")
+        .expect("resolution boundary");
+    assert_eq!(
+        rejection_code(&canwu, 2),
+        Some(ErrorCode::IdempotencyConflict)
+    );
+
+    // A transfer that cites a superseded root version is refused, and the
+    // valid transfer queued after it is admitted.
+    let root_version = canwu
+        .typed_domain_record(&canwu_society::society_state_reference())
+        .expect("society root")
+        .version;
+    assert!(root_version > 1);
+    let transfer = |operation_id: &str,
+                    destination: &str,
+                    quantity: u64,
+                    expected_source_version: u64,
+                    due_time: SimTime| {
+        CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::Plugin {
+                plugin: "canwu-society".to_owned(),
+                command: "transfer_cohort_population".to_owned(),
+                payload: serde_json::to_value(CohortTransferIntent {
+                    operation_id: operation_id.to_owned(),
+                    authority_alignment_id: "council-alignment".to_owned(),
+                    source_cohort_id: "market".to_owned(),
+                    destination_cohort_id: destination.to_owned(),
+                    quantity,
+                    expected_source_version,
+                    due_time,
+                })
+                .expect("transfer intent"),
+            },
+        )
+        .with_authority(CommandAuthority {
+            decision_origin: DecisionOrigin::Actor {
+                actor: ids.commander,
+            },
+            seat_id: None,
+            permission_profile_id: None,
+            command_subject: Some(EntityRef::Government(ids.government)),
+        })
+    };
+    let command = |canwu: &mut Canwu, request: u64, envelope: CommandEnvelope| {
+        canwu
+            .enqueue_command(
+                canwu.time(),
+                0,
+                CommandRequest::new(CommandRequestId::new(request), canwu.revision(), envelope),
+            )
+            .expect("queue a transfer");
+        canwu
+            .step_canonical()
+            .expect("a refused transfer does not fail its boundary")
+            .expect("command boundary");
+        rejection_code(canwu, request)
+    };
+    let due = SimTime::EPOCH + SimDuration::days(2);
+    assert_eq!(
+        command(
+            &mut canwu,
+            3,
+            transfer("stale-version", "village", 10, 1, due)
+        ),
+        Some(ErrorCode::ValueOutOfRange)
+    );
+    assert_eq!(
+        command(
+            &mut canwu,
+            4,
+            transfer("current-version", "village", 10, root_version, due)
+        ),
+        None
+    );
+
+    // The run steps on: the admitted transfer settles, and nothing a refused
+    // command asked for happened.
+    daily(&mut canwu, 2);
+    daily(&mut canwu, 3);
+    let state = load_society_state(&canwu).expect("state after the refusals");
+    assert_eq!(state.cohorts["market"].headcount, 990);
+    assert_eq!(
+        state.institutional_alignments["council-alignment"].last_decision_version,
+        1
+    );
+    let ledger = |canwu: &Canwu| {
+        canwu
+            .typed_domain_record(&society_cohort_exchange_ledger_reference())
+            .expect("ledger exists")
+            .decode_payload::<SocietyCohortExchangeLedgerRecord>()
+            .expect("ledger payload")
+    };
+    assert_eq!(
+        ledger(&canwu).outcomes["current-version"].result,
+        "completed"
+    );
+    assert!(!ledger(&canwu).outcomes.contains_key("stale-version"));
+
+    // A transfer to a cohort that does not exist is refused when commanded.
+    let root_version = canwu
+        .typed_domain_record(&canwu_society::society_state_reference())
+        .expect("society root")
+        .version;
+    let due = SimTime::EPOCH + SimDuration::days(5);
+    assert_eq!(
+        command(
+            &mut canwu,
+            5,
+            transfer("no-such-cohort", "harbor", 10, root_version, due)
+        ),
+        Some(ErrorCode::EntityNotFound)
+    );
+    // Two transfers under one operation ID with different quantities, both
+    // commanded before either packet is admitted, are both accepted. A host
+    // also authors a transfer packet directly. The intake queues the first
+    // transfer and skips the other two packets with an event each, and the
+    // boundaries commit.
+    for (request, quantity) in [(6, 10), (7, 20)] {
+        assert_eq!(
+            command(
+                &mut canwu,
+                request,
+                transfer("reused", "village", quantity, root_version, due)
+            ),
+            None
+        );
+    }
+    canwu
+        .enqueue_plugin_ingress(canwu_api::PluginIngressRequest::new(
+            "canwu-society",
+            "cohort-transfer",
+            canwu.time(),
+            serde_json::json!({}),
+        ))
+        .expect("the transfer packet type is public");
+    daily(&mut canwu, 4);
+    let rejected = |canwu: &Canwu, reason: &str| {
+        canwu
+            .events()
+            .iter()
+            .filter(|event| {
+                event.kind.plugin_identity()
+                    == Some(("canwu-society", SOCIETY_INGRESS_REJECTED_EVENT))
+                    && event.summary.ends_with(reason)
+            })
+            .count()
+    };
+    assert_eq!(rejected(&canwu, "operation_id_conflict"), 1);
+    assert_eq!(rejected(&canwu, "malformed_payload"), 1);
+    // While the first is pending its operation ID is taken: other data is
+    // refused when commanded, and the same transfer again changes nothing.
+    assert_eq!(
+        command(
+            &mut canwu,
+            8,
+            transfer("reused", "village", 30, root_version, due)
+        ),
+        Some(ErrorCode::IdempotencyConflict)
+    );
+    let ingress_before = canwu.ingress_log().len();
+    assert_eq!(
+        command(
+            &mut canwu,
+            9,
+            transfer("reused", "village", 10, root_version, due)
+        ),
+        None
+    );
+    assert_eq!(canwu.ingress_log().len(), ingress_before + 1);
+    daily(&mut canwu, 5);
+    assert_eq!(ledger(&canwu).outcomes["reused"].result, "completed");
+    assert_eq!(ledger(&canwu).outcomes["reused"].quantity, 10);
+    assert_eq!(
+        load_society_state(&canwu).expect("state").cohorts["market"].headcount,
+        980
+    );
+
+    // The recorded rejections and skipped packets restore and replay exactly.
+    let snapshot = canwu.snapshot();
+    let restored = from_society_snapshot_json(&serde_json::to_string(&snapshot).expect("snapshot"))
+        .expect("restore the run");
+    assert_eq!(restored.snapshot(), snapshot);
+    let replayed = Canwu::replay_from_journal(&[&SocietyPlugin::DAILY], &canwu.replay_journal())
+        .expect("replay the run");
+    assert_eq!(replayed.snapshot(), snapshot);
+}
+
+/// The rejection code of the command attempt that carried `request`, or
+/// `None` when the command was accepted.
+fn rejection_code(canwu: &Canwu, request: u64) -> Option<ErrorCode> {
+    let attempt = canwu
+        .command_attempts()
+        .iter()
+        .find(|attempt| attempt.request_id == Some(CommandRequestId::new(request)))
+        .expect("the command was attempted");
+    match &attempt.outcome {
+        CommandAttemptOutcome::Accepted { .. } => None,
+        CommandAttemptOutcome::Rejected { error } => Some(error.code.clone()),
+    }
+}
+
 #[test]
 fn inactive_target_catalog_growth_stays_sparse_and_does_not_change_existing_transition() {
     let (mut baseline, _) = tutorial_simulation();
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let initial = load_society_state(&baseline).expect("baseline society state");
     let mut extended = initial.clone();
     for index in 0..128 {
@@ -412,7 +719,7 @@ fn epoch_and_negative_time_boundaries_are_valid_materialization_times() {
     assert_eq!(epoch_state.last_aggregation_at, Some(SimTime::EPOCH));
     assert!(!epoch_state.aggregates.is_empty());
 
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let demo = Canwu::demo(42).expect("demo scenario");
     let snapshot = demo.snapshot();
     let start_time = SimTime::from_minutes(-2 * 24 * 60);
@@ -442,7 +749,7 @@ fn epoch_and_negative_time_boundaries_are_valid_materialization_times() {
 
 #[test]
 fn society_payload_and_core_references_must_remain_bound() {
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let demo = Canwu::demo(42).expect("demo scenario");
     let ids = Canwu::demo_ids();
     let snapshot = demo.snapshot();
@@ -563,7 +870,7 @@ fn inactive_organizations_neither_receive_nor_relay_influence() {
 }
 
 fn tutorial_simulation() -> (Canwu, Scenario) {
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let demo = Canwu::demo(42).expect("demo scenario");
     let ids = Canwu::demo_ids();
     let snapshot = demo.snapshot();

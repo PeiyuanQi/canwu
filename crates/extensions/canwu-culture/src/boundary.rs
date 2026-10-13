@@ -16,7 +16,7 @@
 //! before `canwu-society` but neither observes the other's phase-7 writes.
 //! Every hand-off is therefore next-boundary: the society delta is admitted
 //! at the next boundary, queued by the society intake, and applied by the
-//! following Daily society settlement; signal batches are admitted at the
+//! following society settlement; signal batches are admitted at the
 //! next boundary as evidence for their consumers.
 //!
 //! Reconciliation: the committed culture lifecycle is the desired society
@@ -233,10 +233,11 @@ impl CultureExposureQueue {
 ///
 /// The scenario installs [`culture_definition_record`], the culture state
 /// (`CultureRuntime::new_at(..).into_record(..)`), and a society state with
-/// [`crate::install_into_society`] applied. Register [`canwu_society::SocietyPlugin`]
-/// alongside: it stays the only writer of `canwu.society:state` and applies
-/// the delivered lifecycle deltas. A host using this plugin must not also call
-/// [`crate::settle_culture_society_boundary`] for the same run.
+/// [`crate::install_into_society`] applied. Register
+/// [`canwu_society::SocietyPlugin`] alongside, on any settlement cadence: it
+/// stays the only writer of `canwu.society:state` and applies the delivered
+/// lifecycle deltas in its next settlement. A host using this plugin must not
+/// also call [`crate::settle_culture_society_boundary`] for the same run.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CultureBoundaryPlugin;
 

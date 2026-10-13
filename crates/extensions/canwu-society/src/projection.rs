@@ -5,6 +5,7 @@ use crate::ingress::{
 };
 use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
 use crate::plugin::{PLUGIN_NAME, policy_decision_key, validate_policy_decision};
+use crate::revision::{SOCIETY_PRESSURE_REVISION_INGRESS, pressure_revision_admission_rejection};
 use crate::{
     SocietyPlugin, SocietyProjection, SocietyState, SocietyStateRecord, society_state_reference,
 };
@@ -69,9 +70,10 @@ fn load_ingress_queue(canwu: &Canwu) -> Result<Option<SocietyIngressQueue>, Canw
 
 /// Re-derives every queued packet from the journal: the packet must be the
 /// exact society ingress admitted at its recorded boundary, a lifecycle delta
-/// must have been generated inside the engine, and a rebase's admission
-/// verdict must match the stock history at the admission cut (changes
-/// committed through phase 11 of the admitting boundary).
+/// must have been generated inside the engine, a rebase's admission verdict
+/// must match the stock history at the admission cut (changes committed
+/// through phase 11 of the admitting boundary), and a pressure revision's
+/// admission verdict must match the cause of its ingress record.
 fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
     let Some(queue) = load_ingress_queue(canwu)? else {
         return Ok(());
@@ -159,6 +161,13 @@ fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
                     "queued rebase admission verdict does not match its stock history",
                 ));
             }
+        } else if entry.packet_type == SOCIETY_PRESSURE_REVISION_INGRESS
+            && pressure_revision_admission_rejection(&entry.payload, record.cause.as_ref())
+                != entry.admission_rejection
+        {
+            return Err(queue_error(
+                "queued pressure revision admission verdict does not match its ingress cause",
+            ));
         }
     }
     Ok(())
@@ -259,31 +268,51 @@ impl StockHistory<'_> {
     }
 }
 
-/// Rehydrates a snapshot with the society plugin and revalidates its semantic
-/// payload-to-reference binding and every queued rebase or lifecycle delta
-/// against the ingress journal before returning the simulation.
+/// Rehydrates a snapshot of a `Daily` society run. It is
+/// [`from_society_snapshot_json_with_plugin`] with [`SocietyPlugin::DAILY`].
 ///
 /// # Errors
 ///
 /// Returns an error when the engine snapshot contract or the society record is
-/// invalid.
+/// invalid, including `PluginManifestMismatch` when the run was registered on
+/// another settlement cadence.
 pub fn from_society_snapshot_json(json: &str) -> Result<Canwu, CanwuError> {
-    let plugin = SocietyPlugin;
-    let canwu = Canwu::from_snapshot_json_with_plugins(json, &[&plugin])?;
+    from_society_snapshot_json_with_plugin(json, &SocietyPlugin::DAILY)
+}
+
+/// Rehydrates a snapshot with the given society plugin and revalidates its
+/// semantic payload-to-reference binding and every queued rebase, lifecycle
+/// delta, or pressure revision against the ingress journal before returning
+/// the simulation. The plugin must have the settlement cadence the run was
+/// registered on.
+///
+/// # Errors
+///
+/// Returns an error when the engine snapshot contract or the society record is
+/// invalid, including `PluginManifestMismatch` when the plugin's settlement
+/// cadence is not the run's.
+pub fn from_society_snapshot_json_with_plugin(
+    json: &str,
+    plugin: &SocietyPlugin,
+) -> Result<Canwu, CanwuError> {
+    let canwu = Canwu::from_snapshot_json_with_plugins(json, &[plugin])?;
     validate_society_runtime(&canwu)?;
     Ok(canwu)
 }
 
 /// Validates restored society state: the root record (as
-/// [`load_society_state`] does) and every queued rebase or lifecycle delta,
-/// re-derived from the ingress journal. Hosts that restore society together
-/// with other plugins call this after `Canwu::from_snapshot_json_with_plugins`.
+/// [`load_society_state`] does) and every queued rebase, lifecycle delta, or
+/// pressure revision, re-derived from the ingress journal. Hosts that restore
+/// society together with other plugins call this after
+/// `Canwu::from_snapshot_json_with_plugins`.
 ///
 /// # Errors
 ///
 /// Returns an error when the society record is invalid or a queued packet is
 /// not the exact admitted packet its entry claims, including a rebase whose
-/// recorded admission verdict disagrees with the stock history.
+/// recorded admission verdict disagrees with the stock history and a
+/// pressure revision whose verdict disagrees with the cause of its ingress
+/// record.
 pub fn validate_society_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
     load_society_state(canwu)?;
     validate_queued_ingress(canwu)

@@ -27,15 +27,18 @@ use canwu_society::{
 fn gap_g35_culture_boundary_system() {
     let definition = definition();
     let plan = compile_culture(&definition).expect("compile culture plan");
-    let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin, &CultureBoundaryPlugin];
+    let plugins: [&dyn SimulationPlugin; 2] = [&SocietyPlugin::DAILY, &CultureBoundaryPlugin];
     let mut canwu =
         Canwu::new_with_plugins(7, scenario(&definition), &plugins).expect("culture simulation");
 
     // The society plugin stays the only owner of its state: a second
     // plugin declaring the same write is rejected at registration, and the
     // host cannot author the internal lifecycle-delta packet.
-    let with_rogue: [&dyn SimulationPlugin; 3] =
-        [&SocietyPlugin, &CultureBoundaryPlugin, &RogueSocietyWriter];
+    let with_rogue: [&dyn SimulationPlugin; 3] = [
+        &SocietyPlugin::DAILY,
+        &CultureBoundaryPlugin,
+        &RogueSocietyWriter,
+    ];
     let error = Canwu::new_with_plugins(7, scenario(&definition), &with_rogue)
         .err()
         .expect("a second society writer must be rejected");

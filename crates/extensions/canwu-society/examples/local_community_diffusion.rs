@@ -17,7 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let plugin = SocietyPlugin;
+    let plugin = SocietyPlugin::DAILY;
     let demo = Canwu::demo(42)?;
     let snapshot = demo.snapshot();
     let scenario = Scenario {

@@ -15,13 +15,99 @@ downstream rules.
 The crate is an official optional release. Its API follows Canwu's pre-1.0
 compatibility policy and may evolve in a future SemVer release.
 
-Use `from_society_snapshot_json` for snapshot rehydration. It performs the
-engine's normal snapshot checks, then recomputes the root record's
-payload-to-core-reference binding and persisted society derivations, and
-re-derives every queued rebase or lifecycle delta from the ingress journal
-before returning the simulation. Hosts that restore society beside other
-plugins call `validate_society_runtime` after
+Society settles in the boundaries that carry the plugin's settlement cadence,
+a `SystemCadence` category: `Daily` for `SocietyPlugin::DAILY` and
+`SocietyPlugin::default()`, or the category given to
+`SocietyPlugin::with_settlement_cadence`. Canwu keeps no calendar, so the host
+decides which boundaries carry the category; a host that wants a week or
+another declared period schedules a category it does not otherwise use, for
+example `EraScheduled`, at that period. The four settlement systems run on the
+cadence; the two event-driven intakes queue admitted work at any boundary, and
+the next settlement applies it. The cadence is recorded in the persisted
+plugin descriptor, so a run is restored and replayed only with a plugin of the
+same cadence (`PluginManifestMismatch` otherwise).
+
+Everything the phase-7 system applies waits for the cadence: due cohort
+transfers, queued rebases, lifecycle deltas and pressure revisions,
+institutional decisions, and transitions. An application that needs such a
+change to take effect within a day registers a `Daily` society. Under a
+coarse cadence, note three things. Of the due transfers that share a cohort,
+as source or destination, one completes per settlement; the others settle as
+`stale_source` and must be reissued against the new state (a `Daily` society
+has the same rule for transfers due on one day). The queue is one record,
+rewritten whole by every boundary that admits a packet, so the evidence of a
+queue that waits a period grows with the square of the packets it collects.
+And a packet that arrives while `MAX_SOCIETY_INGRESS_QUEUE` (4,096) wait is
+dropped with only a `society_ingress_rejected_v1` event: a dropped rebase
+leaves its cohort behind its stock until the provider sends another, and a
+dropped pressure revision never settles and must be decided again.
+
+A transition rate is per settlement, not per unit of simulated time: each
+settlement moves `floor((source × rate + carry) / 1,000,000)` people for a
+rule and cohort and carries the remainder exactly, so the people moved over
+any number of settlements differ from the exact sum of the shares by less
+than one person. An application authors each rate for the cadence it
+registers. Settling the same span on a coarser cadence at a proportionally
+higher rate differs only by the compounding inside the coarser period.
+
+A settlement that changes nothing writes nothing. `last_transition_at` is the
+time of the last settlement in which a transition changed a distribution or a
+carried remainder, and transition state changes at most once per instant.
+`last_mobilization_at` and `last_aggregation_at` are the times those views
+were last materialized: while one is set its view matches the authoritative
+state, a change the view depends on clears it, and the next settlement
+materializes the view once and sets it, also when the view comes out empty.
+A settlement that moves people therefore writes the root up to four times, as
+before, and one that changes only a remainder writes it once.
+
+An observer's projection changes only with that observer's estimate. After
+its changes the settlement recomputes each observer's entries and keeps the
+projection, `observed_at` included, of every observer whose entries are the
+same; the others are rebuilt at that boundary's time, and
+`last_projection_at` is the time the projections were last completed. A
+projection's `observed_at` is therefore the time its estimate last changed,
+and it tells an observer nothing about cohorts outside its scope or about
+changes it cannot detect. It is recorded history: it cannot be derived from
+the rest of the root, validation only bounds it above, and a restored root's
+value is taken as given.
+
+Use `from_society_snapshot_json` for snapshot rehydration of a `Daily` run and
+`from_society_snapshot_json_with_plugin` for a run on another settlement
+cadence. They perform the engine's normal snapshot checks, then recompute the
+root record's payload-to-core-reference binding and persisted society
+derivations, and re-derive every queued rebase, lifecycle delta, or pressure
+revision from the ingress journal before returning the simulation. Hosts that
+restore society beside other plugins call `validate_society_runtime` after
 `Canwu::from_snapshot_json_with_plugins`.
+
+An expected refusal of a society command is a recorded command rejection: the
+boundary commits and the commands queued behind it still settle.
+`set_institutional_policy` refuses a malformed decision as `InvalidPayload`,
+a missing or mismatched authority (including an unknown alignment) as
+`InvalidAuthority`, and a version that is not newer than the applied or the
+pending one, which includes a resend, as `IdempotencyConflict`.
+`transfer_cohort_population` refuses a malformed intent as `InvalidPayload`,
+a missing or mismatched authority as `InvalidAuthority`, an unknown source or
+destination cohort as `EntityNotFound`, a due time in the past as
+`InvalidDuration`, an expected source version that is not the root's current
+version as `ValueOutOfRange`, and an operation ID bound to another settled or
+pending transfer as `IdempotencyConflict`; a resend of a settled or pending
+transfer is accepted and queues nothing. An invalid society record is not a
+refusal and still fails the boundary. The two commands treat a resend
+differently from a pressure revision: a resent policy decision is recorded as
+`IdempotencyConflict`, while a resent pressure revision is accepted and
+changes nothing.
+
+A defective packet never fails a boundary either. The cohort-transfer intake
+skips a packet with a `society_ingress_rejected_v1` event whose summary ends
+with the reason: `malformed_payload`; `unauthorized_origin` (its ingress
+record does not name, as its cause, the transfer command it carries, which is
+how a packet a host authors directly is told apart); `authority_unavailable`
+(the alignment no longer authorizes the actor); `unknown_cohort`; or
+`operation_id_conflict` (another transfer is pending under that operation
+ID). A defective rebase, lifecycle delta, or pressure revision is queued with
+its verdict and settles as a rejected outcome. Only an invalid society record
+fails a boundary.
 
 A `PolicyPressure` may record its provenance: an optional `issuer` (a
 government, organization, or person bound into the record's core references)
@@ -40,7 +126,7 @@ phase-12 intake queues admitted packets in admission order, at most
 `MAX_SOCIETY_INGRESS_QUEUE` at once (further packets are rejected with a
 `society_ingress_rejected_v1` event); only the intake writes the queue, so an
 initial scenario that seeds a non-empty queue is refused with
-`InvalidAuthority`. The next Daily phase-7 settlement applies the queue after
+`InvalidAuthority`. The next phase-7 settlement applies the queue after
 cohort transfers and before institutional decisions and transitions, and
 records each outcome in `SocietyCohortExchangeLedger::rebases` or
 `lifecycle_deltas`. A rebase re-proportions every distribution of the cohort
@@ -58,6 +144,52 @@ cohorts changed after intake (for example through a rebase or another
 transfer), or that no longer fits, settles as a terminal ledger outcome
 (`stale_source` or `rejected`) instead of failing later boundaries; a retry
 needs a new operation ID. Transfers and rebases clear the materialized
-aggregates, mobilization candidates, and projections, which the same Daily
-boundary rematerializes. The society plugin remains the only writer of
-`canwu.society:state`.
+aggregates, mobilization candidates, and projections, which the same
+settlement boundary rematerializes. The society plugin remains the only writer
+of `canwu.society:state`.
+
+An institution revises policy pressure and the activity and reach of influence
+edges and organization nodes at runtime with the `revise_society_pressure`
+command, whose payload is a `PressureRevisionDecision` (build the ticket with
+`pressure_revision_ticket`). The decision is authorized through an
+`InstitutionalAlignment` exactly as `set_institutional_policy` is: a validated
+`DecisionTicket` controller, the alignment's institution as command subject,
+and a decision origin that matches the alignment's authorized actor. A
+decision changes nothing for a cohort outside its alignment's affected cohorts
+(every cohort when that set is empty). It may revise the pressure fields of a
+`PolicyPressure` row of the alignment's target whose `issuer` is that
+institution and whose affected cohorts lie within the alignment's (a row with
+no issuer is never revisable); the `active` flag and `reach_per_mille` of an
+influence edge of the target whose target cohort lies within the alignment's
+(an edge changes only its target cohort's influence signal, so its source may
+be anything); and the `active` flag and `base_reach_per_mille` of an
+organization node of the target, only through an alignment that covers every
+cohort, because an organization acts on every cohort of its target (through
+organization relations it also changes the strength of related organizations,
+which may belong to other targets). It never creates or
+removes a row and never changes a transition rule. A decision revises at most
+`MAX_PRESSURE_REVISION_ROWS` rows and applies as a whole or not at all. A
+refused command is a recorded command rejection (`InvalidPayload`,
+`InvalidAuthority`, `EntityNotFound`, or `IdempotencyConflict`) and never
+fails its boundary.
+
+An admitted decision is queued as the internal `society_pressure_revision_v1`
+packet (the host cannot author it, and the intake rejects a packet the command
+did not produce as `unauthorized_origin`). The packet is admitted at the
+boundary after the command and applies in the first settlement after that, in
+admission order with the other queued packets and before that settlement's
+transitions; `set_institutional_policy` takes effect one boundary sooner.
+Each alignment has its own revision version sequence: a decision
+applies when its `decision_version` is newer than the alignment's applied
+revision version and its `expected_version` is that applied version; a resend
+of the applied decision changes nothing; any other is rejected
+(`superseded_decision`, `stale_expected_version`, `row_out_of_scope`, or
+`authority_unavailable`) without changing society state. An applied decision
+writes its version to the `decision_version` of each pressure row it revises;
+two alignments of one institution on one target can both revise one row, so
+that version names the last decision applied to the row and can go down.
+`SocietyCohortExchangeLedger::pressure_revisions` keeps the latest applied and
+the latest rejected outcome of each alignment, naming the decision version,
+its digest, the issuer, the command, and the admitted packet; every outcome is
+also emitted as a `society_pressure_revised_v1` or
+`society_pressure_revision_rejected_v1` event.

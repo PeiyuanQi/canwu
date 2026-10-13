@@ -1,9 +1,10 @@
 //! Canonical society ingress: cohort headcount rebases and the owner-side
-//! queue shared with lifecycle deltas.
+//! queue shared with lifecycle deltas and pressure revisions.
 
 use crate::PLUGIN_NAME;
 use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
 use crate::model::{SocietyState, invalid};
+use crate::revision::SOCIETY_PRESSURE_REVISION_INGRESS;
 use canwu_api::{
     BoundaryId, CanwuError, DomainRecordType, DomainRecordVersionRef, DomainValueKindClass,
     IngressId, TypedDomainRecordRef,
@@ -22,8 +23,10 @@ pub const REBASE_STALE_STOCK_REJECTION: &str = "stale_external_stock";
 pub const SOCIETY_INGRESS_MALFORMED_REJECTION: &str = "malformed_payload";
 /// Rejection code recorded when the cited stock is a society-owned record.
 pub const REBASE_INVALID_STOCK_REJECTION: &str = "invalid_external_stock";
-/// Most admitted packets that may wait for the next Daily settlement; the
-/// intake rejects further packets with a `society_ingress_rejected_v1` event.
+/// Most admitted packets that may wait for the next society settlement. The
+/// intake drops a further packet with only a `society_ingress_rejected_v1`
+/// event: it gets no ledger outcome and never settles, so its sender must
+/// send it again after a settlement has emptied the queue.
 pub const MAX_SOCIETY_INGRESS_QUEUE: usize = 4_096;
 
 /// Why a cohort's headcount is rebased against an external stock.
@@ -69,7 +72,7 @@ pub fn society_ingress_queue_reference() -> TypedDomainRecordRef<SocietyIngressQ
     TypedDomainRecordRef::new("root")
 }
 
-/// One admitted society packet awaiting the next Daily settlement.
+/// One admitted society packet awaiting the next society settlement.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueuedSocietyIngress {
@@ -83,12 +86,19 @@ pub struct QueuedSocietyIngress {
     pub admission_rejection: Option<String>,
 }
 
-/// Owner-side queue of admitted rebases and lifecycle deltas.
+/// Owner-side queue of admitted rebases, lifecycle deltas, and pressure
+/// revisions.
 ///
 /// The event-driven phase-12 intake appends packets in admission order; the
-/// Daily phase-7 settlement consumes the whole queue it observes. Only the
-/// intake writes entries: an initial scenario cannot seed a non-empty queue,
-/// and at most [`MAX_SOCIETY_INGRESS_QUEUE`] entries wait at once.
+/// phase-7 settlement, which runs on the plugin's settlement cadence,
+/// consumes the whole queue it observes. Only the intake writes entries: an
+/// initial scenario cannot seed a non-empty queue, and at most
+/// [`MAX_SOCIETY_INGRESS_QUEUE`] entries wait at once.
+///
+/// The queue is one record, rewritten whole by every boundary that admits a
+/// packet. Under a coarse settlement cadence a queue that waits a period
+/// therefore journals evidence that grows with the square of the packets it
+/// collects.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocietyIngressQueue {
@@ -117,7 +127,9 @@ impl SocietyIngressQueue {
                 || previous.is_some_and(|boundary| entry.admitted_at < boundary)
                 || !matches!(
                     entry.packet_type.as_str(),
-                    COHORT_REBASE_INGRESS | SOCIETY_LIFECYCLE_DELTA_INGRESS
+                    COHORT_REBASE_INGRESS
+                        | SOCIETY_LIFECYCLE_DELTA_INGRESS
+                        | SOCIETY_PRESSURE_REVISION_INGRESS
                 )
                 || entry
                     .admission_rejection
@@ -253,6 +265,8 @@ pub(crate) fn is_queued_packet(plugin: &str, packet_type: &str) -> bool {
     plugin == PLUGIN_NAME
         && matches!(
             packet_type,
-            COHORT_REBASE_INGRESS | SOCIETY_LIFECYCLE_DELTA_INGRESS
+            COHORT_REBASE_INGRESS
+                | SOCIETY_LIFECYCLE_DELTA_INGRESS
+                | SOCIETY_PRESSURE_REVISION_INGRESS
         )
 }

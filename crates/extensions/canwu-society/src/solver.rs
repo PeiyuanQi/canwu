@@ -236,7 +236,28 @@ impl TransitionSignalIndex {
     }
 }
 
-/// Settles every configured transition once at `at` in canonical key order.
+/// Settles every configured transition once at `at` in canonical key order
+/// and returns whether a distribution or a carried remainder changed.
+///
+/// A rate is **per settlement**: each call moves
+/// `floor((source × rate + carry) / 1_000_000)` people from a rule's source
+/// profile to its destination profile for each affected cohort, where `rate`
+/// is the rule's `base_rate_per_million` adjusted by its weighted signals and
+/// clamped to `0..=1_000_000`, and keeps the division's remainder as the
+/// [`TransitionRemainder`] carry of that rule and cohort. The carry is
+/// exact, so the people a rule has moved for a cohort over any number of
+/// settlements differ from the exact sum of `source × rate / 1_000_000` by
+/// less than one person. Elapsed simulated time does not enter the
+/// arithmetic; how often the function runs is the caller's settlement
+/// cadence (see [`crate::SocietyPlugin`]).
+///
+/// A settlement that changes nothing leaves the state untouched, including
+/// `last_transition_at`. One that changes a distribution or a remainder sets
+/// `last_transition_at` to `at`, and one that changes a distribution also
+/// clears the materialized aggregates, mobilization candidates, and
+/// projections with their timestamps. Transition state therefore changes at
+/// most once per instant of simulated time: a call at or before
+/// `last_transition_at` does nothing.
 ///
 /// # Errors
 ///
@@ -253,7 +274,8 @@ pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool,
     let signal_index = TransitionSignalIndex::build(state, &organization_strengths);
     let rules: Vec<_> = state.transition_rules.values().cloned().collect();
     let all_cohorts: Vec<_> = state.cohorts.keys().cloned().collect();
-    let mut changed = false;
+    let mut distributions_changed = false;
+    let mut remainders_changed = false;
 
     for rule in rules {
         let cohort_ids: Vec<_> = if rule.affected_cohorts.is_empty() {
@@ -262,7 +284,7 @@ pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool,
             rule.affected_cohorts.iter().cloned().collect()
         };
         for cohort_id in cohort_ids {
-            materialize_distribution(state, &cohort_id, &rule.target_id)?;
+            distributions_changed |= materialize_distribution(state, &cohort_id, &rule.target_id)?;
             let signals = signal_index.signals(&cohort_id, &rule.target_id);
             let rate = effective_rate(&rule, signals);
             let distribution_key = distribution_id(&cohort_id, &rule.target_id);
@@ -301,7 +323,7 @@ pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool,
                     .get_mut(&distribution_key)
                     .ok_or_else(|| invalid("materialized distribution disappeared"))?;
                 transfer_between_profiles(distribution, rule.from, rule.to, transfer)?;
-                changed = true;
+                distributions_changed = true;
             }
             if next_remainder != previous_remainder {
                 state.remainders.insert(
@@ -313,21 +335,22 @@ pub fn settle_transitions(state: &mut SocietyState, at: SimTime) -> Result<bool,
                         remainder: next_remainder,
                     },
                 );
-                changed = true;
+                remainders_changed = true;
             }
         }
     }
 
+    if !distributions_changed && !remainders_changed {
+        return Ok(false);
+    }
     state.last_transition_at = Some(at);
-    state.aggregates.clear();
-    state.mobilization_candidates.clear();
-    state.projections.clear();
-    state.last_aggregation_at = None;
-    state.last_mobilization_at = None;
-    state.last_projection_at = None;
+    if distributions_changed {
+        // Every materialized view is derived from the distributions.
+        state.invalidate_derived_state();
+    }
     state.canonicalize()?;
     state.validate()?;
-    Ok(changed || state.last_transition_at == Some(at))
+    Ok(true)
 }
 
 #[must_use]
@@ -495,14 +518,16 @@ pub(crate) fn compute_projections(
         .collect()
 }
 
+/// Creates the neutral distribution of a cohort and target that a rule
+/// covers and returns whether it had to be created.
 fn materialize_distribution(
     state: &mut SocietyState,
     cohort_id: &str,
     target_id: &str,
-) -> Result<(), CanwuError> {
+) -> Result<bool, CanwuError> {
     let id = distribution_id(cohort_id, target_id);
     if state.distributions.contains_key(&id) {
-        return Ok(());
+        return Ok(false);
     }
     let cohort = state
         .cohorts
@@ -524,7 +549,7 @@ fn materialize_distribution(
             }],
         },
     );
-    Ok(())
+    Ok(true)
 }
 
 fn transfer_between_profiles(

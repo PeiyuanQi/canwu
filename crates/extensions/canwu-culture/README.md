@@ -37,7 +37,8 @@ rejected lifecycle step emits `culture_lifecycle_rejected_v1` and leaves
 culture state unchanged; a retired culture state is inert. Phase-7 systems all
 read the same boundary snapshot, so every hand-off is next-boundary: signal
 batches are admitted at the next boundary, and the society applies the delta
-at the first Daily settlement after it is admitted. The society plugin stays
+at its first settlement after it is admitted (Daily unless the society plugin
+is registered on another settlement cadence). The society plugin stays
 the only writer of `canwu.society:state`. A host registers one of the two
 plugins and never also calls `settle_culture_society_boundary` for a run that
 uses `CultureBoundaryPlugin`.

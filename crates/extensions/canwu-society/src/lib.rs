@@ -12,9 +12,12 @@ mod lifecycle;
 mod model;
 mod plugin;
 mod projection;
+mod revision;
 mod solver;
 
-pub use decision::{PolicyChoice, institutional_policy_ticket};
+pub use decision::{
+    PolicyChoice, PressureRevisionChoice, institutional_policy_ticket, pressure_revision_ticket,
+};
 pub use ingress::{
     COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, MAX_SOCIETY_INGRESS_QUEUE,
     QueuedSocietyIngress, REBASE_INVALID_STOCK_REJECTION, REBASE_STALE_STOCK_REJECTION,
@@ -41,6 +44,16 @@ pub use plugin::{
     PLUGIN_NAME, SOCIETY_INGRESS_REJECTED_EVENT, SocietyPlugin, society_policy_decision_state_key,
 };
 pub use projection::{
-    from_society_snapshot_json, load_society_state, projection_for_viewer, validate_society_runtime,
+    from_society_snapshot_json, from_society_snapshot_json_with_plugin, load_society_state,
+    projection_for_viewer, validate_society_runtime,
+};
+pub use revision::{
+    InfluenceEdgeRevision, MAX_PRESSURE_REVISION_ROWS, OrganizationRevision,
+    PRESSURE_REVISION_AUTHORITY_REJECTION, PRESSURE_REVISION_COMMAND,
+    PRESSURE_REVISION_ORIGIN_REJECTION, PRESSURE_REVISION_SCOPE_REJECTION,
+    PRESSURE_REVISION_STALE_REJECTION, PRESSURE_REVISION_SUPERSEDED_REJECTION,
+    PolicyPressureRevision, PressureRevisionDecision, PressureRevisionOutcome,
+    PressureRevisionOutcomes, SOCIETY_PRESSURE_REVISED_EVENT, SOCIETY_PRESSURE_REVISION_INGRESS,
+    SOCIETY_PRESSURE_REVISION_REJECTED_EVENT, SocietyPressureRevisionV1,
 };
 pub use solver::{compute_aggregates, settle_transitions};
