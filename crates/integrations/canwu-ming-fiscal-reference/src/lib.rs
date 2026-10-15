@@ -21,7 +21,8 @@ pub use trace_viewer::{TraceViewerError, TraceViewerHandle, start_trace_viewer};
 
 use canwu_api::{
     Canwu, CanwuError, CommandEnvelope, CommandRequest, CommandRequestId, DomainRecordKind,
-    EntityRef, Issuer, OrganizationId, PersonId, ResourceId, Scenario, SimDuration, SimTime,
+    DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, EvidenceCursor, EvidenceRef,
+    Issuer, OrganizationId, PersonId, ResourceId, Scenario, SimDuration, SimTime,
     SimulationGranularity,
 };
 use canwu_fiscal::{
@@ -269,14 +270,46 @@ pub fn replay_ming_fiscal_reference(
     Ok(canwu)
 }
 
-pub fn validate_ming_fiscal_reference(canwu: &Canwu) -> Result<(), CanwuError> {
+/// Checks that the fiscal state of a reference run is consistent with its
+/// catalog and with the evidence it cites.
+///
+/// It takes either runtime handle, [`Canwu`] or [`canwu_api::CompactedCanwu`],
+/// and reads only what a seal cannot change: committed current records
+/// ([`canwu_api::CanwuRun::domain_record`],
+/// [`canwu_api::CanwuRun::current_domain_record_version`]), replay-stable
+/// versions ([`canwu_api::CanwuRun::replay_stable_domain_record_version`]),
+/// and the journal counters ([`canwu_api::CanwuRun::evidence_cursor`]);
+/// never [`canwu_api::CanwuRun::domain_record_version_evidence_exists`]. So
+/// a sealed run, an unsealed fork of it, a restore from its sealed
+/// segments, and its exact replay all give the same answer:
+///
+/// - each execution receipt is checked against the typed adapter evidence it
+///   cites, which must still be the current version of its record (adapter
+///   evidence records are create-only), with that version's establishment
+///   time;
+/// - a commutation quote or an audit's domain-record evidence must be a
+///   version the run established: the current or initial-scenario version of
+///   its record, or a superseded version established by a settled boundary.
+///   While the record exists, a superseded version must be below its current
+///   version and its boundary no later than the one that established the
+///   current version. The body of a superseded version is not read; the
+///   fiscal plugin checked
+///   it when it admitted the action, and the fiscal state declares quotes
+///   and receipt evidence as payload-required dependencies, which the seal
+///   and the restore keep provable;
+/// - an audit's other evidence (an event, command, command attempt, ingress,
+///   boundary, or random draw) must have an identity the run issued, by the
+///   journal counters.
+pub fn validate_ming_fiscal_reference<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &R,
+) -> Result<(), CanwuError> {
     let catalog_record = canwu
-        .typed_domain_record(&fiscal_catalog_reference())
+        .domain_record(fiscal_catalog_reference().as_untyped())
         .ok_or_else(|| invalid_reference("Ming fiscal catalog is unavailable"))?;
     let catalog = catalog_record.decode_payload::<canwu_fiscal::FiscalCatalogRecord>()?;
     catalog.validate()?;
     let state_record = canwu
-        .typed_domain_record(&fiscal_state_reference())
+        .domain_record(fiscal_state_reference().as_untyped())
         .ok_or_else(|| invalid_reference("Ming fiscal state is unavailable"))?;
     let state = state_record.decode_payload::<canwu_fiscal::FiscalStateRecord>()?;
     state.validate(&catalog)?;
@@ -308,27 +341,85 @@ pub fn validate_ming_fiscal_reference(canwu: &Canwu) -> Result<(), CanwuError> {
             validate_reference_receipt(canwu, request, receipt)?;
         }
     }
+    let cursor = canwu.evidence_cursor()?;
     for assessment in state.assessments() {
         if let Some(quote) = &assessment.commutation_quote
-            && canwu.domain_record_version(quote).is_none()
+            && !established_version(canwu, &cursor, quote)?
         {
             return Err(invalid_reference(
-                "Ming fiscal commutation quote payload is unavailable",
+                "Ming fiscal commutation quote is not a version the run established",
             ));
         }
     }
     for audit in state.audits() {
-        if audit
-            .evidence
-            .iter()
-            .any(|evidence| !canwu.evidence_exists(evidence))
-        {
-            return Err(invalid_reference(
-                "Ming fiscal audit evidence is unavailable",
-            ));
+        for evidence in &audit.evidence {
+            if !issued_evidence(canwu, &cursor, evidence)? {
+                return Err(invalid_reference(
+                    "Ming fiscal audit evidence is unavailable",
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// Whether the run established `version`: it resolves as the current or an
+/// initial-scenario version of its record, or a settled boundary established
+/// it and its record has moved past it. When the record still exists, the
+/// cited version must be below its current version and its boundary no later
+/// than the one that established the current version. Only current state and
+/// counters are read, so the answer does not depend on what a seal kept.
+fn established_version<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &R,
+    cursor: &EvidenceCursor,
+    version: &DomainRecordVersionRef,
+) -> Result<bool, CanwuError> {
+    if canwu.replay_stable_domain_record_version(version).is_some() {
+        return Ok(true);
+    }
+    let DomainRecordVersionSource::BoundaryChange { boundary, .. } = version.established_by else {
+        return Ok(false);
+    };
+    if version.version == 0 || boundary.get() == 0 || boundary.get() > cursor.boundary_count {
+        return Ok(false);
+    }
+    Ok(
+        match canwu.current_domain_record_version(&version.record)? {
+            None => true,
+            Some(current) => {
+                version.version < current.version
+                    && match current.established_by {
+                        DomainRecordVersionSource::BoundaryChange {
+                            boundary: current_boundary,
+                            ..
+                        } => boundary <= current_boundary,
+                        DomainRecordVersionSource::InitialScenario => false,
+                    }
+            }
+        },
+    )
+}
+
+/// Whether the run issued the evidence identity `evidence`. Journal
+/// identities are contiguous from one, so an identity was issued exactly when
+/// it is at most its journal's count, whether its item is retained or sealed.
+fn issued_evidence<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &R,
+    cursor: &EvidenceCursor,
+    evidence: &EvidenceRef,
+) -> Result<bool, CanwuError> {
+    let issued = |id: u64, count: u64| id != 0 && id <= count;
+    Ok(match evidence {
+        EvidenceRef::Event(id) => issued(id.get(), cursor.event_count),
+        EvidenceRef::Command(id) => issued(id.get(), cursor.command_count),
+        EvidenceRef::CommandAttempt(id) => issued(id.get(), cursor.command_attempt_count),
+        EvidenceRef::Ingress(id) => issued(id.get(), cursor.ingress_count),
+        EvidenceRef::Boundary(id) => issued(id.get(), cursor.boundary_count),
+        EvidenceRef::RandomDraw(id) => issued(id.get(), cursor.random_draw_count),
+        EvidenceRef::DomainRecordVersion(version) => {
+            return established_version(canwu, cursor, version);
+        }
+    })
 }
 
 pub fn run_ming_fiscal_sample_cycle(canwu: &mut Canwu, id_prefix: &str) -> Result<(), CanwuError> {
@@ -669,17 +760,24 @@ const fn sample_unit(payment_form: FiscalPaymentForm) -> &'static str {
     }
 }
 
-fn validate_reference_receipt(
-    canwu: &Canwu,
+fn validate_reference_receipt<R: canwu_api::CanwuRun + ?Sized>(
+    canwu: &R,
     request: &canwu_fiscal::FiscalExecutionRequest,
     receipt: &canwu_fiscal::FiscalExecutionReceipt,
 ) -> Result<(), CanwuError> {
     let mut evidenced_quantity = 0_u64;
     let mut external_operations = BTreeSet::new();
     for version in &receipt.external_evidence {
-        let record = canwu.domain_record_version(version).ok_or_else(|| {
-            invalid_reference("Ming fiscal execution evidence payload is unavailable")
-        })?;
+        // Adapter evidence is create-only, so the version a receipt cites
+        // stays its record's current version, whose body and time no seal
+        // removes.
+        let (record, established_at) = canwu
+            .replay_stable_domain_record_version(version)
+            .ok_or_else(|| {
+                invalid_reference(
+                    "Ming fiscal execution evidence is not the current version of its record",
+                )
+            })?;
         let evidence = record.decode_payload::<ReferenceFiscalExecutionEvidenceRecord>()?;
         let operation = FiscalExternalOperationRef {
             evidence_kind: version.record.kind.clone(),
@@ -703,12 +801,7 @@ fn validate_reference_receipt(
         evidenced_quantity = evidenced_quantity
             .checked_add(evidence.quantity)
             .ok_or_else(|| invalid_reference("Ming fiscal evidence quantity overflowed"))?;
-        if canwu
-            .evidence_time(&canwu_api::EvidenceRef::DomainRecordVersion(
-                version.clone(),
-            ))
-            .is_none_or(|at| at < request.requested_at)
-        {
+        if established_at < request.requested_at {
             return Err(invalid_reference(
                 "Ming fiscal execution evidence predates its request",
             ));

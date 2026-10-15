@@ -23,6 +23,14 @@ arrears, or credit state. Settled hot work becomes a bounded package-owned
 terminal receipt; receipts beyond the configured cap advance a deterministic
 continuation chain.
 
+Settled history leaves the root through a content-addressed package archive,
+which the economy reference integration reuses. Each archive commit extends
+a cumulative lookup index in the resource archive's format, so a boundary
+that asks whether a key was archived reads the head directory, one index page
+per level, and one blob on a hit, however many commits the run has made.
+Preparing a commit reads the archive store, and the restore audit rebuilds
+the head's index from the directory chain.
+
 Reports are detached and holder-relative. They are assembled only from typed
 knowledge publications available by the holder's observation cut, so current
 force, shortage, saga, outcome, and acknowledgement truth cannot leak through

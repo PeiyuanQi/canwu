@@ -485,7 +485,7 @@ and `audit_resource_archive_lookup_index` with `ResourceArchiveAuditEntry`.
 The resource archive's own formats and behavior are unchanged.
 
 The package archive of `canwu-force-supply-reference`, which the economy
-reference integration also uses, resolves a record the way the 0.14.0 resource
-archive did: it walks its chain and authenticates every commit it passes. Its
-reference plugins call it inside boundaries, so they keep the cost that G-52
-describes. It is reference code and is not changed here.
+reference integration also uses, resolved a record in 0.15.0 the way the
+0.14.0 resource archive did: it walked its chain and authenticated every
+commit it passed, inside boundaries. 0.16.0 gives it the same lookup index;
+see [reference archive lookup and replay profile](reference-archive-and-replay-profile.md).

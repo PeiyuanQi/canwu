@@ -1,11 +1,11 @@
 use super::{
-    BoundaryRecord, BoundaryRequest, COMMITMENT_FORMAT_VERSION, CanwuError, CauseRef,
-    CommandAttemptOutcome, CommandAttemptRecord, CommandIngress, CommandOutcome, CommandRecord,
-    ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord, PluginArchiveObjectProvider,
-    PluginIngressRequest, PluginRegistry, ReplayJournal, SNAPSHOT_FORMAT_VERSION,
-    STATE_REVISION_FORMAT_VERSION, SimDuration, SimTime, Simulation, SimulationPlugin,
-    authoritative_revision_count, authoritative_run_identity, boundary_state_hash_format,
-    is_canonical_hash, manifest,
+    BoundaryProfile, BoundaryRecord, BoundaryRequest, COMMITMENT_FORMAT_VERSION, CanwuError,
+    CauseRef, CommandAttemptOutcome, CommandAttemptRecord, CommandIngress, CommandOutcome,
+    CommandRecord, ENGINE_VERSION, ErrorCode, IngressPayload, IngressRecord,
+    PluginArchiveObjectProvider, PluginIngressRequest, PluginRegistry, ReplayJournal,
+    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, SimDuration, SimTime, Simulation,
+    SimulationPlugin, authoritative_revision_count, authoritative_run_identity,
+    boundary_state_hash_format, is_canonical_hash, manifest,
 };
 #[cfg(test)]
 use super::{RunConfiguration, RunManifest, Scenario};
@@ -75,7 +75,7 @@ impl Simulation {
     ) -> Result<Self, CanwuError> {
         let simulation =
             Self::new_with_manifest_and_plugins(seed, scenario, run_manifest, plugins)?;
-        Self::replay_records(simulation, commands, &[], &[], boundaries, final_time)
+        Self::replay_records(simulation, commands, &[], &[], boundaries, final_time, None)
     }
 
     /// Reconstructs caller-supplied inputs under a caller-supplied declared run
@@ -116,6 +116,7 @@ impl Simulation {
             &[],
             boundaries,
             final_time,
+            None,
         )
     }
 
@@ -136,6 +137,37 @@ impl Simulation {
         plugins: &[&dyn SimulationPlugin],
         journal: &ReplayJournal,
         archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+    ) -> Result<Self, CanwuError> {
+        Self::replay_exact_journal(plugins, journal, archive_provider, None)
+    }
+
+    /// Replays like [`Self::replay_from_journal_with_archive_provider`] with
+    /// the boundary profile on from before the first recorded boundary, and
+    /// hands the [`BoundaryProfile`] of each replayed boundary to
+    /// `on_profile` as soon as the boundary settles, in journal order.
+    ///
+    /// Profiling changes nothing in the replay: every regenerated boundary
+    /// and the final checkpoint are checked against the journal exactly as in
+    /// an unprofiled replay, and a replay that does not match fails the same
+    /// way. The profiles go to `on_profile` and are not kept in the runtime,
+    /// so [`super::MAX_RETAINED_BOUNDARY_PROFILES`] does not limit a long
+    /// replay. The returned runtime has profiling off, as any replayed
+    /// runtime. When the replay fails, `on_profile` has received the profiles
+    /// of the boundaries that settled before the failure.
+    pub fn replay_from_journal_with_boundary_profiles(
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+        on_profile: &mut dyn FnMut(BoundaryProfile),
+    ) -> Result<Self, CanwuError> {
+        Self::replay_exact_journal(plugins, journal, archive_provider, Some(on_profile))
+    }
+
+    fn replay_exact_journal(
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+        archive_provider: Rc<dyn PluginArchiveObjectProvider>,
+        on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
     ) -> Result<Self, CanwuError> {
         if journal.commitment_format_version != COMMITMENT_FORMAT_VERSION {
             return Err(CanwuError::new(
@@ -227,7 +259,7 @@ impl Simulation {
         )?;
         simulation.set_plugin_archive_object_provider(archive_provider);
         simulation.state.current.authority_root_seed = normalized.authority_root_seed;
-        let simulation = Self::activate_initial_plugins(simulation, plugins)?;
+        let mut simulation = Self::activate_initial_plugins(simulation, plugins)?;
         let actual_descriptors: Vec<_> = simulation.plugin_descriptors().cloned().collect();
         if actual_descriptors != normalized.plugin_descriptors {
             return Err(CanwuError::new(
@@ -236,6 +268,9 @@ impl Simulation {
             ));
         }
 
+        // Profiling is host context: it reads the clock and changes nothing
+        // the replay checks against the journal.
+        simulation.set_boundary_profiling(on_profile.is_some());
         let mut simulation = Self::replay_records(
             simulation,
             &normalized.commands,
@@ -243,7 +278,9 @@ impl Simulation {
             &normalized.ingress,
             &normalized.boundaries,
             normalized.final_time,
+            on_profile,
         )?;
+        simulation.set_boundary_profiling(false);
         if normalized.plugin_registration_closed
             && !simulation.state.metadata.plugin_registration_closed
         {
@@ -298,6 +335,8 @@ impl Simulation {
         Self::replay_from_journal(plugins, journal)
     }
 
+    /// `on_profile`, when given, receives the profile of each boundary as it
+    /// settles; the caller turns profiling on.
     fn replay_records(
         mut simulation: Self,
         commands: &[CommandRecord],
@@ -305,11 +344,12 @@ impl Simulation {
         ingress: &[IngressRecord],
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
+        mut on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
     ) -> Result<Self, CanwuError> {
         simulation.ensure_runtime_ready()?;
         if !attempts.is_empty() {
             return Self::replay_attempt_records(
-                simulation, commands, attempts, ingress, boundaries, final_time,
+                simulation, commands, attempts, ingress, boundaries, final_time, on_profile,
             );
         }
         let mut next_ingress = 0;
@@ -344,6 +384,7 @@ impl Simulation {
                 },
                 boundary_state_hash_format(expected_boundary.state_hash.as_deref())?,
             )?;
+            deliver_boundary_profiles(&mut simulation, &mut on_profile);
             let Some(actual_boundary) = simulation.boundaries().last() else {
                 return Err(CanwuError::new(
                     ErrorCode::ReplayMismatch,
@@ -395,6 +436,7 @@ impl Simulation {
         ingress: &[IngressRecord],
         boundaries: &[BoundaryRecord],
         final_time: SimTime,
+        mut on_profile: Option<&mut dyn FnMut(BoundaryProfile)>,
     ) -> Result<Self, CanwuError> {
         let command_ingress_requests: BTreeSet<_> = ingress
             .iter()
@@ -456,6 +498,7 @@ impl Simulation {
                 },
                 boundary_state_hash_format(expected_boundary.state_hash.as_deref())?,
             )?;
+            deliver_boundary_profiles(&mut simulation, &mut on_profile);
             let Some(actual_boundary) = simulation.boundaries().last() else {
                 return Err(CanwuError::new(
                     ErrorCode::ReplayMismatch,
@@ -504,6 +547,19 @@ impl Simulation {
             simulation.advance_to(final_time)?;
         }
         Ok(simulation)
+    }
+}
+
+/// Hands the profile of the boundary a profiled replay just settled to the
+/// caller, so no profile waits in the runtime's capped queue.
+fn deliver_boundary_profiles(
+    simulation: &mut Simulation,
+    on_profile: &mut Option<&mut dyn FnMut(BoundaryProfile)>,
+) {
+    if let Some(on_profile) = on_profile {
+        for profile in simulation.take_boundary_profiles().profiles {
+            on_profile(profile);
+        }
     }
 }
 

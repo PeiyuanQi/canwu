@@ -38,7 +38,7 @@ pub const ECONOMY_COMMAND_INGRESS: &str = "economy_reference_operation_v1";
 pub const ECONOMY_ARCHIVE_COMMIT_INGRESS: &str = "economy_archive_commit_v1";
 pub const ECONOMY_ARCHIVE_RETENTION_ACK_INGRESS: &str = "economy_archive_retention_ack_v1";
 pub const ECONOMY_SEMANTIC_HASH: &str =
-    "6e845016e90acc5c03101c700eeea61735166e633cd774bb3a3bd5eec89bc8eb";
+    "6bbe3efc7863962661171af6dbbba7464acadb32c9f5aa4095543241a8fc0411";
 static ECONOMY_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static ECONOMY_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -161,16 +161,19 @@ fn economy_archive_reachability(
         return Ok(());
     };
     let state = record.decode_payload::<EconomyReferenceRuntimeRecord>()?;
-    let roots = state.archive_head.directory_root.iter().cloned().chain(
+    canwu_force_supply_reference::extend_archive_reachability::<
+        crate::EconomyArchiveKeyV1,
+        crate::EconomyArchivePayloadV1,
+    >(
+        crate::ECONOMY_ARCHIVE_DOMAIN,
+        state.archive_head.directory_root.as_deref(),
         state
             .archive_retention_handles
             .values()
             .map(|handle| handle.directory_root.clone()),
-    );
-    canwu_force_supply_reference::extend_archive_reachability::<
-        crate::EconomyArchiveKeyV1,
-        crate::EconomyArchivePayloadV1,
-    >(crate::ECONOMY_ARCHIVE_DOMAIN, roots, provider, manifest)
+        provider,
+        manifest,
+    )
 }
 
 impl SimulationPlugin for EconomyReferencePlugin {
@@ -530,30 +533,40 @@ fn apply_economy_ingress(
             continue;
         }
         let admitted: AdmittedEconomyCommandV1 = decode(payload, "admitted economy operation")?;
-        if let Some(existing) = state.outcomes.get(&admitted.value.operation_id) {
-            if existing.input_digest != admitted.input_digest {
-                return Err(CanwuError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "economy operation ID was reused with different input",
-                ));
-            }
-            continue;
-        }
-        if let Some(record) = archived_economy_record(
-            view,
-            &state,
-            &crate::EconomyArchiveKeyV1::OperationOutcome(admitted.value.operation_id.clone()),
-        )? {
-            let crate::EconomyArchivePayloadV1::OperationOutcome(existing) = record.payload else {
-                return Err(invalid(
-                    "economy archive operation membership has the wrong payload",
-                ));
-            };
-            if existing.input_digest != admitted.input_digest {
-                return Err(CanwuError::new(
-                    ErrorCode::IdempotencyConflict,
-                    "archived economy operation ID was reused with different input",
-                ));
+        // An operation ID settles once. Admission refuses a reused ID, but two
+        // commands admitted before either settles are both queued: a repeat
+        // of the settled input is a no-op, and a repeat with other input is
+        // skipped with a visible event rather than failing the boundary, which
+        // could never be stepped past.
+        let settled_digest = match state.outcomes.get(&admitted.value.operation_id) {
+            Some(existing) => Some(existing.input_digest.clone()),
+            None => match archived_economy_record(
+                view,
+                &state,
+                &crate::EconomyArchiveKeyV1::OperationOutcome(admitted.value.operation_id.clone()),
+            )? {
+                Some(record) => {
+                    let crate::EconomyArchivePayloadV1::OperationOutcome(existing) = record.payload
+                    else {
+                        return Err(invalid(
+                            "economy archive operation membership has the wrong payload",
+                        ));
+                    };
+                    Some(existing.input_digest)
+                }
+                None => None,
+            },
+        };
+        if let Some(settled_digest) = settled_digest {
+            if settled_digest != admitted.input_digest {
+                directives.push(BoundaryDirective::Emit {
+                    event_type: "canwu.economy-reference.operation_rejected.v1".to_owned(),
+                    summary: format!(
+                        "economy operation {} skipped: its ID already settled with different input",
+                        admitted.value.operation_id
+                    ),
+                    affected: vec![holder_entity(&admitted.value.holder)],
+                });
             }
             continue;
         }
@@ -630,6 +643,16 @@ fn apply_economy_ingress(
         }
     }
     if changed {
+        // Each packet that changes the root advances the runtime revision, so
+        // a later command of this boundary that expected the revision before
+        // the change is stale. The root is written once per boundary, though,
+        // and its revision is its record version: it ends one past the
+        // version it started from however many packets changed it. Without
+        // this, a boundary that settled two such packets could never commit.
+        state.revision = record
+            .version
+            .checked_add(1)
+            .ok_or_else(|| invalid("economy runtime revision overflowed"))?;
         directives.push(BoundaryDirective::MutateRecord {
             mutation: DomainRecordMutation::Update {
                 record: state.draft()?,
@@ -2420,7 +2443,16 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
     )
 }
 
-/// Stores, verifies, and queues an economy archive commit. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// Stores, verifies, and queues an economy archive commit. Takes either
+/// runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// The batch must equal what the current root and `store` prepare. The
+/// commit is refused here, and nothing is queued, when it could take the
+/// economy root past its maintenance-receipt or retention-handle bound once
+/// it and the commits already queued settle (see
+/// [`canwu_force_supply_reference::package_archive_commit_room`]); the
+/// boundary that settled such a commit would fail and could not be stepped
+/// past.
 pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     prepared: &crate::PreparedEconomyArchiveBatchV1,
@@ -2429,9 +2461,16 @@ pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
     let state = canwu_api::typed_domain_record(canwu, &economy_reference_runtime_reference())
         .ok_or_else(|| invalid("economy runtime is unavailable"))?
         .decode_payload::<EconomyReferenceRuntimeRecord>()?;
-    if state.prepare_economy_archive(prepared.selected.len())? != *prepared {
+    if state.prepare_economy_archive(prepared.selected.len(), store)? != *prepared {
         return Err(invalid("economy archive batch is stale or non-canonical"));
     }
+    canwu_force_supply_reference::package_archive_commit_room(
+        canwu,
+        PLUGIN_NAME,
+        ECONOMY_ARCHIVE_COMMIT_INGRESS,
+        state.archive_maintenance_receipts.len(),
+        state.archive_retention_handles.len(),
+    )?;
     let commit = prepared.store_and_verify(crate::ECONOMY_ARCHIVE_DOMAIN, store)?;
     let permit = ECONOMY_ARCHIVE_PERMIT
         .get()

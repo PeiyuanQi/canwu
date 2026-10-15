@@ -737,6 +737,14 @@ impl GrainHarness {
         &mut self.canwu
     }
 
+    /// The archive store the harness attaches to its run, for tests that
+    /// drive archive commits themselves.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn archive_store(&self) -> Rc<dyn canwu_force_supply_reference::PackageArchiveStore> {
+        self.archive_store.clone()
+    }
+
     pub fn snapshot_json(&self) -> Result<String, GrainLoopError> {
         serde_json::to_string(&GrainHarnessSnapshotV1 {
             canwu_snapshot_json: self.canwu.snapshot_json()?,
@@ -815,7 +823,8 @@ impl GrainHarness {
     pub fn archive_reference_history(&mut self) -> Result<(), GrainLoopError> {
         let force = self.force_state()?;
         if !force.terminal_receipts.is_empty() {
-            let prepared = force.prepare_force_archive(ARCHIVE_BATCH)?;
+            let prepared =
+                force.prepare_force_archive(ARCHIVE_BATCH, self.archive_store.as_ref())?;
             let receipt =
                 enqueue_force_archive(&mut self.canwu, &prepared, self.archive_store.as_ref())?;
             self.settle_current(&[])?;
@@ -842,7 +851,8 @@ impl GrainHarness {
             || !economy.externality_outcomes.is_empty()
             || !economy.outcomes.is_empty();
         if has_archive_candidates {
-            let prepared = economy.prepare_economy_archive(ARCHIVE_BATCH)?;
+            let prepared =
+                economy.prepare_economy_archive(ARCHIVE_BATCH, self.archive_store.as_ref())?;
             let receipt = crate::enqueue_economy_archive(
                 &mut self.canwu,
                 &prepared,

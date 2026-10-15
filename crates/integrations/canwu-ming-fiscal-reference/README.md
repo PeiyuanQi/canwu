@@ -24,6 +24,12 @@ books. `close_ming_fiscal_sample_cycle` closes a sample cycle's book, and
 store the caller passes, so a long run keeps a bounded state; the
 `archive_century` test runs a century that way.
 
+`validate_ming_fiscal_reference` takes either runtime handle, `Canwu` or
+`CompactedCanwu`, and reads only state a seal cannot change: current records,
+the current or initial-scenario version of a record, and the journal
+counters. A sealed run, an unsealed fork, a restore from sealed segments, and
+an exact replay therefore get the same answer.
+
 The starter example also writes a human-oriented trace by default:
 
 ```text

@@ -2464,6 +2464,18 @@ impl CompactedSimulation {
         self.simulation.domain_record(reference)
     }
 
+    /// See [`Simulation::replay_stable_domain_record_version`]: the body and
+    /// establishment time of a record's committed current version or of an
+    /// initial-scenario version, which a seal cannot change.
+    #[must_use]
+    pub fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<(DomainRecord, SimTime)> {
+        self.simulation
+            .replay_stable_domain_record_version(reference)
+    }
+
     #[must_use]
     pub fn decision_ticket(&self, id: super::DecisionTicketId) -> Option<&super::DecisionTicket> {
         self.simulation.decision_ticket(id)

@@ -141,8 +141,8 @@ pub use policy::{
     SeatBinding, SeatPolicy, TracePolicy,
 };
 pub use profile::{
-    BoundaryHandlerKind, BoundaryHandlerTiming, BoundaryProfile, BoundaryProfileBatch,
-    MAX_RETAINED_BOUNDARY_PROFILES,
+    BoundaryEnginePhase, BoundaryEngineTiming, BoundaryHandlerKind, BoundaryHandlerTiming,
+    BoundaryProfile, BoundaryProfileBatch, MAX_RETAINED_BOUNDARY_PROFILES,
 };
 pub use random::{
     KeyedDrawEntry, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer,
@@ -1937,6 +1937,34 @@ impl Simulation {
         retained_domain_record_version(&self.state, reference)
     }
 
+    /// Resolves an exact domain-record version whose body and establishment
+    /// time do not depend on how much evidence a seal kept: the committed
+    /// current version of its record, or an initial-scenario version.
+    ///
+    /// Any other version returns `None`, even while its evidence is retained,
+    /// because a seal can remove its body and time while exact replay keeps
+    /// them. A host check that must give the same answer on a sealed run, an
+    /// unsealed fork, a restore, and an exact replay reads versions through
+    /// this; it is the host form of
+    /// [`SimulationView::replay_stable_domain_record_version`].
+    #[must_use]
+    pub fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<(DomainRecord, SimTime)> {
+        if !matches!(
+            reference.established_by,
+            DomainRecordVersionSource::InitialScenario
+        ) && live_current_domain_record_version(&self.state, reference).is_none()
+        {
+            return None;
+        }
+        retained_domain_record_version(&self.state, reference).zip(retained_evidence_time(
+            &self.state,
+            &EvidenceRef::DomainRecordVersion(reference.clone()),
+        ))
+    }
+
     /// Returns the exact evidence identity for the authoritative current
     /// version without manufacturing an initial-scenario source after
     /// compaction.
@@ -2867,7 +2895,7 @@ impl Simulation {
         &self,
         envelope: &CommandEnvelope,
         context: &CommandContext,
-        profile: Option<&mut profile::BoundaryProfileRecorder>,
+        mut profile: Option<&mut profile::BoundaryProfileRecorder>,
     ) -> Result<PreparedCommand, CanwuError> {
         match &envelope.command {
             Command::OrderMovement {
@@ -3071,7 +3099,7 @@ impl Simulation {
                 let descriptor = registered.descriptor.clone();
                 descriptor.payload_schema.validate(payload)?;
                 let reader = format!("{plugin}.{command}");
-                let handler_started = profile::handler_started(profile.as_deref());
+                let handler_started = profile::handler_started(profile.as_deref_mut());
                 let outcome = catch_unwind(AssertUnwindSafe(|| {
                     handler(
                         &self.plugin_view(&reader, &descriptor.reads),

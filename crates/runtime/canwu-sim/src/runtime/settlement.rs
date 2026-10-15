@@ -356,6 +356,11 @@ impl Simulation {
             evidence.record_changes.push(change);
         }
         for phase in BoundaryPhase::ALL {
+            // Profiled time between and around the systems of a phase is
+            // staging; each system's dispatch, commits, and knowledge work
+            // switch to their own engine phase and back.
+            self.boundary_profiler
+                .enter(super::BoundaryEnginePhase::Staging);
             match phase {
                 BoundaryPhase::AtomicDomainCommit => {
                     let (same_boundary, next_boundary) =
@@ -409,6 +414,8 @@ impl Simulation {
                         !admitted_events.is_empty() || !admitted_ingress.is_empty(),
                     )
             }) {
+                self.boundary_profiler
+                    .enter(super::BoundaryEnginePhase::SystemDispatch);
                 let reader = format!("{}.{}", registered.plugin, registered.contract.name);
                 let (view_current, view_now) = if phase <= BoundaryPhase::InvariantValidation {
                     (&boundary_snapshot, boundary_time)
@@ -594,6 +601,8 @@ impl Simulation {
                     }
                 }));
             }
+            self.boundary_profiler
+                .enter(super::BoundaryEnginePhase::Staging);
             transition_ledger.close_phase();
 
             let (knowledge_directives, mut phase_directives) =
@@ -619,6 +628,8 @@ impl Simulation {
                             "phase 4 accepts knowledge publications but no ordinary directives",
                         ));
                     }
+                    self.boundary_profiler
+                        .enter(super::BoundaryEnginePhase::Knowledge);
                     self.stage_knowledge_publications(
                         phase,
                         knowledge_directives,
@@ -727,6 +738,8 @@ impl Simulation {
                 BoundaryPhase::StrategicAggregation
                 | BoundaryPhase::PerspectiveAndReportMaterialization => {
                     if phase == BoundaryPhase::PerspectiveAndReportMaterialization {
+                        self.boundary_profiler
+                            .enter(super::BoundaryEnginePhase::Knowledge);
                         self.stage_knowledge_publications(
                             phase,
                             knowledge_directives,
@@ -734,6 +747,8 @@ impl Simulation {
                             &mut pending_knowledge_changes,
                             &mut knowledge_correlations,
                         )?;
+                        self.boundary_profiler
+                            .enter(super::BoundaryEnginePhase::Staging);
                     }
                     let (same_boundary, next_boundary) =
                         partition_boundary_visibility(phase_directives);
@@ -757,12 +772,16 @@ impl Simulation {
         }
 
         self.apply_boundary_stage(boundary_id, correlation_id, deferred, None, &mut evidence)?;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Knowledge);
         self.commit_knowledge_publications(
             boundary_id,
             correlation_id,
             &pending_knowledge_changes,
             &mut evidence.emissions,
         )?;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Journal);
         let PendingBoundaryEvidence {
             changes,
             record_changes,
@@ -831,6 +850,8 @@ impl Simulation {
             .map(|draw| draw.id)
             .collect::<Vec<_>>();
         self.state.metadata.plugin_registration_closed = true;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Hashing);
         let state_hash = self.compute_boundary_state_hash_for(state_hash_format)?;
         let previous_hash = self
             .state
@@ -855,6 +876,8 @@ impl Simulation {
             } else {
                 None
             };
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Journal);
         // The receipt counts the changes; the boundary record owns them, so
         // no record or component value is copied to journal it.
         let change_count = changes.len();
@@ -888,7 +911,11 @@ impl Simulation {
             previous_hash,
             hash: String::new(),
         };
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Hashing);
         record.hash = compute_boundary_hash(&record, Some(&record_change_encodings))?;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Journal);
         let boundary_hash = record.hash.clone();
         self.state.evidence.boundaries.push(record);
         super::boundary_window::record_settled_boundary(
@@ -900,7 +927,11 @@ impl Simulation {
         self.state.counters.admitted_command_count = admitted_command_count;
         self.state.counters.admitted_event_count = admitted_event_count;
         self.advance_state_revision()?;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Hashing);
         self.refresh_checkpoint_hash()?;
+        self.boundary_profiler
+            .enter(super::BoundaryEnginePhase::Journal);
         Ok(BoundaryReceipt {
             boundary_id,
             settled_at: request.at,
@@ -971,6 +1002,12 @@ impl Simulation {
         prepared: Option<PreparedRecordStage>,
         evidence: &mut PendingBoundaryEvidence,
     ) -> Result<(), CanwuError> {
+        // A profiled boundary counts this stage as commit time and returns
+        // to its caller's engine phase afterwards. A failed stage fails the
+        // boundary, whose profile is discarded.
+        let resume = self
+            .boundary_profiler
+            .enter(super::BoundaryEnginePhase::Commit);
         let random_decision_count = directives
             .iter()
             .filter(|staged| {
@@ -1466,6 +1503,7 @@ impl Simulation {
             }
         }
         validate_runtime_domain_dependents(&self.state)?;
+        self.boundary_profiler.enter(resume);
         Ok(())
     }
 

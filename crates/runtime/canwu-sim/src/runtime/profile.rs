@@ -13,6 +13,13 @@
 //! any profile: they run when the host schedules the maintenance, outside
 //! settlement, and the boundary only applies the commit they produced.
 //!
+//! The rest of a boundary's time is the simulation core's own work, which the
+//! profile splits into [`BoundaryEnginePhase`]s. The profiler keeps a current
+//! engine phase; settlement switches it where its work changes kind, and a
+//! handler call pauses it at the clock reading the handler's time starts
+//! from. The handlers and the engine phases therefore partition each
+//! boundary's wall time.
+//!
 //! Wall time never enters the simulation. The profiler lives beside the
 //! runtime state, like the plugin archive provider: it is not part of
 //! authoritative state, the commitment, evidence, a snapshot, a checkpoint, or
@@ -67,10 +74,85 @@ pub struct BoundaryHandlerTiming {
     pub elapsed_micros: u64,
 }
 
+/// A part of the simulation core's own work in a boundary, outside every
+/// plugin handler. Each instant of a profiled settlement belongs either to a
+/// handler call or to exactly one engine phase.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BoundaryEnginePhase {
+    /// Checking the request, capturing the rollback point, and admitting the
+    /// boundary's input: due ingress, queued commands, decisions,
+    /// maintenance, and the scheduled actions due at the boundary, with the
+    /// effects of command handlers and event systems (the handler calls
+    /// themselves are handler time).
+    Admission,
+    /// Preparing each due boundary system's view and context, and checking,
+    /// staging, and recording what it proposed.
+    SystemDispatch,
+    /// The work between settlement phases: record and component overlays,
+    /// reservation allocation, and transition audits.
+    Staging,
+    /// Applying staged directives to the state: record mutations,
+    /// components, events, scheduled ingress, and persons.
+    Commit,
+    /// Staging and committing knowledge publications.
+    Knowledge,
+    /// Committing random draws, random decisions, and transition manifests,
+    /// and appending the boundary record and its evidence.
+    Journal,
+    /// Computing the state hash, the boundary hash, and the checkpoint hash.
+    Hashing,
+}
+
+impl BoundaryEnginePhase {
+    /// Every engine phase, in the order [`BoundaryProfile::engine`] lists
+    /// them. A slice, so that a later release can add a phase without
+    /// changing the constant's type.
+    pub const ALL: &'static [Self] = &[
+        Self::Admission,
+        Self::SystemDispatch,
+        Self::Staging,
+        Self::Commit,
+        Self::Knowledge,
+        Self::Journal,
+        Self::Hashing,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Admission => 0,
+            Self::SystemDispatch => 1,
+            Self::Staging => 2,
+            Self::Commit => 3,
+            Self::Knowledge => 4,
+            Self::Journal => 5,
+            Self::Hashing => 6,
+        }
+    }
+}
+
+/// The wall time the simulation core spent in one engine phase of one
+/// boundary, summed over every stretch of that phase.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BoundaryEngineTiming {
+    /// The engine phase.
+    pub phase: BoundaryEnginePhase,
+    /// Wall time in the phase, in microseconds, handler calls excluded.
+    pub elapsed_micros: u64,
+}
+
 /// The wall-time profile of one settled boundary.
 ///
 /// A profile is a host diagnostic. It differs between two runs of the same
 /// input and must not be fed back into the simulation.
+///
+/// The handler calls in [`Self::handlers`] and the engine phases in
+/// [`Self::engine`] partition the settlement: their exact durations add up
+/// to the exact duration of [`Self::total_micros`]. Each value is rounded
+/// down to whole microseconds, so the sum of the listed values is at most
+/// `total_micros` and falls short of it by less than one microsecond per
+/// listed value.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BoundaryProfile {
     /// The settled boundary, as in its [`BoundaryReceipt`].
@@ -85,9 +167,24 @@ pub struct BoundaryProfile {
     /// the boundary admits its input, then the boundary systems that were
     /// due, by phase, plugin name, and system name.
     pub handlers: Vec<BoundaryHandlerTiming>,
+    /// The simulation core's own time, one entry per
+    /// [`BoundaryEnginePhase`] in the order of [`BoundaryEnginePhase::ALL`],
+    /// a phase that did no work included.
+    pub engine: Vec<BoundaryEngineTiming>,
 }
 
 impl BoundaryProfile {
+    /// Wall time the simulation core spent in `phase`, in microseconds.
+    #[must_use]
+    pub fn engine_micros(&self, phase: BoundaryEnginePhase) -> u64 {
+        self.engine
+            .iter()
+            .filter(|timing| timing.phase == phase)
+            .fold(0, |total, timing| {
+                total.saturating_add(timing.elapsed_micros)
+            })
+    }
+
     /// Wall time inside every handler of `plugin`, of any kind, in
     /// microseconds.
     #[must_use]
@@ -102,7 +199,7 @@ impl BoundaryProfile {
 
     /// Wall time outside every plugin handler, in microseconds: the
     /// simulation core's own admission, validation, commit, and hashing
-    /// work.
+    /// work, which [`Self::engine`] splits by phase.
     #[must_use]
     pub fn remaining_micros(&self) -> u64 {
         self.handlers
@@ -138,20 +235,31 @@ pub(super) struct BoundaryProfiler {
 }
 
 impl BoundaryProfiler {
-    /// Starts timing a boundary when profiling is on.
+    /// Starts timing a boundary when profiling is on. The boundary starts in
+    /// [`BoundaryEnginePhase::Admission`].
     pub(super) fn begin(&mut self) {
-        self.recorder = self.enabled.then(|| BoundaryProfileRecorder {
-            started: Instant::now(),
-            handlers: Vec::new(),
+        self.recorder = self.enabled.then(|| {
+            let started = Instant::now();
+            BoundaryProfileRecorder {
+                started,
+                handlers: Vec::new(),
+                phase: BoundaryEnginePhase::Admission,
+                phase_started: started,
+                engine: [Duration::ZERO; BoundaryEnginePhase::ALL.len()],
+            }
         });
     }
 
     /// Ends the boundary being timed: keeps its profile when it settled, and
     /// discards its timings when it failed.
     pub(super) fn end(&mut self, receipt: Option<&BoundaryReceipt>) {
-        let (Some(recorder), Some(receipt)) = (self.recorder.take(), receipt) else {
+        let (Some(mut recorder), Some(receipt)) = (self.recorder.take(), receipt) else {
             return;
         };
+        // The last engine phase ends where the settlement ends, at the same
+        // clock reading, so the phases and the handlers partition the total.
+        let ended = Instant::now();
+        recorder.close_phase(ended);
         if self.profiles.len() == MAX_RETAINED_BOUNDARY_PROFILES {
             self.profiles.pop_front();
             self.dropped = self.dropped.saturating_add(1);
@@ -159,15 +267,31 @@ impl BoundaryProfiler {
         self.profiles.push_back(BoundaryProfile {
             boundary_id: receipt.boundary_id,
             settled_at: receipt.settled_at,
-            total_micros: micros(recorder.started.elapsed()),
+            total_micros: micros(ended.duration_since(recorder.started)),
             handlers: recorder.handlers,
+            engine: BoundaryEnginePhase::ALL
+                .iter()
+                .map(|&phase| BoundaryEngineTiming {
+                    phase,
+                    elapsed_micros: micros(recorder.engine[phase.index()]),
+                })
+                .collect(),
         });
     }
 
+    /// Moves the boundary being timed into the engine phase `phase` and
+    /// returns the phase it was in, so a step that runs from several phases
+    /// can put it back. Does nothing, and reads no clock, when no boundary
+    /// is being timed.
+    pub(super) fn enter(&mut self, phase: BoundaryEnginePhase) -> BoundaryEnginePhase {
+        enter(self.recorder.as_mut(), phase)
+    }
+
     /// The clock reading before a handler runs, or `None` when no boundary
-    /// is being timed, in which case no clock is read.
-    pub(super) fn handler_started(&self) -> Option<Instant> {
-        handler_started(self.recorder.as_ref())
+    /// is being timed, in which case no clock is read. The current engine
+    /// phase pauses at that reading until [`Self::record_handler`].
+    pub(super) fn handler_started(&mut self) -> Option<Instant> {
+        handler_started(self.recorder.as_mut())
     }
 
     /// Records a handler call that began at `started` and just returned.
@@ -197,14 +321,55 @@ impl BoundaryProfiler {
 pub(super) struct BoundaryProfileRecorder {
     started: Instant,
     handlers: Vec<BoundaryHandlerTiming>,
+    /// The engine phase the settlement is in, and since when; a handler call
+    /// pauses it.
+    phase: BoundaryEnginePhase,
+    phase_started: Instant,
+    /// Time spent in each engine phase so far, by [`BoundaryEnginePhase`]
+    /// index.
+    engine: [Duration; BoundaryEnginePhase::ALL.len()],
+}
+
+impl BoundaryProfileRecorder {
+    /// Adds the time since the current phase (re)started to that phase.
+    fn close_phase(&mut self, at: Instant) {
+        let spent = at.saturating_duration_since(self.phase_started);
+        let total = &mut self.engine[self.phase.index()];
+        *total = total.saturating_add(spent);
+        self.phase_started = at;
+    }
+}
+
+/// Moves a timed boundary into the engine phase `phase` and returns the
+/// phase it was in. Without a recorder it returns `phase` and reads no
+/// clock.
+pub(super) fn enter(
+    recorder: Option<&mut BoundaryProfileRecorder>,
+    phase: BoundaryEnginePhase,
+) -> BoundaryEnginePhase {
+    let Some(recorder) = recorder else {
+        return phase;
+    };
+    let previous = recorder.phase;
+    if previous != phase {
+        recorder.close_phase(Instant::now());
+        recorder.phase = phase;
+    }
+    previous
 }
 
 /// The clock reading before a handler runs, when a boundary is being timed.
-pub(super) fn handler_started(recorder: Option<&BoundaryProfileRecorder>) -> Option<Instant> {
-    recorder.map(|_| Instant::now())
+/// The current engine phase pauses at that reading.
+pub(super) fn handler_started(recorder: Option<&mut BoundaryProfileRecorder>) -> Option<Instant> {
+    recorder.map(|recorder| {
+        let started = Instant::now();
+        recorder.close_phase(started);
+        started
+    })
 }
 
-/// Records a handler call that began at `started` and just returned.
+/// Records a handler call that began at `started` and just returned, and
+/// resumes the current engine phase at the same clock reading.
 pub(super) fn record_handler(
     recorder: Option<&mut BoundaryProfileRecorder>,
     started: Option<Instant>,
@@ -214,13 +379,15 @@ pub(super) fn record_handler(
     name: &str,
 ) {
     if let (Some(recorder), Some(started)) = (recorder, started) {
+        let returned = Instant::now();
         recorder.handlers.push(BoundaryHandlerTiming {
             kind,
             phase,
             plugin: plugin.to_owned(),
             name: name.to_owned(),
-            elapsed_micros: micros(started.elapsed()),
+            elapsed_micros: micros(returned.saturating_duration_since(started)),
         });
+        recorder.phase_started = returned;
     }
 }
 
@@ -239,13 +406,15 @@ impl Simulation {
     /// that were not taken yet.
     ///
     /// An exact replay settles its boundaries inside the replay call, on a
-    /// runtime that starts with profiling off, so a replay is not profiled;
-    /// the runtime the replay returns can be profiled from then on.
+    /// runtime that starts with profiling off, so an ordinary replay is not
+    /// profiled; the runtime the replay returns can be profiled from then on.
+    /// [`Self::replay_from_journal_with_boundary_profiles`] profiles a replay
+    /// from its first boundary.
     ///
-    /// Profiling reads the wall clock around each plugin handler and changes
-    /// nothing else: receipts, evidence, hashes, snapshots, and exact replay
-    /// are the same with it on or off. While it is off, settlement reads no
-    /// clock.
+    /// Profiling reads the wall clock around each plugin handler and at each
+    /// engine-phase switch and changes nothing else: receipts, evidence,
+    /// hashes, snapshots, and exact replay are the same with it on or off.
+    /// While it is off, settlement reads no clock.
     pub fn set_boundary_profiling(&mut self, enabled: bool) {
         self.boundary_profiler.enabled = enabled;
     }

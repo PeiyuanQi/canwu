@@ -319,7 +319,9 @@ The last two run while the boundary admits its input, before the first phase,
 so their `phase` is absent. `total_micros` is the wall time of the whole
 settlement, `plugin_micros(plugin)` sums every handler of one plugin, and
 `remaining_micros()` is what is left: the simulation core's own admission,
-validation, commit, and hashing.
+validation, commit, and hashing. Since 0.16.0 the profile also splits that
+remainder into named engine phases (`BoundaryProfile::engine`); see
+[reference archive lookup and replay profile](reference-archive-and-replay-profile.md).
 
 Owner-authorized maintenance participants are in no profile. They run when the
 host schedules the maintenance, outside settlement; the boundary only applies
@@ -347,7 +349,9 @@ and `step_canonical`, which settle boundaries without the host calling
 - A boundary that fails leaves no profile.
 - An exact replay settles its boundaries inside the replay call, on a runtime
   that starts with profiling off, so a replay is not profiled. The runtime the
-  replay returns can be profiled from then on.
+  replay returns can be profiled from then on. Since 0.16.0,
+  `replay_from_journal_with_boundary_profiles` profiles a replay from its
+  first boundary and hands over each boundary's profile as it settles.
 - The runtime keeps at most `MAX_RETAINED_BOUNDARY_PROFILES` (1,024) profiles.
   When more boundaries settle before the host takes them, the oldest are
   dropped, and `BoundaryProfileBatch::dropped` reports how many since the last

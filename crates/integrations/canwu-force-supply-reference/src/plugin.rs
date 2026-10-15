@@ -32,7 +32,7 @@ const RESOURCE_DISPATCH_SYSTEM: &str = "force_supply_resource_dispatch_v1";
 const DUE_EVALUATION_SYSTEM: &str = "force_supply_due_evaluation_v1";
 const VALIDATE_SYSTEM: &str = "force_supply_lifecycle_validate_v1";
 pub const FORCE_SUPPLY_SEMANTIC_HASH: &str =
-    "463307e2b3ebcd17dc6bfb5da61dc1c5f15306bd81e0f55dc7cb7a6da752fc5c";
+    "270448127b82971607b82f80beab69781fd31e9c88e044424b2a846eae6f82a1";
 static FORCE_ARCHIVE_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 static FORCE_ARCHIVE_ACK_PERMIT: OnceLock<PluginIngressPermit> = OnceLock::new();
 
@@ -73,15 +73,13 @@ fn force_archive_reachability(
     let Some((_, state)) = load_state(view)? else {
         return Ok(());
     };
-    let roots = state.archive_head.directory_root.iter().cloned().chain(
+    crate::extend_archive_reachability::<crate::ForceArchiveKeyV1, crate::ForceArchivePayloadV1>(
+        crate::FORCE_ARCHIVE_DOMAIN,
+        state.archive_head.directory_root.as_deref(),
         state
             .archive_retention_handles
             .values()
             .map(|handle| handle.directory_root.clone()),
-    );
-    crate::extend_archive_reachability::<crate::ForceArchiveKeyV1, crate::ForceArchivePayloadV1>(
-        crate::FORCE_ARCHIVE_DOMAIN,
-        roots,
         provider,
         manifest,
     )
@@ -503,27 +501,43 @@ fn apply_force_ingress(
             FORCE_OPERATION_INGRESS => {
                 let admitted: AdmittedForceOperationV1 =
                     decode(payload, "admitted force operation")?;
-                if state.outcomes.contains_key(&admitted.envelope.operation_id) {
-                    continue;
-                }
-                if let Some(record) = archived_force_record(
-                    view,
-                    &state,
-                    &crate::ForceArchiveKeyV1::OperationOutcome(
-                        admitted.envelope.operation_id.clone(),
-                    ),
-                )? {
-                    let crate::ForceArchivePayloadV1::OperationOutcome(existing) = record.payload
-                    else {
-                        return Err(invalid(
-                            "force archive operation membership has the wrong payload",
-                        ));
-                    };
-                    if existing.input_digest != admitted.input_digest {
-                        return Err(CanwuError::new(
-                            ErrorCode::IdempotencyConflict,
-                            "archived force operation ID was reused with different input",
-                        ));
+                // An operation ID settles once. Two commands with one ID
+                // admitted before either settles are both queued: a repeat
+                // of the settled input is a no-op, and a repeat with other
+                // input is skipped with a visible event, never a failed
+                // boundary, whether the outcome is hot or archived.
+                let settled_digest = match state.outcomes.get(&admitted.envelope.operation_id) {
+                    Some(existing) => Some(existing.input_digest.clone()),
+                    None => match archived_force_record(
+                        view,
+                        &state,
+                        &crate::ForceArchiveKeyV1::OperationOutcome(
+                            admitted.envelope.operation_id.clone(),
+                        ),
+                    )? {
+                        Some(record) => {
+                            let crate::ForceArchivePayloadV1::OperationOutcome(existing) =
+                                record.payload
+                            else {
+                                return Err(invalid(
+                                    "force archive operation membership has the wrong payload",
+                                ));
+                            };
+                            Some(existing.input_digest)
+                        }
+                        None => None,
+                    },
+                };
+                if let Some(settled_digest) = settled_digest {
+                    if settled_digest != admitted.input_digest {
+                        directives.push(BoundaryDirective::Emit {
+                            event_type: "canwu.force-supply.operation_rejected.v1".to_owned(),
+                            summary: format!(
+                                "force-supply operation {} skipped: its ID already settled with different input",
+                                admitted.envelope.operation_id
+                            ),
+                            affected: Vec::new(),
+                        });
                     }
                     continue;
                 }
@@ -1329,7 +1343,15 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
     )
 }
 
-/// Stores, verifies, and queues a force-supply archive commit. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+/// Stores, verifies, and queues a force-supply archive commit. Takes either
+/// runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// The batch must equal what the current root and `store` prepare. The
+/// commit is refused here, and nothing is queued, when it could take the
+/// force-supply root past its maintenance-receipt or retention-handle bound
+/// once it and the commits already queued settle (see
+/// [`crate::package_archive_commit_room`]); the boundary that settled such a
+/// commit would fail and could not be stepped past.
 pub fn enqueue_force_archive<H: canwu_api::CanwuRun + ?Sized>(
     canwu: &mut H,
     prepared: &crate::PreparedForceArchiveBatchV1,
@@ -1338,9 +1360,16 @@ pub fn enqueue_force_archive<H: canwu_api::CanwuRun + ?Sized>(
     let record = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
         .ok_or_else(|| invalid("force runtime is unavailable"))?;
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;
-    if state.prepare_force_archive(prepared.selected.len())? != *prepared {
+    if state.prepare_force_archive(prepared.selected.len(), store)? != *prepared {
         return Err(invalid("force archive batch is stale or non-canonical"));
     }
+    crate::package_archive_commit_room(
+        canwu,
+        PLUGIN_NAME,
+        FORCE_ARCHIVE_COMMIT_INGRESS,
+        state.archive_maintenance_receipts.len(),
+        state.archive_retention_handles.len(),
+    )?;
     let commit = prepared.store_and_verify(crate::FORCE_ARCHIVE_DOMAIN, store)?;
     let permit = FORCE_ARCHIVE_PERMIT
         .get()

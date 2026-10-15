@@ -122,10 +122,11 @@ pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
     BoundaryWindow, MAX_BOUNDARY_SCHEDULE_HORIZON,
 };
-// The opt-in wall-time profile of settled boundaries (gap G-47).
+// The opt-in wall-time profile of settled boundaries (gap G-47), with the
+// simulation core's own time split by engine phase.
 pub use canwu_sim::{
-    BoundaryHandlerKind, BoundaryHandlerTiming, BoundaryProfile, BoundaryProfileBatch,
-    MAX_RETAINED_BOUNDARY_PROFILES,
+    BoundaryEnginePhase, BoundaryEngineTiming, BoundaryHandlerKind, BoundaryHandlerTiming,
+    BoundaryProfile, BoundaryProfileBatch, MAX_RETAINED_BOUNDARY_PROFILES,
 };
 // An operation-keyed draw with the ID of its draw evidence (gap G-51).
 pub use canwu_sim::RandomOperationDraw;
@@ -226,6 +227,16 @@ pub trait CanwuRun {
     /// must decide alike in both cites a current version or declares the
     /// version as an identity-only dependency.
     fn domain_record_version_evidence_exists(&self, reference: &DomainRecordVersionRef) -> bool;
+    /// The body and establishment time of a record's committed current
+    /// version or of an initial-scenario version; `None` for any other
+    /// version, even a retained one, so a seal cannot change the answer.
+    fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<(DomainRecord, SimTime)>;
+    /// How many items each evidence journal holds, sealed and retained
+    /// together.
+    fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError>;
     /// The boundaries of the half-open window `from..to`.
     fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
     /// How far back the run keeps settled boundaries.
@@ -276,6 +287,15 @@ macro_rules! impl_canwu_run {
                 reference: &DomainRecordVersionRef,
             ) -> bool {
                 Self::domain_record_version_evidence_exists(self, reference)
+            }
+            fn replay_stable_domain_record_version(
+                &self,
+                reference: &DomainRecordVersionRef,
+            ) -> Option<(DomainRecord, SimTime)> {
+                Self::replay_stable_domain_record_version(self, reference)
+            }
+            fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
+                Self::evidence_cursor(self)
             }
             fn boundaries_between(
                 &self,
@@ -592,6 +612,24 @@ impl Canwu {
         reference: &DomainRecordVersionRef,
     ) -> Option<DomainRecord> {
         self.simulation.domain_record_version(reference)
+    }
+
+    /// Resolves an exact domain-record version whose body and establishment
+    /// time a seal cannot change: the committed current version of its
+    /// record, or an initial-scenario version. Any other version returns
+    /// `None`, even while it is retained.
+    ///
+    /// A host check that must give the same answer on a sealed run, an
+    /// unsealed fork, a restore, and an exact replay reads versions through
+    /// this, as a boundary system reads them through
+    /// [`SimulationView::replay_stable_domain_record_version`].
+    #[must_use]
+    pub fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<(DomainRecord, SimTime)> {
+        self.simulation
+            .replay_stable_domain_record_version(reference)
     }
 
     /// Returns the retained or archive-resolvable exact identity for the
@@ -1136,6 +1174,35 @@ impl Canwu {
             plugins,
             journal,
             archive_provider,
+        )?;
+        Ok(Self { simulation })
+    }
+
+    /// Replays exactly, as [`Self::replay_from_journal_with_archive_provider`]
+    /// does, with the boundary profile on from before the first recorded
+    /// boundary: `on_profile` receives the [`BoundaryProfile`] of each
+    /// replayed boundary as soon as it settles, in journal order. Pass
+    /// `Rc::new(())` as `archive_provider` for a run without package
+    /// archives.
+    ///
+    /// Profiling changes nothing the replay checks: every regenerated
+    /// boundary and the final checkpoint must match the journal exactly as in
+    /// an unprofiled replay. The profiles are handed over, not kept, so
+    /// [`MAX_RETAINED_BOUNDARY_PROFILES`] does not limit a long replay, and
+    /// the returned runtime has profiling off. When the replay fails,
+    /// `on_profile` has received the profiles of the boundaries that settled
+    /// before the failure.
+    pub fn replay_from_journal_with_boundary_profiles(
+        plugins: &[&dyn SimulationPlugin],
+        journal: &ReplayJournal,
+        archive_provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+        on_profile: &mut dyn FnMut(BoundaryProfile),
+    ) -> Result<Self, CanwuError> {
+        let simulation = Simulation::replay_from_journal_with_boundary_profiles(
+            plugins,
+            journal,
+            archive_provider,
+            on_profile,
         )?;
         Ok(Self { simulation })
     }
@@ -1976,6 +2043,18 @@ impl CompactedCanwu {
     #[must_use]
     pub fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.simulation.domain_record(reference)
+    }
+
+    /// The body and establishment time of a record's committed current
+    /// version or of an initial-scenario version, which a seal cannot
+    /// change; see [`Canwu::replay_stable_domain_record_version`].
+    #[must_use]
+    pub fn replay_stable_domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<(DomainRecord, SimTime)> {
+        self.simulation
+            .replay_stable_domain_record_version(reference)
     }
 
     #[must_use]

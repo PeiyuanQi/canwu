@@ -29,6 +29,9 @@ pub const ECONOMY_ARCHIVE_TEMPORAL_PAGE_NAMESPACE: &str =
     "canwu.economy-reference.archive.temporal-page";
 pub const ECONOMY_ARCHIVE_INDEX_DIRECTORY_NAMESPACE: &str =
     "canwu.economy-reference.archive.index-directory";
+/// Namespace of the pages of the economy archive's cumulative lookup index.
+pub const ECONOMY_ARCHIVE_LOOKUP_PAGE_NAMESPACE: &str =
+    "canwu.economy-reference.archive.lookup-page";
 pub const ECONOMY_ARCHIVE_DOMAIN: canwu_force_supply_reference::PackageArchiveDomainV1 =
     canwu_force_supply_reference::PackageArchiveDomainV1 {
         digest_prefix: "canwu.economy-reference",
@@ -36,6 +39,7 @@ pub const ECONOMY_ARCHIVE_DOMAIN: canwu_force_supply_reference::PackageArchiveDo
         membership_namespace: ECONOMY_ARCHIVE_MEMBERSHIP_PAGE_NAMESPACE,
         temporal_namespace: ECONOMY_ARCHIVE_TEMPORAL_PAGE_NAMESPACE,
         directory_namespace: ECONOMY_ARCHIVE_INDEX_DIRECTORY_NAMESPACE,
+        lookup_namespace: ECONOMY_ARCHIVE_LOOKUP_PAGE_NAMESPACE,
     };
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(tag = "kind", content = "key", rename_all = "snake_case")]
@@ -1544,8 +1548,10 @@ impl EconomyReferenceStateV1 {
         let recorded_head = std::mem::take(&mut archive_head.semantic_digest);
         if recorded_head
             != canonical_hash("canwu.economy-reference.archive-head.v1", &archive_head)?
-            || self.archive_retention_handles.len() > 64
-            || self.archive_maintenance_receipts.len() > 8_192
+            || self.archive_retention_handles.len()
+                > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES
+            || self.archive_maintenance_receipts.len()
+                > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS
         {
             return Err(invalid(
                 "economy archive head or hot maintenance bounds are invalid",
@@ -1959,10 +1965,15 @@ impl EconomyReferenceStateV1 {
         )
     }
 
+    /// Prepares an archive commit of up to `candidate_limit` terminal
+    /// records. Extending the archive's lookup index reads the head
+    /// directory and the index pages on the paths of the new keys from
+    /// `store`; `()`, the absent store, is enough for the first commit.
     #[allow(clippy::too_many_lines)]
     pub fn prepare_economy_archive(
         &self,
         candidate_limit: usize,
+        store: &dyn canwu_force_supply_reference::PackageArchiveStore,
     ) -> Result<PreparedEconomyArchiveBatchV1, CanwuError> {
         if candidate_limit == 0
             || candidate_limit > canwu_force_supply_reference::MAX_PACKAGE_ARCHIVE_PAGE_ENTRIES
@@ -2075,6 +2086,7 @@ impl EconomyReferenceStateV1 {
             self.economy_archive_source_root()?,
             &self.archive_head,
             records,
+            store,
         )
     }
 
@@ -2341,7 +2353,9 @@ mod archive_tests {
             },
         );
         state.validate().expect("valid hot history");
-        let prepared = state.prepare_economy_archive(8).expect("prepare archive");
+        let prepared = state
+            .prepare_economy_archive(8, &())
+            .expect("prepare archive");
         assert!(
             prepared
                 .selected

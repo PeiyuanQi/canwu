@@ -1870,8 +1870,9 @@ impl ForceSupplyStateV1 {
                 "canwu.force-supply-reference.archive-head.v1",
                 &archive_head,
             )?
-            || self.archive_retention_handles.len() > 64
-            || self.archive_maintenance_receipts.len() > 8_192
+            || self.archive_retention_handles.len() > crate::MAX_PACKAGE_ARCHIVE_RETENTION_HANDLES
+            || self.archive_maintenance_receipts.len()
+                > crate::MAX_PACKAGE_ARCHIVE_MAINTENANCE_RECEIPTS
         {
             return Err(invalid(
                 "force archive head or hot maintenance bounds are invalid",
@@ -3240,9 +3241,14 @@ impl ForceSupplyStateV1 {
         Ok(archived)
     }
 
+    /// Prepares an archive commit of up to `candidate_limit` terminal
+    /// records. Extending the archive's lookup index reads the head
+    /// directory and the index pages on the paths of the new keys from
+    /// `store`; `()`, the absent store, is enough for the first commit.
     pub fn prepare_force_archive(
         &self,
         candidate_limit: usize,
+        store: &dyn crate::PackageArchiveStore,
     ) -> Result<crate::PreparedForceArchiveBatchV1, CanwuError> {
         if candidate_limit == 0 || candidate_limit > crate::MAX_PACKAGE_ARCHIVE_PAGE_ENTRIES {
             return Err(invalid("force archive candidate budget is invalid"));
@@ -3341,6 +3347,7 @@ impl ForceSupplyStateV1 {
             self.force_archive_source_root()?,
             &self.archive_head,
             records,
+            store,
         )
     }
 
