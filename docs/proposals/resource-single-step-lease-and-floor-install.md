@@ -5,6 +5,16 @@ Status: implemented in 0.15.0. It closes downstream gaps G-53 and G-56 in
 types. The kernel, the archive, and the shape of the resource root are
 unchanged.
 
+Changed in 0.16.0 by
+[resource refusals without stalls](resource-refusals-without-stalls.md): a
+single step, or any resource operation, that does not fit the budgets of the
+root is skipped with an event instead of failing its boundary, and a refused
+one needs room for its outcome only. Every packet that settles nothing,
+including one whose key another request holds, leaves an event naming it, and
+allocation, adapter, and production output packets with a taken key are
+skipped as well. A tracked `Acquire` is checked as the completion ingress
+checks it. The passages below that say otherwise describe 0.15.0.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),

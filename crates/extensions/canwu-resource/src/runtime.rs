@@ -335,10 +335,12 @@ pub struct ResourceAccountLossRequestV1 {
 /// demand keeps the identity of the floor it was admitted under and nothing
 /// else.
 ///
-/// A refusal of the request is its recorded rejection, with two exceptions
-/// it shares with every resource operation: a request that does not fit the
-/// outcome and archive budgets of the root, or whose settlement would pass
-/// the state byte cap, is an error that fails its boundary.
+/// A refusal of the request is its recorded rejection, with one exception it
+/// shares with every resource operation: a request whose result does not fit
+/// the outcome and archive budgets of the root, or would pass its state byte
+/// cap, records nothing. The resource plugin skips its packet with an event,
+/// and [`ResourceState::apply_operation`] returns
+/// [`crate::ResourceError::LimitExceeded`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourceProtectedFloorRequestV1 {
     pub operation_key: ResourceOperationKey,
@@ -416,8 +418,10 @@ pub enum ResourceCompletionOperationV1 {
 /// operation it may send as a tracked command: an `Acquire`, and an `Abort`
 /// of a lease it holds. No holder can take the key of a single step, a
 /// grant, a prepare, an activation, a release, an expiry, or an external
-/// participant step. A packet on the completion ingress whose key a
-/// different request holds settles nothing and does not fail its boundary.
+/// participant step. A packet whose key a different request holds settles
+/// nothing on any ingress, is named by a
+/// [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`], and does not fail its
+/// boundary.
 pub const RESOURCE_COMPLETION_OPERATION_KEY_PREFIX: &str = "resource:completion:";
 
 impl ResourceCompletionOperationV1 {
@@ -635,6 +639,93 @@ struct AppliedOperation {
     remainder: u64,
     result_ref: Option<ResourceRecordRefV1>,
     exact_evidence: Vec<DomainRecordVersionRef>,
+}
+
+/// Why an operation settled nothing: what it would leave does not fit the
+/// root.
+///
+/// Room is measured on the result, not predicted from the kind of
+/// operation. A refused operation needs room for its own outcome only; an
+/// applied one for every terminal record it adds and every reservation it
+/// makes. Work that is not certified by an admitted lease must also leave
+/// the room that admitted leases reserve.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RoomShortage {
+    /// The hot terminal records leave no room, and an archive commit of
+    /// every hot candidate would.
+    ArchiveBacklog,
+    /// Even an empty backlog would leave no room: what remains is reserved
+    /// by admitted completion leases, or the budget is smaller than the
+    /// operation. An archive commit does not help.
+    ///
+    /// `permanent` when no archive commit and no lease release can make room
+    /// for this work: it would not fit even with an empty backlog and every
+    /// reservation free. Otherwise reservations hold the room, and they free:
+    /// leases complete, are released, or expire, and the slots of finished
+    /// participants whose reports wait become ordinary hot records once the
+    /// reports publish, which an archive commit then clears. That holds for
+    /// work an admitted lease certifies too, which must fit beside those
+    /// waiting slots.
+    ReservedCapacity { permanent: bool },
+    /// The result would pass another limit of the root, such as its state
+    /// byte cap.
+    RootLimit,
+}
+
+impl RoomShortage {
+    /// The error a detached caller of [`ResourceState::apply_operation`]
+    /// receives, which has no packet to skip.
+    fn error(self) -> ResourceError {
+        ResourceError::LimitExceeded(
+            match self {
+                Self::ArchiveBacklog => "resource terminal archive backpressure is active",
+                Self::ReservedCapacity { .. } => {
+                    "resource hot capacity is reserved for admitted terminal work"
+                }
+                Self::RootLimit => "resource operation result exceeds a limit of the root",
+            }
+            .to_owned(),
+        )
+    }
+}
+
+/// What settling one operation did to the root.
+pub(crate) enum OperationSettlement {
+    /// The outcome under the operation's key: recorded now, applied or
+    /// rejected, or recorded before for the same request.
+    Settled(ResourceOperationOutcome),
+    /// Nothing changed and nothing was recorded, because the result does not
+    /// fit. The operation key stays free.
+    NoRoom(RoomShortage),
+}
+
+impl OperationSettlement {
+    fn into_outcome(self) -> Result<ResourceOperationOutcome, ResourceError> {
+        match self {
+            Self::Settled(outcome) => Ok(outcome),
+            Self::NoRoom(shortage) => Err(shortage.error()),
+        }
+    }
+}
+
+/// What settling one production output batch did to the root.
+pub(crate) enum OutputBatchSettlement {
+    /// Every credit applied; their outcomes in batch order.
+    Settled(Vec<ResourceOperationOutcome>),
+    /// A credit did not fit, so nothing changed.
+    NoRoom(RoomShortage),
+    /// A credit was refused, so nothing changed: its operation key and the
+    /// reason.
+    Refused(ResourceOperationKey, String),
+}
+
+/// The scalar position of a root before it records a rejection, enough to
+/// take that rejection back without a copy of the whole root.
+struct RecordedRejection {
+    operation_key: ResourceOperationKey,
+    sequence: u64,
+    state_revision: ResourceRevision,
+    next_admitted_sequence: u64,
 }
 
 impl ResourceState {
@@ -1285,33 +1376,75 @@ impl ResourceState {
         })
     }
 
+    /// Applies one operation to this root and records its outcome.
+    ///
+    /// A domain refusal is the operation's recorded rejection. Errors are
+    /// what a detached caller must handle instead: a key under
+    /// [`RESOURCE_COMPLETION_OPERATION_KEY_PREFIX`] on a request that is not
+    /// a completion operation, a key whose outcome another request recorded,
+    /// and a result that does not fit the root
+    /// ([`ResourceError::LimitExceeded`], with nothing changed).
+    ///
+    /// Room is measured on the result. A refused operation needs room for
+    /// its own outcome only, and an applied one for the terminal records it
+    /// adds and the reservations it makes; work that an admitted lease does
+    /// not certify must also leave the room admitted leases reserve. The
+    /// resource plugin skips a packet whose result does not fit instead of
+    /// failing its boundary.
     pub fn apply_operation(
         &mut self,
         request: &ResourceOperationRequestV1,
     ) -> Result<ResourceOperationOutcome, ResourceError> {
-        let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
-        self.apply_operation_with_context(request, request_digest, None, None, None)
+        self.settle_operation(request)?.into_outcome()
     }
 
-    /// Applies an operation that the plugin settles in a boundary at
+    /// Settles an operation the plugin applies without a settlement clock of
+    /// its own, as [`Self::apply_operation`] does, but reports a result that
+    /// does not fit as [`OperationSettlement::NoRoom`].
+    pub(crate) fn settle_operation(
+        &mut self,
+        request: &ResourceOperationRequestV1,
+    ) -> Result<OperationSettlement, ResourceError> {
+        let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
+        self.settle_operation_with_context(request, request_digest, None, None, None)
+    }
+
+    /// Settles an operation that the plugin settles in a boundary at
     /// `settled_at`. Detached callers of [`Self::apply_operation`] have no
     /// separate settlement clock, so their request times stand in for it.
-    pub(crate) fn apply_operation_at(
+    pub(crate) fn settle_operation_at(
         &mut self,
         request: &ResourceOperationRequestV1,
         settled_at: SimTime,
-    ) -> Result<ResourceOperationOutcome, ResourceError> {
+    ) -> Result<OperationSettlement, ResourceError> {
         let request_digest = canonical_digest("canwu.resource.operation-request.v1", request)?;
-        self.apply_operation_with_context(request, request_digest, None, None, Some(settled_at))
+        self.settle_operation_with_context(request, request_digest, None, None, Some(settled_at))
     }
 
     /// Apply every credit in one production output batch atomically. A
     /// rejected leg discards the detached candidate, so no account, outcome,
-    /// conservation, or terminal-index mutation becomes authoritative.
+    /// conservation, or terminal-index mutation becomes authoritative. A leg
+    /// whose result does not fit the root is a [`ResourceError::LimitExceeded`]
+    /// error, again with nothing changed.
     pub fn apply_production_output_batch(
         &mut self,
         requests: &[ResourceCreditRequestV1],
     ) -> Result<Vec<ResourceOperationOutcome>, ResourceError> {
+        match self.settle_production_output_batch(requests)? {
+            OutputBatchSettlement::Settled(outcomes) => Ok(outcomes),
+            OutputBatchSettlement::NoRoom(shortage) => Err(shortage.error()),
+            OutputBatchSettlement::Refused(_, reason) => {
+                Err(ResourceError::InvalidLifecycle(reason))
+            }
+        }
+    }
+
+    /// Settles one production output batch on a detached candidate, so the
+    /// root changes only when every credit applies.
+    pub(crate) fn settle_production_output_batch(
+        &mut self,
+        requests: &[ResourceCreditRequestV1],
+    ) -> Result<OutputBatchSettlement, ResourceError> {
         if requests.is_empty() || requests.len() > 64 {
             return Err(ResourceError::LimitExceeded(
                 "production output batch must contain 1..=64 credits".to_owned(),
@@ -1330,16 +1463,37 @@ impl ResourceState {
                     .to_owned(),
             ));
         }
+        // Room is measured once, for the whole batch against the root before
+        // it: a batch settles every credit or none, so whether an archive
+        // commit makes room is a question about all of them.
+        let reserved_work = self
+            .terminal_work_is_reserved(&ResourceOperationRequestV1::Credit(requests[0].clone()));
+        let hot_candidates = self.terminal_archive_candidates.len();
+        let hot_outcomes = self.outcomes.len();
         let mut candidate = self.clone();
         let mut outcomes = Vec::with_capacity(requests.len());
         for request in requests {
-            let outcome =
-                candidate.apply_operation(&ResourceOperationRequestV1::Credit(request.clone()))?;
+            let credit = ResourceOperationRequestV1::Credit(request.clone());
+            let request_digest = canonical_digest("canwu.resource.operation-request.v1", &credit)?;
+            let outcome = match candidate.settle_operation_measured(
+                &credit,
+                request_digest,
+                None,
+                None,
+                None,
+                false,
+            )? {
+                OperationSettlement::Settled(outcome) => outcome,
+                OperationSettlement::NoRoom(shortage) => {
+                    return Ok(OutputBatchSettlement::NoRoom(shortage));
+                }
+            };
             if !matches!(
                 outcome.status,
                 ResourceOperationStatus::Applied | ResourceOperationStatus::Duplicate
             ) {
-                return Err(ResourceError::InvalidLifecycle(
+                return Ok(OutputBatchSettlement::Refused(
+                    request.operation_key.clone(),
                     outcome
                         .rejection_reason
                         .unwrap_or_else(|| "production output batch leg was rejected".to_owned()),
@@ -1347,15 +1501,27 @@ impl ResourceState {
             }
             outcomes.push(outcome);
         }
+        if let Some(shortage) =
+            candidate.room_shortage(reserved_work, hot_candidates, hot_outcomes, 0)?
+        {
+            return Ok(OutputBatchSettlement::NoRoom(shortage));
+        }
+        match candidate.validate_within(self.limits.operation_state_bytes()) {
+            Ok(()) => {}
+            Err(ResourceError::LimitExceeded(_)) => {
+                return Ok(OutputBatchSettlement::NoRoom(RoomShortage::RootLimit));
+            }
+            Err(error) => return Err(error),
+        }
         *self = candidate;
-        Ok(outcomes)
+        Ok(OutputBatchSettlement::Settled(outcomes))
     }
 
-    pub(crate) fn apply_prepare_with_external_revalidation(
+    pub(crate) fn settle_prepare_with_external_revalidation(
         &mut self,
         request: &crate::PrepareCompletionCapacityV1,
         external_targets_current: bool,
-    ) -> Result<ResourceOperationOutcome, ResourceError> {
+    ) -> Result<OperationSettlement, ResourceError> {
         let operation = ResourceOperationRequestV1::Completion(
             ResourceCompletionOperationV1::Prepare(request.clone()),
         );
@@ -1363,41 +1529,42 @@ impl ResourceState {
         let refusal = (!external_targets_current).then(|| {
             ResourceError::VersionConflict("completion prepare external target is stale".to_owned())
         });
-        self.apply_operation_with_context(&operation, request_digest, None, refusal.as_ref(), None)
+        self.settle_operation_with_context(&operation, request_digest, None, refusal.as_ref(), None)
     }
 
-    /// Applies one single-step lease that the plugin settles in a boundary.
+    /// Settles one single-step lease that the plugin settles in a boundary.
     /// `external_refusal` is what the plugin found against the simulation
     /// view, which the detached state cannot read: a cited external record
     /// version that is not current, an eligibility time that is not the
     /// boundary time, or no room for the reserved reports. A refusal settles
-    /// as the operation's recorded rejection, like one the state finds.
-    pub(crate) fn apply_single_step_lease_with_external_validation(
+    /// as the operation's recorded rejection, like one the state finds, and
+    /// needs room for that outcome only.
+    pub(crate) fn settle_single_step_lease_with_external_validation(
         &mut self,
         request: &crate::SingleStepCompletionLeaseV1,
         external_refusal: Option<&ResourceError>,
-    ) -> Result<ResourceOperationOutcome, ResourceError> {
+    ) -> Result<OperationSettlement, ResourceError> {
         let operation = ResourceOperationRequestV1::Completion(
             ResourceCompletionOperationV1::SingleStepLease(request.clone()),
         );
         let request_digest = canonical_digest("canwu.resource.operation-request.v1", &operation)?;
-        self.apply_operation_with_context(&operation, request_digest, None, external_refusal, None)
+        self.settle_operation_with_context(&operation, request_digest, None, external_refusal, None)
     }
 
-    /// Applies one requester-scoped allocation that the plugin settles in a
+    /// Settles one requester-scoped allocation that the plugin settles in a
     /// boundary at `settled_at`.
-    pub(crate) fn apply_authorized_allocation(
+    pub(crate) fn settle_authorized_allocation(
         &mut self,
         requester: &canwu_api::KnowledgeHolderRef,
         request: &ResourceAllocationRequestV1,
         settled_at: SimTime,
-    ) -> Result<ResourceOperationOutcome, ResourceError> {
+    ) -> Result<OperationSettlement, ResourceError> {
         let operation = ResourceOperationRequestV1::Allocate(request.clone());
         let request_digest = canonical_digest(
             "canwu.resource.authorized-allocation-request.v1",
             &(requester, request),
         )?;
-        self.apply_operation_with_context(
+        self.settle_operation_with_context(
             &operation,
             request_digest,
             Some(requester),
@@ -1408,16 +1575,45 @@ impl ResourceState {
 
     /// `external_refusal` carries what the plugin established against the
     /// simulation view for a `Prepare` or a `SingleStepLease`; see
-    /// [`Self::apply_prepare_with_external_revalidation`] and
-    /// [`Self::apply_single_step_lease_with_external_validation`].
-    fn apply_operation_with_context(
+    /// [`Self::settle_prepare_with_external_revalidation`] and
+    /// [`Self::settle_single_step_lease_with_external_validation`].
+    ///
+    /// The operation is applied first and its room measured on the result
+    /// ([`Self::room_shortage`]). A result that does not fit, or that passes
+    /// another limit of the root, leaves the root as it was and returns
+    /// [`OperationSettlement::NoRoom`]; nothing is recorded and the key stays
+    /// free for the same request later.
+    fn settle_operation_with_context(
         &mut self,
         request: &ResourceOperationRequestV1,
         request_digest: String,
         allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
         external_refusal: Option<&ResourceError>,
         settled_at: Option<SimTime>,
-    ) -> Result<ResourceOperationOutcome, ResourceError> {
+    ) -> Result<OperationSettlement, ResourceError> {
+        self.settle_operation_measured(
+            request,
+            request_digest,
+            allocation_requester,
+            external_refusal,
+            settled_at,
+            true,
+        )
+    }
+
+    /// [`Self::settle_operation_with_context`], which measures room and
+    /// validates the root when `measure` is set. A caller that settles several
+    /// operations as one unit, a production output batch, clears it, and
+    /// measures and validates the unit itself.
+    fn settle_operation_measured(
+        &mut self,
+        request: &ResourceOperationRequestV1,
+        request_digest: String,
+        allocation_requester: Option<&canwu_api::KnowledgeHolderRef>,
+        external_refusal: Option<&ResourceError>,
+        settled_at: Option<SimTime>,
+        measure: bool,
+    ) -> Result<OperationSettlement, ResourceError> {
         // Not recorded: an outcome under the key would itself take it from
         // the completion operation that derives it.
         if request.names_reserved_operation_key() {
@@ -1429,96 +1625,34 @@ impl ResourceState {
         let operation_key = request.operation_key();
         if let Some(existing) = self.outcomes.get(&operation_key) {
             if existing.request_digest == request_digest {
-                return Ok(existing.clone());
+                return Ok(OperationSettlement::Settled(existing.clone()));
             }
             return Err(ResourceError::IdempotencyConflict(
                 "resource operation key was reused with a different request".to_owned(),
             ));
         }
         let terminal_work_is_reserved = self.terminal_work_is_reserved(request);
-        // A single-step lease admits an acquisition exactly as `Acquire`
-        // does, so it reserves the same bounded terminal receipt path.
-        let newly_reserved_outcomes = match request {
-            ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
-                request,
-            )) => usize::from(request.recipe.receipts),
-            ResourceOperationRequestV1::Completion(
-                ResourceCompletionOperationV1::SingleStepLease(request),
-            ) => usize::from(request.lease.recipe.receipts),
-            ResourceOperationRequestV1::Completion(
-                ResourceCompletionOperationV1::GrantExternalParticipant(request),
-            ) => usize::from(request.recipe.receipts),
-            _ => 0,
-        };
-        let mut projected_outcomes = self
-            .outcomes
-            .len()
-            .checked_add(1)
-            .ok_or(ResourceError::Overflow)?;
-        if !terminal_work_is_reserved {
-            projected_outcomes = projected_outcomes
-                .checked_add(self.reserved_hot_outcome_slots()?)
-                .ok_or(ResourceError::Overflow)?;
-        }
-        projected_outcomes = projected_outcomes
-            .checked_add(newly_reserved_outcomes)
-            .ok_or(ResourceError::Overflow)?;
-        if projected_outcomes > self.limits.max_operation_outcomes {
-            return Err(ResourceError::LimitExceeded(
-                "resource hot outcome capacity is exhausted or reserved for admitted terminal work"
-                    .to_owned(),
-            ));
-        }
-        let required_terminal_slots = match request {
-            ResourceOperationRequestV1::Consume(_) => 7,
-            ResourceOperationRequestV1::Credit(_)
-            | ResourceOperationRequestV1::ExternalOutflow(_) => 2,
-            // Outcome, loss record, and completed lease receipt.
-            ResourceOperationRequestV1::RecordLoss(_) => 3,
-            ResourceOperationRequestV1::CompleteTransfer(
-                ResourceTransferDispositionRequestV1 {
-                    disposition:
-                        ResourceTransferDispositionV1::Accept { .. }
-                        | ResourceTransferDispositionV1::AcceptLocal { .. }
-                        | ResourceTransferDispositionV1::Lose { .. },
-                    ..
-                },
-            ) => 8,
-            ResourceOperationRequestV1::CompleteTransfer(_) => 4,
-            ResourceOperationRequestV1::Completion(_) => 2,
-            _ => 1,
-        };
-        let mut projected = self
-            .terminal_archive_candidates
-            .len()
-            .checked_add(required_terminal_slots)
-            .ok_or(ResourceError::Overflow)?;
-        if terminal_work_is_reserved {
-            projected = projected
-                .checked_add(self.pending_external_participant_archive_slots()?)
-                .ok_or(ResourceError::Overflow)?;
-        } else {
-            let newly_reserved = match request {
-                ResourceOperationRequestV1::Completion(ResourceCompletionOperationV1::Acquire(
-                    request,
-                )) => usize::from(request.recipe.receipts),
-                ResourceOperationRequestV1::Completion(
-                    ResourceCompletionOperationV1::SingleStepLease(request),
-                ) => usize::from(request.lease.recipe.receipts),
-                _ => 0,
-            };
-            projected = projected
-                .checked_add(self.reserved_terminal_archive_slots()?)
-                .and_then(|value| value.checked_add(newly_reserved))
-                .ok_or(ResourceError::Overflow)?;
-        }
-        if projected > self.limits.max_archive_candidates {
-            return Err(ResourceError::LimitExceeded(
-                "resource terminal archive backpressure is active".to_owned(),
-            ));
-        }
-        let before = self.clone();
+        let hot_candidates = self.terminal_archive_candidates.len();
+        let hot_outcomes = self.outcomes.len();
+        // The root as it was. An applied operation keeps it to take the
+        // whole operation back; a rejection restores it at once and is taken
+        // back from its recorded position instead.
+        let mut before = Some(self.clone());
         let applied = self.apply_inner(request, allocation_requester, external_refusal, settled_at);
+        if applied.is_err() {
+            *self = before
+                .take()
+                .expect("the root before the operation is kept");
+        }
+        if measure
+            && let Some(shortage) =
+                self.room_shortage(terminal_work_is_reserved, hot_candidates, hot_outcomes, 1)?
+        {
+            if let Some(before) = before {
+                *self = before;
+            }
+            return Ok(OperationSettlement::NoRoom(shortage));
+        }
         let (
             status,
             quantity,
@@ -1537,19 +1671,18 @@ impl ResourceState {
                 None,
                 None,
             ),
-            Err(error) => {
-                *self = before;
-                (
-                    ResourceOperationStatus::Rejected,
-                    0,
-                    request_remainder(self, request),
-                    None,
-                    Vec::new(),
-                    Some(error.code().to_owned()),
-                    Some(error.to_string()),
-                )
-            }
+            Err(error) => (
+                ResourceOperationStatus::Rejected,
+                0,
+                request_remainder(self, request),
+                None,
+                Vec::new(),
+                Some(error.code().to_owned()),
+                Some(error.to_string()),
+            ),
         };
+        let state_revision = self.state_revision;
+        let next_admitted_sequence = self.next_admitted_sequence;
         self.state_revision = self.state_revision.next()?;
         let id = outcome_id(&operation_key, &request_digest)?;
         let mut outcome = ResourceOperationOutcome {
@@ -1584,8 +1717,112 @@ impl ResourceState {
                 .extend(self.report_grants.keys().cloned());
         }
         self.refresh_continuation();
-        self.validate()?;
-        Ok(outcome)
+        if !measure {
+            return Ok(OperationSettlement::Settled(outcome));
+        }
+        // An operation leaves the maintenance reserve of the byte cap free.
+        match self.validate_within(self.limits.operation_state_bytes()) {
+            Ok(()) => Ok(OperationSettlement::Settled(outcome)),
+            // The counted budgets were measured above, so this is another
+            // limit, in practice the state byte cap.
+            Err(ResourceError::LimitExceeded(_)) => {
+                match before {
+                    Some(before) => *self = before,
+                    None => self.take_back_rejection(RecordedRejection {
+                        operation_key: outcome.operation_key,
+                        sequence: outcome.sequence,
+                        state_revision,
+                        next_admitted_sequence,
+                    }),
+                }
+                Ok(OperationSettlement::NoRoom(RoomShortage::RootLimit))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Takes back a rejection recorded on a root that was otherwise left as
+    /// it was: its outcome, its archive candidate, and the counters
+    /// recording it advanced. A rejection changes nothing else.
+    fn take_back_rejection(&mut self, recorded: RecordedRejection) {
+        self.outcomes.remove(&recorded.operation_key);
+        self.terminal_archive_candidates.remove(&recorded.sequence);
+        self.state_revision = recorded.state_revision;
+        self.next_admitted_sequence = recorded.next_admitted_sequence;
+        self.refresh_continuation();
+    }
+
+    /// Whether this root, about to record `pending_records` more outcomes,
+    /// lacks room for what the work left in it. `hot_candidates` and
+    /// `hot_outcomes` are the counts before the work.
+    ///
+    /// Each outcome takes one archive candidate slot and one hot outcome slot.
+    /// Work certified by an admitted lease (`reserved_work`) draws on the
+    /// room that lease reserved, so it must fit only beside the reports that
+    /// wait to become archive candidates. Any other work must also leave
+    /// every reservation of admitted leases and participants free.
+    ///
+    /// A shortage is [`RoomShortage::ArchiveBacklog`] when an archive commit
+    /// of every hot candidate would make room: such a commit archives every
+    /// hot outcome and leaves its own maintenance receipt as the one
+    /// candidate. Otherwise it is [`RoomShortage::ReservedCapacity`], which is
+    /// permanent only for work that would not fit even with an empty backlog
+    /// and every reservation free.
+    fn room_shortage(
+        &self,
+        reserved_work: bool,
+        hot_candidates: usize,
+        hot_outcomes: usize,
+        pending_records: usize,
+    ) -> Result<Option<RoomShortage>, ResourceError> {
+        let candidates = self
+            .terminal_archive_candidates
+            .len()
+            .checked_add(pending_records)
+            .ok_or(ResourceError::Overflow)?;
+        let outcomes = self
+            .outcomes
+            .len()
+            .checked_add(pending_records)
+            .ok_or(ResourceError::Overflow)?;
+        let (reserved_candidates, reserved_outcomes) = if reserved_work {
+            (self.pending_external_participant_archive_slots()?, 0)
+        } else {
+            (
+                self.reserved_terminal_archive_slots()?,
+                self.reserved_hot_outcome_slots()?,
+            )
+        };
+        let fits = |candidates: usize, outcomes: usize| -> Result<bool, ResourceError> {
+            Ok(candidates
+                .checked_add(reserved_candidates)
+                .ok_or(ResourceError::Overflow)?
+                <= self.limits.max_archive_candidates
+                && outcomes
+                    .checked_add(reserved_outcomes)
+                    .ok_or(ResourceError::Overflow)?
+                    <= self.limits.max_operation_outcomes)
+        };
+        if fits(candidates, outcomes)? {
+            return Ok(None);
+        }
+        let added_candidates = candidates.saturating_sub(hot_candidates);
+        let added_outcomes = outcomes.saturating_sub(hot_outcomes);
+        let archive_makes_room =
+            hot_candidates > 0 && fits(added_candidates.saturating_add(1), added_outcomes)?;
+        if archive_makes_room {
+            return Ok(Some(RoomShortage::ArchiveBacklog));
+        }
+        // With an empty backlog and every reservation free, the work would
+        // hold its own records and, after an archive commit, that commit's
+        // receipt.
+        let floor = usize::from(hot_candidates > 0);
+        let fits_alone = added_candidates.saturating_add(floor)
+            <= self.limits.max_archive_candidates
+            && added_outcomes <= self.limits.max_operation_outcomes;
+        Ok(Some(RoomShortage::ReservedCapacity {
+            permanent: !fits_alone,
+        }))
     }
 
     fn apply_inner(
@@ -4857,8 +5094,14 @@ impl ResourceState {
         Ok(current)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn validate(&self) -> Result<(), ResourceError> {
+        self.validate_within(self.limits.max_state_bytes)
+    }
+
+    /// [`Self::validate`] with `max_state_bytes` as the byte cap of the
+    /// encoded root.
+    #[allow(clippy::too_many_lines)]
+    fn validate_within(&self, max_state_bytes: usize) -> Result<(), ResourceError> {
         if self.format_version != RESOURCE_STATE_FORMAT_VERSION {
             return Err(ResourceError::InvalidDefinition(
                 "resource runtime format version is unsupported".to_owned(),
@@ -5268,7 +5511,7 @@ impl ResourceState {
                 "resource authoritative state cannot be encoded: {error}"
             ))
         })?;
-        if encoded.len() > self.limits.max_state_bytes {
+        if encoded.len() > max_state_bytes {
             return Err(ResourceError::LimitExceeded(
                 "resource authoritative state byte cap is exhausted".to_owned(),
             ));
@@ -5568,7 +5811,7 @@ mod tests {
             ))
             .expect("grant");
         let outcome = state
-            .apply_prepare_with_external_revalidation(
+            .settle_prepare_with_external_revalidation(
                 &crate::PrepareCompletionCapacityV1 {
                     acquisition: acquisition.clone(),
                     expected_acquisition_revision: state.completion_leases.acquisitions
@@ -5581,6 +5824,7 @@ mod tests {
                 },
                 false,
             )
+            .and_then(super::OperationSettlement::into_outcome)
             .expect("stable rejection");
         assert_eq!(outcome.status, ResourceOperationStatus::Applied);
         assert_eq!(

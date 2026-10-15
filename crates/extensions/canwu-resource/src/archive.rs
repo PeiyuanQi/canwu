@@ -995,6 +995,38 @@ impl ResourceState {
         Ok(())
     }
 
+    /// Retires the recovery metadata of one settled archive commit by its
+    /// retention handle, when the commit's receipt has already left the root:
+    /// the receipt of an applied commit is archived by a later commit, while
+    /// the state-side handle stays until it is acknowledged and records how
+    /// the commit settled.
+    ///
+    /// The handle, when the root still holds it, must name `directory_root`.
+    /// It is removed with every stale receipt recorded under it. A handle the
+    /// root no longer holds was acknowledged before, so this settles as a
+    /// no-op, like a repeated acknowledgement by receipt.
+    pub(crate) fn acknowledge_archive_retention_handle(
+        &mut self,
+        retention_handle_id: &str,
+        directory_root: &str,
+    ) -> Result<(), ResourceError> {
+        if self
+            .archive_retention_handles
+            .get(retention_handle_id)
+            .is_some_and(|handle| handle.directory_root != directory_root)
+        {
+            return Err(ResourceError::InvalidDefinition(
+                "resource archive acknowledgement handle is forged".to_owned(),
+            ));
+        }
+        self.archive_retention_handles.remove(retention_handle_id);
+        self.archive_maintenance_receipts.retain(|_, hot| {
+            hot.disposition != ResourceArchiveMaintenanceDispositionV1::RejectedStale
+                || hot.retention_handle_id != retention_handle_id
+        });
+        Ok(())
+    }
+
     /// Checks that maintenance receipts and archive candidates agree: the
     /// receipt of an applied commit is a candidate under its own sequence,
     /// and the receipt of a stale commit is not a candidate.

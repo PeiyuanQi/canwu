@@ -4,9 +4,9 @@ use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest,
     BoundarySystemContract, Canwu, CanwuError, DomainRecord, DomainRecordClass, DomainRecordDraft,
     DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation, DomainRecordSchema,
-    DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef, ErrorCode,
-    KnowledgeHolderRef, PayloadSchema, PersonId, PluginRegistrar, Scenario, SimDuration, SimTime,
-    SimulationPlugin, SimulationView, StateVisibility, SystemCadence, TypedDomainRecordRef,
+    DomainRecordType, DomainRecordVersionRef, DomainValueKindClass, EntityRef, KnowledgeHolderRef,
+    PayloadSchema, PersonId, PluginRegistrar, Scenario, SimDuration, SimTime, SimulationPlugin,
+    SimulationView, StateVisibility, SystemCadence, TypedDomainRecordRef,
 };
 use canwu_resource::*;
 use serde_json::{Value, json};
@@ -527,34 +527,69 @@ fn installed_consumer_settles_once_and_survives_restore_and_exact_replay() {
             .is_err()
     );
     assert!(from_resource_snapshot_json(&snapshot, &[&resource]).is_err());
-    // Canonical adapter retries revalidate authority; a completed lease is rejected.
-    // Idempotency here means no second debit, not a successful duplicate receipt.
+    // A canonical adapter retry of the settled request is answered by its own
+    // outcome: no second debit, no event, and its boundary commits.
     enqueue_resource_adapter_operation(&mut simulation, SimTime::EPOCH, &packet)
         .expect("duplicate ingress");
-    let duplicate = simulation
+    simulation
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-        .expect_err("completed lease rejects retry");
-    assert_eq!(duplicate.code, ErrorCode::InvalidAuthority);
+        .expect("a resend settles nothing without failing its boundary");
     assert_eq!(after, read_resources(&simulation));
+    assert!(
+        !simulation
+            .events()
+            .iter()
+            .any(|event| ResourceIngressSkipV1::from_event(event).is_some())
+    );
+}
+
+/// Settles one boundary that admits `packet`, which must be skipped as a
+/// packet that fails its settlement checks, and returns the skip's detail.
+fn skipped(simulation: &mut Canwu, packet: &ResourceAdapterOperationV1, fault: &str) -> String {
+    let queued = enqueue_resource_adapter_operation(simulation, SimTime::EPOCH, packet)
+        .expect("untrusted packet ingress");
+    simulation
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
+        .unwrap_or_else(|error| panic!("{fault} failed its boundary: {error:?}"));
+    let event = simulation
+        .events()
+        .iter()
+        .rev()
+        .find(|event| ResourceIngressSkipV1::from_event(event).is_some())
+        .unwrap_or_else(|| panic!("{fault} left no skip event"));
+    assert_eq!(
+        ResourceIngressSkipV1::from_event(event),
+        Some(ResourceIngressSkipV1 {
+            ingress: queued.ingress_id,
+            reason: ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            operation_key: Some(packet.request.operation_key()),
+            deferred_until: None,
+        }),
+        "{fault}"
+    );
+    event.summary.clone()
 }
 #[test]
 fn malformed_authorizations_and_forged_packets_roll_back_without_spending_lease() {
+    // Each fault is refused by the check that names it in the skip event.
     for (fault, expected) in [
-        ("retired", ErrorCode::InvalidAuthority),
-        ("wrong-demand", ErrorCode::InvalidAuthority),
-        ("ambiguous", ErrorCode::InvalidAuthority),
-        ("digest", ErrorCode::InvalidDomainRecord),
-        ("missing", ErrorCode::InvalidDomainRecord),
-        ("oversized", ErrorCode::ValueOutOfRange),
+        ("retired", "does not uniquely authorize"),
+        ("wrong-demand", "does not uniquely authorize"),
+        ("ambiguous", "(matches=2)"),
+        (
+            "digest",
+            "consumption intent is empty, inconsistent, or forged",
+        ),
+        ("missing", "has no typed resource consumption intents"),
+        ("oversized", "exceeds max_operation_outcomes"),
     ] {
         let (mut simulation, packet, _) = prepared(fault);
         let before = read_resources(&simulation);
-        enqueue_resource_adapter_operation(&mut simulation, SimTime::EPOCH, &packet)
-            .expect("untrusted packet ingress");
-        let error = simulation
-            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-            .expect_err(fault);
-        assert_eq!(error.code, expected, "{fault}: {error:?}");
+        let detail = skipped(&mut simulation, &packet, fault);
+        assert!(
+            detail.contains(expected),
+            "{fault}: {detail} does not name its check"
+        );
         assert_eq!(
             before,
             read_resources(&simulation),
@@ -597,11 +632,7 @@ fn malformed_authorizations_and_forged_packets_roll_back_without_spending_lease(
             _ => unreachable!(),
         }
         let before = read_resources(&simulation);
-        enqueue_resource_adapter_operation(&mut simulation, SimTime::EPOCH, &packet)
-            .expect("untrusted packet ingress");
-        simulation
-            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-            .expect_err(fault);
+        skipped(&mut simulation, &packet, fault);
         assert_eq!(
             before,
             read_resources(&simulation),

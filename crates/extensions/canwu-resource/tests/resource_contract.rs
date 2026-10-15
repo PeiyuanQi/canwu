@@ -3447,16 +3447,40 @@ fn canonical_external_participant_ingress_requires_exact_coordinator_payload_and
         .expect("forged runtime");
     let mut forged_request = request;
     forged_request.holder = holder(2);
-    enqueue_resource_completion_operation(
-        &mut forged,
-        SimTime::EPOCH,
-        &ResourceCompletionOperationV1::GrantExternalParticipant(forged_request),
-    )
-    .expect("forged external grant ingress queues as untrusted input");
-    let error = forged
+    let forged_operation = ResourceCompletionOperationV1::GrantExternalParticipant(forged_request);
+    let before = resource_state(&forged)
+        .expect("forged query")
+        .expect("forged resource state")
+        .1;
+    let queued =
+        enqueue_resource_completion_operation(&mut forged, SimTime::EPOCH, &forged_operation)
+            .expect("forged external grant ingress queues as untrusted input");
+    // The forged packet changes nothing and its boundary commits: a skip
+    // event names it, and its key stays free.
+    forged
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-        .expect_err("forged provider packet must fail before resource mutation");
-    assert_eq!(error.code, ErrorCode::InvalidAuthority);
+        .expect("a forged provider packet is skipped without failing its boundary");
+    assert_eq!(
+        resource_state(&forged)
+            .expect("forged query")
+            .expect("forged resource state")
+            .1,
+        before
+    );
+    let skips = forged
+        .events()
+        .iter()
+        .filter_map(ResourceIngressSkipV1::from_event)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        skips,
+        [ResourceIngressSkipV1 {
+            ingress: queued.ingress_id,
+            reason: ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            operation_key: Some(forged_operation.operation_key()),
+            deferred_until: None,
+        }]
+    );
 }
 
 #[test]

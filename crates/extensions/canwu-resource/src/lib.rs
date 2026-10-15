@@ -24,6 +24,7 @@ mod model;
 mod plugin;
 mod query;
 mod runtime;
+mod skip;
 
 pub use archive::*;
 pub use lease::*;
@@ -31,6 +32,7 @@ pub use model::*;
 pub use plugin::*;
 pub use query::*;
 pub use runtime::*;
+pub use skip::*;
 
 /// Persisted plugin identity.
 pub const PLUGIN_NAME: &str = "canwu-resource";

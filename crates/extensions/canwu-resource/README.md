@@ -29,10 +29,10 @@ consumptions, fulfillments, and outcomes carry exact typed identities and
 revisions. Implicit unit conversion is forbidden. Every operation has a stable
 `ResourceOperationKey`; replaying the same request returns the original
 terminal `ResourceOperationOutcome`, while reusing the key with different
-content fails. A tracked command that does so is refused at admission, or,
-when it was admitted before the first request settled, is left unsettled
-without failing its boundary. Keys under `resource:completion:` are reserved
-for completion operations.
+content fails. A tracked command that does so is refused at admission; a
+packet that reaches settlement with such a key, on any ingress, settles
+nothing and is named by a skip event (see "Skipped packets"). Keys under
+`resource:completion:` are reserved for completion operations.
 
 Allocation is deterministic by descending priority, due time, domain-provided
 tie-break key, admitted sequence, and demand ID. Protected floors, minimum
@@ -171,8 +171,9 @@ An acquisition persisted in `ResourceState` reserves
 `MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE` terminal slots. Admission includes all
 active reservations in archive backpressure, while grant/prepare/activate and
 already-certified debit or terminal settlement consume those reserved slots.
-Consequently a full hot archive rejects the next lifecycle before player cost
-but cannot strand an accepted transfer or certified consumption.
+Consequently a full hot archive skips the next lifecycle before player cost
+(see "Skipped packets") but keeps the room an accepted transfer or certified
+consumption reserved.
 
 ### Single-step lease
 
@@ -215,7 +216,7 @@ four-step operations already have.
 
 A domain refusal is the operation's recorded rejection and leaves no
 acquisition, grant, lock, or spent request token behind. That includes what
-the plugin finds against the simulation view, which fails the boundary on the
+the plugin finds against the simulation view, which skips the packet on the
 four-step path: an eligibility time that is not the boundary time, an
 external record version that is not current, or a record kind the plugin was
 not configured to read. A single step never resumes an acquisition or grant
@@ -230,23 +231,18 @@ operation key, so a retry names a new acquisition id. An archive commit in
 the same boundary settles first, so the commit applies to the root it was
 prepared from and the lease is taken on the root the commit left.
 
-Three things are not recorded and fail the boundary that settles a single
-step, as they do for any resource operation:
-
-- **No room.** The check asks for the whole lease before anything is
-  recorded: `2 + 16` archive candidate slots and `1 + 16` hot outcome slots,
-  beside the 16 of each that every active lease reserves. A single step fits
-  while `hot terminal records + 16 x active leases + 18 <=
-  max_archive_candidates`; with the canonical 256 and no backlog the
-  fifteenth concurrently active lease is the last. The room is asked for
-  even when the request would be refused.
-- **An archive lookup that fails.** A missing, forged, or unreadable archive
-  object is an error, never a miss.
-- **The state byte cap.**
-
-A host application checks headroom before it queues a single step. An archive
-commit frees room taken by hot terminal records and may be queued behind the
-step. It frees nothing held by the reservations of active leases.
+Room is measured on the result, as for every resource operation. A refused
+single step needs room for its outcome only. An applied one needs `2 + 16`
+archive candidate slots (its outcome, its receipt, and the reserved terminal
+path) and `1 + 16` hot outcome slots, beside the 16 of each that every active
+lease reserves: it fits while `hot terminal records + 16 x active leases + 18
+<= max_archive_candidates`, so with the canonical 256 and no backlog the
+fifteenth concurrently active lease is the last. One that does not fit is
+skipped, not failed: `archive_backlog` when an archive commit would make room,
+`reserved_capacity` when the room is held by the reservations of active
+leases, which only their completion, release, or expiry frees. An archive
+lookup that fails (a missing, forged, or unreadable archive object, never a
+miss) still fails the boundary.
 
 What a host application has to watch:
 
@@ -292,14 +288,12 @@ operation it may send as a tracked command:
   hold: admission resolves the holder of a tracked `Abort` from the
   acquisition in the root and refuses anyone else.
 
-A packet on the completion ingress whose key belongs to a different request,
-in the root or the archive, settles nothing, and its boundary commits. The
-same holds for a tracked command admitted before the request that takes its
-key had settled. Such a skip leaves no record of its own, and a skipped
-command stays `Accepted`. The outcome under the key is the other request's:
-a host application compares `ResourceOperationRequestV1::request_digest` of
-what it sent with the outcome's `request_digest` and does not read that
-outcome as its own.
+A packet whose key belongs to a different request, in the root or the
+archive, settles nothing on any ingress, and its boundary commits. That
+includes a tracked command admitted before the request that takes its key had
+settled; the command stays `Accepted`. The skip event names the packet with
+the reason `operation_key_taken`, and the outcome under the key is the other
+request's.
 
 Identities that are valid by themselves may still be too long for the key of
 a step (`has_canonical_operation_key`). For a single step that includes the
@@ -308,15 +302,13 @@ acquisition and the grant. Such an operation is refused at admission or at
 `enqueue_resource_completion_operation`, and one that reaches settlement is a
 recorded `invalid_identifier` rejection.
 
-Two limits remain. `canwu-production` does not yet refuse an output request
-whose operation key lies under the reserved prefix when an execution starts:
-the output batch of such an execution is skipped, its boundary commits and
-nothing is credited, so the execution never receives its acknowledgement and
-its resource participant grant stays `Consumed`, holding its completion
-units, target locks, and 16 reserved outcome slots. And outside the reserved
-prefix, an allocation, adapter, or production output packet whose free-form
-operation key another issuer used first for a different request still fails
-its boundary, as on 0.14.0.
+`canwu-production` does not yet refuse an output request whose operation key
+lies under the reserved prefix, or is already used, when an execution
+starts: the output batch of such an execution is skipped with
+`reserved_operation_key` or `operation_key_taken`, nothing is credited, and
+the execution never receives its acknowledgement; its resource participant
+grant stays `Consumed`, holding its completion units, target locks, and 16
+reserved outcome slots.
 
 ## Protected floors
 
@@ -394,14 +386,92 @@ another account or demand still refers to it.
 A refusal of `SetProtectedFloor` is recorded: as the operation's rejected
 outcome, or on the command when authority or the operation key refuses it at
 admission. A command admitted before the request that takes its key has
-settled is left unsettled: its packet settles nothing and the boundary does
-not fail. The skip leaves no record of its own and the command stays
-`Accepted`; the outcome under the key is the other request's, which a host
-application tells by comparing `ResourceOperationRequestV1::request_digest`.
-This holds for every tracked resource command. What still fails the
-boundary, as for any resource operation, is a request that does not fit the
-outcome and archive budgets of the root, an archive lookup that fails, and
-the state byte cap.
+settled, or whose result does not fit the root, settles nothing and is named
+by a skip event; the command stays `Accepted`. This holds for every tracked
+resource command. An archive lookup that fails still fails the boundary.
+
+## Skipped packets
+
+No packet a host application or a holder can send fails a resource boundary.
+A packet that cannot settle for an expected reason changes nothing, its
+boundary commits, and the plugin emits one `RESOURCE_INGRESS_SKIPPED_EVENT`
+(`canwu.resource.ingress_skipped.v1`) naming its ingress id, the operation key
+it carried, and a reason; `ResourceIngressSkipV1::from_event` reads it back.
+An event naming an entity the run does not hold would fail the boundary, so
+the event names as its affected entity only a holder the run admitted, the
+holder of a tracked command or the requester of an allocation pass, and only
+when it is a registry entity rather than the entity of a domain record, which
+may be gone when the packet settles. The holder of the external participant a
+production output batch or an external participant step belongs to was never
+checked against the run's entities, so the event names it in its detail only
+(`the work belongs to holder {holder}`). For the same reason the settlement
+event names only admitted, registered holders, and
+`enqueue_resource_allocation` refuses a requester that is not an entity of
+the run. The reasons (`ResourceIngressSkipReasonV1`):
+
+- `operation_key_taken`: a different request holds the key;
+- `reserved_operation_key`: a request that is not a completion operation
+  names a key under `resource:completion:`;
+- `failed_settlement_checks`: the packet does not decode or fails the checks
+  its ingress makes at settlement (its tracked command, provider binding,
+  certificate, boundary time, current evidence, or a refused credit of a
+  production output batch);
+- `archive_backlog`, `reserved_capacity`, `root_limit`: its result does not
+  fit the root; the same request settles once room returns. The detail of a
+  `reserved_capacity` skip says when no archive commit or lease release can
+  ever make room: work that would not fit even with an empty backlog and
+  every reservation free. Room reserved for finished participants whose
+  reports wait returns once the reports publish and a commit clears them, for
+  work an admitted lease certifies as well. A production
+  output batch settles every credit or none, and its room is measured for the
+  whole batch. Operations may fill the state byte cap only up to
+  `ResourceLimitsV1::operation_state_bytes`, which leaves
+  `MAINTENANCE_STATE_BYTE_RESERVE` (64 KiB, or a quarter of a smaller cap)
+  for the root's maintenance writes.
+
+Work another plugin scheduled is never handed to the host application. A
+production output batch, or a completion step a plugin scheduled that can
+settle later as the same step (`Prepare`, `Abort`, `Release`, and the
+external participant's prepare, complete, and release), that does not fit the
+root is deferred while waiting can make room: the plugin queues it to itself
+as a `RESOURCE_DEFERRED_INGRESS` packet, an internal ingress no host can
+queue, due one minute later, the delay doubling with each further deferral
+up to 1,024 minutes, retimes a batch's credits to that instant, and emits the
+event with `deferred_until` set and the participant's holder named in its
+detail. Work waiting on an archive backlog or on room
+leases reserve (or finished participants whose reports wait) is retried until
+the commit, release, or publication that makes room; work
+waiting on the byte cap is skipped after the 1,024-minute retry; work no
+commit or release can make room for, and steps bound to their boundary time
+(an acquisition, a grant, an activation, a consumption, an expiry, a single
+step), are skipped at once. While a deferral waits the queue is not empty, so
+the run cannot seal. Adapter packets a plugin scheduled are skipped, because
+their sender (the force-supply reference) dispatches again every consumption
+without an outcome. A batch skipped for room, or a deferred batch whose
+output account changed revision while it waited or whose output key another
+request took, leaves its execution pending. The acknowledgement the plugin
+schedules to the production plugin once a batch settles carries `settled_at`,
+the instant the credits settled.
+
+A resend whose outcome is already recorded settles nothing and leaves no
+event. What a completion step sets in motion (the production plugin's
+acknowledgement, an expiry tick) follows only an applied outcome. An expiry
+skipped for room stops the plugin's expiry ticks, which would otherwise meet
+the same root at the same instant without end; the next applied archive
+commit schedules a tick while an expiry is due, and
+`enqueue_resource_completion_expiry_tick` queues one for a host application.
+
+What still fails a resource boundary is an invalid record or an engine
+invariant: an archive object that is missing, forged, or unreadable during a
+key lookup; a forged archive commit or retention acknowledgement; a root that
+does not validate after settlement for a reason other than a limit;
+maintenance writes (stale commits' receipts and handles, the report system's
+scheduling state) that pass the byte reserve in one boundary; and arithmetic
+or encoding failure. See `docs/proposals/resource-refusals-without-stalls.md`.
+
+A tracked `Acquire` must be eligible at the instant it is admitted and cite
+the current version of its evidence; settlement checks it again as the
+completion ingress does.
 
 ## Reports and restore
 
@@ -435,9 +505,10 @@ is not a candidate, stays in the root outside the budgets until
 A commit queued beside it against a full root still applies. An
 acknowledgement retires the retention handle it names and every stale receipt
 recorded under that handle, so the same batch queued twice leaves no stale
-receipt behind. Finalize each commit before the next commit archives its
-receipt: a call made later fails, and the state-side handle and the store-side
-handle in `DurableIngress` then stay permanently. Within one boundary, archive
+receipt behind. Finalizing reads how the commit settled from the state-side
+retention handle, which stays until its acknowledgement settles, so a commit
+can also be finalized after a later commit archived its receipt. Within one
+boundary, archive
 commits and retention acknowledgements settle before every other packet of
 the resource plugin, so a commit prepared from the root the boundary started
 from applies even when an operation was admitted ahead of it. Releasing a
@@ -458,18 +529,20 @@ records: in the recorded baseline about 13 ms and 0.3 MB at 256 records,
 52 ms and 1.2 MB at 1,024, and 246 ms and 4.6 MB at 4,000
 (`benchmarks/baselines/2026-10-13-resource-archive-full.json`). Choose the
 budget from that cost at the backlog you accept, and archive often rather than
-run with a large backlog. The budget also has a floor: it must cover the
-backlog plus every terminal record the operations due at one boundary can
-produce, between one and eight per operation by its kind, besides the slots
-reserved for admitted completion lifecycles. An operation that does not fit
-fails its boundary and stays queued until an archive commit makes room; it is
-not a recorded rejection. That commit may be queued behind the operation,
-because archive commits settle first. When a boundary fails for this
-backpressure, queue one commit that selects every candidate: a commit queued
-behind another that was prepared from the same root goes stale once the first
-applies. An applied commit leaves its own maintenance receipt as a candidate,
-so the most room a commit can make is the budget minus one, and operations due
-at one boundary that need more than that cannot settle under the budget.
+run with a large backlog. Room is measured on what an operation leaves: a
+refused operation needs one slot for its outcome, an applied one a slot for
+every terminal record it adds, beside the slots reserved for admitted
+completion lifecycles. An operation that does not fit settles nothing and is
+named by a skip event with `archive_backlog` (an archive commit makes room) or
+`reserved_capacity` (it does not); it is not a recorded rejection, and its
+key stays free. Send it again once room returns. With `archive_backlog`, queue
+one commit that selects every candidate, in the same boundary if you like,
+because archive commits settle first. A commit queued behind another that was
+prepared from the same root goes stale once the first applies, and an applied
+commit leaves its own maintenance receipt as a candidate, so one commit makes
+room for the budget minus one record. Operations beyond that are skipped
+again and settle behind the next commit. Nothing is queued for a skipped
+operation, so a long shortage costs events and resends, never a stopped run.
 
 Every operation asks the archive whether its operation key was used before.
 Each commit directory commits to a cumulative lookup index

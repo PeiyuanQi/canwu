@@ -3,6 +3,16 @@
 Status: implemented in 0.15.0. It closes downstream gaps G-52 and G-54 in
 `canwu-resource`.
 
+Changed in 0.16.0 by
+[resource refusals without stalls](resource-refusals-without-stalls.md): an
+operation that does not fit the budget no longer fails its boundary and stays
+queued. It is skipped with an event, nothing is recorded, and it settles when
+sent again, behind as many commits as it takes. Room is measured on the
+result, so a refusal needs room for its outcome only.
+`finalize_resource_archive_retention` reads the disposition from the
+state-side retention handle and succeeds after a later commit archived the
+receipt. The passages below that say otherwise describe 0.15.0.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),

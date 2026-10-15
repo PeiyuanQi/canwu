@@ -14,9 +14,9 @@
 //! failing the boundary for ever, and acknowledgements that arrive twice or
 //! after their receipt was archived settle too. The fourth fixture queues one
 //! batch twice: its acknowledgement retires the stale receipt of the
-//! duplicate. The fifth queues an operation that does not fit a full budget
-//! and, behind it, the commit that makes room: the commit settles first and
-//! the operation after it.
+//! duplicate. The fifth queues an operation that does not fit a full budget:
+//! it is skipped, and sent again with the commit that makes room queued
+//! behind it, the commit settles first and the operation after it.
 
 use canwu_api::{
     BoundaryRequest, Canwu, EntityRef, KnowledgeHolderRef, PersonId, Scenario, SimTime,
@@ -569,23 +569,37 @@ fn an_archive_commit_settles_ahead_of_an_operation_queued_before_it() {
     let archive = MemoryArchive::default();
     let mut canwu = runtime(&plugin, resource, &archive);
 
-    // The budget is full, so the operation does not fit: its boundary fails,
-    // nothing is recorded, and the operation stays queued.
+    // The budget is full, so the operation does not fit: it settles nothing,
+    // its boundary commits, and a skip event names it and says that an
+    // archive commit makes room.
     let full = state(&canwu);
     let blocked = allocation(&canwu, "fixture:allocate:blocked");
     let at = canwu.time();
-    enqueue_resource_allocation(&mut canwu, at, &holder(), &blocked).expect("enqueue allocation");
-    canwu
-        .settle_boundary(BoundaryRequest::at(at))
-        .expect_err("an operation that does not fit fails its boundary");
+    let skipped = enqueue_resource_allocation(&mut canwu, at, &holder(), &blocked)
+        .expect("enqueue allocation");
+    settle(&mut canwu);
     assert_eq!(state(&canwu), full);
+    assert_eq!(
+        canwu
+            .events()
+            .iter()
+            .filter_map(ResourceIngressSkipV1::from_event)
+            .collect::<Vec<_>>(),
+        [ResourceIngressSkipV1 {
+            ingress: skipped.ingress_id,
+            reason: ResourceIngressSkipReasonV1::ArchiveBacklog,
+            operation_key: Some(blocked.operation_key.clone()),
+            deferred_until: None,
+        }]
+    );
 
-    // The commit that makes room is queued behind the operation. It settles
-    // first, against the root it was prepared from, and the operation after
-    // it in the same boundary.
+    // The operation is sent again, and the commit that makes room is queued
+    // behind it. The commit settles first, against the root it was prepared
+    // from, and the operation after it in the same boundary.
     let commit = full
         .prepare_resource_archive(4, &archive)
         .expect("commit of every candidate");
+    enqueue_resource_allocation(&mut canwu, at, &holder(), &blocked).expect("enqueue allocation");
     enqueue_resource_archive(&mut canwu, &commit, &archive).expect("enqueue");
     settle(&mut canwu);
     let settled = state(&canwu);

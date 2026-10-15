@@ -6,15 +6,15 @@ use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
     BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DomainRecord, DomainRecordKind, DomainRecordMutation, DomainRecordSchema,
-    DomainRecordType, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressPayload, Issuer,
-    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
-    KnowledgeSubject, KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema,
-    PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
-    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginIngressTarget,
-    PluginKnowledgeSchema, PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective,
-    payload_required_evidence_continuation_property_v1,
+    DomainRecordType, EntityRef, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressId,
+    IngressPayload, IngressRecord, Issuer, KnowledgeOrigin, KnowledgeRecordDraft,
+    KnowledgeRecordKind, KnowledgeSchemaId, KnowledgeSubject, KnowledgeSubjectSchema,
+    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeWriteGrant,
+    PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadSchema, PluginActionDescriptor,
+    PluginArchiveObjectProvider, PluginArchiveRetention, PluginIngressDescriptor,
+    PluginIngressPermit, PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema,
+    PluginRegistrar, SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility,
+    SystemCadence, SystemDirective, payload_required_evidence_continuation_property_v1,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -30,9 +30,20 @@ pub const RESOURCE_ARCHIVE_COMMIT_INGRESS: &str = "resource_archive_commit_v1";
 pub const RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS: &str = "resource_archive_retention_ack_v1";
 pub const RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS: &str = "resource_completion_expiry_tick_v1";
 pub const RESOURCE_REPORT_WAKE_INGRESS: &str = "resource_report_wake_v1";
+/// Internal packet the resource plugin queues to itself for work another
+/// plugin scheduled (a production output batch, or a completion step not
+/// bound to its boundary time, such as an external participant's completion)
+/// whose result did not fit the root while waiting can make room for it.
+/// It carries the deferred packet and the count of its deferrals, and comes
+/// due one minute after the first deferral, the delay doubling with each
+/// further one up to 1,024 minutes. Work waiting on the byte cap is skipped
+/// after the 1,024-minute retry. It is internal ingress whose permit is never
+/// handed out, so no host can queue it; the resource plugin's lifecycle
+/// system schedules it.
+pub const RESOURCE_DEFERRED_INGRESS: &str = "resource_deferred_packet_v1";
 pub const RESOURCE_REPORT_KNOWLEDGE: &str = "resource_report";
 pub const RESOURCE_SEMANTIC_HASH: &str =
-    "282f0f175c84e786a74d7e5c8bbdcb00035bbc96821cd4220a11281f5d49a440";
+    "3d7a56a2b7cf0f1a1b2b0e5b5d1a95b0d1b3c9e0f4f61c2e8b7d0a3c5e9f1b24";
 
 const RESOURCE_REPORT_SCHEMA_HASH: &str =
     "2e271b9ea79404e662ba51360ce8061421ae896c1e70b09e99feb8d0de01a007";
@@ -49,9 +60,17 @@ pub struct ResourceArchiveIngressReceiptV1 {
     pub directory_root: String,
 }
 
+/// The acknowledgement of one settled archive commit's retention. It names
+/// the commit by its maintenance receipt while the receipt is in the root,
+/// and by its retention handle once a later commit has archived the receipt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct ResourceArchiveRetentionAcknowledgementV1 {
-    receipt: crate::ResourceArchiveMaintenanceReceiptV1,
+#[serde(rename_all = "snake_case")]
+enum ResourceArchiveRetentionAcknowledgementV1 {
+    Receipt(crate::ResourceArchiveMaintenanceReceiptV1),
+    Handle {
+        retention_handle_id: String,
+        directory_root: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -426,6 +445,10 @@ impl SimulationPlugin for ResourcePlugin {
             "canwu.resource.operation_settled.v1",
             EventAudience::AffectedActors,
         )?;
+        registrar.register_event_audience(
+            crate::RESOURCE_INGRESS_SKIPPED_EVENT,
+            EventAudience::AffectedActors,
+        )?;
         registrar.register_archive_reachability_participant(resource_archive_reachability)?;
 
         // The administrative domain-record read lets admission resolve an
@@ -542,6 +565,15 @@ impl SimulationPlugin for ResourcePlugin {
             class: IngressClass::Acknowledgement,
             payload_schema: PayloadSchema::Any,
         })?;
+        // Its permit is never handed out: only the lifecycle system queues
+        // it, to the resource plugin itself.
+        registrar.register_internal_ingress(PluginIngressDescriptor {
+            name: RESOURCE_DEFERRED_INGRESS.to_owned(),
+            description: "Settle plugin-scheduled resource work deferred for want of room"
+                .to_owned(),
+            class: IngressClass::ScheduledSystem,
+            payload_schema: PayloadSchema::Any,
+        })?;
         registrar.register_ingress(PluginIngressDescriptor {
             name: RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS.to_owned(),
             description: "Advance bounded completion-lease expiry without coordinator liveness"
@@ -589,8 +621,15 @@ impl SimulationPlugin for ResourcePlugin {
                 target_plugin: PLUGIN_NAME.to_owned(),
                 packet_type: RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS.to_owned(),
             },
+            PluginIngressTarget {
+                target_plugin: PLUGIN_NAME.to_owned(),
+                packet_type: RESOURCE_DEFERRED_INGRESS.to_owned(),
+            },
         ];
-        lifecycle.emits = vec!["canwu.resource.operation_settled.v1".to_owned()];
+        lifecycle.emits = vec![
+            "canwu.resource.operation_settled.v1".to_owned(),
+            crate::RESOURCE_INGRESS_SKIPPED_EVENT.to_owned(),
+        ];
         lifecycle.visibility = StateVisibility::SameBoundary;
         registrar.register_boundary_system(lifecycle, settle_resource_lifecycle)?;
 
@@ -675,6 +714,7 @@ fn admit_resource_command(
         return Ok(Vec::new());
     }
     validate_resource_authority(view, context, &value)?;
+    validate_tracked_acquisition(view, context, &value.request)?;
     // A key whose outcome is still in the root belongs to the request that
     // settled it. Refusing a different request here records the refusal on
     // the command, as for an archived key. Authority is checked first, so
@@ -703,6 +743,401 @@ fn admit_resource_command(
     }])
 }
 
+/// What the lifecycle system settles in one boundary: whether the root
+/// changed, the holders its settlement event names, and the directives it
+/// proposes, skip events and deferred work included.
+#[derive(Default)]
+struct LifecycleSettlement {
+    changed: bool,
+    affected: Vec<EntityRef>,
+    directives: Vec<BoundaryDirective>,
+    /// Whether this boundary already schedules a completion expiry tick.
+    expiry_tick: bool,
+}
+
+const OPERATION_KEY_TAKEN_DETAIL: &str =
+    "another request holds the operation key; the outcome under the key is that request's";
+const RESERVED_OPERATION_KEY_DETAIL: &str =
+    "operation keys under `resource:completion:` are reserved for completion operations";
+
+/// Most doublings of the delay before deferred work is settled again: the
+/// delay grows from one minute to 1,024 minutes and stays there.
+const MAX_DEFERRAL_BACKOFF_DOUBLINGS: u32 = 10;
+
+/// Where an admitted resource packet came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PacketOrigin {
+    /// The host application or a tracked command. A packet that does not fit
+    /// the root is skipped, and its sender sends it again.
+    Host,
+    /// A plugin's boundary system, which may never send it again. A packet
+    /// that does not fit the root is deferred instead; `deferrals` counts the
+    /// times the resource plugin has deferred it so far.
+    Plugin { deferrals: u32 },
+}
+
+impl PacketOrigin {
+    /// A packet whose cause is a boundary was scheduled by a plugin: the
+    /// kernel refuses that cause on ingress a host application queues.
+    fn of(ingress: &IngressRecord) -> Self {
+        match ingress.cause {
+            Some(CauseRef::Boundary(_)) => Self::Plugin { deferrals: 0 },
+            _ => Self::Host,
+        }
+    }
+}
+
+/// Work another plugin scheduled that the resource plugin deferred because
+/// it did not fit the root, as the packet it queues to itself.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ResourceDeferredPacketV1 {
+    /// [`RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS`] or
+    /// [`RESOURCE_COMPLETION_INGRESS`].
+    packet_type: String,
+    payload: Value,
+    /// The times the work has been deferred, this deferral included.
+    deferrals: u32,
+}
+
+/// Who a skip event names.
+#[derive(Clone, Copy)]
+enum EventHolder<'a> {
+    /// Nobody.
+    Nobody,
+    /// A holder the run admitted: a tracked command's subject, which the
+    /// kernel admitted with the command, or an allocation pass's requester,
+    /// which `enqueue_resource_allocation` checks. The event names it as its
+    /// affected entity when it is a registered one ([`registered_holder`]).
+    Admitted(&'a canwu_api::KnowledgeHolderRef),
+    /// The holder of an external participant, which the coordinator plugin
+    /// vouched for but the run never checked against its entities. An event
+    /// naming an entity the run does not hold fails its boundary, and a
+    /// boundary system cannot ask the registry, so the holder is named in
+    /// the event's detail only.
+    Participant(&'a canwu_api::KnowledgeHolderRef),
+}
+
+/// The entity a resource event may name for `holder`: one of the engine's
+/// entity registry, which never loses an identity. An event that names a
+/// missing entity fails its boundary, and the entity of a domain record may
+/// be gone by the time a packet settles, so such a holder is not named.
+fn registered_holder(holder: &canwu_api::KnowledgeHolderRef) -> Option<EntityRef> {
+    let entity = holder_entity(holder);
+    (!matches!(entity, EntityRef::Domain(_))).then_some(entity)
+}
+
+/// The reason code and detail of a skip or deferral for want of room.
+const fn shortage_reason(
+    shortage: crate::RoomShortage,
+) -> (crate::ResourceIngressSkipReasonV1, &'static str) {
+    match shortage {
+        crate::RoomShortage::ArchiveBacklog => (
+            crate::ResourceIngressSkipReasonV1::ArchiveBacklog,
+            "the result does not fit the archive budgets of the root; an archive commit of the hot candidates makes room",
+        ),
+        crate::RoomShortage::ReservedCapacity { permanent: false } => (
+            crate::ResourceIngressSkipReasonV1::ReservedCapacity,
+            "the result does not fit beside the room admitted completion leases, or finished participants whose reports wait, reserve; an archive commit alone does not make room",
+        ),
+        crate::RoomShortage::ReservedCapacity { permanent: true } => (
+            crate::ResourceIngressSkipReasonV1::ReservedCapacity,
+            "the result does not fit this budget even beside an empty backlog; no archive commit or lease release makes room for it",
+        ),
+        crate::RoomShortage::RootLimit => (
+            crate::ResourceIngressSkipReasonV1::RootLimit,
+            "the result passes a limit of the root",
+        ),
+    }
+}
+
+/// Whether plugin-scheduled work that found no room is worth waiting for.
+///
+/// An archive backlog is cured by an archive commit, and room reserved by
+/// leases by their completion, release, or expiry, or, for the slots of
+/// finished participants, by the publication of their reports and an
+/// archive commit: such work waits as long as it takes. Room no commit or
+/// release can make never comes, so that work is skipped at once. A root limit, in practice the byte cap, may or may not
+/// pass, so the work waits until its delay has grown to the 1,024-minute cap
+/// and is skipped when it still finds no room after that wait.
+const fn deferral_is_worthwhile(shortage: crate::RoomShortage, deferrals: u32) -> bool {
+    match shortage {
+        crate::RoomShortage::ArchiveBacklog => true,
+        crate::RoomShortage::ReservedCapacity { permanent } => !permanent,
+        crate::RoomShortage::RootLimit => deferrals <= MAX_DEFERRAL_BACKOFF_DOUBLINGS,
+    }
+}
+
+/// Whether a completion step can settle at a later instant than the one it
+/// was scheduled for. A step that names its boundary time or boundary, or
+/// starts a lease or a grant at it (an acquisition, a grant, an activation,
+/// a consumption, an expiry, a single step), would fail its time checks
+/// later, so it is never deferred.
+const fn completion_step_can_wait(operation: &crate::ResourceCompletionOperationV1) -> bool {
+    matches!(
+        operation,
+        crate::ResourceCompletionOperationV1::Prepare(_)
+            | crate::ResourceCompletionOperationV1::Abort(_)
+            | crate::ResourceCompletionOperationV1::Release(_)
+            | crate::ResourceCompletionOperationV1::PrepareExternalParticipant(_)
+            | crate::ResourceCompletionOperationV1::CompleteExternalParticipant(_)
+            | crate::ResourceCompletionOperationV1::ReleaseExternalParticipant(_)
+    )
+}
+
+/// Whether a completion or external participant expiry is due by `boundary`.
+fn expiry_overdue(state: &crate::ResourceState, boundary: u64) -> bool {
+    state
+        .completion_leases
+        .expiry_due
+        .range(..=boundary)
+        .any(|(_, values)| !values.is_empty())
+        || state
+            .external_completion_participants
+            .expiry_due
+            .range(..=boundary)
+            .any(|(_, values)| !values.is_empty())
+}
+
+/// The holder of the external participant a completion step belongs to, as
+/// the root records it. The coordinator plugin vouched for that holder when
+/// the participant was granted.
+fn external_participant_holder(
+    state: &crate::ResourceState,
+    operation: &crate::ResourceCompletionOperationV1,
+) -> Option<canwu_api::KnowledgeHolderRef> {
+    let acquisition = match operation {
+        crate::ResourceCompletionOperationV1::PrepareExternalParticipant(request) => {
+            &request.acquisition
+        }
+        crate::ResourceCompletionOperationV1::ConsumeExternalParticipant(request) => {
+            &request.certificate.acquisition
+        }
+        crate::ResourceCompletionOperationV1::CompleteExternalParticipant(request) => {
+            &request.acquisition
+        }
+        crate::ResourceCompletionOperationV1::ReleaseExternalParticipant(request) => {
+            &request.acquisition
+        }
+        _ => return None,
+    };
+    state
+        .external_completion_participants
+        .participant(acquisition)
+        .map(|participant| participant.holder.clone())
+}
+
+impl LifecycleSettlement {
+    /// Records that the packet `ingress` settled nothing, in one
+    /// [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`] that names `holder` as
+    /// [`EventHolder`] says.
+    fn skip(
+        &mut self,
+        ingress: IngressId,
+        reason: crate::ResourceIngressSkipReasonV1,
+        operation_key: Option<&crate::ResourceOperationKey>,
+        detail: &str,
+        holder: EventHolder<'_>,
+    ) {
+        self.emit_skip(
+            crate::ResourceIngressSkipV1 {
+                ingress,
+                reason,
+                operation_key: operation_key.cloned(),
+                deferred_until: None,
+            },
+            detail,
+            holder,
+        );
+    }
+
+    fn emit_skip(
+        &mut self,
+        skip: crate::ResourceIngressSkipV1,
+        detail: &str,
+        holder: EventHolder<'_>,
+    ) {
+        let (affected, detail) = match holder {
+            EventHolder::Nobody => (Vec::new(), detail.to_owned()),
+            EventHolder::Admitted(holder) => (
+                registered_holder(holder).into_iter().collect(),
+                detail.to_owned(),
+            ),
+            EventHolder::Participant(holder) => (
+                Vec::new(),
+                format!(
+                    "{detail}; the work belongs to holder {}",
+                    holder_entity(holder)
+                ),
+            ),
+        };
+        self.directives.push(BoundaryDirective::Emit {
+            event_type: crate::RESOURCE_INGRESS_SKIPPED_EVENT.to_owned(),
+            summary: skip.summary(&detail),
+            affected,
+        });
+    }
+
+    /// Records that the packet `ingress` settled nothing because it does not
+    /// decode as a `label`. The detail is fixed: the decoder's message could
+    /// repeat text the sender supplied.
+    fn skip_undecodable(&mut self, ingress: IngressId, label: &str) {
+        self.skip(
+            ingress,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            None,
+            &format!("the packet does not decode as a {label}"),
+            EventHolder::Nobody,
+        );
+    }
+
+    /// Records that the packet `ingress` settled nothing because its result
+    /// does not fit the root.
+    fn skip_for_room(
+        &mut self,
+        ingress: IngressId,
+        shortage: crate::RoomShortage,
+        operation_key: Option<&crate::ResourceOperationKey>,
+        holder: EventHolder<'_>,
+    ) {
+        let (reason, detail) = shortage_reason(shortage);
+        self.skip(ingress, reason, operation_key, detail, holder);
+    }
+
+    /// Settles nothing of plugin-scheduled work that does not fit the root,
+    /// and queues it to the resource plugin itself for a later instant, as a
+    /// [`RESOURCE_DEFERRED_INGRESS`] packet. The plugin that scheduled the
+    /// work may never send it again, so it is not handed to the host
+    /// application. The callers defer only work that can settle later and
+    /// whose shortage can pass ([`deferral_is_worthwhile`]).
+    ///
+    /// The delay is one minute after the first deferral and doubles with each
+    /// further one, up to 1,024 minutes: never the same instant, which would
+    /// meet the same root without end, and one small packet per retry however
+    /// long the shortage lasts. A production output batch is retimed to the
+    /// instant it is due: each credit's `at` becomes that instant. The event
+    /// names the instant and `holder`.
+    fn defer(
+        &mut self,
+        ingress: IngressId,
+        at: SimTime,
+        shortage: crate::RoomShortage,
+        work: DeferredWork<'_>,
+        holder: EventHolder<'_>,
+    ) -> Result<(), CanwuError> {
+        let delay = canwu_api::SimDuration::minutes(
+            1_i64 << work.deferrals.min(MAX_DEFERRAL_BACKOFF_DOUBLINGS),
+        );
+        let Some(due) = at.checked_add(delay) else {
+            self.skip_for_room(ingress, shortage, work.operation_key, holder);
+            return Ok(());
+        };
+        let payload = match work.packet {
+            DeferredPacket::OutputBatch(batch) => {
+                let mut batch = batch.clone();
+                for request in &mut batch.requests {
+                    request.at = due;
+                }
+                (RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS, encode(&batch)?)
+            }
+            DeferredPacket::Completion(operation) => {
+                (RESOURCE_COMPLETION_INGRESS, encode(operation)?)
+            }
+        };
+        self.directives
+            .push(BoundaryDirective::SchedulePluginIngress {
+                target_plugin: PLUGIN_NAME.to_owned(),
+                after: delay,
+                packet_type: RESOURCE_DEFERRED_INGRESS.to_owned(),
+                priority: 0,
+                payload: encode(&ResourceDeferredPacketV1 {
+                    packet_type: payload.0.to_owned(),
+                    payload: payload.1,
+                    deferrals: work.deferrals.saturating_add(1),
+                })?,
+                affected: Vec::new(),
+            });
+        let (reason, detail) = shortage_reason(shortage);
+        self.emit_skip(
+            crate::ResourceIngressSkipV1 {
+                ingress,
+                reason,
+                operation_key: work.operation_key.cloned(),
+                deferred_until: Some(due),
+            },
+            detail,
+            holder,
+        );
+        Ok(())
+    }
+
+    /// Schedules one completion expiry tick in this boundary, however many
+    /// settlements ask for one.
+    fn schedule_expiry_tick(&mut self) {
+        if !self.expiry_tick {
+            self.expiry_tick = true;
+            self.directives.push(completion_expiry_tick_directive());
+        }
+    }
+
+    /// Whether `request`'s operation key is free for it. A key whose outcome
+    /// is this request's settles nothing and leaves no event: the outcome is
+    /// the resend's own. A key another request holds settles nothing with a
+    /// skip event.
+    fn operation_key_is_free(
+        &mut self,
+        view: &SimulationView<'_>,
+        state: &crate::ResourceState,
+        request: &ResourceOperationRequestV1,
+        request_digest: &str,
+        ingress: IngressId,
+        holder: EventHolder<'_>,
+    ) -> Result<bool, CanwuError> {
+        Ok(
+            match operation_key_holder(view, state, request, request_digest)? {
+                OperationKeyHolder::Nobody => true,
+                OperationKeyHolder::ThisRequestInRoot
+                | OperationKeyHolder::ThisRequestInArchive => false,
+                OperationKeyHolder::AnotherRequest => {
+                    self.skip(
+                        ingress,
+                        crate::ResourceIngressSkipReasonV1::OperationKeyTaken,
+                        Some(&request.operation_key()),
+                        OPERATION_KEY_TAKEN_DETAIL,
+                        holder,
+                    );
+                    false
+                }
+            },
+        )
+    }
+}
+
+/// Plugin-scheduled work to defer.
+struct DeferredWork<'a> {
+    packet: DeferredPacket<'a>,
+    /// The times the work has been deferred before this deferral.
+    deferrals: u32,
+    operation_key: Option<&'a crate::ResourceOperationKey>,
+}
+
+enum DeferredPacket<'a> {
+    OutputBatch(&'a ResourceProductionOutputBatchV1),
+    Completion(&'a crate::ResourceCompletionOperationV1),
+}
+
+/// Settles the resource packets one boundary admitted, archive maintenance
+/// first.
+///
+/// No packet a host application or a holder can send fails the boundary. A
+/// packet that cannot settle for an expected reason (its key is taken or
+/// reserved, it fails its settlement checks, or its result does not fit the
+/// root) changes nothing and leaves a [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`].
+/// Work another plugin scheduled that does not fit the root is deferred to a
+/// later instant instead of skipped. What still fails the boundary is an
+/// invalid record or an engine invariant: an archive object that is missing,
+/// forged, or unreadable during a key lookup, a forged archive commit or
+/// retention acknowledgement, an invalid root after settlement, and
+/// arithmetic overflow.
 fn settle_resource_lifecycle(
     view: &SimulationView<'_>,
     context: &BoundaryContext,
@@ -714,9 +1149,7 @@ fn settle_resource_lifecycle(
         return Ok(BoundaryProposal::default());
     };
     let mut state = record.decode_payload::<ResourceRuntimeRecord>()?;
-    let mut changed = false;
-    let mut affected = Vec::new();
-    let mut directives = Vec::new();
+    let mut settlement = LifecycleSettlement::default();
     let admitted = archive_maintenance_first(view, &context.admitted_ingress)?;
     for ingress_id in &admitted {
         let Some(ingress) = view.ingress(*ingress_id)? else {
@@ -734,331 +1167,112 @@ fn settle_resource_lifecycle(
         if plugin != PLUGIN_NAME {
             continue;
         }
+        let origin = PacketOrigin::of(ingress);
         match packet_type.as_str() {
             RESOURCE_COMMAND_INGRESS => {
-                let admitted: AdmittedResourceCommandV1 =
-                    decode(payload, "admitted resource command")?;
-                validate_admitted_command(view, ingress.cause.as_ref(), &admitted)?;
-                if admitted.value.request.names_reserved_operation_key() {
-                    continue;
-                }
-                let request_digest = admitted
-                    .value
-                    .request
-                    .request_digest()
-                    .map_err(resource_canwu_error)?;
-                // An operation key belongs to the first request that settles
-                // under it. A command whose key another request holds, in the
-                // root or the archive, settles nothing: its packet is left
-                // out, as an archived resend is, and the boundary goes on.
-                // The outcome under the key names the request that owns it.
-                match operation_key_holder(view, &state, &admitted.value.request, &request_digest)?
-                {
-                    OperationKeyHolder::ThisRequestInArchive
-                    | OperationKeyHolder::AnotherRequest => continue,
-                    OperationKeyHolder::Nobody | OperationKeyHolder::ThisRequestInRoot => {}
-                }
-                state
-                    .apply_operation_at(&admitted.value.request, context.at)
-                    .map_err(resource_canwu_error)?;
-                affected.push(holder_entity(&admitted.value.subject));
-                changed = true;
+                settle_command_packet(
+                    view,
+                    context,
+                    ingress,
+                    payload,
+                    &mut state,
+                    &mut settlement,
+                )?;
             }
             RESOURCE_ADAPTER_INGRESS => {
-                let packet: ResourceAdapterOperationV1 =
-                    decode(payload, "resource adapter operation")?;
-                // `resource_adapter_ingress` refuses such a packet. One
-                // queued around it settles nothing and takes no key.
-                if packet.request.names_reserved_operation_key() {
-                    continue;
-                }
-                let request_digest =
-                    crate::canonical_digest("canwu.resource.operation-request.v1", &packet.request)
-                        .map_err(resource_canwu_error)?;
-                if archived_operation_outcome(view, &state, &packet.request, &request_digest)?
-                    .is_some()
-                {
-                    continue;
-                }
-                validate_adapter_packet(view, context.at, &packet, &state)?;
-                state
-                    .apply_operation_at(&packet.request, context.at)
-                    .map_err(resource_canwu_error)?;
-                changed = true;
+                settle_adapter_packet(
+                    view,
+                    context,
+                    ingress,
+                    payload,
+                    &mut state,
+                    &mut settlement,
+                )?;
             }
-            RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
-                let packet: ResourceProductionOutputBatchV1 =
-                    decode(payload, "production output batch")?;
-                // A credit may not take a completion operation's key. A
-                // batch that names one settles nothing.
-                if packet.requests.iter().any(|request| {
-                    request
-                        .operation_key
-                        .as_str()
-                        .starts_with(crate::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
-                }) {
-                    continue;
-                }
-                let execution =
-                    validate_production_output_batch(view, context.at, &packet, &state)?;
-                let mut candidate = state.clone();
-                let outcomes = candidate
-                    .apply_production_output_batch(&packet.requests)
-                    .map_err(resource_canwu_error)?;
-                state = candidate;
-                directives.push(BoundaryDirective::SchedulePluginIngress {
-                    target_plugin: "canwu-production".to_owned(),
-                    after: canwu_api::SimDuration::ZERO,
-                    packet_type: "production_output_ack_v1".to_owned(),
-                    priority: 0,
-                    payload: serde_json::json!({
-                        "execution": execution,
-                        "production_source": packet.provider_source,
-                        "outcomes": outcomes,
-                    }),
-                    affected: Vec::new(),
-                });
-                changed = true;
-            }
-            RESOURCE_ALLOCATION_INGRESS => {
-                let packet: ResourceAuthorizedAllocationV1 =
-                    decode(payload, "authorized resource allocation")?;
-                let operation = ResourceOperationRequestV1::Allocate(packet.request.clone());
-                if operation.names_reserved_operation_key() {
-                    continue;
-                }
-                let request_digest = crate::canonical_digest(
-                    "canwu.resource.authorized-allocation-request.v1",
-                    &(&packet.requester, &packet.request),
-                )
-                .map_err(resource_canwu_error)?;
-                if archived_operation_outcome(view, &state, &operation, &request_digest)?.is_some()
-                {
-                    continue;
-                }
-                state
-                    .apply_authorized_allocation(&packet.requester, &packet.request, context.at)
-                    .map_err(resource_canwu_error)?;
-                affected.push(holder_entity(&packet.requester));
-                changed = true;
-            }
-            RESOURCE_COMPLETION_INGRESS => {
-                let operation: crate::ResourceCompletionOperationV1 =
-                    decode(payload, "resource completion operation")?;
-                let request = ResourceOperationRequestV1::Completion(operation.clone());
-                let request_digest =
-                    crate::canonical_digest("canwu.resource.operation-request.v1", &request)
-                        .map_err(resource_canwu_error)?;
-                // A resend answered by the archive, and a packet whose key
-                // a different request holds, settle nothing. A holder's
-                // tracked `Acquire`, or `Abort` of its own lease, can take a
-                // key first, and that must not fail this boundary.
-                match operation_key_holder(view, &state, &request, &request_digest)? {
-                    OperationKeyHolder::ThisRequestInArchive
-                    | OperationKeyHolder::AnotherRequest => continue,
-                    OperationKeyHolder::Nobody | OperationKeyHolder::ThisRequestInRoot => {}
-                }
-                if let crate::ResourceCompletionOperationV1::SingleStepLease(lease) = &operation {
-                    // Every domain refusal of a single-step lease is its
-                    // recorded rejection. A request that does not fit the
-                    // outcome or archive budgets of the root is not one: it
-                    // is an error below. The step leaves an activated lease
-                    // or nothing, so it starts no expiry clock.
-                    let refusal = single_step_lease_refusal(view, context.at, lease, &state)?;
-                    state
-                        .apply_single_step_lease_with_external_validation(lease, refusal.as_ref())
-                        .map_err(resource_canwu_error)?;
-                    changed = true;
-                    continue;
-                }
-                validate_completion_ingress(view, context.at, &operation, &state)?;
-                let completed_external = match &operation {
-                    crate::ResourceCompletionOperationV1::CompleteExternalParticipant(request) => {
-                        Some(request.acquisition.clone())
-                    }
-                    _ => None,
-                };
-                let preparing_local = match &operation {
-                    crate::ResourceCompletionOperationV1::Prepare(request) => {
-                        Some(request.acquisition.clone())
-                    }
-                    _ => None,
-                };
-                let starts_expiry_clock = matches!(
-                    &operation,
-                    crate::ResourceCompletionOperationV1::Grant(_)
-                        | crate::ResourceCompletionOperationV1::GrantExternalParticipant(_)
-                );
-                match &operation {
-                    crate::ResourceCompletionOperationV1::Prepare(request) => {
-                        let external_targets_current = state
-                            .completion_leases
-                            .grants
-                            .get(&request.grant)
-                            .ok_or_else(|| {
-                                CanwuError::new(
-                                    ErrorCode::InvalidAuthority,
-                                    "completion prepare grant is unavailable",
-                                )
-                            })?
-                            .target_versions
-                            .iter()
-                            .filter_map(|target| match target {
-                                crate::CompletionLockedTargetV1::ExternalRecord { version } => {
-                                    Some(version)
-                                }
-                                _ => None,
-                            })
-                            .try_fold(true, |all_current, version| {
-                                Ok::<_, CanwuError>(
-                                    all_current && is_current_version(view, version)?,
-                                )
-                            })?;
-                        state
-                            .apply_prepare_with_external_revalidation(
-                                request,
-                                external_targets_current,
-                            )
-                            .map_err(resource_canwu_error)?;
-                    }
-                    _ => {
-                        state
-                            .apply_operation(&ResourceOperationRequestV1::Completion(operation))
-                            .map_err(resource_canwu_error)?;
-                    }
-                }
-                if preparing_local.as_ref().is_some_and(|acquisition| {
-                    state
-                        .completion_leases
-                        .acquisitions
-                        .get(acquisition)
-                        .is_some_and(|value| {
-                            value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting
-                        })
-                }) {
-                    directives.push(completion_expiry_tick_directive());
-                }
-                if let Some(acquisition) = completed_external {
-                    let participant = state
-                        .external_completion_participants
-                        .participant(&acquisition)
-                        .ok_or_else(|| {
-                            CanwuError::new(
-                                ErrorCode::InvalidDomainRecord,
-                                "completed external participant disappeared",
-                            )
-                        })?;
-                    if participant.coordinator_plugin == "canwu-production" {
-                        directives.push(BoundaryDirective::SchedulePluginIngress {
-                            target_plugin: participant.coordinator_plugin.clone(),
-                            after: canwu_api::SimDuration::ZERO,
-                            packet_type: "production_completion_operation_v1".to_owned(),
-                            priority: 0,
-                            payload: serde_json::json!({
-                                "completion": "acknowledge_participant_completed",
-                                "request": {
-                                    "acquisition": acquisition,
-                                    "participant": PLUGIN_NAME,
-                                },
-                            }),
-                            affected: Vec::new(),
-                        });
-                    }
-                }
-                if starts_expiry_clock
-                    && (!state.completion_leases.expiry_due.is_empty()
-                        || !state.external_completion_participants.expiry_due.is_empty())
-                {
-                    directives.push(completion_expiry_tick_directive());
-                }
-                changed = true;
+            RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => settle_output_batch_packet(
+                view,
+                context,
+                Admitted {
+                    ingress,
+                    payload,
+                    origin,
+                },
+                &mut state,
+                &mut settlement,
+            )?,
+            RESOURCE_ALLOCATION_INGRESS => settle_allocation_packet(
+                view,
+                context,
+                ingress,
+                payload,
+                &mut state,
+                &mut settlement,
+            )?,
+            RESOURCE_COMPLETION_INGRESS => settle_completion_packet(
+                view,
+                context,
+                Admitted {
+                    ingress,
+                    payload,
+                    origin,
+                },
+                &mut state,
+                &mut settlement,
+            )?,
+            RESOURCE_DEFERRED_INGRESS => {
+                settle_deferred_packet(
+                    view,
+                    context,
+                    ingress,
+                    payload,
+                    &mut state,
+                    &mut settlement,
+                )?;
             }
             RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS => {
-                let boundary = context.boundary_id.get();
-                if state
-                    .completion_leases
-                    .acquisitions
-                    .values()
-                    .any(|value| value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting)
-                {
-                    let released = state
-                        .completion_leases
-                        .cleanup_aborting(1_024)
-                        .map_err(resource_canwu_error)?;
-                    for acquisition in released {
-                        state.completion_report_reservations.remove(&acquisition);
-                        state.completion_report_ready.remove(&acquisition);
-                    }
-                    changed = true;
-                }
-                if state
-                    .completion_leases
-                    .expiry_due
-                    .range(..=boundary)
-                    .any(|(_, values)| !values.is_empty())
-                {
-                    state
-                        .apply_operation(&ResourceOperationRequestV1::Completion(
-                            crate::ResourceCompletionOperationV1::Expire(
-                                crate::ExpireCompletionCapacityV1 {
-                                    at: context.at,
-                                    current_boundary: boundary,
-                                    candidate_limit: 1_024,
-                                },
-                            ),
-                        ))
-                        .map_err(resource_canwu_error)?;
-                    changed = true;
-                }
-                if state
-                    .external_completion_participants
-                    .expiry_due
-                    .range(..=boundary)
-                    .any(|(_, values)| !values.is_empty())
-                {
-                    state
-                        .apply_operation(&ResourceOperationRequestV1::Completion(
-                            crate::ResourceCompletionOperationV1::ExpireExternalParticipants(
-                                crate::ExpireExternalCompletionParticipantGrantsV1 {
-                                    at: context.at,
-                                    current_boundary: boundary,
-                                    candidate_limit: 1_024,
-                                },
-                            ),
-                        ))
-                        .map_err(resource_canwu_error)?;
-                    changed = true;
-                }
-                if !state.completion_leases.expiry_due.is_empty()
-                    || !state.external_completion_participants.expiry_due.is_empty()
-                    || state.completion_leases.acquisitions.values().any(|value| {
-                        value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting
-                    })
-                {
-                    directives.push(completion_expiry_tick_directive());
-                }
+                settle_expiry_tick(context, ingress.id, &mut state, &mut settlement)?;
             }
             RESOURCE_ARCHIVE_COMMIT_INGRESS => {
                 let commit: crate::VerifiedResourceArchiveCommitV1 =
                     decode(payload, "verified resource archive commit")?;
-                state
+                let receipt = state
                     .apply_archive_commit(&commit)
                     .map_err(resource_canwu_error)?;
-                changed = true;
+                // An expiry skipped for want of room resumes once a commit
+                // makes room. A skipped expiry schedules no successor, so
+                // this cannot spin.
+                if receipt.disposition == crate::ResourceArchiveMaintenanceDispositionV1::Applied
+                    && expiry_overdue(&state, context.boundary_id.get())
+                {
+                    settlement.schedule_expiry_tick();
+                }
+                settlement.changed = true;
             }
             RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS => {
                 let acknowledgement: ResourceArchiveRetentionAcknowledgementV1 =
                     decode(payload, "resource archive retention acknowledgement")?;
-                state
-                    .acknowledge_archive_retention(&acknowledgement.receipt)
-                    .map_err(|error| {
-                        CanwuError::new(ErrorCode::InvalidArchive, error.to_string())
-                    })?;
-                changed = true;
+                match &acknowledgement {
+                    ResourceArchiveRetentionAcknowledgementV1::Receipt(receipt) => {
+                        state.acknowledge_archive_retention(receipt)
+                    }
+                    ResourceArchiveRetentionAcknowledgementV1::Handle {
+                        retention_handle_id,
+                        directory_root,
+                    } => state
+                        .acknowledge_archive_retention_handle(retention_handle_id, directory_root),
+                }
+                .map_err(|error| CanwuError::new(ErrorCode::InvalidArchive, error.to_string()))?;
+                settlement.changed = true;
             }
             _ => {}
         }
     }
+    let LifecycleSettlement {
+        changed,
+        affected,
+        mut directives,
+        expiry_tick: _,
+    } = settlement;
     if !changed {
         return Ok(BoundaryProposal {
             directives,
@@ -1092,16 +1306,758 @@ fn settle_resource_lifecycle(
     })
 }
 
+/// One admitted packet whose origin decides what happens when it does not
+/// fit the root.
+#[derive(Clone, Copy)]
+struct Admitted<'a> {
+    ingress: &'a IngressRecord,
+    payload: &'a Value,
+    origin: PacketOrigin,
+}
+
+/// Settles one tracked command.
+///
+/// It settles nothing, with a skip event, when the packet does not match its
+/// command, its key is reserved or held by another request, a completion
+/// command fails the checks the completion ingress makes, or its result does
+/// not fit the root. A command whose outcome is already recorded settles
+/// nothing and leaves no event.
+fn settle_command_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(admitted) = decode::<AdmittedResourceCommandV1>(payload, "admitted resource command")
+    else {
+        out.skip_undecodable(ingress.id, "resource command packet");
+        return Ok(());
+    };
+    let request = &admitted.value.request;
+    let operation_key = request.operation_key();
+    // A packet that does not match its tracked command names no holder: its
+    // subject was never admitted. The check reads the command's retained
+    // evidence, which a seal may have removed for a command the packet only
+    // claims, so the event carries one fixed detail whatever failed.
+    if validate_admitted_command(view, ingress.cause.as_ref(), &admitted).is_err() {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            "the packet does not match an admitted tracked resource command",
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    let subject = EventHolder::Admitted(&admitted.value.subject);
+    if request.names_reserved_operation_key() {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
+            Some(&operation_key),
+            RESERVED_OPERATION_KEY_DETAIL,
+            subject,
+        );
+        return Ok(());
+    }
+    let request_digest = request.request_digest().map_err(resource_canwu_error)?;
+    // An operation key belongs to the first request that settles under it.
+    if !out.operation_key_is_free(view, state, request, &request_digest, ingress.id, subject)? {
+        return Ok(());
+    }
+    // A tracked completion command passes the checks the completion ingress
+    // makes of the same operation: an acquisition's eligibility time, its
+    // report reservation, and the currency of the evidence it persists.
+    if let ResourceOperationRequestV1::Completion(operation) = request
+        && let Err(error) = validate_completion_ingress(view, context.at, operation, state)
+    {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            &error.message,
+            subject,
+        );
+        return Ok(());
+    }
+    match state
+        .settle_operation_at(request, context.at)
+        .map_err(resource_canwu_error)?
+    {
+        crate::OperationSettlement::Settled(_) => {
+            out.changed = true;
+            out.affected
+                .extend(registered_holder(&admitted.value.subject));
+        }
+        crate::OperationSettlement::NoRoom(shortage) => {
+            out.skip_for_room(ingress.id, shortage, Some(&operation_key), subject);
+        }
+    }
+    Ok(())
+}
+
+/// Settles one adapter packet: the same skips as a tracked command, with the
+/// provider binding as its settlement check.
+///
+/// A plugin that schedules adapter packets, as the force-supply reference
+/// does, dispatches again every consumption that has no outcome, so a
+/// skipped one is sent again and is never deferred: a deferred copy would
+/// settle beside the one sent again.
+fn settle_adapter_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(packet) = decode::<ResourceAdapterOperationV1>(payload, "resource adapter operation")
+    else {
+        out.skip_undecodable(ingress.id, "resource adapter operation");
+        return Ok(());
+    };
+    let operation_key = packet.request.operation_key();
+    // `resource_adapter_ingress` refuses such a packet. One queued around it
+    // settles nothing and takes no key.
+    if packet.request.names_reserved_operation_key() {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
+            Some(&operation_key),
+            RESERVED_OPERATION_KEY_DETAIL,
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    let request_digest = packet
+        .request
+        .request_digest()
+        .map_err(resource_canwu_error)?;
+    if !out.operation_key_is_free(
+        view,
+        state,
+        &packet.request,
+        &request_digest,
+        ingress.id,
+        EventHolder::Nobody,
+    )? {
+        return Ok(());
+    }
+    if let Err(error) = validate_adapter_packet(view, context.at, &packet, state) {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            &error.message,
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    match state
+        .settle_operation_at(&packet.request, context.at)
+        .map_err(resource_canwu_error)?
+    {
+        crate::OperationSettlement::Settled(_) => out.changed = true,
+        crate::OperationSettlement::NoRoom(shortage) => {
+            out.skip_for_room(
+                ingress.id,
+                shortage,
+                Some(&operation_key),
+                EventHolder::Nobody,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Settles one production output batch, every credit or none.
+///
+/// The batch settles nothing, with a skip event, when a credit names a
+/// reserved key or a key another request holds, the batch fails its
+/// settlement checks, or a credit is refused. Room is measured for the whole
+/// batch against the root before it. When the batch does not fit, one the
+/// production plugin scheduled is deferred to a later instant if the shortage
+/// can pass ([`deferral_is_worthwhile`]) and skipped otherwise, and one the
+/// host application queued is skipped. A batch whose credits are all
+/// recorded for it settled before and settles nothing again; one with only
+/// some of them recorded is skipped. The events name the holder of the
+/// batch's external participant in their detail. The acknowledgement to the
+/// production plugin carries `settled_at`, the instant the credits settled.
+fn settle_output_batch_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    admitted: Admitted<'_>,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let ingress = admitted.ingress;
+    let Ok(packet) =
+        decode::<ResourceProductionOutputBatchV1>(admitted.payload, "production output batch")
+    else {
+        out.skip_undecodable(ingress.id, "production output batch");
+        return Ok(());
+    };
+    let first_key = packet
+        .requests
+        .first()
+        .map(|request| &request.operation_key);
+    let holder = packet.requests.first().and_then(|request| {
+        state
+            .external_completion_participants
+            .participant(&request.completion_certificate.acquisition)
+            .map(|participant| participant.holder.clone())
+    });
+    let holder = holder
+        .as_ref()
+        .map_or(EventHolder::Nobody, EventHolder::Participant);
+    // A credit may not take a completion operation's key.
+    if let Some(reserved) = packet.requests.iter().find(|request| {
+        request
+            .operation_key
+            .as_str()
+            .starts_with(crate::RESOURCE_COMPLETION_OPERATION_KEY_PREFIX)
+    }) {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
+            Some(&reserved.operation_key),
+            RESERVED_OPERATION_KEY_DETAIL,
+            holder,
+        );
+        return Ok(());
+    }
+    if packet.requests.len() > 64 {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            first_key,
+            "production output batch carries more than 64 credits",
+            holder,
+        );
+        return Ok(());
+    }
+    // The credits of a batch settle together, so all of them are recorded
+    // for this request, which is a resend, or none of them is.
+    let mut recorded = 0_usize;
+    for request in &packet.requests {
+        let credit = ResourceOperationRequestV1::Credit(request.clone());
+        let request_digest = credit.request_digest().map_err(resource_canwu_error)?;
+        match operation_key_holder(view, state, &credit, &request_digest)? {
+            OperationKeyHolder::Nobody => {}
+            OperationKeyHolder::ThisRequestInRoot | OperationKeyHolder::ThisRequestInArchive => {
+                recorded += 1;
+            }
+            OperationKeyHolder::AnotherRequest => {
+                out.skip(
+                    ingress.id,
+                    crate::ResourceIngressSkipReasonV1::OperationKeyTaken,
+                    Some(&request.operation_key),
+                    OPERATION_KEY_TAKEN_DETAIL,
+                    holder,
+                );
+                return Ok(());
+            }
+        }
+    }
+    if recorded == packet.requests.len() && recorded > 0 {
+        return Ok(());
+    }
+    if recorded > 0 {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            first_key,
+            "only some credits of the production output batch are recorded for it",
+            holder,
+        );
+        return Ok(());
+    }
+    let execution = match validate_production_output_batch(view, context.at, &packet, state) {
+        Ok(execution) => execution,
+        Err(error) => {
+            out.skip(
+                ingress.id,
+                crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+                first_key,
+                &error.message,
+                holder,
+            );
+            return Ok(());
+        }
+    };
+    match state
+        .settle_production_output_batch(&packet.requests)
+        .map_err(resource_canwu_error)?
+    {
+        crate::OutputBatchSettlement::Settled(outcomes) => {
+            out.directives
+                .push(BoundaryDirective::SchedulePluginIngress {
+                    target_plugin: "canwu-production".to_owned(),
+                    after: canwu_api::SimDuration::ZERO,
+                    packet_type: "production_output_ack_v1".to_owned(),
+                    priority: 0,
+                    // `settled_at` is the instant the credits settled, which
+                    // is their `at`: a deferred batch is retimed to it.
+                    payload: serde_json::json!({
+                        "execution": execution,
+                        "production_source": packet.provider_source,
+                        "outcomes": outcomes,
+                        "settled_at": context.at,
+                    }),
+                    affected: Vec::new(),
+                });
+            out.changed = true;
+        }
+        crate::OutputBatchSettlement::NoRoom(shortage) => match admitted.origin {
+            PacketOrigin::Plugin { deferrals } if deferral_is_worthwhile(shortage, deferrals) => {
+                out.defer(
+                    ingress.id,
+                    context.at,
+                    shortage,
+                    DeferredWork {
+                        packet: DeferredPacket::OutputBatch(&packet),
+                        deferrals,
+                        operation_key: first_key,
+                    },
+                    holder,
+                )?;
+            }
+            PacketOrigin::Plugin { .. } | PacketOrigin::Host => {
+                out.skip_for_room(ingress.id, shortage, first_key, holder);
+            }
+        },
+        crate::OutputBatchSettlement::Refused(operation_key, reason) => out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            &format!("a credit of the production output batch was refused: {reason}"),
+            holder,
+        ),
+    }
+    Ok(())
+}
+
+/// Settles one requester-scoped allocation pass.
+fn settle_allocation_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(packet) =
+        decode::<ResourceAuthorizedAllocationV1>(payload, "authorized resource allocation")
+    else {
+        out.skip_undecodable(ingress.id, "resource allocation pass");
+        return Ok(());
+    };
+    let requester = EventHolder::Admitted(&packet.requester);
+    let operation = ResourceOperationRequestV1::Allocate(packet.request.clone());
+    let operation_key = operation.operation_key();
+    // `enqueue_resource_allocation` refuses such a packet.
+    if operation.names_reserved_operation_key() {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::ReservedOperationKey,
+            Some(&operation_key),
+            RESERVED_OPERATION_KEY_DETAIL,
+            requester,
+        );
+        return Ok(());
+    }
+    let request_digest = crate::canonical_digest(
+        "canwu.resource.authorized-allocation-request.v1",
+        &(&packet.requester, &packet.request),
+    )
+    .map_err(resource_canwu_error)?;
+    if !out.operation_key_is_free(
+        view,
+        state,
+        &operation,
+        &request_digest,
+        ingress.id,
+        requester,
+    )? {
+        return Ok(());
+    }
+    match state
+        .settle_authorized_allocation(&packet.requester, &packet.request, context.at)
+        .map_err(resource_canwu_error)?
+    {
+        crate::OperationSettlement::Settled(_) => {
+            out.changed = true;
+            out.affected.extend(registered_holder(&packet.requester));
+        }
+        crate::OperationSettlement::NoRoom(shortage) => {
+            out.skip_for_room(ingress.id, shortage, Some(&operation_key), requester);
+        }
+    }
+    Ok(())
+}
+
+/// Settles one completion operation from the completion ingress.
+///
+/// A resend answered by its own outcome settles nothing. A packet whose key
+/// another request holds, or that fails the checks of its step, settles
+/// nothing with a skip event: a holder's tracked `Acquire`, or `Abort` of its
+/// own lease, can take a key first, and that must not fail the boundary. A
+/// packet whose result does not fit the root is deferred when a plugin
+/// scheduled it, the step can settle later ([`completion_step_can_wait`]),
+/// and the shortage can pass ([`deferral_is_worthwhile`]); it is skipped
+/// otherwise. A single step records what it finds against the view as its
+/// rejection instead.
+///
+/// What an applied step sets in motion, and only an applied one, follows the
+/// settlement: the coordinator's acknowledgement of a completed external
+/// participant, the expiry tick a grant starts, and the tick that cleans up an
+/// aborting acquisition. A recorded rejection sets nothing in motion.
+fn settle_completion_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    admitted: Admitted<'_>,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let ingress = admitted.ingress;
+    let Ok(operation) =
+        decode::<crate::ResourceCompletionOperationV1>(admitted.payload, "completion operation")
+    else {
+        out.skip_undecodable(ingress.id, "resource completion operation");
+        return Ok(());
+    };
+    let request = ResourceOperationRequestV1::Completion(operation.clone());
+    let operation_key = request.operation_key();
+    let holder = external_participant_holder(state, &operation);
+    let holder = holder
+        .as_ref()
+        .map_or(EventHolder::Nobody, EventHolder::Participant);
+    let request_digest = request.request_digest().map_err(resource_canwu_error)?;
+    if !out.operation_key_is_free(view, state, &request, &request_digest, ingress.id, holder)? {
+        return Ok(());
+    }
+    let skip_failed = |out: &mut LifecycleSettlement, error: &CanwuError| {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            Some(&operation_key),
+            &error.message,
+            holder,
+        );
+    };
+    let no_room = |out: &mut LifecycleSettlement, shortage| match admitted.origin {
+        PacketOrigin::Plugin { deferrals }
+            if completion_step_can_wait(&operation)
+                && deferral_is_worthwhile(shortage, deferrals) =>
+        {
+            out.defer(
+                ingress.id,
+                context.at,
+                shortage,
+                DeferredWork {
+                    packet: DeferredPacket::Completion(&operation),
+                    deferrals,
+                    operation_key: Some(&operation_key),
+                },
+                holder,
+            )
+        }
+        PacketOrigin::Plugin { .. } | PacketOrigin::Host => {
+            out.skip_for_room(ingress.id, shortage, Some(&operation_key), holder);
+            Ok(())
+        }
+    };
+    if let crate::ResourceCompletionOperationV1::SingleStepLease(lease) = &operation {
+        // Every domain refusal of a single-step lease is its recorded
+        // rejection, and needs room for that outcome only. The step leaves an
+        // activated lease or nothing, so it starts no expiry clock.
+        let refusal = match single_step_lease_refusal(view, context.at, lease, state) {
+            Ok(refusal) => refusal,
+            Err(error) => {
+                skip_failed(out, &error);
+                return Ok(());
+            }
+        };
+        match state
+            .settle_single_step_lease_with_external_validation(lease, refusal.as_ref())
+            .map_err(resource_canwu_error)?
+        {
+            crate::OperationSettlement::Settled(_) => out.changed = true,
+            crate::OperationSettlement::NoRoom(shortage) => no_room(out, shortage)?,
+        }
+        return Ok(());
+    }
+    if let Err(error) = validate_completion_ingress(view, context.at, &operation, state) {
+        skip_failed(out, &error);
+        return Ok(());
+    }
+    let settled = match &operation {
+        crate::ResourceCompletionOperationV1::Prepare(request) => {
+            let external_targets_current =
+                match prepare_external_targets_current(view, state, request) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        skip_failed(out, &error);
+                        return Ok(());
+                    }
+                };
+            state.settle_prepare_with_external_revalidation(request, external_targets_current)
+        }
+        _ => state.settle_operation(&request),
+    }
+    .map_err(resource_canwu_error)?;
+    let outcome = match settled {
+        crate::OperationSettlement::Settled(outcome) => outcome,
+        crate::OperationSettlement::NoRoom(shortage) => return no_room(out, shortage),
+    };
+    out.changed = true;
+    if outcome.status != crate::ResourceOperationStatus::Applied {
+        return Ok(());
+    }
+    match &operation {
+        crate::ResourceCompletionOperationV1::Prepare(request)
+            if state
+                .completion_leases
+                .acquisitions
+                .get(&request.acquisition)
+                .is_some_and(|value| {
+                    value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting
+                }) =>
+        {
+            out.schedule_expiry_tick();
+        }
+        crate::ResourceCompletionOperationV1::Grant(_)
+        | crate::ResourceCompletionOperationV1::GrantExternalParticipant(_)
+            if !state.completion_leases.expiry_due.is_empty()
+                || !state.external_completion_participants.expiry_due.is_empty() =>
+        {
+            out.schedule_expiry_tick();
+        }
+        crate::ResourceCompletionOperationV1::CompleteExternalParticipant(request) => {
+            // The completion applied, so the root holds the participant.
+            let participant = state
+                .external_completion_participants
+                .participant(&request.acquisition)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDomainRecord,
+                        "an applied external participant completion left no participant",
+                    )
+                })?;
+            if participant.coordinator_plugin == "canwu-production" {
+                out.directives
+                    .push(BoundaryDirective::SchedulePluginIngress {
+                        target_plugin: participant.coordinator_plugin.clone(),
+                        after: canwu_api::SimDuration::ZERO,
+                        packet_type: "production_completion_operation_v1".to_owned(),
+                        priority: 0,
+                        payload: serde_json::json!({
+                            "completion": "acknowledge_participant_completed",
+                            "request": {
+                                "acquisition": request.acquisition,
+                                "participant": PLUGIN_NAME,
+                            },
+                        }),
+                        affected: Vec::new(),
+                    });
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Settles work the resource plugin deferred, as the packet it wraps and
+/// with the count of its deferrals. No host application can queue such a
+/// packet: its permit is never handed out, so only a plugin's boundary system
+/// can schedule it, and one that is not from a boundary is skipped. Another
+/// plugin that declares it as a target gains nothing but a deferral count.
+fn settle_deferred_packet(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+    ingress: &IngressRecord,
+    payload: &Value,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let Ok(deferred) = decode::<ResourceDeferredPacketV1>(payload, "deferred resource packet")
+    else {
+        out.skip_undecodable(ingress.id, "deferred resource packet");
+        return Ok(());
+    };
+    if PacketOrigin::of(ingress) == PacketOrigin::Host {
+        out.skip(
+            ingress.id,
+            crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+            None,
+            "a deferred resource packet was not scheduled by a plugin",
+            EventHolder::Nobody,
+        );
+        return Ok(());
+    }
+    let admitted = Admitted {
+        ingress,
+        payload: &deferred.payload,
+        origin: PacketOrigin::Plugin {
+            deferrals: deferred.deferrals,
+        },
+    };
+    match deferred.packet_type.as_str() {
+        RESOURCE_PRODUCTION_OUTPUT_BATCH_INGRESS => {
+            settle_output_batch_packet(view, context, admitted, state, out)
+        }
+        RESOURCE_COMPLETION_INGRESS => {
+            settle_completion_packet(view, context, admitted, state, out)
+        }
+        _ => {
+            out.skip(
+                ingress.id,
+                crate::ResourceIngressSkipReasonV1::FailedSettlementChecks,
+                None,
+                "a deferred resource packet wraps a packet type that is never deferred",
+                EventHolder::Nobody,
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Whether every external record a prepared grant locks is still its
+/// record's current version.
+fn prepare_external_targets_current(
+    view: &SimulationView<'_>,
+    state: &crate::ResourceState,
+    request: &crate::PrepareCompletionCapacityV1,
+) -> Result<bool, CanwuError> {
+    state
+        .completion_leases
+        .grants
+        .get(&request.grant)
+        .ok_or_else(|| {
+            CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "completion prepare grant is unavailable",
+            )
+        })?
+        .target_versions
+        .iter()
+        .filter_map(|target| match target {
+            crate::CompletionLockedTargetV1::ExternalRecord { version } => Some(version),
+            _ => None,
+        })
+        .try_fold(true, |all_current, version| {
+            Ok(all_current && is_current_version(view, version)?)
+        })
+}
+
+/// Advances completion-lease expiry and the cleanup of aborting leases.
+///
+/// An expiry whose result does not fit the root settles nothing, with a skip
+/// event, and the tick does not schedule itself again: a tick scheduled at
+/// the same instant would meet the same root, so the run would settle
+/// boundaries at that instant without end. Expiry resumes with the tick the
+/// next applied archive commit schedules while an expiry is due, which makes
+/// room for it, with the tick the next grant schedules, or with one the host
+/// application queues ([`enqueue_resource_completion_expiry_tick`]).
+fn settle_expiry_tick(
+    context: &BoundaryContext,
+    ingress: IngressId,
+    state: &mut crate::ResourceState,
+    out: &mut LifecycleSettlement,
+) -> Result<(), CanwuError> {
+    let boundary = context.boundary_id.get();
+    let mut reschedule = true;
+    if state
+        .completion_leases
+        .acquisitions
+        .values()
+        .any(|value| value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting)
+    {
+        let released = state
+            .completion_leases
+            .cleanup_aborting(1_024)
+            .map_err(resource_canwu_error)?;
+        for acquisition in released {
+            state.completion_report_reservations.remove(&acquisition);
+            state.completion_report_ready.remove(&acquisition);
+        }
+        out.changed = true;
+    }
+    let mut expiries = Vec::new();
+    if state
+        .completion_leases
+        .expiry_due
+        .range(..=boundary)
+        .any(|(_, values)| !values.is_empty())
+    {
+        expiries.push(crate::ResourceCompletionOperationV1::Expire(
+            crate::ExpireCompletionCapacityV1 {
+                at: context.at,
+                current_boundary: boundary,
+                candidate_limit: 1_024,
+            },
+        ));
+    }
+    if state
+        .external_completion_participants
+        .expiry_due
+        .range(..=boundary)
+        .any(|(_, values)| !values.is_empty())
+    {
+        expiries.push(
+            crate::ResourceCompletionOperationV1::ExpireExternalParticipants(
+                crate::ExpireExternalCompletionParticipantGrantsV1 {
+                    at: context.at,
+                    current_boundary: boundary,
+                    candidate_limit: 1_024,
+                },
+            ),
+        );
+    }
+    for expiry in expiries {
+        let request = ResourceOperationRequestV1::Completion(expiry);
+        match state
+            .settle_operation(&request)
+            .map_err(resource_canwu_error)?
+        {
+            crate::OperationSettlement::Settled(_) => out.changed = true,
+            crate::OperationSettlement::NoRoom(shortage) => {
+                out.skip_for_room(
+                    ingress,
+                    shortage,
+                    Some(&request.operation_key()),
+                    EventHolder::Nobody,
+                );
+                reschedule = false;
+            }
+        }
+    }
+    if reschedule
+        && (!state.completion_leases.expiry_due.is_empty()
+            || !state.external_completion_participants.expiry_due.is_empty()
+            || state
+                .completion_leases
+                .acquisitions
+                .values()
+                .any(|value| value.state == crate::CompletionLeaseAcquisitionStateV1::Aborting))
+    {
+        out.schedule_expiry_tick();
+    }
+    Ok(())
+}
+
 /// Orders the ingress one boundary admitted so that archive commits and
 /// retention acknowledgements settle before every other packet, each group in
 /// its admitted order.
 ///
-/// A full candidate budget fails the boundary of the next operation, and the
-/// remedy is an archive commit. Settling the commit first lets it apply
-/// against the root the boundary started from, the root it was prepared
-/// from, instead of failing behind the operation or going stale after it. A
-/// boundary that admitted no archive packet, or nothing else, keeps its
-/// order.
+/// A full candidate budget skips the next operation, and the remedy is an
+/// archive commit. Settling the commit first lets it apply against the root
+/// the boundary started from, the root it was prepared from, and makes room
+/// for the operations admitted beside it, instead of going stale after one of
+/// them. A boundary that admitted no archive packet, or nothing else, keeps
+/// its order.
 fn archive_maintenance_first(
     view: &SimulationView<'_>,
     admitted: &[canwu_api::IngressId],
@@ -2255,15 +3211,16 @@ fn completion_report_reservation_fits(
 /// These are the checks the acquire, grant, prepare, and activate steps make
 /// against the view: the eligibility time is the boundary time, the reserved
 /// reports fit, and every external record version the lease persists or
-/// locks is its record's current version. The four-step path fails the
-/// boundary on some of them. For a single step each finding becomes the
+/// locks is its record's current version. The four-step path skips its
+/// packet on some of them. For a single step each finding becomes the
 /// operation's recorded rejection instead. Only live state and
 /// current-version provenance are read, never retained evidence, so a sealed
 /// run and its exact replay find the same.
 ///
-/// A finding is recorded only if the request fits the outcome and archive
-/// budgets of the root. That is checked first and for the whole lease, and a
-/// request that does not fit is an error that fails the boundary.
+/// A recorded finding needs room for its outcome only. A request that does
+/// not fit even that, or an applied lease that does not fit, is skipped, and
+/// an error here (a view read other than an undeclared record kind) skips the
+/// packet too.
 fn single_step_lease_refusal(
     view: &SimulationView<'_>,
     at: SimTime,
@@ -2937,6 +3894,43 @@ fn validate_resource_authority(
     Ok(())
 }
 
+/// Refuses a tracked `Acquire` that its settlement would refuse for what the
+/// view holds now.
+///
+/// Its packet settles at the instant the command is admitted, so the
+/// acquisition must be eligible at that instant, and the evidence its
+/// envelope persists must be the current version of its record. Settlement
+/// checks both again, with the report reservation, as the completion ingress
+/// does; a packet that fails them there settles nothing.
+fn validate_tracked_acquisition(
+    view: &SimulationView<'_>,
+    context: &CommandContext,
+    request: &ResourceOperationRequestV1,
+) -> Result<(), CanwuError> {
+    let ResourceOperationRequestV1::Completion(crate::ResourceCompletionOperationV1::Acquire(
+        acquisition,
+    )) = request
+    else {
+        return Ok(());
+    };
+    if acquisition.eligibility_time != context.simulation_time {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "a tracked completion acquisition must be eligible at the time it is admitted",
+        ));
+    }
+    let envelope = &acquisition.eligibility_envelope;
+    for version in envelope
+        .exact_evidence
+        .iter()
+        .chain(&envelope.capability_bindings)
+        .chain(&envelope.route_evidence)
+    {
+        require_current_version(view, version)?;
+    }
+    Ok(())
+}
+
 fn validate_resource_subject_issuer(
     context: &CommandContext,
     subject_holder: &canwu_api::KnowledgeHolderRef,
@@ -3044,6 +4038,10 @@ pub fn enqueue_resource_adapter_operation(
 /// The opaque plugin permit prevents a host-authored packet from bypassing this
 /// helper; settlement additionally checks the current state revision and
 /// filters every due/dirty candidate by `ResourceDemand::requester`.
+///
+/// The requester must be an entity of the run: the settlement and skip
+/// events name it, and an event naming a missing entity would fail its
+/// boundary. A requester that is not is refused here.
 pub fn enqueue_resource_allocation(
     canwu: &mut Canwu,
     due_at: SimTime,
@@ -3051,6 +4049,14 @@ pub fn enqueue_resource_allocation(
     request: &crate::ResourceAllocationRequestV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
     reject_reserved_operation_key(&ResourceOperationRequestV1::Allocate(request.clone()))?;
+    let entity = holder_entity(requester);
+    if !canwu.entity_exists(&entity) {
+        return Err(CanwuError::new(
+            ErrorCode::EntityNotFound,
+            "resource allocation requester is not an entity of the run",
+        )
+        .with_entity(entity));
+    }
     let permit = RESOURCE_ALLOCATION_INGRESS_PERMIT.get().ok_or_else(|| {
         CanwuError::new(
             ErrorCode::PluginNotActive,
@@ -3178,15 +4184,21 @@ pub fn enqueue_resource_archive(
 /// state records an applied or stale terminal archive disposition, and queues
 /// the acknowledgement that retires the state-side handle and every stale
 /// receipt recorded under it. The same batch queued twice has one handle:
-/// either of its ingress receipts finalizes the settlement recorded first.
+/// either of its ingress receipts finalizes it.
 ///
-/// The disposition is read from the commit's maintenance receipt, so
-/// finalize each commit before the next commit archives its receipt. A call
-/// made after that fails here, and nothing retires what it leaves: the
-/// state-side handle stays in `archive_retention_handles` and the store-side
-/// handle stays in `DurableIngress`, both permanently. Once this call has
-/// succeeded, its acknowledgement may settle behind a commit that archives
-/// the receipt, or twice, without harm.
+/// The disposition is read from the state-side retention handle, which stays
+/// in `archive_retention_handles` until this acknowledgement settles and
+/// records how the commit settled: `Committed` once any commit of the batch
+/// applied, `RejectedStale` otherwise. The call may therefore come at any
+/// time after the commit settled, also after a later commit archived the
+/// commit's maintenance receipt; the acknowledgement then names the handle
+/// instead of the receipt. Once the handle is gone, an applied commit whose
+/// receipt is still in the root is finalized again from that receipt, which
+/// settles as a no-op. A call fails only when the commit has not settled, or
+/// when both the handle and the receipt are gone because an earlier call was
+/// acknowledged and a later commit archived the receipt. No call fails a
+/// boundary, and an acknowledgement may settle twice, or behind a commit that
+/// archives the receipt, without harm.
 pub fn finalize_resource_archive_retention(
     canwu: &mut Canwu,
     store: &dyn crate::ResourceArchiveStore,
@@ -3201,21 +4213,35 @@ pub fn finalize_resource_archive_retention(
             terminal.retention_handle_id == receipt.retention_handle_id
                 && terminal.directory_root == receipt.directory_root
         })
-        .ok_or_else(|| {
-            CanwuError::new(
-                ErrorCode::InvalidArchive,
-                "resource archive terminal disposition is unavailable",
+        .cloned();
+    let handle_phase = state
+        .archive_retention_handles
+        .get(&receipt.retention_handle_id)
+        .filter(|handle| handle.directory_root == receipt.directory_root)
+        .map(|handle| handle.phase)
+        .filter(|phase| {
+            matches!(
+                phase,
+                crate::ResourceArchiveRetentionPhaseV1::Committed
+                    | crate::ResourceArchiveRetentionPhaseV1::RejectedStale
             )
-        })?
-        .clone();
-    let phase = match terminal.disposition {
-        crate::ResourceArchiveMaintenanceDispositionV1::Applied => {
-            crate::ResourceArchiveRetentionPhaseV1::Committed
-        }
-        crate::ResourceArchiveMaintenanceDispositionV1::RejectedStale => {
-            crate::ResourceArchiveRetentionPhaseV1::RejectedStale
-        }
-    };
+        });
+    let receipt_phase = terminal
+        .as_ref()
+        .map(|terminal| match terminal.disposition {
+            crate::ResourceArchiveMaintenanceDispositionV1::Applied => {
+                crate::ResourceArchiveRetentionPhaseV1::Committed
+            }
+            crate::ResourceArchiveMaintenanceDispositionV1::RejectedStale => {
+                crate::ResourceArchiveRetentionPhaseV1::RejectedStale
+            }
+        });
+    let phase = handle_phase.or(receipt_phase).ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::InvalidArchive,
+            "resource archive terminal disposition is unavailable",
+        )
+    })?;
     store
         .finalize_resource_archive_retention(&receipt.retention_handle_id, phase)
         .map_err(resource_canwu_error)?;
@@ -3225,15 +4251,44 @@ pub fn finalize_resource_archive_retention(
             "resource plugin must be active before archive acknowledgement",
         )
     })?;
+    let acknowledgement = match terminal {
+        Some(terminal) => ResourceArchiveRetentionAcknowledgementV1::Receipt(terminal),
+        None => ResourceArchiveRetentionAcknowledgementV1::Handle {
+            retention_handle_id: receipt.retention_handle_id.clone(),
+            directory_root: receipt.directory_root.clone(),
+        },
+    };
     canwu.enqueue_permitted_plugin_ingress(
         PluginIngressRequest::new(
             PLUGIN_NAME,
             RESOURCE_ARCHIVE_RETENTION_ACK_INGRESS,
             canwu.time(),
-            encode(&ResourceArchiveRetentionAcknowledgementV1 { receipt: terminal })?,
+            encode(&acknowledgement)?,
         ),
         permit,
     )
+}
+
+/// Queues one completion expiry tick: the next boundary expires every
+/// completion grant and external participant grant due by then, and cleans
+/// up aborting acquisitions.
+///
+/// The resource plugin schedules these ticks itself while expiry is pending.
+/// An expiry whose result does not fit the root is skipped with a
+/// [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`] and stops that schedule, since a
+/// tick at the same instant would meet the same root. The next applied
+/// archive commit, which makes room for it, schedules a tick while an expiry
+/// is due; a host application may also queue one with this function.
+pub fn enqueue_resource_completion_expiry_tick(
+    canwu: &mut Canwu,
+    due_at: SimTime,
+) -> Result<canwu_api::IngressReceipt, CanwuError> {
+    canwu.enqueue_plugin_ingress(PluginIngressRequest::new(
+        PLUGIN_NAME,
+        RESOURCE_COMPLETION_EXPIRY_TICK_INGRESS,
+        due_at,
+        serde_json::json!({ "format_version": 1 }),
+    ))
 }
 
 #[must_use]

@@ -449,13 +449,13 @@ pub struct RequestCompletionLeaseV1 {
 /// the one the four steps produce for the same `lease`, `grant_id`, and
 /// `target_versions` when their activation runs at `current_boundary`.
 ///
-/// Like every resource operation, the request must first fit the budgets of
-/// the root, and that is checked before anything is recorded. Without room
-/// for its outcome, its receipt, and the
+/// Like every resource operation, its result must fit the budgets of the
+/// root, measured on the result. A refused request needs room for its
+/// outcome only; an applied one for its outcome, its receipt, and the
 /// [`MAX_COMPLETION_RECEIPTS_PER_LIFECYCLE`] terminal records the lease
-/// reserves, the request is an error, not a rejection, and the plugin fails
-/// the boundary that settles it. The room is asked for even when the
-/// request would be refused.
+/// reserves. A result that does not fit records nothing: the plugin skips
+/// the packet with a [`crate::RESOURCE_INGRESS_SKIPPED_EVENT`], and the same
+/// request settles when sent again once room returns.
 ///
 /// The lease is active as soon as the request settles, and an active lease
 /// never expires. Until the operation it authorizes completes it, or a

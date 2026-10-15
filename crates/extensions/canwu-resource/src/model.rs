@@ -27,12 +27,15 @@ pub struct ResourceLimitsV1 {
     pub max_reports_per_boundary: usize,
     pub max_observation_heads: usize,
     /// Hot terminal records the root may hold, and the most one archive
-    /// commit selects. An operation whose terminal records would not fit
-    /// fails its boundary and stays queued until an archive commit makes
-    /// room; it is not recorded as a rejection. The budget therefore has to
-    /// cover the backlog plus every terminal record the operations due at one
-    /// boundary can produce. At most [`Self::MAX_ARCHIVE_CANDIDATES`]. Size
-    /// it from the cost of a boundary at that backlog, not from the ceiling.
+    /// commit selects. Room is measured on what an operation leaves: a
+    /// refused operation needs one slot for its outcome, an applied one a
+    /// slot for every terminal record it adds, and work no admitted lease
+    /// certifies must leave the slots admitted leases reserve. The resource
+    /// plugin skips a packet whose result does not fit, with an event, and
+    /// records nothing; the same request settles when sent again once an
+    /// archive commit or a released lease has made room. At most
+    /// [`Self::MAX_ARCHIVE_CANDIDATES`]. Size it from the cost of a boundary
+    /// at that backlog, not from the ceiling.
     pub max_archive_candidates: usize,
     /// Hot maintenance receipts of applied archive commits. Each of them is
     /// an archive candidate, so this must be at least
@@ -67,6 +70,13 @@ impl ResourceLimitsV1 {
     pub const MAX_ARCHIVE_CANDIDATES: usize = 4_096;
     pub const MAX_HOT_RECORD_BYTES: usize = 65_536;
     pub const MAX_AUTHORITATIVE_STATE_BYTES: usize = 256 * 1024 * 1024;
+    /// Most bytes of `max_state_bytes` that operations leave free for the
+    /// root's own maintenance writes, which are not skipped: the receipt and
+    /// retention handle a stale archive commit records (about 4 KB for a
+    /// commit of sixteen pages) and the report scheduling state the report
+    /// system persists. A root with a smaller cap reserves a quarter of it
+    /// ([`Self::operation_state_bytes`]).
+    pub const MAINTENANCE_STATE_BYTE_RESERVE: usize = 64 * 1024;
 
     #[must_use]
     pub const fn canonical() -> Self {
@@ -87,6 +97,22 @@ impl ResourceLimitsV1 {
             max_due_entries: Self::HARD_ACTIVE_PER_SHARD * Self::MAX_SHARDS,
             max_state_bytes: Self::MAX_AUTHORITATIVE_STATE_BYTES,
         }
+    }
+
+    /// The state bytes an operation may leave the root at: `max_state_bytes`
+    /// less the maintenance reserve, which is
+    /// [`Self::MAINTENANCE_STATE_BYTE_RESERVE`] or a quarter of the cap,
+    /// whichever is smaller. An operation whose result passes it records
+    /// nothing; the resource plugin skips its packet as `root_limit`.
+    #[must_use]
+    pub const fn operation_state_bytes(self) -> usize {
+        let quarter = self.max_state_bytes / 4;
+        let reserve = if quarter < Self::MAINTENANCE_STATE_BYTE_RESERVE {
+            quarter
+        } else {
+            Self::MAINTENANCE_STATE_BYTE_RESERVE
+        };
+        self.max_state_bytes - reserve
     }
 
     pub fn validate(self) -> Result<(), ResourceError> {
