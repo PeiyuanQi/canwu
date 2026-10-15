@@ -1249,15 +1249,15 @@ fn a_plugin_scheduled_output_batch_without_room_is_deferred_until_it_fits() {
     assert_eq!(deferred[0].deferred_until, Some(SimTime::from_minutes(1)));
     assert!(skip_summaries(&canwu, events)[0].ends_with("the work belongs to holder person:1"));
     assert_eq!(state(&canwu), full);
-    // While the work waits, the run cannot seal: the queue is not empty, so
-    // a seal cannot drop the evidence the batch and its acknowledgement read.
+    // While the work waits, the run seals: the waiting batch and the evidence
+    // its acknowledgement reads stay pinned in the continuation closure.
     assert!(
         canwu
             .fork()
             .into_compacted()
             .expect("compact interface")
             .seal_evidence()
-            .is_err()
+            .is_ok()
     );
 
     // Still no room a minute later: deferred again, two minutes this time.

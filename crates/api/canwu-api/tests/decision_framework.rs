@@ -156,10 +156,35 @@ fn utility_decision_is_persisted_and_exactly_replayed_without_rerunning_policy()
         )
         .expect("drive decision");
     assert!(matches!(evaluation, DecisionEvaluation::Prepared(_)));
-    canwu
+    // A run sealed while the resolution is pending admits it alike: the
+    // pending decision is the one carrier of its nested command request,
+    // whether retained or archived.
+    let mut sealed = canwu.fork().into_compacted().expect("compact interface");
+    sealed
+        .seal_evidence()
+        .expect("the run seals with the resolution pending")
+        .expect("the settled history seals");
+    let resolution = canwu
         .step_canonical()
         .expect("resolution")
         .expect("resolution boundary");
+    assert_eq!(
+        sealed
+            .step_canonical()
+            .expect("sealed resolution")
+            .expect("sealed resolution boundary"),
+        resolution
+    );
+    assert_eq!(
+        sealed.decision_attempt(DecisionRequestId::new(4)),
+        canwu.decision_attempt(DecisionRequestId::new(4))
+    );
+    assert!(matches!(
+        canwu
+            .decision_attempt(DecisionRequestId::new(4))
+            .map(|attempt| &attempt.outcome),
+        Some(DecisionAttemptOutcome::Accepted { .. })
+    ));
 
     while canwu.decision_attempt(DecisionRequestId::new(99)).is_none() {
         canwu

@@ -369,9 +369,10 @@ where
             ));
         }
         // The matched command passed `validate_assessment_evidence` when it
-        // was admitted, and no seal can run while this ingress is pending.
-        // Checking again could fail only because a cited version stopped
-        // being current since then, which must not fail this boundary.
+        // was admitted. Checking again could fail only because a cited
+        // version stopped being current since then, or because a seal
+        // archived cited evidence while this ingress was pending, and
+        // neither must fail this boundary.
         let reference = TypedDomainRecordRef::<T>::new(&id);
         if let Some(existing) = view.typed_domain_record(&reference)? {
             let existing = existing.decode_payload::<T>()?;

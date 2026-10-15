@@ -2760,13 +2760,13 @@ fn compact_archive_declares_old_payload_dependencies_and_restores_for_continuati
         .expect("generated evidence should enter a completed causal prefix");
 
     let mut compact = canwu.into_compacted().expect("enter compact mode");
-    assert_eq!(
-        compact
-            .seal_evidence()
-            .expect_err("payload-required evidence needs provider-backed sealing")
-            .code,
-        ErrorCode::ArchiveNotReady
-    );
+    // The seal pins payload-required evidence, so a one-phase seal works as
+    // well as the provider-backed one below.
+    compact
+        .fork()
+        .seal_evidence()
+        .expect("a one-phase seal pins payload-required evidence")
+        .expect("technology run should have a retained evidence tail");
     let prepared = compact
         .prepare_evidence_seal()
         .expect("prepare archive")

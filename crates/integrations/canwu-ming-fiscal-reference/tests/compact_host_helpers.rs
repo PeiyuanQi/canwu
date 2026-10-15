@@ -4,6 +4,10 @@
 //! phases, because fiscal state declares payload-required evidence), so each
 //! helper reads a run whose earlier boundaries are sealed. Both runs reach the
 //! same receipts, state, and checkpoint hashes.
+//!
+//! A run restored from a continuation checkpoint written with the
+//! assessment open, the execution authorized, and the adapter result still
+//! queued continues in lockstep with the run it was written from.
 
 use canwu_api::{
     ArchiveProvider, ArchiveStore, ArchiveStoreOutcome, BoundaryReceipt, BoundaryRequest, Canwu,
@@ -16,10 +20,11 @@ use canwu_fiscal::{
     enqueue_execution_receipt, fiscal_action_command, fiscal_state_reference,
 };
 use canwu_ming_fiscal_reference::{
-    DEFAULT_SEED, ReferenceFiscalExecutionEvidence, enqueue_reference_execution_result,
-    ming_fiscal_reference_scenario, new_ming_fiscal_reference,
-    reference_execution_evidence_version,
+    DEFAULT_SEED, MingFiscalExecutionAdapterPlugin, ReferenceFiscalExecutionEvidence,
+    enqueue_reference_execution_result, ming_fiscal_plugin, ming_fiscal_reference_scenario,
+    new_ming_fiscal_reference, reference_execution_evidence_version,
 };
+use canwu_reference_world::ReferenceWorldPlugin;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
@@ -148,9 +153,39 @@ fn action(run: &mut impl Host, actor: PersonId, request_id: u64, action: FiscalA
     ));
 }
 
+/// The adapter result of the fulfillment flow.
+fn execution_evidence() -> ReferenceFiscalExecutionEvidence {
+    let reference = ming_fiscal_reference_scenario("hongwu-1391").expect("fixture");
+    ReferenceFiscalExecutionEvidence {
+        id: "evidence.compact".to_owned(),
+        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
+        external_operation_id: "resource-transfer.compact".to_owned(),
+        request_id: "compact.execution".to_owned(),
+        quantity: 70,
+        unit: "shi_grain_equivalent".to_owned(),
+        payment_form: FiscalPaymentForm::Grain,
+        execution_kind: FiscalExecutionKind::Collect,
+        resource: ResourceId::new(1),
+        source: EntityRef::Person(reference.world_ids.observer),
+        target: EntityRef::Government(reference.world_ids.government),
+        disposition: FiscalReceiptDisposition::Fulfilled,
+    }
+}
+
 /// Assesses, authorizes, publishes adapter evidence, and settles a receipt
 /// for it, with every step's history sealed before the next helper reads.
 fn fulfill(run: &mut impl Host) -> Vec<BoundaryReceipt> {
+    let mut receipts = open_and_authorize(run);
+    let evidence = execution_evidence();
+    let at = run.time();
+    enqueue_reference_execution_result(run, at, &evidence).expect("adapter result enqueues");
+    receipts.extend(step(run));
+    receipts.extend(settle_receipt(run));
+    receipts
+}
+
+/// Opens the assessment and authorizes its execution.
+fn open_and_authorize(run: &mut impl Host) -> Vec<BoundaryReceipt> {
     let reference = ming_fiscal_reference_scenario("hongwu-1391").expect("fixture");
     let actor = reference.world_ids.observer;
     let government = reference.world_ids.government;
@@ -189,23 +224,13 @@ fn fulfill(run: &mut impl Host) -> Vec<BoundaryReceipt> {
         },
     );
     receipts.extend(step(run));
-    let evidence = ReferenceFiscalExecutionEvidence {
-        id: "evidence.compact".to_owned(),
-        scope_binding_id: "scope.lower-yangzi.land".to_owned(),
-        external_operation_id: "resource-transfer.compact".to_owned(),
-        request_id: "compact.execution".to_owned(),
-        quantity: 70,
-        unit: "shi_grain_equivalent".to_owned(),
-        payment_form: FiscalPaymentForm::Grain,
-        execution_kind: FiscalExecutionKind::Collect,
-        resource: ResourceId::new(1),
-        source: EntityRef::Person(actor),
-        target: EntityRef::Government(government),
-        disposition: FiscalReceiptDisposition::Fulfilled,
-    };
-    let at = run.time();
-    enqueue_reference_execution_result(run, at, &evidence).expect("adapter result enqueues");
-    receipts.extend(step(run));
+    receipts
+}
+
+/// Settles the execution receipt for the published adapter evidence.
+fn settle_receipt(run: &mut impl Host) -> Vec<BoundaryReceipt> {
+    let evidence = execution_evidence();
+    let mut receipts = Vec::new();
     // The evidence's establishing boundary is sealed by now in the compact
     // run; its exact version still comes from the current-version index.
     let version =
@@ -253,5 +278,61 @@ fn fiscal_and_adapter_helpers_drive_a_sealed_compact_run_as_a_full_one() {
     assert!(
         compact.boundaries().len() < full.boundaries().len(),
         "the compact run sealed its earlier boundaries"
+    );
+}
+
+#[test]
+fn a_continuation_restored_fiscal_run_continues_in_lockstep() {
+    let mut full = new_ming_fiscal_reference(DEFAULT_SEED, "hongwu-1391").expect("runtime");
+    open_and_authorize(&mut full);
+    // The adapter result is queued for a later instant, so it is pending at
+    // the cut beside the open assessment and the authorized execution.
+    let at = full.time() + SimDuration::minutes(1);
+    enqueue_reference_execution_result(&mut full, at, &execution_evidence())
+        .expect("adapter result enqueues");
+    let (checkpoint, hash) = full
+        .continuation_checkpoint()
+        .expect("the continuation checkpoint builds");
+    assert_eq!(checkpoint.pending_ingress.len(), 1);
+    let world = ReferenceWorldPlugin;
+    let adapter = MingFiscalExecutionAdapterPlugin;
+    let fiscal = ming_fiscal_plugin();
+    let mut restored = CompactedCanwu::from_continuation_checkpoint_json_verified(
+        &checkpoint.to_json().expect("checkpoint JSON"),
+        &hash,
+        &[&world, &adapter, &fiscal],
+    )
+    .expect("the fiscal run restores");
+    assert_eq!(restored.checkpoint_hash(), full.checkpoint_hash());
+
+    let mut full_receipts = step(&mut full);
+    let mut restored_receipts = step(&mut restored);
+    full_receipts.extend(settle_receipt(&mut full));
+    restored_receipts.extend(settle_receipt(&mut restored));
+    for _ in 0..30 {
+        full_receipts.extend(step(&mut full));
+        restored_receipts.extend(step(&mut restored));
+        assert_eq!(restored.checkpoint_hash(), full.checkpoint_hash());
+    }
+    assert_eq!(restored_receipts, full_receipts);
+    assert_eq!(
+        restored.authoritative_state_hash().expect("state hash"),
+        full.authoritative_state_hash().expect("state hash")
+    );
+    let state = fiscal_state(&restored);
+    assert_eq!(state, fiscal_state(&full));
+    assert_eq!(
+        state
+            .execution_receipts()
+            .find(|receipt| receipt.id == "receipt.compact")
+            .map(|receipt| receipt.quantity),
+        Some(70)
+    );
+    assert_eq!(
+        restored
+            .continuation_checkpoint()
+            .expect("restored checkpoint")
+            .1,
+        full.continuation_checkpoint().expect("full checkpoint").1
     );
 }

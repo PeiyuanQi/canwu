@@ -596,7 +596,7 @@ impl Simulation {
                 ),
             ));
         }
-        for record in &self.state.evidence.ingress {
+        for record in self.state.evidence.ingress_records() {
             let IngressPayload::Command { request: existing } = &record.payload else {
                 continue;
             };
@@ -803,7 +803,7 @@ impl Simulation {
                 ),
             ));
         }
-        let Some(record) = self.state.evidence.retained_ingress(ingress_id) else {
+        let Some(record) = self.state.evidence.ingress_record(ingress_id) else {
             if ingress_id.get() != 0
                 && ingress_id.get() <= self.state.evidence.archived.ingress_count
             {
@@ -879,6 +879,14 @@ impl Simulation {
         plugin: &'a str,
         current_generations: &'a [BoundaryIngressGeneration],
     ) -> Result<PluginIngressIssuer<'a>, CanwuError> {
+        if let Some(CauseRef::Boundary(boundary)) = &record.cause
+            && self.state.evidence.retained_boundary(*boundary).is_none()
+            && let Some(generation) = self.state.evidence.pinned.generation(record.id)
+        {
+            // A sealed producing boundary: the kept provenance fact names the
+            // plugin that scheduled the packet.
+            return Ok(PluginIngressIssuer::Plugin(generation.issuer.as_str()));
+        }
         match &record.cause {
             None | Some(CauseRef::System(_)) => Ok(PluginIngressIssuer::Host),
             Some(CauseRef::Command(_)) => Ok(PluginIngressIssuer::Plugin(plugin)),
@@ -963,6 +971,10 @@ impl Simulation {
         self.state.counters.next_ingress_id = next_id;
         self.state.scheduler.pending_ingress.remove(&target);
         self.state.scheduler.cancelled_ingress.insert(target.id);
+        self.state
+            .evidence
+            .pinned
+            .set_ingress_status(target.id, super::PluginIngressStatus::Cancelled);
         self.state.evidence.ingress.push(record);
         self.state.metadata.plugin_registration_closed = true;
         if let Err(error) = self.refresh_checkpoint_hash() {

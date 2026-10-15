@@ -1,0 +1,410 @@
+{
+  "benchmark": "canwu-continuation-checkpoint",
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)"
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "churned_records_per_day": 140,
+    "continuation": "continuation_checkpoint and to_json of the unsealed run, and CompactedCanwu::from_continuation_checkpoint_json_verified of it",
+    "days_per_month": 30,
+    "full_save": "checkpoint_journal_json of the unsealed run, and Canwu::from_checkpoint_journal_json_with_plugins of it",
+    "heap": "allocation build only: net bytes held by a run built alone to the last month, unsealed or sealing every month",
+    "host_commands_per_day": 8,
+    "part_bytes": "the JSON length of each part of the continuation checkpoint",
+    "samples": 3
+  },
+  "metric_mode": "elapsed",
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "series": [
+    {
+      "keyed_draws_per_packet": 0,
+      "months": [
+        {
+          "continuation": {
+            "bytes": 276634,
+            "non_state_bytes": 212908,
+            "part_bytes": {
+              "boundary_ledger": 145,
+              "current_record_versions": 30275,
+              "ingress_provenance": 2,
+              "journal_frontiers": 4282,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 132,
+              "pinned": 15390,
+              "pinned_ingress": 9410,
+              "request_index": 124897,
+              "state": 63726,
+              "time_index": 3721,
+              "unadmitted": 33269
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 15152100,
+            "write_ns_median": 1794400
+          },
+          "full_save": {
+            "bytes": 10681616,
+            "restore_ns_median": 374636200,
+            "write_ns_median": 27416600
+          },
+          "month": 1
+        },
+        {
+          "continuation": {
+            "bytes": 424955,
+            "non_state_bytes": 348914,
+            "part_bytes": {
+              "boundary_ledger": 293,
+              "current_record_versions": 30275,
+              "ingress_provenance": 2,
+              "journal_frontiers": 4635,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 178,
+              "pinned": 21286,
+              "pinned_ingress": 12133,
+              "request_index": 250597,
+              "state": 76041,
+              "time_index": 7441,
+              "unadmitted": 33412
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 26449700,
+            "write_ns_median": 3771000
+          },
+          "full_save": {
+            "bytes": 21310449,
+            "restore_ns_median": 796523100,
+            "write_ns_median": 57812700
+          },
+          "month": 2
+        },
+        {
+          "continuation": {
+            "bytes": 717356,
+            "non_state_bytes": 616378,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 5635,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 247,
+              "pinned": 25519,
+              "pinned_ingress": 15010,
+              "request_index": 504089,
+              "state": 100978,
+              "time_index": 15246,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 54309700,
+            "write_ns_median": 6736200
+          },
+          "full_save": {
+            "bytes": 42621627,
+            "restore_ns_median": 1983871500,
+            "write_ns_median": 155689600
+          },
+          "month": 4
+        },
+        {
+          "continuation": {
+            "bytes": 1151213,
+            "non_state_bytes": 1013062,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 5385,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 271,
+              "pinned": 25481,
+              "pinned_ingress": 14857,
+              "request_index": 888980,
+              "state": 138151,
+              "time_index": 27301,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 59205100,
+            "write_ns_median": 10406200
+          },
+          "full_save": {
+            "bytes": 74648986,
+            "restore_ns_median": 3835428600,
+            "write_ns_median": 289753400
+          },
+          "month": 7
+        },
+        {
+          "continuation": {
+            "bytes": 1586042,
+            "non_state_bytes": 1410721,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 6335,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 266,
+              "pinned": 25205,
+              "pinned_ingress": 14581,
+              "request_index": 1273910,
+              "state": 175321,
+              "time_index": 39361,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 73436200,
+            "write_ns_median": 14396900
+          },
+          "full_save": {
+            "bytes": 106676494,
+            "restore_ns_median": 5302566700,
+            "write_ns_median": 421983600
+          },
+          "month": 10
+        },
+        {
+          "continuation": {
+            "bytes": 2165646,
+            "non_state_bytes": 1940765,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 6778,
+              "keyed_draw_ledger": 2,
+              "known_record_versions": 2,
+              "pending_ingress": 271,
+              "pinned": 25481,
+              "pinned_ingress": 14857,
+              "request_index": 1787150,
+              "state": 224881,
+              "time_index": 55441,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 97925700,
+            "write_ns_median": 21505300
+          },
+          "full_save": {
+            "bytes": 149369838,
+            "restore_ns_median": 7809079200,
+            "write_ns_median": 599280100
+          },
+          "month": 14
+        }
+      ]
+    },
+    {
+      "keyed_draws_per_packet": 10,
+      "months": [
+        {
+          "continuation": {
+            "bytes": 388622,
+            "non_state_bytes": 324894,
+            "part_bytes": {
+              "boundary_ledger": 145,
+              "current_record_versions": 30275,
+              "ingress_provenance": 2,
+              "journal_frontiers": 4566,
+              "keyed_draw_ledger": 111532,
+              "known_record_versions": 2,
+              "pending_ingress": 132,
+              "pinned": 15390,
+              "pinned_ingress": 9410,
+              "request_index": 124897,
+              "state": 63728,
+              "time_index": 3889,
+              "unadmitted": 33269
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 25302900,
+            "write_ns_median": 2578900
+          },
+          "full_save": {
+            "bytes": 10988607,
+            "restore_ns_median": 532138700,
+            "write_ns_median": 35769000
+          },
+          "month": 1
+        },
+        {
+          "continuation": {
+            "bytes": 763196,
+            "non_state_bytes": 687153,
+            "part_bytes": {
+              "boundary_ledger": 293,
+              "current_record_versions": 30275,
+              "ingress_provenance": 2,
+              "journal_frontiers": 6965,
+              "keyed_draw_ledger": 335314,
+              "known_record_versions": 2,
+              "pending_ingress": 178,
+              "pinned": 21286,
+              "pinned_ingress": 12133,
+              "request_index": 250597,
+              "state": 76043,
+              "time_index": 8034,
+              "unadmitted": 33412
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 43032700,
+            "write_ns_median": 6168900
+          },
+          "full_save": {
+            "bytes": 22232602,
+            "restore_ns_median": 1146328300,
+            "write_ns_median": 74973700
+          },
+          "month": 2
+        },
+        {
+          "continuation": {
+            "bytes": 1550269,
+            "non_state_bytes": 1449288,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 7249,
+              "keyed_draw_ledger": 829207,
+              "known_record_versions": 2,
+              "pending_ingress": 247,
+              "pinned": 25519,
+              "pinned_ingress": 15010,
+              "request_index": 504089,
+              "state": 100981,
+              "time_index": 17331,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 81862000,
+            "write_ns_median": 12253800
+          },
+          "full_save": {
+            "bytes": 44902197,
+            "restore_ns_median": 2099523800,
+            "write_ns_median": 163529000
+          },
+          "month": 4
+        },
+        {
+          "continuation": {
+            "bytes": 2804067,
+            "non_state_bytes": 2665913,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 7454,
+              "keyed_draw_ledger": 1646263,
+              "known_record_versions": 2,
+              "pending_ingress": 271,
+              "pinned": 25481,
+              "pinned_ingress": 14857,
+              "request_index": 888980,
+              "state": 138154,
+              "time_index": 31816,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 124542200,
+            "write_ns_median": 16062400
+          },
+          "full_save": {
+            "bytes": 79171982,
+            "restore_ns_median": 3037948600,
+            "write_ns_median": 298624100
+          },
+          "month": 7
+        },
+        {
+          "continuation": {
+            "bytes": 4059455,
+            "non_state_bytes": 3884131,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 8633,
+              "keyed_draw_ledger": 2464163,
+              "known_record_versions": 2,
+              "pending_ingress": 266,
+              "pinned": 25205,
+              "pinned_ingress": 14581,
+              "request_index": 1273910,
+              "state": 175324,
+              "time_index": 46306,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 144741300,
+            "write_ns_median": 21724200
+          },
+          "full_save": {
+            "bytes": 113442760,
+            "restore_ns_median": 4113301900,
+            "write_ns_median": 291786800
+          },
+          "month": 10
+        },
+        {
+          "continuation": {
+            "bytes": 5722005,
+            "non_state_bytes": 5497121,
+            "part_bytes": {
+              "boundary_ledger": 295,
+              "current_record_versions": 30701,
+              "ingress_provenance": 2,
+              "journal_frontiers": 8756,
+              "keyed_draw_ledger": 3544189,
+              "known_record_versions": 2,
+              "pending_ingress": 271,
+              "pinned": 25481,
+              "pinned_ingress": 14857,
+              "request_index": 1787150,
+              "state": 224884,
+              "time_index": 65626,
+              "unadmitted": 33841
+            },
+            "restore_allocation_operations": 0,
+            "restore_net_bytes": 0,
+            "restore_ns_median": 207010600,
+            "write_ns_median": 38829000
+          },
+          "full_save": {
+            "bytes": 159098260,
+            "restore_ns_median": 6243763200,
+            "write_ns_median": 436044900
+          },
+          "month": 14
+        }
+      ]
+    }
+  ]
+}

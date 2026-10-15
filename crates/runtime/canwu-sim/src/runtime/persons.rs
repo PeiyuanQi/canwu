@@ -1045,6 +1045,52 @@ pub(super) fn validate_snapshot_entity_registry(
     Ok(())
 }
 
+/// Checks the entity registry of a state without history: the initial
+/// scenario registry plus exactly the persons the created-person index
+/// names, with every initial person and only initial or created persons in
+/// the `WorldSnapshot` projection. Whether a created person is placed is
+/// history, so the projection is not checked further.
+pub(super) fn validate_state_entity_registry(
+    snapshot: &SimulationSnapshot,
+) -> Result<(), CanwuError> {
+    let Some(initial) = snapshot.initial_scenario.as_ref() else {
+        return Ok(());
+    };
+    let mut expected_entities: BTreeSet<_> = initial.entities.iter().cloned().collect();
+    let initial_people: BTreeSet<_> = initial
+        .world
+        .people
+        .iter()
+        .map(|person| person.id)
+        .collect();
+    let mut created_people = BTreeSet::new();
+    for creation in &snapshot.created_persons {
+        if !expected_entities.insert(EntityRef::Person(creation.person))
+            || initial_people.contains(&creation.person)
+        {
+            return invalid_snapshot("runtime-created person reuses an existing identity");
+        }
+        created_people.insert(creation.person);
+    }
+    let people: BTreeSet<_> = snapshot
+        .world
+        .people
+        .iter()
+        .map(|person| person.id)
+        .collect();
+    if expected_entities.into_iter().collect::<Vec<_>>() != snapshot.entities
+        || !initial_people.is_subset(&people)
+        || people
+            .iter()
+            .any(|person| !initial_people.contains(person) && !created_people.contains(person))
+    {
+        return invalid_snapshot(
+            "snapshot entity registry does not match its manifest-bound initial scenario and committed person creations",
+        );
+    }
+    Ok(())
+}
+
 fn snapshot_availability_is_valid(
     snapshot: &SimulationSnapshot,
     person: PersonId,

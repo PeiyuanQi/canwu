@@ -252,6 +252,14 @@ pub enum SystemDirective {
         summary: String,
         affected: Vec<EntityRef>,
     },
+    /// Runs `directive` after `after`, strictly in the future.
+    ///
+    /// A directive that enqueues plugin ingress, at any depth of nesting, is
+    /// refused with [`ErrorCode::InvalidPayload`]: the packet it queued when
+    /// it fired would carry the command or event that scheduled it as its
+    /// cause but no record of when it was issued, so no load could check it
+    /// against that cause. [`SystemDirective::EnqueuePluginIngress`] takes its
+    /// own delay instead.
     Schedule {
         after: SimDuration,
         directive: Box<SystemDirective>,

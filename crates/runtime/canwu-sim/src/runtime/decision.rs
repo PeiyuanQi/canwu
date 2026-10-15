@@ -285,7 +285,7 @@ impl Simulation {
                 ),
             ));
         }
-        for record in &self.state.evidence.ingress {
+        for record in self.state.evidence.ingress_records() {
             let IngressPayload::Decision { request: existing } = &record.payload else {
                 continue;
             };
@@ -384,7 +384,7 @@ impl Simulation {
                 .evidence
                 .archived_decision_requests
                 .contains_key(&request.request_id)
-            || self.state.evidence.ingress.iter().any(|record| {
+            || self.state.evidence.ingress_records().any(|record| {
                 matches!(
                     &record.payload,
                     IngressPayload::Decision { request: existing }
@@ -436,7 +436,7 @@ impl Simulation {
             .decisions
             .commit_verified_decision_archive(&commit)
             .map_err(decision_error)?;
-        for record in &self.state.evidence.ingress {
+        for record in self.state.evidence.ingress_records() {
             let IngressPayload::Maintenance { request } = &record.payload else {
                 continue;
             };
@@ -839,39 +839,34 @@ impl Simulation {
                 .any(|record| ingress_command_request_id(record) == Some(request_id))
     }
 
+    /// Whether the admitted decision is the only record that carries its
+    /// nested command request. The decision is retained, or was archived by
+    /// a seal while it was pending, so it is counted wherever it lies: in the
+    /// retained ingress or in the archived decision command requests. No
+    /// other decision can carry the same request, because queuing one that
+    /// does is refused while the request is in use.
     fn command_request_id_is_unique_for_admitted_decision(
         &self,
         request_id: CommandRequestId,
     ) -> bool {
-        !self
-            .state
-            .evidence
-            .archived_command_requests
-            .contains_key(&request_id)
-            && !self
-                .state
-                .evidence
-                .archived_ingress_requests
-                .contains_key(&request_id)
-            && !self
-                .state
-                .evidence
+        let evidence = &self.state.evidence;
+        let archived = usize::from(
+            evidence
                 .archived_decision_command_requests
-                .contains(&request_id)
-            && !self
-                .state
-                .evidence
+                .contains(&request_id),
+        );
+        let retained = evidence
+            .ingress
+            .iter()
+            .filter(|record| ingress_command_request_id(record) == Some(request_id))
+            .count();
+        !evidence.archived_command_requests.contains_key(&request_id)
+            && !evidence.archived_ingress_requests.contains_key(&request_id)
+            && !evidence
                 .command_attempts
                 .iter()
                 .any(|attempt| attempt.request_id == Some(request_id))
-            && self
-                .state
-                .evidence
-                .ingress
-                .iter()
-                .filter(|record| ingress_command_request_id(record) == Some(request_id))
-                .count()
-                == 1
+            && archived + retained == 1
     }
 
     fn validate_decision_mutation_entities(

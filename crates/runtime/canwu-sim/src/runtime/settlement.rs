@@ -102,6 +102,12 @@ impl Simulation {
         self.advance_to_before_boundary(request.at)?;
 
         let admitted_ingress = self.take_due_ingress(request.at);
+        for id in &admitted_ingress {
+            self.state
+                .evidence
+                .pinned
+                .set_ingress_status(*id, super::PluginIngressStatus::Admitted);
+        }
         let admitted_ingress_index: HashSet<_> = admitted_ingress.iter().copied().collect();
         let mut maintenance_changes = Vec::new();
         let mut maintenance_record_changes = Vec::new();
@@ -109,7 +115,7 @@ impl Simulation {
             let record = self
                 .state
                 .evidence
-                .retained_ingress(*ingress_id)
+                .ingress_record(*ingress_id)
                 .cloned()
                 .ok_or_else(|| {
                     CanwuError::new(
@@ -1923,6 +1929,30 @@ fn index_current_domain_record_version(
     // Records change only while their boundary settles, when `now` is that
     // boundary's committed time.
     let established_at = state.scheduler.now;
+    // A version this change replaces stops being current. When its
+    // establishing boundary is sealed, the live record is its only body, so
+    // pin it before the record is replaced: a dependency declared on it,
+    // now or while it was current, stays resolvable at the next seal and in
+    // a continuation checkpoint, as in an unsealed run.
+    if let Some(replaced) = state
+        .metadata
+        .current_domain_record_versions
+        .get(&change.current.reference)
+        && let super::DomainRecordVersionSource::BoundaryChange {
+            boundary: sealed, ..
+        } = replaced.version.established_by
+        && sealed.get() <= state.evidence.archived.boundary_count
+        && let Some(previous) = change
+            .previous
+            .as_ref()
+            .filter(|previous| previous.version == replaced.version.version)
+    {
+        state
+            .evidence
+            .pinned
+            .record_versions
+            .insert(replaced.version.clone(), Arc::clone(previous));
+    }
     let versions = &mut state.metadata.current_domain_record_versions;
     // An updated record keeps its shared key, so the persistent map copies no
     // key text along the path it changes.

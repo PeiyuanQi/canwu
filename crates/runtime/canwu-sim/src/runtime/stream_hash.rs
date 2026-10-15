@@ -50,13 +50,6 @@ pub(super) struct ResumableStreamHash {
 }
 
 /// The exported state of a [`ResumableStreamHash`].
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the continuation checkpoint exports and resumes journal frontiers"
-    )
-)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StreamFrontier {
     pub(super) len: u64,
@@ -178,13 +171,6 @@ impl ResumableStreamHash {
     }
 
     /// Exports the state.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the continuation checkpoint exports and resumes journal frontiers"
-        )
-    )]
     pub(super) fn frontier(&self) -> StreamFrontier {
         StreamFrontier {
             len: self.len,
@@ -195,13 +181,6 @@ impl ResumableStreamHash {
 
     /// Resumes an exported state, refusing any shape the hasher could not
     /// have produced before a hazmat call could assert on it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "the continuation checkpoint exports and resumes journal frontiers"
-        )
-    )]
     pub(super) fn from_frontier(frontier: &StreamFrontier) -> Result<Self, CanwuError> {
         let invalid = |message: &str| {
             CanwuError::new(

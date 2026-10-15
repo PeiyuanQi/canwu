@@ -20,6 +20,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1000,36 +1001,38 @@ fn reachable_archived_receipt_references(
         .collect()
 }
 
+/// Exact idempotency entries for tracked requests, built from journal slices
+/// by a seal and by a continuation checkpoint of an unsealed run.
+#[derive(Default)]
+pub(super) struct ArchivedRequestTables {
+    pub(super) commands: Vec<(super::CommandRequestId, ArchivedCommandRequestOutcome)>,
+    pub(super) ingress: Vec<(super::CommandRequestId, ArchivedIngressRequest)>,
+    pub(super) decisions: Vec<(super::DecisionRequestId, ArchivedIngressRequest)>,
+    pub(super) decision_commands: Vec<super::CommandRequestId>,
+}
+
 /// Keeps the receipts of current dependencies. A dependency first cited after
 /// the seal that archived its evidence has no receipt to keep; see
 /// [`Simulation::receipt_required_references`] for which ones must have one.
 fn retain_reachable_archived_evidence_receipts(
-    receipts: &mut BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
+    receipts: &mut im::OrdMap<EvidenceRef, Arc<ArchivedEvidenceReceipt>>,
     dependencies: &[EvidenceDependency],
 ) {
     let reachable = reachable_archived_receipt_references(dependencies);
-    receipts.retain(|reference, _| reachable.contains(reference));
-}
-
-/// Returns whether the journal counters alone prove that an identity-only
-/// dependency exists in the sealed prefix: an ordinal journal item at or
-/// below the archived cut, or an initial-scenario domain-record version.
-fn sealed_identity_is_counted(archived: &EvidenceCursor, reference: &EvidenceRef) -> bool {
-    let (id, count) = match reference {
-        EvidenceRef::Event(id) => (id.get(), archived.event_count),
-        EvidenceRef::Command(id) => (id.get(), archived.command_count),
-        EvidenceRef::CommandAttempt(id) => (id.get(), archived.command_attempt_count),
-        EvidenceRef::Ingress(id) => (id.get(), archived.ingress_count),
-        EvidenceRef::Boundary(id) => (id.get(), archived.boundary_count),
-        EvidenceRef::RandomDraw(id) => (id.get(), archived.random_draw_count),
-        EvidenceRef::DomainRecordVersion(version) => {
-            return matches!(
-                version.established_by,
-                DomainRecordVersionSource::InitialScenario
-            );
-        }
-    };
-    id != 0 && id <= count
+    if receipts
+        .keys()
+        .all(|reference| reachable.contains(reference))
+    {
+        return;
+    }
+    // Rebuilt rather than removed from: a removal from the persistent map
+    // holds several of its nodes on the stack at once in a debug build, which
+    // overflows a 1 MiB thread.
+    *receipts = receipts
+        .iter()
+        .filter(|(reference, _)| reachable.contains(*reference))
+        .map(|(reference, receipt)| (reference.clone(), Arc::clone(receipt)))
+        .collect();
 }
 
 pub(crate) fn load_verified_archived_evidence_segment(
@@ -1713,18 +1716,38 @@ impl SimulationCheckpoint {
     }
 }
 
-fn compact_checkpoint_hash(checkpoint: &SimulationCheckpoint) -> Result<String, CanwuError> {
-    validate_compact_continuation(checkpoint)?;
-    super::canonical_hash(
-        COMPACT_CHECKPOINT_DOMAIN,
-        &CompactCheckpointHashMaterial {
-            state_checkpoint_hash: &checkpoint.state.checkpoint_hash,
-            journal_end: checkpoint.journal_end,
-            archived_segment_manifest_root: checkpoint.archived_segment_manifest_root.as_deref(),
-            archived_receipt_root: checkpoint.archived_receipt_root.as_deref(),
-            evidence_dependency_root: checkpoint.evidence_dependency_root.as_deref(),
-        },
-    )
+impl Simulation {
+    /// The compact identity a two-phase seal token binds: the state
+    /// checkpoint hash, the journal end, and the roots of the segment
+    /// manifest, the kept receipts, and the evidence dependencies. It equals
+    /// the identity of the compact checkpoint this runtime would write, but
+    /// is computed from the runtime's fields, so a continuation runtime,
+    /// which cannot write that checkpoint, has one too.
+    fn compact_identity_hash(&self) -> Result<String, CanwuError> {
+        let dependencies = self.evidence_dependencies()?;
+        let reachable = reachable_archived_receipt_references(&dependencies);
+        let evidence = &self.state.evidence;
+        let headers: Vec<_> = evidence.archived_segment_headers.iter().collect();
+        let receipts: Vec<_> = evidence
+            .archived_evidence_receipts
+            .iter()
+            .filter(|(reference, _)| reachable.contains(*reference))
+            .map(|(_, receipt)| receipt.as_ref())
+            .collect();
+        let manifest_root = skipped_commitment_root(ARCHIVED_SEGMENT_MANIFEST_DOMAIN, &headers)?;
+        let receipt_root = skipped_commitment_root(ARCHIVED_RECEIPT_DOMAIN, &receipts)?;
+        let dependency_root = skipped_commitment_root(EVIDENCE_DEPENDENCY_DOMAIN, &dependencies)?;
+        super::canonical_hash(
+            COMPACT_CHECKPOINT_DOMAIN,
+            &CompactCheckpointHashMaterial {
+                state_checkpoint_hash: &self.state.metadata.checkpoint_hash,
+                journal_end: self.evidence_cursor()?,
+                archived_segment_manifest_root: manifest_root.as_deref(),
+                archived_receipt_root: receipt_root.as_deref(),
+                evidence_dependency_root: dependency_root.as_deref(),
+            },
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1806,7 +1829,7 @@ pub struct CheckpointJournal {
 /// checkpoints.
 pub struct CompactedSimulation {
     simulation: Simulation,
-    committed_seal_tokens: BTreeSet<String>,
+    committed_seal_tokens: im::OrdSet<String>,
 }
 
 impl CompactedSimulation {
@@ -1982,8 +2005,109 @@ impl CompactedSimulation {
     }
 
     /// Captures current state and the total journal cut without cloning sealed evidence.
+    ///
+    /// A continuation-restored run returns
+    /// [`ErrorCode::HistoryUnavailable`]: restoring a compact checkpoint
+    /// needs every segment since genesis. Use
+    /// [`Self::continuation_checkpoint`] instead.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
+    }
+
+    /// Builds the continuation checkpoint of this run at its settled cut and
+    /// returns it with its continuation hash, which the host stores as the
+    /// trust anchor for [`Self::from_continuation_checkpoint_verified`].
+    ///
+    /// Building changes nothing and fails with `ArchiveNotReady` exactly when
+    /// a seal would. Every part is a function of state and history at the
+    /// cut, so an unsealed run, any sealed run, and any continuation-restored
+    /// run write the same checkpoint there.
+    pub fn continuation_checkpoint(
+        &self,
+    ) -> Result<(super::ContinuationCheckpoint, String), CanwuError> {
+        self.simulation.continuation_checkpoint()
+    }
+
+    /// Where this run's history begins when it was restored from a
+    /// continuation checkpoint; `None` for a run that holds its history.
+    #[must_use]
+    pub const fn continuation_base(&self) -> Option<&super::ContinuationBase> {
+        self.simulation.state.evidence.continuation_base.as_ref()
+    }
+
+    /// Restores a run from a continuation checkpoint whose state names no
+    /// plugin. A checkpoint that names one fails with `PluginNotActive`; use
+    /// [`Self::from_continuation_checkpoint_with_plugins`].
+    ///
+    /// The restore checks the checkpoint's shape and own hash, validates its
+    /// state without history, recomputes every keyed draw, requires the
+    /// rebuilt runtime to reproduce the checkpoint hash, and requires the
+    /// checkpoint derived from the restored runtime to be the input. The own
+    /// hash detects corruption only; compare it with the value stored when
+    /// the checkpoint was written through
+    /// [`Self::from_continuation_checkpoint_verified`].
+    pub fn from_continuation_checkpoint(
+        checkpoint: super::ContinuationCheckpoint,
+    ) -> Result<Self, CanwuError> {
+        Self::from_continuation_checkpoint_with_plugins(checkpoint, &[])
+    }
+
+    /// Restores a run from a continuation checkpoint and rehydrates its
+    /// exact executable plugins.
+    pub fn from_continuation_checkpoint_with_plugins(
+        checkpoint: super::ContinuationCheckpoint,
+        plugins: &[&dyn super::SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        let continuation_hash = checkpoint.continuation_hash.clone();
+        let mut simulation = Simulation::restore_continuation(checkpoint)?;
+        for plugin in plugins {
+            simulation.register_plugin(*plugin)?;
+        }
+        simulation.ensure_runtime_ready()?;
+        simulation.verify_continuation_round_trip(&continuation_hash)?;
+        simulation.into_compacted()
+    }
+
+    /// Restores a run from a continuation checkpoint only if its continuation
+    /// hash is the one the host stored when the checkpoint was written. This
+    /// covers the carried evidence, the indexes, and the settled cut, which
+    /// the checkpoint hash of the state does not.
+    pub fn from_continuation_checkpoint_verified(
+        checkpoint: super::ContinuationCheckpoint,
+        expected_continuation_hash: &str,
+        plugins: &[&dyn super::SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        if checkpoint.compute_continuation_hash()? != expected_continuation_hash {
+            return Err(invalid_snapshot_error(
+                "continuation checkpoint does not match the stored continuation hash",
+            ));
+        }
+        Self::from_continuation_checkpoint_with_plugins(checkpoint, plugins)
+    }
+
+    /// Restores a run from the JSON of a continuation checkpoint.
+    pub fn from_continuation_checkpoint_json_with_plugins(
+        json: &str,
+        plugins: &[&dyn super::SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Self::from_continuation_checkpoint_with_plugins(
+            super::ContinuationCheckpoint::from_json(json)?,
+            plugins,
+        )
+    }
+
+    /// Restores a run from the JSON of a continuation checkpoint only if its
+    /// continuation hash is the one the host stored.
+    pub fn from_continuation_checkpoint_json_verified(
+        json: &str,
+        expected_continuation_hash: &str,
+        plugins: &[&dyn super::SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Self::from_continuation_checkpoint_verified(
+            super::ContinuationCheckpoint::from_json(json)?,
+            expected_continuation_hash,
+            plugins,
+        )
     }
 
     /// Clones the retained evidence tail after `start`. Caller-owned sealed
@@ -2044,6 +2168,7 @@ impl CompactedSimulation {
             .evidence
             .archived_evidence_receipts
             .get(reference)
+            .map(Arc::as_ref)
     }
 
     /// Loads and fully verifies the segment containing archived evidence whose
@@ -2098,25 +2223,24 @@ impl CompactedSimulation {
             .enqueue_decision_archive_commit(at, 0, verified)
     }
 
-    /// Seals and releases the current retained evidence tail.
+    /// Seals and releases the settled part of the retained evidence.
     ///
-    /// The runtime changes only after the segment is fully constructed and its
-    /// continuation indexes are prepared. An empty retained tail returns
-    /// `None`. The caller owns persistence and must keep all non-empty segments
-    /// in exact cursor order for save restoration or replay. After a restore,
-    /// the first seal starts at the zero cut and replaces the restored prefix.
+    /// Each journal moves to its settled cut: events, commands, and attempts
+    /// up to the admission cursors, the others to their end. Work in flight
+    /// does not block a seal: unadmitted records stay retained, and the
+    /// continuation closure (pending ingress, the causes of pending work,
+    /// payload-required declarations, and the identity facts of declared
+    /// versions and packets) is pinned in memory, so a run with
+    /// payload-required dependencies seals in one phase too. A dependency
+    /// declared after its evidence was sealed fails with `ArchiveNotReady`,
+    /// and the run is unchanged. Nothing settled returns `None`. The caller
+    /// owns persistence and must keep all non-empty segments in exact cursor
+    /// order for save restoration or replay. After a checkpoint-and-journal
+    /// restore, the first seal starts at the zero cut and replaces the
+    /// restored prefix.
     pub fn seal_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
-        if self
-            .simulation
-            .evidence_dependencies()?
-            .iter()
-            .any(|dependency| dependency.requirement == EvidenceRequirement::PayloadRequired)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "payload-required continuations must use prepare/store/commit sealing",
-            ));
-        }
+        // The persistent evidence structures make this copy constant-size
+        // apart from the retained tail.
         let before = self.simulation.fork();
         match self.simulation.seal_retained_evidence() {
             Ok(segment) => Ok(segment),
@@ -2134,7 +2258,7 @@ impl CompactedSimulation {
     /// live simulation.
     pub fn prepare_evidence_seal(&self) -> Result<Option<PreparedEvidenceSeal>, CanwuError> {
         let source_state_hash = self.simulation.authoritative_state_hash()?;
-        let source_checkpoint_hash = compact_checkpoint_hash(&self.simulation.checkpoint()?)?;
+        let source_checkpoint_hash = self.simulation.compact_identity_hash()?;
         let source_end = self.simulation.evidence_cursor()?;
         let mut candidate = self.simulation.fork();
         let Some(segment) = candidate.seal_retained_evidence()? else {
@@ -2147,7 +2271,7 @@ impl CompactedSimulation {
             .header
             .segment_id
             .clone();
-        let target_checkpoint_hash = compact_checkpoint_hash(&candidate.checkpoint()?)?;
+        let target_checkpoint_hash = candidate.compact_identity_hash()?;
         let token_hash = super::canonical_hash(
             SEAL_TOKEN_DOMAIN,
             &(
@@ -2195,8 +2319,7 @@ impl CompactedSimulation {
             return Err(archive_error("evidence seal token hash is invalid"));
         }
         if self.simulation.authoritative_state_hash()? != token.source_state_hash
-            || compact_checkpoint_hash(&self.simulation.checkpoint()?)?
-                != token.source_checkpoint_hash
+            || self.simulation.compact_identity_hash()? != token.source_checkpoint_hash
             || self.simulation.evidence_cursor()? != token.source_end
         {
             return Err(CanwuError::new(
@@ -2238,9 +2361,7 @@ impl CompactedSimulation {
             }
             self.simulation
                 .validate_payload_required_archive(provider)?;
-            if compact_checkpoint_hash(&self.simulation.checkpoint()?)?
-                != token.target_checkpoint_hash
-            {
+            if self.simulation.compact_identity_hash()? != token.target_checkpoint_hash {
                 return Err(archive_error(
                     "committed checkpoint hash differs from the seal token",
                 ));
@@ -2582,6 +2703,8 @@ impl CompactedSimulation {
         mut segments: Vec<EvidenceJournalSegment>,
         keep_snapshot: bool,
     ) -> Result<(Option<SimulationSnapshot>, Simulation), CanwuError> {
+        self.simulation
+            .ensure_full_history("a snapshot or replay journal from segments")?;
         let tail = self
             .simulation
             .journal_segment_since(self.simulation.state.evidence.archived)?;
@@ -2658,11 +2781,11 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         Ok(CompactedSimulation {
             simulation: self,
-            committed_seal_tokens: BTreeSet::new(),
+            committed_seal_tokens: im::OrdSet::new(),
         })
     }
 
-    fn evidence_dependencies(&self) -> Result<Vec<EvidenceDependency>, CanwuError> {
+    pub(super) fn evidence_dependencies(&self) -> Result<Vec<EvidenceDependency>, CanwuError> {
         let mut dependencies = BTreeMap::new();
         let identity = EvidenceRequirement::IdentityOnly;
 
@@ -2821,6 +2944,26 @@ impl Simulation {
             .collect())
     }
 
+    /// Whether the runtime holds the payload of a piece of evidence: a
+    /// retained or pinned record, or a record version body it can read.
+    pub(super) fn payload_is_held(&self, reference: &EvidenceRef) -> bool {
+        let evidence = &self.state.evidence;
+        match reference {
+            EvidenceRef::Event(id) => evidence.event_record(*id).is_some(),
+            EvidenceRef::Command(id) => evidence.command_record(*id).is_some(),
+            EvidenceRef::CommandAttempt(id) => evidence.command_attempt_record(*id).is_some(),
+            EvidenceRef::Ingress(id) => evidence.ingress_record(*id).is_some(),
+            EvidenceRef::Boundary(id) => evidence.boundary_record(*id).is_some(),
+            EvidenceRef::RandomDraw(id) => evidence.random_draw_record(*id).is_some(),
+            EvidenceRef::DomainRecordVersion(version) => {
+                super::retained_domain_record_version(&self.state, version).is_some()
+            }
+        }
+    }
+
+    /// Checks that every payload-required dependency is held, as the
+    /// continuation closure keeps it, or else receipted and loadable from the
+    /// provider.
     fn validate_payload_required_archive(
         &self,
         provider: &dyn ArchiveProvider,
@@ -2830,6 +2973,9 @@ impl Simulation {
             .into_iter()
             .filter(|dependency| dependency.requirement == EvidenceRequirement::PayloadRequired)
         {
+            if self.payload_is_held(&dependency.reference) {
+                continue;
+            }
             let receipt = self
                 .state
                 .evidence
@@ -2846,211 +2992,186 @@ impl Simulation {
         Ok(())
     }
 
-    fn ensure_retained_evidence_is_sealable(&self) -> Result<(), CanwuError> {
-        if !self.state.scheduler.pending_ingress.is_empty() {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "live evidence can be sealed only when the canonical ingress queue is empty",
+    /// The cut a seal moves each journal to: events, commands, and attempts up
+    /// to the admission cursors (a later boundary has admitted them), and
+    /// ingress, boundaries, and draws to their end. Ingress and boundaries
+    /// share the cut, so a boundary-generated packet and its producing
+    /// boundary always land in the same segment.
+    pub(super) fn settled_cut(&self) -> Result<EvidenceCursor, CanwuError> {
+        let end = self.evidence_cursor()?;
+        let archived = &self.state.evidence.archived;
+        let counters = &self.state.counters;
+        let within = |cursor: u64, archived: u64, end: u64| archived <= cursor && cursor <= end;
+        if !within(
+            counters.admitted_event_count,
+            archived.event_count,
+            end.event_count,
+        ) || !within(
+            counters.admitted_command_count,
+            archived.command_count,
+            end.command_count,
+        ) || !within(
+            counters.admitted_attempt_count,
+            archived.command_attempt_count,
+            end.command_attempt_count,
+        ) {
+            return Err(invalid_snapshot_error(
+                "admission cursors lie outside the retained journals",
             ));
         }
-        let admitted_attempts: std::collections::BTreeSet<_> = self
-            .state
-            .evidence
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_attempts.iter().copied())
-            .collect();
-        if admitted_attempts.len() != self.state.evidence.command_attempts.len()
-            || self
-                .state
-                .evidence
-                .command_attempts
-                .iter()
-                .any(|attempt| !admitted_attempts.contains(&attempt.id))
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "live evidence sealing requires every retained command attempt to belong to a completed boundary",
-            ));
-        }
-        let admitted_commands: std::collections::BTreeSet<_> = self
-            .state
-            .evidence
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_commands.iter().copied())
-            .collect();
-        if admitted_commands.len() != self.state.evidence.commands.len()
-            || self
-                .state
-                .evidence
-                .commands
-                .iter()
-                .any(|command| !admitted_commands.contains(&command.id))
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "live evidence sealing requires every retained command to belong to a completed boundary",
-            ));
-        }
-        let mut settled_ingress: std::collections::BTreeSet<_> = self
-            .state
-            .evidence
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_ingress.iter().copied())
-            .collect();
-        for record in &self.state.evidence.ingress {
-            if let IngressPayload::PluginCancellation { cancelled, .. } = &record.payload {
-                settled_ingress.insert(record.id);
-                settled_ingress.insert(*cancelled);
-            }
-        }
-        if settled_ingress.len() != self.state.evidence.ingress.len()
-            || self
-                .state
-                .evidence
-                .ingress
-                .iter()
-                .any(|record| !settled_ingress.contains(&record.id))
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "live evidence sealing requires every retained ingress record to be admitted by a completed boundary or terminally cancelled",
-            ));
-        }
-        let admitted_events: std::collections::BTreeSet<_> = self
-            .state
-            .evidence
-            .boundaries
-            .iter()
-            .flat_map(|record| record.admitted_events.iter().copied())
-            .collect();
-        if self.state.counters.admitted_event_count
-            != self
-                .state
-                .evidence
-                .archived
-                .event_count
-                .checked_add(
-                    u64::try_from(self.state.evidence.events.len()).map_err(|_| {
-                        CanwuError::new(
-                            ErrorCode::ArchiveNotReady,
-                            "retained event count exceeds the live archive cursor range",
-                        )
-                    })?,
-                )
-                .ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::ArchiveNotReady,
-                        "retained event cursor is exhausted",
-                    )
-                })?
-            || admitted_events.len() != self.state.evidence.events.len()
-            || self
-                .state
-                .evidence
-                .events
-                .iter()
-                .any(|event| !admitted_events.contains(&event.id))
-        {
-            return Err(CanwuError::new(
-                ErrorCode::ArchiveNotReady,
-                "live evidence sealing requires every retained event to be admitted by a later completed boundary",
-            ));
-        }
-        Ok(())
+        Ok(EvidenceCursor {
+            event_count: counters.admitted_event_count,
+            command_count: counters.admitted_command_count,
+            command_attempt_count: counters.admitted_attempt_count,
+            ..end
+        })
     }
 
+    /// Builds the exact idempotency tables for tracked requests whose
+    /// attempts and ingress lie in the given slices, as a seal records them.
+    pub(super) fn archived_request_tables(
+        &self,
+        attempts: &[CommandAttemptRecord],
+        ingress: &[IngressRecord],
+    ) -> Result<ArchivedRequestTables, CanwuError> {
+        let mut tables = ArchivedRequestTables::default();
+        for attempt in attempts {
+            let Some(request_id) = attempt.request_id else {
+                continue;
+            };
+            let outcome = self.command_outcome_from_attempt(attempt)?;
+            tables.commands.push((
+                request_id,
+                ArchivedCommandRequestOutcome {
+                    input_hash: super::canonical_hash(
+                        "canwu.archive.command.request.v1",
+                        &(attempt.expected_revision, &attempt.envelope),
+                    )?,
+                    outcome,
+                },
+            ));
+        }
+        for record in ingress {
+            let receipt = IngressReceipt {
+                ingress_id: record.id,
+                issued_at: record.issued_at,
+                due_at: record.due_at,
+            };
+            match &record.payload {
+                IngressPayload::Command { request } => {
+                    tables.ingress.push((
+                        request.request_id,
+                        ArchivedIngressRequest {
+                            input_hash: super::canonical_hash(
+                                "canwu.archive.ingress.command.v1",
+                                &(record.due_at, record.priority, request.as_ref()),
+                            )?,
+                            receipt,
+                        },
+                    ));
+                }
+                IngressPayload::Decision { request } => {
+                    if let Some(command) = &request.command {
+                        tables.decision_commands.push(command.request_id);
+                    }
+                    tables.decisions.push((
+                        request.request_id,
+                        ArchivedIngressRequest {
+                            input_hash: super::canonical_hash(
+                                "canwu.ingress.decision-request.v1",
+                                &(record.due_at, record.priority, request.as_ref()),
+                            )?,
+                            receipt,
+                        },
+                    ));
+                }
+                IngressPayload::Plugin { .. }
+                | IngressPayload::Calendar { .. }
+                | IngressPayload::Maintenance { .. }
+                | IngressPayload::PluginCancellation { .. } => {}
+            }
+        }
+        Ok(tables)
+    }
+
+    /// Whether a command request was queued as command or decision ingress
+    /// that a seal has already archived.
+    pub(super) fn archived_request_was_queued(&self, request: super::CommandRequestId) -> bool {
+        self.state
+            .evidence
+            .archived_ingress_requests
+            .contains_key(&request)
+            || self
+                .state
+                .evidence
+                .archived_decision_command_requests
+                .contains(&request)
+    }
+
+    /// The history flags of the given slices, as a seal records them. A
+    /// request queued as ingress counts as queued whether its ingress is in
+    /// the slices or was archived by an earlier seal, because a pending
+    /// command ingress can be sealed before the boundary that admits it.
+    pub(super) fn history_flags_of(
+        &self,
+        commands: &[CommandRecord],
+        attempts: &[CommandAttemptRecord],
+        ingress: &[IngressRecord],
+    ) -> (bool, bool, bool) {
+        (
+            commands.iter().any(|record| record.attempt_id.is_none()),
+            !attempts.is_empty() || !ingress.is_empty(),
+            has_unqueued_command_history(commands, attempts, ingress, &|request| {
+                self.archived_request_was_queued(request)
+            }),
+        )
+    }
+
+    /// Seals the settled part of every journal and keeps the continuation
+    /// closure below the new cut as pinned evidence.
+    ///
+    /// Pending ingress, the unadmitted tail, and work in flight do not block
+    /// a seal: the unadmitted events, commands, and attempts stay retained,
+    /// and the closure keeps what pending work and declarations still read.
+    /// A dependency whose evidence the run can no longer read (declared after
+    /// its evidence was sealed) fails with `ArchiveNotReady`.
     fn seal_retained_evidence(&mut self) -> Result<Option<EvidenceJournalSegment>, CanwuError> {
         let start = self.state.evidence.archived;
-        let end = self.evidence_cursor()?;
-        if start == end {
+        let cut = self.settled_cut()?;
+        if start == cut {
             return Ok(None);
         }
-        self.ensure_retained_evidence_is_sealable()?;
         let dependencies = self.evidence_dependencies()?;
+        let needs = self.continuation_needs(&dependencies)?;
+        let pins = self.closure_pins(&needs, &cut)?;
+        let sealed = |count: u64, archived: u64| {
+            usize::try_from(count - archived)
+                .map_err(|_| invalid_snapshot_error("sealed journal slice exceeds platform range"))
+        };
+        let event_count = sealed(cut.event_count, start.event_count)?;
+        let command_count = sealed(cut.command_count, start.command_count)?;
+        let attempt_count = sealed(cut.command_attempt_count, start.command_attempt_count)?;
+        let evidence = &self.state.evidence;
+        let mut segment = EvidenceJournalSegment {
+            format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
+            start,
+            end: cut,
+            events: evidence.events[..event_count].to_vec(),
+            commands: evidence.commands[..command_count].to_vec(),
+            command_attempts: evidence.command_attempts[..attempt_count].to_vec(),
+            ingress: evidence.ingress.clone(),
+            boundaries: evidence.boundaries.clone(),
+            random_draws: evidence.random_draws.clone(),
+            archive: None,
+        };
         let checkpoint_hash = self.state.metadata.checkpoint_hash.clone();
         let commitment_roots = self.state.metadata.commitment_roots.clone();
         let commitment_cache = self.state.metadata.commitment_cache.clone();
-        let prepared = (|| {
-            self.refresh_checkpoint_hash()?;
-
-            let mut archived_command_requests = Vec::new();
-            for attempt in &self.state.evidence.command_attempts {
-                let Some(request_id) = attempt.request_id else {
-                    continue;
-                };
-                let outcome = self.command_outcome_from_attempt(attempt)?;
-                archived_command_requests.push((
-                    request_id,
-                    ArchivedCommandRequestOutcome {
-                        input_hash: super::canonical_hash(
-                            "canwu.archive.command.request.v1",
-                            &(attempt.expected_revision, &attempt.envelope),
-                        )?,
-                        outcome,
-                    },
-                ));
-            }
-
-            let mut archived_ingress_requests = Vec::new();
-            let mut archived_decision_requests = Vec::new();
-            let mut archived_decision_command_requests = Vec::new();
-            for record in &self.state.evidence.ingress {
-                let receipt = IngressReceipt {
-                    ingress_id: record.id,
-                    issued_at: record.issued_at,
-                    due_at: record.due_at,
-                };
-                match &record.payload {
-                    IngressPayload::Command { request } => {
-                        archived_ingress_requests.push((
-                            request.request_id,
-                            ArchivedIngressRequest {
-                                input_hash: super::canonical_hash(
-                                    "canwu.archive.ingress.command.v1",
-                                    &(record.due_at, record.priority, request.as_ref()),
-                                )?,
-                                receipt,
-                            },
-                        ));
-                    }
-                    IngressPayload::Decision { request } => {
-                        if let Some(command) = &request.command {
-                            archived_decision_command_requests.push(command.request_id);
-                        }
-                        archived_decision_requests.push((
-                            request.request_id,
-                            ArchivedIngressRequest {
-                                input_hash: super::canonical_hash(
-                                    "canwu.ingress.decision-request.v1",
-                                    &(record.due_at, record.priority, request.as_ref()),
-                                )?,
-                                receipt,
-                            },
-                        ));
-                    }
-                    IngressPayload::Plugin { .. }
-                    | IngressPayload::Calendar { .. }
-                    | IngressPayload::Maintenance { .. }
-                    | IngressPayload::PluginCancellation { .. } => {}
-                }
-            }
-            Ok::<_, CanwuError>((
-                archived_command_requests,
-                archived_ingress_requests,
-                archived_decision_requests,
-                archived_decision_command_requests,
-            ))
-        })();
-        let (
-            archived_command_requests,
-            archived_ingress_requests,
-            archived_decision_requests,
-            archived_decision_command_requests,
-        ) = match prepared {
-            Ok(prepared) => prepared,
+        let tables = self.refresh_checkpoint_hash().and_then(|()| {
+            self.archived_request_tables(&segment.command_attempts, &segment.ingress)
+        });
+        let tables = match tables {
+            Ok(tables) => tables,
             Err(error) => {
                 self.state.metadata.checkpoint_hash = checkpoint_hash;
                 self.state.metadata.commitment_roots = commitment_roots;
@@ -3058,148 +3179,58 @@ impl Simulation {
                 return Err(error);
             }
         };
-
-        let mut segment = EvidenceJournalSegment {
-            format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
-            start,
-            end,
-            events: self.state.evidence.events.clone(),
-            commands: self.state.evidence.commands.clone(),
-            command_attempts: self.state.evidence.command_attempts.clone(),
-            ingress: self.state.evidence.ingress.clone(),
-            boundaries: self.state.evidence.boundaries.clone(),
-            random_draws: self.state.evidence.random_draws.clone(),
-            archive: None,
-        };
         let (archive, receipts) = evidence_archive_index(&segment)?;
         segment.archive = Some(archive.clone());
         verify_archived_segment(&segment)?;
+        let (legacy, tracked, unqueued) = self.history_flags_of(
+            &segment.commands,
+            &segment.command_attempts,
+            &segment.ingress,
+        );
 
-        self.state.evidence.archived_boundary_head = self
-            .state
-            .evidence
+        let evidence = &mut self.state.evidence;
+        evidence.archived_boundary_head = segment
             .boundaries
             .last()
             .map(|record| record.hash.clone())
-            .or_else(|| self.state.evidence.archived_boundary_head.clone());
-        self.state.evidence.archived_legacy_commands |= self
-            .state
-            .evidence
-            .commands
-            .iter()
-            .any(|record| record.attempt_id.is_none());
-        self.state.evidence.archived_tracked_attempts |=
-            !self.state.evidence.command_attempts.is_empty()
-                || !self.state.evidence.ingress.is_empty();
-        self.state.evidence.archived_unqueued_command_history |= has_unqueued_command_history(
-            &self.state.evidence.commands,
-            &self.state.evidence.command_attempts,
-            &self.state.evidence.ingress,
-        );
-        self.state
-            .evidence
-            .archived_command_requests
-            .extend(archived_command_requests);
-        self.state
-            .evidence
-            .archived_ingress_requests
-            .extend(archived_ingress_requests);
-        self.state
-            .evidence
-            .archived_decision_requests
-            .extend(archived_decision_requests);
-        self.state
-            .evidence
+            .or_else(|| evidence.archived_boundary_head.clone());
+        evidence.archived_legacy_commands |= legacy;
+        evidence.archived_tracked_attempts |= tracked;
+        evidence.archived_unqueued_command_history |= unqueued;
+        evidence.archived_command_requests.extend(tables.commands);
+        evidence.archived_ingress_requests.extend(tables.ingress);
+        evidence.archived_decision_requests.extend(tables.decisions);
+        evidence
             .archived_decision_command_requests
-            .extend(archived_decision_command_requests);
-        let mut sealed_times = self.state.evidence.sealed_times.clone();
-        sealed_times.extend_from(&self.state.evidence);
-        self.state.evidence.sealed_times = sealed_times;
-        self.state.evidence.archived = end;
-        self.state.evidence.events.clear();
-        self.state.evidence.commands.clear();
-        self.state.evidence.command_attempts.clear();
-        self.state.evidence.ingress.clear();
+            .extend(tables.decision_commands);
+        let mut sealed_times = evidence.sealed_times.clone();
+        sealed_times.extend_from_segment(&segment);
+        evidence.sealed_times = sealed_times;
+        evidence.archived = cut;
+        evidence.events.drain(..event_count);
+        evidence.commands.drain(..command_count);
+        evidence.command_attempts.drain(..attempt_count);
+        evidence.ingress.clear();
+        evidence.boundaries.clear();
+        evidence.random_draws.clear();
         self.state.scheduler.cancelled_ingress.clear();
-        self.state.evidence.boundaries.clear();
-        self.state.evidence.random_draws.clear();
-        self.state
-            .evidence
-            .archived_segment_headers
-            .push(archive.header);
+        let evidence = &mut self.state.evidence;
+        evidence.archived_segment_headers.push_back(archive.header);
         for receipt in receipts {
-            if self
-                .state
-                .evidence
+            if evidence
                 .archived_evidence_receipts
-                .insert(receipt.evidence.clone(), receipt)
+                .insert(receipt.evidence.clone(), Arc::new(receipt))
                 .is_some()
             {
                 return Err(archive_error("archived evidence receipt was duplicated"));
             }
         }
         retain_reachable_archived_evidence_receipts(
-            &mut self.state.evidence.archived_evidence_receipts,
+            &mut evidence.archived_evidence_receipts,
             &dependencies,
         );
-        let required = self.receipt_required_references(&dependencies);
-        for dependency in &dependencies {
-            let present = if required.contains(&dependency.reference) {
-                self.state
-                    .evidence
-                    .archived_evidence_receipts
-                    .contains_key(&dependency.reference)
-            } else {
-                sealed_identity_is_counted(&self.state.evidence.archived, &dependency.reference)
-            };
-            if !present {
-                return Err(CanwuError::new(
-                    ErrorCode::ArchiveNotReady,
-                    "declared evidence was not present in the sealed archive prefix",
-                ));
-            }
-        }
+        evidence.pinned = pins;
         Ok(Some(segment))
-    }
-
-    /// Returns the dependencies whose archived receipt a seal must keep
-    /// because a rule reads a fact from it: a payload-required continuation,
-    /// the membership of a domain-record version a boundary established, and
-    /// the ingress provenance of an archived command or decision request.
-    ///
-    /// Every other dependency is an identity-only reference to an ordinal
-    /// journal item (event, command, attempt, ingress, boundary, or draw) or
-    /// an initial-scenario version. At or below the sealed cut the journal
-    /// counters prove it exists, so it needs no receipt, and a rule may cite
-    /// it for the first time after the seal that archived it.
-    fn receipt_required_references(
-        &self,
-        dependencies: &[EvidenceDependency],
-    ) -> BTreeSet<EvidenceRef> {
-        let mut required: BTreeSet<_> = dependencies
-            .iter()
-            .filter(|dependency| {
-                dependency.requirement == EvidenceRequirement::PayloadRequired
-                    || matches!(
-                        &dependency.reference,
-                        EvidenceRef::DomainRecordVersion(version)
-                            if !matches!(
-                                version.established_by,
-                                DomainRecordVersionSource::InitialScenario
-                            )
-                    )
-            })
-            .map(|dependency| dependency.reference.clone())
-            .collect();
-        let evidence = &self.state.evidence;
-        required.extend(
-            evidence
-                .archived_ingress_requests
-                .values()
-                .chain(evidence.archived_decision_requests.values())
-                .map(|archived| EvidenceRef::Ingress(archived.receipt.ingress_id)),
-        );
-        required
     }
 
     pub(super) fn checkpoint_state(&self) -> SimulationSnapshot {
@@ -3452,6 +3483,7 @@ impl Simulation {
         source: Option<&PagedSimulationCheckpoint>,
         provider: &dyn StatePageProvider,
     ) -> Result<PreparedPagedSimulationCheckpoint, CanwuError> {
+        self.ensure_full_history("a paged checkpoint")?;
         if let Some(source) = source {
             if source.format_version != PAGED_CHECKPOINT_FORMAT_VERSION {
                 return Err(invalid_snapshot_error(
@@ -3736,7 +3768,14 @@ impl Simulation {
         &self,
         include_paged_payloads: bool,
     ) -> Result<SimulationCheckpoint, CanwuError> {
-        let archived_segment_headers = self.state.evidence.archived_segment_headers.clone();
+        self.ensure_full_history("a compact checkpoint")?;
+        let archived_segment_headers: Vec<_> = self
+            .state
+            .evidence
+            .archived_segment_headers
+            .iter()
+            .cloned()
+            .collect();
         let evidence_dependencies = self.evidence_dependencies()?;
         let required_receipts = reachable_archived_receipt_references(&evidence_dependencies);
         let archived_evidence_receipts: Vec<_> = self
@@ -3745,7 +3784,7 @@ impl Simulation {
             .archived_evidence_receipts
             .iter()
             .filter(|(reference, _)| required_receipts.contains(*reference))
-            .map(|(_, receipt)| receipt.clone())
+            .map(|(_, receipt)| receipt.as_ref().clone())
             .collect();
         let checkpoint = SimulationCheckpoint {
             format_version: CHECKPOINT_JOURNAL_FORMAT_VERSION,
@@ -3818,7 +3857,7 @@ impl Simulation {
             .iter()
             .map(|key| key.id)
             .collect::<BTreeSet<_>>();
-        for record in &self.state.evidence.ingress {
+        for record in self.state.evidence.ingress_records() {
             if let IngressPayload::Maintenance { request } = &record.payload
                 && let super::MaintenanceIngressRequest::DecisionArchive { commit } =
                     request.as_ref()
@@ -3934,6 +3973,7 @@ impl Simulation {
 
     /// Builds a portable full-save bundle with one segment from genesis.
     pub fn checkpoint_journal(&self) -> Result<CheckpointJournal, CanwuError> {
+        self.ensure_full_history("a portable save")?;
         if self.state.evidence.archived != EvidenceCursor::default() {
             return Err(CanwuError::new(
                 ErrorCode::InvalidSnapshot,
@@ -4811,12 +4851,21 @@ mod tests {
     #[test]
     fn payload_required_receipts_are_exactly_reachable_and_prune_after_completion() {
         let mut compact = payload_continuation_runtime();
-        assert_eq!(
-            compact
-                .seal_evidence()
-                .expect_err("direct sealing must reject payload continuations")
-                .code,
-            ErrorCode::ArchiveNotReady
+        // A one-phase seal keeps the payload-required boundary pinned, so it
+        // no longer needs the provider.
+        let mut direct = compact.fork();
+        direct
+            .seal_evidence()
+            .expect("a one-phase seal pins payload-required evidence")
+            .expect("the settled tail should seal");
+        assert!(
+            direct
+                .runtime()
+                .state
+                .evidence
+                .pinned
+                .boundaries
+                .contains_key(&BoundaryId::new(1))
         );
 
         let archive = TestArchive::default();
@@ -4893,7 +4942,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_required_commit_fails_closed_when_an_older_segment_is_missing() {
+    fn payload_required_commit_accepts_a_pinned_payload_without_older_segments() {
         let mut compact = payload_continuation_runtime();
         let complete_archive = TestArchive::default();
         let first = store_prepared(&compact, &complete_archive);
@@ -4904,24 +4953,24 @@ mod tests {
         compact
             .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
             .expect("a new tail should preserve the active continuation");
+        // The provider holds only the new segment. The payload-required
+        // boundary sealed by the first segment is pinned, so the commit does
+        // not read the older segment back.
         let incomplete_archive = TestArchive::default();
         let second = store_prepared(&compact, &incomplete_archive);
-        let before = compact.checkpoint().expect("checkpoint should build");
-        let error = compact
-            .commit_evidence_seal(&second.token, &incomplete_archive)
-            .expect_err("the provider must retain every payload-required segment");
-        assert_eq!(error.code, ErrorCode::EvidenceContentUnavailable);
-        assert_eq!(
-            compact.checkpoint().expect("checkpoint should build"),
-            before
-        );
-
-        incomplete_archive
-            .store_evidence_segment(&first.segment)
-            .expect("restoring the older required segment should succeed");
         compact
             .commit_evidence_seal(&second.token, &incomplete_archive)
-            .expect("the exact provider set should permit commit");
+            .expect("a pinned payload satisfies the payload-required dependency");
+        assert!(
+            compact
+                .runtime()
+                .state
+                .evidence
+                .pinned
+                .boundaries
+                .contains_key(&BoundaryId::new(1))
+        );
+        assert_eq!(second.segment.start, first.segment.end);
     }
 
     #[test]

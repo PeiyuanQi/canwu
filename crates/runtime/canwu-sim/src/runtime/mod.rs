@@ -1,5 +1,6 @@
 mod boundary;
 mod boundary_window;
+mod continuation;
 mod decision;
 mod error;
 mod evaluation;
@@ -72,6 +73,13 @@ pub use canwu_decision::{
     VerifiedDecisionArchiveCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
     format8_decision_locator_scale_probe, format8_trace_locator_scale_probe,
 };
+pub use continuation::{
+    BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
+    ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
+    JournalFrontier, JournalFrontiers, PinnedEvidenceRecords, PinnedRecordVersion,
+    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, SettledCommandRequest,
+    SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
+};
 pub use decision::{
     DECISION_REQUEST_COMMITMENT_DOMAIN, DecisionEvaluation, DecisionIngressRequest,
     PreparedDecisionIngress,
@@ -137,9 +145,9 @@ pub use profile::{
     MAX_RETAINED_BOUNDARY_PROFILES,
 };
 pub use random::{
-    RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
-    RandomOperationAddressV1, RandomOperationDraw, RandomOperationTarget, RandomSample,
-    RandomStreamKey, RandomStreamState,
+    KeyedDrawEntry, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer,
+    RandomDrawRecord, RandomOperationAddressV1, RandomOperationDraw, RandomOperationTarget,
+    RandomSample, RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,
@@ -517,12 +525,23 @@ fn retained_domain_record_version_body<'a>(
             change_index,
         } => state
             .evidence
-            .retained_boundary(boundary)?
-            .record_changes
-            .get(usize::try_from(change_index).ok()?)
+            .retained_boundary(boundary)
+            .and_then(|record| {
+                record
+                    .record_changes
+                    .get(usize::try_from(change_index).ok()?)
+            })
             .map(|change| change.current.as_ref())
             .filter(|record| {
                 record.reference == reference.record && record.version == reference.version
+            })
+            .or_else(|| {
+                state
+                    .evidence
+                    .pinned
+                    .record_versions
+                    .get(reference)
+                    .map(std::sync::Arc::as_ref)
             }),
     }
 }
@@ -547,6 +566,15 @@ fn current_domain_record_version(
         ));
     }
     Ok(Some(current.version.clone()))
+}
+
+/// Whether a directive, or one it schedules, enqueues plugin ingress.
+pub(super) fn schedules_plugin_ingress(directive: &SystemDirective) -> bool {
+    match directive {
+        SystemDirective::EnqueuePluginIngress { .. } => true,
+        SystemDirective::Schedule { directive, .. } => schedules_plugin_ingress(directive),
+        SystemDirective::SetComponent { .. } | SystemDirective::Emit { .. } => false,
+    }
 }
 
 fn build_current_domain_record_versions(
@@ -625,12 +653,12 @@ fn build_current_domain_record_versions(
 ///
 /// A retained record answers from itself. A sealed ordinal record (event,
 /// command, attempt, ingress, boundary, or draw) answers from the sealed time
-/// index, whatever receipt the seal kept. A domain-record version answers with
-/// the time of the boundary that established it, or the run's initial time,
-/// whenever the runtime knows the version exists. Whether a sealed version
-/// that is not current is still known depends on the receipts a seal kept,
-/// so rules that must replay exactly use
-/// `SimulationView::replay_stable_domain_record_version` instead.
+/// index. A domain-record version answers with the time of the boundary that
+/// established it, or the run's initial time, whenever the runtime knows the
+/// version exists. Whether a sealed version that is not current is still
+/// known depends on what the continuation closure keeps, so rules that must
+/// replay exactly use `SimulationView::replay_stable_domain_record_version`
+/// instead.
 fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Option<SimTime> {
     let retained = match reference {
         EvidenceRef::Command(id) => state
@@ -1627,20 +1655,22 @@ impl Simulation {
                     archived_legacy_commands: false,
                     archived_tracked_attempts: false,
                     archived_unqueued_command_history: false,
-                    archived_command_requests: BTreeMap::new(),
-                    archived_ingress_requests: BTreeMap::new(),
-                    archived_decision_requests: BTreeMap::new(),
-                    archived_decision_command_requests: BTreeSet::new(),
+                    archived_command_requests: im::OrdMap::new(),
+                    archived_ingress_requests: im::OrdMap::new(),
+                    archived_decision_requests: im::OrdMap::new(),
+                    archived_decision_command_requests: im::OrdSet::new(),
                     events: Vec::new(),
                     commands: Vec::new(),
                     command_attempts: Vec::new(),
                     ingress: Vec::new(),
                     boundaries: Vec::new(),
                     random_draws: Vec::new(),
-                    archived_segment_headers: Vec::new(),
-                    archived_evidence_receipts: BTreeMap::new(),
+                    archived_segment_headers: im::Vector::new(),
+                    archived_evidence_receipts: im::OrdMap::new(),
                     keyed_draws: random::KeyedDrawLedger::default(),
                     sealed_times: EvidenceTimeIndex::default(),
+                    pinned: continuation::PinnedEvidence::default(),
+                    continuation_base: None,
                 },
             },
             schema,
@@ -1882,7 +1912,8 @@ impl Simulation {
     /// A sealed event, command, attempt, ingress record, boundary, or draw
     /// answers as in an unsealed run. `None` means the evidence does not
     /// exist at this cut, or is a sealed domain-record version that is not
-    /// current and whose receipt no seal kept. Proposed same-boundary evidence is available through
+    /// current and that the continuation closure does not keep. Proposed
+    /// same-boundary evidence is available through
     /// [`SimulationView::evidence_time`] while its boundary is being built.
     #[must_use]
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
@@ -2507,7 +2538,7 @@ impl Simulation {
         })
     }
 
-    pub fn from_snapshot(snapshot: SimulationSnapshot) -> Result<Self, CanwuError> {
+    pub fn from_snapshot(mut snapshot: SimulationSnapshot) -> Result<Self, CanwuError> {
         if snapshot.snapshot_format_version != SNAPSHOT_FORMAT_VERSION
             || snapshot.engine_version != ENGINE_VERSION
         {
@@ -2571,7 +2602,69 @@ impl Simulation {
             &snapshot.boundaries,
             &snapshot.domain_records,
         )?;
-        let mut simulation = Self {
+        let evidence = RuntimeEvidence {
+            archived: EvidenceCursor::default(),
+            archived_boundary_head: None,
+            archived_legacy_commands: false,
+            archived_tracked_attempts: false,
+            archived_unqueued_command_history: false,
+            archived_command_requests: im::OrdMap::new(),
+            archived_ingress_requests: im::OrdMap::new(),
+            archived_decision_requests: im::OrdMap::new(),
+            archived_decision_command_requests: im::OrdSet::new(),
+            events: std::mem::take(&mut snapshot.events),
+            commands: std::mem::take(&mut snapshot.commands),
+            command_attempts: std::mem::take(&mut snapshot.command_attempts),
+            ingress: std::mem::take(&mut snapshot.ingress),
+            boundaries: std::mem::take(&mut snapshot.boundaries),
+            random_draws: std::mem::take(&mut snapshot.random_draws),
+            archived_segment_headers: im::Vector::new(),
+            archived_evidence_receipts: im::OrdMap::new(),
+            keyed_draws: random::KeyedDrawLedger::default(),
+            sealed_times: EvidenceTimeIndex::default(),
+            pinned: continuation::PinnedEvidence::default(),
+            continuation_base: None,
+        };
+        let mut simulation = Self::assemble_runtime(
+            snapshot,
+            plugins,
+            initial_scenario,
+            initial_domain_record_indexes,
+            pending_ingress,
+            cancelled_ingress,
+            current_domain_record_versions,
+            evidence,
+        )?;
+        simulation.state.scheduler.settled_boundaries =
+            boundary_window::rebuild_settled_boundaries(
+                &simulation.state.evidence,
+                simulation.plugins.boundary_schedule_horizon(),
+            )?;
+        // Validation built the keyed-draw ledger from the full draw journal;
+        // a restore builds it once.
+        simulation.state.evidence.keyed_draws = keyed_draws;
+        simulation.refresh_checkpoint_hash()?;
+        Ok(simulation)
+    }
+
+    /// Assembles a runtime from validated snapshot state, the derived
+    /// scheduler and provenance indexes, and its evidence. Shared by the
+    /// snapshot and continuation-checkpoint restores.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_runtime(
+        snapshot: SimulationSnapshot,
+        plugins: PluginRegistry,
+        initial_scenario: Option<Scenario>,
+        initial_domain_record_indexes: BTreeMap<DomainRecordRef, usize>,
+        pending_ingress: BTreeSet<IngressQueueKey>,
+        cancelled_ingress: BTreeSet<IngressId>,
+        current_domain_record_versions: im::OrdMap<
+            Arc<DomainRecordRef>,
+            Arc<CurrentDomainRecordVersion>,
+        >,
+        evidence: RuntimeEvidence,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
             state: RuntimeState {
                 current: RuntimeCurrentState {
                     entities: snapshot.entities.into_iter().collect(),
@@ -2697,44 +2790,14 @@ impl Simulation {
                     plugin_registration_closed: snapshot.plugin_registration_closed,
                     replay_revision_format_version: snapshot.replay_revision_format_version,
                 },
-                evidence: RuntimeEvidence {
-                    archived: EvidenceCursor::default(),
-                    archived_boundary_head: None,
-                    archived_legacy_commands: false,
-                    archived_tracked_attempts: false,
-                    archived_unqueued_command_history: false,
-                    archived_command_requests: BTreeMap::new(),
-                    archived_ingress_requests: BTreeMap::new(),
-                    archived_decision_requests: BTreeMap::new(),
-                    archived_decision_command_requests: BTreeSet::new(),
-                    events: snapshot.events,
-                    commands: snapshot.commands,
-                    command_attempts: snapshot.command_attempts,
-                    ingress: snapshot.ingress,
-                    boundaries: snapshot.boundaries,
-                    random_draws: snapshot.random_draws,
-                    archived_segment_headers: Vec::new(),
-                    archived_evidence_receipts: BTreeMap::new(),
-                    keyed_draws: random::KeyedDrawLedger::default(),
-                    sealed_times: EvidenceTimeIndex::default(),
-                },
+                evidence,
             },
             schema: snapshot.schema,
             plugins,
             plugin_archive_provider: Rc::new(()),
             sync_reaction_depth: 0,
             boundary_profiler: profile::BoundaryProfiler::default(),
-        };
-        simulation.state.scheduler.settled_boundaries =
-            boundary_window::rebuild_settled_boundaries(
-                &simulation.state.evidence,
-                simulation.plugins.boundary_schedule_horizon(),
-            )?;
-        // Validation built the keyed-draw ledger from the full draw journal;
-        // a restore builds it once.
-        simulation.state.evidence.keyed_draws = keyed_draws;
-        simulation.refresh_checkpoint_hash()?;
-        Ok(simulation)
+        })
     }
 
     pub fn from_snapshot_json(json: &str) -> Result<Self, CanwuError> {
@@ -3376,6 +3439,16 @@ fn validate_directives(
                     return Err(CanwuError::new(
                         ErrorCode::InvalidDuration,
                         "plugin systems must schedule work strictly in the future",
+                    ));
+                }
+                // Ingress issued by a scheduled action would carry its cause
+                // but not its issue time, so no load could check it against
+                // the action that issued it. `EnqueuePluginIngress` takes its
+                // own delay instead.
+                if schedules_plugin_ingress(directive) {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidPayload,
+                        "a scheduled directive cannot enqueue plugin ingress; give EnqueuePluginIngress its own delay",
                     ));
                 }
                 validate_directives(

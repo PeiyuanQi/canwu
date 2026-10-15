@@ -4,10 +4,10 @@
 
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryId, BoundaryPhase, BoundaryProposal,
-    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CreatedPerson, CustodyState,
-    EntityRef, EvidenceRef, LifeState, PersonAvailability, PersonDraft, PersonId, PersonPlacement,
-    PluginRegistrar, SimDuration, SimTime, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence,
+    BoundaryRequest, BoundarySystemContract, Canwu, CanwuError, CompactedCanwu, CreatedPerson,
+    CustodyState, EntityRef, EvidenceRef, LifeState, PersonAvailability, PersonDraft, PersonId,
+    PersonPlacement, PluginRegistrar, SimDuration, SimTime, SimulationPlugin, SimulationView,
+    StateKey, StateVisibility, SystemCadence,
 };
 use serde_json::{Value, json};
 
@@ -197,6 +197,15 @@ fn gap_g03_sim_create_person() {
         .expect("sealed next boundary");
     assert_eq!(sealed.checkpoint_hash(), canwu.checkpoint_hash());
 
+    // A continuation checkpoint of a run that created a person restores: its
+    // entity registry names the person through the created-person index.
+    let (checkpoint, hash) = sealed
+        .continuation_checkpoint()
+        .expect("continuation checkpoint");
+    let mut continued =
+        CompactedCanwu::from_continuation_checkpoint_verified(checkpoint, &hash, &[&lineage])
+            .expect("continuation restore");
+
     // A fork settles the same boundary to the same allocated ID.
     let mut fork = before_birth;
     assert_eq!(
@@ -211,6 +220,13 @@ fn gap_g03_sim_create_person() {
     let json = serde_json::to_string(&canwu.snapshot()).expect("snapshot json");
     let mut restored = Canwu::from_snapshot_json_with_plugins(&json, &[&lineage]).expect("restore");
     let second = canwu.settle_boundary(daily(4)).expect("second birth");
+    assert_eq!(
+        continued
+            .settle_boundary(daily(4))
+            .expect("continued second birth"),
+        second
+    );
+    assert_eq!(continued.checkpoint_hash(), canwu.checkpoint_hash());
     assert_eq!(
         restored
             .settle_boundary(daily(4))

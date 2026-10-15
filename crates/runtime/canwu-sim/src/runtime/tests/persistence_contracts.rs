@@ -886,17 +886,18 @@ fn compacted_live_journals_preserve_continuation_idempotency_and_exact_replay() 
     let mut emitting = emitting
         .into_compacted()
         .expect("the emitting runtime should enter compact mode");
-    let error = emitting
-        .seal_evidence()
-        .expect_err("new boundary emissions remain pending admission");
-    assert_eq!(error.code, ErrorCode::ArchiveNotReady);
-    emitting
-        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-        .expect("a later boundary should admit the emitted event");
+    let emitted_end = emitting.evidence_cursor().unwrap();
+    // The boundary seals; its emission, which no boundary has admitted yet,
+    // stays retained above the event cut.
     let first_emitting_segment = emitting
         .seal_evidence()
-        .expect("admitted emitting evidence should seal")
-        .expect("admitted emitting evidence should produce a segment");
+        .expect("a seal leaves unadmitted emissions retained")
+        .expect("the settled boundary should produce a segment");
+    assert!(first_emitting_segment.end.event_count < emitted_end.event_count);
+    assert_eq!(
+        first_emitting_segment.end.boundary_count,
+        emitted_end.boundary_count
+    );
     assert_eq!(
         emitting
             .outbox_entries_for_segment(&first_emitting_segment)
@@ -904,23 +905,45 @@ fn compacted_live_journals_preserve_continuation_idempotency_and_exact_replay() 
         expected_first_emitting_outbox
     );
     emitting
-        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
-        .expect("an emitting runtime should continue after sealing");
-    let error = emitting
-        .seal_evidence()
-        .expect_err("the new emission should retain the admission frontier");
-    assert_eq!(error.code, ErrorCode::ArchiveNotReady);
-    emitting
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
-        .expect("the next boundary should admit the second emission");
+        .expect("a later boundary should admit the retained emission");
     let second_emitting_segment = emitting
         .seal_evidence()
-        .expect("the second admitted tail should seal")
-        .expect("the second admitted tail should produce a segment");
+        .expect("the admitted emission should seal")
+        .expect("the admitted emission should produce a segment");
     assert_eq!(second_emitting_segment.start, first_emitting_segment.end);
+    assert_eq!(
+        second_emitting_segment.end.event_count,
+        emitted_end.event_count
+    );
+    emitting
+        .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+        .expect("an emitting runtime should continue after sealing");
+    let third_emitting_segment = emitting
+        .seal_evidence()
+        .expect("the new boundary should seal with its emission retained")
+        .expect("the new boundary should produce a segment");
+    assert_eq!(third_emitting_segment.start, second_emitting_segment.end);
     emitting
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
         .expect("post-seal continuation should preserve the event cursor");
+    let fourth_emitting_segment = emitting
+        .seal_evidence()
+        .expect("the second admitted emission should seal")
+        .expect("the second admitted emission should produce a segment");
+    assert_eq!(fourth_emitting_segment.start, third_emitting_segment.end);
+    let restored = CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+        emitting.checkpoint().unwrap(),
+        vec![
+            first_emitting_segment,
+            second_emitting_segment,
+            third_emitting_segment,
+            fourth_emitting_segment,
+        ],
+        &[&ArchiveEmissionPlugin],
+    )
+    .expect("segments with per-journal cuts should reconstruct the run");
+    assert_eq!(restored.checkpoint_hash(), emitting.checkpoint_hash());
 
     let mut direct = Simulation::new(43, scenario).expect("direct compact fixture should load");
     direct
@@ -934,10 +957,13 @@ fn compacted_live_journals_preserve_continuation_idempotency_and_exact_replay() 
     let mut direct = direct
         .into_compacted()
         .expect("the direct runtime should enter compact mode");
-    let error = direct
-        .seal_evidence()
-        .expect_err("unsettled command evidence should remain retained");
-    assert_eq!(error.code, ErrorCode::ArchiveNotReady);
+    assert!(
+        direct
+            .seal_evidence()
+            .expect("unadmitted command evidence stays retained")
+            .is_none(),
+        "nothing below the admission cursors is left to seal"
+    );
     assert_eq!(direct.revision(), revision);
     direct
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
@@ -1307,6 +1333,187 @@ fn knowledge_citing_a_sealed_boundary_does_not_block_the_next_seal() {
             .message
             .contains("reconstructed authoritative indexes")
     );
+}
+
+#[test]
+fn continuation_checkpoints_agree_and_restore_runs_with_pending_work() {
+    let (scenario, _) = demo_scenario();
+    let command = |request_id, revision| {
+        CommandRequest::new(
+            CommandRequestId::new(request_id),
+            revision,
+            CommandEnvelope::new(
+                Issuer::Debug,
+                Command::Plugin {
+                    plugin: "journal-command".to_owned(),
+                    command: "noop".to_owned(),
+                    payload: Value::Null,
+                },
+            ),
+        )
+    };
+    let later = SimTime::EPOCH + SimDuration::days(2);
+    let mut unsealed = Simulation::new(151, scenario).unwrap();
+    unsealed.register_plugin(&JournalCommandPlugin).unwrap();
+    unsealed
+        .enqueue_command(SimTime::EPOCH, 0, command(1, 0))
+        .unwrap();
+    unsealed.step_canonical().unwrap().unwrap();
+    // A command due later stays pending across the cut.
+    unsealed
+        .enqueue_command(later, 0, command(2, unsealed.revision() + 1))
+        .unwrap();
+    unsealed
+        .schedule_calendar_boundary(
+            SimTime::EPOCH + SimDuration::days(1),
+            vec![SystemCadence::Daily],
+        )
+        .unwrap();
+
+    let mut sealed = unsealed.fork().into_compacted().unwrap();
+    sealed
+        .seal_evidence()
+        .expect("a run with pending ingress seals")
+        .expect("the settled tail should seal");
+    let (from_unsealed, hash) = unsealed.continuation_checkpoint().unwrap();
+    let (from_sealed, sealed_hash) = sealed.continuation_checkpoint().unwrap();
+    assert_eq!(from_sealed, from_unsealed);
+    assert_eq!(sealed_hash, hash);
+    assert_eq!(from_unsealed.pending_ingress.len(), 2);
+
+    let json = from_unsealed.to_json().unwrap();
+    let mut restored = CompactedSimulation::from_continuation_checkpoint_json_verified(
+        &json,
+        &hash,
+        &[&JournalCommandPlugin],
+    )
+    .expect("the continuation checkpoint restores");
+    assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
+    assert_eq!(
+        restored
+            .continuation_base()
+            .map(|base| base.continuation_hash.as_str()),
+        Some(hash.as_str())
+    );
+    assert_eq!(
+        restored.checkpoint().unwrap_err().code,
+        ErrorCode::HistoryUnavailable
+    );
+
+    for _ in 0..2 {
+        let expected = unsealed.step_canonical().unwrap().unwrap();
+        assert_eq!(sealed.step_canonical().unwrap().unwrap(), expected);
+        assert_eq!(restored.step_canonical().unwrap().unwrap(), expected);
+        assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+        assert_eq!(restored.checkpoint_hash(), unsealed.checkpoint_hash());
+        assert_eq!(
+            restored.authoritative_state_hash().unwrap(),
+            unsealed.authoritative_state_hash().unwrap()
+        );
+        restored.seal_evidence().unwrap();
+        let (again, again_hash) = unsealed.continuation_checkpoint().unwrap();
+        assert_eq!(restored.continuation_checkpoint().unwrap().1, again_hash);
+        assert_eq!(sealed.continuation_checkpoint().unwrap().0, again);
+    }
+}
+
+const PROVENANCE_PLUGIN: &str = "fixture-provenance";
+
+/// Schedules one ping at the first boundary, and reports at every boundary
+/// whether each admitted ping matches its provenance.
+fn ping_and_probe(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let mut directives = Vec::new();
+    if context.boundary_id == BoundaryId::new(1) {
+        directives.push(BoundaryDirective::ScheduleIngress {
+            after: SimDuration::days(2),
+            packet_type: "ping".to_owned(),
+            priority: 0,
+            payload: Value::Null,
+            affected: Vec::new(),
+        });
+    }
+    for id in &context.admitted_ingress {
+        let matches = view.plugin_ingress_matches(*id, PROVENANCE_PLUGIN, "ping")?;
+        directives.push(BoundaryDirective::Emit {
+            event_type: "probe".to_owned(),
+            summary: format!("{id} matches={matches}"),
+            affected: Vec::new(),
+        });
+    }
+    Ok(BoundaryProposal {
+        directives,
+        ..BoundaryProposal::default()
+    })
+}
+
+struct ProvenancePlugin;
+
+impl SimulationPlugin for ProvenancePlugin {
+    fn name(&self) -> &'static str {
+        PROVENANCE_PLUGIN
+    }
+
+    test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000051");
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_ingress(PluginIngressDescriptor {
+            name: "ping".to_owned(),
+            description: "fixture ping".to_owned(),
+            class: IngressClass::Information,
+            payload_schema: PayloadSchema::Null,
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "ping-and-probe",
+            BoundaryPhase::DomainDeltaProposal,
+            SystemCadence::Daily,
+        );
+        contract.reads = vec![StateKey::core_ingress()];
+        contract.emits = vec!["probe".to_owned()];
+        registrar.register_boundary_system(contract, ping_and_probe)
+    }
+}
+
+#[test]
+fn a_sealed_pending_packet_matches_its_provenance_once_admitted() {
+    let (scenario, _) = demo_scenario();
+    let mut unsealed = Simulation::new(152, scenario).unwrap();
+    unsealed.register_plugin(&ProvenancePlugin).unwrap();
+    let day = |day: i64| SimTime::EPOCH + SimDuration::days(day);
+    let daily = |day| BoundaryRequest::at(day).with_cadence(SystemCadence::Daily);
+    unsealed.settle_boundary(daily(day(0))).unwrap();
+    // The ping is pending when the seal moves its record and its producing
+    // boundary out; the closure keeps its issuer as a provenance fact.
+    let mut sealed = unsealed.fork().into_compacted().unwrap();
+    sealed.seal_evidence().unwrap().unwrap();
+    assert_eq!(
+        sealed
+            .runtime()
+            .state
+            .evidence
+            .pinned
+            .ingress_provenance
+            .len(),
+        1
+    );
+    for d in 1..=3 {
+        unsealed.settle_boundary(daily(day(d))).unwrap();
+        sealed.settle_boundary(daily(day(d))).unwrap();
+    }
+    let probes = |events: &[SimEvent]| -> Vec<String> {
+        events
+            .iter()
+            .filter(|event| event.summary.contains("matches="))
+            .map(|event| event.summary.clone())
+            .collect()
+    };
+    let expected = probes(unsealed.events());
+    assert_eq!(expected.len(), 1);
+    assert!(expected[0].ends_with("matches=true"));
+    assert_eq!(probes(sealed.events()), expected);
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
 }
 
 #[test]

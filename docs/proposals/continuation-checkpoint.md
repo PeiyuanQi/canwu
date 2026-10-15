@@ -57,8 +57,9 @@ To make that possible this design also:
 - gives `CompactedCanwu` the host reads and ingress entry points `Canwu` has,
   behind one trait that extension helpers take instead of `&mut Canwu`.
 
-Commitment format 4, snapshot format 8, boundary hashes, and `checkpoint_hash`
-values are unchanged. `authoritative_state_hash` becomes the commitment-format
+This package changes no commitment root, boundary hash, or `checkpoint_hash`
+value, and keeps snapshot format 8; 0.16.0's commitment format 5 comes from
+the knowledge-ledger package. `authoritative_state_hash` becomes the commitment-format
 state hash, so it no longer differs between a sealed and an unsealed run. The
 checkpoint/evidence-journal format and the paged-checkpoint envelope move from
 4 to 5 because the keyed reservations leave them. The continuation checkpoint
@@ -132,8 +133,9 @@ and stated.
   cut, never of when the run sealed.
 - **Identity facts.** What an `IdentityOnly` dependency still needs after its
   payload is gone, beyond the ordinal ID: the membership of a non-current
-  record version, and the provenance (plugin, packet type, producing boundary)
-  of a boundary-generated plugin ingress.
+  record version, and the provenance of an ingress record (the issuer, target
+  plugin, packet type, and producing boundary of a boundary-generated packet,
+  or that no boundary generated it).
 
 ## The rule plugins obey
 
@@ -155,14 +157,36 @@ The 0.15.0 seal-independence rule, made complete. A plugin obeys it when:
   (through `IdentityEvidenceDependenciesV1`, or as a knowledge origin) for as
   long as it cites it.
 - **R4.** A dependency is added only while its evidence is still readable:
-  evidence produced in the boundary that adds it, a current or
-  initial-scenario record version, or evidence already declared.
+  evidence produced in the boundary that adds it, a packet that boundary
+  admits, a current or initial-scenario record version, or evidence already
+  declared. A plugin that declares an ingress record a host cites checks it
+  with `SimulationView::ingress_is_declarable` (queued, or admitted by the
+  boundary being settled), or against its own current declarations; both
+  answer alike in every run, while existence alone does not keep a sealed
+  packet readable. `canwu-law` refuses any other cited packet as a recorded
+  refusal.
 - **R5.** A fresh operation-keyed draw cites seal-stable operation evidence
   (Part A).
 
-The first-party extensions follow R1 to R3 and R5; the one exception the
-review found, `canwu-history-research`'s relation check, is fixed in this
-package (Part A). R4 stays a plugin obligation. Part B pins at boundary commit
+The first-party extensions follow R5, and R1 to R3 with two known
+exceptions. The exception the design review found, `canwu-history-research`'s
+relation check, is fixed in this package (Part A). Two more, found in the
+review of the first commit, are left to their own package and stay known
+violators until it lands:
+
+- `canwu-information`'s delegated interpretation authority reads the payload
+  of a delegation's command or ingress evidence through
+  `SimulationView::command` and `SimulationView::ingress` at a later
+  boundary without declaring it `PayloadRequired` (R2). After that evidence
+  is sealed, and in a continuation-restored run, the read returns
+  `EvidenceContentUnavailable` where an unsealed run returns the payload.
+- `canwu-law`'s signal and publicity provenance checks call
+  `plugin_ingress_matches` and `plugin_ingress_payload_matches` on ingress
+  admitted at an earlier boundary without declaring it (R3, and R2 for the
+  payload match). After a seal they answer only for packets the closure
+  keeps.
+
+R4 stays a plugin obligation. Part B pins at boundary commit
 every version a boundary stops being current, which covers the common case of
 a dependency declared on the version a boundary supersedes; a seal or a
 continuation checkpoint still reports any other R4 violation as
@@ -205,10 +229,14 @@ none. A seal still keeps the receipts of the dependencies current at that
 seal, so a checkpoint may list fewer receipts than its segments rebuild; a
 checkpoint-and-journal restore requires each listed receipt to equal the one
 the segments rebuild and to name a current dependency, instead of requiring
-the two sets to be equal. `plugin_ingress_matches` on a packet first cited
-after its seal has no receipt to read and returns
-`EvidenceContentUnavailable`, as Part A's payload rule below says; the second
-commit's provenance facts answer it in every run.
+the two sets to be equal. In the second commit the seal no longer reads
+receipts at all: every fact a rule needs comes from the continuation closure
+(Part B), which a continuation-restored run, holding no receipts, has as
+well. A declared dependency must still exist (counters for ordinal
+references, the current index, pins, or facts for versions), or the seal
+fails with `ArchiveNotReady` and the run is unchanged. `plugin_ingress_matches`
+on a packet first cited after its seal has no fact to read and returns
+`EvidenceContentUnavailable`.
 
 **Ordinal time comes from a time index.** A retained record answers with its
 own time (events by `timestamp`, commands by `accepted_at`, attempts by `at`,
@@ -310,17 +338,23 @@ evidence, and its memory and every save grow with the campaign.
 
 At a cut, the continuation closure `K` is:
 
-- **K1, pending ingress.** Every record in the canonical ingress queue.
+- **K1, pending ingress.** Every record in the canonical ingress queue, with
+  its *ingress provenance fact*: the packet ID and either its boundary
+  generation (the issuer, the plugin whose boundary system scheduled it; the
+  target plugin it is addressed to, which differs for a cross-plugin packet;
+  the packet type; the producing boundary; and the status below) or "not
+  generated by a boundary" (host-enqueued or command-caused ingress, or not
+  plugin ingress at all). The generation is the producing boundary's
+  `generated_ingress` entry with the packet's ingress ID, not the boundary
+  record.
 - **K2, causes of pending work.** For each pending ingress record and each
   scheduled action: a `CauseRef::Command` cause's command record, a
   `CauseRef::Event` cause's event record, `ArmyArrival` and `PersonArrival`
   order events, and `KnowledgeReport` dispatch events. A `CauseRef::Boundary`
-  cause contributes only the issuer: an *ingress provenance fact* (packet ID,
-  plugin, packet type, producing boundary) taken from the boundary's
-  `generated_ingress`, not the boundary record.
+  cause contributes only the issuer, which the K1 fact holds.
 - **K3, payload-required dependencies.** Every `PayloadRequired` dependency an
   active continuation declares in a current record: ordinal records, the body
-  of a non-current, non-initial record version, and for a plugin packet its
+  of a non-current, non-initial record version, and for an ingress record its
   provenance fact. Each comes from a retained record, a pin, or a kept fact
   (see pinning at commit below).
 - **K4, the unadmitted tail.** Events, commands, and attempts between the
@@ -328,7 +362,7 @@ At a cut, the continuation closure `K` is:
 - **F, identity facts.** For every `IdentityOnly` dependency (knowledge
   origins, `IdentityEvidenceDependenciesV1` declarations, archived request
   outcomes, scheduled-action causes) that is a non-current, non-initial record
-  version, its membership; that is a boundary-generated plugin packet, its
+  version, its membership; that is an ingress record, whatever made it, its
   provenance fact. Other identity-only ordinal references need nothing. Like
   K3, each comes from a retained record, a pin, or a kept fact.
 
@@ -379,10 +413,33 @@ until the next seal, which then pins what is declared.
 `plugin_ingress_matches` and `plugin_ingress_payload_matches` must not match a
 packet that is still queued or was cancelled. A retained packet is checked
 against the queue and the retained cancellation index; that index is cleared
-by a seal and starts empty after a continuation restore. Each provenance fact
-therefore records the packet's status (pending, admitted, or cancelled), set
-when the fact is made and updated when the packet is admitted or its
-cancellation is recorded, and the two reads answer from it.
+by a seal and starts empty after a continuation restore. Each fact for a
+boundary-generated packet therefore records the packet's status (pending,
+admitted, or cancelled), set when the fact is made and updated when the
+packet is admitted or its cancellation is recorded, and the two reads answer
+from it. The facts replace the archived receipt as the source of a sealed
+packet's provenance: `plugin_ingress_matches` answers from the retained record
+or the fact, and `plugin_ingress_payload_matches` from the retained record or
+a pinned record with its fact. A packet no boundary generated never matches,
+sealed or not, and its fact says so; a generated one matches the plugin that
+both issued and receives it, as the retained check does, so a cross-plugin
+packet matches neither plugin. A seal and a continuation checkpoint never
+read receipts for a fact, so a continuation-restored run, which has none,
+answers alike.
+
+**Every pending or declared ingress record keeps a fact.** A fact is made
+from the record while the runtime holds it, retained or pinned, and kept
+while the record is pending or a current record declares it. So every pinned
+ingress record has one, and a packet first declared after its seal, while
+its record is still pinned (declared at admission, say), answers the reads
+as it does unsealed. A record first declared after its seal and no longer
+held has none: a read of it is `EvidenceContentUnavailable`, and the next
+seal and continuation checkpoint are `ArchiveNotReady`, as for any evidence
+declared after its seal (R4). The request tables declare the ingress of
+every tracked command and decision request, so the facts grow with the
+request index: about 17 bytes per tracked request (`{"ingress":N}`, the
+generation omitted when there is none), beside its index entry of about 520
+bytes.
 
 Every read of retained evidence in `canwu-sim` is classified in this table,
 and the implementation matches it:
@@ -390,15 +447,19 @@ and the implementation matches it:
 | Read site | Reads | After a seal |
 | --- | --- | --- |
 | `settlement.rs`, boundary admission of due ingress | the record of every due packet | pinned fallback (K1) |
-| `ingress.rs`, `plugin_ingress_issuer` | the producing boundary's generated ingress | provenance fact fallback (K2) |
+| `ingress.rs`, `plugin_ingress_issuer` | the producing boundary's generated ingress | provenance fact fallback (K1): the issuer |
 | `ingress.rs`, `plugin_ingress_cancellation_target` | the pending packet's record | pinned fallback (K1); an archived packet that is not pending stays `LateIngress` |
-| `view.rs`, `cancellable_plugin_ingress` | pending records and their producing boundaries | pinned and fact fallbacks (K1, K2) |
+| `view.rs`, `cancellable_plugin_ingress` | pending records and their producing boundaries | pinned and fact fallbacks (K1): the issuer |
 | `view.rs`, `command`, `event`, `ingress` | admitted packets, their causes, unadmitted records | pinned fallback (K1 to K4), otherwise `EvidenceContentUnavailable` |
-| `view.rs`, `plugin_ingress_matches`, `plugin_ingress_payload_matches` | an earlier admitted packet and its producer | pinned record or fact, with its status |
+| `view.rs`, `plugin_ingress_matches`, `plugin_ingress_payload_matches` | an earlier admitted packet and its producer | pinned record or fact (K1, K3, F), with its status; a packet no boundary generated is `false` |
+| `view.rs`, `plugin_ingress_payload_hash` | a packet the boundary admits | its match as above, then the retained or pinned record (K1) |
+| `view.rs`, `ingress_is_declarable` | the ingress queue and the boundary's admitted packets | state only, so every run answers alike |
 | `boundary_window.rs`, `summarize_boundary`, `queued_boundaries` | admitted and pending packets | pinned fallback (K1) |
 | `persistence.rs`, archive reachability scan | pending packets' retention roots | pinned fallback (K1) |
 | `mod.rs`, record-version body and time resolvers | non-current versions | pinned bodies, kept facts, time index |
-| `validation.rs`, `resolve_runtime_domain_record_version` | version membership | receipts, kept facts, current index |
+| `validation.rs`, `resolve_runtime_domain_record_version` | version membership | current index, pinned bodies, membership facts; receipts are not read |
+| `ingress.rs`, `decision.rs`, `maintenance.rs`, idempotent re-enqueue of command, decision, and maintenance requests | an identical queued request | archived request tables, then retained and pinned ingress |
+| `decision.rs`, uniqueness of an admitted decision's nested command request | the carriers of the request | the decision itself counts whether retained or in the archived decision command requests |
 | `settlement.rs`, current-boundary checks: cancellation in this boundary, and proposal evidence for events and ingress the current boundary caused | records appended by the boundary being settled | retained only; nothing is sealed while a boundary runs |
 
 Preconditions after the change: the runtime is ready, no transaction is in
@@ -420,7 +481,15 @@ segment and admitted in a later one.
 
 Per-boundary rollback must not copy growing structures: the pins and facts
 are `im` maps, so the boundary transaction checkpoint copies them in constant
-time, as it already copies the scheduler and the current-version index.
+time, as it already copies the scheduler. The current-version index, the
+archived request tables, the segment manifest, and the kept receipts are
+`im` structures too, with large values behind `Arc` so that a tree node stays
+small, so a fork, a seal's rollback copy, and the transaction checkpoints
+share them instead of copying them (review of the first commit, item 5). They
+are only iterated forward: `im` 15.1.0 ordered maps and sets break on reverse
+traversal past about 2,100 entries. A seal rebuilds the kept receipts rather
+than removing from them, because a removal holds several tree nodes on the
+stack at once in a debug build, which overflowed a 1 MiB thread.
 
 ### What plugins may rely on after a seal or a continuation restore
 
@@ -428,7 +497,9 @@ time, as it already copies the scheduler and the current-version index.
   record, and the issuer of a boundary-generated packet.
 - At the next boundary, every unadmitted event, command, and attempt.
 - The payload of a `PayloadRequired` dependency, and the identity facts of an
-  `IdentityOnly` dependency, while a current record declares it.
+  `IdentityOnly` dependency (for an ingress record, its provenance), while a
+  current record declares it, provided it was declared while the runtime
+  still held it.
 - Existence and time of every ordinal ID at or below the cut, for ever.
 - The current version (body and time) of every live record, and every
   initial-scenario version.
@@ -551,9 +622,9 @@ and the chunk counters bind the stream length.
 The boundary chain is already a head hash, so the checkpoint carries the head
 and checks it against the `boundary_chain` root.
 
-Commitment format 4, every root, and every `checkpoint_hash` stay as they are.
-Keeping old hashes is not a requirement (no 0.16.0 run reads 0.15.0 data), so
-the alternative, a commitment format 5 with hash-chained journal roots, was
+This package changes no root and no `checkpoint_hash`. Keeping old hashes is
+not a requirement (no 0.16.0 run reads 0.15.0 data), so the alternative, a
+commitment format bump with hash-chained journal roots, was
 weighed on simplicity and safety alone. The frontier was kept: it is
 implemented and checked against `blake3::hash` over every chunk and subtree
 boundary and the upstream vectors, its exported state is small and bounded,
@@ -580,7 +651,7 @@ neither form gives membership proofs.
 
 ### Contents
 
-A sketch; field names may change in implementation, the content will not.
+As shipped (`canwu_sim::ContinuationCheckpoint`, re-exported by `canwu-api`):
 
 ```rust
 pub const CONTINUATION_CHECKPOINT_FORMAT_VERSION: u32 = 1;
@@ -595,33 +666,37 @@ pub struct ContinuationCheckpoint {
     pub settled_cut: EvidenceCursor,
     /// Hash of the last boundary record; checked against `boundary_chain`.
     pub boundary_head: Option<String>,
-    /// Resumable command, attempt, event, ingress, and draw streams (Part D).
+    /// Resumable command, attempt, event, ingress, and draw streams (Part D),
+    /// each with its item count, byte length, chaining values, and tail.
     pub journal_frontiers: JournalFrontiers,
     /// K4: the unadmitted events, commands, and attempts, in ID order.
     pub unadmitted: UnadmittedEvidence,
-    /// K1 to K3 below the settled cut, each journal in ID order, record
-    /// version bodies by reference, and the ingress provenance facts.
-    pub pinned: PinnedEvidence,
+    /// K1 to K3 below the settled cut: per journal in ID order, and the
+    /// bodies of declared non-current record versions by reference.
+    pub pinned: PinnedEvidenceRecords,
     /// The IDs of the pending ingress among the pinned records.
     pub pending_ingress: Vec<IngressId>,
-    /// F: record-version memberships.
+    /// The provenance fact of every pending or declared ingress record.
+    pub ingress_provenance: Vec<PluginIngressProvenanceFact>,
+    /// F: record-version memberships whose body is not pinned.
     pub known_record_versions: Vec<DomainRecordVersionRef>,
     /// The provenance index of every live record's current version.
-    pub current_record_versions: Vec<CurrentRecordVersionEntry>,
+    pub current_record_versions: Vec<CurrentRecordVersion>,
     /// Every operation-keyed draw ever made, in draw-ID order (Part C).
     pub keyed_draws: Vec<KeyedDrawEntry>,
     /// Exact idempotency for every tracked request at or below the settled
-    /// cut: command, command-ingress, decision, and decision-command tables.
+    /// cut: command, queued-command, decision, and decision-command tables.
     pub requests: RequestIndex,
     /// Whether the history holds legacy commands, tracked attempts, and
     /// unqueued command history.
     pub history_flags: HistoryFlags,
     /// Part A time index, per journal, up to the settled cut.
-    pub evidence_times: EvidenceTimeIndex,
+    pub evidence_times: EvidenceTimes,
     /// The boundary ledger: settled boundaries within the run's horizon.
     pub settled_boundaries: Vec<BoundarySummary>,
-    /// Domain-separated hash over every field above, with
-    /// `state.checkpoint_hash` (domain `canwu.continuation-checkpoint.v1`).
+    /// Domain-separated hash over every field above (domain
+    /// `canwu.continuation-checkpoint.v1`); `state` carries the checkpoint
+    /// hash.
     pub continuation_hash: String,
 }
 ```
@@ -663,7 +738,8 @@ first requires the recomputed `continuation_hash` to equal the hash the host
 stored, which is the trust anchor below.
 
 1. **Versions.** Continuation format 1, snapshot format 8, the running
-   engine version, commitment format 4, every state journal array empty.
+   engine version, the running commitment format (5), every state journal
+   array empty.
 2. **Integrity.** Recompute `continuation_hash` over the material and compare
    it with the carried value. This detects corruption, not tampering (see
    trust below).
@@ -679,26 +755,35 @@ stored, which is the trust anchor below.
    ID above the cut, and have no two adjacent entries with the same time,
    which is the one representation Part A defines (it is exact for any order
    of times, so times are not required to increase), and every time is at or
-   before `now`; boundary summaries are within the horizon of the last one.
-4. **State.** The state-only part of snapshot validation: scenario state,
-   run manifest and configuration, plugin descriptors and schemas, entities
-   and created persons, domain-record schemas, references, and lifecycle,
-   knowledge structure and relation rules, decision hot state, transition
-   manifests, random streams, counters. Every evidence reference these hold
-   is checked through a runtime validation context over the restored
-   evidence (Part A rules plus pins and facts), so a knowledge origin,
-   declared dependency, or cause of pending work that does not exist is
-   refused. Checks that rebuild state from the boundary journal (the ledger
-   replay of knowledge changes, decision-ingress reconstruction, transition
-   manifest reconstruction, created-person and report-delay cross checks) do
-   not run: they need history.
-5. **Records.** Each pinned or unadmitted record passes its per-record
-   validation; each pending ingress record decodes against its plugin's
-   ingress descriptor, with its queue key derived from the record.
-6. **Ledger.** Each keyed entry's address and bound are valid, its stream is
-   a known stream, its draw ID is unique and at or below the cut, and its
-   value equals the value recomputed from the root seed, stream, address,
-   bound, and purpose hash. A tampered value is refused without any history.
+   before `now`.
+4. **State.** The state-only part of snapshot validation, shared with the
+   snapshot loader: the run description (formats, manifest, initial
+   scenario, configuration, entity registry against the created-person
+   index rather than the boundaries' creations, canonical world order), scenario
+   state, domain records against their schemas, knowledge structure,
+   decision hot state, plugin components and the type schema, random stream
+   states, and the shape of scheduled work with its transit consistency.
+   Scheduled work that would enqueue plugin ingress is refused, because no
+   valid run holds it (see the interaction with `SystemDirective::Schedule`
+   below).
+   Every evidence reference state holds is checked against the restored
+   evidence in step 8, whose closure computation requires each declared
+   dependency to exist (Part A rules plus pins and facts), so a knowledge
+   origin, declared dependency, or cause of pending work that does not exist
+   is refused. Checks that rebuild state from the boundary journal (the
+   ledger replay of knowledge changes, decision-ingress reconstruction,
+   transition manifest reconstruction, created-person and report-delay cross
+   checks) do not run: they need history.
+5. **Records.** Each pinned plugin packet names a declared packet type with
+   its class, canonical existing affected entities, and archive retention
+   roots that are well formed and bound to its payload; each pending
+   ingress's queue key is derived from its pinned record. The identity check
+   (step 7) and the round trip (step 8) bind the rest.
+6. **Ledger.** Each keyed entry's address and bound are valid, its purpose
+   hash is canonical, its address and its draw ID are unique and the ID is
+   at or below the cut, and its value equals the value recomputed from the
+   root seed, stream, address, bound, and purpose hash. A tampered value is
+   refused without any history.
 7. **Identity.** Build the runtime (archived cut = settled cut; retained tail
    = the unadmitted records; pins, facts, ledger, time index, provenance
    index, boundary ledger, request tables, flags, and boundary head from the
@@ -707,10 +792,16 @@ stored, which is the trust anchor below.
    `state.checkpoint_hash` and `state.commitment_roots`. This verifies all
    current state, the journal roots, the boundary chain head, the control
    counters, and the revision.
-8. **Closure round trip.** Derive the continuation checkpoint from the built
-   runtime and require it to equal the input. This proves that the carried
-   closure is exactly the closure of the restored state (nothing missing,
-   nothing extra) and that every derived part is in canonical form.
+8. **Closure round trip.** First the boundary ledger must have the form a
+   run keeps: consecutive boundary IDs ending at the last boundary, the first
+   no earlier than the run's boundary-schedule horizon before the last.
+   Whether a boundary inside the horizon was dropped from its front cannot be
+   checked without history. Then derive the continuation checkpoint from the
+   built runtime and require it to equal the input. This proves that the
+   carried closure is exactly the closure of the restored state (nothing
+   missing, nothing extra) and that every derived part is in canonical form.
+   A closure that cannot be derived, because a cause of pending work or a
+   declared dependency lies beyond the journal end, is refused here.
 9. **Plugins.** Rehydrate the exact plugin descriptors (`_with_plugins`),
    activate them, and enter the compact runtime. Without plugins, a
    checkpoint that names one fails with `PluginNotActive`, as the compact
@@ -743,9 +834,13 @@ F gives it the host operations a game needs.
   within the run.
 - What it cannot verify without history: that the carried evidence records
   are the ones the journal roots commit to (those roots are flat stream
-  hashes, without membership proofs); a keyed entry's draw ID and operation
-  evidence; request outcomes; which change index established a current or
-  known record version; the boundary summaries; the time index; the
+  hashes, without membership proofs), including the payloads of the pinned
+  records; which packets are pending (step 5 binds each pending ID's queue
+  key to its pinned record, not the set of pending IDs) and the content of
+  their records, causes included, beyond each cause lying within the journal
+  (step 8); a keyed entry's draw ID and operation evidence; request outcomes;
+  which change index established a current or known record version; the
+  boundary summaries beyond the ledger's form (step 8); the time index; the
   provenance facts and their statuses; and the settled cut. The admission
   cursors that define the settled cut (`admitted_attempt_count`,
   `admitted_command_count`, `admitted_event_count`) are in no commitment
@@ -951,10 +1046,12 @@ The tests below check the claim directly rather than the argument.
      resumable: a chain head, or a stream kept with Part D's resumable hash
      and carried as a sixth frontier.
   4. The boundary hash only changes the head string this design carries.
-  5. This design keeps commitment format 4 for its own parts. Restore step 7
-     recomputes with whatever commitment format the engine writes, so a bump
-     by that package needs no change here beyond the format and tamper
-     expectations, which whichever package merges second updates.
+  5. This design changes no commitment root of its own. That package moved
+     the commitment format to 5; restore step 7 recomputes with whatever
+     format the engine writes, and the knowledge records accumulator, which
+     that package added to the commitment cache, is rebuilt from state on
+     the first refresh after a continuation restore, like every state-domain
+     root.
   The knowledge ledger's own growth (superseded records it keeps) is state,
   carried as state; that package decides that term.
 - **Resource and production archives.** Their content-addressed archives live
@@ -964,6 +1061,19 @@ The tests below check the claim directly rather than the argument.
   run on a compact runtime through `CanwuRun`. Pending archive commits and
   retention acknowledgements are pending ingress, so they are pinned, and the
   reachability manifest scans pinned pending ingress for retention roots.
+- **`SystemDirective::Schedule` of plugin ingress.** In 0.15.0 a command or
+  event handler could schedule a directive that enqueues plugin ingress. The
+  packet it queues when it fires carries the command or event as its cause
+  but is issued later than that cause was accepted, and the full-save loader,
+  which requires command-caused ingress to be issued when its command was
+  accepted, refused the run. The loader cannot be relaxed exactly: the fired
+  action leaves no evidence of when it was issued, so a load could not tell
+  such a packet from a forged one. `validate_directives` therefore refuses
+  with `InvalidPayload` a `SystemDirective::Schedule` that wraps
+  `EnqueuePluginIngress` at any depth, and the snapshot and continuation
+  loaders refuse scheduled work holding one. `EnqueuePluginIngress` takes its
+  own delay, which gives the same due time. No first-party extension
+  schedules one.
 - **Decision archive.** Hot decision state is in `state`; archived decision
   blobs stay in the host's `DecisionArchiveProvider`, as with a flat
   checkpoint.
@@ -978,12 +1088,12 @@ The tests below check the claim directly rather than the argument.
 | Format | 0.15.0 | 0.16.0 | Why |
 | --- | --- | --- | --- |
 | Snapshot | 8 | 8 | unchanged shape |
-| Commitment | 4 | 4 | unchanged roots and hashes |
+| Commitment | 4 | 5 | moved by the knowledge-ledger package; this package changes no root |
 | Checkpoint/evidence journal | 4 | 5 | `SimulationCheckpoint` loses `keyed_draw_reservations` and `keyed_reservation_root`; its dependency and receipt lists no longer name keyed draws; segments may end at different per-journal cuts |
 | Compact checkpoint hash domain | `canwu.compact-checkpoint.v1` | `.v2` | material loses the reservation root |
 | Seal-token hash domain | `canwu.evidence.seal-token.v1` | `.v2` | bumped with the compact checkpoint identity it binds |
-| Paged-checkpoint envelope | 4 | 5 | embeds `SimulationCheckpoint` |
-| Continuation checkpoint | none | 1 | new |
+| Paged-checkpoint envelope | 4 | 5 | embeds `SimulationCheckpoint`; the record-store package moves it to 5 as well (state-page codec `raw-canonical-v2`), and 0.16.0 has one format 5 carrying both changes |
+| Continuation checkpoint | none | 1 | new; own hash domain `canwu.continuation-checkpoint.v1` |
 
 Snapshots, boundary records, receipts, and replay journals keep their shapes
 and hashes. Segments keep their shape, item encoding, and segment IDs (the ID
@@ -995,6 +1105,10 @@ cover each continuation part.
 
 The first commit changes the checkpoint/evidence-journal format, the paged
 envelope, and the two hash domains; the second adds the continuation format.
+The second commit computes the two-phase seal token's compact identity from
+the runtime's fields instead of a built `SimulationCheckpoint`; the material
+and its value are those of 0.16.0's compact checkpoint hash, so the domain
+does not move again.
 
 Public API: `KeyedDrawReservation` and the two `SimulationCheckpoint` fields
 are removed (breaking; `canwu-api` never re-exported the type).
@@ -1017,6 +1131,7 @@ callers that pass a `Canwu`.
 | Current state (records, knowledge ledger, decisions, components) | yes, as state | yes |
 | Keyed-draw ledger | one entry per address ever drawn | one entry per address |
 | Request index | one entry per tracked request ever | same |
+| Ingress provenance facts | one per pending or declared ingress record; the request index declares the ingress of every tracked request | same |
 | Time index | one entry per distinct instant per journal | same |
 | Segment headers | not carried | one per seal |
 | Boundaries, events, commands, ingress, draws, receipts | only the closure | closure plus tail since the last seal |
@@ -1072,11 +1187,15 @@ run can confirm its own number; the report will ask for it.
 - **The architecture suite**, before and after, for the resumable hash, in
   allocations and in elapsed time.
 - **`continuation-profile`** (second commit), a new harness binary using only
-  `canwu-api`. One daily boundary; a fixture plugin whose commands schedule
-  packets due 1 to 90 days later, whose packets update records, publish
-  superseding knowledge, make `k` keyed draws, schedule follow-ups, and hold a
-  payload-required continuation; host commands and calendar boundaries each
-  day. At months 1, 2, 4, 7, 10, and 14 and for `k` in {0, 10}, it records the
+  `canwu-api`. One daily boundary; a fixture plugin whose commands queue
+  packets due 1 to 90 days later and a follow-up within 9 days, whose packets
+  update a record, make `k` keyed draws each, and schedule follow-ups up to 30
+  days ahead, which publishes superseding knowledge and holds a
+  payload-required continuation, and whose churn system moves 140 records to
+  their next version a day (so that the full save grows about 10 MB a
+  simulated month, the downstream rate, while current state does not); the
+  host dispatches 8 tracked commands a day. At months 1, 2, 4, 7, 10, and 14
+  and for `k` in {0, 10}, it records the
   full portable save's bytes, write time, and restore time; the continuation
   checkpoint's non-state bytes by part, write time, restore time, and restore
   allocations; and, in the allocation build, the heap of a compact run that
@@ -1145,6 +1264,70 @@ this commit.
   (`run_heap_bytes` equal). In a sealed run each sealed keyed draw no longer
   keeps a reservation with its Merkle receipt besides its ledger entry.
 
+### Second-commit results
+
+`continuation-profile` release builds on the same machine, shared with other
+builds (files `2026-10-15-continuation-{elapsed,allocations}.json`; elapsed
+medians of three samples, allocation counts of one). The columns are the
+samples at months 4, 7, and 14 of 30 days; the reports also hold months 1, 2,
+and 10.
+
+| `k` = 0 (no keyed draws) | Month 4 | Month 7 | Month 14 |
+| --- | ---: | ---: | ---: |
+| Full save (`checkpoint_journal_json`) | 42.6 MB | 74.6 MB | 149.4 MB |
+| Continuation checkpoint | 0.72 MB | 1.15 MB | 2.17 MB |
+| of which state | 101 KB | 138 KB | 225 KB |
+| of which request index | 504 KB | 889 KB | 1,787 KB |
+| of which time index | 15 KB | 27 KB | 55 KB |
+| of which pins | 26 KB | 25 KB | 25 KB |
+| Write, continuation against full | 6.7 / 156 ms | 10.4 / 290 ms | 21.5 / 599 ms |
+| Restore, continuation against full | 54 / 1,984 ms | 59 / 3,835 ms | 98 / 7,809 ms |
+
+| `k` = 10 keyed draws per packet | Month 4 | Month 7 | Month 14 |
+| --- | ---: | ---: | ---: |
+| Full save | 44.9 MB | 79.2 MB | 159.1 MB |
+| Continuation checkpoint | 1.55 MB | 2.80 MB | 5.72 MB |
+| of which keyed-draw ledger | 829 KB | 1,646 KB | 3,544 KB |
+| of which request index | 504 KB | 889 KB | 1,787 KB |
+| Write, continuation against full | 12.3 / 164 ms | 16.1 / 299 ms | 38.8 / 436 ms |
+| Restore, continuation against full | 82 / 2,100 ms | 125 / 3,038 ms | 207 / 6,244 ms |
+
+- Target 4 is met by construction and by test: a restore requires the
+  checkpoint derived from the restored runtime to equal the input, so an
+  extra or a missing closure item is refused (the tamper test checks both),
+  and the lockstep test compares the checkpoints of the unsealed, sealed, and
+  restored runs byte for byte.
+- Target 5. The non-state bytes grow only by the terms the table above names
+  as growing with campaign length. Without keyed draws, the rest (non-state
+  bytes less the request index and the time index) is 84 KB at month 1 and
+  98 KB at month 14; less the pins of work in flight, which fill up over the
+  first three months as the 90-day backlog builds, it is 69 KB and 73 KB
+  (within 6 %). The target as written (flat within 10 % with no keyed draws)
+  assumed no tracked requests: every tracked command adds a request-index
+  entry, here about 520 bytes for its exact outcome and its queued-ingress
+  receipt together, 1.8 MB over 14 months at 8 commands a day. With 10
+  keyed draws per packet, the non-state slope from month 10 to month 14 is
+  1,613 KB against 1,080 KB of ledger and 513 KB of request index, 1.2 %
+  apart; the time index (19 KB over those months) is the rest.
+- Target 6 is met: at month 14 writing the continuation checkpoint takes
+  3.6 % (`k` = 0) and 8.9 % (`k` = 10) of the time to write the full save,
+  and restoring it 1.3 % and 3.3 % of the time to restore the full save. The
+  full save is 149 to 159 MB, the downstream figure; the continuation
+  checkpoint is 2.2 and 5.7 MB.
+- Heap, allocation build: a run that seals every month holds 18.5 MB at month
+  14 without keyed draws and 23.1 MB with 10 per packet, against 199 MB and
+  209 MB for the run that never seals. A continuation restore at month 14
+  leaves 3.1 MB and 7.2 MB allocated for the restored run, in 0.72 million
+  and 1.98 million allocator calls.
+- These figures predate the second review's fixes, which add one provenance
+  fact per pending packet and per tracked request: 16 KB at month 4 and
+  57 KB at month 14 (2.6 % of the checkpoint at `k` = 0), measured on the
+  same workload, and change no other part. The fact term grows with the
+  request index (target 5).
+- The profile queues its follow-ups directly with their own delay: a handler
+  can no longer schedule a directive that enqueues plugin ingress (see
+  Interactions).
+
 ## What can still fail
 
 Boundaries (a failed boundary stops the run):
@@ -1163,13 +1346,21 @@ Boundaries (a failed boundary stops the run):
 - Admission of a pending ingress whose record is missing, or a
   boundary-generated packet without its provenance fact: `InvalidSnapshot`.
   An engine invariant; a correct closure makes it impossible.
+- A provenance read of an ingress record first declared after its seal and
+  no longer held: `EvidenceContentUnavailable`, an R4 violation, in the
+  sealed or restored run only.
 
 Not boundaries:
 
 - A seal, a continuation checkpoint, or the two-phase commit fails with
   `ArchiveNotReady` when a declared dependency no longer resolves (an R4
-  violation). The run continues but cannot seal or write a continuation save
-  until the declaration is dropped.
+  violation), including an ingress record first declared after its seal and
+  no longer held, whose provenance fact can no longer be made. The run
+  continues but cannot seal or write a continuation save until the
+  declaration is dropped.
+- A command or event handler whose directives schedule a directive that
+  enqueues plugin ingress: `InvalidPayload`, refused before it changes
+  anything (see Interactions).
 - A continuation restore refuses a corrupted, inconsistent, or tampered
   checkpoint that steps 1 to 8 detect; tampering that also recomputes
   `continuation_hash` is caught only against the host's stored hash.
@@ -1243,40 +1434,71 @@ Second commit:
 
 7. **`crates/api/canwu-api/tests/continuation_checkpoint.rs`** (the slice). A
    fixture plugin with a plugin command whose handler queues a packet (its
-   admission reads the cause command), boundary systems that schedule packets
-   up to 30 days ahead and wakes for themselves, cancel some through
+   admission reads the cause command) and schedules a delayed event (a
+   pending scheduled action), boundary systems that schedule packets up to
+   30 days ahead for the fixture and for a second, receiving plugin (a
+   cross-plugin packet whose issuer and target differ), cancel some of
+   either through
    `cancellable_plugin_ingress`, retry a keyed draw at an address drawn
    before the cut, read `boundaries_between` over a declared seven-day
-   horizon, publish superseding knowledge through `knowledge_heads`, and keep
-   payload-required continuations; the host queues commands and calendar
+   horizon, publish superseding knowledge through `knowledge_heads`, keep
+   payload-required continuations, and declare identity-only the last
+   admitted packets of each kind (boundary-generated, command-caused, and
+   cross-plugin), reading `plugin_ingress_matches` for each at every later
+   boundary while declared; the host queues commands and calendar
    boundaries. The fixture exercises the pinning edge cases across a seal:
-   (a) a dependency on a superseded version declared in a boundary after the
-   seal that archived the version's establishing boundary; (b) cancelling a
+   (a) an identity-only dependency on the version a boundary supersedes,
+   declared in that boundary right after the seal that archived the
+   version's establishing boundary, so that only the pin taken at commit
+   keeps it (the checkpoints after each seal check it); (b) cancelling a
    pinned pending packet whose producing boundary is sealed; (c) a
-   `PayloadRequired` dependency on an event, declared in the event's
-   producing boundary and read after two seals. Three runs take identical
+   `PayloadRequired` dependency on an event, declared in the boundary that
+   admits it and read at every boundary across two seals (a boundary's own
+   emissions become events only when it commits, so the earliest boundary
+   that can declare one is the next). Three runs take identical
    inputs: unsealed `Canwu`, a `CompactedCanwu` that seals every five
    boundaries with work pending, and, from boundary `k` (where pending
    ingress, unadmitted events, and pending scheduled actions are asserted to
    exist), a run restored from the JSON of the first run's continuation
-   checkpoint with `from_continuation_checkpoint_verified`. The three
-   continuation checkpoints are byte-equal at `k` and every fifth boundary
-   after it, including the sealed run's (d). For 40 boundaries the runs
+   checkpoint with `from_continuation_checkpoint_verified`, joined at `k` by
+   a run restored from the first run's full save
+   (`checkpoint_journal_json`). The continuation checkpoints are byte-equal
+   at `k`, every fifth boundary
+   after it, and the boundary after each seal, including the sealed run's
+   (d); the restored runs seal on the sealed run's days. For 40 boundaries
+   the runs
    produce equal receipts, checkpoint hashes, and authoritative state hashes;
    a second restore at `k + 20` joins the lockstep. The restored run refuses
-   full-history operations with `HistoryUnavailable` and an archived payload
-   read with `EvidenceContentUnavailable`. The unsealed run's replay journal
-   still replays.
+   full-history operations with `HistoryUnavailable` and an archived
+   segment read with `EvidenceUnavailable` (it holds no receipt before its
+   base). The checkpoints are asserted to keep a cross-plugin fact and a
+   fact for a packet no boundary generated, and a watched packet to have
+   matched. The unsealed run's replay journal still replays. The whole
+   scenario runs on a 1 MiB thread, so a debug build proves the runtime fits
+   the smallest common thread stack. Beside it,
+   `a_packet_first_declared_after_its_seal_is_not_ready` declares a sealed,
+   no longer held packet and gets `ArchiveNotReady` from the sealed run's
+   continuation checkpoint and next seal while the unsealed run writes one,
+   and `a_scheduled_directive_cannot_enqueue_plugin_ingress` checks the
+   refusal (Interactions).
 8. **A continuation tamper test**: one altered byte in each part refused; an
    altered keyed value refused even with a recomputed `continuation_hash`; an
    altered pinned payload with a recomputed hash accepted by the unverified
    restore and refused by the verified one; a removed or an extra closure item
    refused by the round trip; a changed state field refused by the checkpoint
-   hash; a malformed frontier refused without a panic.
+   hash; a malformed frontier refused without a panic; with a recomputed
+   hash, a boundary ledger without its last boundary or reaching past the
+   horizon, and a pending packet whose cause lies beyond the journal end,
+   refused. A `canwu-sim` test refuses a checkpoint whose scheduled work
+   would enqueue plugin ingress.
 9. **The resource and fiscal drives of tests 3 and 4** taken to a
-   continuation checkpoint with pending completion operations, an active
-   lease, and fiscal actions at the cut, restored, and run 30 boundaries in
-   lockstep with the uninterrupted run.
+   continuation checkpoint with a pending completion operation and, for
+   fiscal, an open assessment, an authorized execution, and the adapter
+   result queued at the cut, restored with `_verified`, and run more than 30
+   boundaries in lockstep with the uninterrupted run (the restored fiscal run
+   seals in two phases). The fixture world of test 3 has no completion
+   partition, so an active lease is not part of it; `gap_g53` covers leases
+   on full-history runs.
 
 ## Documentation delta (for the orchestrator)
 
@@ -1357,6 +1579,70 @@ findings and their resolution:
   Accepted; first commit.
 - **N6: an unsealed run builds requests and flags with the seal's functions
   and domains.** Accepted (Part E).
+
+The review of the first commit accepted it after fixes, all made:
+
+1. *A seal required a receipt for every identity-only dependency*, so
+   knowledge or a declaration citing evidence sealed earlier blocked every
+   later seal. Fixed in the first commit (Part A, "A seal accepts what the
+   counters prove"), with the reviewer's probe as a test; the second commit
+   drops the receipt requirement altogether.
+2. *A hostile frontier could overflow the stream length.* Fixed in the first
+   commit: a frontier is capped at 2^62 bytes and every append checks the
+   length (Part D).
+3. *Measure the resumable hash's elapsed time.* Measured, and aligned
+   multi-chunk subtrees are hashed in one call (first-commit results).
+4. *Documentation*: the golden test pins journal roots, the restore's time
+   index rule matches Part A, and the host helpers that check record-version
+   existence say that the check is seal-dependent for undeclared superseded
+   versions. Fixed in the first commit.
+5. *A seal and a two-phase commit took a full fork for rollback*, copying
+   structures that grow with every seal. Fixed in the second commit: those
+   structures are `im` structures with shared values (Part B).
+6. *The R1 to R3 claim missed two violators.* Corrected: `canwu-information`'s
+   delegated interpretation authority and `canwu-law`'s signal and publicity
+   provenance are listed as known violators (the rule plugins obey); their
+   fix belongs to another package.
+
+The review of both commits accepted them after fixes, all made:
+
+- *B1, blocking: a pending cross-plugin packet blocked every seal* ("lacks
+  its generation evidence"), because the fact was looked up by issuer equal
+  to target. The generation is now found by ingress ID, and the fact keeps
+  the issuer and the target in separate fields; each read answers from the
+  right one (Part B). The lockstep test schedules cross-plugin packets.
+- *S1: a declared sealed packet that no boundary generated kept no fact*, so
+  `plugin_ingress_matches` was `EvidenceContentUnavailable` in a sealed run
+  and `false` unsealed, and a boundary-generated packet first declared after
+  its seal let the checkpoint differ by seal history. Every pending or
+  declared ingress record now keeps a fact, including "not generated by a
+  boundary"; one first declared after its seal and no longer held makes the
+  checkpoint and the seal `ArchiveNotReady`.
+- *S2: a full save refused a valid run whose command handler scheduled a
+  directive enqueueing plugin ingress.* The loader cannot be relaxed
+  exactly: a scheduled action that fires leaves its cause on the packet but
+  no evidence of when it was issued, so a load cannot tell such a packet from
+  a forged one. `validate_directives` therefore refuses a
+  `SystemDirective::Schedule` that wraps `EnqueuePluginIngress`, at any
+  depth, and the snapshot and continuation loaders refuse scheduled work
+  that holds one (Interactions).
+- *S3: debug builds overflowed a 1 MiB thread.* The commitment cache moved
+  behind a box (first commit), and a seal rebuilds the kept receipts instead
+  of removing from them (second commit). `gap_g46_api_paged_checkpoint` and
+  the lockstep test run on a 1 MiB thread.
+- *Notes.* Restore checks the boundary ledger's form (step 8), and a closure
+  that cannot be derived is `InvalidSnapshot`; the trust section lists the
+  pending set, the pinned payloads, and the boundary summaries among what
+  only the stored hash covers; the `canwu-history-research` comment on
+  sealed relations is corrected.
+
+The delta review of both commits on the integrated tree accepted them after
+two fixes, both made: `canwu-law` declared any cited ingress the counters
+prove exists, so a host proposal citing a sealed, undeclared packet blocked
+every later seal for as long as the proposal lived; it now refuses such a
+citation, using the seal-stable `ingress_is_declarable` read and its own
+declarations. And `SystemDirective::Schedule` documents that wrapping
+`EnqueuePluginIngress` is refused and why.
 
 Answers to the design questions, adopted: hazmat frontiers replacing the
 accumulator's hasher; superseded record versions refused as fresh-draw

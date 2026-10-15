@@ -341,13 +341,14 @@ impl SimulationView<'_> {
 
     /// Resolves an exact command ID from the retained runtime journal in O(1).
     ///
-    /// A sealed command remains valid identity evidence, but its payload is
-    /// no longer available through this view: lookup returns
-    /// [`ErrorCode::EvidenceContentUnavailable`], whether or not the seal kept
-    /// a receipt for it. `None` means no command with this ID was committed.
+    /// A sealed command remains valid identity evidence. Its payload stays
+    /// readable while the continuation closure pins it (the cause of pending
+    /// work, or a payload-required declaration); otherwise lookup returns
+    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means no command with
+    /// this ID was committed.
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
-        let retained = self.state.evidence().retained_command(id);
+        let retained = self.state.evidence().command_record(id);
         if retained.is_none()
             && archived_ordinal(id.get(), self.state.evidence().archived.command_count)
         {
@@ -361,13 +362,14 @@ impl SimulationView<'_> {
 
     /// Resolves an exact event ID from the retained runtime journal in O(1).
     ///
-    /// A sealed event remains valid identity evidence, but its payload is no
-    /// longer available through this view: lookup returns
-    /// [`ErrorCode::EvidenceContentUnavailable`], whether or not the seal kept
-    /// a receipt for it. `None` means no event with this ID was committed.
+    /// A sealed event remains valid identity evidence. Its payload stays
+    /// readable while the continuation closure pins it (the cause of pending
+    /// work, or a payload-required declaration); otherwise lookup returns
+    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means no event with
+    /// this ID was committed.
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
-        let retained = self.state.evidence().retained_event(id);
+        let retained = self.state.evidence().event_record(id);
         if retained.is_none()
             && archived_ordinal(id.get(), self.state.evidence().archived.event_count)
         {
@@ -392,6 +394,39 @@ impl SimulationView<'_> {
         !validation::runtime_has_unqueued_command_history(self.state.runtime())
     }
 
+    /// Whether a dependency on this ingress record can be declared now with
+    /// the same outcome in every run, sealed or not: the record is still
+    /// queued, or the boundary being settled admitted it.
+    ///
+    /// A seal keeps every queued record, and a declared one for as long as a
+    /// current record declares it, so a record declared while it is queued or
+    /// just admitted stays readable to the provenance reads. Any other record
+    /// may already be sealed and dropped in some run, where declaring it makes
+    /// every later seal and continuation checkpoint fail with
+    /// [`ErrorCode::ArchiveNotReady`]; whether this run happens to hold it
+    /// does not count. A record the reader's own current declarations keep is
+    /// declarable too, which the reader knows from its own state.
+    pub fn ingress_is_declarable(&self, id: IngressId) -> Result<bool, CanwuError> {
+        self.require_read(&StateKey::core_ingress())?;
+        if self
+            .allowed_ingress
+            .is_some_and(|admitted| admitted.contains(&id))
+        {
+            return Ok(true);
+        }
+        Ok(self
+            .state
+            .evidence()
+            .ingress_record(id)
+            .is_some_and(|record| {
+                self.state
+                    .runtime()
+                    .scheduler
+                    .pending_ingress
+                    .contains(&IngressQueueKey::from_record(record))
+            }))
+    }
+
     pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
         self.require_read(&StateKey::core_ingress())?;
         if self
@@ -400,7 +435,7 @@ impl SimulationView<'_> {
         {
             return Ok(None);
         }
-        let record = self.state.evidence().retained_ingress(id);
+        let record = self.state.evidence().ingress_record(id);
         if record.is_none()
             && archived_ordinal(id.get(), self.state.evidence().archived.ingress_count)
         {
@@ -452,7 +487,7 @@ impl SimulationView<'_> {
             if key.due_at <= now {
                 continue;
             }
-            let Some(record) = evidence.retained_ingress(key.id) else {
+            let Some(record) = evidence.ingress_record(key.id) else {
                 continue;
             };
             let IngressPayload::Plugin { plugin, .. } = &record.payload else {
@@ -460,13 +495,15 @@ impl SimulationView<'_> {
             };
             let issued_by_owner = match &record.cause {
                 Some(CauseRef::Command(_)) => plugin == owner,
-                Some(CauseRef::Boundary(boundary)) => evidence
-                    .retained_boundary(*boundary)
-                    .is_some_and(|boundary| {
-                        boundary.generated_ingress.iter().any(|generation| {
-                            generation.ingress == record.id && generation.plugin == owner
-                        })
+                Some(CauseRef::Boundary(boundary)) => match evidence.retained_boundary(*boundary) {
+                    Some(boundary) => boundary.generated_ingress.iter().any(|generation| {
+                        generation.ingress == record.id && generation.plugin == owner
                     }),
+                    None => evidence
+                        .pinned
+                        .generation(record.id)
+                        .is_some_and(|generation| generation.issuer == owner),
+                },
                 Some(CauseRef::System(_) | CauseRef::Event(_)) | None => false,
             };
             if issued_by_owner {
@@ -570,10 +607,16 @@ impl SimulationView<'_> {
 
     /// Matches retained, plugin-generated ingress provenance without exposing its payload.
     ///
+    /// A packet matches when a boundary system of `plugin` generated it for
+    /// `plugin` itself with `packet_type`, so a cross-plugin packet matches
+    /// neither plugin and a packet no boundary generated never matches.
     /// Durable evidence may cite ingress admitted at an earlier boundary, but a
-    /// generated record still waiting in the scheduler is not yet admissible.
-    /// Format-7 archive receipts retain a Merkle-bound compact producer proof,
-    /// so archived payload bytes do not need to return to the hot path.
+    /// generated record still waiting in the scheduler, or withdrawn by a
+    /// cancellation, is not admissible. A sealed packet answers from the
+    /// provenance fact the continuation closure keeps while the packet is
+    /// pending or a current record declares it; the fact carries the packet's
+    /// status. A sealed packet without one (first declared after its seal and
+    /// no longer held) returns [`ErrorCode::EvidenceContentUnavailable`].
     pub fn plugin_ingress_matches(
         &self,
         id: IngressId,
@@ -583,35 +626,24 @@ impl SimulationView<'_> {
         self.require_read(&StateKey::core_ingress())?;
         let record = self.state.evidence().retained_ingress(id);
         if record.is_none()
-            && let Some(receipt) = self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .get(&EvidenceRef::Ingress(id))
+            && let Some(fact) = self.state.evidence().pinned.fact(id)
         {
-            if self
-                .state
-                .runtime()
-                .scheduler
-                .pending_ingress
-                .iter()
-                .any(|key| key.id == id)
-            {
-                return Ok(false);
-            }
-            return Ok(receipt
-                .plugin_ingress_provenance
-                .as_ref()
-                .is_some_and(|provenance| {
-                    provenance.plugin == plugin && provenance.packet_type == packet_type
-                }));
+            // A packet no boundary generated never matches; a generated one
+            // matches once admitted, when the queried plugin both issued it
+            // and receives it, as the retained check below requires.
+            return Ok(fact.generation.as_ref().is_some_and(|generation| {
+                generation.status == super::PluginIngressStatus::Admitted
+                    && generation.issuer == plugin
+                    && generation.target_plugin == plugin
+                    && generation.packet_type == packet_type
+            }));
         }
         if record.is_none()
             && archived_ordinal(id.get(), self.state.evidence().archived.ingress_count)
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
-                "ingress is archived without a kept provenance receipt; declare it as an identity-only dependency to keep one",
+                "ingress is archived without a kept provenance fact; declare it as an identity-only dependency to keep one",
             ));
         }
         let Some(record) = record else {
@@ -654,10 +686,12 @@ impl SimulationView<'_> {
     }
 
     /// Matches a retained plugin ingress to an exact provider payload and
-    /// delivery time. Payload inspection is deliberately limited to retained
-    /// records: archived receipts prove producer identity, but cannot safely
-    /// be reused to authorize a different legal proposal without the original
-    /// bytes.
+    /// delivery time. Payload inspection is limited to records the runtime
+    /// holds: retained ones, and sealed ones the continuation closure pins
+    /// with their provenance fact, whose status must be admitted. A sealed
+    /// packet whose fact says no boundary generated it never matches; any
+    /// other sealed packet without both returns
+    /// [`ErrorCode::EvidenceContentUnavailable`].
     pub fn plugin_ingress_payload_matches(
         &self,
         id: IngressId,
@@ -667,8 +701,22 @@ impl SimulationView<'_> {
         expected_payload: &Value,
     ) -> Result<bool, CanwuError> {
         self.require_read(&StateKey::core_ingress())?;
-        let Some(record) = self.state.evidence().retained_ingress(id) else {
-            if archived_ordinal(id.get(), self.state.evidence().archived.ingress_count) {
+        let evidence = self.state.evidence();
+        let retained = evidence.retained_ingress(id);
+        let fact = evidence.pinned.fact(id);
+        if retained.is_none() && fact.is_some_and(|fact| fact.generation.is_none()) {
+            // A kept sealed record no boundary generated never matches.
+            return Ok(false);
+        }
+        let generation = evidence.pinned.generation(id);
+        let pinned = evidence
+            .pinned
+            .ingress
+            .get(&id)
+            .filter(|_| generation.is_some())
+            .map(std::sync::Arc::as_ref);
+        let Some(record) = retained.or(pinned) else {
+            if archived_ordinal(id.get(), evidence.archived.ingress_count) {
                 return Err(CanwuError::new(
                     ErrorCode::EvidenceContentUnavailable,
                     "provider ingress payload is archived; exact legal signal binding requires retained content",
@@ -676,7 +724,12 @@ impl SimulationView<'_> {
             }
             return Ok(false);
         };
-        if self.ingress_is_pending_or_cancelled(record) {
+        let admitted = match (retained, generation) {
+            (Some(record), _) => !self.ingress_is_pending_or_cancelled(record),
+            (None, Some(generation)) => generation.status == super::PluginIngressStatus::Admitted,
+            (None, None) => false,
+        };
+        if !admitted {
             return Ok(false);
         }
         let IngressPayload::Plugin {
@@ -698,6 +751,11 @@ impl SimulationView<'_> {
         let Some(CauseRef::Boundary(boundary_id)) = record.cause.as_ref() else {
             return Ok(false);
         };
+        if retained.is_none()
+            && let Some(generation) = generation
+        {
+            return Ok(generation.producer_boundary == *boundary_id && generation.issuer == plugin);
+        }
         let boundary = self.state.evidence().retained_boundary(*boundary_id);
         if boundary.is_none()
             && archived_ordinal(
@@ -721,14 +779,15 @@ impl SimulationView<'_> {
     /// Returns `canonical_hash(domain, &(due_at, payload))` of an admitted,
     /// boundary-generated plugin packet, without exposing the payload, when
     /// [`Self::plugin_ingress_matches`] matches it to `plugin` and
-    /// `packet_type`; `None` when it does not or its record is not retained.
+    /// `packet_type`; `None` when it does not or the runtime no longer holds
+    /// its record (retained, or pinned by the continuation closure).
     ///
     /// A reader that will later need to recognize the packet's exact content
     /// keeps the hash in its own state and compares it with
     /// `canonical_hash(domain, &(expected_due_at, &expected_payload))`, so the
     /// later check reads no retained evidence. A reader whose decision must not
     /// depend on sealing takes the hash only of packets its boundary admits,
-    /// which every run holds.
+    /// which every run holds: retained, or pinned while they were pending.
     pub fn plugin_ingress_payload_hash(
         &self,
         id: IngressId,
@@ -739,7 +798,7 @@ impl SimulationView<'_> {
         if !self.plugin_ingress_matches(id, plugin, packet_type)? {
             return Ok(None);
         }
-        let Some(record) = self.state.evidence().retained_ingress(id) else {
+        let Some(record) = self.state.evidence().ingress_record(id) else {
             return Ok(None);
         };
         let IngressPayload::Plugin { payload, .. } = &record.payload else {
@@ -885,10 +944,11 @@ impl SimulationView<'_> {
     ///
     /// This validates both the record identity/version and its establishment
     /// source. Earlier same-boundary proposals are considered before retained
-    /// or archived runtime evidence. An archived version resolves through its
-    /// own kept receipt. Each seal keeps the receipt of every record's current
-    /// version, including retired and deleted records, and of any other version
-    /// only if a live dependency declares it at that seal. Exact replay always
+    /// or archived runtime evidence. A version whose establishing boundary is
+    /// sealed resolves while it is its record's current version, including
+    /// for retired and deleted records, and otherwise only while the
+    /// continuation closure keeps it: a version a current record declares,
+    /// or one a boundary replaced since the last seal. Exact replay always
     /// finds that other version, so a rule whose outcome must match exact
     /// replay should use [`Self::replay_stable_domain_record_version`]
     /// instead. Either the exact record-kind read or the administrative
@@ -962,14 +1022,12 @@ impl SimulationView<'_> {
     /// Returns when retained or earlier same-boundary evidence first became
     /// authoritative at this proposal-visible cut.
     ///
-    /// Archived identity receipts do not retain a precise semantic time, so
-    /// they return `None` where exact replay, which retains every item, returns
-    /// the time. A record's committed current version is the exception: it
-    /// keeps its establishment time after its establishing boundary is sealed.
-    /// A rule whose outcome must match exact replay therefore reads an exact
+    /// A sealed ordinal record answers from the sealed time index, as an
+    /// unsealed run answers. A record version answers with its establishing
+    /// boundary's time whenever its existence is known, which for a sealed
+    /// version that is not current depends on what the continuation closure
+    /// keeps; a rule whose outcome must match exact replay reads an exact
     /// version's time through [`Self::replay_stable_domain_record_version`].
-    /// Generic evidence has no such read: after a seal, both its existence
-    /// and its time depend on what the seal kept.
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Result<Option<SimTime>, CanwuError> {
         if !self.evidence_exists(reference)? {
             return Ok(None);

@@ -369,7 +369,7 @@ impl Simulation {
         self.ensure_runtime_ready()?;
         self.ensure_canonical_ingress_can_start()?;
         let _ = self.apply_owner_authorized_commit_to_root(&commit)?;
-        for record in &self.state.evidence.ingress {
+        for record in self.state.evidence.ingress_records() {
             let IngressPayload::Maintenance { request } = &record.payload else {
                 continue;
             };

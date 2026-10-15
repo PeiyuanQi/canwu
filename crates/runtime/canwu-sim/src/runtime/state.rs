@@ -19,18 +19,24 @@ pub(super) struct RuntimeEvidence {
     pub(super) archived_legacy_commands: bool,
     pub(super) archived_tracked_attempts: bool,
     pub(super) archived_unqueued_command_history: bool,
-    pub(super) archived_command_requests: BTreeMap<CommandRequestId, ArchivedCommandRequestOutcome>,
-    pub(super) archived_ingress_requests: BTreeMap<CommandRequestId, ArchivedIngressRequest>,
-    pub(super) archived_decision_requests: BTreeMap<DecisionRequestId, ArchivedIngressRequest>,
-    pub(super) archived_decision_command_requests: BTreeSet<CommandRequestId>,
+    // The archived tables, manifest, and receipts grow with the run, so
+    // they are persistent structures: a fork or a seal's rollback copy
+    // shares them. Large values are shared too, which keeps each tree node
+    // small. Iterate them forward only; `im` 15.1.0 ordered maps and sets
+    // break on reverse traversal past about 2,100 entries.
+    pub(super) archived_command_requests:
+        im::OrdMap<CommandRequestId, Arc<ArchivedCommandRequestOutcome>>,
+    pub(super) archived_ingress_requests: im::OrdMap<CommandRequestId, ArchivedIngressRequest>,
+    pub(super) archived_decision_requests: im::OrdMap<DecisionRequestId, ArchivedIngressRequest>,
+    pub(super) archived_decision_command_requests: im::OrdSet<CommandRequestId>,
     pub(super) events: Vec<SimEvent>,
     pub(super) commands: Vec<CommandRecord>,
     pub(super) command_attempts: Vec<CommandAttemptRecord>,
     pub(super) ingress: Vec<IngressRecord>,
     pub(super) boundaries: Vec<BoundaryRecord>,
     pub(super) random_draws: Vec<RandomDrawRecord>,
-    pub(super) archived_segment_headers: Vec<ArchivedSegmentHeader>,
-    pub(super) archived_evidence_receipts: BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
+    pub(super) archived_segment_headers: im::Vector<ArchivedSegmentHeader>,
+    pub(super) archived_evidence_receipts: im::OrdMap<EvidenceRef, Arc<ArchivedEvidenceReceipt>>,
     /// The keyed-draw ledger: every operation-keyed address the run has
     /// drawn, retained or sealed. Extended when a boundary commits its draws,
     /// restored with a failed boundary, untouched by a seal, and built once
@@ -42,6 +48,11 @@ pub(super) struct RuntimeEvidence {
     /// `evidence_time` answers for sealed evidence as an unsealed run does.
     /// Extended by each seal; retained records answer from themselves.
     pub(super) sealed_times: EvidenceTimeIndex,
+    /// The continuation closure below the archived cut.
+    pub(super) pinned: super::continuation::PinnedEvidence,
+    /// Where history begins for a run restored from a continuation
+    /// checkpoint; `None` for a run that holds its history.
+    pub(super) continuation_base: Option<super::ContinuationBase>,
 }
 
 /// The times of the sealed part of each ordinal journal, run-length encoded:
@@ -74,25 +85,77 @@ impl EvidenceTimeIndex {
         }
     }
 
-    /// Records the times of a retained tail that a seal is about to move
-    /// below the archived cut.
-    pub(super) fn extend_from(&mut self, evidence: &RuntimeEvidence) {
-        for event in &evidence.events {
+    /// The run-length lists in the order events, commands, attempts,
+    /// ingress, boundaries, draws.
+    pub(super) const fn runs(&self) -> [&im::Vector<(u64, SimTime)>; 6] {
+        [
+            &self.events,
+            &self.commands,
+            &self.command_attempts,
+            &self.ingress,
+            &self.boundaries,
+            &self.random_draws,
+        ]
+    }
+
+    /// An index from run-length lists in the order of [`Self::runs`].
+    pub(super) fn from_runs(runs: [Vec<(u64, SimTime)>; 6]) -> Self {
+        let [
+            events,
+            commands,
+            command_attempts,
+            ingress,
+            boundaries,
+            random_draws,
+        ] = runs.map(im::Vector::from);
+        Self {
+            events,
+            commands,
+            command_attempts,
+            ingress,
+            boundaries,
+            random_draws,
+        }
+    }
+
+    /// Records the times of the records a seal moves below the archived cut.
+    pub(super) fn extend_from_segment(&mut self, segment: &super::EvidenceJournalSegment) {
+        self.extend_from_slices(
+            &segment.events,
+            &segment.commands,
+            &segment.command_attempts,
+            &segment.ingress,
+            &segment.boundaries,
+            &segment.random_draws,
+        );
+    }
+
+    /// Records the times of journal slices that continue the indexed prefix.
+    pub(super) fn extend_from_slices(
+        &mut self,
+        events: &[SimEvent],
+        commands: &[CommandRecord],
+        attempts: &[CommandAttemptRecord],
+        ingress: &[IngressRecord],
+        boundaries: &[BoundaryRecord],
+        draws: &[RandomDrawRecord],
+    ) {
+        for event in events {
             Self::note(&mut self.events, event.id.get(), event.timestamp);
         }
-        for command in &evidence.commands {
+        for command in commands {
             Self::note(&mut self.commands, command.id.get(), command.accepted_at);
         }
-        for attempt in &evidence.command_attempts {
+        for attempt in attempts {
             Self::note(&mut self.command_attempts, attempt.id.get(), attempt.at);
         }
-        for record in &evidence.ingress {
+        for record in ingress {
             Self::note(&mut self.ingress, record.id.get(), record.issued_at);
         }
-        for boundary in &evidence.boundaries {
+        for boundary in boundaries {
             Self::note(&mut self.boundaries, boundary.id.get(), boundary.at);
         }
-        for draw in &evidence.random_draws {
+        for draw in draws {
             Self::note(&mut self.random_draws, draw.id.get(), draw.at);
         }
     }
@@ -183,6 +246,54 @@ impl RuntimeEvidence {
         self.random_draws
             .get(index)
             .filter(|record| record.id == id)
+    }
+
+    /// A retained or pinned event.
+    pub(super) fn event_record(&self, id: super::EventId) -> Option<&SimEvent> {
+        self.retained_event(id)
+            .or_else(|| self.pinned.events.get(&id).map(Arc::as_ref))
+    }
+
+    /// A retained or pinned command.
+    pub(super) fn command_record(&self, id: super::CommandId) -> Option<&CommandRecord> {
+        self.retained_command(id)
+            .or_else(|| self.pinned.commands.get(&id).map(Arc::as_ref))
+    }
+
+    /// A retained or pinned command attempt.
+    pub(super) fn command_attempt_record(
+        &self,
+        id: super::CommandAttemptId,
+    ) -> Option<&CommandAttemptRecord> {
+        self.retained_command_attempt(id)
+            .or_else(|| self.pinned.command_attempts.get(&id).map(Arc::as_ref))
+    }
+
+    /// A retained or pinned ingress record.
+    pub(super) fn ingress_record(&self, id: super::IngressId) -> Option<&IngressRecord> {
+        self.retained_ingress(id)
+            .or_else(|| self.pinned.ingress.get(&id).map(Arc::as_ref))
+    }
+
+    /// A retained or pinned boundary.
+    pub(super) fn boundary_record(&self, id: super::BoundaryId) -> Option<&BoundaryRecord> {
+        self.retained_boundary(id)
+            .or_else(|| self.pinned.boundaries.get(&id).map(Arc::as_ref))
+    }
+
+    /// A retained or pinned random draw.
+    pub(super) fn random_draw_record(&self, id: super::RandomDrawId) -> Option<&RandomDrawRecord> {
+        self.retained_random_draw(id)
+            .or_else(|| self.pinned.random_draws.get(&id).map(Arc::as_ref))
+    }
+
+    /// Retained ingress followed by pinned ingress below the archived cut.
+    pub(super) fn ingress_records(&self) -> impl Iterator<Item = &IngressRecord> {
+        self.pinned
+            .ingress
+            .values()
+            .map(Arc::as_ref)
+            .chain(self.ingress.iter())
     }
 
     pub(super) fn boundary_head_hash(&self) -> Option<&str> {
@@ -295,6 +406,23 @@ impl OrderedCommitmentAccumulator {
         Ok(self.root_hash()?.to_hex().to_string())
     }
 
+    /// The item count and resumable stream state.
+    pub(super) fn frontier(&self) -> (usize, super::stream_hash::StreamFrontier) {
+        (self.len, self.stream.frontier())
+    }
+
+    /// Resumes an exported stream state after checking its shape.
+    pub(super) fn from_frontier(
+        len: usize,
+        frontier: &super::stream_hash::StreamFrontier,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            stream: super::stream_hash::ResumableStreamHash::from_frontier(frontier)?,
+            root: None,
+            len,
+        })
+    }
+
     /// Returns the root and keeps it until the next append.
     fn refresh_root(&mut self) -> Result<String, CanwuError> {
         let root = self.root_hash()?;
@@ -395,6 +523,14 @@ pub(super) struct RuntimeCommitmentCache {
 
 impl RuntimeCommitmentCache {
     pub(super) fn from_evidence(evidence: &RuntimeEvidence) -> Result<Self, CanwuError> {
+        // Built from the retained journals alone, the cache is exact only
+        // while nothing has been sealed.
+        if evidence.archived != EvidenceCursor::default() {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                "a sealed runtime cannot rebuild its journal commitments from retained evidence",
+            ));
+        }
         Ok(Self {
             commands: OrderedCommitmentAccumulator::from_sorted_by(
                 "canwu.commitment.commands.accepted.v1",
@@ -432,6 +568,41 @@ impl RuntimeCommitmentCache {
             random_streams: None,
             identity: None,
         })
+    }
+
+    /// The journal accumulators in the order commands, attempts, events,
+    /// ingress, draws.
+    pub(super) const fn journals(&self) -> [&OrderedCommitmentAccumulator; 5] {
+        [
+            &self.commands,
+            &self.attempts,
+            &self.events,
+            &self.ingress,
+            &self.random_draws,
+        ]
+    }
+
+    /// A cache resumed from journal accumulators, in the order of
+    /// [`Self::journals`], with every state-domain root left to recompute.
+    pub(super) fn from_journals(journals: [OrderedCommitmentAccumulator; 5]) -> Self {
+        let [commands, attempts, events, ingress, random_draws] = journals;
+        Self {
+            commands,
+            attempts,
+            events,
+            ingress,
+            random_draws,
+            world: None,
+            knowledge: None,
+            knowledge_actors: None,
+            knowledge_records: None,
+            plugin_components: None,
+            domain_records: None,
+            decisions: None,
+            scheduler: None,
+            random_streams: None,
+            identity: None,
+        }
     }
 
     pub(super) fn sync(&mut self, evidence: &RuntimeEvidence) -> Result<(), CanwuError> {

@@ -260,6 +260,52 @@ and [`after`](baselines/2026-10-15-journal-stream-hash-after-elapsed.json).
 The figures are interpreted in
 [`docs/proposals/continuation-checkpoint.md`](../docs/proposals/continuation-checkpoint.md).
 
+## Continuation profile
+
+The standalone `continuation-profile` binary compares what a save costs as a
+campaign grows: the full portable save (`checkpoint_journal_json` and its
+restore) against the continuation checkpoint (`continuation_checkpoint`, its
+JSON, and `CompactedCanwu::from_continuation_checkpoint_json_verified`). The
+workload settles one Daily boundary a simulated day: the host dispatches
+tracked commands whose packets fall due 1 to 90 days later, admitted packets
+move a record, make `--keyed` operation-keyed draws each, and schedule
+follow-ups, a knowledge record supersedes the last each day, a holder keeps a
+payload-required continuation, and a churn system moves `--churn` records a
+day so that the full save grows about 10 MB a simulated month while current
+state does not. At each sampled month it reports both saves' bytes and
+times, and the continuation checkpoint's bytes by part (state, pins,
+keyed-draw ledger, request index, time index, boundary ledger, frontiers).
+The allocation build also reports each restore's allocations and, at the
+last month, the heap of a run that seals every month against one that never
+seals.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin continuation-profile -- \
+  --mode elapsed \
+  --machine local-windows-x86_64 \
+  --recorded-on 2026-10-15 \
+  --output benchmarks/baselines/2026-10-15-continuation-elapsed.json
+
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --features allocation-counting \
+  --bin continuation-profile -- \
+  --mode allocations \
+  --samples 1 \
+  --machine local-windows-x86_64 \
+  --recorded-on 2026-10-15 \
+  --output benchmarks/baselines/2026-10-15-continuation-allocations.json
+```
+
+The defaults sample months 1, 2, 4, 7, 10, and 14 for 0 and 10 keyed draws
+per packet, with 8 commands and 140 churned records a day. The recorded
+[`elapsed`](baselines/2026-10-15-continuation-elapsed.json) and
+[`allocation`](baselines/2026-10-15-continuation-allocations.json) reports
+are interpreted in
+[`docs/proposals/continuation-checkpoint.md`](../docs/proposals/continuation-checkpoint.md).
+
 ## Resource archive profile
 
 The standalone `resource-archive-profile` binary measures the terminal archive

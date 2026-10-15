@@ -226,6 +226,45 @@ pub(crate) struct KeyedDrawMemo {
 
 type KeyedDrawKey = (RandomStreamKey, RandomOperationAddressV1);
 
+/// One operation-keyed draw as a continuation checkpoint carries it: the
+/// address, the draw that answered it, and its value.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KeyedDrawEntry {
+    pub stream: RandomStreamKey,
+    pub address: RandomOperationAddressV1,
+    pub draw_id: RandomDrawId,
+    pub operation_evidence: EvidenceRef,
+    pub upper_exclusive: u64,
+    pub value: u64,
+    /// The V1 purpose hash, lowercase hexadecimal.
+    pub purpose_hash: String,
+}
+
+fn hash_hex(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            let _ = write!(text, "{byte:02x}");
+            text
+        })
+}
+
+fn parse_hash_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64
+        || !text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return None;
+    }
+    let mut bytes = [0_u8; 32];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(index * 2..index * 2 + 2)?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
 /// The keyed-draw ledger: every operation-keyed address the run has drawn,
 /// with what was drawn.
 ///
@@ -259,6 +298,69 @@ impl KeyedDrawLedger {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Every keyed draw, in draw-ID order.
+    pub(crate) fn entries(&self) -> Vec<KeyedDrawEntry> {
+        let mut entries: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(key, memo)| KeyedDrawEntry {
+                stream: key.0.clone(),
+                address: key.1.clone(),
+                draw_id: memo.draw_id,
+                operation_evidence: memo.operation_evidence.clone(),
+                upper_exclusive: memo.upper_exclusive,
+                value: memo.value,
+                purpose_hash: hash_hex(&memo.purpose_hash),
+            })
+            .collect();
+        entries.sort_by_key(|entry| entry.draw_id);
+        entries
+    }
+
+    /// Rebuilds the ledger from checkpoint entries, refusing an invalid
+    /// address or bound, a malformed purpose hash, a duplicate address or
+    /// draw ID, and a value that differs from the one the root seed, stream,
+    /// address, bound, and purpose hash determine.
+    pub(crate) fn from_entries(
+        root_seed: u64,
+        entries: &[KeyedDrawEntry],
+    ) -> Result<Self, CanwuError> {
+        let invalid = |message: &str| CanwuError::new(ErrorCode::InvalidSnapshot, message);
+        let mut ledger = Self::default();
+        let mut draw_ids = std::collections::BTreeSet::new();
+        for entry in entries {
+            validate_operation_address(&entry.stream, &entry.address, entry.upper_exclusive)?;
+            let purpose_hash = parse_hash_hex(&entry.purpose_hash)
+                .ok_or_else(|| invalid("keyed draw purpose hash is not canonical"))?;
+            if entry.draw_id.get() == 0 || !draw_ids.insert(entry.draw_id) {
+                return Err(invalid("keyed draw IDs must be nonzero and unique"));
+            }
+            let expected = operation_value_for_purpose_hash(
+                root_seed,
+                &entry.stream,
+                &entry.address,
+                entry.upper_exclusive,
+                &purpose_hash,
+            )?;
+            if expected != entry.value {
+                return Err(invalid(
+                    "keyed draw value does not match its exact V1 address",
+                ));
+            }
+            let memo = KeyedDrawMemo {
+                draw_id: entry.draw_id,
+                operation_evidence: entry.operation_evidence.clone(),
+                upper_exclusive: entry.upper_exclusive,
+                value: entry.value,
+                purpose_hash,
+            };
+            if !ledger.insert_new((entry.stream.clone(), entry.address.clone()), memo) {
+                return Err(invalid("keyed draw addresses must be unique"));
+            }
+        }
+        Ok(ledger)
     }
 
     /// Whether the two indexes are one tree in memory, which a copy is until
@@ -604,13 +706,24 @@ fn operation_value_v1(
 ) -> Result<u64, CanwuError> {
     validate_operation_inputs(key, address, upper_exclusive, purpose)?;
     let purpose_hash = purpose_hash_v1(purpose)?;
+    operation_value_for_purpose_hash(root_seed, key, address, upper_exclusive, &purpose_hash)
+}
+
+/// The V1 value of an operation-keyed address from its purpose hash.
+fn operation_value_for_purpose_hash(
+    root_seed: u64,
+    key: &RandomStreamKey,
+    address: &RandomOperationAddressV1,
+    upper_exclusive: u64,
+    purpose_hash: &[u8; 32],
+) -> Result<u64, CanwuError> {
     for candidate_index in 0..=u32::MAX {
         let bytes = operation_input_v1(
             root_seed,
             key,
             address,
             upper_exclusive,
-            &purpose_hash,
+            purpose_hash,
             candidate_index,
         )?;
         let digest = blake3::hash(&bytes);

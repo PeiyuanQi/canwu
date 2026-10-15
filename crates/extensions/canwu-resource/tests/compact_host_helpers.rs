@@ -3,10 +3,14 @@
 //! acknowledgement through an attached archive provider, and a completion
 //! operation. The compact run seals its evidence after every settled step.
 //! Both runs reach the same receipts, resource state, and checkpoint hashes.
+//!
+//! A run restored from a continuation checkpoint written with a completion
+//! operation still queued continues in lockstep with the run it was written
+//! from, reading the same archive.
 
 use canwu_api::{
     BoundaryReceipt, BoundaryRequest, Canwu, CanwuError, CanwuRun, CompactedCanwu, EntityRef,
-    KnowledgeHolderRef, PersonId, PluginArchiveObjectProvider, Scenario, SimTime,
+    KnowledgeHolderRef, PersonId, PluginArchiveObjectProvider, Scenario, SimDuration, SimTime,
 };
 use canwu_resource::*;
 use std::cell::RefCell;
@@ -220,4 +224,97 @@ fn resource_helpers_drive_a_sealed_compact_run_as_a_full_one() {
     assert!(compact.boundaries().len() < full.boundaries().len());
     validate_resource_runtime_with_archive_store(&compact, &compact_archive)
         .expect("the compact run validates against its archive");
+}
+
+#[test]
+fn a_continuation_restored_resource_run_continues_in_lockstep() {
+    let archive = MemoryArchive::default();
+    let mut full = runtime();
+    full.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    let mut full_receipts = Vec::new();
+    let first = allocate(&mut full, "continuation:allocate:a", &mut full_receipts);
+    allocate(&mut full, "continuation:allocate:b", &mut full_receipts);
+    let hot = state(&full);
+    let prepared = hot
+        .prepare_resource_archive(hot.terminal_archive_candidates.len(), &archive)
+        .expect("prepare archive commit");
+    let receipt = enqueue_resource_archive(&mut full, &prepared, &archive).expect("commit");
+    step(&mut full, &mut full_receipts);
+    finalize_resource_archive_retention(&mut full, &archive, &receipt).expect("retention");
+    step(&mut full, &mut full_receipts);
+
+    // A completion operation is queued for a later instant, so it is pending
+    // at the cut.
+    let at = full.time() + SimDuration::minutes(5);
+    enqueue_resource_completion_operation(
+        &mut full,
+        at,
+        &ResourceCompletionOperationV1::Expire(ExpireCompletionCapacityV1 {
+            at,
+            current_boundary: 0,
+            candidate_limit: 1,
+        }),
+    )
+    .expect("completion operation enqueues");
+    let (checkpoint, hash) = full
+        .continuation_checkpoint()
+        .expect("the continuation checkpoint builds");
+    assert_eq!(checkpoint.pending_ingress.len(), 1);
+    let mut restored = CompactedCanwu::from_continuation_checkpoint_verified(
+        checkpoint,
+        &hash,
+        &[&ResourcePlugin::default()],
+    )
+    .expect("the resource run restores");
+    restored.set_plugin_archive_object_provider(Rc::new(archive.clone()));
+    assert_eq!(restored.checkpoint_hash(), full.checkpoint_hash());
+
+    full_receipts.extend(full.settle_at(at));
+    let mut restored_receipts = restored.settle_at(at);
+    // A re-sent archived operation is a no-op, decided from the archive, in
+    // both runs.
+    send(&mut full, &first, &mut full_receipts);
+    send(&mut restored, &first, &mut restored_receipts);
+    for _ in 0..30 {
+        step(&mut full, &mut full_receipts);
+        step(&mut restored, &mut restored_receipts);
+        assert_eq!(restored.checkpoint_hash(), full.checkpoint_hash());
+    }
+    assert_eq!(
+        restored_receipts,
+        full_receipts[full_receipts.len() - restored_receipts.len()..]
+    );
+    assert_eq!(state(&restored), state(&full));
+    assert_eq!(
+        restored.authoritative_state_hash().expect("state hash"),
+        full.authoritative_state_hash().expect("state hash")
+    );
+    validate_resource_runtime_with_archive_store(&restored, &archive)
+        .expect("the restored run validates against the archive");
+}
+
+/// Settles the boundary at an instant and the one that admits its
+/// emissions.
+trait Settle {
+    fn settle_at(&mut self, at: SimTime) -> Vec<BoundaryReceipt>;
+}
+
+impl Settle for Canwu {
+    fn settle_at(&mut self, at: SimTime) -> Vec<BoundaryReceipt> {
+        let first = self
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("the boundary settles");
+        vec![first, self.settle_now()]
+    }
+}
+
+impl Settle for CompactedCanwu {
+    fn settle_at(&mut self, at: SimTime) -> Vec<BoundaryReceipt> {
+        let first = self
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("the boundary settles");
+        let receipts = vec![first, self.settle_now()];
+        self.seal();
+        receipts
+    }
 }

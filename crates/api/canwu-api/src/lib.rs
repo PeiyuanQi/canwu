@@ -110,6 +110,13 @@ pub use canwu_sim::{
     payload_required_evidence_continuation_property_v1, prepare_state_delta, state_page_id,
     verify_state_delta,
 };
+pub use canwu_sim::{
+    BoundaryIngressProvenance, CONTINUATION_CHECKPOINT_FORMAT_VERSION, ContinuationBase,
+    ContinuationCheckpoint, CurrentRecordVersion, EvidenceTimeRun, EvidenceTimes, HistoryFlags,
+    JournalFrontier, JournalFrontiers, KeyedDrawEntry, PinnedEvidenceRecords, PinnedRecordVersion,
+    PluginIngressProvenanceFact, PluginIngressStatus, RequestIndex, SettledCommandRequest,
+    SettledDecisionRequest, SettledQueuedCommand, UnadmittedEvidence,
+};
 // The boundaries of a window of simulated time (gap G-60).
 pub use canwu_sim::{
     BoundaryIngressCount, BoundaryIngressKind, BoundaryIngressOrigin, BoundarySummary,
@@ -695,6 +702,16 @@ impl Canwu {
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
         self.simulation.checkpoint()
+    }
+
+    /// Builds the continuation checkpoint of this run at its settled cut and
+    /// returns it with its continuation hash, which the host stores as the
+    /// trust anchor for [`CompactedCanwu::from_continuation_checkpoint_verified`].
+    ///
+    /// It equals the checkpoint any sealed copy of this run writes at the
+    /// same cut. Building changes nothing.
+    pub fn continuation_checkpoint(&self) -> Result<(ContinuationCheckpoint, String), CanwuError> {
+        self.simulation.continuation_checkpoint()
     }
 
     pub fn archive_reachability_manifest(
@@ -1415,6 +1432,98 @@ fn event_by_id(events: &[SimEvent], event_id: EventId) -> Option<&SimEvent> {
 }
 
 impl CompactedCanwu {
+    /// Restores a run from a continuation checkpoint whose state names no
+    /// plugin; one that names a plugin fails with
+    /// [`ErrorCode::PluginNotActive`].
+    ///
+    /// The restored run continues exactly as the uninterrupted run, but has
+    /// no history before the checkpoint: [`Self::checkpoint`],
+    /// [`Self::prepare_paged_checkpoint`], [`Self::snapshot_with_segments`],
+    /// and [`Self::replay_journal_with_segments`] return
+    /// [`ErrorCode::HistoryUnavailable`], and retained-evidence reads see only
+    /// evidence after the base. The checkpoint's own hash detects
+    /// corruption only; use [`Self::from_continuation_checkpoint_verified`]
+    /// with the hash stored when the checkpoint was written.
+    pub fn from_continuation_checkpoint(
+        checkpoint: ContinuationCheckpoint,
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_continuation_checkpoint(checkpoint)?,
+        })
+    }
+
+    /// Restores a run from a continuation checkpoint and rehydrates its
+    /// exact executable plugins.
+    pub fn from_continuation_checkpoint_with_plugins(
+        checkpoint: ContinuationCheckpoint,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_continuation_checkpoint_with_plugins(
+                checkpoint, plugins,
+            )?,
+        })
+    }
+
+    /// Restores a run from a continuation checkpoint only if its
+    /// continuation hash is the one the host stored when it was written.
+    pub fn from_continuation_checkpoint_verified(
+        checkpoint: ContinuationCheckpoint,
+        expected_continuation_hash: &str,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_continuation_checkpoint_verified(
+                checkpoint,
+                expected_continuation_hash,
+                plugins,
+            )?,
+        })
+    }
+
+    /// Restores a run from the JSON of a continuation checkpoint.
+    pub fn from_continuation_checkpoint_json_with_plugins(
+        json: &str,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_continuation_checkpoint_json_with_plugins(
+                json, plugins,
+            )?,
+        })
+    }
+
+    /// Restores a run from the JSON of a continuation checkpoint only if its
+    /// continuation hash is the one the host stored.
+    pub fn from_continuation_checkpoint_json_verified(
+        json: &str,
+        expected_continuation_hash: &str,
+        plugins: &[&dyn SimulationPlugin],
+    ) -> Result<Self, CanwuError> {
+        Ok(Self {
+            simulation: CompactedSimulation::from_continuation_checkpoint_json_verified(
+                json,
+                expected_continuation_hash,
+                plugins,
+            )?,
+        })
+    }
+
+    /// Builds the continuation checkpoint of this run at its settled cut and
+    /// returns it with its continuation hash, the value to store as the
+    /// trust anchor. It fails with [`ErrorCode::ArchiveNotReady`] exactly
+    /// when a seal would.
+    pub fn continuation_checkpoint(&self) -> Result<(ContinuationCheckpoint, String), CanwuError> {
+        self.simulation.continuation_checkpoint()
+    }
+
+    /// Where this run's history begins when it was restored from a
+    /// continuation checkpoint; `None` for a run that holds its history.
+    #[must_use]
+    pub fn continuation_base(&self) -> Option<&ContinuationBase> {
+        self.simulation.continuation_base()
+    }
+
     pub fn from_checkpoint_and_journal(
         checkpoint: SimulationCheckpoint,
         segments: Vec<EvidenceJournalSegment>,

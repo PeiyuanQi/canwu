@@ -3387,6 +3387,69 @@ fn provider_citations_decide_alike_in_sealed_and_unsealed_runs() {
     );
 }
 
+/// A proposal citing a packet that an earlier boundary admitted and no law
+/// record declares is refused alike in a sealed and an unsealed run: a seal
+/// may already have dropped the packet, and declaring it would leave the
+/// sealed run unable to seal again. Later seals and continuation checkpoints
+/// succeed, and the runs stay equal.
+#[test]
+fn a_proposal_citing_an_undeclared_earlier_packet_is_refused_in_every_run() {
+    let plan = compile_law(&definition()).expect("compile legal plan");
+    let plugins: [&dyn SimulationPlugin; 1] = [&LawPlugin];
+    let initial = persisted_law_records(&LegalRuntime::new(&plan));
+    let mut base = Canwu::new_with_plugins(
+        7,
+        Scenario::new(SimTime::EPOCH, Vec::new()).with_domain_records(initial),
+        &plugins,
+    )
+    .expect("law plugin");
+    // A calendar packet that no law record declares, admitted before the
+    // seal.
+    let at = base.time();
+    let calendar = base
+        .schedule_calendar_boundary(at, vec![SystemCadence::Daily])
+        .expect("calendar packet")
+        .ingress_id;
+    base.step_canonical()
+        .expect("admit the calendar packet")
+        .expect("calendar boundary");
+    let mut unsealed = base.fork();
+    let mut sealed = base.into_compacted().expect("enter compact mode");
+    sealed
+        .seal_evidence()
+        .expect("the settled history seals")
+        .expect("the settled history holds evidence");
+
+    let mut citing = proposal();
+    citing.evidence = vec![EvidenceRef::Ingress(calendar)];
+    let mutation = LegalMutation::SubmitProposal { proposal: citing };
+    settle_legal_mutation!(unsealed, mutation.clone());
+    settle_legal_mutation!(sealed, mutation);
+    let rejections = law_rejections(&unsealed);
+    assert_eq!(rejections.len(), 1, "{rejections:?}");
+    assert!(
+        load_legal_runtime(&unsealed, &plan)
+            .expect("load law")
+            .expect("law runtime")
+            .proposals
+            .is_empty()
+    );
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+
+    // Nothing the refusal left behind blocks a later seal.
+    sealed.seal_evidence().expect("a later seal succeeds");
+    let (_, hash) = sealed
+        .continuation_checkpoint()
+        .expect("the sealed run writes a continuation checkpoint");
+    assert_eq!(
+        unsealed
+            .continuation_checkpoint()
+            .expect("the unsealed run writes one")
+            .1,
+        hash
+    );
+}
+
 fn activation_error(runtime: &LegalRuntime) -> CanwuError {
     let initial = persisted_law_records(runtime);
     Canwu::new_with_plugins(

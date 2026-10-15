@@ -3,8 +3,13 @@ use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt::{Display, Formatter};
 
+/// Why an engine operation failed.
+///
+/// New variants may be added in any release, so a `match` outside this crate
+/// needs a wildcard arm.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorCode {
     ActorNotFound,
     ArchiveNotReady,
@@ -53,6 +58,9 @@ pub enum ErrorCode {
     InvalidSnapshot,
     IdentifierExhausted,
     LegacyReplayUnavailable,
+    /// A continuation-restored run was asked for history before its base:
+    /// a full snapshot, a replay journal, or a compact checkpoint.
+    HistoryUnavailable,
     LateIngress,
     MissingIdempotencyKey,
     MixedCommandIngress,
@@ -188,6 +196,7 @@ const fn error_code_name(code: &ErrorCode) -> &'static str {
         ErrorCode::InvalidSnapshot => "invalid_snapshot",
         ErrorCode::IdentifierExhausted => "identifier_exhausted",
         ErrorCode::LegacyReplayUnavailable => "legacy_replay_unavailable",
+        ErrorCode::HistoryUnavailable => "history_unavailable",
         ErrorCode::LateIngress => "late_ingress",
         ErrorCode::MissingIdempotencyKey => "missing_idempotency_key",
         ErrorCode::MixedCommandIngress => "mixed_command_ingress",

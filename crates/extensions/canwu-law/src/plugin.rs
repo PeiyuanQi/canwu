@@ -1684,7 +1684,7 @@ fn check_legal_mutation(
     match mutation {
         crate::LegalMutation::AdmitNonProceduralSource { proposal } => {
             let kinds = verified_required_signal_kinds(plan, runtime, proposal)?;
-            verify_proposal_inputs(view, proposal)?;
+            verify_proposal_inputs(view, runtime, proposal)?;
             Ok(kinds)
         }
         crate::LegalMutation::Signal { signal } => {
@@ -1876,16 +1876,24 @@ fn payload_optional_u64(
 /// current version, a version proposed earlier in this boundary, or an
 /// initial-scenario version. Whether a sealed run still knows any other
 /// version depends on what its seals kept, so such a citation is refused in
-/// every run. An event, command, attempt, ingress record, boundary, or draw is
-/// answered by the engine's existence rule for ordinal evidence.
+/// every run. An ingress record counts only when law already declares it or
+/// the engine says it can be declared now (it is queued, or this boundary
+/// admitted it): law declares what it cites, and a declared record that a
+/// seal has already dropped would block every later seal, so such a citation
+/// is refused in every run too. An event, command, attempt, boundary, or draw
+/// is answered by the engine's existence rule for ordinal evidence.
 fn verify_evidence(
     view: &SimulationView<'_>,
+    declared: &BTreeSet<EvidenceRef>,
     evidence: impl IntoIterator<Item = EvidenceRef>,
 ) -> Result<(), CanwuError> {
     for reference in evidence {
         let exists = match &reference {
             EvidenceRef::DomainRecordVersion(version) => {
                 view.replay_stable_domain_record_version(version)?.is_some()
+            }
+            EvidenceRef::Ingress(id) => {
+                declared.contains(&reference) || view.ingress_is_declarable(*id)?
             }
             _ => view.evidence_exists(&reference)?,
         };
@@ -1923,6 +1931,7 @@ fn host_versions_are_current(
 
 fn verify_proposal_inputs(
     view: &SimulationView<'_>,
+    runtime: &LegalRuntime,
     proposal: &crate::LegalProposal,
 ) -> Result<(), CanwuError> {
     if !host_versions_are_current(view, &proposal.expected_versions)? {
@@ -1931,7 +1940,11 @@ fn verify_proposal_inputs(
             "legal proposal host record compare-and-set failed",
         ));
     }
-    verify_evidence(view, proposal.evidence.iter().cloned())?;
+    verify_evidence(
+        view,
+        &runtime.retained_evidence_dependencies,
+        proposal.evidence.iter().cloned(),
+    )?;
     if proposal
         .cultural_dependencies
         .iter()
@@ -1951,35 +1964,36 @@ fn verify_legal_mutation(
     runtime: &LegalRuntime,
     mutation: &crate::LegalMutation,
 ) -> Result<(), CanwuError> {
+    let declared = &runtime.retained_evidence_dependencies;
     match mutation {
         crate::LegalMutation::SubmitProposal { proposal }
         | crate::LegalMutation::AdmitNonProceduralSource { proposal } => {
-            verify_proposal_inputs(view, proposal)
+            verify_proposal_inputs(view, runtime, proposal)
         }
         crate::LegalMutation::Signal { signal } => {
             verify_signal_provenance(plan, runtime, &signal.kind, &signal.evidence)?;
-            verify_evidence(view, signal.evidence.iter().cloned())
+            verify_evidence(view, declared, signal.evidence.iter().cloned())
         }
         crate::LegalMutation::RetireCulturalTarget { .. }
         | crate::LegalMutation::RecordConflict { .. } => Ok(()),
         crate::LegalMutation::RecordCase { case } => {
-            verify_evidence(view, case.allegations.iter().cloned())
+            verify_evidence(view, declared, case.allegations.iter().cloned())
         }
         crate::LegalMutation::RecordFinding { finding } => {
-            verify_evidence(view, finding.evidence.iter().cloned())
+            verify_evidence(view, declared, finding.evidence.iter().cloned())
         }
         crate::LegalMutation::RecordRuling { ruling } => {
-            verify_evidence(view, ruling.evidence.iter().cloned())
+            verify_evidence(view, declared, ruling.evidence.iter().cloned())
         }
         crate::LegalMutation::RecordPublicity { publicity } => {
             verify_publicity_provenance(plan, runtime, publicity)?;
-            verify_evidence(view, publicity.evidence.iter().cloned())
+            verify_evidence(view, declared, publicity.evidence.iter().cloned())
         }
         crate::LegalMutation::RecordSuccession { succession } => {
-            verify_evidence(view, succession.evidence.iter().cloned())
+            verify_evidence(view, declared, succession.evidence.iter().cloned())
         }
         crate::LegalMutation::AdmitCapacity { allocation } => {
-            verify_evidence(view, [allocation.evidence.clone()])
+            verify_evidence(view, declared, [allocation.evidence.clone()])
         }
     }
 }

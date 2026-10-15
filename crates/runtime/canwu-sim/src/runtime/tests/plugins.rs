@@ -1426,6 +1426,63 @@ fn failed_command_application_rolls_back_every_serialized_change() {
     );
 }
 
+/// No valid run schedules a directive that enqueues plugin ingress, so a
+/// continuation checkpoint holding one is refused before its identity is
+/// checked. (The snapshot loader refuses it too, behind the commitment
+/// roots.)
+#[test]
+fn a_checkpoint_with_scheduled_plugin_ingress_is_refused() {
+    let (mut simulation, ids) = Simulation::demo(36).expect("demo should load");
+    simulation
+        .register_plugin(&FailingPlugin)
+        .expect("plugin should register");
+    simulation
+        .submit(CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::Plugin {
+                plugin: "failing-test".to_owned(),
+                command: "mutate".to_owned(),
+                payload: serde_json::json!({ "scheduled": true }),
+            },
+        ))
+        .expect("the directive schedules");
+    let (mut checkpoint, _) = simulation
+        .continuation_checkpoint()
+        .expect("the continuation checkpoint builds");
+    CompactedSimulation::from_continuation_checkpoint_with_plugins(
+        checkpoint.clone(),
+        &[&FailingPlugin],
+    )
+    .expect("the untouched checkpoint restores");
+    let ScheduledAction::PluginDirective { directive, .. } =
+        &mut checkpoint.state.scheduled[0].action
+    else {
+        panic!("the scheduled work is the plugin directive");
+    };
+    **directive = SystemDirective::EnqueuePluginIngress {
+        after: SimDuration::days(1),
+        packet_type: "packet".to_owned(),
+        priority: 0,
+        payload: Value::Null,
+        affected: Vec::new(),
+    };
+    checkpoint.continuation_hash = checkpoint
+        .compute_continuation_hash()
+        .expect("the material hashes");
+    let Err(error) = CompactedSimulation::from_continuation_checkpoint_with_plugins(
+        checkpoint,
+        &[&FailingPlugin],
+    ) else {
+        panic!("scheduled plugin ingress is refused");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(
+        error.message.contains("cannot enqueue plugin ingress"),
+        "{}",
+        error.message
+    );
+}
+
 #[test]
 fn failed_scheduled_batch_restores_every_writable_domain() {
     let (mut simulation, ids) = Simulation::demo(35).expect("demo should load");

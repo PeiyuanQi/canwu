@@ -298,10 +298,17 @@ enum EventCorrelationRoot {
 
 /// Validates a complete snapshot and returns the keyed-draw ledger it built
 /// from the draw journal, so that a restore builds the ledger once.
-pub(super) fn validate_snapshot(
+/// Validates what describes the run rather than its history: formats,
+/// manifest, initial scenario, configuration, entity registry, and the
+/// canonical order of the world. Returns the initial-scenario records.
+///
+/// A snapshot with history checks its entity registry against the persons
+/// its boundaries created; a continuation state, which has no boundaries,
+/// against its created-person index.
+fn validate_snapshot_header(
     snapshot: &SimulationSnapshot,
-    plugins: &PluginRegistry,
-) -> Result<random::KeyedDrawLedger, CanwuError> {
+    history: bool,
+) -> Result<Option<BTreeMap<DomainRecordRef, DomainRecord>>, CanwuError> {
     if snapshot.engine_version.trim().is_empty() {
         return invalid_snapshot("snapshot engine version cannot be empty");
     }
@@ -341,7 +348,11 @@ pub(super) fn validate_snapshot(
             .map(|record| (record.reference.clone(), record.clone()))
             .collect::<BTreeMap<_, _>>(),
     );
-    super::persons::validate_snapshot_entity_registry(snapshot)?;
+    if history {
+        super::persons::validate_snapshot_entity_registry(snapshot)?;
+    } else {
+        super::persons::validate_state_entity_registry(snapshot)?;
+    }
     if !is_canonical_hash(&snapshot.run_manifest_hash)
         || manifest::hash(run_manifest)? != snapshot.run_manifest_hash
     {
@@ -397,6 +408,7 @@ pub(super) fn validate_snapshot(
             &snapshot.commands,
             &snapshot.command_attempts,
             &snapshot.ingress,
+            &|_| false,
         )
     {
         return invalid_snapshot("canonical ingress cannot coexist with direct command history");
@@ -444,6 +456,187 @@ pub(super) fn validate_snapshot(
     validate_strict_id_order(&snapshot.world.routes, |value| value.id, "routes")?;
     validate_strict_id_order(&snapshot.world.armies, |value| value.id, "armies")?;
     validate_strict_id_order(&snapshot.world.letters, |value| value.id, "letters")?;
+    Ok(initial_domain_records)
+}
+
+/// Validates plugin component ownership and order and the type schema.
+fn validate_snapshot_components_and_schema(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    let mut component_keys = BTreeSet::new();
+    let mut previous_component = None;
+    for record in &snapshot.plugin_components {
+        if !canonical_text(&record.plugin)
+            || !canonical_text(&record.component)
+            || !plugins.descriptors.contains_key(&record.plugin)
+            || !snapshot_entity_exists(snapshot, &record.entity)
+            || plugins.state_owners.get(&record.state) != Some(&record.plugin)
+            || is_domain_record_state(&plugins.record_schemas, &record.state)
+            || (!plugins.immediate_write_states.contains_key(&record.state)
+                && !plugins
+                    .boundary_writers
+                    .keys()
+                    .any(|(_, state)| state == &record.state))
+        {
+            return invalid_snapshot("plugin component record is not owned or well formed");
+        }
+        let key = component_key(
+            &record.plugin,
+            &record.state,
+            &record.entity,
+            &record.component,
+        );
+        if previous_component
+            .as_ref()
+            .is_some_and(|previous| previous >= &key)
+            || !component_keys.insert(key.clone())
+        {
+            return invalid_snapshot("snapshot contains duplicate plugin component records");
+        }
+        previous_component = Some(key);
+    }
+
+    let core_schema = base_schema();
+    for required in core_schema.iter() {
+        if snapshot.schema.get(&required.type_name) != Some(required) {
+            return invalid_snapshot("snapshot is missing an exact core schema definition");
+        }
+    }
+    let mut declared_plugin_schema = BTreeSet::new();
+    for descriptor in plugins.descriptors.values() {
+        for type_name in &descriptor.schema_types {
+            if snapshot.schema.get(type_name).is_none() {
+                return invalid_snapshot("plugin descriptor references a missing schema type");
+            }
+            declared_plugin_schema.insert(type_name.as_str());
+        }
+    }
+    for schema in snapshot.schema.iter() {
+        validate_type_schema(schema).map_err(|error| {
+            invalid_snapshot_error(format!("snapshot schema is invalid: {error}"))
+        })?;
+    }
+    if snapshot.schema.iter().any(|schema| {
+        core_schema.get(&schema.type_name).is_none()
+            && !declared_plugin_schema.contains(schema.type_name.as_str())
+    }) {
+        return invalid_snapshot("snapshot contains an unclaimed schema definition");
+    }
+
+    Ok(())
+}
+
+/// Validates the random stream states and their ownership.
+fn validate_random_stream_states(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    if snapshot.legacy_rng.is_some() {
+        return invalid_snapshot("current snapshots cannot retain the legacy global RNG");
+    }
+    if snapshot
+        .random_streams
+        .windows(2)
+        .any(|pair| pair[0].key >= pair[1].key)
+    {
+        return invalid_snapshot("random streams are not in canonical order");
+    }
+    let expected_streams: BTreeSet<_> = std::iter::once(random::core_report_delay_stream())
+        .chain(plugins.random_stream_owners.keys().cloned())
+        .collect();
+    let actual_streams: BTreeSet<_> = snapshot
+        .random_streams
+        .iter()
+        .map(|state| state.key.clone())
+        .collect();
+    if actual_streams != expected_streams
+        || snapshot
+            .random_streams
+            .iter()
+            .any(|state| !state.is_coherent(snapshot.root_seed))
+    {
+        return invalid_snapshot("random stream state or ownership is inconsistent");
+    }
+    Ok(())
+}
+
+/// Validates the state of a continuation checkpoint without its history:
+/// the run description, domain records, knowledge structure, decision hot
+/// state, plugin components and schema, random streams, and the shape of
+/// scheduled work. Checks that rebuild state from the boundary journal do
+/// not run; evidence references are checked against the restored runtime.
+pub(super) fn validate_continuation_state(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<(), CanwuError> {
+    validate_snapshot_header(snapshot, false)?;
+    validate_snapshot_domain_records(snapshot, plugins)?;
+    super::knowledge::validate_snapshot_records(
+        snapshot,
+        &plugins.knowledge_schemas,
+        &plugins.record_schemas,
+    )
+    .map_err(|error| {
+        invalid_snapshot_error(format!("invalid generic knowledge ledger: {error}"))
+    })?;
+    validate_decision_state(snapshot)?;
+    validate_snapshot_components_and_schema(snapshot, plugins)?;
+    validate_random_stream_states(snapshot, plugins)?;
+    let mut previous: Option<&ScheduleKey> = None;
+    let mut arrivals = BTreeMap::<ArmyId, usize>::new();
+    let mut person_arrivals = BTreeMap::<PersonId, usize>::new();
+    for record in &snapshot.scheduled {
+        if record.key.at <= snapshot.now
+            || record.key.sequence == 0
+            || record.key.sequence >= snapshot.next_schedule_sequence
+            || previous.is_some_and(|previous| previous >= &record.key)
+            || scheduled_correlation_id(&record.action) == 0
+            || scheduled_correlation_id(&record.action) >= snapshot.next_correlation_id
+        {
+            return invalid_snapshot("scheduled work is not canonical");
+        }
+        previous = Some(&record.key);
+        match &record.action {
+            ScheduledAction::ArmyArrival { army, .. } => {
+                *arrivals.entry(*army).or_default() += 1;
+            }
+            ScheduledAction::PersonArrival { person, .. } => {
+                *person_arrivals.entry(*person).or_default() += 1;
+            }
+            ScheduledAction::PluginDirective { directive, .. }
+                if super::schedules_plugin_ingress(directive) =>
+            {
+                return invalid_snapshot("scheduled work cannot enqueue plugin ingress");
+            }
+            ScheduledAction::KnowledgeReport { .. } | ScheduledAction::PluginDirective { .. } => {}
+        }
+    }
+    for army in &snapshot.world.armies {
+        let pending = arrivals.get(&army.id).copied().unwrap_or(0);
+        if (army.transit.is_some() && pending != 1) || (army.transit.is_none() && pending != 0) {
+            return invalid_snapshot(
+                "army transit state must have exactly one matching pending arrival",
+            );
+        }
+    }
+    for person in &snapshot.world.people {
+        let pending = person_arrivals.get(&person.id).copied().unwrap_or(0);
+        if (person.transit.is_some() && pending != 1) || (person.transit.is_none() && pending != 0)
+        {
+            return invalid_snapshot(
+                "person transit state must have exactly one matching pending arrival",
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn validate_snapshot(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+) -> Result<random::KeyedDrawLedger, CanwuError> {
+    let initial_domain_records = validate_snapshot_header(snapshot, true)?;
     let domain_records = validate_snapshot_domain_records(snapshot, plugins)?;
     let max_knowledge_record_id = super::knowledge::validate_snapshot_records(
         snapshot,
@@ -850,65 +1043,7 @@ pub(super) fn validate_snapshot(
             );
         }
     }
-    let mut component_keys = BTreeSet::new();
-    let mut previous_component = None;
-    for record in &snapshot.plugin_components {
-        if !canonical_text(&record.plugin)
-            || !canonical_text(&record.component)
-            || !plugins.descriptors.contains_key(&record.plugin)
-            || !snapshot_entity_exists(snapshot, &record.entity)
-            || plugins.state_owners.get(&record.state) != Some(&record.plugin)
-            || is_domain_record_state(&plugins.record_schemas, &record.state)
-            || (!plugins.immediate_write_states.contains_key(&record.state)
-                && !plugins
-                    .boundary_writers
-                    .keys()
-                    .any(|(_, state)| state == &record.state))
-        {
-            return invalid_snapshot("plugin component record is not owned or well formed");
-        }
-        let key = component_key(
-            &record.plugin,
-            &record.state,
-            &record.entity,
-            &record.component,
-        );
-        if previous_component
-            .as_ref()
-            .is_some_and(|previous| previous >= &key)
-            || !component_keys.insert(key.clone())
-        {
-            return invalid_snapshot("snapshot contains duplicate plugin component records");
-        }
-        previous_component = Some(key);
-    }
-
-    let core_schema = base_schema();
-    for required in core_schema.iter() {
-        if snapshot.schema.get(&required.type_name) != Some(required) {
-            return invalid_snapshot("snapshot is missing an exact core schema definition");
-        }
-    }
-    let mut declared_plugin_schema = BTreeSet::new();
-    for descriptor in plugins.descriptors.values() {
-        for type_name in &descriptor.schema_types {
-            if snapshot.schema.get(type_name).is_none() {
-                return invalid_snapshot("plugin descriptor references a missing schema type");
-            }
-            declared_plugin_schema.insert(type_name.as_str());
-        }
-    }
-    for schema in snapshot.schema.iter() {
-        validate_type_schema(schema).map_err(|error| {
-            invalid_snapshot_error(format!("snapshot schema is invalid: {error}"))
-        })?;
-    }
-    if snapshot.schema.iter().any(|schema| {
-        core_schema.get(&schema.type_name).is_none()
-            && !declared_plugin_schema.contains(schema.type_name.as_str())
-    }) {
-        return invalid_snapshot("snapshot contains an unclaimed schema definition");
-    }
+    validate_snapshot_components_and_schema(snapshot, plugins)?;
 
     let mut schedule_keys = BTreeSet::new();
     let mut previous_schedule = None;
@@ -954,6 +1089,13 @@ pub(super) fn validate_snapshot(
                         "multiple pending reports reference the same dispatch event",
                     );
                 }
+            }
+            // No valid run schedules a directive that enqueues plugin
+            // ingress: `validate_directives` refuses it.
+            ScheduledAction::PluginDirective { directive, .. }
+                if super::schedules_plugin_ingress(directive) =>
+            {
+                return invalid_snapshot("scheduled work cannot enqueue plugin ingress");
             }
             ScheduledAction::PluginDirective { .. } => {}
         }
@@ -1131,32 +1273,7 @@ fn validate_random_evidence(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
 ) -> Result<(u64, u64, random::KeyedDrawLedger), CanwuError> {
-    if snapshot.legacy_rng.is_some() {
-        return invalid_snapshot("current snapshots cannot retain the legacy global RNG");
-    }
-    if snapshot
-        .random_streams
-        .windows(2)
-        .any(|pair| pair[0].key >= pair[1].key)
-    {
-        return invalid_snapshot("random streams are not in canonical order");
-    }
-    let expected_streams: BTreeSet<_> = std::iter::once(random::core_report_delay_stream())
-        .chain(plugins.random_stream_owners.keys().cloned())
-        .collect();
-    let actual_streams: BTreeSet<_> = snapshot
-        .random_streams
-        .iter()
-        .map(|state| state.key.clone())
-        .collect();
-    if actual_streams != expected_streams
-        || snapshot
-            .random_streams
-            .iter()
-            .any(|state| !state.is_coherent(snapshot.root_seed))
-    {
-        return invalid_snapshot("random stream state or ownership is inconsistent");
-    }
+    validate_random_stream_states(snapshot, plugins)?;
 
     let mut boundary_draws = BTreeMap::new();
     for boundary in &snapshot.boundaries {
@@ -2016,6 +2133,80 @@ fn snapshot_decision_entity_error(
     }
 }
 
+/// Checks a plugin packet's archive retention roots: their shape, their
+/// internal ownership, and their binding to the payload.
+fn validate_plugin_ingress_retention(
+    plugins: &PluginRegistry,
+    plugin: &str,
+    packet_type: &str,
+    payload: &serde_json::Value,
+    archive_retention: &[super::PluginArchiveRetention],
+) -> Result<(), CanwuError> {
+    if archive_retention.len() > 32_768
+        || archive_retention.windows(2).any(|pair| pair[0] >= pair[1])
+        || archive_retention.iter().any(|retention| {
+            retention.namespace.is_empty()
+                || retention.namespace.len() > 128
+                || retention.object_id.is_empty()
+                || retention.object_id.len() > 256
+                || !retention.namespace.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'-' | b'_')
+                })
+                || !retention.object_id.is_ascii()
+        })
+    {
+        return invalid_snapshot("plugin ingress archive retention is malformed");
+    }
+    if !archive_retention.is_empty()
+        && !plugins
+            .internal_ingress
+            .contains(&(plugin.to_owned(), packet_type.to_owned()))
+    {
+        return invalid_snapshot("plugin ingress archive retention lacks internal ownership");
+    }
+    plugins
+        .validate_archive_retention(plugin, packet_type, payload, archive_retention)
+        .map_err(|_| {
+            invalid_snapshot_error(
+                "plugin ingress archive retention is not bound to its payload roots",
+            )
+        })
+}
+
+/// Checks a plugin packet a continuation checkpoint pins: its packet type
+/// is declared with its class, its affected entities are canonical and
+/// exist, and its archive retention is well formed and bound to its payload.
+pub(super) fn validate_continuation_ingress(
+    snapshot: &SimulationSnapshot,
+    plugins: &PluginRegistry,
+    record: &IngressRecord,
+) -> Result<(), CanwuError> {
+    let IngressPayload::Plugin {
+        plugin,
+        packet_type,
+        payload,
+        affected_entities,
+        archive_retention,
+    } = &record.payload
+    else {
+        return Ok(());
+    };
+    let Some(descriptor) = plugins.ingress.get(&(plugin.clone(), packet_type.clone())) else {
+        return invalid_snapshot("plugin ingress references an undeclared packet type");
+    };
+    if record.class != descriptor.class
+        || affected_entities.windows(2).any(|pair| pair[0] >= pair[1])
+        || affected_entities
+            .iter()
+            .any(|entity| !snapshot_entity_identity_exists(snapshot, entity))
+    {
+        return invalid_snapshot("plugin ingress class or entity evidence is invalid");
+    }
+    validate_plugin_ingress_retention(plugins, plugin, packet_type, payload, archive_retention)
+}
+
 fn validate_ingress_records(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
@@ -2138,39 +2329,13 @@ fn validate_ingress_records(
                 {
                     return invalid_snapshot("plugin ingress class or entity evidence is invalid");
                 }
-                if archive_retention.len() > 32_768
-                    || archive_retention.windows(2).any(|pair| pair[0] >= pair[1])
-                    || archive_retention.iter().any(|retention| {
-                        retention.namespace.is_empty()
-                            || retention.namespace.len() > 128
-                            || retention.object_id.is_empty()
-                            || retention.object_id.len() > 256
-                            || !retention.namespace.bytes().all(|byte| {
-                                byte.is_ascii_lowercase()
-                                    || byte.is_ascii_digit()
-                                    || matches!(byte, b'.' | b'-' | b'_')
-                            })
-                            || !retention.object_id.is_ascii()
-                    })
-                {
-                    return invalid_snapshot("plugin ingress archive retention is malformed");
-                }
-                if !archive_retention.is_empty()
-                    && !plugins
-                        .internal_ingress
-                        .contains(&(plugin.clone(), packet_type.clone()))
-                {
-                    return invalid_snapshot(
-                        "plugin ingress archive retention lacks internal ownership",
-                    );
-                }
-                plugins
-                    .validate_archive_retention(plugin, packet_type, payload, archive_retention)
-                    .map_err(|_| {
-                        invalid_snapshot_error(
-                            "plugin ingress archive retention is not bound to its payload roots",
-                        )
-                    })?;
+                validate_plugin_ingress_retention(
+                    plugins,
+                    plugin,
+                    packet_type,
+                    payload,
+                    archive_retention,
+                )?;
                 match &record.cause {
                     Some(CauseRef::Boundary(boundary))
                         if generated_by_boundary.get(&record.id) == Some(boundary) => {}
@@ -2737,19 +2902,10 @@ fn resolve_runtime_domain_record_version(
             }
             if boundary.get() <= state.evidence.archived.boundary_count {
                 // A sealed boundary's record versions are not ordinal: the
-                // runtime knows one only through its kept receipt, which is
-                // Merkle-bound to its boundary item and change index, or as a
-                // live record's current version.
-                let known = state
-                    .evidence
-                    .archived_evidence_receipts
-                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone()))
-                    || state
-                        .metadata
-                        .current_domain_record_versions
-                        .get(&reference.record)
-                        .is_some_and(|current| current.version == *reference);
-                return if known {
+                // runtime knows one as a live record's current version, or
+                // through the body or membership the continuation closure
+                // keeps for a declared or just-replaced version.
+                return if sealed_version_is_known(state, reference) {
                     EvidenceAvailability::Archived
                 } else {
                     EvidenceAvailability::Missing
@@ -2763,6 +2919,42 @@ fn resolve_runtime_domain_record_version(
             }
         }
     }
+}
+
+/// Whether the runtime knows a boundary-established record version exists
+/// without its establishing boundary: the live current version, or a version
+/// whose body or membership the continuation closure keeps. A retained
+/// establishing boundary also counts, for a closure computed before a seal.
+pub(super) fn sealed_version_is_known(
+    state: &RuntimeState,
+    reference: &DomainRecordVersionRef,
+) -> bool {
+    let DomainRecordVersionSource::BoundaryChange {
+        boundary,
+        change_index,
+    } = reference.established_by
+    else {
+        return initial_domain_record_matches(state.metadata.initial_scenario.as_ref(), reference);
+    };
+    state
+        .metadata
+        .current_domain_record_versions
+        .get(&reference.record)
+        .is_some_and(|current| current.version == *reference)
+        || state
+            .evidence
+            .pinned
+            .record_versions
+            .contains_key(reference)
+        || state
+            .evidence
+            .pinned
+            .known_record_versions
+            .contains(reference)
+        || state
+            .evidence
+            .retained_boundary(boundary)
+            .is_some_and(|record| boundary_domain_record_matches(record, change_index, reference))
 }
 
 fn resolve_snapshot_domain_record_version(
@@ -4884,18 +5076,29 @@ fn runtime_current_entity_identity_exists(
 }
 
 pub(super) fn runtime_has_unqueued_command_history(state: &RuntimeState) -> bool {
-    state.evidence.archived_unqueued_command_history
+    let evidence = &state.evidence;
+    evidence.archived_unqueued_command_history
         || has_unqueued_command_history(
-            &state.evidence.commands,
-            &state.evidence.command_attempts,
-            &state.evidence.ingress,
+            &evidence.commands,
+            &evidence.command_attempts,
+            &evidence.ingress,
+            &|request| {
+                evidence.archived_ingress_requests.contains_key(&request)
+                    || evidence
+                        .archived_decision_command_requests
+                        .contains(&request)
+            },
         )
 }
 
+/// Whether the slices hold a legacy command or a tracked attempt whose
+/// request was not queued, either as ingress in the slices or as ingress
+/// `archived_queued` reports sealed earlier.
 pub(super) fn has_unqueued_command_history(
     commands: &[CommandRecord],
     attempts: &[CommandAttemptRecord],
     ingress: &[IngressRecord],
+    archived_queued: &dyn Fn(super::CommandRequestId) -> bool,
 ) -> bool {
     let queued_requests: BTreeSet<_> = ingress
         .iter()
@@ -4912,9 +5115,9 @@ pub(super) fn has_unqueued_command_history(
         .collect();
     commands.iter().any(|command| command.attempt_id.is_none())
         || attempts.iter().any(|attempt| {
-            attempt
-                .request_id
-                .is_none_or(|request| !queued_requests.contains(&request))
+            attempt.request_id.is_none_or(|request| {
+                !queued_requests.contains(&request) && !archived_queued(request)
+            })
         })
 }
 

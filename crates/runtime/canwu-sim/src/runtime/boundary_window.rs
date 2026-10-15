@@ -298,7 +298,7 @@ pub(super) fn boundary_window(
 }
 
 /// The earliest instant whose settled boundaries are kept at `now`.
-fn kept_from(now: SimTime, horizon: SimDuration) -> SimTime {
+pub(super) fn kept_from(now: SimTime, horizon: SimDuration) -> SimTime {
     SimTime::from_minutes(now.as_minutes().saturating_sub(horizon.as_minutes()))
 }
 
@@ -317,7 +317,7 @@ pub(super) fn summarize_boundary(
         ..BoundarySummary::queued(at)
     };
     for id in admitted_ingress {
-        let record = evidence.retained_ingress(*id).ok_or_else(|| {
+        let record = evidence.ingress_record(*id).ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "a boundary admitted ingress that is not retained",
@@ -400,7 +400,7 @@ fn queued_boundaries(
         .range(first_ingress..)
         .take_while(|key| key.due_at < to)
     {
-        let record = evidence.retained_ingress(key.id).ok_or_else(|| {
+        let record = evidence.ingress_record(key.id).ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 "pending ingress references an unknown record",

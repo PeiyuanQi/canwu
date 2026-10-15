@@ -47,6 +47,8 @@ impl RejectionTransactionCheckpoint {
 pub(super) struct IngressTransactionCheckpoint {
     next_ingress_id: u64,
     ingress_count: usize,
+    /// Shares structure with the live pins, so the capture copies nothing.
+    pinned: super::continuation::PinnedEvidence,
     plugin_registration_closed: bool,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
@@ -58,6 +60,7 @@ impl IngressTransactionCheckpoint {
         Self {
             next_ingress_id: state.counters.next_ingress_id,
             ingress_count: state.evidence.ingress.len(),
+            pinned: state.evidence.pinned.clone(),
             plugin_registration_closed: state.metadata.plugin_registration_closed,
             checkpoint_hash: state.metadata.checkpoint_hash.clone(),
             commitment_roots: state.metadata.commitment_roots.clone(),
@@ -81,6 +84,7 @@ impl IngressTransactionCheckpoint {
         state.scheduler.pending_ingress.insert(target);
         state.scheduler.cancelled_ingress.remove(&target.id);
         state.evidence.ingress.truncate(self.ingress_count);
+        state.evidence.pinned = self.pinned;
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
         state.metadata.commitment_roots = self.commitment_roots;
@@ -168,6 +172,8 @@ pub(super) struct BoundaryTransactionCheckpoint {
     random_draw_count: usize,
     /// Shares structure with the live index, so the capture copies nothing.
     keyed_draws: super::random::KeyedDrawLedger,
+    /// Shares structure with the live pins, so the capture copies nothing.
+    pinned: super::continuation::PinnedEvidence,
     plugin_registration_closed: bool,
     current_domain_record_versions: im::OrdMap<
         std::sync::Arc<DomainRecordRef>,
@@ -201,6 +207,7 @@ impl BoundaryTransactionCheckpoint {
             boundary_count: state.evidence.boundaries.len(),
             random_draw_count: state.evidence.random_draws.len(),
             keyed_draws: state.evidence.keyed_draws.clone(),
+            pinned: state.evidence.pinned.clone(),
             plugin_registration_closed: state.metadata.plugin_registration_closed,
             current_domain_record_versions: state.metadata.current_domain_record_versions.clone(),
             checkpoint_hash: state.metadata.checkpoint_hash.clone(),
@@ -233,6 +240,7 @@ impl BoundaryTransactionCheckpoint {
         state.evidence.boundaries.truncate(self.boundary_count);
         state.evidence.random_draws.truncate(self.random_draw_count);
         state.evidence.keyed_draws = self.keyed_draws;
+        state.evidence.pinned = self.pinned;
         state.metadata.plugin_registration_closed = self.plugin_registration_closed;
         state.metadata.current_domain_record_versions = self.current_domain_record_versions;
         state.metadata.checkpoint_hash = self.checkpoint_hash;
