@@ -66,7 +66,8 @@ fn validate_production_runtime_with_archive_providers(
     production_archive: Option<&dyn crate::ProductionArchiveStore>,
     resource_archive: Option<&dyn canwu_resource::ResourceArchiveStore>,
 ) -> Result<(), CanwuError> {
-    let Some(record) = canwu.typed_domain_record(&production_runtime_reference()) else {
+    let Some(record) = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
+    else {
         return Ok(());
     };
     let state = record.decode_payload::<ProductionRuntimeRecord>()?;
@@ -843,25 +844,26 @@ fn validate_production_knowledge(canwu: &Canwu, state: &ProductionState) -> Resu
     Ok(())
 }
 
-pub fn production_report(
-    canwu: &Canwu,
+/// The holder-relative production report. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn production_report<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     scope: &crate::ProductionSiteId,
 ) -> Result<ProductionObservationReport, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
         .ok_or_else(|| invalid("production runtime is not configured"))?;
     let state = record.decode_payload::<ProductionRuntimeRecord>()?;
     production_report_from_state(&state, holder, scope, canwu.time())
 }
 
-pub fn production_observation_witness(
-    canwu: &Canwu,
+/// The observation witness a holder may cite for production state.
+/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn production_observation_witness<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     scope: &crate::ProductionSiteId,
 ) -> Result<ProductionObservationWitnessV1, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
         .ok_or_else(|| invalid("production runtime is not configured"))?;
     let state = record.decode_payload::<ProductionRuntimeRecord>()?;
     let head = eligible_observation_head(&state, holder, scope, canwu.time())?;
@@ -940,8 +942,8 @@ pub fn validate_production_observation_witness(
 /// Builds the required playable degraded-facility decision ticket from the
 /// holder's persisted observation cut. Each option contains the exact production
 /// command that the Canwu decision engine will persist and execute if selected.
-pub fn degraded_facility_decision_ticket(
-    canwu: &Canwu,
+pub fn degraded_facility_decision_ticket<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     ticket_id: DecisionTicketId,
     assigned_controller: impl Into<String>,
     holder: &KnowledgeHolderRef,
@@ -949,8 +951,7 @@ pub fn degraded_facility_decision_ticket(
     facility: &crate::FacilityAssetId,
     deadline: Option<SimTime>,
 ) -> Result<DecisionTicketDraft, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
         .ok_or_else(|| invalid("production runtime is not configured"))?;
     let state = record.decode_payload::<ProductionRuntimeRecord>()?;
     let order = state

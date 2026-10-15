@@ -14,7 +14,7 @@ pub(super) struct RejectionTransactionCheckpoint {
     command_attempt_count: usize,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl RejectionTransactionCheckpoint {
@@ -50,7 +50,7 @@ pub(super) struct IngressTransactionCheckpoint {
     plugin_registration_closed: bool,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl IngressTransactionCheckpoint {
@@ -102,7 +102,7 @@ pub(super) struct CommandTransactionCheckpoint {
     plugin_registration_closed: bool,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl CommandTransactionCheckpoint {
@@ -167,7 +167,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     boundary_count: usize,
     random_draw_count: usize,
     /// Shares structure with the live index, so the capture copies nothing.
-    keyed_draws: super::random::KeyedDrawIndex,
+    keyed_draws: super::random::KeyedDrawLedger,
     plugin_registration_closed: bool,
     current_domain_record_versions: im::OrdMap<
         std::sync::Arc<DomainRecordRef>,
@@ -175,7 +175,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     >,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl BoundaryTransactionCheckpoint {
@@ -256,7 +256,7 @@ pub(super) struct ScheduledBatchTransactionCheckpoint {
     plugin_registration_closed: bool,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl ScheduledBatchTransactionCheckpoint {
@@ -304,7 +304,7 @@ pub(super) struct ClockTransactionCheckpoint {
     plugin_registration_closed: bool,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
-    commitment_cache: Option<RuntimeCommitmentCache>,
+    commitment_cache: Option<Box<RuntimeCommitmentCache>>,
 }
 
 impl ClockTransactionCheckpoint {

@@ -11,7 +11,11 @@ publish = false
 [workspace]
 
 [features]
+default = ["compact-fork"]
 allocation-counting = []
+# `keyed-draw-profile` measures `CompactedCanwu::fork`, which engines before
+# 0.16.0 lack; build their exports with `--no-default-features`.
+compact-fork = []
 
 [dependencies]
 canwu-api = { path = "../../crates/api/canwu-api" }

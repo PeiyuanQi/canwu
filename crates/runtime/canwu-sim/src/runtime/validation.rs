@@ -87,21 +87,21 @@ impl<'a> RuntimeValidationContext<'a> {
         Self { state }
     }
 
+    /// Resolves an ordinal evidence ID. Ordinal journals are dense and an
+    /// ID equals its position, so every ID at or below the archived cut was
+    /// committed before a seal moved it out and exists, whether or not a
+    /// receipt was kept for it. The answer therefore does not depend on when
+    /// the run sealed.
     fn runtime_lookup<T>(
         id: u64,
         next_id: u64,
         archived_count: u64,
         retained: Option<&T>,
-        archived_receipt: bool,
     ) -> EvidenceLookup<'_, T> {
         if id == 0 || id >= next_id {
             EvidenceLookup::Missing
         } else if id <= archived_count {
-            if archived_receipt {
-                EvidenceLookup::Archived
-            } else {
-                EvidenceLookup::Missing
-            }
+            EvidenceLookup::Archived
         } else if let Some(record) = retained {
             EvidenceLookup::Retained(record)
         } else {
@@ -117,10 +117,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_event_id,
             self.state.evidence.archived.event_count,
             self.state.evidence.retained_event(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Event(id)),
         )
     }
 
@@ -130,10 +126,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_command_id,
             self.state.evidence.archived.command_count,
             self.state.evidence.retained_command(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Command(id)),
         )
     }
 
@@ -143,10 +135,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_command_attempt_id,
             self.state.evidence.archived.command_attempt_count,
             self.state.evidence.retained_command_attempt(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::CommandAttempt(id)),
         )
     }
 
@@ -156,10 +144,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_ingress_id,
             self.state.evidence.archived.ingress_count,
             self.state.evidence.retained_ingress(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Ingress(id)),
         )
     }
 
@@ -169,10 +153,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_boundary_id,
             self.state.evidence.archived.boundary_count,
             self.state.evidence.retained_boundary(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Boundary(id)),
         )
     }
 
@@ -182,10 +162,6 @@ impl ValidationContext for RuntimeValidationContext<'_> {
             self.state.counters.next_random_draw_id,
             self.state.evidence.archived.random_draw_count,
             self.state.evidence.retained_random_draw(id),
-            self.state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::RandomDraw(id)),
         )
     }
 
@@ -320,10 +296,12 @@ enum EventCorrelationRoot {
     Event(EventId),
 }
 
+/// Validates a complete snapshot and returns the keyed-draw ledger it built
+/// from the draw journal, so that a restore builds the ledger once.
 pub(super) fn validate_snapshot(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
-) -> Result<(), CanwuError> {
+) -> Result<random::KeyedDrawLedger, CanwuError> {
     if snapshot.engine_version.trim().is_empty() {
         return invalid_snapshot("snapshot engine version cannot be empty");
     }
@@ -830,7 +808,8 @@ pub(super) fn validate_snapshot(
             );
         }
     }
-    let (max_random_draw_id, max_random_correlation) = validate_random_evidence(snapshot, plugins)?;
+    let (max_random_draw_id, max_random_correlation, keyed_draws) =
+        validate_random_evidence(snapshot, plugins)?;
     if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {
         let persisted_roots = snapshot.commitment_roots.as_ref().ok_or_else(|| {
             invalid_snapshot_error("current commitment snapshot is missing its domain roots")
@@ -1145,13 +1124,13 @@ pub(super) fn validate_snapshot(
             "persisted state revision does not match committed command, rejection, and boundary evidence",
         );
     }
-    Ok(())
+    Ok(keyed_draws)
 }
 
 fn validate_random_evidence(
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
-) -> Result<(u64, u64), CanwuError> {
+) -> Result<(u64, u64, random::KeyedDrawLedger), CanwuError> {
     if snapshot.legacy_rng.is_some() {
         return invalid_snapshot("current snapshots cannot retain the legacy global RNG");
     }
@@ -1209,7 +1188,7 @@ fn validate_random_evidence(
     let mut max_correlation_id = 0;
     let core_stream = random::core_report_delay_stream();
     let mut report_draws = BTreeMap::new();
-    random::retained_keyed_draws(&snapshot.random_draws).map_err(|error| {
+    let keyed_draws = random::keyed_draw_ledger(&snapshot.random_draws).map_err(|error| {
         invalid_snapshot_error(format!("invalid operation-keyed random index: {error}"))
     })?;
     let evidence_context = SnapshotValidationContext::new(snapshot);
@@ -1433,6 +1412,7 @@ fn validate_random_evidence(
     Ok((
         snapshot.random_draws.last().map_or(0, |draw| draw.id.get()),
         max_correlation_id,
+        keyed_draws,
     ))
 }
 
@@ -2752,31 +2732,34 @@ fn resolve_runtime_domain_record_version(
             boundary,
             change_index,
         } => {
-            // The exact version receipt is Merkle-bound to its boundary item and
-            // change index, so it proves the version without the boundary's own
-            // receipt. Compaction keeps it for every live record's current
-            // version, which the boundary receipt alone would not guarantee.
-            let archived_receipt = boundary.get() <= state.evidence.archived.boundary_count
-                && state
+            if boundary.get() == 0 || boundary.get() >= state.counters.next_boundary_id {
+                return EvidenceAvailability::Missing;
+            }
+            if boundary.get() <= state.evidence.archived.boundary_count {
+                // A sealed boundary's record versions are not ordinal: the
+                // runtime knows one only through its kept receipt, which is
+                // Merkle-bound to its boundary item and change index, or as a
+                // live record's current version.
+                let known = state
                     .evidence
                     .archived_evidence_receipts
-                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone()));
-            match RuntimeValidationContext::runtime_lookup(
-                boundary.get(),
-                state.counters.next_boundary_id,
-                state.evidence.archived.boundary_count,
-                state.evidence.retained_boundary(boundary),
-                archived_receipt,
-            ) {
-                EvidenceLookup::Retained(record)
-                    if boundary_domain_record_matches(record, change_index, reference) =>
-                {
+                    .contains_key(&EvidenceRef::DomainRecordVersion(reference.clone()))
+                    || state
+                        .metadata
+                        .current_domain_record_versions
+                        .get(&reference.record)
+                        .is_some_and(|current| current.version == *reference);
+                return if known {
+                    EvidenceAvailability::Archived
+                } else {
+                    EvidenceAvailability::Missing
+                };
+            }
+            match state.evidence.retained_boundary(boundary) {
+                Some(record) if boundary_domain_record_matches(record, change_index, reference) => {
                     EvidenceAvailability::Retained
                 }
-                EvidenceLookup::Archived => EvidenceAvailability::Archived,
-                EvidenceLookup::Retained(_) | EvidenceLookup::Missing => {
-                    EvidenceAvailability::Missing
-                }
+                _ => EvidenceAvailability::Missing,
             }
         }
     }

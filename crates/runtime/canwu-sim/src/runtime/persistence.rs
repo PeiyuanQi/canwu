@@ -7,16 +7,15 @@ use super::{
     DecisionHistoryLocation, DecisionState, DeterministicRng, DomainRecord, DomainRecordPageRoots,
     DomainRecordRef, DomainRecordSchema, DomainRecordType, DomainRecordVersionRef,
     DomainRecordVersionSource, ENGINE_VERSION, ErrorCode, EvidenceRef, IngressPayload,
-    IngressReceipt, IngressRecord, KeyedDrawReservation, KnowledgeSnapshot, OutboxEntry,
-    PayloadProperty, PayloadSchema, PayloadValueType, PluginComponentRecord, PluginDescriptor,
-    PluginIngressRequest, PreparedDecisionArchive, PreparedStateDelta, RandomDrawAddress,
-    RandomDrawRecord, RandomStreamState, RunConfigurationSnapshot, RunManifest, RuntimeEvidence,
-    SNAPSHOT_FORMAT_VERSION, STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledAction,
-    ScheduledRecord, SchemaRegistry, SimDuration, SimEvent, SimTime, Simulation, SimulationPlugin,
-    StatePageBlob, StatePageProvider, StatePageRetentionLedger, StatePageStore, SystemCadence,
-    TypedDomainRecordRef, WorldSnapshot, canonical_byte_hash, has_unqueued_command_history,
-    invalid_snapshot_error, is_canonical_hash, is_one_u64, is_zero_u32, is_zero_u64, one_u64,
-    prepare_state_delta, verify_state_delta,
+    IngressReceipt, IngressRecord, KnowledgeSnapshot, OutboxEntry, PayloadProperty, PayloadSchema,
+    PayloadValueType, PluginComponentRecord, PluginDescriptor, PluginIngressRequest,
+    PreparedDecisionArchive, PreparedStateDelta, RandomDrawRecord, RandomStreamState,
+    RunConfigurationSnapshot, RunManifest, RuntimeEvidence, SNAPSHOT_FORMAT_VERSION,
+    STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledAction, ScheduledRecord, SchemaRegistry,
+    SimDuration, SimEvent, SimTime, Simulation, SimulationPlugin, StatePageBlob, StatePageProvider,
+    StatePageRetentionLedger, StatePageStore, SystemCadence, TypedDomainRecordRef, WorldSnapshot,
+    canonical_byte_hash, has_unqueued_command_history, invalid_snapshot_error, is_canonical_hash,
+    is_one_u64, is_zero_u32, is_zero_u64, one_u64, prepare_state_delta, verify_state_delta,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -132,7 +131,8 @@ pub struct SimulationSnapshot {
 
 /// Format of the paged-checkpoint envelope and of the decision pages it
 /// names. Format 5 names domain-record pages in state-page codec
-/// `raw-canonical-v2`, whose records may span record-value chunk pages.
+/// `raw-canonical-v2`, whose records may span record-value chunk pages, and
+/// embeds a `SimulationCheckpoint` without keyed-draw reservations.
 pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 5;
 const MAX_PAGED_DECISION_DIRECTORY_ENTRIES: usize = 1_024;
 
@@ -452,11 +452,15 @@ pub struct ReplayJournal {
 }
 
 /// Version of current-state checkpoints plus append-only evidence segments.
-pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 4;
+pub const CHECKPOINT_JOURNAL_FORMAT_VERSION: u32 = 5;
 const ARCHIVED_SEGMENT_MANIFEST_DOMAIN: &str = "canwu.evidence.archived-segment-manifest.v1";
-const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v2";
+pub(crate) const ARCHIVED_RECEIPT_DOMAIN: &str = "canwu.evidence.archived-receipts.v2";
 const EVIDENCE_DEPENDENCY_DOMAIN: &str = "canwu.evidence.dependencies.v1";
-const KEYED_RESERVATION_DOMAIN: &str = "canwu.random.keyed-reservations.v1";
+/// Compact checkpoint identity. Version 2 drops the keyed-reservation root:
+/// sealed keyed draws stay in the keyed-draw ledger instead.
+const COMPACT_CHECKPOINT_DOMAIN: &str = "canwu.compact-checkpoint.v2";
+/// Two-phase seal token, bumped with the compact checkpoint identity it binds.
+const SEAL_TOKEN_DOMAIN: &str = "canwu.evidence.seal-token.v2";
 /// Reserved domain-record payload field declaring a payload-reading continuation.
 pub const PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD: &str =
     "canwu_payload_required_evidence_continuation";
@@ -743,7 +747,7 @@ fn archive_empty_root() -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-fn skipped_commitment_root<T: Serialize>(
+pub(crate) fn skipped_commitment_root<T: Serialize>(
     domain: &str,
     values: &[T],
 ) -> Result<Option<String>, CanwuError> {
@@ -987,29 +991,45 @@ fn add_payload_required_continuation_dependencies(
     Ok(())
 }
 
-fn required_archived_receipt_references(
+fn reachable_archived_receipt_references(
     dependencies: &[EvidenceDependency],
-    reservations: &[KeyedDrawReservation],
 ) -> BTreeSet<EvidenceRef> {
-    let mut required = dependencies
+    dependencies
         .iter()
         .map(|dependency| dependency.reference.clone())
-        .collect::<BTreeSet<_>>();
-    required.extend(
-        reservations
-            .iter()
-            .map(|reservation| reservation.draw_receipt.evidence.clone()),
-    );
-    required
+        .collect()
 }
 
+/// Keeps the receipts of current dependencies. A dependency first cited after
+/// the seal that archived its evidence has no receipt to keep; see
+/// [`Simulation::receipt_required_references`] for which ones must have one.
 fn retain_reachable_archived_evidence_receipts(
     receipts: &mut BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
     dependencies: &[EvidenceDependency],
-    reservations: &[KeyedDrawReservation],
 ) {
-    let required = required_archived_receipt_references(dependencies, reservations);
-    receipts.retain(|reference, _| required.contains(reference));
+    let reachable = reachable_archived_receipt_references(dependencies);
+    receipts.retain(|reference, _| reachable.contains(reference));
+}
+
+/// Returns whether the journal counters alone prove that an identity-only
+/// dependency exists in the sealed prefix: an ordinal journal item at or
+/// below the archived cut, or an initial-scenario domain-record version.
+fn sealed_identity_is_counted(archived: &EvidenceCursor, reference: &EvidenceRef) -> bool {
+    let (id, count) = match reference {
+        EvidenceRef::Event(id) => (id.get(), archived.event_count),
+        EvidenceRef::Command(id) => (id.get(), archived.command_count),
+        EvidenceRef::CommandAttempt(id) => (id.get(), archived.command_attempt_count),
+        EvidenceRef::Ingress(id) => (id.get(), archived.ingress_count),
+        EvidenceRef::Boundary(id) => (id.get(), archived.boundary_count),
+        EvidenceRef::RandomDraw(id) => (id.get(), archived.random_draw_count),
+        EvidenceRef::DomainRecordVersion(version) => {
+            return matches!(
+                version.established_by,
+                DomainRecordVersionSource::InitialScenario
+            );
+        }
+    };
+    id != 0 && id <= count
 }
 
 pub(crate) fn load_verified_archived_evidence_segment(
@@ -1588,10 +1608,6 @@ pub struct SimulationCheckpoint {
     pub evidence_dependencies: Vec<EvidenceDependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_dependency_root: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub keyed_draw_reservations: Vec<KeyedDrawReservation>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub keyed_reservation_root: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1601,7 +1617,6 @@ struct CompactCheckpointHashMaterial<'a> {
     archived_segment_manifest_root: Option<&'a str>,
     archived_receipt_root: Option<&'a str>,
     evidence_dependency_root: Option<&'a str>,
-    keyed_reservation_root: Option<&'a str>,
 }
 
 fn validate_compact_continuation(checkpoint: &SimulationCheckpoint) -> Result<(), CanwuError> {
@@ -1639,18 +1654,6 @@ fn validate_compact_continuation(checkpoint: &SimulationCheckpoint) -> Result<()
             "compact evidence dependencies must be sorted by unique evidence reference",
         ));
     }
-    if checkpoint
-        .keyed_draw_reservations
-        .windows(2)
-        .any(|reservations| {
-            (&reservations[0].stream, &reservations[0].address)
-                >= (&reservations[1].stream, &reservations[1].address)
-        })
-    {
-        return Err(invalid_snapshot_error(
-            "compact keyed reservations must be sorted by unique operation address",
-        ));
-    }
     validate_skipped_commitment_root(
         checkpoint.archived_segment_manifest_root.as_deref(),
         ARCHIVED_SEGMENT_MANIFEST_DOMAIN,
@@ -1668,12 +1671,6 @@ fn validate_compact_continuation(checkpoint: &SimulationCheckpoint) -> Result<()
         EVIDENCE_DEPENDENCY_DOMAIN,
         &checkpoint.evidence_dependencies,
         "evidence-dependency root",
-    )?;
-    validate_skipped_commitment_root(
-        checkpoint.keyed_reservation_root.as_deref(),
-        KEYED_RESERVATION_DOMAIN,
-        &checkpoint.keyed_draw_reservations,
-        "keyed-reservation root",
     )
 }
 
@@ -1719,14 +1716,13 @@ impl SimulationCheckpoint {
 fn compact_checkpoint_hash(checkpoint: &SimulationCheckpoint) -> Result<String, CanwuError> {
     validate_compact_continuation(checkpoint)?;
     super::canonical_hash(
-        "canwu.compact-checkpoint.v1",
+        COMPACT_CHECKPOINT_DOMAIN,
         &CompactCheckpointHashMaterial {
             state_checkpoint_hash: &checkpoint.state.checkpoint_hash,
             journal_end: checkpoint.journal_end,
             archived_segment_manifest_root: checkpoint.archived_segment_manifest_root.as_deref(),
             archived_receipt_root: checkpoint.archived_receipt_root.as_deref(),
             evidence_dependency_root: checkpoint.evidence_dependency_root.as_deref(),
-            keyed_reservation_root: checkpoint.keyed_reservation_root.as_deref(),
         },
     )
 }
@@ -1751,6 +1747,45 @@ pub struct EvidenceJournalSegment {
     pub random_draws: Vec<RandomDrawRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<EvidenceArchiveIndex>,
+}
+
+/// A full snapshot rebuilt from a checkpoint and its evidence prefix, with
+/// the compact continuation the checkpoint claimed and the one rebuilt from
+/// the prefix.
+struct ReconstructedCheckpoint {
+    rebuilt_headers: Vec<ArchivedSegmentHeader>,
+    rebuilt_receipts: BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
+    expected_headers: Vec<ArchivedSegmentHeader>,
+    expected_receipts: Vec<ArchivedEvidenceReceipt>,
+    expected_dependencies: Vec<EvidenceDependency>,
+}
+
+impl ReconstructedCheckpoint {
+    /// Checks the claimed continuation against the runtime built from the
+    /// reconstructed snapshot, so that a restore builds one runtime.
+    ///
+    /// A live seal keeps the receipts of the dependencies current at that seal,
+    /// and a dependency first cited by identity after its seal needs none, so
+    /// the claimed receipts may be fewer than the prefix can rebuild. Each
+    /// claimed receipt must still equal the rebuilt one and name a current
+    /// dependency.
+    fn verify(self, simulation: &Simulation) -> Result<(), CanwuError> {
+        let rebuilt_dependencies = simulation.evidence_dependencies()?;
+        let reachable = reachable_archived_receipt_references(&rebuilt_dependencies);
+        let genuine_receipts = self.expected_receipts.iter().all(|receipt| {
+            reachable.contains(&receipt.evidence)
+                && self.rebuilt_receipts.get(&receipt.evidence) == Some(receipt)
+        });
+        if self.rebuilt_headers != self.expected_headers
+            || !genuine_receipts
+            || rebuilt_dependencies != self.expected_dependencies
+        {
+            return Err(invalid_snapshot_error(
+                "checkpoint compact continuation does not match its reconstructed authoritative indexes",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -1784,6 +1819,166 @@ impl CompactedSimulation {
     /// Returns the monotonic cut through sealed and retained evidence.
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
+    }
+
+    /// Copies the compact runtime, sharing persistent structures, with
+    /// profiling off. The copy keeps the seal tokens already committed, so it
+    /// treats a repeated commit of one of them as the original does.
+    #[must_use]
+    pub fn fork(&self) -> Self {
+        Self {
+            simulation: self.simulation.fork(),
+            committed_seal_tokens: self.committed_seal_tokens.clone(),
+        }
+    }
+
+    /// Attaches the caller-owned provider used to resolve package cold
+    /// archives during admission, settlement, and detached queries.
+    pub fn set_plugin_archive_object_provider(
+        &mut self,
+        provider: std::rc::Rc<dyn super::PluginArchiveObjectProvider>,
+    ) {
+        self.simulation.set_plugin_archive_object_provider(provider);
+    }
+
+    /// Loads one package-owned archive object from the attached provider.
+    pub fn plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.simulation.plugin_archive_object(namespace, object_id)
+    }
+
+    /// The commitment-format state hash, equal to the hash of an unsealed run
+    /// with the same state.
+    pub fn authoritative_state_hash(&self) -> Result<String, CanwuError> {
+        self.simulation.authoritative_state_hash()
+    }
+
+    /// The hash of the run manifest this run was created with.
+    #[must_use]
+    pub fn run_manifest_hash(&self) -> &str {
+        self.simulation.run_manifest_hash()
+    }
+
+    /// The persisted run configuration.
+    #[must_use]
+    pub const fn run_configuration(&self) -> &super::RunConfigurationSnapshot {
+        self.simulation.run_configuration()
+    }
+
+    /// The run's type schema.
+    #[must_use]
+    pub const fn schema(&self) -> &SchemaRegistry {
+        self.simulation.schema()
+    }
+
+    /// The persisted descriptors of the run's plugins.
+    pub fn plugin_descriptors(&self) -> impl Iterator<Item = &PluginDescriptor> {
+        self.simulation.plugin_descriptors()
+    }
+
+    /// Whether an evidence identity exists at this cut; see
+    /// [`Simulation::evidence_exists`].
+    #[must_use]
+    pub fn evidence_exists(&self, reference: &EvidenceRef) -> bool {
+        self.simulation.evidence_exists(reference)
+    }
+
+    /// When evidence became authoritative; see [`Simulation::evidence_time`].
+    #[must_use]
+    pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
+        self.simulation.evidence_time(reference)
+    }
+
+    /// The body of one exact domain-record version; see
+    /// [`Simulation::domain_record_version`].
+    #[must_use]
+    pub fn domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<DomainRecord> {
+        self.simulation.domain_record_version(reference)
+    }
+
+    /// Whether an exact domain-record version exists in current, retained,
+    /// or kept evidence.
+    #[must_use]
+    pub fn domain_record_version_evidence_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> bool {
+        self.simulation
+            .domain_record_version_evidence_exists(reference)
+    }
+
+    /// The exact identity of a record's current version, which no seal can
+    /// change.
+    pub fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        self.simulation.current_domain_record_version(reference)
+    }
+
+    /// Every current domain record.
+    pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
+        self.simulation.domain_records()
+    }
+
+    /// One page of records of one kind, bound to an authoritative revision.
+    pub fn domain_record_page(
+        &self,
+        kind: &super::DomainRecordKind,
+        after: Option<&DomainRecordRef>,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<super::DomainRecordPage, CanwuError> {
+        self.simulation
+            .domain_record_page(kind, after, limit, expected_revision)
+    }
+
+    /// The retained event tail, after the last seal.
+    #[must_use]
+    pub fn events(&self) -> &[SimEvent] {
+        self.simulation.events()
+    }
+
+    /// The retained accepted-command tail, after the last seal.
+    #[must_use]
+    pub fn command_log(&self) -> &[CommandRecord] {
+        self.simulation.command_log()
+    }
+
+    /// The retained command-attempt tail, after the last seal.
+    #[must_use]
+    pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
+        self.simulation.command_attempts()
+    }
+
+    /// The retained ingress tail, after the last seal.
+    #[must_use]
+    pub fn ingress_log(&self) -> &[IngressRecord] {
+        self.simulation.ingress_log()
+    }
+
+    /// The retained draw tail, after the last seal.
+    #[must_use]
+    pub fn random_draws(&self) -> &[RandomDrawRecord] {
+        self.simulation.random_draws()
+    }
+
+    /// The latest committed boundary, retained or sealed.
+    #[must_use]
+    pub fn latest_boundary_id(&self) -> Option<super::BoundaryId> {
+        self.simulation.latest_boundary_id()
+    }
+
+    /// The persisted audience declaration for an event.
+    #[must_use]
+    pub fn event_audience(&self, event: &SimEvent) -> canwu_event::EventAudience {
+        self.simulation.event_audience(event)
     }
 
     /// Captures current state and the total journal cut without cloning sealed evidence.
@@ -1954,7 +2149,7 @@ impl CompactedSimulation {
             .clone();
         let target_checkpoint_hash = compact_checkpoint_hash(&candidate.checkpoint()?)?;
         let token_hash = super::canonical_hash(
-            "canwu.evidence.seal-token.v1",
+            SEAL_TOKEN_DOMAIN,
             &(
                 &source_state_hash,
                 &source_checkpoint_hash,
@@ -1987,7 +2182,7 @@ impl CompactedSimulation {
             return Ok(());
         }
         let expected_token_hash = super::canonical_hash(
-            "canwu.evidence.seal-token.v1",
+            SEAL_TOKEN_DOMAIN,
             &(
                 &token.source_state_hash,
                 &token.source_checkpoint_hash,
@@ -2364,18 +2559,10 @@ impl CompactedSimulation {
     /// plus the currently retained tail.
     pub fn snapshot_with_segments(
         &self,
-        mut segments: Vec<EvidenceJournalSegment>,
+        segments: Vec<EvidenceJournalSegment>,
     ) -> Result<SimulationSnapshot, CanwuError> {
-        let tail = self
-            .simulation
-            .journal_segment_since(self.simulation.state.evidence.archived)?;
-        if tail.start != tail.end {
-            segments.push(tail);
-        }
-        let snapshot =
-            Simulation::snapshot_from_checkpoint_and_journal(self.checkpoint()?, segments)?;
-        Simulation::from_snapshot(snapshot.clone())?;
-        Ok(snapshot)
+        let (snapshot, _) = self.restore_with_segments(segments, true)?;
+        snapshot.ok_or_else(|| invalid_snapshot_error("reconstructed snapshot was not kept"))
     }
 
     /// Produces the ordinary exact-replay journal after validating the supplied archive.
@@ -2383,9 +2570,30 @@ impl CompactedSimulation {
         &self,
         segments: Vec<EvidenceJournalSegment>,
     ) -> Result<ReplayJournal, CanwuError> {
-        let snapshot = self.snapshot_with_segments(segments)?;
-        let simulation = Simulation::from_snapshot(snapshot)?;
+        let (_, simulation) = self.restore_with_segments(segments, false)?;
         Ok(simulation.replay_journal())
+    }
+
+    /// Rebuilds and validates the full run from the supplied sealed prefix
+    /// plus the retained tail, building one runtime, and keeps a copy of the
+    /// reconstructed snapshot when asked.
+    fn restore_with_segments(
+        &self,
+        mut segments: Vec<EvidenceJournalSegment>,
+        keep_snapshot: bool,
+    ) -> Result<(Option<SimulationSnapshot>, Simulation), CanwuError> {
+        let tail = self
+            .simulation
+            .journal_segment_since(self.simulation.state.evidence.archived)?;
+        if tail.start != tail.end {
+            segments.push(tail);
+        }
+        let (snapshot, reconstructed) =
+            Simulation::reconstruct_checkpoint_snapshot(self.checkpoint()?, segments)?;
+        let kept = keep_snapshot.then(|| snapshot.clone());
+        let simulation = Simulation::from_snapshot(snapshot)?;
+        reconstructed.verify(&simulation)?;
+        Ok((kept, simulation))
     }
 
     /// Restores and validates a checkpoint plus its archive, then enters the
@@ -2523,34 +2731,9 @@ impl Simulation {
             }
         }
 
-        for reservation in &self.state.evidence.keyed_draw_reservations {
-            promote_dependency(
-                &mut dependencies,
-                reservation.operation_evidence.clone(),
-                identity,
-            );
-            promote_dependency(
-                &mut dependencies,
-                reservation.draw_receipt.evidence.clone(),
-                identity,
-            );
-        }
-        for draw in &self.state.evidence.random_draws {
-            if matches!(draw.address, RandomDrawAddress::OperationV1(_)) {
-                let reference = draw.operation_evidence.clone().ok_or_else(|| {
-                    CanwuError::new(
-                        ErrorCode::ArchiveNotReady,
-                        "operation-keyed retained draw is missing its operation evidence",
-                    )
-                })?;
-                promote_dependency(&mut dependencies, reference, identity);
-                promote_dependency(
-                    &mut dependencies,
-                    EvidenceRef::RandomDraw(draw.id),
-                    identity,
-                );
-            }
-        }
+        // Keyed draws are not dependencies: the keyed-draw ledger answers an
+        // exact retry without reading evidence, and ordinal identities stay
+        // provable from the journal counters after a seal.
 
         for archived in self.state.evidence.archived_command_requests.values() {
             add_command_outcome_dependencies(&mut dependencies, &archived.outcome);
@@ -2892,40 +3075,6 @@ impl Simulation {
         segment.archive = Some(archive.clone());
         verify_archived_segment(&segment)?;
 
-        let receipt_map: BTreeMap<_, _> = receipts
-            .iter()
-            .cloned()
-            .map(|receipt| (receipt.evidence.clone(), receipt))
-            .collect();
-        let mut reservations = Vec::new();
-        for draw in &segment.random_draws {
-            let RandomDrawAddress::OperationV1(address) = &draw.address else {
-                continue;
-            };
-            let operation_evidence = draw.operation_evidence.clone().ok_or_else(|| {
-                archive_error("operation-keyed archived draw is missing operation evidence")
-            })?;
-            let draw_receipt = receipt_map
-                .get(&EvidenceRef::RandomDraw(draw.id))
-                .cloned()
-                .ok_or_else(|| {
-                    archive_error("operation-keyed archived draw is missing its receipt")
-                })?;
-            reservations.push(KeyedDrawReservation {
-                stream: draw.stream.clone(),
-                address: address.clone(),
-                upper_exclusive: draw.upper_exclusive,
-                purpose_hash: super::random::purpose_hash_hex_v1(&draw.purpose)?,
-                result: draw.value,
-                draw_id: draw.id,
-                operation_evidence,
-                draw_receipt,
-            });
-        }
-        reservations.sort_by(|left, right| {
-            (&left.stream, &left.address).cmp(&(&right.stream, &right.address))
-        });
-
         self.state.evidence.archived_boundary_head = self
             .state
             .evidence
@@ -2963,6 +3112,9 @@ impl Simulation {
             .evidence
             .archived_decision_command_requests
             .extend(archived_decision_command_requests);
+        let mut sealed_times = self.state.evidence.sealed_times.clone();
+        sealed_times.extend_from(&self.state.evidence);
+        self.state.evidence.sealed_times = sealed_times;
         self.state.evidence.archived = end;
         self.state.evidence.events.clear();
         self.state.evidence.commands.clear();
@@ -2986,50 +3138,21 @@ impl Simulation {
                 return Err(archive_error("archived evidence receipt was duplicated"));
             }
         }
-        self.state
-            .evidence
-            .keyed_draw_reservations
-            .extend(reservations);
-        self.state
-            .evidence
-            .keyed_draw_reservations
-            .sort_by(|left, right| {
-                (&left.stream, &left.address).cmp(&(&right.stream, &right.address))
-            });
-        if self
-            .state
-            .evidence
-            .keyed_draw_reservations
-            .windows(2)
-            .any(|reservations| {
-                (&reservations[0].stream, &reservations[0].address)
-                    == (&reservations[1].stream, &reservations[1].address)
-            })
-        {
-            return Err(archive_error("archived keyed reservation was duplicated"));
-        }
         retain_reachable_archived_evidence_receipts(
             &mut self.state.evidence.archived_evidence_receipts,
             &dependencies,
-            &self.state.evidence.keyed_draw_reservations,
         );
+        let required = self.receipt_required_references(&dependencies);
         for dependency in &dependencies {
-            if matches!(
-                &dependency.reference,
-                EvidenceRef::DomainRecordVersion(version)
-                    if matches!(
-                        version.established_by,
-                        DomainRecordVersionSource::InitialScenario
-                    )
-            ) {
-                continue;
-            }
-            if !self
-                .state
-                .evidence
-                .archived_evidence_receipts
-                .contains_key(&dependency.reference)
-            {
+            let present = if required.contains(&dependency.reference) {
+                self.state
+                    .evidence
+                    .archived_evidence_receipts
+                    .contains_key(&dependency.reference)
+            } else {
+                sealed_identity_is_counted(&self.state.evidence.archived, &dependency.reference)
+            };
+            if !present {
                 return Err(CanwuError::new(
                     ErrorCode::ArchiveNotReady,
                     "declared evidence was not present in the sealed archive prefix",
@@ -3037,6 +3160,46 @@ impl Simulation {
             }
         }
         Ok(Some(segment))
+    }
+
+    /// Returns the dependencies whose archived receipt a seal must keep
+    /// because a rule reads a fact from it: a payload-required continuation,
+    /// the membership of a domain-record version a boundary established, and
+    /// the ingress provenance of an archived command or decision request.
+    ///
+    /// Every other dependency is an identity-only reference to an ordinal
+    /// journal item (event, command, attempt, ingress, boundary, or draw) or
+    /// an initial-scenario version. At or below the sealed cut the journal
+    /// counters prove it exists, so it needs no receipt, and a rule may cite
+    /// it for the first time after the seal that archived it.
+    fn receipt_required_references(
+        &self,
+        dependencies: &[EvidenceDependency],
+    ) -> BTreeSet<EvidenceRef> {
+        let mut required: BTreeSet<_> = dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.requirement == EvidenceRequirement::PayloadRequired
+                    || matches!(
+                        &dependency.reference,
+                        EvidenceRef::DomainRecordVersion(version)
+                            if !matches!(
+                                version.established_by,
+                                DomainRecordVersionSource::InitialScenario
+                            )
+                    )
+            })
+            .map(|dependency| dependency.reference.clone())
+            .collect();
+        let evidence = &self.state.evidence;
+        required.extend(
+            evidence
+                .archived_ingress_requests
+                .values()
+                .chain(evidence.archived_decision_requests.values())
+                .map(|archived| EvidenceRef::Ingress(archived.receipt.ingress_id)),
+        );
+        required
     }
 
     pub(super) fn checkpoint_state(&self) -> SimulationSnapshot {
@@ -3575,12 +3738,7 @@ impl Simulation {
     ) -> Result<SimulationCheckpoint, CanwuError> {
         let archived_segment_headers = self.state.evidence.archived_segment_headers.clone();
         let evidence_dependencies = self.evidence_dependencies()?;
-        let mut keyed_draw_reservations = self.state.evidence.keyed_draw_reservations.clone();
-        keyed_draw_reservations.sort_by(|left, right| {
-            (&left.stream, &left.address).cmp(&(&right.stream, &right.address))
-        });
-        let required_receipts =
-            required_archived_receipt_references(&evidence_dependencies, &keyed_draw_reservations);
+        let required_receipts = reachable_archived_receipt_references(&evidence_dependencies);
         let archived_evidence_receipts: Vec<_> = self
             .state
             .evidence
@@ -3608,11 +3766,6 @@ impl Simulation {
                 &evidence_dependencies,
             )?,
             evidence_dependencies,
-            keyed_reservation_root: skipped_commitment_root(
-                KEYED_RESERVATION_DOMAIN,
-                &keyed_draw_reservations,
-            )?,
-            keyed_draw_reservations,
         };
         if include_paged_payloads {
             validate_compact_continuation(&checkpoint)?;
@@ -3807,10 +3960,14 @@ impl Simulation {
         })
     }
 
-    fn snapshot_from_checkpoint_and_journal(
+    /// Concatenates a checkpoint and its contiguous evidence prefix into a
+    /// full snapshot and returns it with the compact continuation the
+    /// checkpoint claims, which the caller checks against the one runtime it
+    /// builds from the snapshot.
+    fn reconstruct_checkpoint_snapshot(
         checkpoint: SimulationCheckpoint,
         segments: Vec<EvidenceJournalSegment>,
-    ) -> Result<SimulationSnapshot, CanwuError> {
+    ) -> Result<(SimulationSnapshot, ReconstructedCheckpoint), CanwuError> {
         if checkpoint.format_version != CHECKPOINT_JOURNAL_FORMAT_VERSION {
             return Err(invalid_snapshot_error(format!(
                 "checkpoint-journal format {} is unsupported; this engine reads format {CHECKPOINT_JOURNAL_FORMAT_VERSION}",
@@ -3821,7 +3978,6 @@ impl Simulation {
         let expected_headers = checkpoint.archived_segment_headers;
         let expected_receipts = checkpoint.archived_evidence_receipts;
         let expected_dependencies = checkpoint.evidence_dependencies;
-        let expected_reservations = checkpoint.keyed_draw_reservations;
         let mut snapshot = checkpoint.state;
         if snapshot.snapshot_format_version != SNAPSHOT_FORMAT_VERSION {
             return Err(invalid_snapshot_error(format!(
@@ -3843,7 +3999,6 @@ impl Simulation {
         let mut cursor = EvidenceCursor::default();
         let mut rebuilt_headers = Vec::new();
         let mut rebuilt_receipts = BTreeMap::new();
-        let mut rebuilt_reservations = Vec::new();
         for segment in segments {
             if segment.format_version != CHECKPOINT_JOURNAL_FORMAT_VERSION {
                 return Err(invalid_snapshot_error(format!(
@@ -3885,30 +4040,6 @@ impl Simulation {
                         ));
                     }
                 }
-                for draw in &segment.random_draws {
-                    let RandomDrawAddress::OperationV1(address) = &draw.address else {
-                        continue;
-                    };
-                    let operation_evidence = draw.operation_evidence.clone().ok_or_else(|| {
-                        invalid_snapshot_error("archived keyed draw is missing operation evidence")
-                    })?;
-                    let draw_receipt = rebuilt_receipts
-                        .get(&EvidenceRef::RandomDraw(draw.id))
-                        .cloned()
-                        .ok_or_else(|| {
-                            invalid_snapshot_error("archived keyed draw receipt is missing")
-                        })?;
-                    rebuilt_reservations.push(KeyedDrawReservation {
-                        stream: draw.stream.clone(),
-                        address: address.clone(),
-                        upper_exclusive: draw.upper_exclusive,
-                        purpose_hash: super::random::purpose_hash_hex_v1(&draw.purpose)?,
-                        result: draw.value,
-                        draw_id: draw.id,
-                        operation_evidence,
-                        draw_receipt,
-                    });
-                }
             }
             snapshot.events.extend(segment.events);
             snapshot.commands.extend(segment.commands);
@@ -3923,27 +4054,16 @@ impl Simulation {
                 "evidence-journal segments do not reach the checkpoint journal cut",
             ));
         }
-        rebuilt_reservations.sort_by(|left, right| {
-            (&left.stream, &left.address).cmp(&(&right.stream, &right.address))
-        });
-        let rebuilt_dependencies =
-            Simulation::from_snapshot(snapshot.clone())?.evidence_dependencies()?;
-        retain_reachable_archived_evidence_receipts(
-            &mut rebuilt_receipts,
-            &rebuilt_dependencies,
-            &rebuilt_reservations,
-        );
-        let rebuilt_receipts: Vec<_> = rebuilt_receipts.into_values().collect();
-        if rebuilt_headers != expected_headers
-            || rebuilt_receipts != expected_receipts
-            || rebuilt_dependencies != expected_dependencies
-            || rebuilt_reservations != expected_reservations
-        {
-            return Err(invalid_snapshot_error(
-                "checkpoint compact continuation does not match its reconstructed authoritative indexes",
-            ));
-        }
-        Ok(snapshot)
+        Ok((
+            snapshot,
+            ReconstructedCheckpoint {
+                rebuilt_headers,
+                rebuilt_receipts,
+                expected_headers,
+                expected_receipts,
+                expected_dependencies,
+            },
+        ))
     }
 
     /// Restores a checkpoint after proving a contiguous journal prefix.
@@ -3951,9 +4071,11 @@ impl Simulation {
         checkpoint: SimulationCheckpoint,
         segments: Vec<EvidenceJournalSegment>,
     ) -> Result<Self, CanwuError> {
-        Self::from_snapshot(Self::snapshot_from_checkpoint_and_journal(
-            checkpoint, segments,
-        )?)
+        let (snapshot, reconstructed) =
+            Self::reconstruct_checkpoint_snapshot(checkpoint, segments)?;
+        let simulation = Self::from_snapshot(snapshot)?;
+        reconstructed.verify(&simulation)?;
+        Ok(simulation)
     }
 
     /// Restores a portable checkpoint-journal bundle.

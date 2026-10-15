@@ -45,7 +45,7 @@ categories = ["simulation", "game-development"]
 rust-version = "1.88"
 
 [workspace.dependencies]
-blake3 = "1"
+blake3 = "1.8"
 im = { version = "15", features = ["serde"] }
 canwu-api = { path = "crates/api/canwu-api", version = "=0.15.0" }
 canwu-core = { path = "crates/foundation/canwu-core", version = "=0.15.0" }

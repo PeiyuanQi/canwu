@@ -169,6 +169,145 @@ impl PluginArchiveObjectProvider for Canwu {
     }
 }
 
+impl PluginArchiveObjectProvider for CompactedCanwu {
+    fn load_plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.plugin_archive_object(namespace, object_id)
+    }
+}
+
+/// The reads and canonical ingress that host-facing helpers use on one
+/// simulation run, shared by [`Canwu`] and [`CompactedCanwu`].
+///
+/// It is a read-and-ingress contract: it settles nothing, admits nothing,
+/// and changes no state except by queuing canonical ingress, which is checked
+/// at admission and again at settlement as from either handle. Its reads are
+/// detached trusted-host reads; do not pass them to player, agent, observer,
+/// or remote clients. Every method behaves as the method of the same name on
+/// the handle. Typed record reads are free functions over it, such as
+/// [`typed_domain_record`], so the trait stays usable as `dyn CanwuRun`.
+///
+/// Extension helpers take `&H` or `&mut H` with `H: CanwuRun + ?Sized`, so a
+/// host drives them with either handle.
+pub trait CanwuRun {
+    /// The committed simulation time.
+    fn time(&self) -> SimTime;
+    /// The persisted authoritative transaction revision.
+    fn revision(&self) -> u64;
+    /// The checkpoint hash of the current state.
+    fn checkpoint_hash(&self) -> &str;
+    /// Whether an entity is part of the run.
+    fn entity_exists(&self, entity: &EntityRef) -> bool;
+    /// The current version of one domain record.
+    fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord>;
+    /// Every current domain record.
+    fn domain_records(&self) -> Box<dyn Iterator<Item = &DomainRecord> + '_>;
+    /// The exact identity of a record's current version.
+    fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError>;
+    /// Whether an exact domain-record version exists in current, retained,
+    /// or kept evidence.
+    ///
+    /// On a sealed run a superseded version that is not declared as a
+    /// dependency is known only while an earlier seal kept its receipt, so the
+    /// answer can differ between a sealed run and an unsealed one; a rule that
+    /// must decide alike in both cites a current version or declares the
+    /// version as an identity-only dependency.
+    fn domain_record_version_evidence_exists(&self, reference: &DomainRecordVersionRef) -> bool;
+    /// The boundaries of the half-open window `from..to`.
+    fn boundaries_between(&self, from: SimTime, to: SimTime) -> Result<BoundaryWindow, CanwuError>;
+    /// How far back the run keeps settled boundaries.
+    fn boundary_schedule_horizon(&self) -> SimDuration;
+    /// Queues a public plugin packet.
+    fn enqueue_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+    ) -> Result<IngressReceipt, CanwuError>;
+    /// Queues a plugin packet of an internal packet type through its owning
+    /// plugin's opaque registration permit.
+    fn enqueue_permitted_plugin_ingress(
+        &mut self,
+        request: PluginIngressRequest,
+        permit: &PluginIngressPermit,
+    ) -> Result<IngressReceipt, CanwuError>;
+}
+
+macro_rules! impl_canwu_run {
+    ($handle:ty) => {
+        impl CanwuRun for $handle {
+            fn time(&self) -> SimTime {
+                Self::time(self)
+            }
+            fn revision(&self) -> u64 {
+                Self::revision(self)
+            }
+            fn checkpoint_hash(&self) -> &str {
+                Self::checkpoint_hash(self)
+            }
+            fn entity_exists(&self, entity: &EntityRef) -> bool {
+                Self::entity_exists(self, entity)
+            }
+            fn domain_record(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+                Self::domain_record(self, reference)
+            }
+            fn domain_records(&self) -> Box<dyn Iterator<Item = &DomainRecord> + '_> {
+                Box::new(Self::domain_records(self))
+            }
+            fn current_domain_record_version(
+                &self,
+                reference: &DomainRecordRef,
+            ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+                Self::current_domain_record_version(self, reference)
+            }
+            fn domain_record_version_evidence_exists(
+                &self,
+                reference: &DomainRecordVersionRef,
+            ) -> bool {
+                Self::domain_record_version_evidence_exists(self, reference)
+            }
+            fn boundaries_between(
+                &self,
+                from: SimTime,
+                to: SimTime,
+            ) -> Result<BoundaryWindow, CanwuError> {
+                Self::boundaries_between(self, from, to)
+            }
+            fn boundary_schedule_horizon(&self) -> SimDuration {
+                Self::boundary_schedule_horizon(self)
+            }
+            fn enqueue_plugin_ingress(
+                &mut self,
+                request: PluginIngressRequest,
+            ) -> Result<IngressReceipt, CanwuError> {
+                Self::enqueue_plugin_ingress(self, request)
+            }
+            fn enqueue_permitted_plugin_ingress(
+                &mut self,
+                request: PluginIngressRequest,
+                permit: &PluginIngressPermit,
+            ) -> Result<IngressReceipt, CanwuError> {
+                Self::enqueue_permitted_plugin_ingress(self, request, permit)
+            }
+        }
+    };
+}
+
+impl_canwu_run!(Canwu);
+impl_canwu_run!(CompactedCanwu);
+
+/// The current version of a typed domain record, from either handle.
+pub fn typed_domain_record<'a, T: DomainRecordType, R: CanwuRun + ?Sized>(
+    run: &'a R,
+    reference: &TypedDomainRecordRef<T>,
+) -> Option<&'a DomainRecord> {
+    run.domain_record(reference.as_untyped())
+}
+
 impl Canwu {
     #[must_use]
     pub const fn version() -> &'static str {
@@ -426,10 +565,10 @@ impl Canwu {
         self.simulation.evidence_exists(reference)
     }
 
-    /// Returns when retained evidence first became authoritative.
-    ///
-    /// Compacted identity-only receipts return `None`; load the archived
-    /// evidence body before making decisions that require temporal ordering.
+    /// Returns when evidence first became authoritative: a retained record's
+    /// own time, the sealed time index's time for a sealed ordinal record,
+    /// and a domain-record version's establishing time whenever the version
+    /// is known to exist.
     #[must_use]
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
         self.simulation.evidence_time(reference)
@@ -1007,175 +1146,271 @@ impl Canwu {
         holder: KnowledgeHolderRef,
         query: &KnowledgeQuery,
     ) -> Result<KnowledgeQueryResult, CanwuError> {
-        self.simulation
-            .knowledge()
-            .query_current(
-                holder,
-                query,
-                self.simulation.boundaries().last().map(|value| value.id),
-            )
-            .map_err(map_knowledge_query_error)
+        admin_query_knowledge(&self.simulation, holder, query)
     }
 
     /// Creates the restricted viewer dictated entirely by the persisted run
     /// policy and seat binding.
     pub fn viewer(&self) -> Result<CanwuViewer<'_>, CanwuError> {
-        let principal = self.declared_observation_principal()?;
-        Ok(CanwuViewer {
-            canwu: self,
-            context: KnowledgeViewContext { principal },
-        })
+        viewer(&self.simulation)
     }
 
     /// Character-seat and compatibility convenience. It never upgrades an
     /// institution, public, research, or developer policy to a person.
     pub fn viewer_for_actor(&self, actor: PersonId) -> Result<CanwuViewer<'_>, CanwuError> {
-        if !self.entity_exists(&EntityRef::Person(actor)) {
-            return Err(CanwuError::new(
-                ErrorCode::ActorNotFound,
-                format!("actor {actor} was not found"),
-            ));
-        }
-        let principal = match self.run_configuration().declared() {
-            Some(configuration)
-                if configuration.observation == ObservationPolicy::ActorBound
-                    && configuration.seat == SeatPolicy::CharacterBound
-                    && configuration
-                        .seat_binding
-                        .as_ref()
-                        .and_then(|binding| binding.actor)
-                        == Some(actor) =>
-            {
-                ObservationPrincipal::Person(actor)
-            }
-            Some(_) => {
-                return Err(CanwuError::new(
-                    ErrorCode::InvalidAuthority,
-                    "the persisted run policy does not authorize a character viewer",
-                ));
-            }
-            None => ObservationPrincipal::Person(actor),
-        };
-        Ok(CanwuViewer {
-            canwu: self,
-            context: KnowledgeViewContext { principal },
-        })
+        viewer_for_actor(&self.simulation, actor)
     }
 
     pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
-        let viewer = self.viewer_for_actor(actor)?;
-        Ok(ViewerContext {
-            principal: viewer.context.principal.clone(),
-            observation: ObservationPolicy::ActorBound,
-            checkpoint_hash: self.checkpoint_hash().to_owned(),
-        })
-    }
-
-    fn declared_observation_principal(&self) -> Result<ObservationPrincipal, CanwuError> {
-        let Some(configuration) = self.run_configuration().declared() else {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidAuthority,
-                "legacy runs require viewer_for_actor with an existing character",
-            ));
-        };
-        match configuration.observation {
-            ObservationPolicy::ActorBound => match configuration.seat {
-                SeatPolicy::CharacterBound => configuration
-                    .seat_binding
-                    .as_ref()
-                    .and_then(|binding| binding.actor)
-                    .map(ObservationPrincipal::Person)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidAuthority,
-                            "character-bound observation lacks an actor binding",
-                        )
-                    }),
-                SeatPolicy::InstitutionBound => configuration
-                    .seat_binding
-                    .as_ref()
-                    .and_then(|binding| binding.institution.clone())
-                    .map(ObservationPrincipal::Institution)
-                    .ok_or_else(|| {
-                        CanwuError::new(
-                            ErrorCode::InvalidAuthority,
-                            "institution-bound observation lacks an institution binding",
-                        )
-                    }),
-                SeatPolicy::ObserverSeat | SeatPolicy::AdvisorSeat | SeatPolicy::None => {
-                    Err(CanwuError::new(
-                        ErrorCode::InvalidAuthority,
-                        "actor-bound observation requires a character or institution seat",
-                    ))
-                }
-            },
-            ObservationPolicy::PublicObserver => Ok(ObservationPrincipal::Public),
-            ObservationPolicy::ResearchFull => Ok(ObservationPrincipal::Research),
-            ObservationPolicy::DeveloperDiagnostic => Ok(ObservationPrincipal::Developer),
-        }
+        viewer_context(&self.simulation, actor)
     }
 
     #[must_use]
     pub fn explain(&self, request: &ExplanationRequest) -> Explanation {
-        match request {
-            ExplanationRequest::Event(event_id) => self.explain_event(*event_id),
-            ExplanationRequest::Failure(error) => Explanation {
-                summary: error.message.clone(),
-                causal_chain: vec![ExplanationStep {
-                    label: format!("Validation failed: {:?}", error.code),
-                    event: None,
-                }],
-            },
-        }
-    }
-
-    fn explain_event(&self, event_id: EventId) -> Explanation {
-        let mut chain = Vec::new();
-        let events = self.events();
-        let mut current = event_by_id(events, event_id);
-        while let Some(event) = current {
-            chain.push(ExplanationStep {
-                label: event.summary.clone(),
-                event: Some(event.id),
-            });
-            current = match &event.cause {
-                Some(CauseRef::Boundary(boundary)) => {
-                    chain.push(ExplanationStep {
-                        label: format!("Committed by boundary {boundary}"),
-                        event: None,
-                    });
-                    None
-                }
-                Some(CauseRef::Event(parent)) => event_by_id(events, *parent),
-                Some(CauseRef::Command(command)) => {
-                    chain.push(ExplanationStep {
-                        label: format!("Accepted command {command}"),
-                        event: None,
-                    });
-                    None
-                }
-                Some(CauseRef::System(system)) => {
-                    chain.push(ExplanationStep {
-                        label: format!("Produced by system {system}"),
-                        event: None,
-                    });
-                    None
-                }
-                None => None,
-            };
-        }
-        Explanation {
-            summary: chain.first().map_or_else(
-                || "Event was not found".to_owned(),
-                |step| step.label.clone(),
-            ),
-            causal_chain: chain,
-        }
+        explain(&self.simulation, request)
     }
 }
 
+/// The reads the restricted viewer and the explanation make, shared by a
+/// full-history runtime and a compact one. Evidence reads see what the
+/// runtime retains.
+trait ViewerSource {
+    fn source_knowledge(&self) -> &KnowledgeSnapshot;
+    fn source_checkpoint_hash(&self) -> &str;
+    fn source_events(&self) -> &[SimEvent];
+    fn source_event_audience(&self, event: &SimEvent) -> EventAudience;
+    fn source_boundaries(&self) -> &[BoundaryRecord];
+    fn source_entity_exists(&self, entity: &EntityRef) -> bool;
+    fn source_latest_boundary_id(&self) -> Option<BoundaryId>;
+    fn source_run_configuration(&self) -> &RunConfigurationSnapshot;
+}
+
+impl ViewerSource for Simulation {
+    fn source_knowledge(&self) -> &KnowledgeSnapshot {
+        self.knowledge()
+    }
+    fn source_checkpoint_hash(&self) -> &str {
+        self.checkpoint_hash()
+    }
+    fn source_events(&self) -> &[SimEvent] {
+        self.events()
+    }
+    fn source_event_audience(&self, event: &SimEvent) -> EventAudience {
+        self.event_audience(event)
+    }
+    fn source_boundaries(&self) -> &[BoundaryRecord] {
+        self.boundaries()
+    }
+    fn source_entity_exists(&self, entity: &EntityRef) -> bool {
+        self.entity_exists(entity)
+    }
+    fn source_latest_boundary_id(&self) -> Option<BoundaryId> {
+        self.latest_boundary_id()
+    }
+    fn source_run_configuration(&self) -> &RunConfigurationSnapshot {
+        self.run_configuration()
+    }
+}
+
+impl ViewerSource for CompactedSimulation {
+    fn source_knowledge(&self) -> &KnowledgeSnapshot {
+        self.knowledge()
+    }
+    fn source_checkpoint_hash(&self) -> &str {
+        self.checkpoint_hash()
+    }
+    fn source_events(&self) -> &[SimEvent] {
+        self.events()
+    }
+    fn source_event_audience(&self, event: &SimEvent) -> EventAudience {
+        self.event_audience(event)
+    }
+    fn source_boundaries(&self) -> &[BoundaryRecord] {
+        self.boundaries()
+    }
+    fn source_entity_exists(&self, entity: &EntityRef) -> bool {
+        self.entity_exists(entity)
+    }
+    fn source_latest_boundary_id(&self) -> Option<BoundaryId> {
+        self.latest_boundary_id()
+    }
+    fn source_run_configuration(&self) -> &RunConfigurationSnapshot {
+        self.run_configuration()
+    }
+}
+
+fn admin_query_knowledge(
+    source: &dyn ViewerSource,
+    holder: KnowledgeHolderRef,
+    query: &KnowledgeQuery,
+) -> Result<KnowledgeQueryResult, CanwuError> {
+    source
+        .source_knowledge()
+        .query_current(holder, query, source.source_latest_boundary_id())
+        .map_err(map_knowledge_query_error)
+}
+
+fn viewer(source: &dyn ViewerSource) -> Result<CanwuViewer<'_>, CanwuError> {
+    let principal = declared_observation_principal(source)?;
+    Ok(CanwuViewer {
+        source,
+        context: KnowledgeViewContext { principal },
+    })
+}
+
+fn viewer_for_actor(
+    source: &dyn ViewerSource,
+    actor: PersonId,
+) -> Result<CanwuViewer<'_>, CanwuError> {
+    if !source.source_entity_exists(&EntityRef::Person(actor)) {
+        return Err(CanwuError::new(
+            ErrorCode::ActorNotFound,
+            format!("actor {actor} was not found"),
+        ));
+    }
+    let principal = match source.source_run_configuration().declared() {
+        Some(configuration)
+            if configuration.observation == ObservationPolicy::ActorBound
+                && configuration.seat == SeatPolicy::CharacterBound
+                && configuration
+                    .seat_binding
+                    .as_ref()
+                    .and_then(|binding| binding.actor)
+                    == Some(actor) =>
+        {
+            ObservationPrincipal::Person(actor)
+        }
+        Some(_) => {
+            return Err(CanwuError::new(
+                ErrorCode::InvalidAuthority,
+                "the persisted run policy does not authorize a character viewer",
+            ));
+        }
+        None => ObservationPrincipal::Person(actor),
+    };
+    Ok(CanwuViewer {
+        source,
+        context: KnowledgeViewContext { principal },
+    })
+}
+
+fn viewer_context(source: &dyn ViewerSource, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+    let viewer = viewer_for_actor(source, actor)?;
+    Ok(ViewerContext {
+        principal: viewer.context.principal.clone(),
+        observation: ObservationPolicy::ActorBound,
+        checkpoint_hash: source.source_checkpoint_hash().to_owned(),
+    })
+}
+
+fn declared_observation_principal(
+    source: &dyn ViewerSource,
+) -> Result<ObservationPrincipal, CanwuError> {
+    let Some(configuration) = source.source_run_configuration().declared() else {
+        return Err(CanwuError::new(
+            ErrorCode::InvalidAuthority,
+            "legacy runs require viewer_for_actor with an existing character",
+        ));
+    };
+    match configuration.observation {
+        ObservationPolicy::ActorBound => match configuration.seat {
+            SeatPolicy::CharacterBound => configuration
+                .seat_binding
+                .as_ref()
+                .and_then(|binding| binding.actor)
+                .map(ObservationPrincipal::Person)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidAuthority,
+                        "character-bound observation lacks an actor binding",
+                    )
+                }),
+            SeatPolicy::InstitutionBound => configuration
+                .seat_binding
+                .as_ref()
+                .and_then(|binding| binding.institution.clone())
+                .map(ObservationPrincipal::Institution)
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidAuthority,
+                        "institution-bound observation lacks an institution binding",
+                    )
+                }),
+            SeatPolicy::ObserverSeat | SeatPolicy::AdvisorSeat | SeatPolicy::None => {
+                Err(CanwuError::new(
+                    ErrorCode::InvalidAuthority,
+                    "actor-bound observation requires a character or institution seat",
+                ))
+            }
+        },
+        ObservationPolicy::PublicObserver => Ok(ObservationPrincipal::Public),
+        ObservationPolicy::ResearchFull => Ok(ObservationPrincipal::Research),
+        ObservationPolicy::DeveloperDiagnostic => Ok(ObservationPrincipal::Developer),
+    }
+}
+
+fn explain(source: &dyn ViewerSource, request: &ExplanationRequest) -> Explanation {
+    match request {
+        ExplanationRequest::Event(event_id) => explain_event(source, *event_id),
+        ExplanationRequest::Failure(error) => Explanation {
+            summary: error.message.clone(),
+            causal_chain: vec![ExplanationStep {
+                label: format!("Validation failed: {:?}", error.code),
+                event: None,
+            }],
+        },
+    }
+}
+
+fn explain_event(source: &dyn ViewerSource, event_id: EventId) -> Explanation {
+    let mut chain = Vec::new();
+    let events = source.source_events();
+    let mut current = event_by_id(events, event_id);
+    while let Some(event) = current {
+        chain.push(ExplanationStep {
+            label: event.summary.clone(),
+            event: Some(event.id),
+        });
+        current = match &event.cause {
+            Some(CauseRef::Boundary(boundary)) => {
+                chain.push(ExplanationStep {
+                    label: format!("Committed by boundary {boundary}"),
+                    event: None,
+                });
+                None
+            }
+            Some(CauseRef::Event(parent)) => event_by_id(events, *parent),
+            Some(CauseRef::Command(command)) => {
+                chain.push(ExplanationStep {
+                    label: format!("Accepted command {command}"),
+                    event: None,
+                });
+                None
+            }
+            Some(CauseRef::System(system)) => {
+                chain.push(ExplanationStep {
+                    label: format!("Produced by system {system}"),
+                    event: None,
+                });
+                None
+            }
+            None => None,
+        };
+    }
+    Explanation {
+        summary: chain.first().map_or_else(
+            || "Event was not found".to_owned(),
+            |step| step.label.clone(),
+        ),
+        causal_chain: chain,
+    }
+}
+
+/// Finds an event in a retained, ID-ordered event tail, which starts after
+/// the last seal in a compact runtime.
 fn event_by_id(events: &[SimEvent], event_id: EventId) -> Option<&SimEvent> {
-    let index = usize::try_from(event_id.get().checked_sub(1)?).ok()?;
+    let first = events.first()?.id.get();
+    let index = usize::try_from(event_id.get().checked_sub(first)?).ok()?;
     events.get(index).filter(|event| event.id == event_id)
 }
 
@@ -1251,6 +1486,208 @@ impl CompactedCanwu {
 
     pub fn evidence_cursor(&self) -> Result<EvidenceCursor, CanwuError> {
         self.simulation.evidence_cursor()
+    }
+
+    /// Copies the compact runtime for a look-ahead or an alternative
+    /// reality, as [`Canwu::fork`] does. The copy keeps the seal tokens
+    /// already committed and starts with profiling off.
+    #[must_use]
+    pub fn fork(&self) -> Self {
+        Self {
+            simulation: self.simulation.fork(),
+        }
+    }
+
+    /// Attaches caller-owned package archive storage for authenticated cold
+    /// history resolution during admission, settlement, and queries, as
+    /// [`Canwu::set_plugin_archive_object_provider`] does.
+    pub fn set_plugin_archive_object_provider(
+        &mut self,
+        provider: std::rc::Rc<dyn PluginArchiveObjectProvider>,
+    ) {
+        self.simulation.set_plugin_archive_object_provider(provider);
+    }
+
+    /// Loads one opaque package archive object from the attached provider.
+    /// Package integrations authenticate the bytes against their committed
+    /// archive roots before use.
+    pub fn plugin_archive_object(
+        &self,
+        namespace: &str,
+        object_id: &str,
+    ) -> Result<Option<Vec<u8>>, CanwuError> {
+        self.simulation.plugin_archive_object(namespace, object_id)
+    }
+
+    /// The commitment-format hash of authoritative state. A compact run and
+    /// an unsealed run with the same state have the same hash.
+    pub fn authoritative_state_hash(&self) -> Result<String, CanwuError> {
+        self.simulation.authoritative_state_hash()
+    }
+
+    /// The hash of the run manifest this run was created with.
+    #[must_use]
+    pub fn run_manifest_hash(&self) -> &str {
+        self.simulation.run_manifest_hash()
+    }
+
+    /// The persisted run configuration.
+    #[must_use]
+    pub const fn run_configuration(&self) -> &RunConfigurationSnapshot {
+        self.simulation.run_configuration()
+    }
+
+    /// The run's type schema.
+    #[must_use]
+    pub const fn schema(&self) -> &SchemaRegistry {
+        self.simulation.schema()
+    }
+
+    /// The persisted descriptors of the run's plugins.
+    pub fn plugin_descriptors(&self) -> impl Iterator<Item = &PluginDescriptor> {
+        self.simulation.plugin_descriptors()
+    }
+
+    /// Whether an evidence identity exists at this cut. A sealed event,
+    /// command, command attempt, ingress record, boundary, or draw exists
+    /// whether or not the seal kept its receipt; see
+    /// [`Canwu::evidence_exists`].
+    #[must_use]
+    pub fn evidence_exists(&self, reference: &EvidenceRef) -> bool {
+        self.simulation.evidence_exists(reference)
+    }
+
+    /// When evidence became authoritative, answered for sealed ordinal
+    /// evidence as an unsealed run answers; see [`Canwu::evidence_time`].
+    #[must_use]
+    pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
+        self.simulation.evidence_time(reference)
+    }
+
+    /// The body of one exact domain-record version. `None` covers both a
+    /// version that does not exist and one whose body a seal removed, so a
+    /// host check built on it depends on what the run has sealed. The
+    /// current version always resolves.
+    #[must_use]
+    pub fn domain_record_version(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> Option<DomainRecord> {
+        self.simulation.domain_record_version(reference)
+    }
+
+    /// Whether an exact domain-record version exists in current, retained,
+    /// or kept evidence.
+    ///
+    /// On a sealed run a superseded version that is not declared as a
+    /// dependency is known only while an earlier seal kept its receipt, so the
+    /// answer can differ between a sealed run and an unsealed one; a rule that
+    /// must decide alike in both cites a current version or declares the
+    /// version as an identity-only dependency.
+    #[must_use]
+    pub fn domain_record_version_evidence_exists(
+        &self,
+        reference: &DomainRecordVersionRef,
+    ) -> bool {
+        self.simulation
+            .domain_record_version_evidence_exists(reference)
+    }
+
+    /// The exact identity of a record's current version, which no seal can
+    /// change.
+    pub fn current_domain_record_version(
+        &self,
+        reference: &DomainRecordRef,
+    ) -> Result<Option<DomainRecordVersionRef>, CanwuError> {
+        self.simulation.current_domain_record_version(reference)
+    }
+
+    /// Every current domain record.
+    pub fn domain_records(&self) -> impl Iterator<Item = &DomainRecord> {
+        self.simulation.domain_records()
+    }
+
+    /// Returns one trusted-host page bound to an authoritative revision, as
+    /// [`Canwu::domain_record_page`] does.
+    pub fn domain_record_page(
+        &self,
+        kind: &DomainRecordKind,
+        after: Option<&DomainRecordRef>,
+        limit: usize,
+        expected_revision: Option<u64>,
+    ) -> Result<DomainRecordPage, CanwuError> {
+        self.simulation
+            .domain_record_page(kind, after, limit, expected_revision)
+    }
+
+    /// The retained event tail, after the last seal.
+    #[must_use]
+    pub fn events(&self) -> &[SimEvent] {
+        self.simulation.events()
+    }
+
+    /// The retained accepted-command tail, after the last seal.
+    #[must_use]
+    pub fn commands(&self) -> &[CommandRecord] {
+        self.simulation.command_log()
+    }
+
+    /// The retained boundary tail, after the last seal.
+    #[must_use]
+    pub fn boundaries(&self) -> &[BoundaryRecord] {
+        self.simulation.boundaries()
+    }
+
+    /// The retained command-attempt tail, after the last seal.
+    #[must_use]
+    pub fn command_attempts(&self) -> &[CommandAttemptRecord] {
+        self.simulation.command_attempts()
+    }
+
+    /// The retained ingress tail, after the last seal.
+    #[must_use]
+    pub fn ingress_log(&self) -> &[IngressRecord] {
+        self.simulation.ingress_log()
+    }
+
+    /// The retained random-draw tail, after the last seal.
+    #[must_use]
+    pub fn random_draws(&self) -> &[RandomDrawRecord] {
+        self.simulation.random_draws()
+    }
+
+    /// Trusted host/admin holder query, as [`Canwu::admin_query_knowledge`]
+    /// does. Player-facing callers must use a restricted [`CanwuViewer`].
+    pub fn admin_query_knowledge(
+        &self,
+        holder: KnowledgeHolderRef,
+        query: &KnowledgeQuery,
+    ) -> Result<KnowledgeQueryResult, CanwuError> {
+        admin_query_knowledge(&self.simulation, holder, query)
+    }
+
+    /// Creates the restricted viewer dictated by the persisted run policy
+    /// and seat binding, as [`Canwu::viewer`] does. Its evidence-backed reads
+    /// (`visible_changes_since`, `evaluation_traces`) see the retained tail.
+    pub fn viewer(&self) -> Result<CanwuViewer<'_>, CanwuError> {
+        viewer(&self.simulation)
+    }
+
+    /// Character-seat convenience, as [`Canwu::viewer_for_actor`] does.
+    pub fn viewer_for_actor(&self, actor: PersonId) -> Result<CanwuViewer<'_>, CanwuError> {
+        viewer_for_actor(&self.simulation, actor)
+    }
+
+    /// The viewer context of a character seat, as [`Canwu::viewer_context`]
+    /// returns it.
+    pub fn viewer_context(&self, actor: PersonId) -> Result<ViewerContext, CanwuError> {
+        viewer_context(&self.simulation, actor)
+    }
+
+    /// Explains an event from the retained tail, as [`Canwu::explain`] does.
+    #[must_use]
+    pub fn explain(&self, request: &ExplanationRequest) -> Explanation {
+        explain(&self.simulation, request)
     }
 
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint, CanwuError> {
@@ -1738,7 +2175,7 @@ struct KnowledgeViewContext {
 /// Restricted player/agent/observer API. It deliberately exposes no raw
 /// snapshot, event, boundary, domain-record, or audit-origin access.
 pub struct CanwuViewer<'a> {
-    canwu: &'a Canwu,
+    source: &'a dyn ViewerSource,
     context: KnowledgeViewContext,
 }
 
@@ -1766,7 +2203,7 @@ impl CanwuViewer<'_> {
                 ));
             }
         };
-        self.canwu.admin_query_knowledge(holder, query)
+        admin_query_knowledge(self.source, holder, query)
     }
 
     /// Selects an existing holder under an explicit research/developer policy.
@@ -1782,13 +2219,13 @@ impl CanwuViewer<'_> {
             | ObservationPrincipal::Institution(_)
             | ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
         }
-        if !knowledge_holder_exists(self.canwu, &holder) {
+        if !knowledge_holder_exists(self.source, &holder) {
             return Err(CanwuError::new(
                 ErrorCode::InvalidKnowledgeHolder,
                 "the requested knowledge holder does not exist",
             ));
         }
-        self.canwu.admin_query_knowledge(holder, query)
+        admin_query_knowledge(self.source, holder, query)
     }
 
     /// Returns one audit-bearing stored record only for research/developer
@@ -1804,7 +2241,7 @@ impl CanwuViewer<'_> {
             | ObservationPrincipal::Institution(_)
             | ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
         }
-        if !knowledge_holder_exists(self.canwu, holder) {
+        if !knowledge_holder_exists(self.source, holder) {
             return Err(CanwuError::new(
                 ErrorCode::InvalidKnowledgeHolder,
                 "the requested knowledge holder does not exist",
@@ -1816,8 +2253,8 @@ impl CanwuViewer<'_> {
                 "holder-relative knowledge record ID is outside the supported range",
             )
         })?;
-        self.canwu
-            .knowledge()
+        self.source
+            .source_knowledge()
             .for_holder(holder)
             .and_then(|records| records.values().nth(index))
             .cloned()
@@ -1834,14 +2271,14 @@ impl CanwuViewer<'_> {
         let context = ViewerContext {
             principal: self.context.principal.clone(),
             observation: observation_for_principal(&self.context.principal),
-            checkpoint_hash: self.canwu.checkpoint_hash().to_owned(),
+            checkpoint_hash: self.source.source_checkpoint_hash().to_owned(),
         };
-        self.canwu
-            .events()
+        self.source
+            .source_events()
             .iter()
             .filter(|event| event.timestamp > since)
             .filter_map(|event| {
-                let audience = self.canwu.simulation.event_audience(event);
+                let audience = self.source.source_event_audience(event);
                 visible_change(&context, event, &audience)
             })
             .collect()
@@ -1881,18 +2318,18 @@ impl CanwuViewer<'_> {
                 (entity.clone(), KnowledgeHolderRef::Entity(entity.clone()))
             }
             ObservationPrincipal::Research | ObservationPrincipal::Developer => {
-                return Ok(self.canwu.evaluation_trace_views(subject, after, None));
+                return Ok(evaluation_trace_views(self.source, subject, after, None));
             }
             ObservationPrincipal::Public => return Err(invalid_knowledge_authority()),
         };
         if &own == subject {
-            return Ok(self.canwu.evaluation_trace_views(subject, after, None));
+            return Ok(evaluation_trace_views(self.source, subject, after, None));
         }
         // Every generic ledger record is committed by exactly one boundary
         // knowledge change, so the first change naming the subject is the
         // exact cut at which the holder learned of it. A next-boundary
         // publication becomes known only once its boundary has settled.
-        let learned = self.canwu.boundaries().iter().find_map(|boundary| {
+        let learned = self.source.source_boundaries().iter().find_map(|boundary| {
             boundary
                 .knowledge_changes
                 .iter()
@@ -1912,38 +2349,35 @@ impl CanwuViewer<'_> {
                 .min()
         });
         Ok(learned.map_or_else(Vec::new, |learned| {
-            self.canwu
-                .evaluation_trace_views(subject, after, Some(learned))
+            evaluation_trace_views(self.source, subject, after, Some(learned))
         }))
     }
 }
 
-impl Canwu {
-    fn evaluation_trace_views(
-        &self,
-        subject: &EntityRef,
-        after: Option<BoundaryId>,
-        learned: Option<(BoundaryId, BoundaryPhase)>,
-    ) -> Vec<EvaluationTraceView> {
-        let boundaries = self.boundaries();
-        let start = after.map_or(0, |after| {
-            boundaries.partition_point(|boundary| boundary.id <= after)
-        });
-        boundaries[start..]
-            .iter()
-            .flat_map(|boundary| {
-                boundary
-                    .evaluation_traces
-                    .iter()
-                    .map(move |entry| (boundary.id, entry))
-            })
-            .filter(|(boundary, entry)| {
-                &entry.trace.subject == subject
-                    && learned.is_none_or(|learned| learned < (*boundary, entry.phase))
-            })
-            .map(|(_, entry)| EvaluationTraceView::from(&entry.trace))
-            .collect()
-    }
+fn evaluation_trace_views(
+    source: &dyn ViewerSource,
+    subject: &EntityRef,
+    after: Option<BoundaryId>,
+    learned: Option<(BoundaryId, BoundaryPhase)>,
+) -> Vec<EvaluationTraceView> {
+    let boundaries = source.source_boundaries();
+    let start = after.map_or(0, |after| {
+        boundaries.partition_point(|boundary| boundary.id <= after)
+    });
+    boundaries[start..]
+        .iter()
+        .flat_map(|boundary| {
+            boundary
+                .evaluation_traces
+                .iter()
+                .map(move |entry| (boundary.id, entry))
+        })
+        .filter(|(boundary, entry)| {
+            &entry.trace.subject == subject
+                && learned.is_none_or(|learned| learned < (*boundary, entry.phase))
+        })
+        .map(|(_, entry)| EvaluationTraceView::from(&entry.trace))
+        .collect()
 }
 
 fn knowledge_names_subject(record: &KnowledgeRecord, subject: &EntityRef) -> bool {
@@ -2014,10 +2448,12 @@ fn invalid_knowledge_authority() -> CanwuError {
     )
 }
 
-fn knowledge_holder_exists(canwu: &Canwu, holder: &KnowledgeHolderRef) -> bool {
+fn knowledge_holder_exists(source: &dyn ViewerSource, holder: &KnowledgeHolderRef) -> bool {
     match holder {
-        KnowledgeHolderRef::Person(actor) => canwu.entity_exists(&EntityRef::Person(*actor)),
-        KnowledgeHolderRef::Entity(entity) => canwu.entity_exists(entity),
+        KnowledgeHolderRef::Person(actor) => {
+            source.source_entity_exists(&EntityRef::Person(*actor))
+        }
+        KnowledgeHolderRef::Entity(entity) => source.source_entity_exists(entity),
     }
 }
 

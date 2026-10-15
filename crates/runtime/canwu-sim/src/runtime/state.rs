@@ -3,10 +3,10 @@ use super::{
     CommandAttemptRecord, CommandOutcome, CommandRecord, CommandRequestId, CommitmentRoots,
     DecisionRequestId, DecisionState, DomainRecordRef, EntityRef, ErrorCode, EvidenceCursor,
     EvidenceRef, Government, GovernmentId, IngressQueueKey, IngressReceipt, IngressRecord,
-    KeyedDrawReservation, KnowledgeSnapshot, PersistentDomainRecordStore, Person,
-    PersonAvailability, PersonId, PluginComponentKey, PluginComponentRecord, RandomDrawRecord,
-    RandomStreamKey, RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest,
-    Scenario, ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
+    KnowledgeSnapshot, PersistentDomainRecordStore, Person, PersonAvailability, PersonId,
+    PluginComponentKey, PluginComponentRecord, RandomDrawRecord, RandomStreamKey,
+    RandomStreamState, Route, RouteId, RunConfigurationSnapshot, RunManifest, Scenario,
+    ScheduleKey, ScheduledAction, SimEvent, SimTime, Territory, TerritoryId,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,14 +31,99 @@ pub(super) struct RuntimeEvidence {
     pub(super) random_draws: Vec<RandomDrawRecord>,
     pub(super) archived_segment_headers: Vec<ArchivedSegmentHeader>,
     pub(super) archived_evidence_receipts: BTreeMap<EvidenceRef, ArchivedEvidenceReceipt>,
-    pub(super) keyed_draw_reservations: Vec<KeyedDrawReservation>,
-    /// Derived index of every operation-keyed address in `random_draws` and
-    /// `keyed_draw_reservations`. Extended when a boundary commits its draws,
-    /// restored with a failed boundary, unchanged by a seal (the reservation
-    /// of a sealed draw records what its draw record did), and rebuilt on
-    /// restore. It is never persisted or committed. Only boundary systems
-    /// make keyed draws, so no other transaction changes it.
-    pub(super) keyed_draws: super::random::KeyedDrawIndex,
+    /// The keyed-draw ledger: every operation-keyed address the run has
+    /// drawn, retained or sealed. Extended when a boundary commits its draws,
+    /// restored with a failed boundary, untouched by a seal, and built once
+    /// from the draw journal on restore. It is never part of a snapshot, a
+    /// checkpoint, or a commitment. Only boundary systems make keyed draws,
+    /// so no other transaction changes it.
+    pub(super) keyed_draws: super::random::KeyedDrawLedger,
+    /// When each sealed ordinal record became authoritative, so that
+    /// `evidence_time` answers for sealed evidence as an unsealed run does.
+    /// Extended by each seal; retained records answer from themselves.
+    pub(super) sealed_times: EvidenceTimeIndex,
+}
+
+/// The times of the sealed part of each ordinal journal, run-length encoded:
+/// one entry `(first ID, time)` starts whenever the time changes along the
+/// journal, and an ID's time is the entry with the largest first ID at or
+/// below it. This is exact for any order of times; journals that append in
+/// time order keep about one entry per distinct instant.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(super) struct EvidenceTimeIndex {
+    events: im::Vector<(u64, SimTime)>,
+    commands: im::Vector<(u64, SimTime)>,
+    command_attempts: im::Vector<(u64, SimTime)>,
+    ingress: im::Vector<(u64, SimTime)>,
+    boundaries: im::Vector<(u64, SimTime)>,
+    random_draws: im::Vector<(u64, SimTime)>,
+}
+
+impl EvidenceTimeIndex {
+    fn note(runs: &mut im::Vector<(u64, SimTime)>, id: u64, at: SimTime) {
+        if runs.back().is_none_or(|(_, last)| *last != at) {
+            runs.push_back((id, at));
+        }
+    }
+
+    fn time_of(runs: &im::Vector<(u64, SimTime)>, id: u64) -> Option<SimTime> {
+        match runs.binary_search_by(|(first, _)| first.cmp(&id)) {
+            Ok(index) => runs.get(index).map(|(_, at)| *at),
+            Err(0) => None,
+            Err(index) => runs.get(index - 1).map(|(_, at)| *at),
+        }
+    }
+
+    /// Records the times of a retained tail that a seal is about to move
+    /// below the archived cut.
+    pub(super) fn extend_from(&mut self, evidence: &RuntimeEvidence) {
+        for event in &evidence.events {
+            Self::note(&mut self.events, event.id.get(), event.timestamp);
+        }
+        for command in &evidence.commands {
+            Self::note(&mut self.commands, command.id.get(), command.accepted_at);
+        }
+        for attempt in &evidence.command_attempts {
+            Self::note(&mut self.command_attempts, attempt.id.get(), attempt.at);
+        }
+        for record in &evidence.ingress {
+            Self::note(&mut self.ingress, record.id.get(), record.issued_at);
+        }
+        for boundary in &evidence.boundaries {
+            Self::note(&mut self.boundaries, boundary.id.get(), boundary.at);
+        }
+        for draw in &evidence.random_draws {
+            Self::note(&mut self.random_draws, draw.id.get(), draw.at);
+        }
+    }
+
+    /// The time of an ordinal reference at or below `archived`; `None` for a
+    /// domain-record version or an ID the seals have not reached.
+    pub(super) fn sealed_time(
+        &self,
+        reference: &EvidenceRef,
+        archived: &EvidenceCursor,
+    ) -> Option<SimTime> {
+        let (runs, id, count) = match reference {
+            EvidenceRef::Event(id) => (&self.events, id.get(), archived.event_count),
+            EvidenceRef::Command(id) => (&self.commands, id.get(), archived.command_count),
+            EvidenceRef::CommandAttempt(id) => (
+                &self.command_attempts,
+                id.get(),
+                archived.command_attempt_count,
+            ),
+            EvidenceRef::Ingress(id) => (&self.ingress, id.get(), archived.ingress_count),
+            EvidenceRef::Boundary(id) => (&self.boundaries, id.get(), archived.boundary_count),
+            EvidenceRef::RandomDraw(id) => {
+                (&self.random_draws, id.get(), archived.random_draw_count)
+            }
+            EvidenceRef::DomainRecordVersion(_) => return None,
+        };
+        if id == 0 || id > count {
+            return None;
+        }
+        Self::time_of(runs, id)
+    }
 }
 
 #[derive(Clone)]
@@ -100,21 +185,6 @@ impl RuntimeEvidence {
             .filter(|record| record.id == id)
     }
 
-    /// Rebuilds the keyed-draw index from the retained draws and the keyed
-    /// reservations, which is everything a restore holds of it. Every restore
-    /// path must call this after it has set both. A malformed draw or
-    /// reservation, or an address held twice, is an invalid snapshot.
-    pub(super) fn rebuild_keyed_draws(&mut self) -> Result<(), CanwuError> {
-        self.keyed_draws = super::random::keyed_draws_with_reservations(
-            &self.random_draws,
-            &self.keyed_draw_reservations,
-        )
-        .map_err(|error| {
-            super::invalid_snapshot_error(format!("invalid operation-keyed random index: {error}"))
-        })?;
-        Ok(())
-    }
-
     pub(super) fn boundary_head_hash(&self) -> Option<&str> {
         self.boundaries
             .last()
@@ -123,19 +193,30 @@ impl RuntimeEvidence {
     }
 }
 
+/// The canonical hash of one append-only journal, `canonical_hash(domain,
+/// &items)`, extended one item at a time. Its stream is resumable, so the
+/// state can be exported and continued without the items already fed.
 #[derive(Clone)]
 pub(super) struct OrderedCommitmentAccumulator {
-    hasher: blake3::Hasher,
+    stream: super::stream_hash::ResumableStreamHash,
+    /// The root of the items fed so far, kept until the next append. Every
+    /// committed transaction recomputes all journal roots, and most
+    /// transactions leave most journals unchanged.
+    root: Option<blake3::Hash>,
     pub(super) len: usize,
 }
 
 impl OrderedCommitmentAccumulator {
-    pub(super) fn new(domain: &str) -> Self {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(domain.as_bytes());
-        hasher.update(&[0]);
-        hasher.update(b"[");
-        Self { hasher, len: 0 }
+    pub(super) fn new(domain: &str) -> Result<Self, CanwuError> {
+        let mut stream = super::stream_hash::ResumableStreamHash::new();
+        stream.update(domain.as_bytes())?;
+        stream.update(&[0])?;
+        stream.update(b"[")?;
+        Ok(Self {
+            stream,
+            root: None,
+            len: 0,
+        })
     }
 
     fn from_sorted_by<T, K, F>(domain: &str, values: &[T], mut key: F) -> Result<Self, CanwuError>
@@ -146,7 +227,7 @@ impl OrderedCommitmentAccumulator {
     {
         let mut ordered: Vec<_> = values.iter().collect();
         ordered.sort_by_key(|value| key(value));
-        let mut accumulator = Self::new(domain);
+        let mut accumulator = Self::new(domain)?;
         for value in ordered {
             accumulator.append(value)?;
         }
@@ -160,10 +241,11 @@ impl OrderedCommitmentAccumulator {
                 format!("could not encode incremental commitment item: {error}"),
             )
         })?;
+        self.root = None;
         if self.len != 0 {
-            self.hasher.update(b",");
+            self.stream.update(b",")?;
         }
-        self.hasher.update(&encoded);
+        self.stream.update(&encoded)?;
         self.len = self.len.checked_add(1).ok_or_else(|| {
             CanwuError::new(
                 ErrorCode::IdentifierExhausted,
@@ -199,10 +281,25 @@ impl OrderedCommitmentAccumulator {
         Ok(())
     }
 
-    pub(super) fn root(&self) -> String {
-        let mut hasher = self.hasher.clone();
-        hasher.update(b"]");
-        hasher.finalize().to_hex().to_string()
+    fn root_hash(&self) -> Result<blake3::Hash, CanwuError> {
+        if let Some(root) = self.root {
+            return Ok(root);
+        }
+        let mut stream = self.stream.clone();
+        stream.update(b"]")?;
+        Ok(stream.finalize())
+    }
+
+    #[cfg(test)]
+    pub(super) fn root(&self) -> Result<String, CanwuError> {
+        Ok(self.root_hash()?.to_hex().to_string())
+    }
+
+    /// Returns the root and keeps it until the next append.
+    fn refresh_root(&mut self) -> Result<String, CanwuError> {
+        let root = self.root_hash()?;
+        self.root = Some(root);
+        Ok(root.to_hex().to_string())
     }
 }
 
@@ -228,13 +325,13 @@ pub(super) struct KnowledgeRecordAccumulator {
 }
 
 impl KnowledgeRecordAccumulator {
-    pub(super) fn new() -> Self {
-        Self {
+    pub(super) fn new() -> Result<Self, CanwuError> {
+        Ok(Self {
             records: OrderedCommitmentAccumulator::new(
                 super::hashing::KNOWLEDGE_RECORD_COMMITMENT_DOMAIN,
-            ),
+            )?,
             last: None,
-        }
+        })
     }
 
     /// Feeds the records the ledgers gained after the last record fed.
@@ -256,13 +353,14 @@ impl KnowledgeRecordAccumulator {
 
     /// Builds the accumulator of a whole ledger.
     pub(super) fn of(ledgers: &super::HolderLedgers) -> Result<Self, CanwuError> {
-        let mut accumulator = Self::new();
+        let mut accumulator = Self::new()?;
         accumulator.sync(ledgers)?;
         Ok(accumulator)
     }
 
-    pub(super) fn root(&self) -> String {
-        self.records.root()
+    /// Returns the records sub-root and keeps it until the next record.
+    pub(super) fn root(&mut self) -> Result<String, CanwuError> {
+        self.records.refresh_root()
     }
 
     /// The ID of the last record fed.
@@ -352,14 +450,14 @@ impl RuntimeCommitmentCache {
         Ok(())
     }
 
-    pub(super) fn roots(&self) -> JournalCommitmentRoots {
-        JournalCommitmentRoots {
-            commands: self.commands.root(),
-            attempts: self.attempts.root(),
-            events: self.events.root(),
-            ingress: self.ingress.root(),
-            random_draws: self.random_draws.root(),
-        }
+    pub(super) fn roots(&mut self) -> Result<JournalCommitmentRoots, CanwuError> {
+        Ok(JournalCommitmentRoots {
+            commands: self.commands.refresh_root()?,
+            attempts: self.attempts.refresh_root()?,
+            events: self.events.refresh_root()?,
+            ingress: self.ingress.refresh_root()?,
+            random_draws: self.random_draws.refresh_root()?,
+        })
     }
 
     pub(super) fn needs(&self) -> CommitmentDomains {
@@ -604,7 +702,11 @@ pub(super) struct RuntimeMetadata {
     pub(super) checkpoint_hash: String,
     pub(super) commitment_format_version: u32,
     pub(super) commitment_roots: Option<CommitmentRoots>,
-    pub(super) commitment_cache: Option<RuntimeCommitmentCache>,
+    /// Boxed: the five resumable journal streams are about 14 KB, and the
+    /// runtime and every transaction checkpoint hold the cache, so keeping
+    /// it inline would put that much on the stack of every frame that moves
+    /// one.
+    pub(super) commitment_cache: Option<Box<RuntimeCommitmentCache>>,
     pub(super) plugin_registration_closed: bool,
     pub(super) replay_revision_format_version: u32,
 }

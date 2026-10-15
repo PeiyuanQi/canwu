@@ -2,7 +2,7 @@ use crate::model::*;
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    Canwu, CanwuError, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordClass,
+    CanwuError, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordClass,
     DomainRecordDraft, DomainRecordKind, DomainRecordLifecycle, DomainRecordMutation,
     DomainRecordRef, DomainRecordSchema, DomainRecordType, EntityRef, ErrorCode, EvidenceRef,
     IngressClass, IngressId, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1,
@@ -144,8 +144,10 @@ pub fn military_command(command: MilitaryCommand) -> Result<Command, CanwuError>
     })
 }
 
-pub fn enqueue_provider_outcome(
-    canwu: &mut Canwu,
+/// Queues a provider outcome acknowledgement for a military operation.
+/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn enqueue_provider_outcome<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     outcome: ProviderOutcome,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {

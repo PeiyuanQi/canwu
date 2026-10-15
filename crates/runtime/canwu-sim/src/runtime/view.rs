@@ -341,19 +341,15 @@ impl SimulationView<'_> {
 
     /// Resolves an exact command ID from the retained runtime journal in O(1).
     ///
-    /// An archived command remains valid identity evidence, but its payload is
+    /// A sealed command remains valid identity evidence, but its payload is
     /// no longer available through this view: lookup returns
-    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means the ID has
-    /// neither retained content nor a committed archive receipt.
+    /// [`ErrorCode::EvidenceContentUnavailable`], whether or not the seal kept
+    /// a receipt for it. `None` means no command with this ID was committed.
     pub fn command(&self, id: CommandId) -> Result<Option<&CommandRecord>, CanwuError> {
         self.require_read(&StateKey::core_commands())?;
         let retained = self.state.evidence().retained_command(id);
         if retained.is_none()
-            && self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Command(id))
+            && archived_ordinal(id.get(), self.state.evidence().archived.command_count)
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
@@ -365,19 +361,15 @@ impl SimulationView<'_> {
 
     /// Resolves an exact event ID from the retained runtime journal in O(1).
     ///
-    /// An archived event remains valid identity evidence, but its payload is
-    /// no longer available through this view: lookup returns
-    /// [`ErrorCode::EvidenceContentUnavailable`]. `None` means the ID has
-    /// neither retained content nor a committed archive receipt.
+    /// A sealed event remains valid identity evidence, but its payload is no
+    /// longer available through this view: lookup returns
+    /// [`ErrorCode::EvidenceContentUnavailable`], whether or not the seal kept
+    /// a receipt for it. `None` means no event with this ID was committed.
     pub fn event(&self, id: EventId) -> Result<Option<&SimEvent>, CanwuError> {
         self.require_read(&StateKey::core_events())?;
         let retained = self.state.evidence().retained_event(id);
         if retained.is_none()
-            && self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Event(id))
+            && archived_ordinal(id.get(), self.state.evidence().archived.event_count)
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
@@ -410,11 +402,7 @@ impl SimulationView<'_> {
         }
         let record = self.state.evidence().retained_ingress(id);
         if record.is_none()
-            && self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Ingress(id))
+            && archived_ordinal(id.get(), self.state.evidence().archived.ingress_count)
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
@@ -618,6 +606,14 @@ impl SimulationView<'_> {
                     provenance.plugin == plugin && provenance.packet_type == packet_type
                 }));
         }
+        if record.is_none()
+            && archived_ordinal(id.get(), self.state.evidence().archived.ingress_count)
+        {
+            return Err(CanwuError::new(
+                ErrorCode::EvidenceContentUnavailable,
+                "ingress is archived without a kept provenance receipt; declare it as an identity-only dependency to keep one",
+            ));
+        }
         let Some(record) = record else {
             return Ok(false);
         };
@@ -639,11 +635,10 @@ impl SimulationView<'_> {
         };
         let boundary = self.state.evidence().retained_boundary(*boundary_id);
         if boundary.is_none()
-            && self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Boundary(*boundary_id))
+            && archived_ordinal(
+                boundary_id.get(),
+                self.state.evidence().archived.boundary_count,
+            )
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
@@ -673,12 +668,7 @@ impl SimulationView<'_> {
     ) -> Result<bool, CanwuError> {
         self.require_read(&StateKey::core_ingress())?;
         let Some(record) = self.state.evidence().retained_ingress(id) else {
-            if self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Ingress(id))
-            {
+            if archived_ordinal(id.get(), self.state.evidence().archived.ingress_count) {
                 return Err(CanwuError::new(
                     ErrorCode::EvidenceContentUnavailable,
                     "provider ingress payload is archived; exact legal signal binding requires retained content",
@@ -710,11 +700,10 @@ impl SimulationView<'_> {
         };
         let boundary = self.state.evidence().retained_boundary(*boundary_id);
         if boundary.is_none()
-            && self
-                .state
-                .evidence()
-                .archived_evidence_receipts
-                .contains_key(&EvidenceRef::Boundary(*boundary_id))
+            && archived_ordinal(
+                boundary_id.get(),
+                self.state.evidence().archived.boundary_count,
+            )
         {
             return Err(CanwuError::new(
                 ErrorCode::EvidenceContentUnavailable,
@@ -999,10 +988,13 @@ impl SimulationView<'_> {
 
     /// Resolves the retained record body for one exact domain-record version.
     ///
-    /// Archived receipts prove that a version existed but do not contain its
-    /// body, so this returns `None` when the corresponding evidence segment is
-    /// not live in the runtime. The committed current version resolves to its
-    /// live body even after its establishing boundary is sealed.
+    /// The committed current version resolves to its live body even after its
+    /// establishing boundary is sealed. A version the runtime knows exists but
+    /// whose body a seal removed returns
+    /// [`ErrorCode::EvidenceContentUnavailable`], because an unsealed run would
+    /// return the body; `None` means the version does not exist at this cut.
+    /// A rule whose outcome must match exact replay reads
+    /// [`Self::replay_stable_domain_record_version`] instead.
     pub fn domain_record_version(
         &self,
         reference: &DomainRecordVersionRef,
@@ -1020,9 +1012,20 @@ impl SimulationView<'_> {
                 })
                 .map(|record| record.as_ref().clone()));
         }
-        Ok(retained_domain_record_version(
-            self.state.runtime(),
-            reference,
+        let runtime = self.state.runtime();
+        if let Some(record) = retained_domain_record_version(runtime, reference) {
+            return Ok(Some(record));
+        }
+        if validation::resolve_evidence_reference(
+            &validation::RuntimeValidationContext::new(runtime),
+            &EvidenceRef::DomainRecordVersion(reference.clone()),
+        ) == validation::EvidenceAvailability::Missing
+        {
+            return Ok(None);
+        }
+        Err(CanwuError::new(
+            ErrorCode::EvidenceContentUnavailable,
+            "domain-record version is archived; its body is no longer held by the runtime",
         ))
     }
 
@@ -1290,22 +1293,17 @@ impl SimulationView<'_> {
     ///
     /// An address that has not been drawn is drawn now, and returns the ID
     /// its record has once the boundary being settled commits; see
-    /// [`super::RandomOperationDraw::draw_id`]. A fresh draw needs operation
-    /// evidence that exists at the reader's cut: retained evidence, or
-    /// evidence produced earlier in this boundary. Evidence that a seal has
-    /// archived is refused, although an unsealed run with the same history
-    /// would accept it. A system that may draw an address for the first time
-    /// after a seal, and must then behave as its unsealed replay, cites
-    /// evidence that survives a seal, such as the initial-scenario version
-    /// of a record, or evidence newer than the seal.
-    ///
-    /// A handler whose fresh draw is refused for sealed evidence must return
-    /// the error, which fails the boundary. A handler that swallows
-    /// `InvalidRandomOperationEvidence` and carries on settles a boundary
-    /// that the run's own exact replay rejects, because the replay retains
-    /// the evidence and makes the draw. A run restored from its sealed
-    /// segments retains that evidence again too, so it accepts the draw the
-    /// live sealed run refused.
+    /// [`super::RandomOperationDraw::draw_id`]. A fresh draw cites operation
+    /// evidence whose existence no seal can change: evidence produced earlier
+    /// in this boundary, a committed event, command, command attempt,
+    /// ingress, boundary, or random draw (sealed or not), or a domain-record
+    /// version that is its record's committed current version or an
+    /// initial-scenario version. A version that is no longer current is
+    /// refused in every run, sealed or not, because whether a sealed run still
+    /// knows it depends on what its seals kept. The boundary being settled is
+    /// not evidence yet. A run that sealed, a run that did not, a run restored
+    /// from sealed segments, and exact replay therefore accept and refuse the
+    /// same fresh draws.
     ///
     /// # Errors
     ///
@@ -1315,14 +1313,14 @@ impl SimulationView<'_> {
     /// malformed address, bound, or purpose; `RandomOperationConflict` when
     /// the address was already drawn with different evidence, bound, or
     /// purpose; `InvalidRandomOperationEvidence` when the address has not
-    /// been drawn and `evidence` is neither retained nor produced earlier in
-    /// this boundary; and `IdentifierExhausted` when the run has no draw ID
-    /// left for a fresh draw.
+    /// been drawn and `evidence` is none of the evidence a fresh draw may
+    /// cite; and `IdentifierExhausted` when the run has no draw ID left for a
+    /// fresh draw.
     ///
     /// A view without a random session, such as a command handler's, never
     /// draws. There the evidence is still checked first: the call returns
-    /// `InvalidRandomOperationEvidence` when `evidence` is not retained, and
-    /// `UndeclaredRandomStream` otherwise.
+    /// `InvalidRandomOperationEvidence` when a fresh draw could not cite
+    /// `evidence`, and `UndeclaredRandomStream` otherwise.
     #[allow(clippy::too_many_arguments)]
     pub fn random_draw_for_operation(
         &self,
@@ -1335,15 +1333,33 @@ impl SimulationView<'_> {
         upper_exclusive: u64,
         purpose: &str,
     ) -> Result<super::RandomOperationDraw, CanwuError> {
-        // Evidence a new draw may cite: retained, or produced earlier in this
-        // boundary.
+        // Evidence a new draw may cite, answered alike whatever the run has
+        // sealed: evidence produced earlier in this boundary, a committed
+        // ordinal ID, or a record version that is current or initial.
+        let runtime = self.state.runtime();
         let available = |evidence: &EvidenceRef| {
-            self.proposal_evidence
+            if self
+                .proposal_evidence
                 .is_some_and(|values| values.contains(evidence))
-                || validation::resolve_evidence_reference(
-                    &validation::RuntimeValidationContext::new(self.state.runtime()),
-                    evidence,
-                ) == validation::EvidenceAvailability::Retained
+            {
+                return true;
+            }
+            match evidence {
+                EvidenceRef::DomainRecordVersion(version) => match version.established_by {
+                    DomainRecordVersionSource::InitialScenario => {
+                        retained_domain_record_version(runtime, version).is_some()
+                    }
+                    DomainRecordVersionSource::BoundaryChange { .. } => {
+                        live_current_domain_record_version(runtime, version).is_some()
+                    }
+                },
+                _ => {
+                    validation::resolve_evidence_reference(
+                        &validation::RuntimeValidationContext::new(runtime),
+                        evidence,
+                    ) != validation::EvidenceAvailability::Missing
+                }
+            }
         };
         let Some(session) = &self.random_session else {
             if !available(&evidence) {
@@ -1471,4 +1487,10 @@ impl super::PluginArchiveObjectProvider for SimulationView<'_> {
     ) -> Result<Option<Vec<u8>>, CanwuError> {
         self.plugin_archive_object(namespace, object_id)
     }
+}
+
+/// Whether an ordinal evidence ID lies in the sealed part of its journal. Such
+/// an ID was committed and exists; only its payload is gone.
+const fn archived_ordinal(id: u64, archived_count: u64) -> bool {
+    id != 0 && id <= archived_count
 }

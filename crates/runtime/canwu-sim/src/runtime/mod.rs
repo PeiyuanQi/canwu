@@ -24,6 +24,7 @@ mod scenario;
 mod scheduling;
 mod settlement;
 mod state;
+mod stream_hash;
 mod transactions;
 mod transitions;
 mod validation;
@@ -136,9 +137,9 @@ pub use profile::{
     MAX_RETAINED_BOUNDARY_PROFILES,
 };
 pub use random::{
-    KeyedDrawReservation, RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome,
-    RandomDrawProducer, RandomDrawRecord, RandomOperationAddressV1, RandomOperationDraw,
-    RandomOperationTarget, RandomSample, RandomStreamKey, RandomStreamState,
+    RandomAlgorithm, RandomDrawAddress, RandomDrawOutcome, RandomDrawProducer, RandomDrawRecord,
+    RandomOperationAddressV1, RandomOperationDraw, RandomOperationTarget, RandomSample,
+    RandomStreamKey, RandomStreamState,
 };
 pub use records::{
     DomainRecord, DomainRecordChange, DomainRecordClass, DomainRecordCommitmentRoots,
@@ -202,8 +203,8 @@ use revision::{
 };
 use settlement::{PendingBoundaryRandomDraw, boundary_has_event_ingress, boundary_system_due};
 use state::{
-    CommitmentDomains, CurrentDomainRecordVersion, JournalCommitmentRoots, RuntimeCommitmentCache,
-    RuntimeCommitmentRootUpdates, RuntimeCounters, RuntimeCurrentState,
+    CommitmentDomains, CurrentDomainRecordVersion, EvidenceTimeIndex, JournalCommitmentRoots,
+    RuntimeCommitmentCache, RuntimeCommitmentRootUpdates, RuntimeCounters, RuntimeCurrentState,
     RuntimeDomainCommitmentRoots, RuntimeEvidence, RuntimeMetadata, RuntimeScheduler, RuntimeState,
 };
 use transactions::{
@@ -620,14 +621,18 @@ fn build_current_domain_record_versions(
         .collect())
 }
 
-/// Returns when evidence the runtime can still read became authoritative.
+/// Returns when evidence became authoritative, as an unsealed run answers.
 ///
-/// Archived evidence returns `None` even though exact replay knows its time,
-/// except a record's current version, whose time the provenance index keeps.
-/// Rules that must replay exactly use
+/// A retained record answers from itself. A sealed ordinal record (event,
+/// command, attempt, ingress, boundary, or draw) answers from the sealed time
+/// index, whatever receipt the seal kept. A domain-record version answers with
+/// the time of the boundary that established it, or the run's initial time,
+/// whenever the runtime knows the version exists. Whether a sealed version
+/// that is not current is still known depends on the receipts a seal kept,
+/// so rules that must replay exactly use
 /// `SimulationView::replay_stable_domain_record_version` instead.
 fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Option<SimTime> {
-    match reference {
+    let retained = match reference {
         EvidenceRef::Command(id) => state
             .evidence
             .retained_command(*id)
@@ -652,27 +657,30 @@ fn retained_evidence_time(state: &RuntimeState, reference: &EvidenceRef) -> Opti
             .evidence
             .retained_random_draw(*id)
             .map(|record| record.at),
-        EvidenceRef::DomainRecordVersion(version) => match version.established_by {
-            DomainRecordVersionSource::InitialScenario => {
-                retained_domain_record_version(state, version).map(|_| state.scheduler.initial_time)
+        EvidenceRef::DomainRecordVersion(version) => {
+            if validation::resolve_evidence_reference(
+                &validation::RuntimeValidationContext::new(state),
+                reference,
+            ) == validation::EvidenceAvailability::Missing
+            {
+                return None;
             }
-            DomainRecordVersionSource::BoundaryChange { boundary, .. } => {
-                retained_domain_record_version(state, version).and_then(|_| {
-                    state
-                        .evidence
-                        .retained_boundary(boundary)
-                        .map(|record| record.at)
-                        // Only a sealed boundary's current version reaches the
-                        // index. Full-retention replay never does, so it
-                        // independently checks the indexed time.
-                        .or_else(|| {
-                            live_current_domain_record_version(state, version)
-                                .map(|(_, current)| current.established_at)
-                        })
-                })
-            }
-        },
-    }
+            return match version.established_by {
+                DomainRecordVersionSource::InitialScenario => Some(state.scheduler.initial_time),
+                DomainRecordVersionSource::BoundaryChange { boundary, .. } => {
+                    live_current_domain_record_version(state, version)
+                        .map(|(_, current)| current.established_at)
+                        .or_else(|| retained_evidence_time(state, &EvidenceRef::Boundary(boundary)))
+                }
+            };
+        }
+    };
+    retained.or_else(|| {
+        state
+            .evidence
+            .sealed_times
+            .sealed_time(reference, &state.evidence.archived)
+    })
 }
 
 pub use error::{CanwuError, ErrorCode};
@@ -1631,8 +1639,8 @@ impl Simulation {
                     random_draws: Vec::new(),
                     archived_segment_headers: Vec::new(),
                     archived_evidence_receipts: BTreeMap::new(),
-                    keyed_draw_reservations: Vec::new(),
-                    keyed_draws: random::KeyedDrawIndex::default(),
+                    keyed_draws: random::KeyedDrawLedger::default(),
+                    sealed_times: EvidenceTimeIndex::default(),
                 },
             },
             schema,
@@ -1774,8 +1782,21 @@ impl Simulation {
     /// Hash of simulated state and causal evidence. Run-purpose, controller,
     /// seat, observation, interaction, and trace policy remain save identity
     /// but are deliberately excluded from this authoritative result identity.
+    ///
+    /// It is the commitment-format state hash (`v1:` over the canonical
+    /// commitment roots), whose journal roots cover the whole history, so a
+    /// run that sealed evidence, a run that did not, and a restored run with
+    /// the same state report the same hash. Before 0.16.0 it hashed the
+    /// retained journals, so a sealed run reported another value.
     pub fn authoritative_state_hash(&self) -> Result<String, CanwuError> {
-        self.compute_boundary_state_hash()
+        match &self.state.metadata.commitment_roots {
+            Some(roots)
+                if self.state.metadata.commitment_format_version == COMMITMENT_FORMAT_VERSION =>
+            {
+                boundary_state_hash_for_commitments(roots)
+            }
+            _ => self.compute_boundary_state_hash(),
+        }
     }
 
     pub fn entities(&self) -> impl Iterator<Item = &EntityRef> {
@@ -1856,10 +1877,12 @@ impl Simulation {
         )
     }
 
-    /// Returns when retained evidence first became authoritative.
+    /// Returns when evidence first became authoritative.
     ///
-    /// `None` means the evidence is missing or only its compact archive
-    /// receipt remains. Proposed same-boundary evidence is available through
+    /// A sealed event, command, attempt, ingress record, boundary, or draw
+    /// answers as in an unsealed run. `None` means the evidence does not
+    /// exist at this cut, or is a sealed domain-record version that is not
+    /// current and whose receipt no seal kept. Proposed same-boundary evidence is available through
     /// [`SimulationView::evidence_time`] while its boundary is being built.
     #[must_use]
     pub fn evidence_time(&self, reference: &EvidenceRef) -> Option<SimTime> {
@@ -1868,9 +1891,13 @@ impl Simulation {
 
     /// Resolves the retained record body for one exact domain-record version.
     ///
-    /// Returns `None` when the version is unavailable or only its compacted
-    /// archive receipt remains. The current version resolves to its live body
-    /// even after its establishing boundary is sealed.
+    /// Returns `None` when the version does not exist and also when a seal
+    /// removed its body; this host read does not tell the two apart, so a
+    /// host check that uses it depends on what the run has sealed. The current
+    /// version resolves to its live body even after its establishing boundary
+    /// is sealed. Boundary systems read
+    /// [`SimulationView::domain_record_version`], which reports a removed
+    /// body as `EvidenceContentUnavailable`.
     #[must_use]
     pub fn domain_record_version(
         &self,
@@ -1943,6 +1970,18 @@ impl Simulation {
     #[must_use]
     pub fn boundaries(&self) -> &[BoundaryRecord] {
         &self.state.evidence.boundaries
+    }
+
+    /// The ID of the latest committed boundary, from the boundary counter, so
+    /// it does not depend on whether that boundary's record is still retained.
+    #[must_use]
+    pub fn latest_boundary_id(&self) -> Option<BoundaryId> {
+        self.state
+            .counters
+            .next_boundary_id
+            .checked_sub(1)
+            .filter(|id| *id != 0)
+            .map(BoundaryId::new)
     }
 
     #[must_use]
@@ -2298,13 +2337,14 @@ impl Simulation {
             Some(actors) => actors,
             None => knowledge_actor_commitment_root(&knowledge.actors)?,
         };
-        let mut records = cache
-            .and_then(|cache| cache.knowledge_records.clone())
-            .unwrap_or_else(state::KnowledgeRecordAccumulator::new);
+        let mut records = match cache.and_then(|cache| cache.knowledge_records.clone()) {
+            Some(records) => records,
+            None => state::KnowledgeRecordAccumulator::new()?,
+        };
         if !records.sync(&knowledge.records)? {
             records = state::KnowledgeRecordAccumulator::of(&knowledge.records)?;
         }
-        let root = knowledge_commitment_root_from_parts(&actors, &records.root())?;
+        let root = knowledge_commitment_root_from_parts(&actors, &records.root()?)?;
         Ok((root, actors, records))
     }
 
@@ -2326,8 +2366,9 @@ impl Simulation {
         }
         let needs = {
             if self.state.metadata.commitment_cache.is_none() {
-                self.state.metadata.commitment_cache =
-                    Some(RuntimeCommitmentCache::from_evidence(&self.state.evidence)?);
+                self.state.metadata.commitment_cache = Some(Box::new(
+                    RuntimeCommitmentCache::from_evidence(&self.state.evidence)?,
+                ));
             }
             let cache = self
                 .state
@@ -2372,7 +2413,7 @@ impl Simulation {
                     )
                 })?;
             cache.apply(updates);
-            (cache.domain_roots()?, cache.roots())
+            (cache.domain_roots()?, cache.roots()?)
         };
         runtime_commitment_roots(
             &domain_roots,
@@ -2486,7 +2527,7 @@ impl Simulation {
             domain_records: snapshot.domain_records.clone(),
         })?;
         let plugins = PluginRegistry::from_descriptors(snapshot.plugin_descriptors.clone())?;
-        validate_snapshot(&snapshot, &plugins)?;
+        let keyed_draws = validate_snapshot(&snapshot, &plugins)?;
         let admitted_ingress: BTreeSet<_> = snapshot
             .boundaries
             .iter()
@@ -2674,8 +2715,8 @@ impl Simulation {
                     random_draws: snapshot.random_draws,
                     archived_segment_headers: Vec::new(),
                     archived_evidence_receipts: BTreeMap::new(),
-                    keyed_draw_reservations: Vec::new(),
-                    keyed_draws: random::KeyedDrawIndex::default(),
+                    keyed_draws: random::KeyedDrawLedger::default(),
+                    sealed_times: EvidenceTimeIndex::default(),
                 },
             },
             schema: snapshot.schema,
@@ -2689,7 +2730,9 @@ impl Simulation {
                 &simulation.state.evidence,
                 simulation.plugins.boundary_schedule_horizon(),
             )?;
-        simulation.state.evidence.rebuild_keyed_draws()?;
+        // Validation built the keyed-draw ledger from the full draw journal;
+        // a restore builds it once.
+        simulation.state.evidence.keyed_draws = keyed_draws;
         simulation.refresh_checkpoint_hash()?;
         Ok(simulation)
     }

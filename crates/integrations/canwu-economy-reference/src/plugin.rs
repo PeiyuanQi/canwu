@@ -8,13 +8,13 @@ use crate::{
 };
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, Command, CommandContext,
-    CommandIngress, DecisionAction, DecisionOrigin, DecisionTicketState, DomainRecord,
-    DomainRecordDraft, DomainRecordMutation, DomainRecordSchema, ErrorCode, IngressClass,
-    IngressPayload, Issuer, PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider,
-    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
-    PluginIngressTarget, PluginRegistrar, SimDuration, SimulationPlugin, SimulationView, StateKey,
-    StateVisibility, SystemCadence, SystemDirective, canonical_hash,
+    BoundaryProposal, BoundarySystemContract, CanwuError, Command, CommandContext, CommandIngress,
+    DecisionAction, DecisionOrigin, DecisionTicketState, DomainRecord, DomainRecordDraft,
+    DomainRecordMutation, DomainRecordSchema, ErrorCode, IngressClass, IngressPayload, Issuer,
+    PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginIngressTarget,
+    PluginRegistrar, SimDuration, SimulationPlugin, SimulationView, StateKey, StateVisibility,
+    SystemCadence, SystemDirective, canonical_hash,
 };
 use canwu_economy_reference_content::ExternalityApplicability;
 use canwu_force_supply_reference::{
@@ -2420,13 +2420,13 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
     )
 }
 
-pub fn enqueue_economy_archive(
-    canwu: &mut Canwu,
+/// Stores, verifies, and queues an economy archive commit. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn enqueue_economy_archive<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     prepared: &crate::PreparedEconomyArchiveBatchV1,
     store: &dyn canwu_force_supply_reference::PackageArchiveStore,
 ) -> Result<EconomyArchiveIngressReceiptV1, CanwuError> {
-    let state = canwu
-        .typed_domain_record(&economy_reference_runtime_reference())
+    let state = canwu_api::typed_domain_record(canwu, &economy_reference_runtime_reference())
         .ok_or_else(|| invalid("economy runtime is unavailable"))?
         .decode_payload::<EconomyReferenceRuntimeRecord>()?;
     if state.prepare_economy_archive(prepared.selected.len())? != *prepared {
@@ -2462,13 +2462,14 @@ pub fn enqueue_economy_archive(
     })
 }
 
-pub fn finalize_economy_archive_retention(
-    canwu: &mut Canwu,
+/// Finalizes an economy archive retention handle and queues its
+/// acknowledgement. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn finalize_economy_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     store: &dyn canwu_force_supply_reference::PackageArchiveStore,
     ingress: &EconomyArchiveIngressReceiptV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let state = canwu
-        .typed_domain_record(&economy_reference_runtime_reference())
+    let state = canwu_api::typed_domain_record(canwu, &economy_reference_runtime_reference())
         .ok_or_else(|| invalid("economy runtime is unavailable"))?
         .decode_payload::<EconomyReferenceRuntimeRecord>()?;
     let receipt = state

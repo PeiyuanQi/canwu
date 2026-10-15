@@ -181,6 +181,23 @@ fn assert_same_run(restored: &Canwu, live: &Canwu) {
 
 #[test]
 fn paged_checkpoint_round_trips_through_the_public_api_and_stores_only_changed_pages() {
+    paged_round_trip();
+}
+
+/// The same round trip on a 1 MiB thread, the Windows main-thread default:
+/// a debug build must keep room on the stack for the runtime and its
+/// transaction checkpoints, which hold the commitment cache by box.
+#[test]
+fn the_paged_round_trip_fits_a_one_mebibyte_stack() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(paged_round_trip)
+        .expect("the thread starts")
+        .join()
+        .expect("the round trip runs on a 1 MiB stack");
+}
+
+fn paged_round_trip() {
     let plugin = LedgerPlugin;
     let mut live = Host {
         canwu: Canwu::new_with_plugins(4646, Scenario::new(SimTime::EPOCH, Vec::new()), &[&plugin])

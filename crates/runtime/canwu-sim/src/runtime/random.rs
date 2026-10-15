@@ -200,18 +200,6 @@ pub struct RandomDrawRecord {
     pub correlation_id: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct KeyedDrawReservation {
-    pub stream: RandomStreamKey,
-    pub address: RandomOperationAddressV1,
-    pub upper_exclusive: u64,
-    pub purpose_hash: String,
-    pub result: u64,
-    pub draw_id: RandomDrawId,
-    pub operation_evidence: EvidenceRef,
-    pub draw_receipt: crate::ArchivedEvidenceReceipt,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct PendingRandomDraw {
     /// The ID an operation-keyed draw was handed out with, which its
@@ -238,27 +226,22 @@ pub(crate) struct KeyedDrawMemo {
 
 type KeyedDrawKey = (RandomStreamKey, RandomOperationAddressV1);
 
-/// Every operation-keyed address the run has drawn, with what was drawn.
+/// The keyed-draw ledger: every operation-keyed address the run has drawn,
+/// with what was drawn.
 ///
-/// The index is derived: it equals [`keyed_draws_with_reservations`] of the
-/// retained draw journal and the keyed reservations of sealed draws. The
-/// runtime keeps it with its evidence, extends it when a boundary commits,
-/// and rebuilds it on restore, so settling a boundary does no work that grows
-/// with the number of addresses. It is a persistent map of shared entries: a
-/// copy shares structure with its source, and adding an address copies one
-/// path of the tree.
-///
-/// Work outside settlement still grows with every keyed draw the run has
-/// made: a checkpoint and a seal walk every keyed reservation, a fork copies
-/// the draw journal and the reservations, and a restore builds this index
-/// from all of them. The index holds one entry per address for the life of
-/// the runtime.
+/// It is the record of every keyed draw for the life of the run, whether its
+/// draw record is retained or sealed. A boundary commit extends it, a failed
+/// boundary restores it, a seal leaves it as it is, and a restore builds it
+/// once from the draw journal. A checkpoint, a paged checkpoint, and a seal
+/// never read it. It is a persistent map of shared entries: a copy, such as
+/// a fork or a boundary's working copy, shares structure with its source,
+/// and adding an address copies one path of the tree.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct KeyedDrawIndex {
+pub(crate) struct KeyedDrawLedger {
     entries: im::OrdMap<Arc<KeyedDrawKey>, Arc<KeyedDrawMemo>>,
 }
 
-impl KeyedDrawIndex {
+impl KeyedDrawLedger {
     fn get(&self, key: &KeyedDrawKey) -> Option<&KeyedDrawMemo> {
         self.entries.get(key).map(Arc::as_ref)
     }
@@ -286,11 +269,18 @@ impl KeyedDrawIndex {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread built a keyed-draw ledger from a draw
+    /// journal, so tests can check that a restore builds it once.
+    pub(crate) static LEDGER_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) struct RandomExecution {
     pub states: BTreeMap<RandomStreamKey, RandomStreamState>,
     pub draws: Vec<PendingRandomDraw>,
     /// The index the session started from, with its own keyed draws added.
-    pub keyed: KeyedDrawIndex,
+    pub keyed: KeyedDrawLedger,
 }
 
 pub(crate) struct RandomSession {
@@ -298,7 +288,7 @@ pub(crate) struct RandomSession {
     draws: Vec<PendingRandomDraw>,
     root_seed: u64,
     producer_plugin: String,
-    keyed: KeyedDrawIndex,
+    keyed: KeyedDrawLedger,
     /// The ID the boundary gives this session's first draw.
     first_draw_id: u64,
 }
@@ -309,7 +299,7 @@ impl RandomSession {
         allowed: &[RandomStreamKey],
         root_seed: u64,
         producer_plugin: &str,
-        keyed: &KeyedDrawIndex,
+        keyed: &KeyedDrawLedger,
     ) -> Result<Self, CanwuError> {
         let mut states = BTreeMap::new();
         for key in allowed {
@@ -539,12 +529,13 @@ impl RandomSession {
     }
 }
 
-/// Indexes the operation-keyed draws of a retained draw journal, refusing a
-/// malformed draw and an address drawn twice.
-pub(crate) fn retained_keyed_draws(
-    draws: &[RandomDrawRecord],
-) -> Result<KeyedDrawIndex, CanwuError> {
-    let mut index = KeyedDrawIndex::default();
+/// Builds the keyed-draw ledger of a complete draw journal, refusing a
+/// malformed draw and an address drawn twice. Every restore builds the
+/// ledger with this function exactly once.
+pub(crate) fn keyed_draw_ledger(draws: &[RandomDrawRecord]) -> Result<KeyedDrawLedger, CanwuError> {
+    #[cfg(test)]
+    LEDGER_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    let mut index = KeyedDrawLedger::default();
     for draw in draws {
         let RandomDrawAddress::OperationV1(address) = &draw.address else {
             continue;
@@ -568,59 +559,6 @@ pub(crate) fn retained_keyed_draws(
             return Err(CanwuError::new(
                 ErrorCode::RandomOperationConflict,
                 "random journal contains a duplicate operation-keyed address",
-            ));
-        }
-    }
-    Ok(index)
-}
-
-/// Builds the keyed-draw index from what a runtime holds: the retained draw
-/// journal and the keyed reservations of sealed draws. This is the definition
-/// the index kept in `RuntimeEvidence` must always equal, and what a restore
-/// rebuilds it with. It refuses a malformed draw or reservation and an
-/// address held twice.
-pub(crate) fn keyed_draws_with_reservations(
-    draws: &[RandomDrawRecord],
-    reservations: &[KeyedDrawReservation],
-) -> Result<KeyedDrawIndex, CanwuError> {
-    let mut index = retained_keyed_draws(draws)?;
-    for reservation in reservations {
-        validate_operation_address(
-            &reservation.stream,
-            &reservation.address,
-            reservation.upper_exclusive,
-        )?;
-        if reservation.purpose_hash.len() != 64
-            || reservation
-                .purpose_hash
-                .bytes()
-                .any(|byte| !byte.is_ascii_digit() && !(b'a'..=b'f').contains(&byte))
-            || reservation.draw_receipt.evidence != EvidenceRef::RandomDraw(reservation.draw_id)
-        {
-            return Err(CanwuError::new(
-                ErrorCode::InvalidRandomDraw,
-                "keyed draw reservation has an invalid purpose hash or draw receipt",
-            ));
-        }
-        // The check above admits only 64 lowercase hexadecimal digits.
-        let purpose_hash = blake3::Hash::from_hex(&reservation.purpose_hash).map_err(|_| {
-            CanwuError::new(
-                ErrorCode::InvalidRandomDraw,
-                "keyed draw reservation has an invalid purpose hash or draw receipt",
-            )
-        })?;
-        let key = (reservation.stream.clone(), reservation.address.clone());
-        let memo = KeyedDrawMemo {
-            draw_id: reservation.draw_id,
-            operation_evidence: reservation.operation_evidence.clone(),
-            upper_exclusive: reservation.upper_exclusive,
-            value: reservation.result,
-            purpose_hash: *purpose_hash.as_bytes(),
-        };
-        if !index.insert_new(key, memo) {
-            return Err(CanwuError::new(
-                ErrorCode::RandomOperationConflict,
-                "keyed draw reservation overlaps retained or reserved evidence",
             ));
         }
     }
@@ -789,12 +727,6 @@ fn purpose_hash_v1(purpose: &str) -> Result<[u8; 32], CanwuError> {
     bytes.push(0);
     put_text(&mut bytes, purpose)?;
     Ok(*blake3::hash(&bytes).as_bytes())
-}
-
-pub(crate) fn purpose_hash_hex_v1(purpose: &str) -> Result<String, CanwuError> {
-    Ok(blake3::Hash::from_bytes(purpose_hash_v1(purpose)?)
-        .to_hex()
-        .to_string())
 }
 
 fn operation_input_v1(
@@ -1054,7 +986,7 @@ mod tests {
             std::slice::from_ref(&stream),
             41,
             "fixture-random",
-            &KeyedDrawIndex::default(),
+            &KeyedDrawLedger::default(),
         )
         .expect("session should initialize");
         let evidence = EvidenceRef::Ingress(canwu_core::IngressId::new(2));
@@ -1124,7 +1056,7 @@ mod tests {
                 std::slice::from_ref(&stream),
                 91,
                 "fixture-random",
-                &KeyedDrawIndex::default(),
+                &KeyedDrawLedger::default(),
             )
             .expect("session should initialize");
             if include_unrelated {
@@ -1214,7 +1146,7 @@ mod tests {
             std::slice::from_ref(&stream),
             root_seed,
             "fixture-random",
-            &KeyedDrawIndex::default(),
+            &KeyedDrawLedger::default(),
         )
         .expect("session should initialize");
         let value = session

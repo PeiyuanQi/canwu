@@ -3,7 +3,7 @@ use crate::{
     EconomyReferenceStateV1, EconomyRouteObservationV1, PriceEvidenceApplicabilityV1,
     economy_reference_runtime_reference,
 };
-use canwu_api::{Canwu, CanwuError, ErrorCode, KnowledgeHolderRef, SimDuration, SimTime};
+use canwu_api::{CanwuError, ErrorCode, KnowledgeHolderRef, SimDuration, SimTime};
 use canwu_resource::ResourceScopeId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -58,11 +58,13 @@ impl EconomyObservationWitnessV1 {
     }
 }
 
-pub fn economy_reference_state(
-    canwu: &Canwu,
+/// The economy-reference runtime record and state, if the run has one.
+/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn economy_reference_state<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
 ) -> Result<Option<(canwu_api::DomainRecord, EconomyReferenceStateV1)>, CanwuError> {
     let reference = economy_reference_runtime_reference();
-    let Some(record) = canwu.typed_domain_record(&reference).cloned() else {
+    let Some(record) = canwu_api::typed_domain_record(canwu, &reference).cloned() else {
         return Ok(None);
     };
     let state = record.decode_payload::<EconomyReferenceRuntimeRecord>()?;
@@ -71,8 +73,8 @@ pub fn economy_reference_state(
 
 /// Validates the economy runtime and its complete provider-backed archive and
 /// retention closure before restored state is allowed to resume.
-pub fn validate_economy_reference_runtime_with_archive_store(
-    canwu: &Canwu,
+pub fn validate_economy_reference_runtime_with_archive_store<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     store: &dyn canwu_force_supply_reference::PackageArchiveStore,
 ) -> Result<(), CanwuError> {
     let Some((record, state)) = economy_reference_state(canwu)? else {
@@ -96,9 +98,13 @@ pub fn validate_economy_reference_runtime_with_archive_store(
     )
 }
 
+/// The observation witness a holder may cite for an economy scope, read
+/// with the attached archive provider. Takes either runtime handle.
 #[allow(clippy::too_many_lines)]
-pub fn economy_observation_witness(
-    canwu: &Canwu,
+pub fn economy_observation_witness<
+    H: canwu_api::CanwuRun + canwu_api::PluginArchiveObjectProvider,
+>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     scope: &ResourceScopeId,
 ) -> Result<EconomyObservationWitnessV1, CanwuError> {

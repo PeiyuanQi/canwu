@@ -980,8 +980,6 @@ fn two_phase_archive_sealing_is_immutable_atomic_idempotent_and_tamper_evident()
         "archived_receipt_root",
         "evidence_dependencies",
         "evidence_dependency_root",
-        "keyed_draw_reservations",
-        "keyed_reservation_root",
     ] {
         assert!(
             empty_wire.get(field).is_none(),
@@ -998,7 +996,6 @@ fn two_phase_archive_sealing_is_immutable_atomic_idempotent_and_tamper_evident()
     assert!(before.archived_receipt_root.is_none());
     assert!(!before.evidence_dependencies.is_empty());
     assert!(before.evidence_dependency_root.is_some());
-    assert!(before.keyed_reservation_root.is_none());
     let prepared = compact.prepare_evidence_seal().unwrap().unwrap();
     assert_eq!(compact.checkpoint().unwrap(), before);
     assert_eq!(
@@ -1039,7 +1036,6 @@ fn two_phase_archive_sealing_is_immutable_atomic_idempotent_and_tamper_evident()
     assert!(committed.archived_segment_manifest_root.is_some());
     assert!(committed.archived_receipt_root.is_some());
     assert!(committed.evidence_dependency_root.is_some());
-    assert!(committed.keyed_reservation_root.is_none());
     assert!(
         committed
             .evidence_dependencies
@@ -1205,7 +1201,116 @@ fn archived_segment_receipts_require_provider_for_payload_reads() {
 }
 
 #[test]
-fn repeated_keyed_seals_restore_sorted_reservations_and_exact_dependencies() {
+fn knowledge_citing_a_sealed_boundary_does_not_block_the_next_seal() {
+    // Seals boundary 1, then lets a plugin publish knowledge at boundary 2
+    // that cites it.
+    let cited_after_its_seal = || {
+        let (scenario, _) = demo_scenario();
+        let mut simulation = Simulation::new(143, scenario).unwrap();
+        simulation
+            .register_plugin(&ArchivedEvidencePublicationPlugin)
+            .unwrap();
+        simulation
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .unwrap();
+        let mut compact = simulation.into_compacted().unwrap();
+        let first = compact
+            .seal_evidence()
+            .expect("the first boundary should seal")
+            .expect("the first boundary should leave evidence");
+        compact
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .expect("knowledge may cite a sealed boundary by identity");
+        // A later boundary admits the publication's events, so they can seal.
+        compact
+            .settle_boundary(BoundaryRequest::at(SimTime::EPOCH).with_cadence(SystemCadence::Daily))
+            .unwrap();
+        (compact, first)
+    };
+    let cited = EvidenceRef::Boundary(BoundaryId::new(1));
+
+    let (mut compact, first) = cited_after_its_seal();
+    let checkpoint = compact.checkpoint().unwrap();
+    assert!(
+        checkpoint
+            .evidence_dependencies
+            .iter()
+            .any(|dependency| dependency.reference == cited
+                && dependency.requirement == EvidenceRequirement::IdentityOnly)
+    );
+    // The first seal kept no receipt for the boundary: nothing cited it then.
+    assert!(compact.archived_evidence_receipt(&cited).is_none());
+    let second = compact
+        .seal_evidence()
+        .expect("the journal counters prove a sealed identity-only citation")
+        .expect("the second boundary should leave evidence");
+    assert_eq!(second.start, first.end);
+    assert!(compact.archived_evidence_receipt(&cited).is_none());
+    let sealed = compact.checkpoint().unwrap();
+    assert!(
+        sealed
+            .evidence_dependencies
+            .iter()
+            .any(|dependency| dependency.reference == cited)
+    );
+
+    // The two-phase seal reaches the same continuation.
+    let (mut two_phase, _) = cited_after_its_seal();
+    let prepared = two_phase.prepare_evidence_seal().unwrap().unwrap();
+    let archive = TestArchive::default();
+    archive.store_evidence_segment(&prepared.segment).unwrap();
+    two_phase
+        .commit_evidence_seal(&prepared.token, &archive)
+        .expect("the two-phase commit accepts a sealed identity-only citation");
+    assert_eq!(prepared.segment, second);
+    assert_eq!(two_phase.checkpoint().unwrap(), sealed);
+
+    // The checkpoint keeps fewer receipts than its prefix can rebuild, and
+    // still restores. A claimed receipt must equal the one the prefix
+    // rebuilds for a current dependency.
+    let restore = |checkpoint: SimulationCheckpoint| {
+        CompactedSimulation::from_checkpoint_and_journal_with_plugins(
+            checkpoint,
+            vec![first.clone(), second.clone()],
+            &[&ArchivedEvidencePublicationPlugin],
+        )
+    };
+    let restored = restore(sealed.clone())
+        .expect("a checkpoint whose citation postdates its seal should restore");
+    assert_eq!(restored.checkpoint_hash(), compact.checkpoint_hash());
+    let mut unarchived = first.clone();
+    unarchived.archive = None;
+    let (_, receipts) = persistence::evidence_archive_index(&unarchived).unwrap();
+    let genuine = receipts
+        .into_iter()
+        .find(|receipt| receipt.evidence == cited)
+        .expect("the first segment indexes the cited boundary");
+    let with_receipt = |receipt: ArchivedEvidenceReceipt| {
+        let mut claimed = sealed.clone();
+        claimed.archived_evidence_receipts = vec![receipt];
+        claimed.archived_receipt_root = persistence::skipped_commitment_root(
+            persistence::ARCHIVED_RECEIPT_DOMAIN,
+            &claimed.archived_evidence_receipts,
+        )
+        .unwrap();
+        claimed
+    };
+    assert!(restore(with_receipt(genuine.clone())).is_ok());
+    let mut forged = genuine;
+    forged.item_commitment = "0".repeat(64);
+    let Err(error) = restore(with_receipt(forged)) else {
+        panic!("a claimed receipt must equal the one its prefix rebuilds");
+    };
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
+    assert!(
+        error
+            .message
+            .contains("reconstructed authoritative indexes")
+    );
+}
+
+#[test]
+fn repeated_keyed_seals_keep_draws_out_of_the_checkpoint_and_dependencies() {
     let (_, _, simulation, _) = run_keyed_fixture(&["zeta"]);
     let mut compact = simulation.into_compacted().unwrap();
     let first = compact
@@ -1230,30 +1335,20 @@ fn repeated_keyed_seals_restore_sorted_reservations_and_exact_dependencies() {
         .expect("the second keyed evidence tail should be non-empty");
     assert_eq!(second.start, first.end);
 
+    // Sealed keyed draws stay in the keyed-draw ledger. The checkpoint does
+    // not list them, and neither a draw nor its operation evidence is a
+    // dependency whose receipt a seal keeps.
     let checkpoint = compact.checkpoint().unwrap();
     assert_eq!(checkpoint.archived_segment_headers.len(), 2);
-    assert_eq!(checkpoint.keyed_draw_reservations.len(), 2);
-    assert!(checkpoint.keyed_reservation_root.is_some());
-    assert!(checkpoint.evidence_dependency_root.is_some());
+    assert_eq!(compact.runtime().state.evidence.keyed_draws.len(), 2);
+    let wire = serde_json::to_value(&checkpoint).unwrap();
+    assert!(wire.get("keyed_draw_reservations").is_none());
     assert!(
-        checkpoint
-            .keyed_draw_reservations
-            .windows(2)
-            .all(|reservations| {
-                (&reservations[0].stream, &reservations[0].address)
-                    < (&reservations[1].stream, &reservations[1].address)
-            })
+        !checkpoint
+            .evidence_dependencies
+            .iter()
+            .any(|dependency| { matches!(dependency.reference, EvidenceRef::RandomDraw(_)) })
     );
-    for reservation in &checkpoint.keyed_draw_reservations {
-        assert!(checkpoint.evidence_dependencies.iter().any(|dependency| {
-            dependency.reference == reservation.operation_evidence
-                && dependency.requirement == EvidenceRequirement::IdentityOnly
-        }));
-        assert!(checkpoint.evidence_dependencies.iter().any(|dependency| {
-            dependency.reference == reservation.draw_receipt.evidence
-                && dependency.requirement == EvidenceRequirement::IdentityOnly
-        }));
-    }
 
     let restored = CompactedSimulation::from_checkpoint_and_journal_with_plugins(
         checkpoint.clone(),
@@ -1280,8 +1375,8 @@ fn repeated_keyed_seals_restore_sorted_reservations_and_exact_dependencies() {
     let RandomDrawAddress::OperationV1(alpha_address) = &alpha.address else {
         unreachable!("the selected draw is operation-keyed")
     };
-    let keyed = random::retained_keyed_draws(&restored_snapshot.random_draws)
-        .expect("restored draws should rebuild the keyed index");
+    let keyed = random::keyed_draw_ledger(&restored_snapshot.random_draws)
+        .expect("restored draws should rebuild the keyed ledger");
     let available = restored_snapshot
         .random_streams
         .iter()
@@ -1330,16 +1425,16 @@ fn repeated_keyed_seals_restore_sorted_reservations_and_exact_dependencies() {
     assert!(retry_session.finish().draws.is_empty());
 
     let mut tampered = checkpoint;
-    tampered.keyed_draw_reservations.swap(0, 1);
-    tampered.keyed_reservation_root = Some(
+    tampered.archived_segment_headers.swap(0, 1);
+    tampered.archived_segment_manifest_root = Some(
         canonical_hash(
-            "canwu.random.keyed-reservations.v1",
-            &tampered.keyed_draw_reservations,
+            "canwu.evidence.archived-segment-manifest.v1",
+            &tampered.archived_segment_headers,
         )
         .unwrap(),
     );
     let Err(error) = Simulation::from_checkpoint_and_journal(tampered, vec![first, second]) else {
-        panic!("reservation ordering is part of compact continuation")
+        panic!("segment-manifest ordering is part of compact continuation")
     };
     assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 }
@@ -1391,7 +1486,10 @@ fn simulation_view_resolves_retained_commands_and_events_by_id() {
 }
 
 #[test]
-fn simulation_view_excludes_archived_ids_after_compaction() {
+/// A sealed ID exists whether or not a receipt was kept for it, so its
+/// payload read reports that the content is gone instead of answering `None`,
+/// which would contradict the unsealed run that returns the record.
+fn simulation_view_reports_sealed_payloads_as_unavailable() {
     let (scenario, ids) = demo_scenario();
     let mut simulation = Simulation::new(45, scenario).expect("archive lookup fixture should load");
     let debug_command = |morale| {
@@ -1430,8 +1528,18 @@ fn simulation_view_excludes_archived_ids_after_compaction() {
     let reads = [StateKey::core_commands(), StateKey::core_events()];
     let view = simulation.plugin_view("lookup", &reads);
 
-    assert!(view.command(archived.command_id).unwrap().is_none());
-    assert!(view.event(archived.emitted_events[0]).unwrap().is_none());
+    assert_eq!(
+        view.command(archived.command_id).unwrap_err().code,
+        ErrorCode::EvidenceContentUnavailable
+    );
+    assert_eq!(
+        view.event(archived.emitted_events[0]).unwrap_err().code,
+        ErrorCode::EvidenceContentUnavailable
+    );
+    assert!(
+        view.evidence_exists(&EvidenceRef::Command(archived.command_id))
+            .unwrap()
+    );
     assert_eq!(
         view.command(retained.command_id).unwrap().unwrap().id,
         retained.command_id

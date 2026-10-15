@@ -4,7 +4,7 @@ use crate::{
 };
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, CauseRef, Command, CommandContext,
+    BoundaryProposal, BoundarySystemContract, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DomainRecord, DomainRecordKind, DomainRecordMutation, DomainRecordSchema,
     DomainRecordType, EntityRef, ErrorCode, EventAudience, EvidenceRef, IngressClass, IngressId,
     IngressPayload, IngressRecord, Issuer, KnowledgeOrigin, KnowledgeRecordDraft,
@@ -4020,8 +4020,14 @@ pub fn resource_adapter_ingress(
     ))
 }
 
-pub fn enqueue_resource_adapter_operation(
-    canwu: &mut Canwu,
+/// Queues a resource adapter operation whose provider source version
+/// exists. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// On a [`canwu_api::CompactedCanwu`], whether a cited superseded version that
+/// no dependency declares still exists depends on the receipts earlier seals
+/// kept; see [`canwu_api::CanwuRun::domain_record_version_evidence_exists`].
+pub fn enqueue_resource_adapter_operation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     packet: &ResourceAdapterOperationV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -4042,8 +4048,8 @@ pub fn enqueue_resource_adapter_operation(
 /// The requester must be an entity of the run: the settlement and skip
 /// events name it, and an event naming a missing entity would fail its
 /// boundary. A requester that is not is refused here.
-pub fn enqueue_resource_allocation(
-    canwu: &mut Canwu,
+pub fn enqueue_resource_allocation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     requester: &canwu_api::KnowledgeHolderRef,
     request: &crate::ResourceAllocationRequestV1,
@@ -4092,8 +4098,8 @@ pub fn enqueue_resource_allocation(
 /// ([`crate::ResourceCompletionOperationV1::has_canonical_operation_key`]) is
 /// refused here. One scheduled around this call settles as a recorded
 /// rejection.
-pub fn enqueue_resource_completion_operation(
-    canwu: &mut Canwu,
+pub fn enqueue_resource_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     operation: &crate::ResourceCompletionOperationV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -4119,8 +4125,8 @@ pub fn enqueue_resource_completion_operation(
 /// with one host-retained authenticated directory root. The batch must equal
 /// what [`crate::ResourceState::prepare_resource_archive`] derives from the
 /// current resource root and `store`, including its lookup index pages.
-pub fn enqueue_resource_archive(
-    canwu: &mut Canwu,
+pub fn enqueue_resource_archive<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     prepared: &crate::PreparedResourceArchiveBatchV1,
     store: &dyn crate::ResourceArchiveStore,
 ) -> Result<ResourceArchiveIngressReceiptV1, CanwuError> {
@@ -4199,8 +4205,8 @@ pub fn enqueue_resource_archive(
 /// acknowledged and a later commit archived the receipt. No call fails a
 /// boundary, and an acknowledgement may settle twice, or behind a commit that
 /// archives the receipt, without harm.
-pub fn finalize_resource_archive_retention(
-    canwu: &mut Canwu,
+pub fn finalize_resource_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     store: &dyn crate::ResourceArchiveStore,
     receipt: &ResourceArchiveIngressReceiptV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -4279,8 +4285,8 @@ pub fn finalize_resource_archive_retention(
 /// tick at the same instant would meet the same root. The next applied
 /// archive commit, which makes room for it, schedules a tick while an expiry
 /// is due; a host application may also queue one with this function.
-pub fn enqueue_resource_completion_expiry_tick(
-    canwu: &mut Canwu,
+pub fn enqueue_resource_completion_expiry_tick<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
     canwu.enqueue_plugin_ingress(PluginIngressRequest::new(

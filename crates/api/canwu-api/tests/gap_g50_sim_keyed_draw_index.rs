@@ -293,16 +293,17 @@ fn gap_g50_sim_keyed_draw_index() {
     assert_eq!(probe!(reloaded, &packets), live);
 
     // After a seal every draw record and every packet the draws cite has
-    // left the runtime, and each address is a keyed reservation. The sealed
-    // run and a run restored from the sealed evidence still answer as the
-    // unsealed runs do.
+    // left the runtime; the keyed-draw ledger keeps every address and the
+    // checkpoint lists none. The sealed run and a run restored from the
+    // sealed evidence still answer as the unsealed runs do.
     let mut compacted = canwu.into_compacted().expect("compact runtime");
     let sealed = compacted
         .seal_evidence()
         .expect("the retained evidence should seal")
         .expect("the retained evidence is not empty");
     let checkpoint = compacted.checkpoint().expect("sealed checkpoint");
-    assert_eq!(checkpoint.keyed_draw_reservations.len(), 96);
+    let wire = serde_json::to_value(&checkpoint).expect("checkpoint encodes");
+    assert!(wire.get("keyed_draw_reservations").is_none());
     let mut resumed = CompactedCanwu::from_checkpoint_and_journal_with_plugins(
         checkpoint,
         vec![sealed],

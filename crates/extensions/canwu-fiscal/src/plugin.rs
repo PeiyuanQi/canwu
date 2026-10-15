@@ -3821,8 +3821,10 @@ pub fn fiscal_action_command(request: &FiscalActionRequest) -> Result<Command, s
     })
 }
 
-pub fn enqueue_execution_receipt(
-    canwu: &mut Canwu,
+/// Queues a fiscal execution receipt that cites exact, current external
+/// evidence versions. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn enqueue_execution_receipt<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     packet: &FiscalExecutionReceiptPacket,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -4192,6 +4194,7 @@ fn stale(message: &str) -> CanwuError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canwu_api::Canwu;
 
     thread_local! {
         /// The budget `settlement_budget` returns on this thread, so a test
@@ -4495,8 +4498,7 @@ mod tests {
     /// plan, which is what settlement holds to the budget: every committed
     /// state's derived fields are current, so it is also its measure.
     fn committed(canwu: &Canwu) -> (FiscalState, usize) {
-        let record = canwu
-            .typed_domain_record(&fiscal_state_reference())
+        let record = canwu_api::typed_domain_record(canwu, &fiscal_state_reference())
             .expect("fiscal state record");
         let state = record
             .decode_payload::<FiscalStateRecord>()

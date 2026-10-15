@@ -4,6 +4,16 @@ Status: implemented in 0.15.0. Three changes to random draws and settlement
 timing in `canwu-sim`, reached through `canwu-api` (downstream gaps G-50,
 G-51, and G-47). None changes a persisted format or a committed hash.
 
+Changed in 0.16.0 by the [continuation checkpoint](continuation-checkpoint.md):
+the keyed reservations are gone. The index described here became the
+keyed-draw ledger, which holds every drawn address whether its draw record is
+retained or sealed; a checkpoint, a paged checkpoint, a seal, and a fork no
+longer copy or scan keyed draws, and a restore builds the ledger once. A first
+draw that cites sealed evidence (the case in "An exact retry after a seal")
+is now decided from journal counters and the current-version index, alike in
+sealed and unsealed runs, and a superseded record version is refused as fresh
+operation evidence in every run.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),

@@ -60,11 +60,11 @@ fn cache_fingerprint(simulation: &Simulation) -> CacheFingerprint {
         .expect("current runtimes should maintain a commitment cache");
     CacheFingerprint {
         journals: [
-            cache.commands.root(),
-            cache.attempts.root(),
-            cache.events.root(),
-            cache.ingress.root(),
-            cache.random_draws.root(),
+            cache.commands.root().unwrap(),
+            cache.attempts.root().unwrap(),
+            cache.events.root().unwrap(),
+            cache.ingress.root().unwrap(),
+            cache.random_draws.root().unwrap(),
         ],
         domains: [
             cache.world.clone(),

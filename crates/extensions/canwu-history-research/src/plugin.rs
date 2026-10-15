@@ -559,11 +559,15 @@ fn validate_exact_evidence(
     Ok(())
 }
 
+/// The subject of the assessment that `reference` names, read through
+/// [`SimulationView::replay_stable_domain_record_version`] like every exact
+/// version an assessment cites, so a run that sealed evidence and one that
+/// did not accept or refuse a relation alike.
 fn assessment_subject(
     view: &SimulationView<'_>,
     reference: &canwu_api::DomainRecordVersionRef,
 ) -> Result<Option<canwu_api::DomainRecordVersionRef>, CanwuError> {
-    let Some(record) = view.domain_record_version(reference)? else {
+    let Some((record, _)) = view.replay_stable_domain_record_version(reference)? else {
         return Ok(None);
     };
     let subject = if record

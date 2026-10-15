@@ -247,18 +247,23 @@ pub struct ResourceObservationWitnessV1 {
     pub digest: String,
 }
 
-pub fn resource_state(canwu: &Canwu) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
+/// The resource runtime record and its decoded state, if the run has one.
+/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn resource_state<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+) -> Result<Option<(DomainRecord, ResourceState)>, CanwuError> {
     let reference = resource_runtime_reference();
-    let Some(record) = canwu.typed_domain_record(&reference).cloned() else {
+    let Some(record) = canwu_api::typed_domain_record(canwu, &reference).cloned() else {
         return Ok(None);
     };
     let state = record.decode_payload::<ResourceRuntimeRecord>()?;
     Ok(Some((record, state)))
 }
 
+/// The current allocation leg with this ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_allocation_leg(
-    canwu: &Canwu,
+pub fn resource_allocation_leg<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     id: &ResourceAllocationLegId,
 ) -> Option<ResourceAllocationLegVersionV1> {
     resource_state(canwu).ok().flatten().and_then(|(_, state)| {
@@ -269,8 +274,9 @@ pub fn resource_allocation_leg(
     })
 }
 
-pub fn exact_resource_allocation_leg(
-    canwu: &Canwu,
+/// An allocation leg at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn exact_resource_allocation_leg<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     exact: &ResourceAllocationLegVersionV1,
 ) -> Result<ResourceAllocationLeg, CanwuError> {
     let (_, state) =
@@ -292,9 +298,10 @@ pub fn exact_resource_allocation_leg(
     Ok(leg.clone())
 }
 
+/// The current consumption with this ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_consumption(
-    canwu: &Canwu,
+pub fn resource_consumption<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     id: &ResourceConsumptionId,
 ) -> Option<ResourceConsumptionVersionV1> {
     resource_state(canwu).ok().flatten().and_then(|(_, state)| {
@@ -305,8 +312,9 @@ pub fn resource_consumption(
     })
 }
 
-pub fn exact_resource_consumption(
-    canwu: &Canwu,
+/// A consumption at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn exact_resource_consumption<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     exact: &ResourceConsumptionVersionV1,
 ) -> Result<ResourceConsumption, CanwuError> {
     let (_, state) =
@@ -327,9 +335,10 @@ pub fn exact_resource_consumption(
     Ok(consumption.clone())
 }
 
+/// The hot outcome of an operation key. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_operation_outcome(
-    canwu: &Canwu,
+pub fn resource_operation_outcome<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     operation_key: &ResourceOperationKey,
 ) -> Option<ResourceOperationOutcomeVersionV1> {
     resource_state(canwu)
@@ -338,9 +347,10 @@ pub fn resource_operation_outcome(
         .and_then(|(_, state)| state.outcomes.get(operation_key).map(Into::into))
 }
 
+/// The hot outcome with this operation ID. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_operation_outcome_by_id(
-    canwu: &Canwu,
+pub fn resource_operation_outcome_by_id<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     id: &ResourceOperationOutcomeId,
 ) -> Option<ResourceOperationOutcomeVersionV1> {
     resource_state(canwu).ok().flatten().and_then(|(_, state)| {
@@ -352,9 +362,10 @@ pub fn resource_operation_outcome_by_id(
     })
 }
 
+/// The completion certificate of a lease. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_completion_certificate(
-    canwu: &Canwu,
+pub fn resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     acquisition: &crate::CompletionLeaseAcquisitionId,
 ) -> Option<crate::CompletionLeaseActivationCertificateV1> {
     resource_state(canwu)
@@ -363,9 +374,10 @@ pub fn resource_completion_certificate(
         .and_then(|(_, state)| state.completion_leases.certificate(acquisition).cloned())
 }
 
+/// A completion capacity grant. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn resource_completion_grant(
-    canwu: &Canwu,
+pub fn resource_completion_grant<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     grant: &crate::CompletionCapacityGrantId,
 ) -> Option<crate::CompletionCapacityGrantV1> {
     resource_state(canwu)
@@ -374,8 +386,9 @@ pub fn resource_completion_grant(
         .and_then(|(_, state)| state.completion_leases.grants.get(grant).cloned())
 }
 
-pub fn resource_completion_status(
-    canwu: &Canwu,
+/// The status of a completion lease acquisition. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn resource_completion_status<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     acquisition: &crate::CompletionLeaseAcquisitionId,
 ) -> Result<crate::CompletionLeaseStatusDtoV1, CanwuError> {
@@ -399,8 +412,9 @@ pub struct ResourceAccessGrantStatusDtoV1 {
     pub remaining_quantity: u64,
 }
 
-pub fn resource_access_grant_status(
-    canwu: &Canwu,
+/// The status of an access grant. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn resource_access_grant_status<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     grant: &crate::ResourceAccessGrantId,
 ) -> Result<ResourceAccessGrantStatusDtoV1, CanwuError> {
@@ -426,8 +440,9 @@ pub fn resource_access_grant_status(
     })
 }
 
-pub fn exact_resource_completion_certificate(
-    canwu: &Canwu,
+/// A completion certificate at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn exact_resource_completion_certificate<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     exact: &crate::CompletionLeaseActivationCertificateV1,
 ) -> Result<crate::CompletionLeaseActivationCertificateV1, CanwuError> {
     let (_, state) =
@@ -448,8 +463,9 @@ pub fn exact_resource_completion_certificate(
     Ok(persisted.clone())
 }
 
-pub fn exact_resource_operation_outcome(
-    canwu: &Canwu,
+/// An operation outcome at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn exact_resource_operation_outcome<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     exact: &ResourceOperationOutcomeVersionV1,
 ) -> Result<ResourceOperationOutcome, CanwuError> {
     let (_, state) =
@@ -471,9 +487,10 @@ pub fn exact_resource_operation_outcome(
     Ok(outcome.clone())
 }
 
+/// The latest fulfillment of a demand. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
 #[must_use]
-pub fn latest_resource_fulfillment(
-    canwu: &Canwu,
+pub fn latest_resource_fulfillment<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     demand: &ResourceDemandId,
 ) -> Option<ResourceFulfillmentVersionV1> {
     resource_state(canwu).ok().flatten().and_then(|(_, state)| {
@@ -485,8 +502,9 @@ pub fn latest_resource_fulfillment(
     })
 }
 
-pub fn exact_resource_fulfillment(
-    canwu: &Canwu,
+/// A fulfillment at an exact state revision. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn exact_resource_fulfillment<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     exact: &ResourceFulfillmentVersionV1,
 ) -> Result<crate::ResourceFulfillment, CanwuError> {
     let (_, state) =
@@ -508,8 +526,9 @@ pub fn exact_resource_fulfillment(
     Ok(fulfillment.clone())
 }
 
-pub fn resource_report(
-    canwu: &Canwu,
+/// The holder-relative resource report. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn resource_report<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     grant_id: &ResourceReportGrantId,
     materialized_at: SimTime,
@@ -522,8 +541,13 @@ pub fn resource_report(
 
 /// Materializes a detached G5 witness from the persisted provider-owned
 /// observation head. This never reads current balances or backdates truth.
-pub fn resource_observation_witness(
-    canwu: &Canwu,
+/// Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// On a [`canwu_api::CompactedCanwu`], whether a cited superseded version that
+/// no dependency declares still exists depends on the receipts earlier seals
+/// kept; see [`canwu_api::CanwuRun::domain_record_version_evidence_exists`].
+pub fn resource_observation_witness<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     grant_id: &ResourceReportGrantId,
     adapter_revision: crate::ResourceObservationAdapterRevisionId,
@@ -715,7 +739,15 @@ pub fn validate_resource_report(report: &ResourceReportDtoV1) -> Result<(), Reso
     Ok(())
 }
 
-pub fn validate_resource_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
+/// Checks the resource runtime record and the exact evidence its
+/// outcomes cite. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+///
+/// On a [`canwu_api::CompactedCanwu`], whether a cited superseded version that
+/// no dependency declares still exists depends on the receipts earlier seals
+/// kept; see [`canwu_api::CanwuRun::domain_record_version_evidence_exists`].
+pub fn validate_resource_runtime<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+) -> Result<(), CanwuError> {
     let Some((record, state)) = resource_state(canwu)? else {
         return Ok(());
     };
@@ -742,8 +774,10 @@ pub fn validate_resource_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
     Ok(())
 }
 
-pub fn validate_resource_runtime_with_archive_store(
-    canwu: &Canwu,
+/// Checks the resource runtime and authenticates its archive against
+/// `store`. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn validate_resource_runtime_with_archive_store<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     store: &dyn crate::ResourceArchiveStore,
 ) -> Result<(), CanwuError> {
     validate_resource_runtime(canwu)?;

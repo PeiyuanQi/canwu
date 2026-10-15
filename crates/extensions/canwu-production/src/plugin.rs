@@ -6,7 +6,7 @@ use crate::model::{
 use crate::{PLUGIN_NAME, PLUGIN_NAMESPACE};
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, CauseRef, Command, CommandContext,
+    BoundaryProposal, BoundarySystemContract, CanwuError, CauseRef, Command, CommandContext,
     CommandIngress, DecisionAction, DecisionTicketState, DomainRecord, DomainRecordMutation,
     DomainRecordSchema, ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer,
     KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeQuery,
@@ -1528,13 +1528,12 @@ fn production_archive_reachability(
 /// including its lookup-index pages. The boundary that settles the commit
 /// reads no archive object: it applies the commit when the root still is the
 /// one the batch was prepared from, and otherwise records it as stale.
-pub fn enqueue_production_archive(
-    canwu: &mut Canwu,
+pub fn enqueue_production_archive<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     prepared: &crate::PreparedProductionArchiveBatchV1,
     store: &dyn crate::ProductionArchiveStore,
 ) -> Result<ProductionArchiveIngressReceiptV1, CanwuError> {
-    let state = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let state = canwu_api::typed_domain_record(&*canwu, &production_runtime_reference())
         .ok_or_else(|| CanwuError::new(ErrorCode::PluginNotActive, "production runtime is absent"))?
         .decode_payload::<ProductionRuntimeRecord>()?;
     let canonical = state.prepare_production_archive(prepared.selected_count(), store)?;
@@ -1587,8 +1586,8 @@ pub fn enqueue_production_archive(
 /// Queues one canonical production-owned completion coordinator transition.
 /// Participant state remains authoritative in the participant plugin and is
 /// accepted here only through an exact current provider record acknowledgement.
-pub fn enqueue_production_completion_operation(
-    canwu: &mut Canwu,
+pub fn enqueue_production_completion_operation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: canwu_api::SimTime,
     operation: &crate::ProductionCompletionIngressV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -1612,13 +1611,12 @@ pub fn enqueue_production_completion_operation(
 /// Authenticates every compacted resource input for one active facility
 /// project against the resource archive provider, then queues a package-owned
 /// witness used by later canonical project ingress.
-pub fn enqueue_production_resource_continuation(
-    canwu: &mut Canwu,
+pub fn enqueue_production_resource_continuation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     project_id: &crate::FacilityProjectId,
     store: &dyn canwu_resource::ResourceArchiveStore,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let production_record = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let production_record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
         .ok_or_else(|| invalid("production runtime is unavailable"))?;
     let production = production_record.decode_payload::<ProductionRuntimeRecord>()?;
     let project = production
@@ -1635,9 +1633,9 @@ pub fn enqueue_production_resource_continuation(
             "production continuation witness requires an active facility project",
         ));
     }
-    let resource_record = canwu
-        .typed_domain_record(&canwu_resource::resource_runtime_reference())
-        .ok_or_else(|| invalid("resource runtime is unavailable"))?;
+    let resource_record =
+        canwu_api::typed_domain_record(canwu, &canwu_resource::resource_runtime_reference())
+            .ok_or_else(|| invalid("resource runtime is unavailable"))?;
     let resource = resource_record.decode_payload::<canwu_resource::ResourceRuntimeRecord>()?;
     let root = resource
         .archive_head
@@ -1709,13 +1707,12 @@ pub fn enqueue_production_resource_continuation(
 /// The handle must still be in the production root when this is called. An
 /// acknowledgement that settles after another one retired the handle is a
 /// no-op, so calling this twice before the next boundary is harmless.
-pub fn finalize_production_archive_retention(
-    canwu: &mut Canwu,
+pub fn finalize_production_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     store: &dyn crate::ProductionArchiveStore,
     receipt: &ProductionArchiveIngressReceiptV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&production_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &production_runtime_reference())
         .ok_or_else(|| invalid("production runtime is unavailable"))?;
     let state = record.decode_payload::<ProductionRuntimeRecord>()?;
     let handle = state

@@ -48,13 +48,14 @@ pub struct ForceSupplyObservationWitnessV1 {
     pub canonical_digest: String,
 }
 
-pub fn force_supply_report(
-    canwu: &Canwu,
+/// The holder-relative force-supply report, read with the attached
+/// archive provider. Takes either runtime handle.
+pub fn force_supply_report<H: canwu_api::CanwuRun + canwu_api::PluginArchiveObjectProvider>(
+    canwu: &H,
     holder: &KnowledgeHolderRef,
     force: &ReferenceForceId,
 ) -> Result<ForceSupplyReportV1, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&force_supply_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
         .ok_or_else(|| invalid("force-supply runtime is not configured"))?;
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;
     let archived = crate::load_package_archive_records::<
@@ -291,7 +292,8 @@ fn report_from_state_with_archive(
 
 #[allow(clippy::too_many_lines)]
 pub fn validate_force_supply_runtime(canwu: &Canwu) -> Result<(), CanwuError> {
-    let Some(record) = canwu.typed_domain_record(&force_supply_runtime_reference()) else {
+    let Some(record) = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
+    else {
         return Ok(());
     };
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;
@@ -431,7 +433,8 @@ pub fn validate_force_supply_runtime_with_archive_store(
     store: &dyn crate::PackageArchiveStore,
 ) -> Result<(), CanwuError> {
     validate_force_supply_runtime(canwu)?;
-    let Some(record) = canwu.typed_domain_record(&force_supply_runtime_reference()) else {
+    let Some(record) = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
+    else {
         return Ok(());
     };
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;

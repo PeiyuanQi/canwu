@@ -13,15 +13,15 @@ use crate::report::{
 };
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    Canwu, CanwuError, CauseRef, Command, CommandContext, CommandIngress, DomainRecord,
-    DomainRecordKind, DomainRecordMutation, DomainRecordRef, DomainRecordSchema,
-    DomainRecordVersionRef, ErrorCode, EvidenceRef, IngressClass, IngressPayload, Issuer,
-    KnowledgeHolderRef, KnowledgeLimitsV1, KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeSubject,
-    KnowledgeSubjectSchema, KnowledgeSubjectTarget, KnowledgeSubjectTargetKind,
-    KnowledgeWriteGrant, LifeState, PayloadSchema, PluginActionDescriptor, PluginIngressDescriptor,
-    PluginIngressRequest, PluginIngressTarget, PluginKnowledgeSchema, PluginRegistrar, SimDuration,
-    SimTime, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
-    SystemDirective, TransportExecutionId, canonical_hash,
+    CanwuError, CauseRef, Command, CommandContext, CommandIngress, DomainRecord, DomainRecordKind,
+    DomainRecordMutation, DomainRecordRef, DomainRecordSchema, DomainRecordVersionRef, ErrorCode,
+    EvidenceRef, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeLimitsV1,
+    KnowledgeOrigin, KnowledgeRecordDraft, KnowledgeSubject, KnowledgeSubjectSchema,
+    KnowledgeSubjectTarget, KnowledgeSubjectTargetKind, KnowledgeWriteGrant, LifeState,
+    PayloadSchema, PluginActionDescriptor, PluginIngressDescriptor, PluginIngressRequest,
+    PluginIngressTarget, PluginKnowledgeSchema, PluginRegistrar, SimDuration, SimTime,
+    SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, SystemDirective,
+    TransportExecutionId, canonical_hash,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -281,10 +281,11 @@ pub fn movement_incident_target() -> PluginIngressTarget {
 }
 
 /// Reads the committed movement runtime, if one exists.
-pub fn movement_state(canwu: &Canwu) -> Result<Option<(DomainRecord, MovementState)>, CanwuError> {
-    let Some(record) = canwu
-        .typed_domain_record(&movement_runtime_reference())
-        .cloned()
+pub fn movement_state<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
+) -> Result<Option<(DomainRecord, MovementState)>, CanwuError> {
+    let Some(record) =
+        canwu_api::typed_domain_record(canwu, &movement_runtime_reference()).cloned()
     else {
         return Ok(None);
     };

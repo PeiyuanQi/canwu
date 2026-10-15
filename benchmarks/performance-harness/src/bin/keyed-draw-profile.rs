@@ -10,7 +10,16 @@
 //!   every earlier draw is a keyed reservation (skipped when nothing is
 //!   retained, because there is nothing to seal);
 //! - `snapshot_restore`: loading the run from its snapshot JSON, which
-//!   validates every draw and builds whatever the engine derives from them.
+//!   validates every draw and builds whatever the engine derives from them;
+//! - `checkpoint_journal_restore`: loading the run from its portable
+//!   checkpoint journal, which rebuilds the snapshot from the evidence prefix;
+//! - on the run after one seal, when every keyed draw is sealed:
+//!   `compact_checkpoint` (`checkpoint()`), `compact_paged_checkpoint`
+//!   (`prepare_paged_checkpoint` against an empty page store), `compact_seal`
+//!   (sealing the evidence of one more boundary), and, where the engine has
+//!   it, `compact_fork` (`CompactedCanwu::fork`, behind the default
+//!   `compact-fork` feature, which an engine without that call builds
+//!   without).
 //!
 //! Elapsed time and allocation traffic are collected in separate release
 //! builds, as in the main harness: `--mode elapsed` without the
@@ -26,7 +35,7 @@ use canwu_api::{
     BoundaryContext, BoundaryPhase, BoundaryProposal, BoundarySystemContract, Canwu, CanwuError,
     CompactedCanwu, ENGINE_VERSION, ErrorCode, EvidenceRef, PluginRegistrar, RandomOperationTarget,
     RandomStreamKey, Scenario, SimDuration, SimTime, SimulationPlugin, SimulationView,
-    SystemCadence,
+    StatePageBlob, StatePageProvider, SystemCadence,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "allocation-counting")]
@@ -439,6 +448,95 @@ fn measure_sealed(
     Ok(measurements)
 }
 
+/// Measures loading the run from its portable checkpoint journal.
+fn measure_checkpoint_journal_restore(
+    canwu: &Canwu,
+    plugin: &KeyedDrawPlugin,
+    options: &Options,
+) -> Result<Measurements, Box<dyn Error>> {
+    let bundle = canwu.checkpoint_journal()?;
+    let plugins: [&dyn SimulationPlugin; 1] = [plugin];
+    let mut measurements = Measurements::default();
+    for _ in 0..options.restore_samples {
+        let input = bundle.clone();
+        let restored = measure(options.mode, &mut measurements, || {
+            Canwu::from_checkpoint_journal_with_plugins(input, &plugins)
+        })?;
+        drop(black_box(restored));
+    }
+    Ok(measurements)
+}
+
+/// A page store that holds nothing, so a paged checkpoint emits every page.
+struct NoPages;
+
+impl StatePageProvider for NoPages {
+    fn load_state_page(&self, _page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        Ok(None)
+    }
+}
+
+/// One measured case, or the error an engine returned for it.
+type CompactCase = (&'static str, Measurements, Option<String>);
+
+/// Measures the persistence operations of a compact run whose keyed draws
+/// are all sealed: a checkpoint, a paged checkpoint, a fork where the engine
+/// has one, and a seal of one more boundary's evidence. An operation that an
+/// engine refuses (0.15.0 refuses a paged checkpoint whose keyed reservations
+/// overflow one state page) is reported with its error instead of samples.
+fn measure_compact_persistence(
+    compacted: &mut CompactedCanwu,
+    options: &Options,
+) -> Result<Vec<CompactCase>, Box<dyn Error>> {
+    compacted.seal_evidence()?;
+    let mut checkpoint = Measurements::default();
+    let mut paged = Measurements::default();
+    let mut paged_error = None;
+    for _ in 0..options.samples {
+        let value = measure(options.mode, &mut checkpoint, || compacted.checkpoint())?;
+        drop(black_box(value));
+        if paged_error.is_none() {
+            match measure(options.mode, &mut paged, || {
+                compacted.prepare_paged_checkpoint(None, &NoPages)
+            }) {
+                Ok(value) => drop(black_box(value)),
+                Err(error) => paged_error = Some(format!("{:?}: {}", error.code, error.message)),
+            }
+        }
+    }
+    let mut cases = vec![
+        ("compact_checkpoint", checkpoint, None),
+        ("compact_paged_checkpoint", paged, paged_error),
+    ];
+    #[cfg(feature = "compact-fork")]
+    {
+        let mut fork = Measurements::default();
+        for _ in 0..options.samples {
+            let value = measure(options.mode, &mut fork, || compacted.fork());
+            drop(black_box(value));
+        }
+        cases.push(("compact_fork", fork, None));
+    }
+    let mut seal = Measurements::default();
+    let mut discarded = Measurements::default();
+    for sample in 0..options.warmup + options.samples {
+        let at = next_minute(compacted.time())?;
+        compacted.schedule_calendar_boundary(at, vec![SystemCadence::Daily])?;
+        compacted
+            .step_canonical()?
+            .ok_or("the boundary before the seal did not settle")?;
+        let target = if sample < options.warmup {
+            &mut discarded
+        } else {
+            &mut seal
+        };
+        let segment = measure(options.mode, target, || compacted.seal_evidence())?;
+        drop(black_box(segment.ok_or("the seal found nothing to seal")?));
+    }
+    cases.push(("compact_seal", seal, None));
+    Ok(cases)
+}
+
 /// Measures loading the run from its snapshot JSON with its plugin.
 fn measure_restore(
     canwu: &Canwu,
@@ -565,8 +663,22 @@ fn main() -> Result<(), Box<dyn Error>> {
             &measure_restore(&canwu, &plugin, &options)?,
             options.mode,
         ));
+        cases.push(case_json(
+            "checkpoint_journal_restore",
+            &measure_checkpoint_journal_restore(&canwu, &plugin, &options)?,
+            options.mode,
+        ));
         if kept > 0 {
             let mut compacted = canwu.into_compacted()?;
+            for (name, measurements, error) in
+                measure_compact_persistence(&mut compacted, &options)?
+            {
+                let mut case = case_json(name, &measurements, options.mode);
+                if let Some(error) = error {
+                    case["error"] = json!(error);
+                }
+                cases.push(case);
+            }
             cases.push(case_json(
                 "sealed_boundary",
                 &measure_sealed(&mut compacted, &options)?,
@@ -613,6 +725,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "live_boundary": "one Daily boundary on a fork of the run, after one unmeasured boundary on that fork",
             "sealed_boundary": "one Daily boundary on the sealed run; before each sample the evidence is sealed again and one unmeasured boundary settles",
             "snapshot_restore": "Canwu::from_snapshot_json_with_plugins of the run's snapshot JSON",
+            "checkpoint_journal_restore": "Canwu::from_checkpoint_journal_with_plugins of the run's checkpoint journal",
+            "compact_persistence": "after one seal of the whole run: checkpoint(), prepare_paged_checkpoint against an empty page store, CompactedCanwu::fork where compiled, and seal_evidence of one more Daily boundary",
             "run_heap_bytes": "allocation build only: bytes allocated while building the run and still held by it",
             "allocation_scope": if options.mode == MetricMode::Allocations { "thread-local allocator calls and requested bytes during the operation; setup and post-measurement drops are excluded" } else { "not collected in this uninstrumented build" },
             "elapsed_scope": if options.mode == MetricMode::Elapsed { "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded" } else { "not collected in the allocation-instrumented build" },

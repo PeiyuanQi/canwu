@@ -78,17 +78,57 @@ fn enqueue_operations(simulation: &mut Simulation, at: SimTime, operations: &[&s
     }
 }
 
-/// The keyed-draw index a runtime keeps, after checking that it equals its
-/// definition over the retained draws and the keyed reservations.
-fn exact_index(simulation: &Simulation) -> random::KeyedDrawIndex {
+/// The keyed-draw ledger a runtime keeps, after checking that it equals the
+/// ledger built from its complete draw journal: the draws `sealed` before its
+/// retained tail, followed by the retained draws.
+fn exact_ledger(simulation: &Simulation, sealed: &[RandomDrawRecord]) -> random::KeyedDrawLedger {
     let evidence = &simulation.state.evidence;
-    let rebuilt = random::keyed_draws_with_reservations(
-        &evidence.random_draws,
-        &evidence.keyed_draw_reservations,
-    )
-    .expect("retained draws and reservations should index");
+    let journal = sealed
+        .iter()
+        .chain(&evidence.random_draws)
+        .cloned()
+        .collect::<Vec<_>>();
+    let rebuilt =
+        random::keyed_draw_ledger(&journal).expect("the complete draw journal should index");
     assert_eq!(evidence.keyed_draws, rebuilt);
     rebuilt
+}
+
+fn exact_index(simulation: &Simulation) -> random::KeyedDrawLedger {
+    exact_ledger(simulation, &[])
+}
+
+/// An in-memory state-page store for the paged restore.
+#[derive(Default)]
+struct MemoryStatePages(std::cell::RefCell<BTreeMap<String, StatePageBlob>>);
+
+impl StatePageProvider for MemoryStatePages {
+    fn load_state_page(&self, page_id: &str) -> Result<Option<StatePageBlob>, CanwuError> {
+        Ok(self.0.borrow().get(page_id).cloned())
+    }
+}
+
+impl StatePageStore for MemoryStatePages {
+    fn store_state_page(&self, page: &StatePageBlob) -> Result<ArchiveStoreOutcome, CanwuError> {
+        Ok(
+            match self
+                .0
+                .borrow_mut()
+                .insert(page.page_id.clone(), page.clone())
+            {
+                Some(_) => ArchiveStoreOutcome::AlreadyPresent,
+                None => ArchiveStoreOutcome::Stored,
+            },
+        )
+    }
+}
+
+/// How many keyed-draw ledgers `operation` builds from a draw journal.
+fn ledger_builds<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+    let before = random::LEDGER_BUILDS.with(std::cell::Cell::get);
+    let value = operation();
+    let after = random::LEDGER_BUILDS.with(std::cell::Cell::get);
+    (value, after - before)
 }
 
 #[test]
@@ -135,34 +175,73 @@ fn keyed_draw_index_stays_exact_through_commit_rollback_seal_restore_replay_and_
     // The fork shares the index it was taken with and then diverges.
     assert_eq!(exact_index(&fork), committed);
 
-    // Save/load and exact replay rebuild the same index.
-    let restored = Simulation::from_snapshot_with_plugins(simulation.snapshot(), &[&plugin])
-        .expect("the run should load");
+    // Save/load, a checkpoint-journal restore, a paged restore, and exact
+    // replay rebuild the same ledger, each restore building it once.
+    let snapshot = simulation.snapshot();
+    let (restored, builds) =
+        ledger_builds(|| Simulation::from_snapshot_with_plugins(snapshot, &[&plugin]));
+    let restored = restored.expect("the run should load");
+    assert_eq!(builds, 1, "a snapshot restore builds the ledger once");
     assert_eq!(exact_index(&restored), live);
-    let replayed = Simulation::replay_from_journal(&[&plugin], &simulation.replay_journal())
-        .expect("the run should replay");
+    let bundle = simulation
+        .checkpoint_journal()
+        .expect("a checkpoint journal");
+    let (from_bundle, builds) =
+        ledger_builds(|| Simulation::from_checkpoint_journal_with_plugins(bundle, &[&plugin]));
+    let from_bundle = from_bundle.expect("the checkpoint journal should restore");
+    assert_eq!(
+        builds, 1,
+        "a checkpoint-journal restore builds the ledger once"
+    );
+    assert_eq!(exact_index(&from_bundle), live);
+    let pages = MemoryStatePages::default();
+    let prepared = simulation
+        .prepare_paged_checkpoint(None, &pages)
+        .expect("a paged checkpoint");
+    prepared
+        .store_and_verify(&pages)
+        .expect("the paged checkpoint should store");
+    let segment = simulation
+        .journal_segment_since(EvidenceCursor::default())
+        .expect("the evidence prefix");
+    let (from_pages, builds) = ledger_builds(|| {
+        Simulation::from_paged_checkpoint_and_journal_with_plugins(
+            &prepared.checkpoint,
+            &pages,
+            vec![segment],
+            &[&plugin],
+        )
+    });
+    let from_pages = from_pages.expect("the paged checkpoint should restore");
+    assert_eq!(builds, 1, "a paged restore builds the ledger once");
+    assert_eq!(exact_index(&from_pages), live);
+    let (replayed, builds) =
+        ledger_builds(|| Simulation::replay_from_journal(&[&plugin], &simulation.replay_journal()));
+    let replayed = replayed.expect("the run should replay");
+    assert!(builds <= 1, "exact replay builds the ledger at most once");
     assert_eq!(exact_index(&replayed), live);
 
-    // A seal turns every draw record into a reservation and leaves the index
-    // as it was; later draws extend it beside the reservations.
+    // A seal, a checkpoint, and a paged checkpoint leave the ledger as it
+    // was: the sealed draws stay in it and nothing copies it.
     let mut compact = simulation
         .into_compacted()
         .expect("the run should enter the compact runtime");
+    let kept = compact.runtime().state.evidence.keyed_draws.clone();
     let sealed = compact
         .seal_evidence()
         .expect("the retained evidence should seal")
         .expect("the retained evidence is not empty");
     assert!(compact.runtime().state.evidence.random_draws.is_empty());
-    assert_eq!(
+    compact.checkpoint().expect("a compact checkpoint");
+    assert!(
         compact
             .runtime()
             .state
             .evidence
-            .keyed_draw_reservations
-            .len(),
-        3
+            .keyed_draws
+            .shares_root_with(&kept)
     );
-    assert_eq!(exact_index(compact.runtime()), live);
+    assert_eq!(exact_ledger(compact.runtime(), &sealed.random_draws), live);
     compact
         .enqueue_plugin_ingress(PluginIngressRequest::new(
             INDEX_PLUGIN,
@@ -174,7 +253,7 @@ fn keyed_draw_index_stays_exact_through_commit_rollback_seal_restore_replay_and_
     compact
         .settle_boundary(BoundaryRequest::at(SimTime::EPOCH))
         .expect("a boundary after the seal should settle");
-    let continued = exact_index(compact.runtime());
+    let continued = exact_ledger(compact.runtime(), &sealed.random_draws);
     assert_eq!(continued.len(), 4);
 
     // A restore from the sealed checkpoint retains every draw again; the
@@ -182,12 +261,17 @@ fn keyed_draw_index_stays_exact_through_commit_rollback_seal_restore_replay_and_
     let tail = compact
         .journal_segment_since(sealed.end)
         .expect("the retained tail should materialize");
-    let resumed = Simulation::from_checkpoint_and_journal(
-        compact.checkpoint().expect("compact checkpoint"),
-        vec![sealed, tail],
-    )
-    .expect("the sealed run should restore");
-    assert!(resumed.state.evidence.keyed_draw_reservations.is_empty());
+    let (resumed, builds) = ledger_builds(|| {
+        Simulation::from_checkpoint_and_journal(
+            compact.checkpoint().expect("compact checkpoint"),
+            vec![sealed, tail],
+        )
+    });
+    let resumed = resumed.expect("the sealed run should restore");
+    assert_eq!(
+        builds, 1,
+        "a restore from sealed segments builds the ledger once"
+    );
     assert_eq!(exact_index(&resumed), continued);
 }
 

@@ -1,22 +1,22 @@
 use canwu_core::{
     DecisionRequestId, DecisionTicketId, DecisionTraceId, DomainRecordKind, DomainRecordRef,
-    DomainRecordVersionRef, DomainRecordVersionSource,
+    DomainRecordVersionRef, DomainRecordVersionSource, EntityRef,
 };
 use canwu_sim::{
-    ArchiveStoreOutcome, BoundaryRequest, DecisionArchiveBlob, DecisionArchiveProvider,
-    DecisionArchiveStore, DecisionArchiveStoreOutcome, DecisionHistoryKey, DecisionHistoryLocation,
-    DecisionIngressRequest, DecisionMutation, DomainRecord, DomainRecordClass, DomainRecordDraft,
-    DomainRecordLifecycle, DomainRecordMutation, DomainRecordSchema, ErrorCode,
-    MaintenanceDisposition, OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation,
-    OwnerAuthorizedParticipantDraft, OwnerAuthorizedParticipantProposal,
-    OwnerAuthorizedParticipantRole, OwnerAuthorizedRecordExpectation,
-    PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadSchema, PersistentDomainRecordStore,
-    PreparedStateDelta, Scenario, Simulation, SimulationPlugin, SimulationView, StatePageBlob,
-    StatePageProvider, StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore,
-    StateVisibility, SystemCadence, canonical_hash, prepare_state_delta, state_page_id,
-    verify_state_delta,
+    ArchiveStoreOutcome, BoundaryRequest, Command, CommandEnvelope, DecisionArchiveBlob,
+    DecisionArchiveProvider, DecisionArchiveStore, DecisionArchiveStoreOutcome, DecisionHistoryKey,
+    DecisionHistoryLocation, DecisionIngressRequest, DecisionMutation, DomainRecord,
+    DomainRecordClass, DomainRecordDraft, DomainRecordLifecycle, DomainRecordMutation,
+    DomainRecordSchema, ErrorCode, Issuer, MaintenanceDisposition,
+    OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
+    OwnerAuthorizedParticipantProposal, OwnerAuthorizedParticipantRole,
+    OwnerAuthorizedRecordExpectation, PLUGIN_DESCRIPTOR_FORMAT_VERSION, PayloadSchema,
+    PersistentDomainRecordStore, PreparedStateDelta, Scenario, Simulation, SimulationPlugin,
+    SimulationView, StatePageBlob, StatePageProvider, StatePageRetentionLedger,
+    StatePageRetentionPhase, StatePageStore, StateVisibility, SystemCadence, canonical_hash,
+    prepare_state_delta, state_page_id, verify_state_delta,
 };
-use canwu_time::SimTime;
+use canwu_time::{SimDuration, SimTime};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1215,5 +1215,67 @@ fn rejected_stale_owner_maintenance_is_authorized_and_restores_without_poisoning
         error.message.contains("participant set is incomplete"),
         "{}",
         error.message
+    );
+}
+
+/// The journal commitments do not depend on how the runtime hashes them
+/// incrementally: since 0.16.0 the command, event, ingress, and draw streams
+/// are kept in a resumable form, and these roots of a fixed run are the ones
+/// 0.15.0, which hashed them with a plain BLAKE3 hasher, computes for it.
+#[test]
+fn journal_commitment_roots_are_those_of_the_plain_stream_hash() {
+    let (mut simulation, ids) = Simulation::demo(1601).expect("demo run");
+    simulation
+        .submit(CommandEnvelope::new(
+            Issuer::Actor(ids.commander),
+            Command::OrderMovement {
+                subject: EntityRef::Army(ids.army),
+                destination: ids.eastern_territory,
+                cargo: Vec::new(),
+            },
+        ))
+        .expect("movement order");
+    simulation
+        .advance(SimDuration::days(30))
+        .expect("arrival and reports");
+    for morale in [10, 20, 30] {
+        simulation
+            .submit(CommandEnvelope::new(
+                Issuer::Debug,
+                Command::DebugSetArmyMorale {
+                    army: ids.army,
+                    morale,
+                },
+            ))
+            .expect("morale command");
+    }
+    let at = simulation.time();
+    simulation
+        .settle_boundary(BoundaryRequest::at(at).with_cadence(SystemCadence::Daily))
+        .expect("boundary");
+    assert_eq!(
+        (
+            simulation.events().len(),
+            simulation.command_log().len(),
+            simulation.random_draws().len()
+        ),
+        (8, 4, 1)
+    );
+    let roots = simulation.snapshot().commitment_roots.expect("roots");
+    assert_eq!(
+        roots.commands,
+        "52b059cef33e45e7ddd9e506e33bf3332da87894f88e7a7003ad869c96990fdc"
+    );
+    assert_eq!(
+        roots.events,
+        "f268ae74f18630b5732527f371758901147d51a9981b3304e5d1a858cbb30212"
+    );
+    assert_eq!(
+        roots.ingress,
+        "e00308f09971194a7aa12c93212db40ef8b74074fe6303fdadd2d29794d897fb"
+    );
+    assert_eq!(
+        roots.random,
+        "903d3d174e73f47e10814d129b51631bc2625dd5f596dd2656d0107c3794d351"
     );
 }

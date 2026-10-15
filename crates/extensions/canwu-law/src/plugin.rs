@@ -7,7 +7,7 @@ use crate::{
 };
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, Canwu, CanwuError, CauseRef, Command, CommandContext, DecisionOrigin,
+    BoundaryProposal, CanwuError, CauseRef, Command, CommandContext, DecisionOrigin,
     DecisionRequestId, DecisionTicketId, DomainRecord, DomainRecordMutation, DomainRecordRef,
     DomainRecordSchema, EntityRef, ErrorCode, EvidenceRef, IDENTITY_EVIDENCE_DEPENDENCIES_FIELD,
     IngressClass, IngressPayload, KnowledgeHolderRef, OwnerAuthorizedMaintenanceRequest,
@@ -392,16 +392,16 @@ pub fn law_command_descriptor() -> PluginActionDescriptor {
 }
 
 /// Queue one legal mutation through Canwu's canonical ingress.
-pub fn enqueue_legal_mutation(
-    canwu: &mut Canwu,
+pub fn enqueue_legal_mutation<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     mutation: &crate::LegalMutation,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
     enqueue_legal_mutation_at(canwu, canwu.time(), mutation)
 }
 
 /// Queue one legal mutation for a declared future boundary.
-pub fn enqueue_legal_mutation_at(
-    canwu: &mut Canwu,
+pub fn enqueue_legal_mutation_at<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     at: canwu_api::SimTime,
     mutation: &crate::LegalMutation,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -416,8 +416,8 @@ pub fn enqueue_legal_mutation_at(
 /// Stores, reads back, verifies, and queues one legal cold-archive transition
 /// through plugin-owned canonical ingress. Callers never receive an ingress
 /// capability that can serialize an arbitrary commit.
-pub fn enqueue_legal_archive(
-    canwu: &mut Canwu,
+pub fn enqueue_legal_archive<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     prepared: &PreparedLegalArchiveBatch,
     store: &dyn LegalArchiveStore,
 ) -> Result<LegalArchiveIngressReceipt, CanwuError> {
@@ -454,8 +454,8 @@ pub fn enqueue_legal_archive(
 /// Transfers or releases the store-side retention lease after the canonical
 /// legal boundary records its terminal disposition. This operation is
 /// idempotent and may be replayed after a host restart.
-pub fn finalize_legal_archive_retention(
-    canwu: &mut Canwu,
+pub fn finalize_legal_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     plan: &crate::CompiledLawPlan,
     store: &dyn LegalArchiveStore,
     receipt: &LegalArchiveIngressReceipt,
@@ -2519,17 +2519,18 @@ fn encoded_runtime_payload_len(record: &DomainRecord) -> Result<usize, CanwuErro
 }
 
 /// Load the plugin-owned runtime record and fail closed on a plan mismatch.
-pub fn load_legal_runtime(
-    canwu: &Canwu,
+pub fn load_legal_runtime<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     plan: &crate::CompiledLawPlan,
 ) -> Result<Option<LegalRuntime>, CanwuError> {
     validate_law_records(canwu)?;
-    let Some(plan_record) = canwu.typed_domain_record(&legal_plan_state_reference()) else {
+    let Some(plan_record) = canwu_api::typed_domain_record(canwu, &legal_plan_state_reference())
+    else {
         return Ok(None);
     };
-    let directory_record = canwu
-        .typed_domain_record(&legal_directory_state_reference())
-        .ok_or_else(|| invalid_record("law directory record is missing"))?;
+    let directory_record =
+        canwu_api::typed_domain_record(canwu, &legal_directory_state_reference())
+            .ok_or_else(|| invalid_record("law directory record is missing"))?;
     let plan_state = plan_record.decode_payload::<LegalPlanStateRecord>()?;
     let directory_state = directory_record.decode_payload::<LegalDirectoryStateRecord>()?;
     let mut encoded_bytes = encoded_runtime_payload_len(plan_record)?
@@ -2543,14 +2544,14 @@ pub fn load_legal_runtime(
         .iter()
         .chain(directory_state.directory.archive_only_shards.iter())
     {
-        let shard_record = canwu
-            .typed_domain_record(&legal_shard_state_reference(shard)?)
-            .ok_or_else(|| invalid_record("law directory references a missing shard record"))?;
-        let archive_record = canwu
-            .typed_domain_record(&legal_archive_head_state_reference(shard)?)
-            .ok_or_else(|| {
-                invalid_record("law directory references a missing archive-head record")
-            })?;
+        let shard_record =
+            canwu_api::typed_domain_record(canwu, &legal_shard_state_reference(shard)?)
+                .ok_or_else(|| invalid_record("law directory references a missing shard record"))?;
+        let archive_record =
+            canwu_api::typed_domain_record(canwu, &legal_archive_head_state_reference(shard)?)
+                .ok_or_else(|| {
+                    invalid_record("law directory references a missing archive-head record")
+                })?;
         let shard_bytes = encoded_runtime_payload_len(shard_record)?;
         let archive_bytes = encoded_runtime_payload_len(archive_record)?;
         encoded_bytes = encoded_bytes
@@ -2582,14 +2583,14 @@ pub fn load_legal_runtime(
 }
 
 /// Decode every law-owned record before exposing the plan-bound runtime.
-pub fn load_law_state_for_plan(
-    canwu: &Canwu,
+pub fn load_law_state_for_plan<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     plan: &crate::CompiledLawPlan,
 ) -> Result<Option<LegalRuntime>, CanwuError> {
     load_legal_runtime(canwu, plan)
 }
 
-fn validate_law_records(canwu: &Canwu) -> Result<(), CanwuError> {
+fn validate_law_records<H: canwu_api::CanwuRun + ?Sized>(canwu: &H) -> Result<(), CanwuError> {
     for record in canwu
         .domain_records()
         .filter(|record| record.reference.kind.namespace == crate::PLUGIN_NAMESPACE)

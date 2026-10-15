@@ -6,13 +6,13 @@ use crate::{
 };
 use canwu_api::{
     ArchiveReachabilityManifest, BoundaryContext, BoundaryDirective, BoundaryPhase,
-    BoundaryProposal, BoundarySystemContract, Canwu, CanwuError, Command, CommandContext,
-    CommandIngress, DecisionAction, DecisionOrigin, DecisionTicketState, DomainRecord,
-    DomainRecordMutation, DomainRecordSchema, ErrorCode, IngressClass, IngressPayload, Issuer,
-    KnowledgeHolderRef, PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider,
-    PluginArchiveRetention, PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest,
-    PluginRegistrar, SimDuration, SimulationPlugin, SimulationView, StateKey, StateVisibility,
-    SystemCadence, SystemDirective, canonical_hash,
+    BoundaryProposal, BoundarySystemContract, CanwuError, Command, CommandContext, CommandIngress,
+    DecisionAction, DecisionOrigin, DecisionTicketState, DomainRecord, DomainRecordMutation,
+    DomainRecordSchema, ErrorCode, IngressClass, IngressPayload, Issuer, KnowledgeHolderRef,
+    PayloadSchema, PluginActionDescriptor, PluginArchiveObjectProvider, PluginArchiveRetention,
+    PluginIngressDescriptor, PluginIngressPermit, PluginIngressRequest, PluginRegistrar,
+    SimDuration, SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence,
+    SystemDirective, canonical_hash,
 };
 use canwu_resource::{
     ResourceOperationOutcomeVersionV1, ResourceRuntimeRecord, resource_runtime_reference,
@@ -1329,13 +1329,13 @@ fn expected_domain_rejection(error: &CanwuError) -> bool {
     )
 }
 
-pub fn enqueue_force_archive(
-    canwu: &mut Canwu,
+/// Stores, verifies, and queues a force-supply archive commit. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn enqueue_force_archive<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     prepared: &crate::PreparedForceArchiveBatchV1,
     store: &dyn crate::PackageArchiveStore,
 ) -> Result<ForceArchiveIngressReceiptV1, CanwuError> {
-    let record = canwu
-        .typed_domain_record(&force_supply_runtime_reference())
+    let record = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
         .ok_or_else(|| invalid("force runtime is unavailable"))?;
     let state = record.decode_payload::<ForceSupplyRuntimeRecord>()?;
     if state.prepare_force_archive(prepared.selected.len())? != *prepared {
@@ -1373,13 +1373,14 @@ pub fn enqueue_force_archive(
     })
 }
 
-pub fn finalize_force_archive_retention(
-    canwu: &mut Canwu,
+/// Finalizes a force-supply archive retention handle and queues its
+/// acknowledgement. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn finalize_force_archive_retention<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     store: &dyn crate::PackageArchiveStore,
     ingress: &ForceArchiveIngressReceiptV1,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
-    let state = canwu
-        .typed_domain_record(&force_supply_runtime_reference())
+    let state = canwu_api::typed_domain_record(canwu, &force_supply_runtime_reference())
         .ok_or_else(|| invalid("force runtime is unavailable"))?
         .decode_payload::<ForceSupplyRuntimeRecord>()?;
     let receipt = state

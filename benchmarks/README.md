@@ -161,8 +161,21 @@ keeps more operation-keyed random draws. For each `--systems` count and each
   due and each makes `--draws` fresh keyed draws, on a run that still retains
   every draw record;
 - `sealed_boundary`: the same boundary after the evidence was sealed, when
-  each earlier draw is a keyed reservation (skipped when nothing is retained);
-- `snapshot_restore`: loading the run from its snapshot JSON.
+  each earlier draw is sealed (skipped when nothing is retained);
+- `snapshot_restore`: loading the run from its snapshot JSON;
+- `checkpoint_journal_restore`: loading the run from its portable checkpoint
+  journal;
+- after one seal of the whole run, so that every keyed draw is sealed:
+  `compact_checkpoint`, `compact_paged_checkpoint` (against an empty page
+  store), `compact_seal` (sealing one more Daily boundary), and
+  `compact_fork`. An operation the engine refuses is reported with an
+  `error` field instead of being treated as a failed run.
+
+`compact_fork` needs `CompactedCanwu::fork`, which engines before 0.16.0 lack.
+It sits behind the harness's default `compact-fork` feature; build an export
+of an older release with `--no-default-features` (and
+`--no-default-features --features allocation-counting` for its allocation
+build).
 
 It follows the conventions of the main harness. Elapsed time and allocation
 traffic come from separate release builds; allocation counts do not depend on
@@ -222,6 +235,30 @@ ran on the machine during the elapsed runs, so compare the elapsed files for
 growth and the allocation files for exact counts. The figures are interpreted
 in
 [`docs/proposals/keyed-draw-index-and-settlement-profile.md`](../docs/proposals/keyed-draw-index-and-settlement-profile.md).
+
+The 2026-10-15 allocation baselines compare 0.15.0 with the keyed-draw ledger
+of the continuation-checkpoint package, at 8 due systems and 1,000, 10,000,
+and 100,000 retained keyed draws:
+[`before`](baselines/2026-10-15-keyed-draw-ledger-before-allocations.json)
+and [`after`](baselines/2026-10-15-keyed-draw-ledger-after-allocations.json).
+The before file comes from an export of `v0.15.0` built with
+`--no-default-features`, with `CARGO_TARGET_DIR` set to a short path (the
+`blake3` assembler on Windows refuses very long object paths). Its
+`compact_paged_checkpoint` cases at 10,000 and 100,000 draws carry the error
+0.15.0 returns there: the paged envelope that lists every keyed reservation
+no longer fits one 4 MiB state page. The architecture suite was run on both
+trees for the same comparison:
+[`before`](baselines/2026-10-15-architecture-ledger-before-allocations.json)
+and [`after`](baselines/2026-10-15-architecture-ledger-after-allocations.json).
+The elapsed cost of the resumable journal stream hash was measured on one tree
+in two release builds, one with the 0.15.0 `blake3::Hasher` journal
+accumulator and one with the resumable hash, run alternately five times each
+in elapsed mode; each file merges the samples of its five runs, and its
+`method.variant` names the build:
+[`before`](baselines/2026-10-15-journal-stream-hash-before-elapsed.json)
+and [`after`](baselines/2026-10-15-journal-stream-hash-after-elapsed.json).
+The figures are interpreted in
+[`docs/proposals/continuation-checkpoint.md`](../docs/proposals/continuation-checkpoint.md).
 
 ## Resource archive profile
 

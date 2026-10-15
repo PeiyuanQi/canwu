@@ -789,6 +789,107 @@ fn sealed_run_admits_only_current_exact_versions_and_replays_exactly() {
     assert_eq!(rejections, 2);
 }
 
+/// An assessment command's admission checks a generic citation's existence
+/// and time and its relation to an earlier assessment. A run that sealed the
+/// cited evidence and the earlier assessment's boundary decides exactly as the
+/// run that did not.
+#[test]
+fn citation_and_relation_checks_decide_alike_after_a_seal() {
+    let technology = TechnologyPlugin;
+    let history = HistoricalSourcesPlugin;
+    let plugins: &[&dyn SimulationPlugin] = &[&technology, &history];
+    let actor = PersonId::new(1);
+    let subject = initial_record_version::<MetricSchema>("pressure");
+    let sources = HistoricalSourcesAssessment::PLUGIN_NAME;
+    let payload = |core| HistoricalSourcesAssessmentPayload {
+        core,
+        earliest_date: SimTime::EPOCH,
+        latest_date: SimTime::EPOCH,
+        authenticity_per_mille: 900,
+        reliability_per_mille: 750,
+        provenance_digest: digest('b'),
+    };
+    let mut unsealed =
+        Canwu::new_with_plugins(44, scenario(actor), plugins).expect("plugins should initialize");
+    enqueue_assessment(
+        &mut unsealed,
+        actor,
+        1,
+        sources,
+        HistoricalAssessmentCommand {
+            id: "base".to_owned(),
+            subject: KnowledgeHolderRef::Person(actor),
+            assessment: payload(core(actor, subject.clone())),
+        },
+    );
+    unsealed
+        .settle_boundary(BoundaryRequest::at(unsealed.time()))
+        .expect("a later boundary admits the base assessment's emissions");
+    let base = current_version(
+        &unsealed,
+        &TypedDomainRecordRef::<HistoricalSourcesAssessment>::new("base").into_untyped(),
+    );
+    // A boundary's record-change event: no dependency keeps its receipt.
+    let cited = EvidenceRef::Event(
+        unsealed
+            .events()
+            .iter()
+            .find(|event| matches!(event.cause, Some(canwu_api::CauseRef::Boundary(_))))
+            .expect("the base boundary emitted a record-change event")
+            .id,
+    );
+
+    let mut sealed = unsealed.fork().into_compacted().expect("compact mode");
+    sealed
+        .seal_evidence()
+        .expect("settled history should seal")
+        .expect("settled history should contain evidence");
+    assert!(sealed.archived_evidence_receipt(&cited).is_none());
+    assert_eq!(
+        sealed.evidence_exists(&cited),
+        unsealed.evidence_exists(&cited)
+    );
+    assert_eq!(sealed.evidence_time(&cited), unsealed.evidence_time(&cited));
+
+    let mut follow_up = core(actor, subject);
+    follow_up.supersedes = vec![base];
+    follow_up.citations = vec![cited];
+    let command = tracked_command(
+        actor,
+        2,
+        unsealed.revision(),
+        unsealed.time(),
+        sources,
+        ASSESSMENT_COMMAND,
+        serde_json::to_value(HistoricalAssessmentCommand {
+            id: "follow-up".to_owned(),
+            subject: KnowledgeHolderRef::Person(actor),
+            assessment: payload(follow_up),
+        })
+        .expect("assessment command should encode"),
+    );
+    let at = unsealed.time();
+    unsealed
+        .enqueue_command(at, 0, command.clone())
+        .expect("assessment should enqueue");
+    sealed
+        .enqueue_command(at, 0, command)
+        .expect("assessment should enqueue");
+    for _ in 0..2 {
+        let expected = unsealed
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("the unsealed run settles");
+        let actual = sealed
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("the sealed run settles");
+        assert_eq!(actual, expected);
+    }
+    let follow_up = TypedDomainRecordRef::<HistoricalSourcesAssessment>::new("follow-up");
+    assert!(unsealed.typed_domain_record(&follow_up).is_some());
+    assert!(sealed.typed_domain_record(&follow_up).is_some());
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+}
+
 fn tracked_command(
     actor: PersonId,
     request_id: u64,

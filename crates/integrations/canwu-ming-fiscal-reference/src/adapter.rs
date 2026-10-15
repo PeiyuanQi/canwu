@@ -1,6 +1,6 @@
 use canwu_api::{
     BoundaryContext, BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundarySystemContract,
-    Canwu, CanwuError, DomainRecordDraft, DomainRecordMutation, DomainRecordMutationPolicy,
+    CanwuError, DomainRecordDraft, DomainRecordMutation, DomainRecordMutationPolicy,
     DomainRecordSchema, DomainRecordType, DomainRecordVersionRef, DomainRecordVersionSource,
     DomainValueKindClass, ErrorCode, IngressClass, IngressPayload, PayloadSchema,
     PluginIngressDescriptor, PluginIngressRequest, PluginRegistrar, SimTime, SimulationPlugin,
@@ -156,8 +156,9 @@ fn validate_execution_result(
     Ok(())
 }
 
-pub fn enqueue_reference_execution_result(
-    canwu: &mut Canwu,
+/// Queues a reference adapter execution result. Takes either runtime handle, [`canwu_api::Canwu`] or [`canwu_api::CompactedCanwu`].
+pub fn enqueue_reference_execution_result<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &mut H,
     due_at: SimTime,
     evidence: &ReferenceFiscalExecutionEvidence,
 ) -> Result<canwu_api::IngressReceipt, CanwuError> {
@@ -178,28 +179,25 @@ pub fn reference_execution_evidence_ref(
     TypedDomainRecordRef::new(id)
 }
 
+/// The exact version of a reference execution evidence record, from the
+/// current-version provenance index, so it answers alike before and after a
+/// seal and on either runtime handle.
 #[must_use]
-pub fn reference_execution_evidence_version(
-    canwu: &Canwu,
+pub fn reference_execution_evidence_version<H: canwu_api::CanwuRun + ?Sized>(
+    canwu: &H,
     id: &str,
 ) -> Option<DomainRecordVersionRef> {
     let reference = reference_execution_evidence_ref(id).into_untyped();
-    let version = canwu.domain_record(&reference)?.version;
-    for boundary in canwu.boundaries().iter().rev() {
-        for (change_index, change) in boundary.record_changes.iter().enumerate().rev() {
-            if change.current.reference == reference && change.current.version == version {
-                return Some(DomainRecordVersionRef {
-                    record: reference,
-                    version,
-                    established_by: DomainRecordVersionSource::BoundaryChange {
-                        boundary: boundary.id,
-                        change_index: u64::try_from(change_index).ok()?,
-                    },
-                });
-            }
-        }
-    }
-    None
+    canwu
+        .current_domain_record_version(&reference)
+        .ok()
+        .flatten()
+        .filter(|version| {
+            matches!(
+                version.established_by,
+                DomainRecordVersionSource::BoundaryChange { .. }
+            )
+        })
 }
 
 fn invalid(message: impl Into<String>) -> CanwuError {
