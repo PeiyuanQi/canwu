@@ -1,7 +1,8 @@
 use crate::ingress::{
-    COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, SOCIETY_INGRESS_MALFORMED_REJECTION,
-    SocietyIngressQueue, SocietyIngressQueueRecord, rebase_admission_rejection,
-    society_ingress_queue_reference,
+    COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, QueuedSocietyIngress,
+    SOCIETY_INGRESS_MALFORMED_REJECTION, SocietyIngressBatch, SocietyIngressBatchRecord,
+    SocietyIngressQueueRecord, queue_entries, rebase_admission_rejection,
+    society_ingress_batch_reference, society_ingress_queue_reference,
 };
 use crate::lifecycle::SOCIETY_LIFECYCLE_DELTA_INGRESS;
 use crate::plugin::{PLUGIN_NAME, policy_decision_key, validate_policy_decision};
@@ -41,19 +42,33 @@ pub fn load_society_state(canwu: &Canwu) -> Result<SocietyState, CanwuError> {
     state.validate_at(canwu.time())?;
     state.validate_record_binding(record)?;
     validate_policy_components(canwu, &state)?;
-    load_ingress_queue(canwu)?;
+    society_ingress_queue_entries(canwu)?;
     Ok(state)
 }
 
-/// Loads the owner-side ingress queue and rejects entries an initial
-/// scenario seeded, since only the intake may write admitted packets.
-fn load_ingress_queue(canwu: &Canwu) -> Result<Option<SocietyIngressQueue>, CanwuError> {
+/// Reads the packets that wait in the owner-side ingress queue for the next
+/// society settlement, in admission order.
+///
+/// The queue is a head record ([`crate::SocietyIngressQueue`]) and one batch record
+/// ([`SocietyIngressBatch`]) for each boundary that admitted packets to it
+/// since the last settlement. A packet refused because the queue was full is
+/// not here: its outcome is already in the cohort exchange ledger.
+///
+/// # Errors
+///
+/// Returns `InvalidDomainRecord` when the head or a batch in use is invalid
+/// or they disagree, and `InvalidAuthority` when the initial scenario seeded
+/// a non-empty queue, since only the society intake may queue admitted
+/// packets.
+pub fn society_ingress_queue_entries(
+    canwu: &Canwu,
+) -> Result<Vec<QueuedSocietyIngress>, CanwuError> {
     let Some(record) = canwu.typed_domain_record(&society_ingress_queue_reference()) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
-    let queue = record.decode_payload::<SocietyIngressQueueRecord>()?;
-    queue.validate()?;
-    if !queue.entries.is_empty()
+    let head = record.decode_payload::<SocietyIngressQueueRecord>()?;
+    head.validate()?;
+    if head.queued > 0
         && canwu
             .current_domain_record_version(&record.reference)?
             .is_none_or(|version| {
@@ -65,7 +80,20 @@ fn load_ingress_queue(canwu: &Canwu) -> Result<Option<SocietyIngressQueue>, Canw
             "an initial scenario cannot seed admitted society ingress",
         ));
     }
-    Ok(Some(queue))
+    let batches = (0..head.batches)
+        .map(|slot| {
+            canwu
+                .typed_domain_record(&society_ingress_batch_reference(slot))
+                .ok_or_else(|| {
+                    CanwuError::new(
+                        ErrorCode::InvalidDomainRecord,
+                        "a society ingress batch in use is missing",
+                    )
+                })?
+                .decode_payload::<SocietyIngressBatchRecord>()
+        })
+        .collect::<Result<Vec<SocietyIngressBatch>, _>>()?;
+    queue_entries(&head, batches)
 }
 
 /// Re-derives every queued packet from the journal: the packet must be the
@@ -75,10 +103,8 @@ fn load_ingress_queue(canwu: &Canwu) -> Result<Option<SocietyIngressQueue>, Canw
 /// through phase 11 of the admitting boundary), and a pressure revision's
 /// admission verdict must match the cause of its ingress record.
 fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
-    let Some(queue) = load_ingress_queue(canwu)? else {
-        return Ok(());
-    };
-    if queue.entries.is_empty() {
+    let queue = society_ingress_queue_entries(canwu)?;
+    if queue.is_empty() {
         return Ok(());
     }
     let ingress = canwu
@@ -107,7 +133,7 @@ fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
         versions: &versions,
     };
     let queue_error = |message: &str| CanwuError::new(ErrorCode::InvalidAuthority, message);
-    for entry in &queue.entries {
+    for entry in &queue {
         let record = ingress
             .get(&entry.ingress)
             .ok_or_else(|| queue_error("queued society ingress has no retained ingress record"))?;
@@ -177,10 +203,9 @@ fn validate_queued_ingress(canwu: &Canwu) -> Result<(), CanwuError> {
 /// queued rebase was established.
 fn cited_stock_versions(
     canwu: &Canwu,
-    queue: &SocietyIngressQueue,
+    queue: &[QueuedSocietyIngress],
 ) -> BTreeMap<(DomainRecordRef, u64), (BoundaryId, usize)> {
     let cited = queue
-        .entries
         .iter()
         .filter(|entry| entry.packet_type == COHORT_REBASE_INGRESS)
         .filter_map(|entry| {

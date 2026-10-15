@@ -21,8 +21,9 @@ pub use decision::{
 pub use ingress::{
     COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1, MAX_SOCIETY_INGRESS_QUEUE,
     QueuedSocietyIngress, REBASE_INVALID_STOCK_REJECTION, REBASE_STALE_STOCK_REJECTION,
-    RebaseReason, SOCIETY_INGRESS_MALFORMED_REJECTION, SocietyIngressQueue,
-    SocietyIngressQueueRecord, society_ingress_queue_reference,
+    RebaseReason, SOCIETY_INGRESS_MALFORMED_REJECTION, SOCIETY_INGRESS_QUEUE_FULL_REJECTION,
+    SocietyIngressBatch, SocietyIngressBatchRecord, SocietyIngressQueue, SocietyIngressQueueRecord,
+    society_ingress_batch_reference, society_ingress_queue_reference,
 };
 pub use lifecycle::{
     SOCIETY_LIFECYCLE_DELTA_INGRESS, SocietyLifecycleDeltaV1, SocietyTargetBindings,
@@ -41,11 +42,12 @@ pub use model::{
     society_cohort_transfer_pending_reference, society_state_reference,
 };
 pub use plugin::{
-    PLUGIN_NAME, SOCIETY_INGRESS_REJECTED_EVENT, SocietyPlugin, society_policy_decision_state_key,
+    COHORT_TRANSFER_INSUFFICIENT_SOURCE, PLUGIN_NAME, SOCIETY_INGRESS_REJECTED_EVENT,
+    SocietyPlugin, TransferSettlement, society_policy_decision_state_key,
 };
 pub use projection::{
     from_society_snapshot_json, from_society_snapshot_json_with_plugin, load_society_state,
-    projection_for_viewer, validate_society_runtime,
+    projection_for_viewer, society_ingress_queue_entries, validate_society_runtime,
 };
 pub use revision::{
     InfluenceEdgeRevision, MAX_PRESSURE_REVISION_ROWS, OrganizationRevision,

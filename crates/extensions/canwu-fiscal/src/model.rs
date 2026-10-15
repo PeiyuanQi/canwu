@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const FISCAL_CONTENT_SCHEMA_VERSION: u32 = 1;
-pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 2;
+/// Version of the serialized [`FiscalState`]. Version 3 adds the audit
+/// appointment policies and proposals, the nomination an audit binding was
+/// appointed on, and the appointment a finding's auditor held.
+pub const FISCAL_RUNTIME_SCHEMA_VERSION: u32 = 3;
 /// Authority bindings, audit bindings, and scope bindings, each counted on
 /// its own. Audit binding IDs are one namespace across all institutions and
 /// share this one cap.
@@ -71,31 +74,74 @@ pub const FISCAL_REPORT_FACTS_PER_PART: usize = 16;
 pub const MAX_FISCAL_REPORT_PARTS: usize = MAX_FISCAL_ASSESSMENTS / FISCAL_REPORT_FACTS_PER_PART;
 /// Fiscal report records one boundary publishes, over all observers: about a
 /// tenth of the engine's per-boundary knowledge record limit, which every
-/// plugin shares. Parts that changed but do not fit are published by the next
-/// boundary that changes the fiscal state, and until then the observer's
-/// summary names them in [`FiscalReportSummary::pending_parts`].
+/// plugin shares. Parts that changed but do not fit are owed: the boundary
+/// schedules an internal `fiscal_report_drain_v1` packet, due at once, so the
+/// next boundary publishes them without waiting for a change of the fiscal
+/// state, up to this many records again. Until then the observer's summary
+/// names them in [`FiscalReportSummary::pending_parts`].
 ///
 /// The limit is reached only when one boundary has more records than this to
 /// publish, and then an observer can infer a little that its binding does not
-/// show it. The records are shared in the order of the observer bindings, so
+/// show it: the records are shared in the order of the observer bindings, so
 /// which parts of a report are pending depends on the reports of the
-/// observers before it. And pending parts go out with the next change of the
-/// fiscal state, whoever made it and whatever it was, so their arrival says
-/// that something changed.
+/// observers before it.
 pub const MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY: usize = 1_024;
 pub const MAX_FISCAL_EVIDENCE_KINDS: usize = 32;
 pub const MAX_FISCAL_EVIDENCE_PER_RECORD: usize = 32;
-/// Serialized byte budget of the fiscal state record. An action whose result,
-/// with its outcome and the derived fields that follow from it, would not fit
-/// the budget less 16 KiB is rejected as its own outcome with
-/// [`FISCAL_STATE_BUDGET_EXHAUSTED`]; the actions around it and the boundary
-/// are unaffected. The 16 KiB are kept for the report plan, which can list
-/// the same parts under other keys when an observer cannot receive knowledge.
-/// Admission does not look at the budget: near it, commands are still
-/// accepted, and each is rejected at settlement while a rejection fits and
-/// dropped after that. An execution receipt or a historical-context change
-/// that would not fit still fails its boundary.
+/// Parties one [`FiscalAppointmentPolicy`] lists as nominators, and as
+/// petitioners, each.
+pub const MAX_FISCAL_APPOINTMENT_PARTIES: usize = 32;
+/// Nominations and removal petitions that one party of one
+/// [`FiscalAppointmentPolicy`] may have pending at once, over all the
+/// policy's bindings. Admission refuses a further one as `ValueOutOfRange`,
+/// unless it replaces the party's pending proposal of the same kind on the
+/// same binding. A policy lists at most [`MAX_FISCAL_APPOINTMENT_PARTIES`]
+/// nominators and as many petitioners, so it has at most
+/// `2 * MAX_FISCAL_APPOINTMENT_PARTIES * MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`
+/// proposals pending, and no party fills another's room.
+pub const MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY: usize = 4;
+/// Resolved nominations and petitions kept for one policy, as the record of
+/// who proposed, on what, and who decided. A resolution past it drops the
+/// policy's oldest resolved proposals (by the time they were resolved, then
+/// by ID), so a run never runs out of room for proposals; a binding and a
+/// finding keep their nominator in [`FiscalProposalRef`] either way.
+pub const MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY: usize = 64;
+/// Serialized byte budget of the fiscal state record.
+///
+/// Settlement holds every record its boundary writes, leaving out the report
+/// plan, to this budget less [`MAX_FISCAL_REPORT_PLAN_BYTES`]: the state as
+/// settlement writes it, and as the candidate and aggregate systems of the
+/// same boundary rewrite it with their derived fields. Any report plan fits
+/// in what is left, so no derived write can pass the budget, however much a
+/// change grows the derived fields.
+///
+/// An action whose result does not fit is rejected as its own outcome with
+/// [`FISCAL_STATE_BUDGET_EXHAUSTED`]. An execution receipt or a
+/// historical-context change that does not fit changes nothing, and one
+/// `canwu.fiscal.ingress_rejected.v1` event whose summary ends with
+/// [`FISCAL_INGRESS_BUDGET_REJECTION`] is its only record. The packets around
+/// it and the boundary are unaffected. Admission does not look at the
+/// budget: near it, commands are still accepted, and each is rejected at
+/// settlement while a rejection fits and dropped after that.
 pub const MAX_FISCAL_STATE_JSON_BYTES: usize = 32 * 1_024 * 1_024;
+/// The most bytes a report plan can add to the serialized fiscal state: its
+/// key, its revision, and both of its maps listing every part of every
+/// observer binding under the longest binding ID. A valid plan never takes
+/// more, so settlement leaves this much of [`MAX_FISCAL_STATE_JSON_BYTES`]
+/// free for whatever plan the aggregate system, or a later boundary that
+/// publishes owed parts, writes.
+pub const MAX_FISCAL_REPORT_PLAN_BYTES: usize = {
+    // `,"report_plan":{"revision":` and its closing brace around a revision
+    // of at most 20 digits, and the keys `,"publish":` and `,"deferred":`.
+    let frame = 96;
+    // One observer's entry in one map: the quoted binding ID, a colon,
+    // brackets, a separating comma, and its part numbers, each below
+    // `MAX_FISCAL_REPORT_PARTS` and so at most three digits and a comma.
+    let entry = MAX_FISCAL_IDENTIFIER_BYTES + 6 + MAX_FISCAL_REPORT_PARTS * 4;
+    frame + 2 * MAX_FISCAL_OBSERVERS * entry
+};
+const _: () = assert!(MAX_FISCAL_REPORT_PARTS <= 1_000);
+const _: () = assert!(MAX_FISCAL_REPORT_PLAN_BYTES < MAX_FISCAL_STATE_JSON_BYTES / 64);
 pub const MAX_FISCAL_CATALOG_PERIODS: usize = 512;
 pub const MAX_FISCAL_CATALOG_REGIONS: usize = 1_024;
 pub const MAX_FISCAL_CATALOG_DEFINITIONS: usize = 16_384;
@@ -297,18 +343,24 @@ pub enum FiscalIssuerRole {
     Acting,
     /// A decision controller deciding as the binding's institution as a body:
     /// its decision origin is that institution with no responsible actor.
-    /// Only the rebind actions admit this role, and only while the binding
-    /// names an authorized actor; on a binding with none, the same controller
-    /// holds the principal role.
+    /// Only the rebind and appointment actions admit this role (see
+    /// [`FiscalAction::NominateAuditor`]), and only while the binding names
+    /// an authorized actor; on a binding with none, the same controller holds
+    /// the principal role.
     Institution,
     /// The `auditor` of a [`FiscalAuditBinding`], under its `authority_basis`.
     Auditor,
+    /// A person a [`FiscalAppointmentPolicy`] lists by name as a nominator or
+    /// petitioner, acting under that policy: the issuer's `binding_id` is the
+    /// policy's ID. Only a nomination or removal petition admits this role.
+    ListedActor,
 }
 
 /// Who issued a settled fiscal action, under which binding and role.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalActionIssuer {
-    /// The authority binding or audit binding the issuer acted under.
+    /// The authority binding or audit binding the issuer acted under, or the
+    /// appointment policy a [`FiscalIssuerRole::ListedActor`] acted under.
     pub binding_id: String,
     pub role: FiscalIssuerRole,
     /// The person who issued the action. `None` when an institution decided
@@ -327,7 +379,10 @@ pub struct FiscalActionRequest {
     pub action_id: String,
     /// The binding the issuer acts under: an authority binding of the
     /// institution the action concerns, or, for [`FiscalAction::RecordAudit`]
-    /// only, an audit binding on that institution.
+    /// only, an audit binding on that institution. For the appointment actions
+    /// it is an authority binding of a party the governing
+    /// [`FiscalAppointmentPolicy`] lists, or, for a person the policy lists by
+    /// name, the policy's own ID.
     pub authority_binding_id: String,
     /// The procedure revision the issuer decided against. The action is stale,
     /// and settles as a `Rejected` outcome, unless this equals the procedure
@@ -434,21 +489,124 @@ pub enum FiscalAction {
         authority_basis: Option<DomainRecordVersionRef>,
     },
     /// Installs, replaces, or removes one audit binding on the issuer's own
-    /// institution. With `auditor` and `authority_basis` both set it installs
-    /// the binding or replaces its auditor and basis; with both `None` it
-    /// removes the binding.
+    /// institution, where that institution appoints its own auditors. With
+    /// `auditor` and `authority_basis` both set it installs the binding or
+    /// replaces its auditor and basis; with both `None` it removes the
+    /// binding.
     ///
     /// The issuer must hold the principal or institution role under an
     /// authority binding of the audited institution, the auditor must exist,
     /// and the basis must be current as for [`Self::RebindAuthority`]. An
-    /// audit binding of another institution cannot be changed. The audited
-    /// institution therefore chooses and removes its own auditors; see
-    /// [`FiscalAuditBinding`] for what that does and does not establish.
+    /// audit binding of another institution cannot be changed. The
+    /// [`FiscalAppointmentPolicy`] of the audited institution must name that
+    /// institution as its own appointer, and must let the appointer appoint
+    /// without a nomination (to install), remove without a petition (to
+    /// remove), or both (to replace the seated auditor by another): the
+    /// action is then the appointer's decision
+    /// ([`Self::DecideAuditAppointment`] with
+    /// [`FiscalAppointmentDecision::Appoint`] or
+    /// [`FiscalAppointmentDecision::Remove`]) and has the same effects.
+    /// Anywhere else it is refused, and the policy's appointer decides.
     RebindAudit {
         audit_binding_id: String,
         auditor: Option<PersonId>,
         authority_basis: Option<DomainRecordVersionRef>,
     },
+    /// Nominates `candidate`, under `authority_basis`, as the auditor of the
+    /// audit binding `audit_binding_id` on `institution`, which need not
+    /// exist yet. The nomination stays pending, as a
+    /// [`FiscalAuditProposal`] with ID `nomination_id`, until the appointer
+    /// decides on it or it is superseded, or the same party's next
+    /// nomination for the binding replaces it. A party has at most
+    /// [`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`] proposals pending.
+    ///
+    /// The issuer must be a nominator of the institution's
+    /// [`FiscalAppointmentPolicy`]: an institution it lists, acting under one
+    /// of its authority bindings as its principal or as a body, or a person
+    /// it lists, acting under the policy's ID. An acting actor never
+    /// nominates. The candidate must exist, the basis must be current as for
+    /// [`Self::RebindAuthority`], and an existing binding of that ID must be
+    /// on `institution`. All of this is checked when the command is admitted
+    /// and again when the action settles.
+    NominateAuditor {
+        nomination_id: String,
+        audit_binding_id: String,
+        institution: EntityRef,
+        candidate: PersonId,
+        authority_basis: DomainRecordVersionRef,
+    },
+    /// Petitions the appointer to remove the auditor of the existing audit
+    /// binding `audit_binding_id`, on `grounds` (at least one evidence
+    /// reference). The petition names the auditor the binding has when it
+    /// settles and stays pending, as a [`FiscalAuditProposal`] with ID
+    /// `petition_id`, until the appointer decides on it or it is superseded,
+    /// or the same party's next petition on the binding replaces it.
+    ///
+    /// The issuer must be a petitioner of the audited institution's
+    /// [`FiscalAppointmentPolicy`], as for a nominator in
+    /// [`Self::NominateAuditor`].
+    PetitionAuditorRemoval {
+        petition_id: String,
+        audit_binding_id: String,
+        grounds: BTreeSet<EvidenceRef>,
+    },
+    /// The appointer's decision on the audit binding `audit_binding_id`.
+    ///
+    /// The issuer must hold the principal or institution role under an
+    /// authority binding of the appointer that the audited institution's
+    /// [`FiscalAppointmentPolicy`] names; an acting actor never decides. The
+    /// binding records the decision in `rebound_by` and the nomination it
+    /// accepted, if any, in [`FiscalAuditBinding::nomination`]. See
+    /// [`FiscalAppointmentDecision`] for the decisions and for what each
+    /// resolves.
+    DecideAuditAppointment {
+        audit_binding_id: String,
+        decision: FiscalAppointmentDecision,
+    },
+}
+
+/// What an appointer decides about one audit binding.
+///
+/// An appointment (of a nominee or not) fills a vacant binding, or appoints
+/// its seated auditor again, as the policy's appointment rule allows.
+/// Replacing a seated auditor by another is also a removal: the policy must
+/// let the appointer remove without a petition
+/// ([`FISCAL_PETITION_REQUIRED`] otherwise), and an auditor a petition is
+/// pending against is otherwise removed by accepting it first. An
+/// appointment resolves every other nomination pending on the binding as
+/// superseded, and the petitions pending on it only when it replaces the
+/// auditor they name. A removal (on a petition or not) removes the binding
+/// and resolves every other petition pending on it as superseded;
+/// nominations stay pending, since they propose someone for the vacancy.
+/// Only the audited institution's proposals are superseded: a binding ID
+/// free on one institution can be nominated for on another. A cited
+/// nomination or petition must be pending on the decided binding
+/// ([`FISCAL_PROPOSAL_NOT_PENDING`] otherwise), and it is resolved as
+/// accepted, or as dismissed.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "decision", rename_all = "snake_case")]
+pub enum FiscalAppointmentDecision {
+    /// Appoints the candidate of the pending nomination `nomination_id`,
+    /// under the basis it named, which must still be current.
+    AcceptNomination { nomination_id: String },
+    /// Appoints `auditor` under `authority_basis` without a nomination, which
+    /// the policy must allow ([`FISCAL_NOMINATION_REQUIRED`] otherwise).
+    /// `institution` is the audited institution: the policy's, and an
+    /// existing binding's.
+    Appoint {
+        institution: EntityRef,
+        auditor: PersonId,
+        authority_basis: DomainRecordVersionRef,
+    },
+    /// Removes the auditor the pending petition `petition_id` names, who
+    /// still holds the binding.
+    AcceptPetition { petition_id: String },
+    /// Removes the binding's auditor without a petition, which the policy
+    /// must allow ([`FISCAL_PETITION_REQUIRED`] otherwise).
+    Remove,
+    /// Dismisses the pending nomination or petition `proposal_id` and
+    /// changes nothing else.
+    Dismiss { proposal_id: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -903,6 +1061,37 @@ pub const FISCAL_AUTHORITY_BASIS_NOT_CURRENT: &str =
 pub const FISCAL_ISSUER_NOT_BOUND: &str =
     "fiscal action issuer no longer holds the binding it was admitted under";
 
+/// Stable rejection message used when no [`FiscalAppointmentPolicy`]
+/// governs the auditors of the institution an appointment action concerns.
+/// Without one, nobody appoints or removes them at runtime.
+pub const FISCAL_APPOINTMENT_POLICY_MISSING: &str =
+    "no appointment policy governs the auditors of this institution";
+
+/// Stable rejection message used when the issuer of an appointer's decision,
+/// or of a `RebindAudit`, does not act for the appointer the policy names.
+pub const FISCAL_ISSUER_NOT_APPOINTER: &str =
+    "the issuer does not act for the appointer of this institution's auditors";
+
+/// Stable rejection message used when the issuer of a nomination or removal
+/// petition is not a party the policy lists for it.
+pub const FISCAL_ISSUER_NOT_LISTED: &str =
+    "the appointment policy does not list the issuer for this proposal";
+
+/// Stable rejection message used when the appointer appoints without a
+/// nomination under a policy that requires one.
+pub const FISCAL_NOMINATION_REQUIRED: &str =
+    "the appointment policy requires a nomination before an appointment";
+
+/// Stable rejection message used when the appointer removes an auditor
+/// without a petition under a policy that requires one.
+pub const FISCAL_PETITION_REQUIRED: &str =
+    "the appointment policy requires a removal petition before a removal";
+
+/// Stable rejection message used when a decision cites a nomination or
+/// petition that is not pending on the audit binding it decides.
+pub const FISCAL_PROPOSAL_NOT_PENDING: &str =
+    "the cited nomination or petition is not pending on this audit binding";
+
 /// Stable rejection message used for an action that is current and
 /// authorized in a boundary that already applied
 /// [`MAX_FISCAL_ACTIONS_PER_BOUNDARY`] actions.
@@ -914,7 +1103,45 @@ pub const FISCAL_BOUNDARY_ACTION_LIMIT: &str =
 pub const FISCAL_STATE_BUDGET_EXHAUSTED: &str =
     "fiscal action would exceed the fiscal state byte budget";
 
+/// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
+/// event for an execution receipt or a historical-context change whose
+/// result would not fit [`MAX_FISCAL_STATE_JSON_BYTES`]. The packet changes
+/// nothing: a receipt consumes neither its evidence versions nor its external
+/// operations, and the procedure revision does not advance.
+pub const FISCAL_INGRESS_BUDGET_REJECTION: &str = "state_budget_exhausted";
+
+/// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
+/// event for a fiscal packet whose payload does not decode: an execution
+/// receipt or historical-context change a host sent malformed, or an action
+/// packet, which only a boundary system of another plugin that declares the
+/// action ingress as a target can produce. The packet changes nothing.
+pub const FISCAL_INGRESS_MALFORMED_REJECTION: &str = "malformed_payload";
+
+/// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
+/// event for an execution receipt or historical-context change that
+/// decodes but is not valid, after the message that says why: a receipt
+/// whose evidence is not the current version of its record, is of a kind the
+/// state does not approve, does not match its request, cites an external
+/// operation another receipt settled, or takes its request past the
+/// authorized quantity; a receipt ID reused with other content; or a
+/// historical year outside the pack. The packet changes nothing: a receipt
+/// consumes neither its evidence versions nor its external operations, and
+/// the procedure revision does not advance.
+pub const FISCAL_INGRESS_INVALID_REJECTION: &str = "invalid_packet";
+
+/// Reason that ends the summary of a `canwu.fiscal.ingress_rejected.v1`
+/// event for a fiscal action packet whose ingress record does not name, as
+/// its cause, the command the packet carries. Only the admission of an
+/// `apply_fiscal_action_v1` command produces a packet with that cause, so
+/// such a packet was scheduled by a boundary system of another plugin; it
+/// changes nothing and its action ID is not consumed.
+pub const FISCAL_INGRESS_ORIGIN_REJECTION: &str = "unauthorized_origin";
+
 /// The settled action that last replaced a binding's actors, and its issuer.
+///
+/// Appointments use the same record for the action that made or resolved a
+/// nomination or petition ([`FiscalAuditProposal`]); `rebound_at` is then
+/// the time that action settled.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalRebinding {
     /// The rebind action; its [`FiscalActionOutcome`] names the command.
@@ -955,19 +1182,24 @@ pub struct FiscalAuthorityBinding {
 /// otherwise the action is rejected with
 /// [`FISCAL_AUTHORITY_BASIS_NOT_CURRENT`]. An audit binding grants no other
 /// fiscal action and is never consulted when an authority binding is checked.
-/// It is installed with the state or by [`FiscalAction::RebindAudit`], and its
-/// ID must differ from every authority binding ID. Audit binding IDs are one
-/// namespace across all institutions.
+/// It is installed with the state or by the appointer of the audited
+/// institution's [`FiscalAppointmentPolicy`], and its ID must differ from
+/// every authority binding ID and appointment policy ID. Audit binding IDs are
+/// one namespace across all institutions.
 ///
-/// The binding establishes attribution, not independence. The audited
-/// institution installs, replaces, and removes its own audit bindings, and
-/// can remove one before a finding admitted under it settles. The basis only
-/// has to be the current version of some application record the plugin reads;
-/// what that record says about the auditor is the application's to decide.
-/// A basis named here, in [`FiscalAuditFinding::entered_by`], or in
-/// `rebound_by` is not declared as required evidence: no decision reads it
-/// again, and after `seal_evidence` a superseded version may no longer be
-/// provable.
+/// Who installs and removes the binding at runtime is the policy's to say: an
+/// appointer, which may need a nomination or a removal petition first. The
+/// binding is independent of the audited institution exactly as far as the
+/// policy makes it: an institution that is its own appointer installs,
+/// replaces, and removes its own auditors, and can remove one before a
+/// finding admitted under it settles, so its bindings establish attribution
+/// only; an institution with no policy has only the bindings installed with
+/// the state. The basis only has to be the current version of some
+/// application record the plugin reads; what that record says about the
+/// auditor is the application's to decide. A basis named here, in
+/// [`FiscalAuditFinding::entered_by`], in a nomination, or in `rebound_by` is
+/// not declared as required evidence: no decision reads it again, and after
+/// `seal_evidence` a superseded version may no longer be provable.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalAuditBinding {
     pub id: String,
@@ -975,10 +1207,153 @@ pub struct FiscalAuditBinding {
     pub institution: EntityRef,
     pub auditor: PersonId,
     pub authority_basis: DomainRecordVersionRef,
-    /// Who installed or last replaced this binding at runtime, by which
-    /// action. `None` for a binding installed with the state.
+    /// Who decided to install or last replace this binding at runtime, by
+    /// which action: the appointer's decision. `None` for a binding installed
+    /// with the state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebound_by: Option<FiscalRebinding>,
+    /// The nomination that decision accepted, and its nominator. `None` for
+    /// an auditor appointed without a nomination or installed with the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nomination: Option<FiscalProposalRef>,
+}
+
+/// Who appoints and removes the auditors of one institution, and who may ask
+/// for an appointment or a removal.
+///
+/// A policy is declared with the state, at most one per audited
+/// `institution`, and no action changes it. The `appointer` is an institution:
+/// it decides under one of its authority bindings, as that binding's
+/// principal or as a body ([`FiscalIssuerRole::Principal`] or
+/// [`FiscalIssuerRole::Institution`]), never through an acting actor. The
+/// audited institution is its own appointer only where the policy names it
+/// so; otherwise it cannot install, replace, or remove its own auditors.
+///
+/// Nominators propose a candidate ([`FiscalAction::NominateAuditor`]) and
+/// petitioners ask for an auditor's removal on grounds
+/// ([`FiscalAction::PetitionAuditorRemoval`]). Whether the appointer may act
+/// without either is the policy's to say: `removes_without_petition`
+/// governs every removal of a seated auditor, including his replacement by
+/// another. Each proposal is recorded with its party in
+/// [`FiscalState::audit_proposals`]; a party has at most
+/// [`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`] pending, and the policy keeps
+/// its latest [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`] resolved ones.
+///
+/// The shape names no binding kind: the same policy could govern who
+/// appoints and dismisses the actors of an authority binding.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalAppointmentPolicy {
+    pub id: String,
+    /// The institution whose audit bindings the policy governs.
+    pub institution: EntityRef,
+    /// The institution whose decision appoints and removes them.
+    pub appointer: EntityRef,
+    /// Who may nominate a candidate.
+    pub nominators: BTreeSet<FiscalAppointmentParty>,
+    /// Who may petition for an auditor's removal.
+    pub petitioners: BTreeSet<FiscalAppointmentParty>,
+    /// Whether the appointer may appoint without a nomination.
+    pub appoints_without_nomination: bool,
+    /// Whether the appointer may remove without a petition.
+    pub removes_without_petition: bool,
+}
+
+/// A nominator or petitioner of a [`FiscalAppointmentPolicy`].
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FiscalAppointmentParty {
+    /// An institution, acting under one of its authority bindings as that
+    /// binding's principal or as a body.
+    Institution { institution: EntityRef },
+    /// A person, acting under the policy itself
+    /// ([`FiscalIssuerRole::ListedActor`]): directly, or as the actor or
+    /// responsible actor of a validated decision whose subject is the
+    /// audited institution.
+    Actor { actor: PersonId },
+}
+
+/// One nomination or removal petition for one audit binding.
+///
+/// A proposal is pending until it is resolved, once: the appointer accepts
+/// or dismisses it, or a decision on its binding supersedes it as
+/// [`FiscalAppointmentDecision`] says. A new proposal of the same kind by the
+/// same party on the same binding replaces the party's pending one, which is
+/// dropped. A resolved proposal stays, as the record of who proposed, on
+/// what, and who decided, among the latest
+/// [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`] of its policy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalAuditProposal {
+    pub id: String,
+    pub audit_binding_id: String,
+    /// The audited institution.
+    pub institution: EntityRef,
+    pub kind: FiscalAuditProposalKind,
+    /// The listed party that made the proposal.
+    pub party: FiscalAppointmentParty,
+    /// The action that made the proposal, and its issuer.
+    pub proposed_by: FiscalRebinding,
+    /// How the proposal was resolved; `None` while it is pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<FiscalProposalResolution>,
+}
+
+impl FiscalAuditProposal {
+    /// Whether the proposal still waits for a decision.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.resolution.is_none()
+    }
+}
+
+/// What a [`FiscalAuditProposal`] proposes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum FiscalAuditProposalKind {
+    /// `candidate`, under `authority_basis`, as the binding's auditor.
+    Nomination {
+        candidate: PersonId,
+        authority_basis: DomainRecordVersionRef,
+    },
+    /// The removal of `auditor`, who held the binding when the petition
+    /// settled, on `grounds`.
+    RemovalPetition {
+        auditor: PersonId,
+        grounds: BTreeSet<EvidenceRef>,
+    },
+}
+
+/// How a proposal was resolved, and by which settled action.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalProposalResolution {
+    pub outcome: FiscalProposalOutcome,
+    /// The appointer's decision that accepted, dismissed, or superseded the
+    /// proposal, and its issuer.
+    pub resolved_by: FiscalRebinding,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FiscalProposalOutcome {
+    /// The appointer appointed the nominee, or removed the petitioned auditor.
+    Accepted,
+    /// The appointer dismissed it.
+    Dismissed,
+    /// A decision on the binding made it moot.
+    Superseded,
+}
+
+/// A nomination or petition as a binding or finding cites it: its ID in
+/// [`FiscalState::audit_proposals`], and who made it.
+///
+/// The record is kept only among the latest resolved proposals of its
+/// policy, and once it is dropped or pruned its ID can be used again, so a
+/// binding's or finding's `proposal_id` may later name a different
+/// proposal. `proposed_by`, which the citing record carries itself, stays
+/// authoritative for who nominated.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FiscalProposalRef {
+    pub proposal_id: String,
+    pub proposed_by: FiscalActionIssuer,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1085,6 +1460,14 @@ pub struct FiscalAuditFinding {
     /// finding settled before issuers were recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub entered_by: Option<FiscalActionIssuer>,
+    /// For a finding entered under an audit binding, the decision that
+    /// appointed its auditor, as the binding held it when the finding
+    /// settled. `None` otherwise, and for a binding installed with the state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub appointed_by: Option<FiscalRebinding>,
+    /// The nomination that appointment accepted, and its nominator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nomination: Option<FiscalProposalRef>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1260,11 +1643,24 @@ impl FiscalReport {
 /// at its scenario version it is ignored, and the first system that writes
 /// the state clears it, so the first derivation of an authored state always
 /// plans every report whole.
+///
+/// Parts the plan defers for an observer who can receive knowledge do not
+/// wait for a change of the fiscal state. The aggregate system of any later
+/// boundary that runs the fiscal systems finds them by reading this field
+/// from the committed record, without decoding the state, and publishes them
+/// in a plan of their own; a boundary that leaves such parts owed schedules
+/// an internal `fiscal_report_drain_v1` packet so that the next boundary
+/// comes at once. A boundary in which no observer is owed anything it can
+/// receive does not decode the state.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FiscalReportPlan {
     /// The procedure revision the plan was computed at; zero while no report
     /// has been planned. `publish` is published by the boundary that computed
-    /// the plan, and a plan of an earlier revision has been carried out.
+    /// the plan, and a plan of an earlier revision has been carried out. A
+    /// plan that publishes owed parts is computed by a boundary that does not
+    /// advance the procedure revision, and every other write of the state
+    /// either advances it or writes a new plan, so a plan is never carried
+    /// out twice.
     pub revision: u64,
     /// Observer binding ID to the part numbers to publish. An observer listed
     /// here also gets its summary.
@@ -1274,9 +1670,12 @@ pub struct FiscalReportPlan {
     /// planned: they did not fit
     /// [`MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY`], or the observer's actor is
     /// dead, and the engine publishes no knowledge to a dead person. The next
-    /// plan takes them first; a dead observer's stay here, outside every
-    /// plan's limit, for as long as the actor is dead. An observer listed
-    /// with no part is owed its summary only.
+    /// plan takes them first. A dead observer's stay here, outside every
+    /// plan's limit, for as long as the actor is dead, and are published by
+    /// the first boundary after the actor is alive again that runs the fiscal
+    /// systems: the boundary that revives the actor, when it admits any
+    /// ingress or event. An observer listed with no part is owed its summary
+    /// only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub deferred: BTreeMap<String, BTreeSet<u32>>,
 }
@@ -1302,6 +1701,15 @@ pub struct FiscalState {
     /// field is omitted from the serialized state while it is empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub audit_bindings: BTreeMap<String, FiscalAuditBinding>,
+    /// Who appoints and removes each institution's auditors, keyed by policy
+    /// ID; declared with the state. Omitted from the serialized state while
+    /// it is empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audit_appointment_policies: BTreeMap<String, FiscalAppointmentPolicy>,
+    /// Every nomination and removal petition, pending or resolved, keyed by
+    /// proposal ID. Omitted from the serialized state while it is empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub audit_proposals: BTreeMap<String, FiscalAuditProposal>,
     pub scope_bindings: BTreeMap<String, FiscalScopeBinding>,
     pub observer_bindings: BTreeMap<String, FiscalObserverBinding>,
     pub adoptions: BTreeMap<String, FiscalAdoptionState>,
@@ -1337,6 +1745,8 @@ impl FiscalState {
             execution_evidence_kinds: BTreeSet::new(),
             authority_bindings: BTreeMap::new(),
             audit_bindings: BTreeMap::new(),
+            audit_appointment_policies: BTreeMap::new(),
+            audit_proposals: BTreeMap::new(),
             scope_bindings: BTreeMap::new(),
             observer_bindings: BTreeMap::new(),
             adoptions: BTreeMap::new(),
@@ -1363,6 +1773,7 @@ impl FiscalState {
         if self.execution_evidence_kinds.len() > MAX_FISCAL_EVIDENCE_KINDS
             || self.authority_bindings.len() > MAX_FISCAL_RUNTIME_BINDINGS
             || self.audit_bindings.len() > MAX_FISCAL_RUNTIME_BINDINGS
+            || self.audit_appointment_policies.len() > MAX_FISCAL_RUNTIME_BINDINGS
             || self.scope_bindings.len() > MAX_FISCAL_RUNTIME_BINDINGS
             || self.observer_bindings.len() > MAX_FISCAL_OBSERVERS
             || self.adoptions.len() > MAX_FISCAL_EXECUTION_REQUESTS
@@ -1447,11 +1858,13 @@ impl FiscalState {
         if self.audit_bindings.values().any(|binding| {
             binding.authority_basis.version == 0
                 || self.authority_bindings.contains_key(&binding.id)
+                || self.audit_appointment_policies.contains_key(&binding.id)
         }) {
             return Err(invalid(
-                "fiscal audit bindings require one exact authority basis and an ID no authority binding uses",
+                "fiscal audit bindings require one exact authority basis and an ID no authority binding or appointment policy uses",
             ));
         }
+        self.validate_appointments()?;
         if self
             .authority_bindings
             .values()
@@ -1460,6 +1873,16 @@ impl FiscalState {
                 self.audit_bindings
                     .values()
                     .map(|binding| &binding.authority_basis),
+            )
+            .chain(
+                self.audit_proposals
+                    .values()
+                    .filter_map(|proposal| match &proposal.kind {
+                        FiscalAuditProposalKind::Nomination {
+                            authority_basis, ..
+                        } => Some(authority_basis),
+                        FiscalAuditProposalKind::RemovalPetition { .. } => None,
+                    }),
             )
             .any(|basis| basis.record.kind.namespace == FiscalStateRecord::NAMESPACE)
         {
@@ -1726,6 +2149,113 @@ impl FiscalState {
             {
                 return Err(invalid(format!("audit {} has an unknown target", audit.id)));
             }
+        }
+        Ok(())
+    }
+
+    /// Checks the appointment policies and proposals: one policy per audited
+    /// institution, bounded party lists, and IDs apart from every authority
+    /// binding; proposals on governed institutions, by a listed party, with
+    /// bounded grounds; at most [`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY`]
+    /// pending for one party of one policy, each of a different kind or
+    /// binding, and at most [`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY`]
+    /// resolved for one policy; and every pending petition still apt: its
+    /// binding still has the auditor it names, since any change of that
+    /// auditor supersedes the petition.
+    fn validate_appointments(&self) -> Result<(), CanwuError> {
+        validate_map(
+            &self.audit_appointment_policies,
+            |value| &value.id,
+            "appointment policy",
+        )?;
+        let mut governed = BTreeSet::new();
+        for policy in self.audit_appointment_policies.values() {
+            if !governed.insert(&policy.institution)
+                || policy.nominators.len() > MAX_FISCAL_APPOINTMENT_PARTIES
+                || policy.petitioners.len() > MAX_FISCAL_APPOINTMENT_PARTIES
+                || self.authority_bindings.contains_key(&policy.id)
+            {
+                return Err(invalid(
+                    "fiscal appointment policies govern one institution each, list a bounded number of parties, and take an ID no authority binding uses",
+                ));
+            }
+        }
+        validate_map(&self.audit_proposals, |value| &value.id, "audit proposal")?;
+        let policies: BTreeMap<&EntityRef, &FiscalAppointmentPolicy> = self
+            .audit_appointment_policies
+            .values()
+            .map(|policy| (&policy.institution, policy))
+            .collect();
+        // Pending proposals by policy, party, kind, and binding, and resolved
+        // proposals by policy.
+        let mut pending = BTreeMap::<_, BTreeSet<_>>::new();
+        let mut resolved = BTreeMap::<&EntityRef, usize>::new();
+        for proposal in self.audit_proposals.values() {
+            let Some(policy) = policies.get(&proposal.institution) else {
+                return Err(invalid(format!(
+                    "audit proposal {} concerns an institution no appointment policy governs",
+                    proposal.id
+                )));
+            };
+            let binding = self.audit_bindings.get(&proposal.audit_binding_id);
+            let (listed, bounded, apt) = match &proposal.kind {
+                FiscalAuditProposalKind::Nomination {
+                    authority_basis, ..
+                } => (
+                    policy.nominators.contains(&proposal.party),
+                    authority_basis.version != 0,
+                    true,
+                ),
+                FiscalAuditProposalKind::RemovalPetition { auditor, grounds } => (
+                    policy.petitioners.contains(&proposal.party),
+                    !grounds.is_empty() && grounds.len() <= MAX_FISCAL_EVIDENCE_PER_RECORD,
+                    binding.is_some_and(|binding| {
+                        binding.institution == proposal.institution && binding.auditor == *auditor
+                    }),
+                ),
+            };
+            if !listed
+                || !bounded
+                || validate_identifier(&proposal.audit_binding_id, "audit binding").is_err()
+                || self
+                    .authority_bindings
+                    .contains_key(&proposal.audit_binding_id)
+                || self
+                    .audit_appointment_policies
+                    .contains_key(&proposal.audit_binding_id)
+                || proposal.is_pending() && !apt
+            {
+                return Err(invalid(format!(
+                    "audit proposal {} is invalid or no longer apt while pending",
+                    proposal.id
+                )));
+            }
+            if proposal.is_pending() {
+                let nominates = matches!(proposal.kind, FiscalAuditProposalKind::Nomination { .. });
+                if !pending
+                    .entry((&proposal.institution, &proposal.party))
+                    .or_default()
+                    .insert((nominates, &proposal.audit_binding_id))
+                {
+                    return Err(invalid(format!(
+                        "audit proposal {} duplicates a pending proposal of its party",
+                        proposal.id
+                    )));
+                }
+            } else {
+                *resolved.entry(&proposal.institution).or_default() += 1;
+            }
+        }
+        if pending
+            .values()
+            .any(|proposals| proposals.len() > MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY)
+            || resolved
+                .values()
+                .any(|count| *count > MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY)
+        {
+            return Err(invalid(
+                "fiscal audit proposals exceed the pending room of a party or the resolved room of a policy",
+            ));
         }
         Ok(())
     }

@@ -6,6 +6,7 @@
 
 #![allow(clippy::missing_errors_doc)]
 
+mod appointment;
 mod content;
 mod derive;
 mod model;
@@ -20,8 +21,8 @@ pub use derive::{
 pub use model::*;
 pub use plugin::{
     APPLY_FISCAL_ACTION_COMMAND, FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS,
-    FISCAL_HISTORICAL_CONTEXT_INGRESS, FiscalPlugin, PLUGIN_NAME, enqueue_execution_receipt,
-    fiscal_action_command, fiscal_historical_context_ingress, fiscal_report_knowledge_schema_id,
-    fiscal_reports,
+    FISCAL_HISTORICAL_CONTEXT_INGRESS, FISCAL_INGRESS_REJECTED_EVENT, FISCAL_REPORT_DRAIN_INGRESS,
+    FiscalPlugin, PLUGIN_NAME, enqueue_execution_receipt, fiscal_action_command,
+    fiscal_historical_context_ingress, fiscal_report_knowledge_schema_id, fiscal_reports,
 };
 pub use projection::{load_fiscal_catalog, load_fiscal_state};

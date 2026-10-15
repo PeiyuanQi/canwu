@@ -23,11 +23,25 @@ pub const REBASE_STALE_STOCK_REJECTION: &str = "stale_external_stock";
 pub const SOCIETY_INGRESS_MALFORMED_REJECTION: &str = "malformed_payload";
 /// Rejection code recorded when the cited stock is a society-owned record.
 pub const REBASE_INVALID_STOCK_REJECTION: &str = "invalid_external_stock";
-/// Most admitted packets that may wait for the next society settlement. The
-/// intake drops a further packet with only a `society_ingress_rejected_v1`
-/// event: it gets no ledger outcome and never settles, so its sender must
-/// send it again after a settlement has emptied the queue.
+/// Rejection code recorded for a packet that arrives while
+/// [`MAX_SOCIETY_INGRESS_QUEUE`] packets wait, and the error message of a
+/// `revise_society_pressure` command refused for the same reason.
+pub const SOCIETY_INGRESS_QUEUE_FULL_REJECTION: &str = "queue_full";
+/// Most admitted packets that may wait for the next society settlement.
+///
+/// A packet that arrives while the queue is full is refused where its sender
+/// can first learn of it. The boundary that admits it records a terminal
+/// rejected outcome with [`SOCIETY_INGRESS_QUEUE_FULL_REJECTION`] in the
+/// cohort exchange ledger, where every other outcome of its kind is recorded:
+/// under `rebases` or `lifecycle_deltas` by ingress ID, or as the alignment's
+/// latest rejected pressure revision. A `revise_society_pressure` command is
+/// already refused at admission while the queue is full, as a recorded
+/// `ValueOutOfRange` command rejection; its packet can still find the queue
+/// full when it is admitted, if other packets filled it in between.
 pub const MAX_SOCIETY_INGRESS_QUEUE: usize = 4_096;
+// A batch record's ID is its slot number in four digits, so the IDs sort in
+// slot order, and no queue needs more slots than it holds packets.
+const _: () = assert!(MAX_SOCIETY_INGRESS_QUEUE <= 10_000);
 
 /// Why a cohort's headcount is rebased against an external stock.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -57,6 +71,7 @@ pub struct CohortHeadcountRebaseV1 {
     pub reason: RebaseReason,
 }
 
+/// The head record of the owner-side society ingress queue.
 pub struct SocietyIngressQueueRecord;
 
 impl DomainRecordType for SocietyIngressQueueRecord {
@@ -70,6 +85,27 @@ impl DomainRecordType for SocietyIngressQueueRecord {
 #[must_use]
 pub fn society_ingress_queue_reference() -> TypedDomainRecordRef<SocietyIngressQueueRecord> {
     TypedDomainRecordRef::new("root")
+}
+
+/// One batch record of the owner-side society ingress queue: the packets one
+/// boundary admitted.
+pub struct SocietyIngressBatchRecord;
+
+impl DomainRecordType for SocietyIngressBatchRecord {
+    type Payload = SocietyIngressBatch;
+    type Class = DomainValueKindClass;
+
+    const NAMESPACE: &'static str = "canwu.society";
+    const NAME: &'static str = "ingress-batch";
+}
+
+/// The batch record in queue slot `slot`. Its ID is the slot number in four
+/// digits, so batch records sort in slot order.
+#[must_use]
+pub fn society_ingress_batch_reference(
+    slot: u32,
+) -> TypedDomainRecordRef<SocietyIngressBatchRecord> {
+    TypedDomainRecordRef::new(format!("{slot:04}"))
 }
 
 /// One admitted society packet awaiting the next society settlement.
@@ -86,45 +122,108 @@ pub struct QueuedSocietyIngress {
     pub admission_rejection: Option<String>,
 }
 
-/// Owner-side queue of admitted rebases, lifecycle deltas, and pressure
-/// revisions.
+/// The head of the owner-side queue of admitted rebases, lifecycle deltas,
+/// and pressure revisions (schema version 2).
 ///
-/// The event-driven phase-12 intake appends packets in admission order; the
-/// phase-7 settlement, which runs on the plugin's settlement cadence,
-/// consumes the whole queue it observes. Only the intake writes entries: an
-/// initial scenario cannot seed a non-empty queue, and at most
-/// [`MAX_SOCIETY_INGRESS_QUEUE`] entries wait at once.
+/// The queue is this head and one [`SocietyIngressBatch`] for each boundary
+/// that admitted a packet to it since the last society settlement, in slots
+/// `0` to `batches - 1`. The event-driven phase-12 intake writes the packets a
+/// boundary admits into the next slot and counts them here; the phase-7
+/// settlement, which runs on the plugin's settlement cadence, applies every
+/// batch in slot order, empties the slots it used, and resets the head.
+/// Each record of the queue is therefore written in proportion to what one
+/// boundary admits or one settlement consumes, never rewritten whole as the
+/// queue grows, and slots are reused after a settlement, so there are never
+/// more batch records than [`MAX_SOCIETY_INGRESS_QUEUE`].
 ///
-/// The queue is one record, rewritten whole by every boundary that admits a
-/// packet. Under a coarse settlement cadence a queue that waits a period
-/// therefore journals evidence that grows with the square of the packets it
-/// collects.
+/// Only the intake adds packets: an initial scenario cannot seed a
+/// non-empty queue. At most [`MAX_SOCIETY_INGRESS_QUEUE`] packets wait at
+/// once, and every slot in use holds at least one.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocietyIngressQueue {
     pub schema_version: u32,
-    pub entries: Vec<QueuedSocietyIngress>,
+    /// Packets waiting, over all batches.
+    pub queued: u32,
+    /// Batch records in use: slots `0` to `batches - 1`.
+    pub batches: u32,
 }
 
 impl SocietyIngressQueue {
-    pub const SCHEMA_VERSION: u32 = 1;
+    /// Version 1 was one record holding every queued packet; version 2 is a
+    /// head over batch records.
+    pub const SCHEMA_VERSION: u32 = 2;
+
+    /// An empty queue at the current schema version.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            queued: 0,
+            batches: 0,
+        }
+    }
 
     /// # Errors
     ///
-    /// Returns `InvalidDomainRecord` when the schema, packet types, ingress
-    /// identities, or admission order are invalid.
+    /// Returns `InvalidDomainRecord` when the schema is not version 2, more
+    /// than [`MAX_SOCIETY_INGRESS_QUEUE`] packets wait, or the batch count
+    /// cannot hold the packets (a batch in use holds at least one).
     pub fn validate(&self) -> Result<(), CanwuError> {
         if self.schema_version != Self::SCHEMA_VERSION {
             return Err(invalid("unsupported society ingress queue version"));
         }
+        if usize::try_from(self.queued).map_or(true, |queued| queued > MAX_SOCIETY_INGRESS_QUEUE)
+            || self.batches > self.queued
+            || (self.batches == 0) != (self.queued == 0)
+        {
+            return Err(invalid(
+                "society ingress queue head counts more packets or batches than it may hold",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The packets one boundary admitted to the owner-side society ingress
+/// queue, in admission order; empty while its slot is not in use.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocietyIngressBatch {
+    pub schema_version: u32,
+    pub entries: Vec<QueuedSocietyIngress>,
+}
+
+impl SocietyIngressBatch {
+    pub const SCHEMA_VERSION: u32 = 1;
+
+    /// An empty batch at the current schema version.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            schema_version: Self::SCHEMA_VERSION,
+            entries: Vec::new(),
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns `InvalidDomainRecord` when the schema, a packet type, or an
+    /// admission verdict is invalid, an ingress appears twice, or the entries
+    /// were not all admitted by one boundary.
+    pub fn validate(&self) -> Result<(), CanwuError> {
+        if self.schema_version != Self::SCHEMA_VERSION {
+            return Err(invalid("unsupported society ingress batch version"));
+        }
         if self.entries.len() > MAX_SOCIETY_INGRESS_QUEUE {
-            return Err(invalid("society ingress queue exceeds its capacity"));
+            return Err(invalid(
+                "society ingress batch exceeds the queue's capacity",
+            ));
         }
         let mut seen = BTreeSet::new();
-        let mut previous = None;
         for entry in &self.entries {
             if !seen.insert(entry.ingress)
-                || previous.is_some_and(|boundary| entry.admitted_at < boundary)
+                || entry.admitted_at != self.entries[0].admitted_at
                 || !matches!(
                     entry.packet_type.as_str(),
                     COHORT_REBASE_INGRESS
@@ -136,12 +235,58 @@ impl SocietyIngressQueue {
                     .as_ref()
                     .is_some_and(String::is_empty)
             {
-                return Err(invalid("society ingress queue contains an invalid entry"));
+                return Err(invalid("society ingress batch contains an invalid entry"));
             }
-            previous = Some(entry.admitted_at);
         }
         Ok(())
     }
+}
+
+/// Joins the batches of the queue `head` describes, given in slot order, into
+/// the queued packets in admission order.
+///
+/// # Errors
+///
+/// Returns `InvalidDomainRecord` when a batch is invalid or empty, the
+/// batches were not admitted by strictly later boundaries in slot order, an
+/// ingress appears twice, or the batches do not hold exactly the packets and
+/// batches the head counts.
+pub(crate) fn queue_entries(
+    head: &SocietyIngressQueue,
+    batches: impl IntoIterator<Item = SocietyIngressBatch>,
+) -> Result<Vec<QueuedSocietyIngress>, CanwuError> {
+    let mut entries: Vec<QueuedSocietyIngress> = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut count = 0_u32;
+    for batch in batches {
+        batch.validate()?;
+        let Some(first) = batch.entries.first() else {
+            return Err(invalid("a society ingress batch in use is empty"));
+        };
+        if entries
+            .last()
+            .is_some_and(|last| first.admitted_at <= last.admitted_at)
+        {
+            return Err(invalid(
+                "society ingress batches are not in the order their boundaries admitted them",
+            ));
+        }
+        for entry in batch.entries {
+            if !seen.insert(entry.ingress) {
+                return Err(invalid("a society ingress packet is queued twice"));
+            }
+            entries.push(entry);
+        }
+        count = count
+            .checked_add(1)
+            .ok_or_else(|| invalid("society ingress batch count overflowed"))?;
+    }
+    if count != head.batches || u32::try_from(entries.len()).ok() != Some(head.queued) {
+        return Err(invalid(
+            "society ingress batches do not hold the packets their queue head counts",
+        ));
+    }
+    Ok(entries)
 }
 
 impl SocietyState {

@@ -16,10 +16,11 @@ use canwu_society::{
     AffiliationTarget, AssentBand, AwarenessBand, COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1,
     CohortTransferIntent, DispositionBucket, DispositionDistribution, DispositionProfile,
     InstitutionalAlignment, PolicyPressure, REBASE_STALE_STOCK_REJECTION, RebaseReason,
-    SocietyCohort, SocietyCohortExchangeLedgerRecord, SocietyIngressQueueRecord,
-    SocietyIngressStatus, SocietyPlugin, SocietyState, TransitionRule, TransitionWeights,
-    distribution_id, load_society_state, society_cohort_exchange_ledger_reference,
-    society_ingress_queue_reference, society_state_reference, validate_society_runtime,
+    SocietyCohort, SocietyCohortExchangeLedgerRecord, SocietyIngressStatus, SocietyPlugin,
+    SocietyState, TransitionRule, TransitionWeights, distribution_id, load_society_state,
+    society_cohort_exchange_ledger_reference, society_ingress_batch_reference,
+    society_ingress_queue_entries, society_ingress_queue_reference, society_state_reference,
+    validate_society_runtime,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -182,15 +183,11 @@ fn gap_g32_society_cohort_rebase() {
     canwu
         .settle_boundary(BoundaryRequest::at(canwu.time()))
         .expect("admit the stale rebase");
-    let queue = canwu
-        .typed_domain_record(&society_ingress_queue_reference())
-        .expect("society ingress queue")
-        .decode_payload::<SocietyIngressQueueRecord>()
-        .expect("queue payload");
-    assert_eq!(queue.entries.len(), 2);
-    assert_eq!(queue.entries[0].admission_rejection, None);
+    let queue = society_ingress_queue_entries(&canwu).expect("queued society ingress");
+    assert_eq!(queue.len(), 2);
+    assert_eq!(queue[0].admission_rejection, None);
     assert_eq!(
-        queue.entries[1].admission_rejection.as_deref(),
+        queue[1].admission_rejection.as_deref(),
         Some(REBASE_STALE_STOCK_REJECTION)
     );
     assert_eq!(
@@ -252,12 +249,8 @@ fn gap_g32_society_cohort_rebase() {
         Some(REBASE_STALE_STOCK_REJECTION)
     );
     assert!(
-        canwu
-            .typed_domain_record(&society_ingress_queue_reference())
-            .expect("queue")
-            .decode_payload::<SocietyIngressQueueRecord>()
-            .expect("queue payload")
-            .entries
+        society_ingress_queue_entries(&canwu)
+            .expect("queued society ingress")
             .is_empty()
     );
 
@@ -381,14 +374,10 @@ fn gap_g32_society_transfer_and_queue_authority() {
     canwu
         .settle_boundary(BoundaryRequest::at(canwu.time()))
         .expect("admit the rebase");
-    let queued = canwu
-        .typed_domain_record(&society_ingress_queue_reference())
-        .expect("queue")
-        .decode_payload::<SocietyIngressQueueRecord>()
-        .expect("queue payload");
-    assert_eq!(queued.entries.len(), 1);
+    let queued = society_ingress_queue_entries(&canwu).expect("queued society ingress");
+    assert_eq!(queued.len(), 1);
     assert_eq!(
-        queued.entries[0].admission_rejection.as_deref(),
+        queued[0].admission_rejection.as_deref(),
         Some(REBASE_STALE_STOCK_REJECTION),
         "a stock record that does not exist is never current"
     );
@@ -437,12 +426,8 @@ fn gap_g32_society_transfer_and_queue_authority() {
         canwu
             .settle_boundary(BoundaryRequest::at(canwu.time()))
             .expect("admit the stock change and rebase together");
-        let queued = canwu
-            .typed_domain_record(&society_ingress_queue_reference())
-            .expect("queue")
-            .decode_payload::<SocietyIngressQueueRecord>()
-            .expect("queue payload");
-        assert_eq!(queued.entries[0].admission_rejection.as_deref(), verdict);
+        let queued = society_ingress_queue_entries(&canwu).expect("queued society ingress");
+        assert_eq!(queued[0].admission_rejection.as_deref(), verdict);
         let restored = Canwu::from_snapshot_json_with_plugins(
             &serde_json::to_string(&canwu.snapshot()).expect("encode snapshot"),
             &plugins,
@@ -465,21 +450,28 @@ fn gap_g32_society_transfer_and_queue_authority() {
         })
         .expect("seeded rebase"),
     });
+    let record = |reference: canwu_api::DomainRecordRef, payload: serde_json::Value| DomainRecord {
+        reference,
+        owner: "canwu-society".to_owned(),
+        class: DomainRecordClass::Record,
+        version: 1,
+        lifecycle: DomainRecordLifecycle::Active,
+        payload,
+        references: Vec::new(),
+    };
     let seeded = |entry: serde_json::Value| {
-        let payload = serde_json::json!({ "schema_version": 1, "entries": [entry] });
         Canwu::new_with_plugins(
             42,
             scenario(vec![
                 society_state().into_record().expect("society record"),
-                DomainRecord {
-                    reference: society_ingress_queue_reference().into_untyped(),
-                    owner: "canwu-society".to_owned(),
-                    class: DomainRecordClass::Record,
-                    version: 1,
-                    lifecycle: DomainRecordLifecycle::Active,
-                    payload,
-                    references: Vec::new(),
-                },
+                record(
+                    society_ingress_queue_reference().into_untyped(),
+                    serde_json::json!({ "schema_version": 2, "queued": 1, "batches": 1 }),
+                ),
+                record(
+                    society_ingress_batch_reference(0).into_untyped(),
+                    serde_json::json!({ "schema_version": 1, "entries": [entry] }),
+                ),
             ]),
             &plugins,
         )

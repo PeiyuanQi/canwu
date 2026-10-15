@@ -264,6 +264,15 @@ impl Fixture {
         [&self.commissions, &self.fiscal]
     }
 
+    /// The fixture's plugins and one more.
+    #[must_use]
+    pub fn plugins_with<'a>(
+        &'a self,
+        extra: &'a dyn SimulationPlugin,
+    ) -> [&'a dyn SimulationPlugin; 3] {
+        [&self.commissions, &self.fiscal, extra]
+    }
+
     pub fn try_runtime(&self, scenario: Scenario) -> Result<Canwu, CanwuError> {
         Canwu::new_with_plugins(41, scenario, &self.plugins())
     }
@@ -758,15 +767,21 @@ pub fn enqueue_renewal(canwu: &mut Canwu, commission: &str) {
         .expect("commission renewal ingress");
 }
 
+/// Ingress at `at` that sets whether `person` is alive.
+#[must_use]
+pub fn life_at(at: SimTime, person: PersonId, alive: bool) -> PluginIngressRequest {
+    PluginIngressRequest::new(
+        COMMISSION_PLUGIN,
+        LIFE_INGRESS,
+        at,
+        serde_json::json!({ "person": person.get(), "alive": alive }),
+    )
+}
+
 /// Queues, for the next boundary, a change of whether `person` is alive.
 pub fn enqueue_life(canwu: &mut Canwu, person: PersonId, alive: bool) {
     canwu
-        .enqueue_plugin_ingress(PluginIngressRequest::new(
-            COMMISSION_PLUGIN,
-            LIFE_INGRESS,
-            canwu.time(),
-            serde_json::json!({ "person": person.get(), "alive": alive }),
-        ))
+        .enqueue_plugin_ingress(life_at(canwu.time(), person, alive))
         .expect("life ingress");
 }
 

@@ -27,7 +27,8 @@ use canwu_fiscal::{
     FiscalMechanism, FiscalObserverBinding, FiscalPackManifest, FiscalPaymentForm,
     FiscalPeriodDefinition, FiscalPlugin, FiscalProvenance, FiscalRegionDefinition,
     FiscalRuleDefinition, FiscalScopeBinding, FiscalState, FiscalStateRecord, HistoricalConfidence,
-    HistoricalYearWindow, compile_fiscal_content, fiscal_action_command, fiscal_state_reference,
+    HistoricalYearWindow, compile_fiscal_content, compute_aggregates,
+    compute_transition_candidates, fiscal_action_command, fiscal_state_reference,
     recompute_derived,
 };
 use serde_json::{Value, json};
@@ -298,6 +299,7 @@ fn state_component_costs(canwu: &Canwu, options: &Options) -> Result<Value, Box<
     let mut clone = Vec::with_capacity(options.samples);
     let mut validate = Vec::with_capacity(options.samples);
     let mut encode = Vec::with_capacity(options.samples);
+    let mut measure = Vec::with_capacity(options.samples);
     for _ in 0..options.samples {
         let started = Meter::start();
         let decoded = record.decode_payload::<FiscalStateRecord>()?;
@@ -311,13 +313,28 @@ fn state_component_costs(canwu: &Canwu, options: &Options) -> Result<Value, Box<
         let started = Meter::start();
         let encoded = serde_json::to_value(&state)?;
         encode.push(started.finish());
-        drop((decoded, copy, encoded));
+        // What settlement adds to its one encoding of the state to measure the
+        // records the derived systems of its boundary will write: the derived
+        // candidates and aggregates, and the encoded size of those fields
+        // before and after.
+        let started = Meter::start();
+        let candidates = compute_transition_candidates(&state, &catalog, SimTime::EPOCH);
+        let aggregates = compute_aggregates(&state, &catalog)?;
+        let sizes = [
+            serde_json::to_vec(&state.transition_candidates)?.len(),
+            serde_json::to_vec(&candidates)?.len(),
+            serde_json::to_vec(&state.aggregates)?.len(),
+            serde_json::to_vec(&aggregates)?.len(),
+        ];
+        measure.push(started.finish());
+        drop((decoded, copy, encoded, candidates, aggregates, sizes));
     }
     Ok(json!({
         "decode": summary(&decode),
         "clone": summary(&clone),
         "validate": summary(&validate),
         "encode": summary(&encode),
+        "settlement_measure": summary(&measure),
     }))
 }
 

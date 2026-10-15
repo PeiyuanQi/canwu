@@ -6,6 +6,14 @@ policy pressure and of influence edge and organization activity and reach),
 and it makes sure that a refused society command or a defective society packet
 never fails a boundary.
 
+0.16.0 stores the owner-side ingress queue as a head and one batch record per
+admitting boundary, so its evidence no longer grows with the square of the
+packets it collects, and refuses a packet that finds the queue full with a
+recorded ledger outcome. It also settles the cohort transfers due at one
+settlement as a batch by default, so the one-per-shared-cohort limit below
+applies only to a society that asks for `TransferSettlement::OneByOne`; see
+[fiscal and society limits](fiscal-and-society-limits.md).
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [same-instant supersession and unplaced persons](same-instant-supersession-and-unplaced-persons.md),

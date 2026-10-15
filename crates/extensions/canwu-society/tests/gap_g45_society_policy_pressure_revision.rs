@@ -7,24 +7,26 @@ use canwu_api::{
     CommandAuthority, CommandEnvelope, CommandId, CommandRequest, CommandRequestId,
     DecisionAuthority, DecisionControllerBinding, DecisionEvaluation, DecisionIngressRequest,
     DecisionMutation, DecisionOrigin, DecisionPolicyIdentity, DecisionPolicyKind,
-    DecisionRequestId, DecisionTicketId, DomainRecord, EntityRef, ErrorCode, Issuer,
+    DecisionRequestId, DecisionTicketId, DomainRecord, DomainRecordKind, DomainRecordRef,
+    DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, ErrorCode, Issuer,
     PluginIngressRequest, PluginIngressTarget, PluginRegistrar, Scenario, SimDuration, SimTime,
     SimulationPlugin, SimulationView, StateKey, StateVisibility, SystemCadence, UtilityProfile,
     WeightedUtilityPolicy,
 };
 use canwu_society::{
-    AffiliationTarget, AwarenessBand, DispositionProfile, InfluenceEdgeRevision, InfluenceSource,
-    InstitutionalAlignment, MAX_PRESSURE_REVISION_ROWS, ObserverProfile, OrganizationNode,
+    AffiliationTarget, AwarenessBand, COHORT_REBASE_INGRESS, CohortHeadcountRebaseV1,
+    DispositionProfile, InfluenceEdgeRevision, InfluenceSource, InstitutionalAlignment,
+    MAX_PRESSURE_REVISION_ROWS, MAX_SOCIETY_INGRESS_QUEUE, ObserverProfile, OrganizationNode,
     OrganizationRevision, PRESSURE_REVISION_COMMAND, PRESSURE_REVISION_ORIGIN_REJECTION,
     PRESSURE_REVISION_STALE_REJECTION, PRESSURE_REVISION_SUPERSEDED_REJECTION, PolicyPressure,
-    PolicyPressureRevision, PressureRevisionChoice, PressureRevisionDecision,
-    SOCIETY_PRESSURE_REVISED_EVENT, SOCIETY_PRESSURE_REVISION_INGRESS,
-    SOCIETY_PRESSURE_REVISION_REJECTED_EVENT, SocialInfluenceEdge, SocietyCohort,
-    SocietyCohortExchangeLedger, SocietyCohortExchangeLedgerRecord, SocietyIngressQueueRecord,
-    SocietyPlugin, SocietyPressureRevisionV1, SocietyState, SocietyStateRecord, TransitionRule,
-    TransitionWeights, distribution_id, load_society_state, pressure_revision_ticket,
-    projection_for_viewer, society_cohort_exchange_ledger_reference,
-    society_ingress_queue_reference, society_state_reference, validate_society_runtime,
+    PolicyPressureRevision, PressureRevisionChoice, PressureRevisionDecision, RebaseReason,
+    SOCIETY_INGRESS_QUEUE_FULL_REJECTION, SOCIETY_PRESSURE_REVISED_EVENT,
+    SOCIETY_PRESSURE_REVISION_INGRESS, SOCIETY_PRESSURE_REVISION_REJECTED_EVENT,
+    SocialInfluenceEdge, SocietyCohort, SocietyCohortExchangeLedger,
+    SocietyCohortExchangeLedgerRecord, SocietyPlugin, SocietyPressureRevisionV1, SocietyState,
+    SocietyStateRecord, TransitionRule, TransitionWeights, distribution_id, load_society_state,
+    pressure_revision_ticket, projection_for_viewer, society_cohort_exchange_ledger_reference,
+    society_ingress_queue_entries, society_state_reference, validate_society_runtime,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -162,17 +164,10 @@ fn gap_g45_society_policy_pressure_revision() {
         .settle_boundary(BoundaryRequest::at(canwu.time()))
         .expect("admit the queued revision");
     assert_eq!(load_society_state(&canwu).expect("queued state"), before);
-    let queue = canwu
-        .typed_domain_record(&society_ingress_queue_reference())
-        .expect("society ingress queue")
-        .decode_payload::<SocietyIngressQueueRecord>()
-        .expect("queue payload");
-    assert_eq!(queue.entries.len(), 1);
-    assert_eq!(
-        queue.entries[0].packet_type,
-        SOCIETY_PRESSURE_REVISION_INGRESS
-    );
-    assert_eq!(queue.entries[0].admission_rejection, None);
+    let queue = society_ingress_queue_entries(&canwu).expect("queued society ingress");
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].packet_type, SOCIETY_PRESSURE_REVISION_INGRESS);
+    assert_eq!(queue[0].admission_rejection, None);
     assert!(ledger(&canwu).pressure_revisions.is_empty());
 
     // The next settlement applies the revision before its transitions, so
@@ -433,13 +428,9 @@ fn gap_g45_society_pressure_revision_origin_and_sealed_replay() {
     canwu
         .settle_boundary(BoundaryRequest::at(canwu.time()))
         .expect("admit the forged packet");
-    let queue = canwu
-        .typed_domain_record(&society_ingress_queue_reference())
-        .expect("society ingress queue")
-        .decode_payload::<SocietyIngressQueueRecord>()
-        .expect("queue payload");
+    let queue = society_ingress_queue_entries(&canwu).expect("queued society ingress");
     assert_eq!(
-        queue.entries[0].admission_rejection.as_deref(),
+        queue[0].admission_rejection.as_deref(),
         Some(PRESSURE_REVISION_ORIGIN_REJECTION)
     );
     canwu
@@ -503,6 +494,118 @@ fn gap_g45_society_pressure_revision_origin_and_sealed_replay() {
             .snapshot_with_segments(segments)
             .expect("the sealed archive should reconstruct a full snapshot")
     );
+}
+
+/// While the owner-side queue is full, a revision is refused at command
+/// admission, the earliest point its issuer can learn of it, as a recorded
+/// command rejection. A decision admitted while one place was left, whose
+/// packet then finds the queue full, becomes the alignment's latest rejected
+/// decision with `queue_full`, recorded by the boundary that admits the
+/// packet. Neither fails a boundary, and after a settlement has emptied the
+/// queue the same decision is admitted and applies.
+#[test]
+fn a_pressure_revision_is_refused_while_the_queue_is_full() {
+    let society = SocietyPlugin::with_settlement_cadence(SystemCadence::Monthly);
+    let plugins: [&dyn SimulationPlugin; 1] = [&society];
+    let mut canwu = Canwu::new_with_plugins(
+        45,
+        scenario(vec![society_state().into_record().expect("society record")]),
+        &plugins,
+    )
+    .expect("society simulation");
+    let mut decisions = Decisions::register(&mut canwu);
+    let rebase = |at: SimTime| {
+        PluginIngressRequest::new(
+            "canwu-society",
+            COHORT_REBASE_INGRESS,
+            at,
+            serde_json::to_value(CohortHeadcountRebaseV1 {
+                cohort_id: "market".to_owned(),
+                new_headcount: 1_200,
+                external_stock: DomainRecordVersionRef {
+                    record: DomainRecordRef {
+                        kind: DomainRecordKind::new("fixture.stock", "population"),
+                        id: "market".to_owned(),
+                    },
+                    version: 1,
+                    established_by: DomainRecordVersionSource::InitialScenario,
+                },
+                reason: RebaseReason::Correction,
+            })
+            .expect("rebase payload"),
+        )
+    };
+
+    // All but one place of the queue is taken.
+    for _ in 1..MAX_SOCIETY_INGRESS_QUEUE {
+        canwu
+            .enqueue_plugin_ingress(rebase(canwu.time()))
+            .expect("rebase");
+    }
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("queue the rebases");
+    decisions
+        .decide(&mut canwu, open_hall())
+        .expect("admitted while one place is left");
+    // A rebase due with the decision's packet is admitted ahead of it and
+    // takes the last place; the packet is refused, and the boundary commits.
+    canwu
+        .enqueue_plugin_ingress(rebase(canwu.time()))
+        .expect("the last rebase");
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("admit the rebase and the revision packet");
+    assert_eq!(
+        society_ingress_queue_entries(&canwu)
+            .expect("queued society ingress")
+            .len(),
+        MAX_SOCIETY_INGRESS_QUEUE
+    );
+    let outcomes = &ledger(&canwu).pressure_revisions[ALIGNMENT];
+    assert_eq!(outcomes.applied, None);
+    let rejected = outcomes.rejected.as_ref().expect("the refused decision");
+    assert_eq!(rejected.decision_version, 1);
+    assert_eq!(
+        rejected.rejection.as_deref(),
+        Some(SOCIETY_INGRESS_QUEUE_FULL_REJECTION)
+    );
+    assert_eq!(rejected.settled_at, canwu.time());
+    assert_eq!(
+        event_count(&canwu, SOCIETY_PRESSURE_REVISION_REJECTED_EVENT),
+        1
+    );
+
+    // While the queue is full the command itself is refused.
+    let error = decisions
+        .decide(&mut canwu, open_hall())
+        .expect_err("the queue is full");
+    assert_eq!(error.code, ErrorCode::ValueOutOfRange);
+    assert!(
+        error
+            .message
+            .ends_with(SOCIETY_INGRESS_QUEUE_FULL_REJECTION)
+    );
+
+    // A settlement empties the queue; the decision is then admitted and
+    // applies at the next one.
+    canwu
+        .settle_boundary(BoundaryRequest::at(day(30)).with_cadence(SystemCadence::Monthly))
+        .expect("the first Monthly settlement");
+    decisions
+        .decide(&mut canwu, open_hall())
+        .expect("admitted once the queue is empty");
+    canwu
+        .settle_boundary(BoundaryRequest::at(canwu.time()))
+        .expect("admit the revision packet");
+    canwu
+        .settle_boundary(BoundaryRequest::at(day(60)).with_cadence(SystemCadence::Monthly))
+        .expect("the second Monthly settlement");
+    assert_eq!(
+        ledger(&canwu).pressure_revisions[ALIGNMENT].applied_version(),
+        1
+    );
+    assert!(load_society_state(&canwu).expect("state").organizations["hall"].active);
 }
 
 fn day(days: i64) -> SimTime {

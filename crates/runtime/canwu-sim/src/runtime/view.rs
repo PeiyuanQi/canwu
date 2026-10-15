@@ -354,6 +354,19 @@ impl SimulationView<'_> {
         Ok(retained)
     }
 
+    /// Whether a boundary system may schedule ingress
+    /// (`BoundaryDirective::ScheduleIngress` or `SchedulePluginIngress`) in
+    /// this run. A run that holds direct command history cannot add
+    /// canonical ingress, and a boundary whose system schedules some then
+    /// fails with `MixedCommandIngress`; a system that can do without the
+    /// packet checks this first. The answer depends only on the run's
+    /// command history, so a restore, a seal, and an exact replay give the
+    /// same one.
+    #[must_use]
+    pub fn can_schedule_ingress(&self) -> bool {
+        !validation::runtime_has_unqueued_command_history(self.state.runtime())
+    }
+
     pub fn ingress(&self, id: IngressId) -> Result<Option<&IngressRecord>, CanwuError> {
         self.require_read(&StateKey::core_ingress())?;
         if self

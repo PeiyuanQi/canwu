@@ -278,7 +278,12 @@ pub struct PressureRevisionOutcomes {
     /// revision version, which the next decision must expect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied: Option<PressureRevisionOutcome>,
-    /// The last rejected decision.
+    /// The rejected decision that settled last. A pressure revision refused
+    /// for a full queue settles when the boundary that admits its packet
+    /// commits, which can be before a decision of a lower version, queued
+    /// earlier, is rejected at the next settlement; that rejection then
+    /// replaces it here. Every rejection stays in the event journal as a
+    /// [`SOCIETY_PRESSURE_REVISION_REJECTED_EVENT`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected: Option<PressureRevisionOutcome>,
 }

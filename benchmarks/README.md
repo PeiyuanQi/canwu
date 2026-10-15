@@ -280,7 +280,11 @@ execution requests (48 institutions and 40 settled cycles by default, about
 - the boundary that admits a batch of fiscal action commands, one per
   institution, and the boundary that settles them; and
 - decoding, copying, validating, and encoding the state itself, so a boundary
-  time can be read as a count of those operations.
+  time can be read as a count of those operations; and
+- `settlement_measure`: what settlement adds, from 0.16.0, to its one
+  encoding of the state to measure every record its boundary writes, namely
+  deriving the transition candidates and aggregates and encoding those fields
+  before and after.
 
 ```console
 cargo run --release \
@@ -348,6 +352,22 @@ the change were recorded from an earlier state of it, which differed in the
 order of its current-record sets and in load validation; its allocation runs
 were recorded again on 2026-10-15 from the final state and give the same
 counts.
+
+The fiscal-limits change of 0.16.0 (see
+[`docs/proposals/fiscal-and-society-limits.md`](../docs/proposals/fiscal-and-society-limits.md))
+was recorded separately on 2026-10-14, alternating a 0.15.0 build of the
+harness with a build of the change, round by round, before the allocation
+mode existed, so these runs are elapsed only. Its 0.15.0 runs are its own,
+named `0.15.0-fiscal-limits`, and predate `settlement_measure`. The machine
+was running other builds throughout, so the boundary times vary by a third
+between rounds and are context, not a comparison; the component costs,
+timed inside one process, are the figures to read.
+
+| Run | 0.15.0 | 0.16.0 fiscal limits |
+| --- | --- | --- |
+| Round 1 | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.15.0-fiscal-limits-round1-elapsed.json) | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.16.0-fiscal-limits-round1-elapsed.json) |
+| Round 2 | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.15.0-fiscal-limits-round2-elapsed.json) | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.16.0-fiscal-limits-round2-elapsed.json) |
+| Round 3 | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.15.0-fiscal-limits-round3-elapsed.json) | [`elapsed`](baselines/2026-10-14-fiscal-boundary-0.16.0-fiscal-limits-round3-elapsed.json) |
 
 ## Knowledge-ledger profile
 

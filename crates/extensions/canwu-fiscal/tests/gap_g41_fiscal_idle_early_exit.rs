@@ -76,6 +76,24 @@ fn gap_g41_fiscal_idle_early_exit() {
             .is_err(),
         "an invalid fiscal state must be refused at activation"
     );
+    // So is a state that approves an execution evidence kind the plugin was
+    // not configured to read: settlement could read none of its receipts.
+    let mut unread_evidence = authored_state();
+    unread_evidence
+        .execution_evidence_kinds
+        .insert(canwu_api::DomainRecordKind::new(
+            "fixture.execution",
+            "result",
+        ));
+    let error = fixture
+        .try_runtime(scenario_from_state(unread_evidence))
+        .err()
+        .expect("an evidence kind the plugin does not read must be refused at activation");
+    assert!(
+        error.message.contains("not declared by FiscalPlugin::new"),
+        "{}",
+        error.message
+    );
 
     let mut canwu = fixture.runtime(scenario_from_state(authored_state()));
     assert!(fiscal_state(&canwu).aggregates.is_empty());

@@ -5,12 +5,13 @@ use canwu_api::{
     SimTime,
 };
 use canwu_fiscal::{
-    FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FiscalAction, FiscalActionDisposition,
-    FiscalActionIssuer, FiscalActionRequest, FiscalAdoptionStage, FiscalAssessment,
-    FiscalCatalogRecord, FiscalExecutionKind, FiscalExecutionReceipt, FiscalExecutionReceiptPacket,
-    FiscalExecutionRequest, FiscalExternalOperationRef, FiscalHistoricalContextPacket,
-    FiscalHistoricalMode, FiscalIssuerRole, FiscalPaymentForm, FiscalProjection,
-    FiscalReceiptDisposition, FiscalStateRecord, MAX_FISCAL_ASSESSMENTS,
+    FISCAL_ACTION_INGRESS, FISCAL_EXECUTION_RECEIPT_INGRESS, FISCAL_INGRESS_INVALID_REJECTION,
+    FISCAL_INGRESS_MALFORMED_REJECTION, FISCAL_INGRESS_REJECTED_EVENT, FiscalAction,
+    FiscalActionDisposition, FiscalActionIssuer, FiscalActionRequest, FiscalAdoptionStage,
+    FiscalAssessment, FiscalCatalogRecord, FiscalExecutionKind, FiscalExecutionReceipt,
+    FiscalExecutionReceiptPacket, FiscalExecutionRequest, FiscalExternalOperationRef,
+    FiscalHistoricalContextPacket, FiscalHistoricalMode, FiscalIssuerRole, FiscalPaymentForm,
+    FiscalProjection, FiscalReceiptDisposition, FiscalStateRecord, MAX_FISCAL_ASSESSMENTS,
     MAX_FISCAL_EVIDENCE_PER_RECORD, PLUGIN_NAME, compute_aggregates, enqueue_execution_receipt,
     fiscal_action_command, fiscal_catalog_reference, fiscal_historical_context_ingress,
     fiscal_reports, fiscal_state_reference,
@@ -648,7 +649,7 @@ fn receipt_helper_rejects_an_unbounded_evidence_set() {
 }
 
 #[test]
-fn forged_action_ingress_without_an_admitted_command_is_rejected() {
+fn a_host_cannot_enqueue_a_fiscal_action_packet() {
     let mut canwu = new_ming_fiscal_reference(DEFAULT_SEED, "hongwu-1391").expect("runtime");
     let request = FiscalActionRequest {
         action_id: "forged.assessment.action".to_owned(),
@@ -675,19 +676,26 @@ fn forged_action_ingress_without_an_admitted_command_is_rejected() {
             authority_basis: None,
         },
     });
+    // The action packet is internal ingress: a host cannot enqueue one, so
+    // nothing reaches settlement and the run goes on.
     let now = canwu.time();
-    canwu
+    let error = canwu
         .enqueue_plugin_ingress(PluginIngressRequest::new(
             PLUGIN_NAME,
             FISCAL_ACTION_INGRESS,
             now,
             payload,
         ))
-        .expect("enqueue forged ingress");
-    let error = canwu
+        .expect_err("a host cannot enqueue a fiscal action packet");
+    assert_eq!(error.code, ErrorCode::InvalidAuthority);
+    canwu
         .advance_canonical(SimDuration::minutes(1))
-        .expect_err("forged action must fail");
-    assert!(error.message.contains("caused by an admitted command"));
+        .expect("the run continues");
+    assert!(
+        !fiscal_state(&canwu)
+            .action_outcomes
+            .contains_key("forged.assessment.action")
+    );
 }
 
 #[test]
@@ -712,10 +720,7 @@ fn generic_receipt_ingress_cannot_bypass_exact_evidence_validation() {
             serde_json::to_value(packet).expect("receipt payload"),
         ))
         .expect("enqueue forged receipt");
-    let error = canwu
-        .advance_canonical(SimDuration::minutes(1))
-        .expect_err("unavailable evidence must fail");
-    assert!(error.message.contains("unavailable"));
+    assert_receipt_refused(&mut canwu, "unavailable", FISCAL_INGRESS_INVALID_REJECTION);
 }
 
 #[test]
@@ -770,10 +775,11 @@ fn live_receipt_rejects_evidence_for_another_authorized_request() {
         },
     )
     .expect("receipt ingress");
-    let error = canwu
-        .advance_canonical(SimDuration::minutes(1))
-        .expect_err("cross-request evidence must fail at the live boundary");
-    assert!(error.message.contains("does not match"));
+    assert_receipt_refused(
+        &mut canwu,
+        "does not match",
+        FISCAL_INGRESS_INVALID_REJECTION,
+    );
     assert!(fiscal_state(&canwu).execution_receipts.is_empty());
 }
 
@@ -825,10 +831,13 @@ fn receipt_payload_cannot_redeclare_evidence_quantity_or_disposition() {
             }),
         ))
         .expect("raw receipt ingress");
-    let error = canwu
-        .advance_canonical(SimDuration::minutes(1))
-        .expect_err("receipt declarations must be derived from evidence");
-    assert!(error.message.contains("could not be decoded"));
+    // A receipt that declares its own quantity and disposition does not
+    // decode: both are derived from the evidence.
+    assert_receipt_refused(
+        &mut canwu,
+        FISCAL_EXECUTION_RECEIPT_INGRESS,
+        FISCAL_INGRESS_MALFORMED_REJECTION,
+    );
     assert!(fiscal_state(&canwu).execution_receipts.is_empty());
 }
 
@@ -870,10 +879,11 @@ fn different_records_cannot_reuse_one_external_operation_for_the_same_request() 
         },
     )
     .expect("second receipt ingress");
-    let error = canwu
-        .advance_canonical(SimDuration::minutes(1))
-        .expect_err("one external operation must not settle through two records");
-    assert!(error.message.contains("external fiscal operation"));
+    assert_receipt_refused(
+        &mut canwu,
+        "external fiscal operation",
+        FISCAL_INGRESS_INVALID_REJECTION,
+    );
     let state = fiscal_state(&canwu);
     assert_eq!(state.execution_receipts.len(), 1);
     assert_eq!(
@@ -922,10 +932,11 @@ fn different_requests_cannot_reuse_one_external_operation() {
         },
     )
     .expect("cross-request receipt ingress");
-    let error = canwu
-        .advance_canonical(SimDuration::minutes(1))
-        .expect_err("one external operation must not settle different requests");
-    assert!(error.message.contains("external fiscal operation"));
+    assert_receipt_refused(
+        &mut canwu,
+        "external fiscal operation",
+        FISCAL_INGRESS_INVALID_REJECTION,
+    );
     assert_eq!(fiscal_state(&canwu).execution_receipts.len(), 1);
 }
 
@@ -1171,10 +1182,34 @@ fn assert_restore_replay_and_reject_duplicate(
     let now = canwu.time();
     canwu_fiscal::enqueue_execution_receipt(canwu, now, &duplicate)
         .expect("enqueue duplicate receipt");
-    let error = canwu
+    assert_receipt_refused(
+        canwu,
+        "external fiscal operation",
+        FISCAL_INGRESS_INVALID_REJECTION,
+    );
+}
+
+/// Settles what is due and asserts that the boundary committed and refused
+/// one receipt: its only `canwu.fiscal.ingress_rejected.v1` event names
+/// `detail` and ends with `reason`. Settlement never fails a boundary for a
+/// receipt a host sent.
+fn assert_receipt_refused(canwu: &mut Canwu, detail: &str, reason: &str) {
+    let events = canwu.events().len();
+    canwu
         .advance_canonical(SimDuration::minutes(1))
-        .expect_err("one adapter result cannot settle twice");
-    assert!(error.message.contains("external fiscal operation"));
+        .expect("the boundary commits and refuses the receipt");
+    let refusals: Vec<_> = canwu.events()[events..]
+        .iter()
+        .filter(|event| {
+            event.kind.plugin_identity() == Some((PLUGIN_NAME, FISCAL_INGRESS_REJECTED_EVENT))
+        })
+        .collect();
+    assert_eq!(refusals.len(), 1, "{refusals:?}");
+    assert!(
+        refusals[0].summary.contains(detail) && refusals[0].summary.ends_with(reason),
+        "{}",
+        refusals[0].summary
+    );
 }
 
 fn assert_receipt_retry_is_idempotent(

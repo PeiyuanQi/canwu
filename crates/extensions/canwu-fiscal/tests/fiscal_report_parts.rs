@@ -7,30 +7,37 @@
 //! republishes only the parts whose facts changed, each superseding exactly
 //! the record before it on its line, and restore and exact replay agree. The
 //! second run changes more parts in one boundary than a boundary publishes:
-//! the rest follow in the next fiscal boundary, and until then the summary
-//! names the parts that are pending. The last runs cover what cannot be
-//! published at all: a report for an observer who has died, an observer who
-//! does not exist, and a report plan that came with a scenario.
+//! the rest are owed, and the next boundary, which the settling boundary
+//! schedules at once, publishes them without any change of the fiscal state;
+//! until then the summary names the parts that are pending. The last runs
+//! cover what cannot be published at once or at all: a report for an
+//! observer who has died, completed by the boundary that revives him, in a
+//! run that sealed its evidence as in one that did not; an observer who does
+//! not exist; a report plan that came with a scenario; and a run with direct
+//! command history, which cannot schedule a drain.
 
 mod support;
 
 use canwu_api::{
-    BoundaryReceipt, Canwu, ErrorCode, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecord,
-    KnowledgeRecordId, KnowledgeSubject, KnowledgeSubjectTarget, PersonId, SimTime,
+    BoundaryReceipt, BoundaryRequest, Canwu, Command, CommandEnvelope, CompactedCanwu, ErrorCode,
+    IngressPayload, Issuer, KnowledgeHolderRef, KnowledgeOrigin, KnowledgeRecord,
+    KnowledgeRecordId, KnowledgeSubject, KnowledgeSubjectTarget, PersonId, SimDuration, SimTime,
+    TerritoryId,
 };
 use canwu_fiscal::{
-    FISCAL_REPORT_FACTS_PER_PART, FiscalAction, FiscalActionDisposition, FiscalAssessment,
-    FiscalAuditSeverity, FiscalObserverBinding, FiscalPaymentForm, FiscalReport, FiscalReportPlan,
-    FiscalReportRecord, FiscalState, MAX_FISCAL_OBSERVERS, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY,
-    compute_projections, fiscal_report_knowledge_schema_id, fiscal_reports, fiscal_state_reference,
+    FISCAL_REPORT_DRAIN_INGRESS, FISCAL_REPORT_FACTS_PER_PART, FiscalAction,
+    FiscalActionDisposition, FiscalAssessment, FiscalAuditSeverity, FiscalObserverBinding,
+    FiscalPaymentForm, FiscalReport, FiscalReportPlan, FiscalReportRecord, FiscalState,
+    MAX_FISCAL_OBSERVERS, MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY, compute_projections,
+    fiscal_report_knowledge_schema_id, fiscal_reports, fiscal_state_reference,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use support::{
     AUDITOR, DEPUTY, Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL, GRANARY_SCOPE, OBSERVER,
-    PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, base_state, draft,
-    enqueue_life, enqueue_requests, enqueue_tick, fiscal_state, granary, procedure_revision,
-    published_report_records, scenario, scenario_from_state, settle, submit, treasury,
-    treasury_scope,
+    PRINCIPAL, RULE, TREASURY_AUTHORITY, TREASURY_SCOPES, assessment, base_state, draft, enqueue,
+    enqueue_life, enqueue_requests, enqueue_tick, fiscal_record_version, fiscal_state, granary,
+    life_at, procedure_revision, published_report_records, scenario, scenario_from_state, settle,
+    submit, submit_sealed, treasury, treasury_scope,
 };
 
 /// The second binding of the treasury's observer: the same actor, the
@@ -354,11 +361,15 @@ fn a_report_past_one_record_is_published_in_parts() {
 }
 
 /// When more parts change in one boundary than a boundary publishes, the
-/// boundary still commits. The parts that did not fit are published by the
-/// next boundary that changes the fiscal state, and until then the reports
-/// they belong to say how many parts are pending.
+/// boundary still commits, and the reports the parts belong to say how many
+/// are pending. The boundary schedules a drain packet due at once, so the
+/// next boundary, at the same instant, publishes the rest. Nothing in the
+/// fiscal state changes for that but the plan: no procedure revision, no
+/// action, no receipt. After it nothing is owed, nothing more is queued, and
+/// a boundary without fiscal ingress writes and publishes nothing.
 #[test]
-fn parts_past_the_boundary_limit_follow_in_the_next_fiscal_boundary() {
+#[allow(clippy::too_many_lines)]
+fn parts_past_the_boundary_limit_follow_in_the_next_boundary() {
     const AUTHORED_CYCLES: usize = 64;
     let facts = TREASURY_SCOPES * AUTHORED_CYCLES;
     let parts = facts / FISCAL_REPORT_FACTS_PER_PART;
@@ -380,11 +391,33 @@ fn parts_past_the_boundary_limit_follow_in_the_next_fiscal_boundary() {
     let wanted = MAX_FISCAL_OBSERVERS * (1 + parts);
     assert!(wanted > MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY);
     let deferred = wanted - MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY;
+    let drains = |canwu: &Canwu| {
+        canwu
+            .ingress_log()
+            .iter()
+            .filter(|ingress| {
+                matches!(
+                    &ingress.payload,
+                    IngressPayload::Plugin { packet_type, .. }
+                        if packet_type == FISCAL_REPORT_DRAIN_INGRESS
+                )
+            })
+            .count()
+    };
 
     // The first fiscal change plans every part of every report. The boundary
-    // publishes as many records as it may and commits.
-    let receipts = submit(&mut canwu, vec![granary_assessment("first", "new.000")]);
-    assert_eq!(published(&receipts), MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY);
+    // that settles it publishes as many records as it may and commits.
+    enqueue(&mut canwu, vec![granary_assessment("first", "new.000")]);
+    canwu.step_canonical().expect("the admitting boundary");
+    let settling = canwu
+        .step_canonical()
+        .expect("the settling boundary")
+        .expect("a boundary settles the action");
+    assert_eq!(
+        settling.knowledge_record_count,
+        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
+    );
+    assert_eq!(drains(&canwu), 1, "the settling boundary schedules a drain");
     let reports = reports_of(&canwu, PRINCIPAL);
     assert_eq!(reports.len(), MAX_FISCAL_OBSERVERS);
     let pending: usize = reports
@@ -412,37 +445,90 @@ fn parts_past_the_boundary_limit_follow_in_the_next_fiscal_boundary() {
             .collect()
     );
 
-    // The next fiscal change publishes what was left, with a new summary for
-    // each report it completes, and nothing else.
+    // The next boundary comes at once, at the same instant, and publishes
+    // what was left with a new summary for each report it completes, and
+    // nothing else. The fiscal state changes only in its plan.
     let incomplete = reports
         .values()
         .filter(|report| !report.is_complete())
         .count();
-    let receipts = submit(&mut canwu, vec![granary_assessment("second", "new.001")]);
-    assert_eq!(published(&receipts), incomplete + deferred);
+    // A run restored while the drain is queued, and the run's exact replay,
+    // carry it out alike.
+    fixture.assert_restore_and_replay(&canwu);
+    let mut restored = Canwu::from_snapshot_json_with_plugins(
+        &canwu.snapshot_json().expect("snapshot with a queued drain"),
+        &fixture.plugins(),
+    )
+    .expect("restored with a queued drain");
+    restored.step_canonical().expect("the restored drain");
+    let revision = procedure_revision(&canwu);
+    let outcomes = state.action_outcomes.len();
+    let at = canwu.time();
+    let drain = canwu
+        .step_canonical()
+        .expect("the drain boundary")
+        .expect("the drain packet opens a boundary");
+    assert_eq!(drain.knowledge_record_count, incomplete + deferred);
+    assert_eq!(canwu.time(), at);
+    assert_eq!(
+        restored.snapshot_json().expect("restored snapshot"),
+        canwu.snapshot_json().expect("snapshot")
+    );
     assert_reports_match_state(&canwu);
-    assert!(fiscal_state(&canwu).report_plan.deferred.is_empty());
+    let drained = fiscal_state(&canwu);
+    assert!(drained.report_plan.deferred.is_empty());
+    assert_eq!(drained.procedure_revision, revision);
+    assert_eq!(drained.action_outcomes.len(), outcomes);
+    assert_eq!(
+        FiscalState {
+            report_plan: state.report_plan.clone(),
+            ..drained.clone()
+        },
+        state
+    );
+
+    // Nothing is owed and nothing more is queued. A boundary without fiscal
+    // ingress then writes and publishes nothing.
+    assert_eq!(drains(&canwu), 1);
+    assert!(
+        canwu
+            .step_canonical()
+            .expect("an empty canonical queue")
+            .is_none()
+    );
+    let version = fiscal_record_version(&canwu);
+    enqueue_tick(&mut canwu);
+    assert_eq!(published(&settle(&mut canwu)), 0);
+    assert_eq!(fiscal_record_version(&canwu), version);
 
     fixture.assert_restore_and_replay(&canwu);
 }
 
-/// The engine publishes no knowledge to a dead person. When an observer's
-/// actor has died, a change that his report would show still commits, the
-/// other observers get their parts, and his report stays as he last had it.
-/// What he missed is kept, by part and so without growing, and is published
-/// by the first fiscal change after he is alive again.
-#[test]
-fn a_dead_observer_is_skipped_until_he_is_alive_again() {
-    const DEPUTY_BINDING: &str = "observer.deputy";
-    let fixture = Fixture::new();
-    let mut canwu = fixture.runtime(scenario(|state| {
+const DEPUTY_BINDING: &str = "observer.deputy";
+
+/// The base scenario with the deputy observing the treasury and the auditor
+/// the granary.
+fn deputy_and_auditor() -> canwu_api::Scenario {
+    scenario(|state| {
         for binding in [
             observer(DEPUTY_BINDING, DEPUTY, treasury(), 1_000),
             observer(AUDITOR_BINDING, AUDITOR, granary(), 900),
         ] {
             state.observer_bindings.insert(binding.id.clone(), binding);
         }
-    }));
+    })
+}
+
+/// The engine publishes no knowledge to a dead person. When an observer's
+/// actor has died, a change that his report would show still commits, the
+/// other observers get their parts, and his report stays as he last had it.
+/// What he missed is kept, by part and so without growing, and the boundary
+/// that revives him publishes it, without waiting for a change of the fiscal
+/// state.
+#[test]
+fn a_dead_observer_is_skipped_until_he_is_alive_again() {
+    let fixture = Fixture::new();
+    let mut canwu = fixture.runtime(deputy_and_auditor());
     let deferred = |canwu: &Canwu| fiscal_state(canwu).report_plan.deferred;
     let held_for_deputy = BTreeMap::from([(DEPUTY_BINDING.to_owned(), BTreeSet::from([0_u32]))]);
 
@@ -480,18 +566,112 @@ fn a_dead_observer_is_skipped_until_he_is_alive_again() {
     assert_eq!(deferred(&canwu), held_for_deputy);
     assert_eq!(reports_of(&canwu, DEPUTY), at_death);
 
-    // Alive again. The next fiscal change, here one he cannot see, publishes
-    // what he missed with a new summary.
+    // While he is dead, a boundary without fiscal ingress writes and
+    // publishes nothing, although parts are owed to him.
+    let version = fiscal_record_version(&canwu);
+    enqueue_tick(&mut canwu);
+    assert_eq!(published(&settle(&mut canwu)), 0);
+    assert_eq!(fiscal_record_version(&canwu), version);
+
+    // Alive again. The boundary that revives him publishes what he missed,
+    // with a new summary, and nothing else: the fiscal state changes only in
+    // its plan, and no action becomes stale.
+    let revision = procedure_revision(&canwu);
     enqueue_life(&mut canwu, DEPUTY, true);
-    settle(&mut canwu);
-    assert_eq!(deferred(&canwu), held_for_deputy);
-    let receipts = submit(&mut canwu, vec![granary_assessment("granary.again", "c2")]);
-    assert_eq!(published(&receipts), 4);
+    assert_eq!(published(&settle(&mut canwu)), 2);
     assert!(deferred(&canwu).is_empty());
+    assert_eq!(procedure_revision(&canwu), revision);
     let reports = assert_reports_match_state(&canwu);
     assert_eq!(reports[DEPUTY_BINDING].projection.facts.len(), 3);
 
+    // A later change he cannot see publishes nothing to him.
+    let receipts = submit(&mut canwu, vec![granary_assessment("granary.again", "c2")]);
+    assert_eq!(published(&receipts), 2);
+    assert_reports_match_state(&canwu);
+
     fixture.assert_restore_and_replay(&canwu);
+}
+
+/// Whether report parts are owed, and to whom, is read from the committed
+/// fiscal state and person availability, never from retained evidence. A run
+/// that sealed its evidence while parts were owed to a dead observer
+/// publishes them when he is revived exactly as an unsealed fork, a restore
+/// from the sealed segments, and its own exact replay do.
+#[test]
+fn a_sealed_run_publishes_what_a_revived_observer_is_owed_as_its_replay_does() {
+    let fixture = Fixture::new();
+    let plugins = fixture.plugins();
+    let mut base = fixture.runtime(deputy_and_auditor());
+    submit(&mut base, vec![treasury_assessment("first", 0, "c1")]);
+    enqueue_life(&mut base, DEPUTY, false);
+    settle(&mut base);
+    submit(&mut base, vec![treasury_assessment("second", 1, "c1")]);
+    assert!(
+        fiscal_state(&base)
+            .report_plan
+            .deferred
+            .contains_key(DEPUTY_BINDING)
+    );
+
+    // A quiet boundary admits what the last boundary emitted, and then the
+    // whole history seals.
+    base.settle_boundary(BoundaryRequest::at(base.time()))
+        .expect("a quiet boundary before sealing");
+    let mut unsealed = base.fork();
+    let mut sealed = base.into_compacted().expect("compact interface");
+    let segment = sealed
+        .seal_evidence()
+        .expect("the settled history seals")
+        .expect("the settled history holds evidence");
+    let mut from_sealed = CompactedCanwu::from_checkpoint_and_journal_with_plugins(
+        sealed.checkpoint().expect("compact checkpoint"),
+        vec![segment.clone()],
+        &plugins,
+    )
+    .expect("the sealed segments restore the compact run");
+
+    // Each run revives the deputy, and the reviving boundary publishes what
+    // he is owed: his summary and his one part.
+    unsealed
+        .enqueue_plugin_ingress(life_at(unsealed.time(), DEPUTY, true))
+        .expect("revive in the unsealed run");
+    assert_eq!(published(&settle(&mut unsealed)), 2);
+    for run in [&mut sealed, &mut from_sealed] {
+        run.enqueue_plugin_ingress(life_at(run.time(), DEPUTY, true))
+            .expect("revive in a compact run");
+        run.advance_canonical(canwu_api::SimDuration::minutes(1))
+            .expect("the reviving boundary");
+    }
+    let report = &reports_of(&unsealed, DEPUTY)[DEPUTY_BINDING];
+    assert!(report.is_complete());
+    assert_eq!(report.projection.facts.len(), 2);
+    let deputy = KnowledgeHolderRef::Person(DEPUTY);
+    let ledger = |knowledge: &canwu_api::KnowledgeSnapshot| {
+        knowledge
+            .for_holder(&deputy)
+            .expect("the deputy's ledger")
+            .clone()
+    };
+    assert_eq!(ledger(sealed.knowledge()), ledger(unsealed.knowledge()));
+    assert_eq!(
+        ledger(from_sealed.knowledge()),
+        ledger(unsealed.knowledge())
+    );
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+    assert_eq!(from_sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+
+    // A later change in the sealed run settles as in the unsealed one.
+    let later = vec![treasury_assessment("third", 2, "c1")];
+    submit(&mut unsealed, later.clone());
+    submit_sealed(&mut sealed, later);
+    assert_eq!(sealed.checkpoint_hash(), unsealed.checkpoint_hash());
+
+    let journal = sealed
+        .replay_journal_with_segments(vec![segment.clone()])
+        .expect("the sealed run produces an exact replay journal");
+    let replayed =
+        Canwu::replay_from_journal(&plugins, &journal).expect("the sealed run replays exactly");
+    assert_eq!(replayed.snapshot(), unsealed.snapshot());
 }
 
 /// A state whose observer binding names a person who does not exist is
@@ -553,6 +733,69 @@ fn a_report_plan_that_came_with_a_scenario_is_ignored() {
     assert_eq!(published(&settle(&mut canwu)), 1 + parts);
     let reports = assert_reports_match_state(&canwu);
     assert_eq!(reports[OBSERVER].projection.facts.len(), facts);
+}
+
+/// A run that holds direct command history cannot add canonical ingress, so
+/// a boundary of it cannot schedule a drain. The first boundary that runs the
+/// fiscal systems on an authored state, planning more report records than it
+/// may publish, then commits with the rest owed instead of failing, and the
+/// next boundary that runs the fiscal systems publishes more of them.
+#[test]
+fn owed_parts_wait_in_a_run_with_direct_command_history() {
+    const AUTHORED_CYCLES: usize = 64;
+    let fixture = Fixture::new();
+    // The derived fields are not computed, so the first boundary that runs
+    // the fiscal systems writes them and plans every report whole.
+    let mut state = base_state();
+    author_treasury_assessments(&mut state, AUTHORED_CYCLES);
+    state.observer_bindings.clear();
+    for index in 0..MAX_FISCAL_OBSERVERS {
+        let observer = observer(
+            &format!("observer.{index:02}"),
+            PRINCIPAL,
+            treasury(),
+            1_000,
+        );
+        state
+            .observer_bindings
+            .insert(observer.id.clone(), observer);
+    }
+    let mut canwu = fixture.runtime(scenario_from_state(state));
+    let direct_command_boundary = |canwu: &mut Canwu| {
+        canwu
+            .submit(CommandEnvelope::new(
+                Issuer::Actor(PRINCIPAL),
+                Command::OrderMovement {
+                    subject: canwu_api::EntityRef::Person(PRINCIPAL),
+                    destination: TerritoryId::new(1),
+                    cargo: Vec::new(),
+                },
+            ))
+            .expect("a direct command");
+        let at = canwu.time() + SimDuration::minutes(1);
+        canwu
+            .settle_boundary(BoundaryRequest::at(at))
+            .expect("the boundary commits")
+    };
+
+    let first = direct_command_boundary(&mut canwu);
+    assert_eq!(
+        first.knowledge_record_count,
+        MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY
+    );
+    assert!(first.generated_ingress.is_empty(), "no drain is scheduled");
+    let owed = |canwu: &Canwu| -> usize {
+        let plan = fiscal_state(canwu).report_plan;
+        plan.deferred.len() + plan.deferred.values().map(BTreeSet::len).sum::<usize>()
+    };
+    let owed_after_first = owed(&canwu);
+    assert!(owed_after_first > 0);
+
+    let second = direct_command_boundary(&mut canwu);
+    assert!(second.knowledge_record_count > 0);
+    assert!(second.generated_ingress.is_empty());
+    assert!(owed(&canwu) < owed_after_first);
+    fixture.assert_restore_and_replay(&canwu);
 }
 
 /// A scenario whose knowledge carries a report record of schema version 1,

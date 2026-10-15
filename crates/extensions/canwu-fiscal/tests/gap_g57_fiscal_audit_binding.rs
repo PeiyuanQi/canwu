@@ -2,32 +2,57 @@
 //! findings on it under an audit binding, and the finding names him.
 //!
 //! The audit binding admits `RecordAudit` on the audited institution's scopes
-//! and nothing else, only while its own authority basis is current. The
-//! audited institution installs, replaces, and removes its audit bindings with
-//! `RebindAudit`, under the same rules as an authority rebind. The binding
-//! therefore establishes who entered a finding, not that he is independent of
-//! the institution he audits.
+//! and nothing else, only while its own authority basis is current. Here both
+//! institutions' appointment policies make each its own appointer, free to act
+//! without a nomination or petition, so each installs, replaces, and removes
+//! its audit bindings with `RebindAudit`, under the same rules as an authority
+//! rebind. Such a binding therefore establishes who entered a finding, not
+//! that he is independent of the institution he audits; see
+//! `fiscal_audit_appointment.rs` for appointers above the audited
+//! institution.
 
 mod support;
 
 use canwu_api::{Canwu, DomainRecordVersionRef, ErrorCode, PersonId, SimTime};
 use canwu_fiscal::{
     FISCAL_AUTHORITY_BASIS_NOT_CURRENT, FISCAL_ISSUER_NOT_BOUND, FiscalAction,
-    FiscalActionDisposition, FiscalActionIssuer, FiscalAssessment, FiscalAuditBinding,
-    FiscalAuditSeverity, FiscalIssuerRole, FiscalPaymentForm, FiscalState,
+    FiscalActionDisposition, FiscalActionIssuer, FiscalAppointmentPolicy, FiscalAssessment,
+    FiscalAuditBinding, FiscalAuditSeverity, FiscalIssuerRole, FiscalPaymentForm, FiscalState,
 };
 use std::collections::BTreeSet;
 use support::{
     AUDITOR, AUDITOR_COMMISSION, DEPUTY, Draft, Fixture, GRANARY_AUTHORITY, GRANARY_PRINCIPAL,
     GRANARY_SCOPE, PRINCIPAL, RULE, SECOND_AUDITOR, TREASURY_AUTHORITY, admission_rejection,
-    assessment, current_commission, draft, enqueue_renewal, fiscal_state, initial_commission,
-    outcome, scenario, submit, treasury, treasury_scope,
+    assessment, current_commission, draft, enqueue_renewal, fiscal_state, granary,
+    initial_commission, outcome, scenario, submit, treasury, treasury_scope,
 };
 
 const TREASURY_AUDIT: &str = "audit.treasury";
 const GRANARY_AUDIT: &str = "audit.granary";
 const TREASURY_ASSESSMENT: &str = "treasury.assessment";
 const GRANARY_ASSESSMENT: &str = "granary.assessment";
+
+/// Makes each institution its own appointer, free to act without a
+/// nomination or petition: the 0.15.0 rule for audit bindings.
+fn self_appointment(state: &mut FiscalState) {
+    for (id, institution) in [
+        ("appointment.treasury", treasury()),
+        ("appointment.granary", granary()),
+    ] {
+        state.audit_appointment_policies.insert(
+            id.to_owned(),
+            FiscalAppointmentPolicy {
+                id: id.to_owned(),
+                institution: institution.clone(),
+                appointer: institution,
+                nominators: BTreeSet::new(),
+                petitioners: BTreeSet::new(),
+                appoints_without_nomination: true,
+                removes_without_petition: true,
+            },
+        );
+    }
+}
 
 fn authored_assessment(state: &mut FiscalState, id: &str, scope: &str) {
     state.assessments.insert(
@@ -123,6 +148,7 @@ fn gap_g57_fiscal_audit_binding() {
     let fixture = Fixture::new();
     let commission = initial_commission(AUDITOR_COMMISSION);
     let mut canwu = fixture.runtime(scenario(|state| {
+        self_appointment(state);
         authored_assessment(state, TREASURY_ASSESSMENT, &treasury_scope(0));
         authored_assessment(state, GRANARY_ASSESSMENT, GRANARY_SCOPE);
         state.audit_bindings.insert(
@@ -133,6 +159,7 @@ fn gap_g57_fiscal_audit_binding() {
                 auditor: AUDITOR,
                 authority_basis: initial_commission(AUDITOR_COMMISSION),
                 rebound_by: None,
+                nomination: None,
             },
         );
     }));

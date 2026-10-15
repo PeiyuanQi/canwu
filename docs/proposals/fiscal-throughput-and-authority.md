@@ -8,6 +8,19 @@ that the first two can be used. The public fixtures are
 `fiscal_report_parts`, and `fiscal_reports_after_seal` under
 `crates/extensions/canwu-fiscal/tests/`.
 
+0.16.0 changes five parts of this contract, described in
+[fiscal and society limits](fiscal-and-society-limits.md): settlement measures
+every record its boundary writes, derived fields included, against the budget
+less the largest report plan instead of a 16 KiB reserve, and refuses a
+receipt or historical-context change that does not fit, is malformed, or is
+not valid, instead of failing the boundary; owed report parts are published
+by the next boundary without a change of the fiscal state, and a revived
+observer's by the boundary that revives him; the action packet is internal
+ingress; and who appoints and removes an institution's auditors is a
+scenario-declared appointment policy, so `RebindAudit` keeps the behaviour
+described below only where that policy makes the audited institution its own
+appointer.
+
 The release entry is in [Versioning and Persistence](../versioning.md). The
 other 0.15.0 proposals are
 [society settlement cadence and runtime revision](society-cadence-and-runtime-revision.md),
@@ -514,7 +527,9 @@ that record commissions this auditor is the application's to say. Who appoints
 an auditor is left open for the owner to decide. The alternatives are audit
 bindings that only a scenario installs, a `RebindAudit` limited to re-pointing
 the same auditor at a renewed basis, and an appointing institution distinct
-from the audited one.
+from the audited one. (Decided for 0.16.0: an appointment policy per audited
+institution names the appointer, nominators, and petitioners; see
+[auditor appointment and removal](fiscal-and-society-limits.md#auditor-appointment-and-removal).)
 
 ### Invariants
 

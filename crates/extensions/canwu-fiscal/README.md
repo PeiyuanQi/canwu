@@ -12,10 +12,16 @@ domain-record versions through `enqueue_execution_receipt`. At the live
 settlement boundary the extension requires each cited version to be the current
 version of its record, decodes the generic execution-evidence envelope,
 validates every field against the authorization, and derives the receipt
-quantity and disposition from the evidence. If a cited record changes in a
-boundary before the one that settles its receipt, the settling boundary fails,
-and a receipt that is already due cannot be cancelled, so cite create-only
-evidence kinds or cancel a pending receipt before its due time. A configured
+quantity and disposition from the evidence. No receipt or historical-context
+change fails its boundary: one whose payload does not decode, whose evidence
+is no longer current or does not match its request, that cites an external
+operation another receipt settled, that reuses a receipt ID with other
+content, or a context year outside the pack, changes nothing and is refused
+with one `canwu.fiscal.ingress_rejected.v1` event, whose summary names the
+ingress and the packet and ends with `FISCAL_INGRESS_MALFORMED_REJECTION` or,
+after the message that says why, `FISCAL_INGRESS_INVALID_REJECTION`. A
+refused receipt consumes nothing, so a corrected one can settle later; if a
+cited record changes before the receipt settles, cite its new version. A configured
 evidence-kind allowlist and the host integration's redundant semantic validator
 keep arbitrary world records from proving execution. Exact evidence versions and
 `(evidence kind, external_operation_id)` pairs can each settle at most one
@@ -59,23 +65,73 @@ audit findings on it. It admits `RecordAudit` on targets whose scope the
 audited institution owns, and nothing else, only while its own
 `authority_basis` is current (`FISCAL_AUTHORITY_BASIS_NOT_CURRENT` otherwise).
 Audit bindings live beside the authority bindings, not inside them, so no
-check of who may act for an institution ever consults an auditor. They are
-installed with the state or by `FiscalAction::RebindAudit`, which the audited
-institution issues to install, replace, or remove one, under the rules of an
-authority rebind. Every settled `FiscalAuditFinding` names who entered it,
-under which binding and role, in `entered_by`. Audit binding IDs are one
-namespace across institutions.
+check of who may act for an institution ever consults an auditor. Every
+settled `FiscalAuditFinding` names who entered it, under which binding and
+role, in `entered_by`. Audit binding IDs are one namespace across
+institutions.
 
-An audit binding establishes who entered a finding, not that the auditor is
-independent of the institution he audits. The audited institution appoints
-and removes its own auditors, and can remove one before a finding admitted
-under his binding settles; the basis only has to be the current version of an
-application record of a kind the plugin reads. Who appoints an auditor is an
-open design decision, recorded in the Canwu repository's
-`docs/proposals/fiscal-throughput-and-authority.md`.
+Who appoints and removes an institution's auditors is the institution's
+`FiscalAppointmentPolicy`, declared with the state in
+`FiscalState::audit_appointment_policies`, at most one per audited
+institution:
 
-The record versions that `rebound_by`, an audit binding, and a finding's
-`entered_by` name are not declared as required evidence. After
+- **Appointer.** The institution whose decision appoints and removes them. It
+  decides with `FiscalAction::DecideAuditAppointment` under one of its own
+  authority bindings, as that binding's principal or as a body; an acting
+  actor never decides. A decision appoints the candidate of a pending
+  nomination (`AcceptNomination`), appoints directly (`Appoint`), removes the
+  auditor a pending petition names (`AcceptPetition`), removes directly
+  (`Remove`), or dismisses a pending nomination or petition (`Dismiss`).
+- **Nominators and petitioners.** Institutions, acting under one of their
+  authority bindings, or persons the policy lists by name, acting under the
+  policy's own ID (`FiscalIssuerRole::ListedActor`). A nominator proposes a
+  candidate and an authority basis with `NominateAuditor`; a petitioner asks
+  for the removal of a binding's auditor on evidence grounds with
+  `PetitionAuditorRemoval`.
+- **Unprompted decisions.** `appoints_without_nomination` and
+  `removes_without_petition` say whether the appointer may act without one
+  (`FISCAL_NOMINATION_REQUIRED`, `FISCAL_PETITION_REQUIRED` otherwise).
+- **Tenure.** Replacing a seated auditor by another is a removal as well as
+  an appointment, so it needs `removes_without_petition`; where the policy
+  protects him, the appointer accepts a petition against him first and then
+  fills the vacancy. Appointing into a vacancy, or the seated auditor again,
+  removes nobody.
+
+Each nomination and petition is a `FiscalAuditProposal` in
+`FiscalState::audit_proposals`, recorded with its party and the action and
+issuer that made it, and pending until it is resolved once: accepted or
+dismissed by the appointer, or superseded. A party's new proposal of the same
+kind on the same binding replaces its pending one, which is dropped; an
+appointment supersedes every other nomination pending on the binding, and the
+petitions only when it replaces the auditor they name; a removal supersedes
+every other petition (nominations stay pending for the vacancy). Only the
+audited institution's proposals are touched. Each party has room for
+`MAX_FISCAL_PENDING_PROPOSALS_PER_PARTY` (4) pending proposals under a
+policy, so no party can take another's; admission refuses a further one as
+`ValueOutOfRange`. Each policy keeps its latest
+`MAX_FISCAL_RESOLVED_PROPOSALS_PER_POLICY` (64) resolved proposals and drops
+older ones. Authority and what a decision cites are
+checked when the command is admitted and again when the action settles, and
+every refusal is recorded: a rejected command at admission, a rejected
+outcome at settlement. The binding names the decision in `rebound_by` and the
+nomination it accepted, with its nominator, in `nomination`; a finding keeps
+both as its auditor's binding held them (`appointed_by`, `nomination`); a
+petition keeps who petitioned and, in its resolution, who decided.
+
+`FiscalAction::RebindAudit` is the appointer's direct decision where the
+policy makes the audited institution its own appointer and lets it act
+without a nomination or petition: that institution then installs, replaces,
+and removes its own auditors as in 0.15.0 (replacing needs both permissions),
+and such a binding establishes
+who entered a finding, not that the auditor is independent of the
+institution he audits. Anywhere else the audited institution cannot change
+its auditors (`FISCAL_ISSUER_NOT_APPOINTER`), and an institution with no
+policy has only the audit bindings installed with the state
+(`FISCAL_APPOINTMENT_POLICY_MISSING`). The basis only has to be the current
+version of an application record of a kind the plugin reads.
+
+The record versions that `rebound_by`, an audit binding, a nomination, and a
+finding's `entered_by` name are not declared as required evidence. After
 `seal_evidence`, a superseded version among them may no longer be provable.
 
 Historical content periods and host-defined accounting cycles remain separate.
@@ -116,9 +172,39 @@ No action fails a boundary for the others. Admission rejects as
 (32 KiB), a `finding`, `reason`, or `purpose` longer than
 `MAX_FISCAL_ACTION_TEXT_BYTES` (2,048 bytes), a `unit` or referenced ID longer
 than `MAX_FISCAL_IDENTIFIER_BYTES` (160 bytes), and a new entry whose ID is
-not canonical. An action whose result would not fit the state's byte budget,
-less 16 KiB that is kept for the report plan, is rejected as its own outcome
-with `FISCAL_STATE_BUDGET_EXHAUSTED`.
+not canonical. An action whose result would not fit the state's byte budget
+is rejected as its own outcome with `FISCAL_STATE_BUDGET_EXHAUSTED`.
+
+No packet fails a boundary for the byte budget or for what the derived
+systems add. Settlement measures every record its boundary will write: the
+state as it leaves it, and that state with the transition candidates and the
+aggregates the candidate and aggregate systems will write after it. It holds
+the largest of them, without the report plan, to the budget less
+`MAX_FISCAL_REPORT_PLAN_BYTES` (152,416 bytes), more than any plan can take,
+so a change that adds many derived fields is measured with them. When the
+whole boundary does not fit, the packets are settled again with each one
+measured. An execution receipt or a historical-context change that does not
+fit changes nothing: the state keeps neither the receipt nor its evidence
+versions and external operations, the procedure revision does not advance,
+and one `canwu.fiscal.ingress_rejected.v1` event, whose summary names the
+ingress and ends with `FISCAL_INGRESS_BUDGET_REJECTION`, is its only record.
+The crate has no archive, so a state at its budget stays there: a host that
+must record its executions watches for that event, or for the state's size,
+and starts a new run or shard before then. Near the budget each receipt or
+context change of a boundary is measured on its own, at the cost of a
+clone, a validation, two serializations, and a derivation of the state
+(an estimated 30 to 40 ms at 2.2 MB, about half a second near 32 MiB), so
+keep the receipts per boundary few there. An authored state whose derived fields, which its first
+fiscal boundary writes, would not fit is refused when the run is created.
+
+The fiscal action packet (`fiscal_action_v1`) is internal ingress. A host
+cannot enqueue one; it issues an action with the `apply_fiscal_action_v1`
+command, whose admission queues the packet. A packet settles only when its
+ingress record names, as its cause, the command the packet carries, which
+only that admission produces. A packet that a boundary system of another
+plugin schedules into the action ingress is skipped with a
+`canwu.fiscal.ingress_rejected.v1` event ending with `unauthorized_origin`, or
+`malformed_payload` when it does not decode, and the boundary commits.
 
 An action that settlement can give no outcome is dropped: it changes nothing,
 its action ID is not consumed, and one `canwu.fiscal.action_dropped.v1` event
@@ -176,19 +262,35 @@ schema) is one summary or one part, not a report.
 - A report can be as large as the state allows: 4,096 facts in 256 parts. One
   boundary publishes at most `MAX_FISCAL_REPORT_RECORDS_PER_BOUNDARY` (1,024)
   report records over all observers. Parts that changed but did not fit are
-  published by the next boundary that changes the fiscal state, whatever that
-  change is. Until then the report's summary names them in `pending_parts`,
-  `FiscalReport::is_complete` is false, and `FiscalReport::is_stale` tells a
-  fact of a pending part, which may be older than `as_of` or missing, from a
-  current one. Deferral shows an observer a little that its binding does
-  not: a boundary's records are shared in the order of the observer
-  bindings, so which parts are pending depends on the reports of the
-  observers before it, and the arrival of pending parts says that the fiscal
-  state changed, whoever changed it.
+  owed, and the boundary schedules an internal `fiscal_report_drain_v1`
+  packet due at once (`FISCAL_REPORT_DRAIN_INGRESS`), so the next boundary,
+  at the same instant, publishes them, up to the same limit, without any
+  change of the fiscal state. `advance_canonical` and `step_canonical` settle
+  that boundary before they move on; `settle_boundary` refuses a later time
+  until a boundary at that instant has admitted the packet, as it does for
+  the packet an action command queues. A run that holds direct command
+  history cannot add canonical ingress, so there no drain is scheduled and
+  the owed parts wait for the next boundary that runs the fiscal systems.
+  Until then the
+  report's summary names them in `pending_parts`, `FiscalReport::is_complete`
+  is false, and `FiscalReport::is_stale` tells a fact of a pending part,
+  which may be older than `as_of` or missing, from a current one. Deferral
+  shows an observer a little that its binding does not: a boundary's records
+  are shared in the order of the observer bindings, so which parts are
+  pending depends on the reports of the observers before it.
 - The engine publishes no knowledge to a dead person. While an observer's
   actor is dead, nothing is published to that observer and the report stays
   as it was; what changes in it is kept in the report plan, by part, and is
-  published by the first fiscal change after the person is alive again.
+  published by the first boundary after the person is alive again that runs
+  the fiscal systems: the boundary that revives the person, when it admits
+  any ingress or event.
+- Publishing owed parts changes the fiscal state only in its report plan, so
+  the procedure revision does not advance and no action becomes stale. A
+  boundary finds owed parts by reading the plan's owed observers, and their
+  actors, from the committed record without decoding the state; one in
+  which nothing is owed to an observer who can receive it decodes nothing,
+  as before. A queued drain packet is pending ingress, so like any other it
+  holds back `seal_evidence` until the boundary that admits it.
 - A report plan (`FiscalState::report_plan`) means something only in a state
   a boundary has written. One that comes with a scenario is ignored, and the
   first derivation publishes every report whole.

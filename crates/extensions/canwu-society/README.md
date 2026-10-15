@@ -31,16 +31,33 @@ Everything the phase-7 system applies waits for the cadence: due cohort
 transfers, queued rebases, lifecycle deltas and pressure revisions,
 institutional decisions, and transitions. An application that needs such a
 change to take effect within a day registers a `Daily` society. Under a
-coarse cadence, note three things. Of the due transfers that share a cohort,
-as source or destination, one completes per settlement; the others settle as
-`stale_source` and must be reissued against the new state (a `Daily` society
-has the same rule for transfers due on one day). The queue is one record,
-rewritten whole by every boundary that admits a packet, so the evidence of a
-queue that waits a period grows with the square of the packets it collects.
-And a packet that arrives while `MAX_SOCIETY_INGRESS_QUEUE` (4,096) wait is
-dropped with only a `society_ingress_rejected_v1` event: a dropped rebase
-leaves its cohort behind its stock until the provider sends another, and a
-dropped pressure revision never settles and must be decided again.
+coarse cadence, note two things. Every issuer in the period decided against
+the same state, so by default the due transfers are checked together against
+the state at the start of the settlement and each one that still fits
+completes; `TransferSettlement::OneByOne` instead completes one transfer per
+shared cohort per settlement and settles the others as `stale_source` (see
+below). And at most
+`MAX_SOCIETY_INGRESS_QUEUE` (4,096) packets wait for a settlement. A packet
+that arrives while the queue is full is refused by the boundary that admits
+it, the earliest point its sender can learn of it: a terminal rejected
+outcome with `queue_full` (`SOCIETY_INGRESS_QUEUE_FULL_REJECTION`) is
+recorded in the cohort exchange ledger, where every other outcome of its
+kind is, and one event reports it. A `revise_society_pressure` command is
+refused at admission while the queue is full, as a recorded
+`ValueOutOfRange` command rejection. A refused rebase leaves its cohort
+behind its stock until the provider sends another, and a refused pressure
+revision must be decided again.
+
+The queue costs evidence in proportion to what each boundary admits, however
+long it waits. It is a small head record (`SocietyIngressQueue`, schema
+version 2: the number of packets and of batches) and one batch record
+(`SocietyIngressBatch`, kind `canwu.society:ingress-batch`) for each boundary
+that admitted packets since the last settlement. A boundary writes its own
+batch into the next free slot and updates the head; a settlement applies the
+batches in slot order, empties the slots it used, and resets the head, and
+later boundaries reuse the slots from the first. There are never more batch
+records than `MAX_SOCIETY_INGRESS_QUEUE`. `society_ingress_queue_entries`
+reads the waiting packets in admission order.
 
 A transition rate is per settlement, not per unit of simulated time: each
 settlement moves `floor((source × rate + carry) / 1,000,000)` people for a
@@ -123,10 +140,11 @@ admitted, or the rebase is rejected as `stale_external_stock`. The internal
 lifecycle provider's target-scoped rule, alignment, and release changes, for
 example from `canwu-culture`; deltas apply idempotently. An event-driven
 phase-12 intake queues admitted packets in admission order, at most
-`MAX_SOCIETY_INGRESS_QUEUE` at once (further packets are rejected with a
-`society_ingress_rejected_v1` event); only the intake writes the queue, so an
-initial scenario that seeds a non-empty queue is refused with
-`InvalidAuthority`. The next phase-7 settlement applies the queue after
+`MAX_SOCIETY_INGRESS_QUEUE` at once (a further packet is refused with a
+`queue_full` ledger outcome and a `society_ingress_rejected_v1` event); only
+the intake adds packets to the queue, so an initial scenario that seeds a
+non-empty queue is refused with `InvalidAuthority`, and one whose head and
+batches disagree is refused when the run is created. The next phase-7 settlement applies the queue after
 cohort transfers and before institutional decisions and transitions, and
 records each outcome in `SocietyCohortExchangeLedger::rebases` or
 `lifecycle_deltas`. A rebase re-proportions every distribution of the cohort
@@ -147,6 +165,29 @@ needs a new operation ID. Transfers and rebases clear the materialized
 aggregates, mobilization candidates, and projections, which the same
 settlement boundary rematerializes. The society plugin remains the only writer
 of `canwu.society:state`.
+
+How a settlement checks the transfers due at it is an option of the plugin,
+`SocietyPlugin::with_transfer_settlement(mode)`, recorded in its identity like
+the cadence: a run is restored and replayed only with a plugin of the same
+mode.
+
+- `TransferSettlement::Batch`, the default: every due transfer is checked
+  against the state at the start of the settlement, the state every issuer
+  of the period could see, and one whose cohorts changed since it was
+  admitted settles as `stale_source`. The others apply in admission order,
+  each to the state the earlier ones left, so people are conserved; one whose
+  quantity no longer fits its source cohort settles as `insufficient_source`
+  (`COHORT_TRANSFER_INSUFFICIENT_SOURCE`), a recorded outcome that never
+  fails the boundary. It suits a coarse settlement cadence, and any run where
+  several transfers may move people out of or into one cohort between two
+  settlements.
+- `TransferSettlement::OneByOne`: each due transfer is checked against the
+  state the earlier transfers of the same settlement left, in operation-ID
+  order. Of the due transfers that share a cohort, one completes and the
+  others settle as `stale_source`. This is the rule of every release before
+  0.16.0. Choose it when each transfer must see the result of the one before
+  it, so that a transfer decided before another moved its cohorts is
+  reissued against the new state rather than applied.
 
 An institution revises policy pressure and the activity and reach of influence
 edges and organization nodes at runtime with the `revise_society_pressure`
@@ -170,8 +211,9 @@ which may belong to other targets). It never creates or
 removes a row and never changes a transition rule. A decision revises at most
 `MAX_PRESSURE_REVISION_ROWS` rows and applies as a whole or not at all. A
 refused command is a recorded command rejection (`InvalidPayload`,
-`InvalidAuthority`, `EntityNotFound`, or `IdempotencyConflict`) and never
-fails its boundary.
+`InvalidAuthority`, `EntityNotFound`, `IdempotencyConflict`, or
+`ValueOutOfRange` while the ingress queue is full) and never fails its
+boundary.
 
 An admitted decision is queued as the internal `society_pressure_revision_v1`
 packet (the host cannot author it, and the intake rejects a packet the command
