@@ -1,0 +1,1129 @@
+{
+  "benchmark": "canwu-record-write-cost",
+  "empty_store_idle": {
+    "samples": [
+      {
+        "boundary_ns": 24000,
+        "follow_up_boundary_ns": 22400,
+        "handler_us": 0,
+        "profile_total_us": 23
+      },
+      {
+        "boundary_ns": 23300,
+        "follow_up_boundary_ns": 21800,
+        "handler_us": 0,
+        "profile_total_us": 23
+      },
+      {
+        "boundary_ns": 22800,
+        "follow_up_boundary_ns": 21800,
+        "handler_us": 0,
+        "profile_total_us": 22
+      }
+    ],
+    "summary": {
+      "boundary_us_median": 23.3,
+      "engine_us_median": 23.0,
+      "engine_us_per_write": null,
+      "follow_up_boundary_us_median": 21.8,
+      "handler_us_median": 0.0
+    },
+    "variant": "idle",
+    "writes": 0
+  },
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "fit_over_bytes": {
+    "follow_up_boundary_us_per_write": {
+      "a_us": 0.15,
+      "b_us_per_kib": 0.02
+    },
+    "points_kib_us": [
+      [
+        1.329,
+        400.331
+      ],
+      [
+        2.396,
+        492.561
+      ],
+      [
+        4.53,
+        1498.347
+      ],
+      [
+        8.44,
+        2411.969
+      ]
+    ],
+    "previous_record_term_us_per_write": {
+      "a_us": 36.765,
+      "b_us_per_kib": 43.304
+    },
+    "update_engine_us_per_write": {
+      "a_us": -42.224,
+      "b_us_per_kib": 297.797
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "boundary": "one Daily boundary on the compacted run in which the probe system proposes N record updates; the evidence is sealed after every boundary",
+    "boundary_samples": 3,
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and sealing are excluded",
+    "engine_share": "boundary profile total minus the probe handler's own time (elapsed), or the boundary's allocations minus those made inside the handler (allocations)",
+    "fit_over_bytes": "least squares of the per-write slopes against the record's serialized KiB",
+    "fit_over_writes": "least squares of the engine share against N for each size: slope per write, intercept per boundary",
+    "follow_up": "the boundary after each measured one writes nothing and admits the events the writes emitted; it is timed on its own and fitted per write",
+    "paged_checkpoint": "elapsed build only: prepare_paged_checkpoint of a run holding one record, against a provider that holds no page",
+    "payload": "entries: an object of generated ledger entries of about 350 bytes each (identifiers, numbers, one note); text: one string of the same size; either with the record's ordinal and a generation that changes every write",
+    "payload_shape": "entries",
+    "reproduced_terms": "elapsed build only: the engine's per-write encodings rebuilt in the harness with the same encodings and timed outside the engine",
+    "store_records": 65536,
+    "target_payload_bytes": [
+      1024,
+      2048,
+      4096,
+      8192
+    ],
+    "update_from_small": "before each sample an unmeasured boundary rewrites the N records with a one-entry payload, so the measured update has a small previous version",
+    "warmup_iterations": 1,
+    "writes_per_boundary": [
+      1000,
+      10000,
+      50000
+    ]
+  },
+  "metric_mode": "elapsed",
+  "paged_checkpoint": {
+    "bisection": {
+      "bracketed": true,
+      "largest_fitting_payload_bytes": 1151023,
+      "smallest_failing_payload_bytes": 1151751
+    },
+    "error": "invalid_archive: state page bytes exceed the bounded page limit",
+    "prepared": false,
+    "record_payload_bytes": 1247847,
+    "requested_payload_bytes": 1200000
+  },
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "sizes": [
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "boundary_ns": 48913700,
+              "follow_up_boundary_ns": 45989300,
+              "handler_us": 1,
+              "profile_total_us": 48912
+            },
+            {
+              "boundary_ns": 49405400,
+              "follow_up_boundary_ns": 44860800,
+              "handler_us": 0,
+              "profile_total_us": 49404
+            },
+            {
+              "boundary_ns": 46781000,
+              "follow_up_boundary_ns": 38874300,
+              "handler_us": 0,
+              "profile_total_us": 46780
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 48913.7,
+            "engine_us_median": 48911.0,
+            "engine_us_per_write": null,
+            "follow_up_boundary_us_median": 44860.8,
+            "handler_us_median": 0.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 354032000,
+              "follow_up_boundary_ns": 52595900,
+              "handler_us": 6488,
+              "profile_total_us": 354030
+            },
+            {
+              "boundary_ns": 335189000,
+              "follow_up_boundary_ns": 52786000,
+              "handler_us": 6534,
+              "profile_total_us": 335187
+            },
+            {
+              "boundary_ns": 331678900,
+              "follow_up_boundary_ns": 51856600,
+              "handler_us": 6540,
+              "profile_total_us": 331677
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 335189.0,
+            "engine_us_median": 328653.0,
+            "engine_us_per_write": 328.653,
+            "follow_up_boundary_us_median": 52595.9,
+            "handler_us_median": 6534.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 2952006000,
+              "follow_up_boundary_ns": 51428000,
+              "handler_us": 62250,
+              "profile_total_us": 2952004
+            },
+            {
+              "boundary_ns": 2911435000,
+              "follow_up_boundary_ns": 51777900,
+              "handler_us": 62056,
+              "profile_total_us": 2911432
+            },
+            {
+              "boundary_ns": 2941071900,
+              "follow_up_boundary_ns": 52214000,
+              "handler_us": 70211,
+              "profile_total_us": 2941070
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 2941071.9,
+            "engine_us_median": 2870859.0,
+            "engine_us_per_write": 287.086,
+            "follow_up_boundary_us_median": 51777.9,
+            "handler_us_median": 62250.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 21720758400,
+              "follow_up_boundary_ns": 90441900,
+              "handler_us": 709041,
+              "profile_total_us": 21720755
+            },
+            {
+              "boundary_ns": 19991756500,
+              "follow_up_boundary_ns": 79017200,
+              "handler_us": 416359,
+              "profile_total_us": 19991753
+            },
+            {
+              "boundary_ns": 19938569100,
+              "follow_up_boundary_ns": 76324200,
+              "handler_us": 436861,
+              "profile_total_us": 19938567
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 19991756.5,
+            "engine_us_median": 19575394.0,
+            "engine_us_per_write": 391.508,
+            "follow_up_boundary_us_median": 79017.2,
+            "handler_us_median": 436861.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 507138600,
+              "follow_up_boundary_ns": 84014400,
+              "handler_us": 11513,
+              "profile_total_us": 507136
+            },
+            {
+              "boundary_ns": 503069600,
+              "follow_up_boundary_ns": 80682500,
+              "handler_us": 11611,
+              "profile_total_us": 503067
+            },
+            {
+              "boundary_ns": 499037700,
+              "follow_up_boundary_ns": 117580800,
+              "handler_us": 14351,
+              "profile_total_us": 499035
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 503069.6,
+            "engine_us_median": 491456.0,
+            "engine_us_per_write": 491.456,
+            "follow_up_boundary_us_median": 84014.4,
+            "handler_us_median": 11611.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 3946358300,
+              "follow_up_boundary_ns": 76028700,
+              "handler_us": 95800,
+              "profile_total_us": 3946356
+            },
+            {
+              "boundary_ns": 3843060400,
+              "follow_up_boundary_ns": 73150300,
+              "handler_us": 94223,
+              "profile_total_us": 3843057
+            },
+            {
+              "boundary_ns": 4034206200,
+              "follow_up_boundary_ns": 76048700,
+              "handler_us": 88953,
+              "profile_total_us": 4034203
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 3946358.3,
+            "engine_us_median": 3850556.0,
+            "engine_us_per_write": 385.056,
+            "follow_up_boundary_us_median": 76028.7,
+            "handler_us_median": 94223.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 18402248200,
+              "follow_up_boundary_ns": 77681300,
+              "handler_us": 391413,
+              "profile_total_us": 18402246
+            },
+            {
+              "boundary_ns": 18524956900,
+              "follow_up_boundary_ns": 80640900,
+              "handler_us": 409391,
+              "profile_total_us": 18524955
+            },
+            {
+              "boundary_ns": 23297571500,
+              "follow_up_boundary_ns": 90155900,
+              "handler_us": 601717,
+              "profile_total_us": 23297568
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 18524956.9,
+            "engine_us_median": 18115564.0,
+            "engine_us_per_write": 362.311,
+            "follow_up_boundary_us_median": 80640.9,
+            "handler_us_median": 409391.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_us_per_boundary": -548430.43,
+          "engine_us_per_write": 400.331,
+          "follow_up_us_per_write": 0.582
+        },
+        "update_from_small": {
+          "engine_us_per_boundary": 191295.198,
+          "engine_us_per_write": 358.749,
+          "follow_up_us_per_write": -0.013
+        }
+      },
+      "payload_bytes": 1145,
+      "record_bytes": 1361,
+      "reproduced_terms": {
+        "branch_pages_on_path": 17,
+        "leaf_page_bytes": 5634,
+        "leaf_page_bytes_per_record_byte": 4.134,
+        "ns_per_write": {
+          "branch_path_encode_and_hash": 15522.5,
+          "change_encode_and_hash_previous_and_current": 5697.5,
+          "leaf_page_encode_and_hash": 12284.0,
+          "record_clone_and_drop": 3387.5,
+          "record_encode": 1662.0,
+          "value_hash": 1555.5
+        },
+        "record_bytes": 1363
+      },
+      "store_records": 65536,
+      "target_payload_bytes": 1024
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "boundary_ns": 82241500,
+              "follow_up_boundary_ns": 83722300,
+              "handler_us": 1,
+              "profile_total_us": 82239
+            },
+            {
+              "boundary_ns": 112828200,
+              "follow_up_boundary_ns": 88030100,
+              "handler_us": 1,
+              "profile_total_us": 112825
+            },
+            {
+              "boundary_ns": 125122300,
+              "follow_up_boundary_ns": 92034300,
+              "handler_us": 1,
+              "profile_total_us": 125119
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 112828.2,
+            "engine_us_median": 112824.0,
+            "engine_us_per_write": null,
+            "follow_up_boundary_us_median": 88030.1,
+            "handler_us_median": 1.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 714589900,
+              "follow_up_boundary_ns": 84597800,
+              "handler_us": 19645,
+              "profile_total_us": 714586
+            },
+            {
+              "boundary_ns": 706337000,
+              "follow_up_boundary_ns": 85589000,
+              "handler_us": 17609,
+              "profile_total_us": 706334
+            },
+            {
+              "boundary_ns": 818931900,
+              "follow_up_boundary_ns": 94010900,
+              "handler_us": 17685,
+              "profile_total_us": 818929
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 714589.9,
+            "engine_us_median": 694941.0,
+            "engine_us_per_write": 694.941,
+            "follow_up_boundary_us_median": 85589.0,
+            "handler_us_median": 17685.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 6519700400,
+              "follow_up_boundary_ns": 78767400,
+              "handler_us": 221127,
+              "profile_total_us": 6519683
+            },
+            {
+              "boundary_ns": 6310282100,
+              "follow_up_boundary_ns": 84845400,
+              "handler_us": 168787,
+              "profile_total_us": 6310279
+            },
+            {
+              "boundary_ns": 6413432600,
+              "follow_up_boundary_ns": 98936700,
+              "handler_us": 181900,
+              "profile_total_us": 6413429
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 6413432.6,
+            "engine_us_median": 6231529.0,
+            "engine_us_per_write": 623.153,
+            "follow_up_boundary_us_median": 84845.4,
+            "handler_us_median": 181900.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 25958308300,
+              "follow_up_boundary_ns": 74050500,
+              "handler_us": 743498,
+              "profile_total_us": 25958306
+            },
+            {
+              "boundary_ns": 25683225800,
+              "follow_up_boundary_ns": 77276400,
+              "handler_us": 740527,
+              "profile_total_us": 25683224
+            },
+            {
+              "boundary_ns": 26734599800,
+              "follow_up_boundary_ns": 74268700,
+              "handler_us": 748997,
+              "profile_total_us": 26734597
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 25958308.3,
+            "engine_us_median": 25214808.0,
+            "engine_us_per_write": 504.296,
+            "follow_up_boundary_us_median": 74268.7,
+            "handler_us_median": 743498.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 560220500,
+              "follow_up_boundary_ns": 79168000,
+              "handler_us": 18397,
+              "profile_total_us": 560218
+            },
+            {
+              "boundary_ns": 568702200,
+              "follow_up_boundary_ns": 73270700,
+              "handler_us": 18540,
+              "profile_total_us": 568699
+            },
+            {
+              "boundary_ns": 578496300,
+              "follow_up_boundary_ns": 79771000,
+              "handler_us": 19081,
+              "profile_total_us": 578494
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 568702.2,
+            "engine_us_median": 550159.0,
+            "engine_us_per_write": 550.159,
+            "follow_up_boundary_us_median": 79168.0,
+            "handler_us_median": 18540.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 4835736900,
+              "follow_up_boundary_ns": 79146900,
+              "handler_us": 162730,
+              "profile_total_us": 4835734
+            },
+            {
+              "boundary_ns": 4682514700,
+              "follow_up_boundary_ns": 77393600,
+              "handler_us": 156215,
+              "profile_total_us": 4682512
+            },
+            {
+              "boundary_ns": 4657756300,
+              "follow_up_boundary_ns": 78357600,
+              "handler_us": 151099,
+              "profile_total_us": 4657754
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 4682514.7,
+            "engine_us_median": 4526297.0,
+            "engine_us_per_write": 452.63,
+            "follow_up_boundary_us_median": 78357.6,
+            "handler_us_median": 156215.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 24326005700,
+              "follow_up_boundary_ns": 74104800,
+              "handler_us": 768648,
+              "profile_total_us": 24326003
+            },
+            {
+              "boundary_ns": 24275139700,
+              "follow_up_boundary_ns": 79533300,
+              "handler_us": 752269,
+              "profile_total_us": 24275137
+            },
+            {
+              "boundary_ns": 23141570800,
+              "follow_up_boundary_ns": 77506400,
+              "handler_us": 737184,
+              "profile_total_us": 23141568
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 24275139.7,
+            "engine_us_median": 23522868.0,
+            "engine_us_per_write": 470.457,
+            "follow_up_boundary_us_median": 77506.4,
+            "handler_us_median": 752269.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_us_per_boundary": 698352.667,
+          "engine_us_per_write": 492.561,
+          "follow_up_us_per_write": -0.241
+        },
+        "update_from_small": {
+          "engine_us_per_boundary": -37360.741,
+          "engine_us_per_write": 470.679,
+          "follow_up_us_per_write": -0.03
+        }
+      },
+      "payload_bytes": 2238,
+      "record_bytes": 2454,
+      "reproduced_terms": {
+        "branch_pages_on_path": 17,
+        "leaf_page_bytes": 9621,
+        "leaf_page_bytes_per_record_byte": 3.917,
+        "ns_per_write": {
+          "branch_path_encode_and_hash": 15802.5,
+          "change_encode_and_hash_previous_and_current": 8719.0,
+          "leaf_page_encode_and_hash": 18588.0,
+          "record_clone_and_drop": 6072.5,
+          "record_encode": 2672.5,
+          "value_hash": 2548.0
+        },
+        "record_bytes": 2456
+      },
+      "store_records": 65536,
+      "target_payload_bytes": 2048
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "boundary_ns": 75562300,
+              "follow_up_boundary_ns": 72718300,
+              "handler_us": 1,
+              "profile_total_us": 75560
+            },
+            {
+              "boundary_ns": 79164000,
+              "follow_up_boundary_ns": 69644200,
+              "handler_us": 1,
+              "profile_total_us": 79162
+            },
+            {
+              "boundary_ns": 76185700,
+              "follow_up_boundary_ns": 74376700,
+              "handler_us": 1,
+              "profile_total_us": 76184
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 76185.7,
+            "engine_us_median": 76183.0,
+            "engine_us_per_write": null,
+            "follow_up_boundary_us_median": 72718.3,
+            "handler_us_median": 1.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 991201800,
+              "follow_up_boundary_ns": 74713300,
+              "handler_us": 32727,
+              "profile_total_us": 991199
+            },
+            {
+              "boundary_ns": 935974700,
+              "follow_up_boundary_ns": 75881200,
+              "handler_us": 32831,
+              "profile_total_us": 935972
+            },
+            {
+              "boundary_ns": 800191400,
+              "follow_up_boundary_ns": 84156100,
+              "handler_us": 22165,
+              "profile_total_us": 800189
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 935974.7,
+            "engine_us_median": 903141.0,
+            "engine_us_per_write": 903.141,
+            "follow_up_boundary_us_median": 75881.2,
+            "handler_us_median": 32727.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 8157745100,
+              "follow_up_boundary_ns": 76748800,
+              "handler_us": 247414,
+              "profile_total_us": 8157742
+            },
+            {
+              "boundary_ns": 8112361900,
+              "follow_up_boundary_ns": 72286500,
+              "handler_us": 305959,
+              "profile_total_us": 8112360
+            },
+            {
+              "boundary_ns": 8389082400,
+              "follow_up_boundary_ns": 71044800,
+              "handler_us": 274819,
+              "profile_total_us": 8389080
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 8157745.1,
+            "engine_us_median": 7910328.0,
+            "engine_us_per_write": 791.033,
+            "follow_up_boundary_us_median": 72286.5,
+            "handler_us_median": 274819.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 68829975100,
+              "follow_up_boundary_ns": 82718000,
+              "handler_us": 1445071,
+              "profile_total_us": 68829972
+            },
+            {
+              "boundary_ns": 73530121900,
+              "follow_up_boundary_ns": 60983000,
+              "handler_us": 1464328,
+              "profile_total_us": 73530119
+            },
+            {
+              "boundary_ns": 77029388600,
+              "follow_up_boundary_ns": 83160500,
+              "handler_us": 1455799,
+              "profile_total_us": 77029386
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 73530121.9,
+            "engine_us_median": 72065791.0,
+            "engine_us_per_write": 1441.316,
+            "follow_up_boundary_us_median": 82718.0,
+            "handler_us_median": 1455799.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 1390314300,
+              "follow_up_boundary_ns": 51726000,
+              "handler_us": 31860,
+              "profile_total_us": 1390312
+            },
+            {
+              "boundary_ns": 1570991100,
+              "follow_up_boundary_ns": 68759700,
+              "handler_us": 31273,
+              "profile_total_us": 1570989
+            },
+            {
+              "boundary_ns": 1408840500,
+              "follow_up_boundary_ns": 71584600,
+              "handler_us": 22311,
+              "profile_total_us": 1408839
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 1408840.5,
+            "engine_us_median": 1386528.0,
+            "engine_us_per_write": 1386.528,
+            "follow_up_boundary_us_median": 68759.7,
+            "handler_us_median": 31273.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 13091852800,
+              "follow_up_boundary_ns": 73062300,
+              "handler_us": 301352,
+              "profile_total_us": 13091851
+            },
+            {
+              "boundary_ns": 12534497900,
+              "follow_up_boundary_ns": 72019600,
+              "handler_us": 212930,
+              "profile_total_us": 12534496
+            },
+            {
+              "boundary_ns": 12225666400,
+              "follow_up_boundary_ns": 70832900,
+              "handler_us": 280105,
+              "profile_total_us": 12225664
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 12534497.9,
+            "engine_us_median": 12321566.0,
+            "engine_us_per_write": 1232.157,
+            "follow_up_boundary_us_median": 72019.6,
+            "handler_us_median": 280105.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 44326193700,
+              "follow_up_boundary_ns": 77262600,
+              "handler_us": 1498507,
+              "profile_total_us": 44326191
+            },
+            {
+              "boundary_ns": 51845799700,
+              "follow_up_boundary_ns": 81824400,
+              "handler_us": 1424162,
+              "profile_total_us": 51845797
+            },
+            {
+              "boundary_ns": 66210202200,
+              "follow_up_boundary_ns": 58967000,
+              "handler_us": 1493057,
+              "profile_total_us": 66210200
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 51845799.7,
+            "engine_us_median": 50421635.0,
+            "engine_us_per_write": 1008.433,
+            "follow_up_boundary_us_median": 77262.6,
+            "handler_us_median": 1493057.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_us_per_boundary": -3506638.65,
+          "engine_us_per_write": 1498.347,
+          "follow_up_us_per_write": 0.176
+        },
+        "update_from_small": {
+          "engine_us_per_boundary": 1326483.32,
+          "engine_us_per_write": 986.07,
+          "follow_up_us_per_write": 0.161
+        }
+      },
+      "payload_bytes": 4423,
+      "record_bytes": 4639,
+      "reproduced_terms": {
+        "branch_pages_on_path": 17,
+        "leaf_page_bytes": 17587,
+        "leaf_page_bytes_per_record_byte": 3.79,
+        "ns_per_write": {
+          "branch_path_encode_and_hash": 16550.5,
+          "change_encode_and_hash_previous_and_current": 15024.0,
+          "leaf_page_encode_and_hash": 199826.0,
+          "record_clone_and_drop": 12716.5,
+          "record_encode": 5768.5,
+          "value_hash": 3994.5
+        },
+        "record_bytes": 4640
+      },
+      "store_records": 65536,
+      "target_payload_bytes": 4096
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "boundary_ns": 72427800,
+              "follow_up_boundary_ns": 67819800,
+              "handler_us": 1,
+              "profile_total_us": 72426
+            },
+            {
+              "boundary_ns": 70172400,
+              "follow_up_boundary_ns": 68029600,
+              "handler_us": 1,
+              "profile_total_us": 70170
+            },
+            {
+              "boundary_ns": 73294700,
+              "follow_up_boundary_ns": 75527200,
+              "handler_us": 1,
+              "profile_total_us": 73292
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 72427.8,
+            "engine_us_median": 72425.0,
+            "engine_us_per_write": null,
+            "follow_up_boundary_us_median": 68029.6,
+            "handler_us_median": 1.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 1536677000,
+              "follow_up_boundary_ns": 61000600,
+              "handler_us": 51603,
+              "profile_total_us": 1536675
+            },
+            {
+              "boundary_ns": 1543501400,
+              "follow_up_boundary_ns": 72272300,
+              "handler_us": 49633,
+              "profile_total_us": 1543499
+            },
+            {
+              "boundary_ns": 1555260200,
+              "follow_up_boundary_ns": 69010200,
+              "handler_us": 53880,
+              "profile_total_us": 1555258
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 1543501.4,
+            "engine_us_median": 1493866.0,
+            "engine_us_per_write": 1493.866,
+            "follow_up_boundary_us_median": 69010.2,
+            "handler_us_median": 51603.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 13836924100,
+              "follow_up_boundary_ns": 75582100,
+              "handler_us": 664906,
+              "profile_total_us": 13836922
+            },
+            {
+              "boundary_ns": 13845625400,
+              "follow_up_boundary_ns": 73262600,
+              "handler_us": 550859,
+              "profile_total_us": 13845623
+            },
+            {
+              "boundary_ns": 13358108700,
+              "follow_up_boundary_ns": 78223300,
+              "handler_us": 549985,
+              "profile_total_us": 13358106
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 13836924.1,
+            "engine_us_median": 13172016.0,
+            "engine_us_per_write": 1317.202,
+            "follow_up_boundary_us_median": 75582.1,
+            "handler_us_median": 550859.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 108079002700,
+              "follow_up_boundary_ns": 83021600,
+              "handler_us": 2638877,
+              "profile_total_us": 108079000
+            },
+            {
+              "boundary_ns": 118847858300,
+              "follow_up_boundary_ns": 90076700,
+              "handler_us": 2660946,
+              "profile_total_us": 118847855
+            },
+            {
+              "boundary_ns": 132037379400,
+              "follow_up_boundary_ns": 92413000,
+              "handler_us": 2760324,
+              "profile_total_us": 132037376
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 118847858.3,
+            "engine_us_median": 116186909.0,
+            "engine_us_per_write": 2323.738,
+            "follow_up_boundary_us_median": 90076.7,
+            "handler_us_median": 2660946.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 2255253400,
+              "follow_up_boundary_ns": 76592900,
+              "handler_us": 61104,
+              "profile_total_us": 2255251
+            },
+            {
+              "boundary_ns": 2208655100,
+              "follow_up_boundary_ns": 74059800,
+              "handler_us": 66236,
+              "profile_total_us": 2208653
+            },
+            {
+              "boundary_ns": 2175755800,
+              "follow_up_boundary_ns": 72805300,
+              "handler_us": 57111,
+              "profile_total_us": 2175754
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 2208655.1,
+            "engine_us_median": 2142417.0,
+            "engine_us_per_write": 2142.417,
+            "follow_up_boundary_us_median": 74059.8,
+            "handler_us_median": 61104.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 18386185400,
+              "follow_up_boundary_ns": 79827100,
+              "handler_us": 521790,
+              "profile_total_us": 18386183
+            },
+            {
+              "boundary_ns": 18599473700,
+              "follow_up_boundary_ns": 78532700,
+              "handler_us": 464525,
+              "profile_total_us": 18599471
+            },
+            {
+              "boundary_ns": 18079077400,
+              "follow_up_boundary_ns": 81376100,
+              "handler_us": 488547,
+              "profile_total_us": 18079075
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 18386185.4,
+            "engine_us_median": 17864393.0,
+            "engine_us_per_write": 1786.439,
+            "follow_up_boundary_us_median": 79827.1,
+            "handler_us_median": 488547.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "boundary_ns": 86349415400,
+              "follow_up_boundary_ns": 98034400,
+              "handler_us": 2165754,
+              "profile_total_us": 86349412
+            },
+            {
+              "boundary_ns": 107429956200,
+              "follow_up_boundary_ns": 97504000,
+              "handler_us": 2686016,
+              "profile_total_us": 107429952
+            },
+            {
+              "boundary_ns": 120988138500,
+              "follow_up_boundary_ns": 87863300,
+              "handler_us": 2547821,
+              "profile_total_us": 120988135
+            }
+          ],
+          "summary": {
+            "boundary_us_median": 107429956.2,
+            "engine_us_median": 104743936.0,
+            "engine_us_per_write": 2094.879,
+            "follow_up_boundary_us_median": 97504.0,
+            "handler_us_median": 2547821.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_us_per_boundary": -5425776.248,
+          "engine_us_per_write": 2411.969,
+          "follow_up_us_per_write": 0.409
+        },
+        "update_from_small": {
+          "engine_us_per_boundary": -1474836.262,
+          "engine_us_per_write": 2117.627,
+          "follow_up_us_per_write": 0.467
+        }
+      },
+      "payload_bytes": 8427,
+      "record_bytes": 8643,
+      "reproduced_terms": {
+        "branch_pages_on_path": 17,
+        "leaf_page_bytes": 32184,
+        "leaf_page_bytes_per_record_byte": 3.723,
+        "ns_per_write": {
+          "branch_path_encode_and_hash": 16255.5,
+          "change_encode_and_hash_previous_and_current": 486245.5,
+          "leaf_page_encode_and_hash": 284403.5,
+          "record_clone_and_drop": 23460.0,
+          "record_encode": 13852.5,
+          "value_hash": 5162.0
+        },
+        "record_bytes": 8644
+      },
+      "store_records": 65536,
+      "target_payload_bytes": 8192
+    }
+  ],
+  "source": {
+    "content_hash": "6e803ecf0d27398b77c48acab204e2d113660fd035b7860b83ca89f47182f195",
+    "label": "gap/world-scale-fiscal working tree on v0.15.0 (df945ef)"
+  }
+}

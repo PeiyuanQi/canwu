@@ -1,0 +1,765 @@
+{
+  "benchmark": "canwu-record-write-cost",
+  "empty_store_idle": {
+    "samples": [
+      {
+        "allocated_bytes": 33362,
+        "allocation_operations": 226,
+        "deallocated_bytes": 32581,
+        "follow_up_allocated_bytes": 32880,
+        "follow_up_allocation_operations": 222,
+        "handler_allocated_bytes": 0,
+        "handler_allocation_operations": 0
+      }
+    ],
+    "summary": {
+      "engine_allocated_bytes_median": 33362.0,
+      "engine_allocation_operations_median": 226.0,
+      "follow_up_allocated_bytes_median": 32880.0,
+      "follow_up_allocation_operations_median": 222.0
+    },
+    "variant": "idle",
+    "writes": 0
+  },
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [
+      "allocation-counting"
+    ],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "fit_over_bytes": {
+    "follow_up_allocation_operations_per_write": {
+      "a": 0.0,
+      "b_per_kib": 0.0
+    },
+    "update_engine_allocated_bytes_per_write": {
+      "a": 140794.522,
+      "b_per_kib": 84178.9
+    },
+    "update_engine_allocation_operations_per_write": {
+      "a": 616.426,
+      "b_per_kib": 592.969
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "thread-local allocator calls and requested bytes during the boundary; setup, sealing, and post-measurement drops are excluded",
+    "boundary": "one Daily boundary on the compacted run in which the probe system proposes N record updates; the evidence is sealed after every boundary",
+    "boundary_samples": 1,
+    "elapsed_scope": "not collected in the allocation-instrumented build",
+    "engine_share": "boundary profile total minus the probe handler's own time (elapsed), or the boundary's allocations minus those made inside the handler (allocations)",
+    "fit_over_bytes": "least squares of the per-write slopes against the record's serialized KiB",
+    "fit_over_writes": "least squares of the engine share against N for each size: slope per write, intercept per boundary",
+    "follow_up": "the boundary after each measured one writes nothing and admits the events the writes emitted; it is timed on its own and fitted per write",
+    "paged_checkpoint": "elapsed build only: prepare_paged_checkpoint of a run holding one record, against a provider that holds no page",
+    "payload": "entries: an object of generated ledger entries of about 350 bytes each (identifiers, numbers, one note); text: one string of the same size; either with the record's ordinal and a generation that changes every write",
+    "payload_shape": "entries",
+    "reproduced_terms": "elapsed build only: the engine's per-write encodings rebuilt in the harness with the same encodings and timed outside the engine",
+    "store_records": 65536,
+    "target_payload_bytes": [
+      1024,
+      2048,
+      4096,
+      8192
+    ],
+    "update_from_small": "before each sample an unmeasured boundary rewrites the N records with a one-entry payload, so the measured update has a small previous version",
+    "warmup_iterations": 0,
+    "writes_per_boundary": [
+      1000,
+      10000,
+      50000
+    ]
+  },
+  "metric_mode": "allocations",
+  "paged_checkpoint": null,
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "sizes": [
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 27706882,
+              "allocation_operations": 404364,
+              "deallocated_bytes": 27706101,
+              "follow_up_allocated_bytes": 27706400,
+              "follow_up_allocation_operations": 404360,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 27706882.0,
+            "engine_allocation_operations_median": 404364.0,
+            "follow_up_allocated_bytes_median": 27706400.0,
+            "follow_up_allocation_operations_median": 404360.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 272054618,
+              "allocation_operations": 1989201,
+              "deallocated_bytes": 262207301,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 263686834.0,
+            "engine_allocation_operations_median": 1876192.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 2403505398,
+              "allocation_operations": 15764970,
+              "deallocated_bytes": 2304596161,
+              "follow_up_allocated_bytes": 27996448,
+              "follow_up_allocation_operations": 404369,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 2315686694.0,
+            "engine_allocation_operations_median": 14634957.0,
+            "follow_up_allocated_bytes_median": 27996448.0,
+            "follow_up_allocation_operations_median": 404369.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 11859103874,
+              "allocation_operations": 76306677,
+              "deallocated_bytes": 11365744693,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 428088848,
+              "handler_allocation_operations": 5650015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 11431015026.0,
+            "engine_allocation_operations_median": 70656662.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 260513618,
+              "allocation_operations": 1829201,
+              "deallocated_bytes": 249939301,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 252145834.0,
+            "engine_allocation_operations_median": 1716192.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 2288092398,
+              "allocation_operations": 14164970,
+              "deallocated_bytes": 2181912161,
+              "follow_up_allocated_bytes": 28127520,
+              "follow_up_allocation_operations": 404370,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 2200273694.0,
+            "engine_allocation_operations_median": 13034957.0,
+            "follow_up_allocated_bytes_median": 28127520.0,
+            "follow_up_allocation_operations_median": 404370.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 11013594418,
+              "allocation_operations": 68306676,
+              "deallocated_bytes": 10483874237,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 428088848,
+              "handler_allocation_operations": 5650015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 10585505570.0,
+            "engine_allocation_operations_median": 62656661.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 227898.141,
+          "engine_allocation_operations_per_write": 1402.729,
+          "follow_up_allocated_bytes_per_write": 37.634,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 210503.933,
+          "engine_allocation_operations_per_write": 1242.729,
+          "follow_up_allocated_bytes_per_write": 36.639,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 1145,
+      "record_bytes": 1361,
+      "store_records": 65536,
+      "target_payload_bytes": 1024
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 27706882,
+              "allocation_operations": 404364,
+              "deallocated_bytes": 27706101,
+              "follow_up_allocated_bytes": 27706400,
+              "follow_up_allocation_operations": 404360,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 27706882.0,
+            "engine_allocation_operations_median": 404364.0,
+            "follow_up_allocated_bytes_median": 27706400.0,
+            "follow_up_allocation_operations_median": 404360.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 393705586,
+              "allocation_operations": 2714458,
+              "deallocated_bytes": 378243269,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 379721802.0,
+            "engine_allocation_operations_median": 2505449.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 3604304062,
+              "allocation_operations": 23025217,
+              "deallocated_bytes": 3449243825,
+              "follow_up_allocated_bytes": 27996448,
+              "follow_up_allocation_operations": 404369,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 3460325358.0,
+            "engine_allocation_operations_median": 20935204.0,
+            "follow_up_allocated_bytes_median": 27996448.0,
+            "follow_up_allocation_operations_median": 404369.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 17528082794,
+              "allocation_operations": 112607436,
+              "deallocated_bytes": 16753963613,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 708888848,
+              "handler_allocation_operations": 10450015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 16819193946.0,
+            "engine_allocation_operations_median": 102157421.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 356456978,
+              "allocation_operations": 2314457,
+              "deallocated_bytes": 339174661,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 342473194.0,
+            "engine_allocation_operations_median": 2105448.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 3315704062,
+              "allocation_operations": 19025217,
+              "deallocated_bytes": 3142443825,
+              "follow_up_allocated_bytes": 28127520,
+              "follow_up_allocation_operations": 404370,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 3171725358.0,
+            "engine_allocation_operations_median": 16935204.0,
+            "follow_up_allocated_bytes_median": 28127520.0,
+            "follow_up_allocation_operations_median": 404370.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 16085088794,
+              "allocation_operations": 92607436,
+              "deallocated_bytes": 15219968613,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 708888848,
+              "handler_allocation_operations": 10450015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 15376199946.0,
+            "engine_allocation_operations_median": 82157421.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 335035.353,
+          "engine_allocation_operations_per_write": 2032.754,
+          "follow_up_allocated_bytes_per_write": 37.634,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 306294.675,
+          "engine_allocation_operations_per_write": 1632.754,
+          "follow_up_allocated_bytes_per_write": 36.639,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 2238,
+      "record_bytes": 2454,
+      "store_records": 65536,
+      "target_payload_bytes": 2048
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 27706882,
+              "allocation_operations": 404364,
+              "deallocated_bytes": 27706101,
+              "follow_up_allocated_bytes": 27706400,
+              "follow_up_allocation_operations": 404360,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 27706882.0,
+            "engine_allocation_operations_median": 404364.0,
+            "follow_up_allocated_bytes_median": 27706400.0,
+            "follow_up_allocation_operations_median": 404360.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 658008722,
+              "allocation_operations": 4193171,
+              "deallocated_bytes": 628594405,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 630072938.0,
+            "engine_allocation_operations_median": 3788162.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 6209205990,
+              "allocation_operations": 37780853,
+              "deallocated_bytes": 5914625753,
+              "follow_up_allocated_bytes": 27996448,
+              "follow_up_allocation_operations": 404369,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 5925707286.0,
+            "engine_allocation_operations_median": 33730840.0,
+            "follow_up_allocated_bytes_median": 27996448.0,
+            "follow_up_allocation_operations_median": 404369.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 30423444730,
+              "allocation_operations": 186407119,
+              "deallocated_bytes": 28951725549,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 1406488848,
+              "handler_allocation_operations": 20250015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 29016955882.0,
+            "engine_allocation_operations_median": 166157104.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 570939506,
+              "allocation_operations": 3303170,
+              "deallocated_bytes": 537521189,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 543003722.0,
+            "engine_allocation_operations_median": 2898161.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 5372068262,
+              "allocation_operations": 28880852,
+              "deallocated_bytes": 5037448025,
+              "follow_up_allocated_bytes": 28127520,
+              "follow_up_allocation_operations": 404370,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 5088569558.0,
+            "engine_allocation_operations_median": 24830839.0,
+            "follow_up_allocated_bytes_median": 28127520.0,
+            "follow_up_allocation_operations_median": 404370.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 26908850730,
+              "allocation_operations": 141907119,
+              "deallocated_bytes": 25236930549,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 1406488848,
+              "handler_allocation_operations": 20250015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 25502361882.0,
+            "engine_allocation_operations_median": 121657104.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 578703.556,
+          "engine_allocation_operations_per_write": 3312.742,
+          "follow_up_allocated_bytes_per_write": 37.634,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 509669.362,
+          "engine_allocation_operations_per_write": 2422.742,
+          "follow_up_allocated_bytes_per_write": 36.639,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 4422,
+      "record_bytes": 4638,
+      "store_records": 65536,
+      "target_payload_bytes": 4096
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 27706882,
+              "allocation_operations": 404364,
+              "deallocated_bytes": 27706101,
+              "follow_up_allocated_bytes": 27706400,
+              "follow_up_allocation_operations": 404360,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 27706882.0,
+            "engine_allocation_operations_median": 404364.0,
+            "follow_up_allocated_bytes_median": 27706400.0,
+            "follow_up_allocation_operations_median": 404360.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 940369714,
+              "allocation_operations": 6851010,
+              "deallocated_bytes": 889098397,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 890577930.0,
+            "engine_allocation_operations_median": 6092001.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 8969758966,
+              "allocation_operations": 64365891,
+              "deallocated_bytes": 8456609729,
+              "follow_up_allocated_bytes": 27996448,
+              "follow_up_allocation_operations": 404369,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 8467700262.0,
+            "engine_allocation_operations_median": 56775878.0,
+            "follow_up_allocated_bytes_median": 27996448.0,
+            "follow_up_allocation_operations_median": 404369.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 43952789930,
+              "allocation_operations": 319307204,
+              "deallocated_bytes": 41388230749,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 2499288848,
+              "handler_allocation_operations": 37950015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 41453501082.0,
+            "engine_allocation_operations_median": 281357189.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update",
+          "writes": 50000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 769874282,
+              "allocation_operations": 5076009,
+              "deallocated_bytes": 710595965,
+              "follow_up_allocated_bytes": 27737760,
+              "follow_up_allocation_operations": 404366,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 720082498.0,
+            "engine_allocation_operations_median": 4317000.0,
+            "follow_up_allocated_bytes_median": 27737760.0,
+            "follow_up_allocation_operations_median": 404366.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 7331910510,
+              "allocation_operations": 46615890,
+              "deallocated_bytes": 6738690273,
+              "follow_up_allocated_bytes": 28127520,
+              "follow_up_allocation_operations": 404370,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 6829851806.0,
+            "engine_allocation_operations_median": 39025877.0,
+            "follow_up_allocated_bytes_median": 28127520.0,
+            "follow_up_allocation_operations_median": 404370.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 36031974106,
+              "allocation_operations": 230557203,
+              "deallocated_bytes": 33067053925,
+              "follow_up_allocated_bytes": 29553952,
+              "follow_up_allocation_operations": 404372,
+              "handler_allocated_bytes": 2499288848,
+              "handler_allocation_operations": 37950015
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 33532685258.0,
+            "engine_allocation_operations_median": 192607188.0,
+            "follow_up_allocated_bytes_median": 29553952.0,
+            "follow_up_allocation_operations_median": 404372.0
+          },
+          "variant": "update_from_small",
+          "writes": 50000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 826851.879,
+          "engine_allocation_operations_per_write": 5616.708,
+          "follow_up_allocated_bytes_per_write": 37.634,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 669014.894,
+          "engine_allocation_operations_per_write": 3841.708,
+          "follow_up_allocated_bytes_per_write": 36.639,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 8426,
+      "record_bytes": 8642,
+      "store_records": 65536,
+      "target_payload_bytes": 8192
+    }
+  ],
+  "source": {
+    "content_hash": "6e803ecf0d27398b77c48acab204e2d113660fd035b7860b83ca89f47182f195",
+    "label": "gap/world-scale-fiscal working tree on v0.15.0 (df945ef)"
+  }
+}

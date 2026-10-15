@@ -479,6 +479,61 @@ day:
 [`0.16.0 allocations`](baselines/2026-10-15-knowledge-ledger-0.16.0-allocations.json).
 They are interpreted in the proposal linked above.
 
+## Record-write profile
+
+The standalone `record-write-profile` binary measures what the engine does for
+each domain record a boundary writes, the Phase 0 probe of
+[`docs/proposals/world-scale-fiscal.md`](../docs/proposals/world-scale-fiscal.md).
+A probe plugin builds a store of `--store` records (65,536 by default) of one
+payload size, then times boundaries that update the first N of them
+(`--counts`, 1,000, 10,000, and 50,000 by default) for each payload size
+(`--sizes`, 1, 2, 4, and 8 KiB by default):
+
+- `idle`: the probe system runs and writes nothing;
+- `update`: N updates whose previous version has the same size;
+- `update_from_small`: the same N updates from a one-entry previous version,
+  so the difference is what the engine does with the previous record.
+
+The engine's share of each boundary is the boundary profile's total less the
+probe handler's own time (or allocations), and it is fitted against N and then
+against the record's KiB as `a + b * KiB` per write. Each measured boundary is
+followed by one that writes nothing and admits the events the writes emitted;
+it is timed on its own. The elapsed build also times the encodings a write
+performs, rebuilt in the harness (`reproduced_terms`), and bisects the largest
+record a paged checkpoint can hold. `--shape text` makes every payload one
+string of the same size instead of generated ledger entries, which separates
+the cost of a record's bytes from that of its JSON values.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin record-write-profile -- \
+  --mode elapsed --samples 3 --warmup 1 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-record-write-entries-elapsed.json
+
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --features allocation-counting \
+  --bin record-write-profile -- \
+  --mode allocations --samples 1 --warmup 0 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --output benchmarks/baselines/YYYY-MM-DD-record-write-entries-allocations.json
+```
+
+Recorded on 0.15.0 sources:
+[`entries, elapsed`](baselines/2026-10-15-record-write-entries-elapsed.json),
+[`text, elapsed`](baselines/2026-10-15-record-write-text-elapsed.json) (counts
+1,000 and 10,000), and
+[`entries, allocations`](baselines/2026-10-15-record-write-entries-allocations.json).
+Their `source.content_hash` names the tree just before one lint-only change to
+the probe (its thread-local payload template got a `const` initializer); the
+measured code is otherwise the committed one. The machine was loaded by other
+builds throughout, so single elapsed cases moved by up to a third between
+neighbouring runs; the allocation counts do not depend on load.
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate
