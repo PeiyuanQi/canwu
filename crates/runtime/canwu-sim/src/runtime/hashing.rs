@@ -1,3 +1,4 @@
+use super::records::RecordChangeEncodings;
 use super::{
     ArtifactManifest, BOUNDARY_STATE_HASH_V1_PREFIX, BoundaryChange, BoundaryEmission, BoundaryId,
     BoundaryIngressGeneration, BoundaryRecord, BoundaryStateHashFormat, COMMITMENT_FORMAT_VERSION,
@@ -9,9 +10,9 @@ use super::{
     RuntimeDomainCommitmentRoots, STATE_REVISION_FORMAT_VERSION, Scenario, ScheduledRecord,
     SchemaRegistry, SimEvent, SimTime, SimulationSnapshot, SystemCadence, WorldSnapshot,
     boundary_state_hash_format, command_attempt_id_slice_is_empty, command_attempt_slice_is_empty,
-    component_key, domain_record_change_slice_is_empty, domain_record_slice_is_empty,
-    ingress_record_slice_is_empty, invalid_snapshot, invalid_snapshot_error, is_one_u64,
-    is_zero_u64, maintenance_change_slice_is_empty, manifest, policy,
+    component_key, domain_record_slice_is_empty, ingress_record_slice_is_empty, invalid_snapshot,
+    invalid_snapshot_error, is_one_u64, is_zero_u64, maintenance_change_slice_is_empty, manifest,
+    policy,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1005,7 +1006,15 @@ pub(super) fn snapshot_is_at_boundary_head(snapshot: &SimulationSnapshot) -> boo
     accounted_events.len() == snapshot.events.len()
 }
 
-pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, CanwuError> {
+/// The boundary hash. A record change enters it through the encoding digests
+/// of the two versions it names (see [`RecordChangeCommitments`]);
+/// `record_change_encodings`, aligned with `record.record_changes`, supplies
+/// the encodings the record store already computed, and `None` encodes the
+/// versions afresh. Both give the same hash.
+pub(super) fn compute_boundary_hash(
+    record: &BoundaryRecord,
+    record_change_encodings: Option<&[RecordChangeEncodings]>,
+) -> Result<String, CanwuError> {
     #[derive(Serialize)]
     struct BoundaryHashMaterial<'a> {
         id: BoundaryId,
@@ -1025,8 +1034,8 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         allocations: &'a [ReservationAllocation],
         random_draws: &'a [RandomDrawId],
         changes: &'a [BoundaryChange],
-        #[serde(skip_serializing_if = "domain_record_change_slice_is_empty")]
-        record_changes: &'a [DomainRecordChange],
+        #[serde(skip_serializing_if = "RecordChangeCommitments::is_empty")]
+        record_changes: RecordChangeCommitments<'a>,
         // Commitment format 5: every field of every knowledge change,
         // including the visibility and producer correlation that load
         // validation and the holder views read. Omitted while empty, so the
@@ -1052,6 +1061,18 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         previous_hash: &'a str,
     }
 
+    let encoded;
+    let record_change_encodings = match record_change_encodings {
+        Some(encodings) if encodings.len() == record.record_changes.len() => encodings,
+        _ => {
+            encoded = record
+                .record_changes
+                .iter()
+                .map(RecordChangeEncodings::of)
+                .collect::<Result<Vec<_>, _>>()?;
+            encoded.as_slice()
+        }
+    };
     canonical_hash(
         "canwu.boundary-record.v1",
         &BoundaryHashMaterial {
@@ -1071,7 +1092,10 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
             allocations: &record.allocations,
             random_draws: &record.random_draws,
             changes: &record.changes,
-            record_changes: &record.record_changes,
+            record_changes: RecordChangeCommitments {
+                changes: &record.record_changes,
+                encodings: record_change_encodings,
+            },
             knowledge_changes: (!record.knowledge_changes.is_empty())
                 .then_some(record.knowledge_changes.as_slice()),
             maintenance_changes: &record.maintenance_changes,
@@ -1093,6 +1117,78 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
     )
 }
 
+/// The record changes of a boundary as its hash commits to them: each change
+/// with its fields in declaration order, except that `previous` and
+/// `current` are the lowercase hex encoding digests
+/// (`canonical_byte_hash("canwu.domain-record.encoding.v1", canonical JSON)`)
+/// of the versions it names instead of the versions themselves. The digests
+/// bind every byte of both versions, so the commitment means what the
+/// version bodies meant, but a boundary hashes 64 characters per version
+/// instead of serializing its whole value twice.
+pub(super) struct RecordChangeCommitments<'a> {
+    pub(super) changes: &'a [DomainRecordChange],
+    pub(super) encodings: &'a [RecordChangeEncodings],
+}
+
+impl RecordChangeCommitments<'_> {
+    fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+}
+
+impl Serialize for RecordChangeCommitments<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeSeq, SerializeStruct};
+
+        struct Change<'a> {
+            change: &'a DomainRecordChange,
+            encodings: &'a RecordChangeEncodings,
+        }
+
+        impl Serialize for Change<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let mut state = serializer.serialize_struct("DomainRecordChange", 7)?;
+                state.serialize_field("plugin", &self.change.plugin)?;
+                state.serialize_field("system", &self.change.system)?;
+                state.serialize_field("operation", &self.change.operation)?;
+                state.serialize_field(
+                    "previous",
+                    &self
+                        .encodings
+                        .previous
+                        .as_ref()
+                        .map(|encoding| DigestHex(encoding.digest())),
+                )?;
+                state.serialize_field("current", &DigestHex(self.encodings.current.digest()))?;
+                state.serialize_field("visibility", &self.change.visibility)?;
+                state.serialize_field("summary", &self.change.summary)?;
+                state.end()
+            }
+        }
+
+        let mut sequence = serializer.serialize_seq(Some(self.changes.len()))?;
+        for (change, encodings) in self.changes.iter().zip(self.encodings) {
+            sequence.serialize_element(&Change { change, encodings })?;
+        }
+        sequence.end()
+    }
+}
+
+/// A 32-byte digest serialized as lowercase hex without a heap allocation.
+struct DigestHex([u8; 32]);
+
+impl Serialize for DigestHex {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        let mut text = [0_u8; 64];
+        for (index, byte) in self.0.iter().enumerate() {
+            text[index * 2] = DIGITS[usize::from(byte >> 4)];
+            text[index * 2 + 1] = DIGITS[usize::from(byte & 0x0f)];
+        }
+        serializer.serialize_str(std::str::from_utf8(&text).expect("hex digits are ASCII"))
+    }
+}
+
 /// Computes the engine's canonical JSON commitment for plugin-owned data.
 ///
 /// The caller supplies a stable, versioned domain string. This is the same
@@ -1103,17 +1199,60 @@ pub fn canonical_hash<T: Serialize + ?Sized>(
     domain: &str,
     value: &T,
 ) -> Result<String, CanwuError> {
-    let encoded = serde_json::to_vec(value).map_err(|error| {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(&[0]);
+    // The JSON streams into the hash through a stack buffer, so a commitment
+    // over a large value does not first copy the whole encoding into memory.
+    // The hashed bytes are exactly those `serde_json::to_vec` would produce.
+    let mut writer = HashWriter {
+        hasher,
+        buffer: [0; HASH_WRITER_BUFFER_BYTES],
+        len: 0,
+    };
+    serde_json::to_writer(&mut writer, value).map_err(|error| {
         CanwuError::new(
             ErrorCode::InvalidSnapshot,
             format!("could not encode deterministic hash material: {error}"),
         )
     })?;
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(&encoded);
-    Ok(hasher.finalize().to_hex().to_string())
+    Ok(writer.finish().to_hex().to_string())
+}
+
+const HASH_WRITER_BUFFER_BYTES: usize = 4_096;
+
+/// Feeds serialized bytes into a BLAKE3 hasher in buffer-sized updates.
+struct HashWriter {
+    hasher: blake3::Hasher,
+    buffer: [u8; HASH_WRITER_BUFFER_BYTES],
+    len: usize,
+}
+
+impl HashWriter {
+    fn finish(mut self) -> blake3::Hash {
+        self.hasher.update(&self.buffer[..self.len]);
+        self.hasher.finalize()
+    }
+}
+
+impl std::io::Write for HashWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.len + bytes.len() > HASH_WRITER_BUFFER_BYTES {
+            self.hasher.update(&self.buffer[..self.len]);
+            self.len = 0;
+            if bytes.len() >= HASH_WRITER_BUFFER_BYTES {
+                self.hasher.update(bytes);
+                return Ok(bytes.len());
+            }
+        }
+        self.buffer[self.len..self.len + bytes.len()].copy_from_slice(bytes);
+        self.len += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Computes a domain-separated BLAKE3 commitment over an already canonical

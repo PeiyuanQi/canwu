@@ -635,6 +635,27 @@ fn retention_handoff_fault_matrix_preserves_or_releases_pages_by_phase() {
     );
 }
 
+/// A binary Patricia branch page in state-page codec `raw-canonical-v2`:
+/// magic, kind 2, the domain, the bit, both child page IDs, and the entry and
+/// structural byte counts, every integer little-endian.
+fn binary_branch_page(left_page: &str, right_page: &str) -> StatePageBlob {
+    let domain = b"fixture.retention";
+    let mut bytes = b"\0cwp\x02".to_vec();
+    bytes.extend_from_slice(&u16::try_from(domain.len()).unwrap().to_le_bytes());
+    bytes.extend_from_slice(domain);
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    for page_id in [left_page, right_page] {
+        bytes.extend(
+            (0..page_id.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&page_id[at..at + 2], 16).expect("hex page ID")),
+        );
+    }
+    bytes.extend_from_slice(&2_u64.to_le_bytes());
+    bytes.extend_from_slice(&0_u64.to_le_bytes());
+    StatePageBlob::new(bytes).expect("create fixture branch page")
+}
+
 #[test]
 fn releasing_one_committed_root_preserves_pages_shared_with_a_newer_root_after_restart() {
     let store = PageStore::default();
@@ -645,16 +666,8 @@ fn releasing_one_committed_root_preserves_pages_shared_with_a_newer_root_after_r
     let shared = page(serde_json::json!({ "node": "leaf", "value": "shared" }));
     let first_only = page(serde_json::json!({ "node": "leaf", "value": "first" }));
     let second_only = page(serde_json::json!({ "node": "leaf", "value": "second" }));
-    let first_root = page(serde_json::json!({
-        "node": "branch",
-        "left_page": shared.page_id,
-        "right_page": first_only.page_id,
-    }));
-    let second_root = page(serde_json::json!({
-        "node": "branch",
-        "left_page": shared.page_id,
-        "right_page": second_only.page_id,
-    }));
+    let first_root = binary_branch_page(&shared.page_id, &first_only.page_id);
+    let second_root = binary_branch_page(&shared.page_id, &second_only.page_id);
     for page in [
         &shared,
         &first_only,

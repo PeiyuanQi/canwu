@@ -95,10 +95,11 @@ pub use maintenance::{
 };
 pub use manifest::{ArtifactManifest, RUN_MANIFEST_FORMAT_VERSION, RunManifest};
 pub use page_store::{
-    MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES, PreparedStateDelta, STATE_PAGE_CODEC,
-    STATE_PAGE_FORMAT_VERSION, STATE_PAGE_RETENTION_FORMAT_VERSION, StatePageBlob,
-    StatePageProvider, StatePageRetentionHandle, StatePageRetentionLedger, StatePageRetentionPhase,
-    StatePageStore, prepare_state_delta, state_page_id, verify_state_delta,
+    MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES, PreparedStateDelta,
+    STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION, STATE_PAGE_RETENTION_FORMAT_VERSION,
+    STATE_PAGE_VALUE_CHUNK_BYTES, StatePageBlob, StatePageProvider, StatePageRetentionHandle,
+    StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore, prepare_state_delta,
+    state_page_id, verify_state_delta,
 };
 pub use persistence::{
     ArchiveProvider, ArchiveReachabilityManifest, ArchiveStore, ArchiveStoreOutcome,
@@ -179,6 +180,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use event_payloads::{
     DebugFieldChanged, KNOWLEDGE_PUBLISHED, KnowledgePublished, MoveOrdered, PLUGIN,
@@ -517,7 +519,7 @@ fn retained_domain_record_version_body<'a>(
             .retained_boundary(boundary)?
             .record_changes
             .get(usize::try_from(change_index).ok()?)
-            .map(|change| &change.current)
+            .map(|change| change.current.as_ref())
             .filter(|record| {
                 record.reference == reference.record && record.version == reference.version
             }),
@@ -551,7 +553,7 @@ fn build_current_domain_record_versions(
     initial_time: SimTime,
     boundaries: &[BoundaryRecord],
     current_records: &[DomainRecord],
-) -> Result<BTreeMap<DomainRecordRef, CurrentDomainRecordVersion>, CanwuError> {
+) -> Result<im::OrdMap<Arc<DomainRecordRef>, Arc<CurrentDomainRecordVersion>>, CanwuError> {
     let mut versions = initial_scenario
         .into_iter()
         .flat_map(|scenario| scenario.domain_records.iter())
@@ -612,7 +614,10 @@ fn build_current_domain_record_versions(
         }
     }
     versions.retain(|reference, _| current_references.contains(reference));
-    Ok(versions)
+    Ok(versions
+        .into_iter()
+        .map(|(reference, version)| (Arc::new(reference), Arc::new(version)))
+        .collect())
 }
 
 /// Returns when evidence the runtime can still read became authoritative.
@@ -962,7 +967,7 @@ impl BoundaryDomainEntityCuts {
     fn record(&mut self, stage: DomainRecordCommitStage, change: &DomainRecordChange) {
         let previous_live = change
             .previous
-            .as_ref()
+            .as_deref()
             .is_some_and(domain_record_is_live_entity);
         let current_live = domain_record_is_live_entity(&change.current);
         if previous_live != current_live {
@@ -1295,10 +1300,6 @@ fn command_attempt_id_slice_is_empty(value: &&[CommandAttemptId]) -> bool {
 }
 
 fn domain_record_slice_is_empty(value: &&[DomainRecord]) -> bool {
-    value.is_empty()
-}
-
-fn domain_record_change_slice_is_empty(value: &&[DomainRecordChange]) -> bool {
     value.is_empty()
 }
 

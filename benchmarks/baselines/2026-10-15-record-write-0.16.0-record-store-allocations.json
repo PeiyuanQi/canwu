@@ -1,0 +1,974 @@
+{
+  "benchmark": "canwu-record-write-cost",
+  "empty_store_idle": {
+    "samples": [
+      {
+        "allocated_bytes": 18002,
+        "allocation_operations": 184,
+        "deallocated_bytes": 17413,
+        "follow_up_allocated_bytes": 17712,
+        "follow_up_allocation_operations": 181,
+        "handler_allocated_bytes": 0,
+        "handler_allocation_operations": 0
+      },
+      {
+        "allocated_bytes": 18002,
+        "allocation_operations": 184,
+        "deallocated_bytes": 17413,
+        "follow_up_allocated_bytes": 17712,
+        "follow_up_allocation_operations": 181,
+        "handler_allocated_bytes": 0,
+        "handler_allocation_operations": 0
+      },
+      {
+        "allocated_bytes": 18002,
+        "allocation_operations": 184,
+        "deallocated_bytes": 17413,
+        "follow_up_allocated_bytes": 17712,
+        "follow_up_allocation_operations": 181,
+        "handler_allocated_bytes": 0,
+        "handler_allocation_operations": 0
+      }
+    ],
+    "summary": {
+      "engine_allocated_bytes_median": 18002.0,
+      "engine_allocation_operations_median": 184.0,
+      "follow_up_allocated_bytes_median": 17712.0,
+      "follow_up_allocation_operations_median": 181.0
+    },
+    "variant": "idle",
+    "writes": 0
+  },
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [
+      "allocation-counting"
+    ],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "fit_over_bytes": {
+    "follow_up_allocation_operations_per_write": {
+      "a": 0.0,
+      "b_per_kib": 0.0
+    },
+    "update_engine_allocated_bytes_per_write": {
+      "a": 15225.975,
+      "b_per_kib": 1024.061
+    },
+    "update_engine_allocation_operations_per_write": {
+      "a": 90.932,
+      "b_per_kib": 0.0
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "thread-local allocator calls and requested bytes during the boundary; setup, sealing, and post-measurement drops are excluded",
+    "boundary": "one Daily boundary on the compacted run in which the probe system proposes N record updates; the evidence is sealed after every boundary",
+    "boundary_samples": 3,
+    "elapsed_scope": "not collected in the allocation-instrumented build",
+    "engine_share": "boundary profile total minus the probe handler's own time (elapsed), or the boundary's allocations minus those made inside the handler (allocations)",
+    "fit_over_bytes": "least squares of the per-write slopes against the record's serialized KiB",
+    "fit_over_writes": "least squares of the engine share against N for each size: slope per write, intercept per boundary",
+    "follow_up": "the boundary after each measured one writes nothing and admits the events the writes emitted; it is timed on its own and fitted per write",
+    "paged_checkpoint": "elapsed build only: prepare_paged_checkpoint of a run holding one record, against a provider that holds no page",
+    "payload": "entries: an object of generated ledger entries of about 350 bytes each (identifiers, numbers, one note); text: one string of the same size; either with the record's ordinal and a generation that changes every write",
+    "payload_shape": "entries",
+    "reproduced_terms": "elapsed build only: the engine's per-write encodings rebuilt in the harness with the same encodings and timed outside the engine",
+    "store_records": 65536,
+    "target_payload_bytes": [
+      1024,
+      2048,
+      4096,
+      8192
+    ],
+    "update_from_small": "before each sample an unmeasured boundary rewrites the N records with a one-entry payload, so the measured update has a small previous version",
+    "warmup_iterations": 1,
+    "writes_per_boundary": [
+      1000,
+      10000
+    ]
+  },
+  "metric_mode": "allocations",
+  "paged_checkpoint": null,
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "sizes": [
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 18002.0,
+            "engine_allocation_operations_median": 184.0,
+            "follow_up_allocated_bytes_median": 17712.0,
+            "follow_up_allocation_operations_median": 181.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 24133189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 18671872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            },
+            {
+              "allocated_bytes": 24133189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 18671872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            },
+            {
+              "allocated_bytes": 24133189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 18671872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 15765405.0,
+            "engine_allocation_operations_median": 92009.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 252914797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 197864560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            },
+            {
+              "allocated_bytes": 252914797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 197864560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            },
+            {
+              "allocated_bytes": 252914797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 197864560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 165096093.0,
+            "engine_allocation_operations_median": 910458.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 24134189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 17944872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            },
+            {
+              "allocated_bytes": 24134189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 17944872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            },
+            {
+              "allocated_bytes": 24134189,
+              "allocation_operations": 205018,
+              "deallocated_bytes": 17944872,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 8367784,
+              "handler_allocation_operations": 113009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 15766405.0,
+            "engine_allocation_operations_median": 92009.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 252915797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 190585560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            },
+            {
+              "allocated_bytes": 252924797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 190594560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            },
+            {
+              "allocated_bytes": 252924797,
+              "allocation_operations": 2040471,
+              "deallocated_bytes": 190594560,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 87818704,
+              "handler_allocation_operations": 1130013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 165106093.0,
+            "engine_allocation_operations_median": 910458.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 16592.299,
+          "engine_allocation_operations_per_write": 90.939,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 16593.299,
+          "engine_allocation_operations_per_write": 90.939,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 1145,
+      "record_bytes": 1361,
+      "store_records": 65536,
+      "target_payload_bytes": 1024
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 18002.0,
+            "engine_allocation_operations_median": 184.0,
+            "follow_up_allocated_bytes_median": 17712.0,
+            "follow_up_allocation_operations_median": 181.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 30858613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 22589296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            },
+            {
+              "allocated_bytes": 30858613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 22589296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            },
+            {
+              "allocated_bytes": 30858613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 22589296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 16874829.0,
+            "engine_allocation_operations_median": 92031.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 319939061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 236798824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            },
+            {
+              "allocated_bytes": 319939061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 236808824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            },
+            {
+              "allocated_bytes": 319939061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 236808824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 175960357.0,
+            "engine_allocation_operations_median": 910375.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 30860613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 20771296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            },
+            {
+              "allocated_bytes": 30860613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 20771296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            },
+            {
+              "allocated_bytes": 30860613,
+              "allocation_operations": 301040,
+              "deallocated_bytes": 20771296,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 13983784,
+              "handler_allocation_operations": 209009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 16876829.0,
+            "engine_allocation_operations_median": 92031.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 319940061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 218609824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            },
+            {
+              "allocated_bytes": 319949061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 218618824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            },
+            {
+              "allocated_bytes": 319949061,
+              "allocation_operations": 3000388,
+              "deallocated_bytes": 218618824,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 143978704,
+              "handler_allocation_operations": 2090013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 175970357.0,
+            "engine_allocation_operations_median": 910375.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 17676.17,
+          "engine_allocation_operations_per_write": 90.927,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 17677.059,
+          "engine_allocation_operations_per_write": 90.927,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 2238,
+      "record_bytes": 2454,
+      "store_records": 65536,
+      "target_payload_bytes": 2048
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 18002.0,
+            "engine_allocation_operations_median": 184.0,
+            "follow_up_allocated_bytes_median": 17712.0,
+            "follow_up_allocation_operations_median": 181.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 46977397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 31732080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            },
+            {
+              "allocated_bytes": 46977397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 31732080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            },
+            {
+              "allocated_bytes": 46977397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 31732080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 19041613.0,
+            "engine_allocation_operations_median": 92008.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 481296765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 328406528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            },
+            {
+              "allocated_bytes": 481296765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 328406528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            },
+            {
+              "allocated_bytes": 481296765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 328406528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 197798061.0,
+            "engine_allocation_operations_median": 910374.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 46978397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 27729080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            },
+            {
+              "allocated_bytes": 46978397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 27729080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            },
+            {
+              "allocated_bytes": 46978397,
+              "allocation_operations": 497017,
+              "deallocated_bytes": 27729080,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 27935784,
+              "handler_allocation_operations": 405009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 19042613.0,
+            "engine_allocation_operations_median": 92008.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 481297765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 288367528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            },
+            {
+              "allocated_bytes": 481306765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 288376528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            },
+            {
+              "allocated_bytes": 481306765,
+              "allocation_operations": 4960387,
+              "deallocated_bytes": 288376528,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 283498704,
+              "handler_allocation_operations": 4050013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 197808061.0,
+            "engine_allocation_operations_median": 910374.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 19861.828,
+          "engine_allocation_operations_per_write": 90.93,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 19862.828,
+          "engine_allocation_operations_per_write": 90.93,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 4423,
+      "record_bytes": 4639,
+      "store_records": 65536,
+      "target_payload_bytes": 4096
+    },
+    {
+      "cases": [
+        {
+          "samples": [
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            },
+            {
+              "allocated_bytes": 18002,
+              "allocation_operations": 184,
+              "deallocated_bytes": 17413,
+              "follow_up_allocated_bytes": 17712,
+              "follow_up_allocation_operations": 181,
+              "handler_allocated_bytes": 0,
+              "handler_allocation_operations": 0
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 18002.0,
+            "engine_allocation_operations_median": 184.0,
+            "follow_up_allocated_bytes_median": 17712.0,
+            "follow_up_allocation_operations_median": 181.0
+          },
+          "variant": "idle",
+          "writes": 0
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 72857197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 46683880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            },
+            {
+              "allocated_bytes": 72857197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 46683880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            },
+            {
+              "allocated_bytes": 72857197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 46683880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 23065413.0,
+            "engine_allocation_operations_median": 92033.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 739968757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 477798520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            },
+            {
+              "allocated_bytes": 739968757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 477798520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            },
+            {
+              "allocated_bytes": 739968757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 477798520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 237910053.0,
+            "engine_allocation_operations_median": 910463.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update",
+          "writes": 10000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 72858197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 38676880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            },
+            {
+              "allocated_bytes": 72858197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 38676880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            },
+            {
+              "allocated_bytes": 72858197,
+              "allocation_operations": 851042,
+              "deallocated_bytes": 38676880,
+              "follow_up_allocated_bytes": 33712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 49791784,
+              "handler_allocation_operations": 759009
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 23066413.0,
+            "engine_allocation_operations_median": 92033.0,
+            "follow_up_allocated_bytes_median": 33712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 1000
+        },
+        {
+          "samples": [
+            {
+              "allocated_bytes": 739969757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 397719520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            },
+            {
+              "allocated_bytes": 739978757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 397728520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            },
+            {
+              "allocated_bytes": 739978757,
+              "allocation_operations": 8500476,
+              "deallocated_bytes": 397728520,
+              "follow_up_allocated_bytes": 177712,
+              "follow_up_allocation_operations": 183,
+              "handler_allocated_bytes": 502058704,
+              "handler_allocation_operations": 7590013
+            }
+          ],
+          "summary": {
+            "engine_allocated_bytes_median": 237920053.0,
+            "engine_allocation_operations_median": 910463.0,
+            "follow_up_allocated_bytes_median": 177712.0,
+            "follow_up_allocation_operations_median": 183.0
+          },
+          "variant": "update_from_small",
+          "writes": 10000
+        }
+      ],
+      "fit_over_writes": {
+        "update": {
+          "engine_allocated_bytes_per_write": 23871.627,
+          "engine_allocation_operations_per_write": 90.937,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        },
+        "update_from_small": {
+          "engine_allocated_bytes_per_write": 23872.627,
+          "engine_allocation_operations_per_write": 90.937,
+          "follow_up_allocated_bytes_per_write": 16.0,
+          "follow_up_allocation_operations_per_write": 0.0
+        }
+      },
+      "payload_bytes": 8427,
+      "record_bytes": 8643,
+      "store_records": 65536,
+      "target_payload_bytes": 8192
+    }
+  ],
+  "source": {
+    "content_hash": "d6232d72b306116a09715b46280d14497d15de4092cad941aa118a4689759690",
+    "label": "gap/paged-record-ceiling working tree before commit (record-store change)"
+  }
+}

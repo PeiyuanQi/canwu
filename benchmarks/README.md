@@ -541,6 +541,66 @@ measured code is otherwise the committed one. The machine was loaded by other
 builds throughout, so single elapsed cases moved by up to a third between
 neighbouring runs; the allocation counts do not depend on load.
 
+## Record-store profiles
+
+The record-store change of 0.16.0 was measured with `record-write-profile`
+above and a second binary, `paged-record-profile`. It measures, on forks of a
+run holding `--records` (65,536) small records, an idle boundary and one
+boundary that replaces one record with a payload of each `--write-bytes` size,
+after one unmeasured boundary that writes another record; and, for each
+`--paged` set of record sizes, preparing a paged checkpoint of a run holding
+exactly those records into an empty page store and restoring it with its
+evidence prefix. A set the engine cannot page is reported with the error it
+returned. It follows the conventions of the keyed-draw profile and uses only
+public API that the integration base also has.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin record-write-profile -- \
+  --mode elapsed \
+  --sizes 1024,2048,4096,8192 \
+  --counts 1000,10000 \
+  --samples 5 \
+  --warmup 1 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-record-write-LABEL-elapsed.json
+
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin paged-record-profile -- \
+  --mode elapsed \
+  --samples 31 \
+  --warmup 3 \
+  --paged-samples 5 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-paged-record-LABEL-elapsed.json
+```
+
+Allocation reports come from the same commands with `--features
+allocation-counting` and `--mode allocations` (3 samples, 1 warm-up, 1 paged
+sample). The 2026-10-15 reports compare the 0.16.0 integration base
+(`12d4775`, built in an export with these binaries' sources copied in; label
+`base`) with the record-store change before the version bump (label
+`record-store`); every `engine_version` field reads `0.15.0`, and the
+record-store reports were recorded before the review fixes (documentation,
+comments, and the error code of an oversized record at paged preparation),
+and on the integration base before the resource, production, law,
+information, and fiscal changes joined it, so their `source.content_hash`
+differs from the committed tree's. The architecture-suite allocation reports
+of the same two builds are beside them. They are interpreted in
+[`docs/proposals/record-store-ceiling-and-cost.md`](../docs/proposals/record-store-ceiling-and-cost.md):
+
+| Profile | Base | Record store |
+| --- | --- | --- |
+| Record writes | [`elapsed`](baselines/2026-10-15-record-write-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-record-write-0.16.0-base-allocations.json) | [`elapsed`](baselines/2026-10-15-record-write-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-record-write-0.16.0-record-store-allocations.json), [`elapsed at 50,000 writes`](baselines/2026-10-15-record-write-0.16.0-record-store-50k-elapsed.json) |
+| Paged records | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-base-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-base-allocations.json) | [`elapsed`](baselines/2026-10-15-paged-record-0.16.0-record-store-elapsed.json), [`allocations`](baselines/2026-10-15-paged-record-0.16.0-record-store-allocations.json) |
+| Architecture suite | [`allocations`](baselines/2026-10-15-architecture-0.16.0-base-allocations.json) | [`allocations`](baselines/2026-10-15-architecture-0.16.0-record-store-allocations.json) |
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

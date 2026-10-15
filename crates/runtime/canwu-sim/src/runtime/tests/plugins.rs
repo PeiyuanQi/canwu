@@ -339,8 +339,9 @@ fn phased_boundary_allocates_deterministically_and_respects_visibility() {
         snapshot_state_hash(&due_at_boundary)
             .expect("the structurally corrupted state should hash"),
     );
-    due_at_boundary.boundaries[0].hash = compute_boundary_hash(&due_at_boundary.boundaries[0])
-        .expect("the structurally corrupted boundary should hash");
+    due_at_boundary.boundaries[0].hash =
+        compute_boundary_hash(&due_at_boundary.boundaries[0], None)
+            .expect("the structurally corrupted boundary should hash");
     refresh_snapshot_commitments_and_checkpoint(&mut due_at_boundary);
     let error = Simulation::from_snapshot(due_at_boundary)
         .err()
@@ -1004,12 +1005,12 @@ fn scoped_random_streams_are_isolated_recorded_hashed_and_replayable() {
     let mut missing_state_commitment = primary_only.snapshot();
     missing_state_commitment.boundaries[0].state_hash = None;
     missing_state_commitment.boundaries[0].hash =
-        compute_boundary_hash(&missing_state_commitment.boundaries[0])
+        compute_boundary_hash(&missing_state_commitment.boundaries[0], None)
             .expect("the malformed legacy-style boundary should hash");
     let first_hash = missing_state_commitment.boundaries[0].hash.clone();
     missing_state_commitment.boundaries[1].previous_hash = first_hash;
     missing_state_commitment.boundaries[1].hash =
-        compute_boundary_hash(&missing_state_commitment.boundaries[1])
+        compute_boundary_hash(&missing_state_commitment.boundaries[1], None)
             .expect("the dependent boundary should rehash");
     refresh_snapshot_commitments_and_checkpoint(&mut missing_state_commitment);
     let Err(error) =

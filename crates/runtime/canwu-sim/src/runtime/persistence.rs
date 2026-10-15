@@ -130,7 +130,10 @@ pub struct SimulationSnapshot {
     pub(super) next_person_id: u64,
 }
 
-pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 4;
+/// Format of the paged-checkpoint envelope and of the decision pages it
+/// names. Format 5 names domain-record pages in state-page codec
+/// `raw-canonical-v2`, whose records may span record-value chunk pages.
+pub const PAGED_CHECKPOINT_FORMAT_VERSION: u32 = 5;
 const MAX_PAGED_DECISION_DIRECTORY_ENTRIES: usize = 1_024;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

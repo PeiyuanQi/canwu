@@ -1,0 +1,339 @@
+{
+  "benchmark": "canwu-paged-records",
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "idle_boundary": "one Daily boundary whose system proposes nothing, measured as the writes are",
+    "paged_prepare": "Canwu::prepare_paged_checkpoint into an empty page store, of a run whose store holds exactly the listed records",
+    "paged_restore": "Canwu::from_paged_checkpoint_and_journal_with_plugins from a store that holds the prepared pages",
+    "paged_samples": 5,
+    "records_per_filling_boundary": 4096,
+    "warmup_iterations": 3,
+    "write": "one Daily boundary that replaces one small record with a record whose payload text has the stated bytes, on a fork of the filled run, after one unmeasured boundary on that fork",
+    "write_payload_bytes": [
+      1024,
+      8192,
+      65536,
+      1048576
+    ],
+    "write_samples": 31,
+    "write_store_records": 65536
+  },
+  "metric_mode": "elapsed",
+  "paged": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            580800,
+            544400,
+            651700,
+            613800,
+            624200
+          ],
+          "name": "paged_prepare",
+          "summary": {
+            "elapsed_ns_max": 651700,
+            "elapsed_ns_median": 613800,
+            "elapsed_ns_min": 544400,
+            "elapsed_ns_p95": 651700
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            10134600,
+            12556900,
+            13201500,
+            13626900,
+            13190600
+          ],
+          "name": "paged_restore",
+          "summary": {
+            "elapsed_ns_max": 13626900,
+            "elapsed_ns_median": 13190600,
+            "elapsed_ns_min": 10134600,
+            "elapsed_ns_p95": 13626900
+          }
+        }
+      ],
+      "delta_page_bytes": 908309,
+      "delta_pages": 4,
+      "largest_page_bytes": 900407,
+      "payload_bytes": [
+        900000
+      ]
+    },
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            29175300,
+            32991900,
+            33603200,
+            33624900,
+            33354800
+          ],
+          "name": "paged_prepare",
+          "summary": {
+            "elapsed_ns_max": 33624900,
+            "elapsed_ns_median": 33354800,
+            "elapsed_ns_min": 29175300,
+            "elapsed_ns_p95": 33624900
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            470754700,
+            480691900,
+            473817300,
+            472284400,
+            467502400
+          ],
+          "name": "paged_restore",
+          "summary": {
+            "elapsed_ns_max": 480691900,
+            "elapsed_ns_median": 472284400,
+            "elapsed_ns_min": 467502400,
+            "elapsed_ns_p95": 480691900
+          }
+        }
+      ],
+      "delta_page_bytes": 33210324,
+      "delta_pages": 39,
+      "largest_page_bytes": 1048581,
+      "payload_bytes": [
+        1200000,
+        32000000
+      ]
+    }
+  ],
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "source": {
+    "content_hash": "fa1cc8946907f996de4b284185161a70bafa25eeadb321ced86b0609fc35a643",
+    "label": "gap/paged-record-ceiling working tree before commit (record-store change)"
+  },
+  "writes": [
+    {
+      "elapsed_samples_ns": [
+        32600,
+        35900,
+        46600,
+        41900,
+        34400,
+        32100,
+        33200,
+        36700,
+        35000,
+        31200,
+        50800,
+        44000,
+        38900,
+        33000,
+        29700,
+        47000,
+        35600,
+        36200,
+        48300,
+        45000,
+        51500,
+        52800,
+        32400,
+        29700,
+        43000,
+        47000,
+        32600,
+        44700,
+        44200,
+        46100,
+        49500
+      ],
+      "name": "idle_boundary",
+      "summary": {
+        "elapsed_ns_max": 52800,
+        "elapsed_ns_median": 38900,
+        "elapsed_ns_min": 29700,
+        "elapsed_ns_p95": 51500
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        96200,
+        144600,
+        128100,
+        116500,
+        138000,
+        110900,
+        85000,
+        113900,
+        132200,
+        84300,
+        107900,
+        125400,
+        118100,
+        98700,
+        125400,
+        155500,
+        107600,
+        97200,
+        124300,
+        109400,
+        116100,
+        112200,
+        94700,
+        103500,
+        98100,
+        125600,
+        112800,
+        105600,
+        129800,
+        121100,
+        116800
+      ],
+      "name": "write_1024",
+      "summary": {
+        "elapsed_ns_max": 155500,
+        "elapsed_ns_median": 113900,
+        "elapsed_ns_min": 84300,
+        "elapsed_ns_p95": 144600
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        147100,
+        134700,
+        119800,
+        127800,
+        102300,
+        122700,
+        131200,
+        127800,
+        122300,
+        129800,
+        121700,
+        128300,
+        122100,
+        125100,
+        105400,
+        128200,
+        116200,
+        147800,
+        90900,
+        123800,
+        104400,
+        119900,
+        132800,
+        118000,
+        138900,
+        91300,
+        132000,
+        128400,
+        90200,
+        137700,
+        130400
+      ],
+      "name": "write_8192",
+      "summary": {
+        "elapsed_ns_max": 147800,
+        "elapsed_ns_median": 125100,
+        "elapsed_ns_min": 90200,
+        "elapsed_ns_p95": 147100
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        117900,
+        178300,
+        171600,
+        198700,
+        190500,
+        196900,
+        185100,
+        190200,
+        168100,
+        177900,
+        160800,
+        160800,
+        160700,
+        189100,
+        192100,
+        168600,
+        153100,
+        173800,
+        173700,
+        134600,
+        196100,
+        179100,
+        140700,
+        165300,
+        173200,
+        202600,
+        165400,
+        166700,
+        120700,
+        183400,
+        122200
+      ],
+      "name": "write_65536",
+      "summary": {
+        "elapsed_ns_max": 202600,
+        "elapsed_ns_median": 173200,
+        "elapsed_ns_min": 117900,
+        "elapsed_ns_p95": 198700
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        1401000,
+        1390600,
+        1055100,
+        1428500,
+        1414100,
+        1379700,
+        1401500,
+        1399100,
+        1400000,
+        1459800,
+        1414400,
+        1390900,
+        1444000,
+        1430800,
+        1413100,
+        1454900,
+        1449900,
+        1420200,
+        1055700,
+        1469400,
+        1457300,
+        1313800,
+        1371500,
+        1487700,
+        1539900,
+        1109600,
+        1443300,
+        1432500,
+        1486000,
+        1361600,
+        1472600
+      ],
+      "name": "write_1048576",
+      "summary": {
+        "elapsed_ns_max": 1539900,
+        "elapsed_ns_median": 1414400,
+        "elapsed_ns_min": 1055100,
+        "elapsed_ns_p95": 1487700
+      }
+    }
+  ]
+}

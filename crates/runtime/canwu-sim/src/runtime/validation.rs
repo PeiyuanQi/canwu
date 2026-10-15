@@ -2831,13 +2831,13 @@ fn validate_boundary_records(
     for boundary in snapshot.boundaries.iter().rev() {
         for change in boundary.record_changes.iter().rev() {
             let reference = &change.current.reference;
-            if domain_record_values.get(reference) != Some(&change.current) {
+            if domain_record_values.get(reference) != Some(change.current.as_ref()) {
                 return invalid_snapshot(
                     "boundary domain-record history does not match its persisted successor",
                 );
             }
             if let Some(previous) = &change.previous {
-                domain_record_values.insert(reference.clone(), previous.clone());
+                domain_record_values.insert(reference.clone(), previous.as_ref().clone());
             } else {
                 domain_record_values.remove(reference);
             }
@@ -3009,7 +3009,7 @@ fn validate_boundary_records(
         if record.previous_hash != previous_hash
             || !is_canonical_hash(&record.hash)
             || (requires_state_hash && record.state_hash.is_none())
-            || compute_boundary_hash(record).map_err(|error| {
+            || compute_boundary_hash(record, None).map_err(|error| {
                 invalid_snapshot_error(format!("could not verify boundary hash: {error}"))
             })? != record.hash
         {
@@ -3672,6 +3672,7 @@ fn validate_boundary_record_changes(
                 .iter()
                 .zip(&mutations)
                 .map(|(change, mutation)| records::DomainMutationRequest {
+                    payload: None,
                     plugin: &change.plugin,
                     system: &change.system,
                     visibility: change.visibility,
@@ -4948,12 +4949,13 @@ pub(super) fn validate_runtime_cause(
 
 pub(super) fn runtime_entity_exists_with_record_overlay(
     current: &RuntimeCurrentState,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     entity: &EntityRef,
 ) -> bool {
     match entity {
         EntityRef::Domain(reference) => record_overlay
             .get(reference)
+            .map(std::sync::Arc::as_ref)
             .or_else(|| current.domain_records.get(reference))
             .is_some_and(|record| {
                 record.class == DomainRecordClass::Entity && !record.is_deleted()
@@ -4965,7 +4967,7 @@ pub(super) fn runtime_entity_exists_with_record_overlay(
 pub(super) fn proposal_entity_exists(
     current: &RuntimeCurrentState,
     schemas: &records::DomainRecordSchemas,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     proposal: &BoundaryProposal,
     entity: &EntityRef,
 ) -> bool {

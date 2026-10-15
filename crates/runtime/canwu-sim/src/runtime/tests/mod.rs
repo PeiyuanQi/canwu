@@ -1631,7 +1631,7 @@ fn try_rehash_tampered_snapshot(snapshot: &mut SimulationSnapshot) -> Result<(),
     let mut previous_hash = GENESIS_BOUNDARY_HASH.to_owned();
     for boundary in &mut snapshot.boundaries {
         boundary.previous_hash.clone_from(&previous_hash);
-        boundary.hash = compute_boundary_hash(boundary)?;
+        boundary.hash = compute_boundary_hash(boundary, None)?;
         previous_hash.clone_from(&boundary.hash);
     }
     if snapshot.commitment_format_version == COMMITMENT_FORMAT_VERSION {

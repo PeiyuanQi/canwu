@@ -1,6 +1,12 @@
+use super::page_store::{
+    DecodedBinaryPage, DecodedLeafValue, LeafEntryEncoding, PageIdHasher, PageSink,
+    decode_binary_page, encode_patricia_branch, encode_patricia_leaf, page_id_hex,
+    record_value_chunk_count, value_chunk_page_bytes, value_chunk_page_id,
+};
 use super::{
-    CanwuError, ErrorCode, MAX_STATE_DELTA_PAGES, PayloadSchema, StateKey, StatePageBlob,
-    StatePageProvider, StateVisibility, canonical_byte_hash, canonical_hash, state_page_id,
+    CanwuError, ErrorCode, MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES, PayloadSchema,
+    STATE_PAGE_VALUE_CHUNK_BYTES, StateKey, StatePageBlob, StatePageProvider, StateVisibility,
+    canonical_byte_hash, canonical_hash,
 };
 use canwu_core::{
     CoreEntityKind, DomainEntityType, DomainKindClass, DomainRecordKind, DomainRecordRef,
@@ -12,9 +18,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::Write as _;
 use std::mem::size_of;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 /// Independent commitment roots for the Format-8 domain-record store.
 ///
@@ -82,8 +87,10 @@ pub struct DomainStoreScaleMetrics {
 
 #[derive(Clone, Debug)]
 pub struct PersistentDomainRecordStore {
-    records: PersistentHashMap<DomainRecordRef, Arc<DomainRecord>>,
-    record_key_pages: Vector<Arc<Vec<DomainRecordRef>>>,
+    /// Keys are shared with the ordered key pages, so copying a node of either
+    /// on a write copies no key text.
+    records: PersistentHashMap<Arc<DomainRecordRef>, Arc<DomainRecord>>,
+    record_key_pages: Vector<Arc<Vec<Arc<DomainRecordRef>>>>,
     reverse_lookup: PersistentHashMap<DomainRecordRef, PersistentHashSet<DomainRecordRef>>,
     successor_lookup: PersistentHashMap<DomainRecordRef, DomainRecordRef>,
     predecessor_lookup: PersistentHashMap<DomainRecordRef, PersistentHashSet<DomainRecordRef>>,
@@ -91,7 +98,8 @@ pub struct PersistentDomainRecordStore {
     reverse_references: PersistentPatricia,
     successor_of: PersistentPatricia,
     predecessors_of: PersistentPatricia,
-    roots: DomainRecordCommitmentRoots,
+    /// The four Patricia roots, computed when first read after a change.
+    roots: OnceLock<DomainRecordCommitmentRoots>,
     primary_leaf_count: usize,
 }
 
@@ -107,18 +115,21 @@ impl PersistentDomainRecordStore {
             store.primary.insert(reference, record)?;
             store.add_indexes(record)?;
         }
-        let sorted = records.into_iter().collect::<Vec<_>>();
+        let sorted = records
+            .into_iter()
+            .map(|(reference, record)| (Arc::new(reference), Arc::new(record)))
+            .collect::<Vec<_>>();
         for chunk in sorted.chunks(DOMAIN_RECORD_KEY_PAGE_CAPACITY) {
             store.record_key_pages.push_back(Arc::new(
                 chunk
                     .iter()
-                    .map(|(reference, _)| reference.clone())
+                    .map(|(reference, _)| Arc::clone(reference))
                     .collect(),
             ));
             for (reference, record) in chunk {
                 store
                     .records
-                    .insert(reference.clone(), Arc::new(record.clone()));
+                    .insert(Arc::clone(reference), Arc::clone(record));
                 store.add_lookup_indexes(record);
             }
         }
@@ -151,7 +162,7 @@ impl PersistentDomainRecordStore {
             page.iter().filter_map(|reference| {
                 self.records
                     .get(reference)
-                    .map(|record| (reference, record.as_ref()))
+                    .map(|record| (reference.as_ref(), record.as_ref()))
             })
         })
     }
@@ -162,7 +173,7 @@ impl PersistentDomainRecordStore {
 
     #[must_use]
     pub fn roots(&self) -> &DomainRecordCommitmentRoots {
-        &self.roots
+        self.roots.get_or_init(|| self.computed_roots())
     }
 
     /// Number of canonical primary leaves. It is independent of insertion
@@ -192,9 +203,16 @@ impl PersistentDomainRecordStore {
     }
 
     pub(crate) fn commitment_root(&self) -> Result<String, CanwuError> {
-        canonical_hash("canwu.format8.domain-record.roots.v1", &self.roots)
+        canonical_hash("canwu.format8.domain-record.roots.v1", self.roots())
     }
 
+    /// Emits every page of the four Patricia indexes, with the record-value
+    /// chunk pages of every record longer than
+    /// [`STATE_PAGE_VALUE_CHUNK_BYTES`].
+    ///
+    /// Fails with `value_out_of_range` when a record's canonical encoding is
+    /// longer than [`MAX_PAGED_RECORD_BYTES`]: the paged form cannot hold the
+    /// record, though the run is valid.
     pub fn state_pages(&self) -> Result<(DomainRecordPageRoots, Vec<StatePageBlob>), CanwuError> {
         let mut pages = BTreeMap::new();
         let roots = DomainRecordPageRoots {
@@ -202,10 +220,10 @@ impl PersistentDomainRecordStore {
             reverse_references: collect_patricia_pages(&self.reverse_references, &mut pages)?,
             successor_of: collect_patricia_pages(&self.successor_of, &mut pages)?,
             predecessors_of: collect_patricia_pages(&self.predecessors_of, &mut pages)?,
-            commitment_roots: self.roots.clone(),
+            commitment_roots: self.roots().clone(),
         };
         if pages.len() > MAX_STATE_DELTA_PAGES {
-            return Err(invalid_patricia_page(
+            return Err(invalid_record_page(
                 "domain record store exceeds the bounded state-page count",
             ));
         }
@@ -214,7 +232,14 @@ impl PersistentDomainRecordStore {
 
     /// Emits only page paths whose content addresses are not already present.
     /// An existing node page is a closure boundary: its child page identities
-    /// are committed by its bytes and were retained with that prior root.
+    /// are committed by its bytes and were retained with that prior root. A
+    /// new leaf emits its record-value chunk pages too, except chunks the
+    /// provider already holds.
+    ///
+    /// Fails with `value_out_of_range` when a record's canonical encoding is
+    /// longer than [`MAX_PAGED_RECORD_BYTES`], as [`Self::state_pages`] does,
+    /// and with `invalid_snapshot` when the provider returns a page that does
+    /// not match its ID.
     pub fn missing_state_pages(
         &self,
         provider: &dyn StatePageProvider,
@@ -233,10 +258,10 @@ impl PersistentDomainRecordStore {
                 provider,
                 &mut pages,
             )?,
-            commitment_roots: self.roots.clone(),
+            commitment_roots: self.roots().clone(),
         };
         if pages.len() > MAX_STATE_DELTA_PAGES {
-            return Err(invalid_patricia_page(
+            return Err(invalid_record_page(
                 "domain record delta exceeds the bounded state-page count",
             ));
         }
@@ -248,6 +273,28 @@ impl PersistentDomainRecordStore {
         self.primary.metrics()
     }
 
+    /// Rebuilds the store from its page roots, loading each record's value
+    /// chunks, and checks that the rebuilt indexes reproduce every committed
+    /// root.
+    ///
+    /// A page the provider does not hold fails with `state_page_unavailable`.
+    /// Every other defect fails with `invalid_snapshot` before the store is
+    /// exposed: a page whose bytes do not match its ID, a malformed or
+    /// truncated page, a chunk count or chunk length that is not the
+    /// canonical split of its value, a value longer than
+    /// [`MAX_PAGED_RECORD_BYTES`], or a root that the rebuilt indexes do not
+    /// reproduce.
+    ///
+    /// The load allocates what the pages describe: each record value up to
+    /// [`MAX_PAGED_RECORD_BYTES`], however few distinct bytes the provider
+    /// holds, because a leaf may name one chunk page many times (a value with
+    /// long runs of one byte does). A value grows only by chunks that matched
+    /// their IDs and their slice of the split, but the number of records is
+    /// bounded only by the page-count limit, so the whole restore is bounded
+    /// only by that limit times the ceiling. A host that
+    /// restores pages from an untrusted source authenticates the checkpoint
+    /// (for example, its root page ID against one it recorded) before
+    /// restoring it.
     pub fn from_state_pages(
         roots: &DomainRecordPageRoots,
         provider: &dyn StatePageProvider,
@@ -282,6 +329,7 @@ impl PersistentDomainRecordStore {
             collect_primary_records(root, &mut materialized)?;
         }
         let rebuilt = Self::from_records(materialized)?;
+        let rebuilt_roots = rebuilt.roots().clone();
         let loaded = Self {
             records: rebuilt.records,
             record_key_pages: rebuilt.record_key_pages,
@@ -292,7 +340,7 @@ impl PersistentDomainRecordStore {
             reverse_references,
             successor_of,
             predecessors_of,
-            roots: roots.commitment_roots.clone(),
+            roots: OnceLock::from(roots.commitment_roots.clone()),
             primary_leaf_count: rebuilt.primary_leaf_count,
         };
         let actual_roots = DomainRecordCommitmentRoots {
@@ -301,8 +349,8 @@ impl PersistentDomainRecordStore {
             successor_of: loaded.successor_of.root_hash(),
             predecessors_of: loaded.predecessors_of.root_hash(),
         };
-        if actual_roots != roots.commitment_roots || rebuilt.roots != roots.commitment_roots {
-            return Err(invalid_patricia_page(
+        if actual_roots != roots.commitment_roots || rebuilt_roots != roots.commitment_roots {
+            return Err(invalid_record_page(
                 "state pages do not reconstruct the committed domain-record indexes",
             ));
         }
@@ -315,7 +363,7 @@ impl PersistentDomainRecordStore {
     /// leaf count, and Patricia commitment must describe the same record set.
     pub(crate) fn validate_internal_indexes(&self) -> Result<(), CanwuError> {
         if self.records.len() != self.primary_leaf_count {
-            return Err(invalid_patricia_page(
+            return Err(invalid_record_page(
                 "domain record HAMT count disagrees with the primary leaf count",
             ));
         }
@@ -326,28 +374,32 @@ impl PersistentDomainRecordStore {
                 || page.len() > DOMAIN_RECORD_KEY_PAGE_CAPACITY
                 || page.windows(2).any(|pair| pair[0] >= pair[1])
             {
-                return Err(invalid_patricia_page(
+                return Err(invalid_record_page(
                     "domain record ordered key page is malformed",
                 ));
             }
             for reference in page.iter() {
-                if previous.is_some_and(|prior| prior >= reference)
-                    || !paged_keys.insert(reference.clone())
+                if previous.is_some_and(|prior| prior >= reference.as_ref())
+                    || !paged_keys.insert(reference.as_ref().clone())
                     || self
                         .records
                         .get(reference)
-                        .is_none_or(|record| record.reference != *reference)
+                        .is_none_or(|record| record.reference != **reference)
                 {
-                    return Err(invalid_patricia_page(
+                    return Err(invalid_record_page(
                         "domain record ordered key pages disagree with the HAMT",
                     ));
                 }
-                previous = Some(reference);
+                previous = Some(reference.as_ref());
             }
         }
-        let hamt_keys = self.records.keys().cloned().collect::<BTreeSet<_>>();
+        let hamt_keys = self
+            .records
+            .keys()
+            .map(|key| key.as_ref().clone())
+            .collect::<BTreeSet<_>>();
         if paged_keys != hamt_keys {
-            return Err(invalid_patricia_page(
+            return Err(invalid_record_page(
                 "domain record ordered key pages omit or invent HAMT entries",
             ));
         }
@@ -410,7 +462,7 @@ impl PersistentDomainRecordStore {
             || actual_successors != expected_successors
             || actual_predecessors != expected_predecessors
         {
-            return Err(invalid_patricia_page(
+            return Err(invalid_record_page(
                 "domain record COW lookup indexes disagree with authoritative records",
             ));
         }
@@ -420,8 +472,8 @@ impl PersistentDomainRecordStore {
             successor_of: self.successor_of.root_hash(),
             predecessors_of: self.predecessors_of.root_hash(),
         };
-        if actual_roots != self.roots {
-            return Err(invalid_patricia_page(
+        if &actual_roots != self.roots() {
+            return Err(invalid_record_page(
                 "domain record Patricia roots disagree with cached commitments",
             ));
         }
@@ -434,12 +486,6 @@ impl PersistentDomainRecordStore {
         let successor_of = PersistentPatricia::new("canwu.format8.domain-record.successor.v1");
         let predecessors_of =
             PersistentPatricia::new("canwu.format8.domain-record.predecessors.v1");
-        let roots = DomainRecordCommitmentRoots {
-            primary: primary.root_hash(),
-            reverse_references: reverse_references.root_hash(),
-            successor_of: successor_of.root_hash(),
-            predecessors_of: predecessors_of.root_hash(),
-        };
         Self {
             records: PersistentHashMap::new(),
             record_key_pages: Vector::new(),
@@ -450,7 +496,7 @@ impl PersistentDomainRecordStore {
             reverse_references,
             successor_of,
             predecessors_of,
-            roots,
+            roots: OnceLock::new(),
             primary_leaf_count: 0,
         }
     }
@@ -458,25 +504,35 @@ impl PersistentDomainRecordStore {
     fn insert_record(
         &mut self,
         reference: DomainRecordRef,
-        record: DomainRecord,
-    ) -> Result<(), CanwuError> {
-        let previous = self.records.get(&reference).cloned();
-        if let Some(previous) = previous.as_deref() {
+        record: Arc<DomainRecord>,
+    ) -> Result<RecordChangeEncodings, CanwuError> {
+        let existing = self
+            .records
+            .get_key_value(&reference)
+            .map(|(key, previous)| (Arc::clone(key), Arc::clone(previous)));
+        if let Some((_, previous)) = &existing {
             self.remove_indexes(previous)?;
             self.remove_lookup_indexes(previous);
         }
-        self.primary.insert(&reference, &record)?;
+        let (replaced, written) = self.primary.insert(&reference, record.as_ref())?;
         self.add_indexes(&record)?;
         self.add_lookup_indexes(&record);
-        if previous.is_none() {
-            self.insert_record_key(reference.clone());
-        }
-        self.records.insert(reference, Arc::new(record));
+        let key = if let Some((key, _)) = existing {
+            key
+        } else {
+            let key = Arc::new(reference);
+            self.insert_record_key(Arc::clone(&key));
+            key
+        };
+        self.records.insert(key, record);
         self.refresh_roots();
-        Ok(())
+        Ok(RecordChangeEncodings {
+            previous: replaced.map(RecordEncoding),
+            current: RecordEncoding(written),
+        })
     }
 
-    fn insert_record_key(&mut self, reference: DomainRecordRef) {
+    fn insert_record_key(&mut self, reference: Arc<DomainRecordRef>) {
         if self.record_key_pages.is_empty() {
             self.record_key_pages.push_back(Arc::new(vec![reference]));
             return;
@@ -505,7 +561,7 @@ impl PersistentDomainRecordStore {
             let last = self.record_key_pages[middle]
                 .last()
                 .expect("record key pages are never empty");
-            if last < reference {
+            if last.as_ref() < reference {
                 lower = middle.saturating_add(1);
             } else {
                 upper = middle;
@@ -520,7 +576,7 @@ impl PersistentDomainRecordStore {
         }
         let page_index = self.record_key_page_for(reference);
         let page = &self.record_key_pages[page_index];
-        let key_index = match page.binary_search(reference) {
+        let key_index = match page.binary_search_by(|probe| probe.as_ref().cmp(reference)) {
             Ok(index) if excluded => index.saturating_add(1),
             Ok(index) | Err(index) => index,
         };
@@ -635,12 +691,16 @@ impl PersistentDomainRecordStore {
 
     fn refresh_roots(&mut self) {
         self.primary_leaf_count = self.primary.entry_count();
-        self.roots = DomainRecordCommitmentRoots {
+        self.roots = OnceLock::new();
+    }
+
+    fn computed_roots(&self) -> DomainRecordCommitmentRoots {
+        DomainRecordCommitmentRoots {
             primary: self.primary.root_hash(),
             reverse_references: self.reverse_references.root_hash(),
             successor_of: self.successor_of.root_hash(),
             predecessors_of: self.predecessors_of.root_hash(),
-        };
+        }
     }
 }
 
@@ -650,44 +710,23 @@ struct PersistentPatricia {
     root: Option<Arc<PatriciaNode>>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct StoredPatriciaEntry {
-    key_hash: String,
-    key_bytes: Vec<u8>,
-    value_hash: String,
-    value_bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "node", rename_all = "snake_case")]
-enum StoredPatriciaPage {
-    Leaf {
-        domain: String,
-        key_hash: String,
-        entries: Vec<StoredPatriciaEntry>,
-        entry_count: u64,
-        structural_bytes: u64,
-    },
-    Branch {
-        domain: String,
-        bit: u16,
-        left_page: String,
-        right_page: String,
-        entry_count: u64,
-        structural_bytes: u64,
-    },
-}
-
 impl PersistentPatricia {
     const fn new(domain: &'static str) -> Self {
         Self { domain, root: None }
     }
 
-    fn insert<K: Serialize, V: Serialize>(&mut self, key: &K, value: &V) -> Result<(), CanwuError> {
-        let entry = PatriciaEntry::new(self.domain, key, value)?;
-        self.root = Some(insert_patricia(self.domain, self.root.as_ref(), entry));
-        Ok(())
+    /// Inserts or replaces one entry and returns the encodings of the value it
+    /// replaced, if any, and of the value it wrote.
+    fn insert<K: Serialize, V: Serialize>(
+        &mut self,
+        key: &K,
+        value: &V,
+    ) -> Result<(Option<Arc<PatriciaValue>>, Arc<PatriciaValue>), CanwuError> {
+        let entry = PatriciaEntry::new(key, value)?;
+        let written = Arc::clone(&entry.value);
+        let (root, replaced) = insert_patricia(self.domain, self.root.as_ref(), entry);
+        self.root = Some(root);
+        Ok((replaced, written))
     }
 
     fn remove<K: Serialize>(&mut self, key: &K) -> Result<(), CanwuError> {
@@ -697,7 +736,7 @@ impl PersistentPatricia {
                 format!("cannot encode Patricia key: {error}"),
             )
         })?;
-        let key_hash = compact_canonical_byte_hash(&format!("{}.key", self.domain), &key_bytes);
+        let key_hash = patricia_key_hash(self.domain, &key_bytes);
         self.root = remove_patricia(self.domain, self.root.as_ref(), key_hash, &key_bytes);
         Ok(())
     }
@@ -747,7 +786,15 @@ impl PersistentPatricia {
                             as u64
                         + entries
                             .iter()
-                            .map(|entry| entry.key_bytes.capacity() as u64)
+                            .map(|entry| {
+                                // The shared value's header and chunk IDs; the
+                                // value bytes themselves are payload.
+                                (entry.key_bytes.capacity()
+                                    + 2 * size_of::<usize>()
+                                    + size_of::<PatriciaValue>()
+                                    + entry.value.chunk_ids.capacity() * size_of::<[u8; 32]>())
+                                    as u64
+                            })
                             .sum::<u64>()
                 }
                 PatriciaNode::Branch { left, right, .. } => {
@@ -796,10 +843,10 @@ pub fn format8_patricia_scale_probe(
 ) -> Result<DomainStoreScaleMetrics, CanwuError> {
     let mut store = PersistentDomainRecordStore::empty();
     let key_count_u64 = u64::try_from(key_count)
-        .map_err(|_| invalid_patricia_page("scale probe key count exceeds u64"))?;
+        .map_err(|_| invalid_record_page("scale probe key count exceeds u64"))?;
     for ordinal in 0..key_count {
         let ordinal = u64::try_from(ordinal)
-            .map_err(|_| invalid_patricia_page("scale probe key exceeds u64"))?;
+            .map_err(|_| invalid_record_page("scale probe key exceeds u64"))?;
         let reference =
             DomainRecordRef::new("canwu.format8.scale", "record", format!("{ordinal:016x}"));
         let predecessor = (ordinal > 0).then(|| {
@@ -837,7 +884,7 @@ pub fn format8_patricia_scale_probe(
                 })
                 .unwrap_or_default(),
         };
-        store.insert_record(reference, record)?;
+        store.insert_record(reference, Arc::new(record))?;
     }
     store.validate_internal_indexes()?;
     let primary = store.primary.metrics();
@@ -883,38 +930,129 @@ pub fn format8_patricia_scale_probe(
     })
 }
 
+/// One canonical key/value pair of a Patricia leaf. The value is shared, so
+/// copying a leaf to change one entry copies no value bytes.
 #[derive(Clone, Debug)]
 struct PatriciaEntry {
     key_bytes: Vec<u8>,
-    value_hash: CompactHash,
-    value_bytes: Vec<u8>,
+    value: Arc<PatriciaValue>,
+}
+
+/// A canonical value with the page IDs of its record-value chunks, computed
+/// once when the value is written. `chunk_ids` is empty when the leaf holds
+/// the value inline.
+#[derive(Debug)]
+struct PatriciaValue {
+    bytes: Vec<u8>,
+    chunk_ids: Vec<[u8; 32]>,
+    /// The value's encoding digest, computed when first asked for: a boundary
+    /// commits to a record change through the digests of its two versions.
+    digest: OnceLock<CompactHash>,
+}
+
+impl PatriciaValue {
+    fn new(bytes: Vec<u8>) -> Self {
+        let chunk_ids = if record_value_chunk_count(bytes.len()) == 0 {
+            Vec::new()
+        } else {
+            bytes
+                .chunks(STATE_PAGE_VALUE_CHUNK_BYTES)
+                .map(value_chunk_page_id)
+                .collect()
+        };
+        Self {
+            bytes,
+            chunk_ids,
+            digest: OnceLock::new(),
+        }
+    }
+
+    fn digest(&self) -> CompactHash {
+        *self.digest.get_or_init(|| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(DOMAIN_RECORD_ENCODING_DIGEST_DOMAIN.as_bytes());
+            hasher.update(&[0]);
+            hasher.update(&self.bytes);
+            CompactHash(*hasher.finalize().as_bytes())
+        })
+    }
+}
+
+/// Hash domain of a domain record's encoding digest, the commitment a
+/// boundary hash makes to each version a record change names.
+const DOMAIN_RECORD_ENCODING_DIGEST_DOMAIN: &str = "canwu.domain-record.encoding.v1";
+
+/// The canonical encoding of one domain record version, shared with the
+/// store that holds it.
+#[derive(Clone, Debug)]
+pub(crate) struct RecordEncoding(Arc<PatriciaValue>);
+
+impl RecordEncoding {
+    /// Encodes `record` afresh.
+    pub(crate) fn of(record: &DomainRecord) -> Result<Self, CanwuError> {
+        let bytes = canonical_json_bytes(record).map_err(|error| {
+            CanwuError::new(
+                ErrorCode::InvalidSnapshot,
+                format!("cannot encode domain record: {error}"),
+            )
+        })?;
+        Ok(Self(Arc::new(PatriciaValue::new(bytes))))
+    }
+
+    /// `canonical_byte_hash("canwu.domain-record.encoding.v1", encoding)`.
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.0.digest().0
+    }
+}
+
+/// The encodings of the two versions a record change names, in the order of
+/// the changes they belong to.
+#[derive(Clone, Debug)]
+pub(crate) struct RecordChangeEncodings {
+    pub(crate) previous: Option<RecordEncoding>,
+    pub(crate) current: RecordEncoding,
+}
+
+impl RecordChangeEncodings {
+    /// Encodes both versions of `change` afresh.
+    pub(crate) fn of(change: &DomainRecordChange) -> Result<Self, CanwuError> {
+        Ok(Self {
+            previous: change
+                .previous
+                .as_deref()
+                .map(RecordEncoding::of)
+                .transpose()?,
+            current: RecordEncoding::of(&change.current)?,
+        })
+    }
 }
 
 impl PatriciaEntry {
-    fn new<K: Serialize, V: Serialize>(
-        domain: &str,
-        key: &K,
-        value: &V,
-    ) -> Result<Self, CanwuError> {
-        let mut key_bytes = serde_json::to_vec(key).map_err(|error| {
+    fn new<K: Serialize, V: Serialize>(key: &K, value: &V) -> Result<Self, CanwuError> {
+        let key_bytes = canonical_json_bytes(key).map_err(|error| {
             CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 format!("cannot encode Patricia key: {error}"),
             )
         })?;
-        key_bytes.shrink_to_fit();
-        let mut value_bytes = serde_json::to_vec(value).map_err(|error| {
+        let value_bytes = canonical_json_bytes(value).map_err(|error| {
             CanwuError::new(
                 ErrorCode::InvalidSnapshot,
                 format!("cannot encode Patricia value: {error}"),
             )
         })?;
-        value_bytes.shrink_to_fit();
         Ok(Self {
             key_bytes,
-            value_hash: compact_canonical_byte_hash(&format!("{domain}.value"), &value_bytes),
-            value_bytes,
+            value: Arc::new(PatriciaValue::new(value_bytes)),
         })
+    }
+
+    fn encoding(&self) -> LeafEntryEncoding<'_> {
+        LeafEntryEncoding {
+            key: &self.key_bytes,
+            value: &self.value.bytes,
+            chunk_ids: &self.value.chunk_ids,
+        }
     }
 }
 
@@ -922,88 +1060,137 @@ impl PatriciaEntry {
 struct CompactHash([u8; 32]);
 
 impl CompactHash {
-    fn parse(value: &str) -> Result<Self, CanwuError> {
-        if value.len() != 64 {
-            return Err(invalid_patricia_page(
-                "Patricia hash must contain exactly 64 hexadecimal characters",
-            ));
-        }
-        let mut bytes = [0_u8; 32];
-        let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
-        if !remainder.is_empty() {
-            return Err(invalid_patricia_page(
-                "Patricia hash must contain complete hexadecimal byte pairs",
-            ));
-        }
-        for (index, pair) in pairs.iter().enumerate() {
-            let high = decode_hex_nibble(pair[0])?;
-            let low = decode_hex_nibble(pair[1])?;
-            bytes[index] = (high << 4) | low;
-        }
-        Ok(Self(bytes))
-    }
-
     fn to_hex(self) -> String {
-        let mut encoded = String::with_capacity(64);
-        for byte in self.0 {
-            write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        page_id_hex(&self.0)
+    }
+}
+
+/// The Patricia routing hash of a canonical key: the same digest as
+/// `canonical_byte_hash("{domain}.key", key_bytes)`, without formatting the
+/// domain or the digest.
+/// Largest encoding buffer a thread keeps between record writes.
+const RETAINED_ENCODE_BUFFER_BYTES: usize = 1024 * 1024;
+
+thread_local! {
+    /// Reused across writes, so encoding a record grows no buffer by doubling
+    /// and the stored encoding is one exact-size allocation.
+    static ENCODE_BUFFER: std::cell::RefCell<Vec<u8>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+/// The canonical JSON encoding of `value` in an exactly sized buffer.
+fn canonical_json_bytes<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    ENCODE_BUFFER.with(|buffer| {
+        let Ok(mut buffer) = buffer.try_borrow_mut() else {
+            // Only a re-entrant encode reaches here; it gets its own buffer.
+            return serde_json::to_vec(value).map(|mut bytes| {
+                bytes.shrink_to_fit();
+                bytes
+            });
+        };
+        buffer.clear();
+        let encoded = serde_json::to_writer(&mut *buffer, value).map(|()| buffer.to_vec());
+        if buffer.capacity() > RETAINED_ENCODE_BUFFER_BYTES {
+            *buffer = Vec::new();
         }
         encoded
-    }
+    })
 }
 
-fn decode_hex_nibble(byte: u8) -> Result<u8, CanwuError> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        _ => Err(invalid_patricia_page(
-            "Patricia hash must use lowercase hexadecimal",
-        )),
-    }
+fn patricia_key_hash(domain: &str, key_bytes: &[u8]) -> CompactHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain.as_bytes());
+    hasher.update(b".key");
+    hasher.update(&[0]);
+    hasher.update(key_bytes);
+    CompactHash(*hasher.finalize().as_bytes())
 }
 
-fn compact_canonical_byte_hash(domain: &str, bytes: &[u8]) -> CompactHash {
-    CompactHash::parse(&canonical_byte_hash(domain, bytes))
-        .expect("canonical_byte_hash always returns a lowercase 32-byte digest")
-}
-
-fn compact_state_page_id(stored: &StoredPatriciaPage) -> CompactHash {
-    let bytes =
-        serde_json::to_vec(stored).expect("canonical Patricia page values always serialize");
-    CompactHash::parse(&state_page_id(&bytes))
-        .expect("state_page_id always returns a lowercase 32-byte digest")
-}
-
+/// One node of a persistent Patricia tree. Its hash, the page ID of its
+/// binary page, is computed when first asked for and kept. A boundary that
+/// writes many records therefore hashes each changed node once, when the
+/// roots are next read, instead of once per write along every shared path.
 #[derive(Clone, Debug)]
 enum PatriciaNode {
     Leaf {
+        domain: &'static str,
         key_hash: CompactHash,
         entries: Arc<Vec<PatriciaEntry>>,
-        hash: CompactHash,
+        hash: OnceLock<CompactHash>,
         entry_count: usize,
         structural_bytes: usize,
     },
     Branch {
+        domain: &'static str,
         bit: u16,
+        /// The key hash of the leftmost leaf below, cached so that descending
+        /// a path compares hashes without walking each subtree.
+        sample_key_hash: CompactHash,
         left: Arc<Self>,
         right: Arc<Self>,
-        hash: CompactHash,
+        hash: OnceLock<CompactHash>,
         entry_count: usize,
         structural_bytes: usize,
     },
 }
 
 impl PatriciaNode {
-    const fn hash(&self) -> CompactHash {
+    fn hash(&self) -> CompactHash {
         match self {
-            Self::Leaf { hash, .. } | Self::Branch { hash, .. } => *hash,
+            Self::Leaf {
+                domain,
+                key_hash,
+                entries,
+                hash,
+                entry_count,
+                structural_bytes,
+            } => *hash.get_or_init(|| {
+                let mut hasher = PageIdHasher::new();
+                write_leaf_page(
+                    &mut hasher,
+                    domain,
+                    *key_hash,
+                    entries,
+                    *entry_count,
+                    *structural_bytes,
+                );
+                CompactHash(hasher.finish())
+            }),
+            Self::Branch {
+                domain,
+                bit,
+                left,
+                right,
+                hash,
+                entry_count,
+                structural_bytes,
+                ..
+            } => *hash.get_or_init(|| {
+                // The children first, so that no hasher state stays on the
+                // stack while a deep subtree is hashed.
+                let (left, right) = (left.hash(), right.hash());
+                let mut hasher = PageIdHasher::new();
+                write_branch_page(
+                    &mut hasher,
+                    domain,
+                    *bit,
+                    left,
+                    right,
+                    *entry_count,
+                    *structural_bytes,
+                );
+                CompactHash(hasher.finish())
+            }),
         }
     }
 
     fn sample_key_hash(&self) -> CompactHash {
         match self {
             Self::Leaf { key_hash, .. } => *key_hash,
-            Self::Branch { left, .. } => left.sample_key_hash(),
+            Self::Branch {
+                sample_key_hash, ..
+            } => *sample_key_hash,
         }
     }
 
@@ -1025,8 +1212,49 @@ impl PatriciaNode {
     }
 }
 
-fn patricia_leaf(
+fn write_leaf_page<S: PageSink>(
+    sink: &mut S,
     domain: &str,
+    key_hash: CompactHash,
+    entries: &[PatriciaEntry],
+    entry_count: usize,
+    structural_bytes: usize,
+) {
+    encode_patricia_leaf(
+        sink,
+        domain,
+        &key_hash.0,
+        entry_count as u64,
+        structural_bytes as u64,
+        entries.iter().map(PatriciaEntry::encoding),
+    );
+}
+
+fn write_branch_page<S: PageSink>(
+    sink: &mut S,
+    domain: &str,
+    bit: u16,
+    left: CompactHash,
+    right: CompactHash,
+    entry_count: usize,
+    structural_bytes: usize,
+) {
+    encode_patricia_branch(
+        sink,
+        domain,
+        bit,
+        &left.0,
+        &right.0,
+        entry_count as u64,
+        structural_bytes as u64,
+    );
+}
+
+/// Builds a leaf. Its hash, computed on first use, streams its binary page
+/// into the hasher: each inline value byte is hashed once, each chunked value
+/// through its chunk IDs, and no value is copied.
+fn patricia_leaf(
+    domain: &'static str,
     key_hash: CompactHash,
     mut entries: Vec<PatriciaEntry>,
 ) -> Arc<PatriciaNode> {
@@ -1037,33 +1265,18 @@ fn patricia_leaf(
             .map(|entry| 8 + entry.key_bytes.len() + 32)
             .sum::<usize>();
     let entry_count = entries.len();
-    let stored = StoredPatriciaPage::Leaf {
-        domain: domain.to_owned(),
-        key_hash: key_hash.to_hex(),
-        entries: entries
-            .iter()
-            .map(|entry| StoredPatriciaEntry {
-                key_hash: key_hash.to_hex(),
-                key_bytes: entry.key_bytes.clone(),
-                value_hash: entry.value_hash.to_hex(),
-                value_bytes: entry.value_bytes.clone(),
-            })
-            .collect(),
-        entry_count: entry_count as u64,
-        structural_bytes: structural_bytes as u64,
-    };
-    let hash = compact_state_page_id(&stored);
     Arc::new(PatriciaNode::Leaf {
+        domain,
         key_hash,
         entries: Arc::new(entries),
-        hash,
+        hash: OnceLock::new(),
         entry_count,
         structural_bytes,
     })
 }
 
 fn patricia_branch(
-    domain: &str,
+    domain: &'static str,
     bit: usize,
     left: Arc<PatriciaNode>,
     right: Arc<PatriciaNode>,
@@ -1071,36 +1284,30 @@ fn patricia_branch(
     let bit = u16::try_from(bit).expect("Patricia bit index is bounded to 256 bits");
     let entry_count = left.entry_count() + right.entry_count();
     let structural_bytes = 2 + 64 + 16 + left.structural_bytes() + right.structural_bytes();
-    let stored = StoredPatriciaPage::Branch {
-        domain: domain.to_owned(),
-        bit,
-        left_page: left.hash().to_hex(),
-        right_page: right.hash().to_hex(),
-        entry_count: entry_count as u64,
-        structural_bytes: structural_bytes as u64,
-    };
-    let hash = compact_state_page_id(&stored);
     Arc::new(PatriciaNode::Branch {
+        domain,
         bit,
+        sample_key_hash: left.sample_key_hash(),
         left,
         right,
-        hash,
+        hash: OnceLock::new(),
         entry_count,
         structural_bytes,
     })
 }
 
 fn insert_patricia(
-    domain: &str,
+    domain: &'static str,
     node: Option<&Arc<PatriciaNode>>,
     entry: PatriciaEntry,
-) -> Arc<PatriciaNode> {
-    let entry_key_hash = compact_canonical_byte_hash(&format!("{domain}.key"), &entry.key_bytes);
+) -> (Arc<PatriciaNode>, Option<Arc<PatriciaValue>>) {
+    let entry_key_hash = patricia_key_hash(domain, &entry.key_bytes);
     let Some(root) = node else {
-        return patricia_leaf(domain, entry_key_hash, vec![entry]);
+        return (patricia_leaf(domain, entry_key_hash, vec![entry]), None);
     };
     let mut current = Arc::clone(root);
-    let mut path = Vec::new();
+    let mut path = Vec::with_capacity(64);
+    let mut replaced = None;
     let mut entry = Some(entry);
     let mut replacement = loop {
         let difference = first_discriminating_bit(current.sample_key_hash(), entry_key_hash);
@@ -1129,7 +1336,9 @@ fn insert_patricia(
                 .take()
                 .expect("Patricia insertion consumes its entry exactly once");
             match next.binary_search_by(|candidate| candidate.key_bytes.cmp(&entry.key_bytes)) {
-                Ok(index) => next[index] = entry,
+                Ok(index) => {
+                    replaced = Some(std::mem::replace(&mut next[index], entry).value);
+                }
                 Err(index) => next.insert(index, entry),
             }
             break patricia_leaf(domain, current.sample_key_hash(), next);
@@ -1156,11 +1365,11 @@ fn insert_patricia(
             patricia_branch(domain, bit, sibling, replacement)
         };
     }
-    replacement
+    (replacement, replaced)
 }
 
 fn remove_patricia(
-    domain: &str,
+    domain: &'static str,
     node: Option<&Arc<PatriciaNode>>,
     key_hash: CompactHash,
     key_bytes: &[u8],
@@ -1206,7 +1415,12 @@ fn remove_patricia(
 }
 
 fn first_discriminating_bit(left: CompactHash, right: CompactHash) -> Option<usize> {
-    (0..256).find(|bit| bit_at(left, *bit) != bit_at(right, *bit))
+    left.0
+        .iter()
+        .zip(right.0)
+        .enumerate()
+        .find(|(_, (left, right))| *left != right)
+        .map(|(byte, (left, right))| byte * 8 + (*left ^ right).leading_zeros() as usize)
 }
 
 fn bit_at(hash: CompactHash, bit: usize) -> u8 {
@@ -1235,6 +1449,52 @@ fn collect_missing_patricia_pages(
         .transpose()
 }
 
+/// Loads a page the provider already holds and checks it is the page
+/// `page_id` names. `None` when the provider does not hold it.
+fn load_existing_page(
+    provider: &dyn StatePageProvider,
+    page_id: &str,
+) -> Result<Option<StatePageBlob>, CanwuError> {
+    let Some(page) = provider.load_state_page(page_id)? else {
+        return Ok(None);
+    };
+    page.validate()
+        .map_err(|error| invalid_record_page(error.message))?;
+    if page.page_id != page_id {
+        return Err(invalid_record_page(
+            "state-page provider returned the wrong content address",
+        ));
+    }
+    Ok(Some(page))
+}
+
+/// Loads a page the record store needs; a page the provider does not hold
+/// fails with `state_page_unavailable`.
+fn load_required_page(
+    provider: &dyn StatePageProvider,
+    page_id: &str,
+) -> Result<StatePageBlob, CanwuError> {
+    load_existing_page(provider, page_id)?.ok_or_else(|| {
+        CanwuError::new(
+            ErrorCode::StatePageUnavailable,
+            format!("state page {page_id} is unavailable"),
+        )
+    })
+}
+
+fn insert_page(
+    pages: &mut BTreeMap<String, StatePageBlob>,
+    page: StatePageBlob,
+) -> Result<(), CanwuError> {
+    pages.insert(page.page_id.clone(), page);
+    if pages.len() > MAX_STATE_DELTA_PAGES {
+        return Err(invalid_record_page(
+            "Patricia page graph exceeds the bounded page count",
+        ));
+    }
+    Ok(())
+}
+
 fn collect_missing_patricia_node_pages(
     domain: &str,
     node: &Arc<PatriciaNode>,
@@ -1242,31 +1502,30 @@ fn collect_missing_patricia_node_pages(
     pages: &mut BTreeMap<String, StatePageBlob>,
 ) -> Result<String, CanwuError> {
     let page_id = node.hash().to_hex();
-    if let Some(existing) = provider.load_state_page(&page_id)? {
-        existing.validate()?;
-        if existing.page_id != page_id {
-            return Err(invalid_patricia_page(
-                "state-page provider returned the wrong Patricia page",
-            ));
-        }
+    if load_existing_page(provider, &page_id)?.is_some() {
         return Ok(page_id);
     }
-    if let PatriciaNode::Branch { left, right, .. } = node.as_ref() {
-        collect_missing_patricia_node_pages(domain, left, provider, pages)?;
-        collect_missing_patricia_node_pages(domain, right, provider, pages)?;
+    match node.as_ref() {
+        PatriciaNode::Branch { left, right, .. } => {
+            collect_missing_patricia_node_pages(domain, left, provider, pages)?;
+            collect_missing_patricia_node_pages(domain, right, provider, pages)?;
+        }
+        PatriciaNode::Leaf { entries, .. } => {
+            for entry in entries.iter() {
+                for (chunk_id, payload) in entry
+                    .value
+                    .chunk_ids
+                    .iter()
+                    .zip(entry.value.bytes.chunks(STATE_PAGE_VALUE_CHUNK_BYTES))
+                {
+                    if load_existing_page(provider, &page_id_hex(chunk_id))?.is_none() {
+                        insert_page(pages, value_chunk_page(chunk_id, payload)?)?;
+                    }
+                }
+            }
+        }
     }
-    let page = patricia_node_page(domain, node)?;
-    if page.page_id != page_id {
-        return Err(invalid_patricia_page(
-            "Patricia node commitment disagrees with its state page",
-        ));
-    }
-    pages.insert(page_id.clone(), page);
-    if pages.len() > MAX_STATE_DELTA_PAGES {
-        return Err(invalid_patricia_page(
-            "Patricia delta exceeds the bounded page count",
-        ));
-    }
+    insert_page(pages, patricia_node_page(domain, node)?)?;
     Ok(page_id)
 }
 
@@ -1275,46 +1534,76 @@ fn collect_patricia_node_pages(
     node: &Arc<PatriciaNode>,
     pages: &mut BTreeMap<String, StatePageBlob>,
 ) -> Result<String, CanwuError> {
-    if let PatriciaNode::Branch { left, right, .. } = node.as_ref() {
-        collect_patricia_node_pages(domain, left, pages)?;
-        collect_patricia_node_pages(domain, right, pages)?;
+    match node.as_ref() {
+        PatriciaNode::Branch { left, right, .. } => {
+            collect_patricia_node_pages(domain, left, pages)?;
+            collect_patricia_node_pages(domain, right, pages)?;
+        }
+        PatriciaNode::Leaf { entries, .. } => {
+            for entry in entries.iter() {
+                for (chunk_id, payload) in entry
+                    .value
+                    .chunk_ids
+                    .iter()
+                    .zip(entry.value.bytes.chunks(STATE_PAGE_VALUE_CHUNK_BYTES))
+                {
+                    insert_page(pages, value_chunk_page(chunk_id, payload)?)?;
+                }
+            }
+        }
     }
     let page = patricia_node_page(domain, node)?;
     let page_id = page.page_id.clone();
-    pages.insert(page_id.clone(), page);
-    if pages.len() > MAX_STATE_DELTA_PAGES {
-        return Err(invalid_patricia_page(
-            "Patricia page graph exceeds the bounded page count",
-        ));
-    }
+    insert_page(pages, page)?;
     Ok(page_id)
 }
 
+/// Materializes one record-value chunk page and checks it against the chunk
+/// ID the leaf commits to.
+fn value_chunk_page(chunk_id: &[u8; 32], payload: &[u8]) -> Result<StatePageBlob, CanwuError> {
+    let page = StatePageBlob::new(value_chunk_page_bytes(payload))
+        .map_err(|error| invalid_record_page(error.message))?;
+    if page.page_id != page_id_hex(chunk_id) {
+        return Err(invalid_record_page(
+            "record-value chunk commitment disagrees with its state page",
+        ));
+    }
+    Ok(page)
+}
+
+/// Materializes one node page and checks it against the node's commitment.
 fn patricia_node_page(domain: &str, node: &Arc<PatriciaNode>) -> Result<StatePageBlob, CanwuError> {
-    let stored = match node.as_ref() {
+    let mut bytes = Vec::new();
+    match node.as_ref() {
         PatriciaNode::Leaf {
             key_hash,
             entries,
             entry_count,
             structural_bytes,
             ..
-        } => StoredPatriciaPage::Leaf {
-            domain: domain.to_owned(),
-            key_hash: key_hash.to_hex(),
-            entries: entries
+        } => {
+            if let Some(entry) = entries
                 .iter()
-                .map(|entry| StoredPatriciaEntry {
-                    key_hash: key_hash.to_hex(),
-                    key_bytes: entry.key_bytes.clone(),
-                    value_hash: entry.value_hash.to_hex(),
-                    value_bytes: entry.value_bytes.clone(),
-                })
-                .collect(),
-            entry_count: u64::try_from(*entry_count)
-                .map_err(|_| invalid_patricia_page("Patricia entry count exceeds u64"))?,
-            structural_bytes: u64::try_from(*structural_bytes)
-                .map_err(|_| invalid_patricia_page("Patricia byte count exceeds u64"))?,
-        },
+                .find(|entry| entry.value.bytes.len() > MAX_PAGED_RECORD_BYTES)
+            {
+                // A limit of the paged form, not a defect: the run is valid.
+                return Err(CanwuError::new(
+                    ErrorCode::ValueOutOfRange,
+                    format!(
+                        "a {}-byte domain record exceeds the {MAX_PAGED_RECORD_BYTES}-byte paged record ceiling",
+                        entry.value.bytes.len()
+                    ),
+                ));
+            }
+            write_leaf_page(
+                &mut bytes,
+                domain,
+                *key_hash,
+                entries,
+                *entry_count,
+                *structural_bytes,
+            );
+        }
         PatriciaNode::Branch {
             bit,
             left,
@@ -1322,21 +1611,23 @@ fn patricia_node_page(domain: &str, node: &Arc<PatriciaNode>) -> Result<StatePag
             entry_count,
             structural_bytes,
             ..
-        } => StoredPatriciaPage::Branch {
-            domain: domain.to_owned(),
-            bit: *bit,
-            left_page: left.hash().to_hex(),
-            right_page: right.hash().to_hex(),
-            entry_count: u64::try_from(*entry_count)
-                .map_err(|_| invalid_patricia_page("Patricia entry count exceeds u64"))?,
-            structural_bytes: u64::try_from(*structural_bytes)
-                .map_err(|_| invalid_patricia_page("Patricia byte count exceeds u64"))?,
-        },
-    };
-    let bytes = serde_json::to_vec(&stored).map_err(|error| {
-        invalid_patricia_page(format!("cannot encode canonical Patricia page: {error}"))
-    })?;
-    StatePageBlob::new(bytes)
+        } => write_branch_page(
+            &mut bytes,
+            domain,
+            *bit,
+            left.hash(),
+            right.hash(),
+            *entry_count,
+            *structural_bytes,
+        ),
+    }
+    let page = StatePageBlob::new(bytes).map_err(|error| invalid_record_page(error.message))?;
+    if page.page_id != node.hash().to_hex() {
+        return Err(invalid_record_page(
+            "Patricia node commitment disagrees with its state page",
+        ));
+    }
+    Ok(page)
 }
 
 fn load_patricia_root(
@@ -1366,7 +1657,7 @@ fn load_patricia_node(
     depth: usize,
 ) -> Result<Arc<PatriciaNode>, CanwuError> {
     if depth > 256 || cache.len() >= MAX_STATE_DELTA_PAGES {
-        return Err(invalid_patricia_page(
+        return Err(invalid_record_page(
             "Patricia page graph exceeds its depth or page budget",
         ));
     }
@@ -1375,127 +1666,108 @@ fn load_patricia_node(
         return Ok(Arc::clone(node));
     }
     if !active.insert(page_id.to_owned()) {
-        return Err(invalid_patricia_page(
-            "Patricia page graph contains a cycle",
-        ));
+        return Err(invalid_record_page("Patricia page graph contains a cycle"));
     }
-    let page = provider.load_state_page(page_id)?.ok_or_else(|| {
-        CanwuError::new(
-            ErrorCode::StatePageUnavailable,
-            format!("state page {page_id} is unavailable"),
-        )
-    })?;
-    page.validate()?;
-    if page.page_id != page_id {
-        return Err(invalid_patricia_page(
-            "state-page provider returned the wrong content address",
-        ));
-    }
-    let stored: StoredPatriciaPage = serde_json::from_slice(&page.bytes)
-        .map_err(|error| invalid_patricia_page(format!("invalid Patricia state page: {error}")))?;
-    let node = match stored {
-        StoredPatriciaPage::Leaf {
-            domain: stored_domain,
-            key_hash,
-            entries,
-            entry_count,
-            structural_bytes,
-        } => {
-            if stored_domain != domain || entries.is_empty() {
-                return Err(invalid_patricia_page(
+    let page = load_required_page(provider, page_id)?;
+    let node = match decode_binary_page(&page.bytes).map_err(invalid_record_page)? {
+        DecodedBinaryPage::Leaf(leaf) => {
+            if leaf.domain != domain || leaf.entries.is_empty() {
+                return Err(invalid_record_page(
                     "Patricia leaf domain or collision membership is invalid",
                 ));
             }
-            let mut decoded = Vec::with_capacity(entries.len());
-            for entry in entries {
-                if entry.key_hash != key_hash
-                    || entry.key_hash
-                        != canonical_byte_hash(&format!("{domain}.key"), &entry.key_bytes)
-                    || entry.value_hash
-                        != canonical_byte_hash(&format!("{domain}.value"), &entry.value_bytes)
-                {
-                    return Err(invalid_patricia_page(
+            let key_hash = CompactHash(leaf.key_hash);
+            let mut decoded = Vec::with_capacity(leaf.entries.len());
+            for entry in leaf.entries {
+                if patricia_key_hash(domain, entry.key) != key_hash {
+                    return Err(invalid_record_page(
                         "Patricia leaf entry hash is inconsistent",
                     ));
                 }
+                let value = match entry.value {
+                    DecodedLeafValue::Inline(bytes) => PatriciaValue::new(bytes.to_vec()),
+                    DecodedLeafValue::Chunked { len, chunk_ids } => {
+                        load_record_value(provider, len, chunk_ids)?
+                    }
+                };
                 decoded.push(PatriciaEntry {
-                    key_bytes: entry.key_bytes,
-                    value_hash: CompactHash::parse(&entry.value_hash)?,
-                    value_bytes: entry.value_bytes,
+                    key_bytes: entry.key.to_vec(),
+                    value: Arc::new(value),
                 });
             }
             if decoded
                 .windows(2)
                 .any(|pair| pair[0].key_bytes >= pair[1].key_bytes)
             {
-                return Err(invalid_patricia_page(
+                return Err(invalid_record_page(
                     "Patricia collision entries are not strictly ordered",
                 ));
             }
-            let rebuilt = patricia_leaf(domain, CompactHash::parse(&key_hash)?, decoded);
+            let rebuilt = patricia_leaf(domain, key_hash, decoded);
             if rebuilt.hash().to_hex() != page_id
-                || rebuilt.entry_count() as u64 != entry_count
-                || rebuilt.structural_bytes() as u64 != structural_bytes
+                || rebuilt.entry_count() as u64 != leaf.entry_count
+                || rebuilt.structural_bytes() as u64 != leaf.structural_bytes
             {
-                return Err(invalid_patricia_page(
+                return Err(invalid_record_page(
                     "Patricia leaf metadata or commitment is inconsistent",
                 ));
             }
             rebuilt
         }
-        StoredPatriciaPage::Branch {
-            domain: stored_domain,
-            bit,
-            left_page,
-            right_page,
-            entry_count,
-            structural_bytes,
-        } => {
-            if stored_domain != domain || left_page == right_page || usize::from(bit) >= 256 {
-                return Err(invalid_patricia_page(
+        DecodedBinaryPage::Branch(branch) => {
+            if branch.domain != domain
+                || branch.left_page == branch.right_page
+                || usize::from(branch.bit) >= 256
+            {
+                return Err(invalid_record_page(
                     "Patricia branch domain, bit, or child identity is invalid",
                 ));
             }
-            if parent_bit.is_some_and(|parent| bit <= parent) {
-                return Err(invalid_patricia_page(
+            if parent_bit.is_some_and(|parent| branch.bit <= parent) {
+                return Err(invalid_record_page(
                     "Patricia discriminating bits must increase down a path",
                 ));
             }
             let left = load_patricia_node(
                 domain,
-                &left_page,
+                &page_id_hex(&branch.left_page),
                 provider,
                 cache,
                 active,
-                Some(bit),
+                Some(branch.bit),
                 depth + 1,
             )?;
             let right = load_patricia_node(
                 domain,
-                &right_page,
+                &page_id_hex(&branch.right_page),
                 provider,
                 cache,
                 active,
-                Some(bit),
+                Some(branch.bit),
                 depth + 1,
             )?;
-            if bit_at(left.sample_key_hash(), usize::from(bit)) != 0
-                || bit_at(right.sample_key_hash(), usize::from(bit)) != 1
+            if bit_at(left.sample_key_hash(), usize::from(branch.bit)) != 0
+                || bit_at(right.sample_key_hash(), usize::from(branch.bit)) != 1
             {
-                return Err(invalid_patricia_page(
+                return Err(invalid_record_page(
                     "Patricia children occupy the wrong discriminating slots",
                 ));
             }
-            let rebuilt = patricia_branch(domain, usize::from(bit), left, right);
+            let rebuilt = patricia_branch(domain, usize::from(branch.bit), left, right);
             if rebuilt.hash().to_hex() != page_id
-                || rebuilt.entry_count() as u64 != entry_count
-                || rebuilt.structural_bytes() as u64 != structural_bytes
+                || rebuilt.entry_count() as u64 != branch.entry_count
+                || rebuilt.structural_bytes() as u64 != branch.structural_bytes
             {
-                return Err(invalid_patricia_page(
+                return Err(invalid_record_page(
                     "Patricia branch metadata or commitment is inconsistent",
                 ));
             }
             rebuilt
+        }
+        DecodedBinaryPage::Chunk(_) => {
+            return Err(invalid_record_page(
+                "a record-value chunk page stands where a Patricia node belongs",
+            ));
         }
     };
     validate_child_bit(&node, parent_bit)?;
@@ -1504,11 +1776,59 @@ fn load_patricia_node(
     Ok(node)
 }
 
+/// Assembles one chunked record value. Decoding the leaf already bounded
+/// `len` by the paged record ceiling and the number of chunk IDs by `len`.
+/// Each chunk must match its ID and be exactly the slice of the value that
+/// the canonical split puts in it. The value grows only by chunks that
+/// passed, up to `len`; a leaf may name one chunk many times, so `len`, not
+/// the distinct bytes the provider holds, bounds the allocation.
+fn load_record_value(
+    provider: &dyn StatePageProvider,
+    len: usize,
+    chunk_ids: &[[u8; 32]],
+) -> Result<PatriciaValue, CanwuError> {
+    let count = record_value_chunk_count(len);
+    let mut bytes = Vec::new();
+    let mut ids = Vec::with_capacity(chunk_ids.len());
+    for (index, chunk_id) in chunk_ids.iter().enumerate() {
+        let page = load_required_page(provider, &page_id_hex(chunk_id))?;
+        let DecodedBinaryPage::Chunk(payload) =
+            decode_binary_page(&page.bytes).map_err(invalid_record_page)?
+        else {
+            return Err(invalid_record_page(
+                "a record value names a page that is not a record-value chunk",
+            ));
+        };
+        let expected = if index + 1 == count {
+            len - index * STATE_PAGE_VALUE_CHUNK_BYTES
+        } else {
+            STATE_PAGE_VALUE_CHUNK_BYTES
+        };
+        if payload.len() != expected {
+            return Err(invalid_record_page(
+                "record-value chunk length is not the canonical split of its value",
+            ));
+        }
+        bytes.extend_from_slice(payload);
+        ids.push(*chunk_id);
+    }
+    if ids.len() != count || bytes.len() != len {
+        return Err(invalid_record_page(
+            "record-value chunks do not cover their value",
+        ));
+    }
+    Ok(PatriciaValue {
+        bytes,
+        chunk_ids: ids,
+        digest: OnceLock::new(),
+    })
+}
+
 fn validate_child_bit(node: &PatriciaNode, parent_bit: Option<u16>) -> Result<(), CanwuError> {
     if let (Some(parent), PatriciaNode::Branch { bit: child_bit, .. }) = (parent_bit, node)
         && *child_bit <= parent
     {
-        return Err(invalid_patricia_page(
+        return Err(invalid_record_page(
             "Patricia discriminating bits must increase down a path",
         ));
     }
@@ -1524,18 +1844,18 @@ fn collect_primary_records(
             for entry in entries.iter() {
                 let reference: DomainRecordRef =
                     serde_json::from_slice(&entry.key_bytes).map_err(|error| {
-                        invalid_patricia_page(format!(
+                        invalid_record_page(format!(
                             "cannot decode domain-record key page: {error}"
                         ))
                     })?;
                 let record: DomainRecord =
-                    serde_json::from_slice(&entry.value_bytes).map_err(|error| {
-                        invalid_patricia_page(format!(
+                    serde_json::from_slice(&entry.value.bytes).map_err(|error| {
+                        invalid_record_page(format!(
                             "cannot decode domain-record value page: {error}"
                         ))
                     })?;
                 if record.reference != reference || records.insert(reference, record).is_some() {
-                    return Err(invalid_patricia_page(
+                    return Err(invalid_record_page(
                         "domain-record primary page contains a duplicate or mismatched key",
                     ));
                 }
@@ -1549,8 +1869,11 @@ fn collect_primary_records(
     Ok(())
 }
 
-fn invalid_patricia_page(message: impl Into<String>) -> CanwuError {
-    CanwuError::new(ErrorCode::InvalidArchive, message)
+/// Every defect the record store finds in a page, whether it writes the page
+/// or reads it, is an invalid snapshot. A page the provider does not hold is
+/// `state_page_unavailable` instead.
+fn invalid_record_page(message: impl Into<String>) -> CanwuError {
+    CanwuError::new(ErrorCode::InvalidSnapshot, message)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -1759,11 +2082,14 @@ impl DomainRecordDraft {
         })?;
         Ok(Self::new(reference.into_untyped(), payload))
     }
+}
 
-    pub(crate) fn canonicalize(&mut self) {
-        self.references.sort();
-        self.references.dedup();
-    }
+/// A draft's references in canonical order, without duplicates.
+fn canonical_references(references: &[DomainReference]) -> Vec<DomainReference> {
+    let mut references = references.to_vec();
+    references.sort();
+    references.dedup();
+    references
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1883,21 +2209,33 @@ impl DomainRecordOperation {
     }
 }
 
+/// One domain-record mutation a boundary or maintenance commit applied.
+///
+/// `previous` and `current` share the records the store holds, so recording
+/// a change, journaling it, and keeping it as evidence copy no record. They
+/// encode exactly as the records themselves.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DomainRecordChange {
     pub plugin: String,
     pub system: String,
     pub operation: DomainRecordOperation,
-    pub previous: Option<DomainRecord>,
-    pub current: DomainRecord,
+    pub previous: Option<Arc<DomainRecord>>,
+    pub current: Arc<DomainRecord>,
     pub visibility: StateVisibility,
     pub summary: String,
 }
 
 pub(crate) type DomainRecordSchemas = BTreeMap<DomainRecordKind, (String, DomainRecordSchema)>;
 
+/// Records a boundary has proposed but not committed, shared with the changes
+/// that produced them.
+pub(crate) type DomainRecordOverlay = BTreeMap<DomainRecordRef, Arc<DomainRecord>>;
+
 pub(crate) trait DomainRecordRead {
     fn get(&self, reference: &DomainRecordRef) -> Option<&DomainRecord>;
+    /// The record as a shared handle, so a change can keep its previous
+    /// version without copying it.
+    fn get_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>>;
     fn iter(&self) -> Box<dyn Iterator<Item = (&DomainRecordRef, &DomainRecord)> + '_>;
     fn range_from(
         &self,
@@ -1911,12 +2249,22 @@ pub(crate) trait DomainRecordRead {
 }
 
 trait DomainRecordWrite: DomainRecordRead {
-    fn insert(&mut self, reference: DomainRecordRef, record: DomainRecord);
+    /// Writes `record`, returning the encodings of the version it replaced
+    /// and of `record` when the store keeps them.
+    fn insert(
+        &mut self,
+        reference: DomainRecordRef,
+        record: Arc<DomainRecord>,
+    ) -> Option<RecordChangeEncodings>;
 }
 
 impl DomainRecordRead for BTreeMap<DomainRecordRef, DomainRecord> {
     fn get(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         BTreeMap::get(self, reference)
+    }
+
+    fn get_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        BTreeMap::get(self, reference).map(|record| Arc::new(record.clone()))
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = (&DomainRecordRef, &DomainRecord)> + '_> {
@@ -1938,15 +2286,55 @@ impl DomainRecordRead for BTreeMap<DomainRecordRef, DomainRecord> {
     }
 }
 
+impl DomainRecordRead for DomainRecordOverlay {
+    fn get(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
+        BTreeMap::get(self, reference).map(Arc::as_ref)
+    }
+
+    fn get_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        BTreeMap::get(self, reference).cloned()
+    }
+
+    fn iter(&self) -> Box<dyn Iterator<Item = (&DomainRecordRef, &DomainRecord)> + '_> {
+        Box::new(BTreeMap::iter(self).map(|(reference, record)| (reference, record.as_ref())))
+    }
+
+    fn range_from(
+        &self,
+        lower: DomainRecordRef,
+        excluded: bool,
+    ) -> Box<dyn Iterator<Item = (&DomainRecordRef, &DomainRecord)> + '_> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let lower = if excluded {
+            Excluded(lower)
+        } else {
+            Included(lower)
+        };
+        Box::new(
+            self.range((lower, Unbounded))
+                .map(|(reference, record)| (reference, record.as_ref())),
+        )
+    }
+}
+
 impl DomainRecordWrite for BTreeMap<DomainRecordRef, DomainRecord> {
-    fn insert(&mut self, reference: DomainRecordRef, record: DomainRecord) {
-        let _ = BTreeMap::insert(self, reference, record);
+    fn insert(
+        &mut self,
+        reference: DomainRecordRef,
+        record: Arc<DomainRecord>,
+    ) -> Option<RecordChangeEncodings> {
+        let _ = BTreeMap::insert(self, reference, Arc::unwrap_or_clone(record));
+        None
     }
 }
 
 impl DomainRecordRead for PersistentDomainRecordStore {
     fn get(&self, reference: &DomainRecordRef) -> Option<&DomainRecord> {
         self.get(reference)
+    }
+
+    fn get_shared(&self, reference: &DomainRecordRef) -> Option<Arc<DomainRecord>> {
+        self.records.get(reference).cloned()
     }
 
     fn iter(&self) -> Box<dyn Iterator<Item = (&DomainRecordRef, &DomainRecord)> + '_> {
@@ -1974,7 +2362,7 @@ impl DomainRecordRead for PersistentDomainRecordStore {
                         .filter_map(|reference| {
                             self.records
                                 .get(reference)
-                                .map(|record| (reference, record.as_ref()))
+                                .map(|record| (reference.as_ref(), record.as_ref()))
                         })
                 }),
         )
@@ -1982,9 +2370,15 @@ impl DomainRecordRead for PersistentDomainRecordStore {
 }
 
 impl DomainRecordWrite for PersistentDomainRecordStore {
-    fn insert(&mut self, reference: DomainRecordRef, record: DomainRecord) {
-        self.insert_record(reference, record)
-            .expect("validated domain records must have canonical Patricia encodings");
+    fn insert(
+        &mut self,
+        reference: DomainRecordRef,
+        record: Arc<DomainRecord>,
+    ) -> Option<RecordChangeEncodings> {
+        Some(
+            self.insert_record(reference, record)
+                .expect("validated domain records must have canonical Patricia encodings"),
+        )
     }
 }
 
@@ -1994,6 +2388,10 @@ pub(crate) struct DomainMutationRequest<'a> {
     pub visibility: StateVisibility,
     pub mutation: &'a DomainRecordMutation,
     pub summary: &'a str,
+    /// The draft's payload when the caller moved it out of `mutation`, so
+    /// that applying the mutation does not copy it. `None` copies the
+    /// payload `mutation` holds.
+    pub payload: Option<Value>,
 }
 
 pub(crate) fn record_state_key(kind: &DomainRecordKind) -> StateKey {
@@ -2103,10 +2501,19 @@ pub(crate) fn apply_mutation_bundle(
     CanwuError,
 > {
     let mut next = records.clone();
-    let changes =
+    let (changes, _) =
         apply_mutation_bundle_in_place(records, &mut next, schemas, now, core_exists, requests)?;
     validate_record_store(&next, schemas, now, core_exists)?;
     Ok((next, changes))
+}
+
+/// A mutation bundle applied to a persistent store: the new store, the
+/// changes in target order, and, aligned with them, the encodings of the
+/// versions each change names, which the store already computed.
+pub(crate) struct AppliedRecordBundle {
+    pub(crate) records: PersistentDomainRecordStore,
+    pub(crate) changes: Vec<DomainRecordChange>,
+    pub(crate) encodings: Vec<RecordChangeEncodings>,
 }
 
 /// Applies one canonical boundary mutation bundle to a structurally shared
@@ -2118,12 +2525,16 @@ pub(crate) fn apply_mutation_bundle_cow(
     now: SimTime,
     core_exists: &dyn Fn(&EntityRef) -> bool,
     requests: Vec<DomainMutationRequest<'_>>,
-) -> Result<(PersistentDomainRecordStore, Vec<DomainRecordChange>), CanwuError> {
+) -> Result<AppliedRecordBundle, CanwuError> {
     let mut next = records.clone();
-    let changes =
+    let (changes, encodings) =
         apply_mutation_bundle_in_place(records, &mut next, schemas, now, core_exists, requests)?;
     validate_affected_record_store(&next, schemas, now, core_exists, &changes)?;
-    Ok((next, changes))
+    Ok(AppliedRecordBundle {
+        records: next,
+        changes,
+        encodings,
+    })
 }
 
 /// Applies a boundary mutation bundle over a small, already-validated record
@@ -2135,19 +2546,21 @@ pub(crate) fn apply_mutation_bundle_cow(
 /// the overlay and the affected-reference closure, not to unrelated payloads.
 pub(crate) fn apply_mutation_bundle_cow_with_overlay(
     records: &PersistentDomainRecordStore,
-    overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    overlay: &DomainRecordOverlay,
     schemas: &DomainRecordSchemas,
     now: SimTime,
     core_exists: &dyn Fn(&EntityRef) -> bool,
     requests: Vec<DomainMutationRequest<'_>>,
-) -> Result<(PersistentDomainRecordStore, Vec<DomainRecordChange>), CanwuError> {
+) -> Result<AppliedRecordBundle, CanwuError> {
     let mut base = records.clone();
     for (reference, record) in overlay {
-        base.insert_record(reference.clone(), record.clone())?;
+        base.insert_record(reference.clone(), Arc::clone(record))?;
     }
     apply_mutation_bundle_cow(&base, schemas, now, core_exists, requests)
 }
 
+/// Applies `requests` to `next`, returning the changes and, when `next` is a
+/// persistent store, the encodings it computed for them.
 fn apply_mutation_bundle_in_place<R, N>(
     records: &R,
     next: &mut N,
@@ -2155,7 +2568,7 @@ fn apply_mutation_bundle_in_place<R, N>(
     now: SimTime,
     _core_exists: &dyn Fn(&EntityRef) -> bool,
     mut requests: Vec<DomainMutationRequest<'_>>,
-) -> Result<Vec<DomainRecordChange>, CanwuError>
+) -> Result<(Vec<DomainRecordChange>, Vec<RecordChangeEncodings>), CanwuError>
 where
     R: DomainRecordRead,
     N: DomainRecordWrite,
@@ -2178,7 +2591,8 @@ where
         .collect::<BTreeSet<_>>();
 
     let mut changes = Vec::with_capacity(requests.len());
-    for request in requests {
+    let mut change_encodings = Vec::new();
+    for mut request in requests {
         if !canonical_text(request.summary) {
             return invalid_record("domain record mutations require a canonical summary");
         }
@@ -2205,69 +2619,87 @@ where
             return invalid_record(format!("domain record kind {} is create-only", target.kind));
         }
 
-        let (operation, previous, current) = match request.mutation {
+        let (operation, previous, current, encodings) = match request.mutation {
             DomainRecordMutation::Create { record } => {
-                let mut record = record.clone();
-                record.canonicalize();
                 if next.contains_key(&record.reference) {
                     return Err(CanwuError::new(
                         ErrorCode::DuplicateDomainRecord,
                         format!("domain record {} already exists", record.reference),
                     ));
                 }
-                let current = DomainRecord {
-                    reference: record.reference,
+                let current = Arc::new(DomainRecord {
+                    reference: record.reference.clone(),
                     owner: owner.clone(),
                     class: schema.class,
                     version: 1,
                     lifecycle: DomainRecordLifecycle::Active,
-                    payload: record.payload,
-                    references: record.references,
-                };
-                next.insert(current.reference.clone(), current.clone());
-                (DomainRecordOperation::Created, None, current)
+                    payload: request
+                        .payload
+                        .take()
+                        .unwrap_or_else(|| record.payload.clone()),
+                    references: canonical_references(&record.references),
+                });
+                let encodings = next.insert(current.reference.clone(), Arc::clone(&current));
+                (DomainRecordOperation::Created, None, current, encodings)
             }
             DomainRecordMutation::Update {
                 record,
                 expected_version,
             } => {
-                let mut draft = record.clone();
-                draft.canonicalize();
-                let previous = require_mutable_record(next, target, *expected_version)?.clone();
-                let version = next_record_version(previous.version)?;
-                let current = DomainRecord {
-                    reference: draft.reference,
+                require_mutable_record(next, target, *expected_version)?;
+                let previous = next
+                    .get_shared(target)
+                    .expect("a mutable record was just found");
+                let current = Arc::new(DomainRecord {
+                    reference: record.reference.clone(),
                     owner: previous.owner.clone(),
                     class: previous.class,
-                    version,
+                    version: next_record_version(previous.version)?,
                     lifecycle: DomainRecordLifecycle::Active,
-                    payload: draft.payload,
-                    references: draft.references,
-                };
-                next.insert(current.reference.clone(), current.clone());
-                (DomainRecordOperation::Updated, Some(previous), current)
+                    payload: request
+                        .payload
+                        .take()
+                        .unwrap_or_else(|| record.payload.clone()),
+                    references: canonical_references(&record.references),
+                });
+                let encodings = next.insert(current.reference.clone(), Arc::clone(&current));
+                (
+                    DomainRecordOperation::Updated,
+                    Some(previous),
+                    current,
+                    encodings,
+                )
             }
             DomainRecordMutation::Retire {
                 record,
                 expected_version,
                 successor,
             } => {
-                let previous = require_mutable_record(next, record, *expected_version)?.clone();
+                require_mutable_record(next, record, *expected_version)?;
+                let previous = next
+                    .get_shared(record)
+                    .expect("a mutable record was just found");
                 validate_new_successor(record, successor.as_ref(), records, &created_records)?;
-                let mut current = previous.clone();
+                let mut current = previous.as_ref().clone();
                 current.version = next_record_version(previous.version)?;
                 current.lifecycle = DomainRecordLifecycle::Retired {
                     at: now,
                     successor: successor.clone(),
                 };
-                next.insert(record.clone(), current.clone());
-                (DomainRecordOperation::Retired, Some(previous), current)
+                let current = Arc::new(current);
+                let encodings = next.insert(record.clone(), Arc::clone(&current));
+                (
+                    DomainRecordOperation::Retired,
+                    Some(previous),
+                    current,
+                    encodings,
+                )
             }
             DomainRecordMutation::Delete {
                 record,
                 expected_version,
             } => {
-                let previous = next.get(record).ok_or_else(|| {
+                let previous = next.get_shared(record).ok_or_else(|| {
                     CanwuError::new(
                         ErrorCode::DomainRecordNotFound,
                         format!("domain record {record} was not found"),
@@ -2283,13 +2715,18 @@ where
                 if !matches!(previous.lifecycle, DomainRecordLifecycle::Retired { .. }) {
                     return invalid_record("domain records must be retired before deletion");
                 }
-                let previous = previous.clone();
-                let mut current = previous.clone();
+                let mut current = previous.as_ref().clone();
                 current.version = next_record_version(previous.version)?;
                 current.lifecycle = DomainRecordLifecycle::Deleted { at: now };
                 current.references.clear();
-                next.insert(record.clone(), current.clone());
-                (DomainRecordOperation::Deleted, Some(previous), current)
+                let current = Arc::new(current);
+                let encodings = next.insert(record.clone(), Arc::clone(&current));
+                (
+                    DomainRecordOperation::Deleted,
+                    Some(previous),
+                    current,
+                    encodings,
+                )
             }
         };
         changes.push(DomainRecordChange {
@@ -2301,8 +2738,9 @@ where
             visibility: request.visibility,
             summary: request.summary.to_owned(),
         });
+        change_encodings.extend(encodings);
     }
-    Ok(changes)
+    Ok((changes, change_encodings))
 }
 
 fn validate_affected_record_store(
@@ -2797,6 +3235,7 @@ mod tests {
 
     fn mutation_request(mutation: &DomainRecordMutation) -> DomainMutationRequest<'_> {
         DomainMutationRequest {
+            payload: None,
             plugin: "fixture",
             system: "fixture-system",
             visibility: StateVisibility::NextBoundary,
@@ -2929,7 +3368,11 @@ mod tests {
             record: DomainRecordDraft::new(first_ref.clone(), json!("changed")),
             expected_version: 1,
         };
-        let (updated, changes) = apply_mutation_bundle_cow(
+        let AppliedRecordBundle {
+            records: updated,
+            changes,
+            ..
+        } = apply_mutation_bundle_cow(
             &store,
             &schemas,
             SimTime::EPOCH,
@@ -2975,7 +3418,7 @@ mod tests {
         let mut first_overlay = store.get(&first_ref).unwrap().clone();
         first_overlay.version = 2;
         first_overlay.payload = json!("first-overlay");
-        let overlay = BTreeMap::from([(first_ref.clone(), first_overlay)]);
+        let overlay = BTreeMap::from([(first_ref.clone(), Arc::new(first_overlay))]);
         let schema = DomainRecordSchema::new(kind.clone(), DomainRecordClass::Record);
         let schemas = BTreeMap::from([(kind, ("fixture".to_owned(), schema))]);
         let update = DomainRecordMutation::Update {
@@ -2983,7 +3426,11 @@ mod tests {
             expected_version: 1,
         };
 
-        let (updated, changes) = apply_mutation_bundle_cow_with_overlay(
+        let AppliedRecordBundle {
+            records: updated,
+            changes,
+            ..
+        } = apply_mutation_bundle_cow_with_overlay(
             &store,
             &overlay,
             &schemas,

@@ -452,6 +452,7 @@ pub(super) fn apply_verified_owner_authorized_commit(
                 .mutations
                 .iter()
                 .map(|change| records::DomainMutationRequest {
+                    payload: None,
                     plugin: proposal.plugin.as_str(),
                     system: OWNER_AUTHORIZED_MAINTENANCE_SYSTEM,
                     visibility: change.visibility,
@@ -467,6 +468,7 @@ pub(super) fn apply_verified_owner_authorized_commit(
         core_exists,
         mutations,
     )
+    .map(|applied| (applied.records, applied.changes))
 }
 
 fn validate_verified_commit_authorization(

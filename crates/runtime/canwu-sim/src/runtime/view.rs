@@ -14,6 +14,7 @@ use super::{
     validation,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 pub(super) enum SimulationViewState<'a> {
     Runtime(&'a RuntimeState),
@@ -64,8 +65,8 @@ pub struct SimulationView<'a> {
     pub(super) ingress_plugin: Option<&'a str>,
     pub(super) component_overlay: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
     pub(super) proposed_components: Option<&'a BTreeMap<PluginComponentKey, PluginComponentRecord>>,
-    pub(super) record_overlay: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
-    pub(super) proposed_records: Option<&'a BTreeMap<DomainRecordRef, DomainRecord>>,
+    pub(super) record_overlay: Option<&'a super::records::DomainRecordOverlay>,
+    pub(super) proposed_records: Option<&'a super::records::DomainRecordOverlay>,
     pub(super) boundary_id: Option<BoundaryId>,
     pub(super) proposal_evidence: Option<&'a BTreeSet<EvidenceRef>>,
     pub(super) knowledge_overlay:
@@ -792,7 +793,7 @@ impl SimulationView<'_> {
         self.require_domain_record_read(reference)?;
         Ok(self
             .record_overlay
-            .and_then(|overlay| overlay.get(reference))
+            .and_then(|overlay| overlay.get(reference).map(Arc::as_ref))
             .or_else(|| self.state.current().domain_records.get(reference)))
     }
 
@@ -810,7 +811,7 @@ impl SimulationView<'_> {
         self.require_read(&records::record_state_key(&reference.kind))?;
         Ok(self
             .proposed_records
-            .and_then(|records| records.get(reference)))
+            .and_then(|records| records.get(reference).map(Arc::as_ref)))
     }
 
     pub fn proposed_typed_domain_record<T: DomainRecordType>(
@@ -933,7 +934,7 @@ impl SimulationView<'_> {
         self.require_domain_record_read(&reference.record)?;
         let current = self
             .record_overlay
-            .and_then(|overlay| overlay.get(&reference.record))
+            .and_then(|overlay| overlay.get(&reference.record).map(Arc::as_ref))
             .or_else(|| self.state.current().domain_records.get(&reference.record));
         Ok(
             current.is_some_and(|record| record.version == reference.version)
@@ -1017,7 +1018,7 @@ impl SimulationView<'_> {
                     self.record_overlay
                         .and_then(|records| records.get(&reference.record))
                 })
-                .cloned());
+                .map(|record| record.as_ref().clone()));
         }
         Ok(retained_domain_record_version(
             self.state.runtime(),
@@ -1056,7 +1057,7 @@ impl SimulationView<'_> {
                     .filter(|record| record.version == reference.version)
             })
         {
-            return Ok(Some((record.clone(), self.time())));
+            return Ok(Some((record.as_ref().clone(), self.time())));
         }
         let runtime = self.state.runtime();
         if !matches!(

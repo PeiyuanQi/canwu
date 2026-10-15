@@ -169,7 +169,10 @@ pub(super) struct BoundaryTransactionCheckpoint {
     /// Shares structure with the live index, so the capture copies nothing.
     keyed_draws: super::random::KeyedDrawIndex,
     plugin_registration_closed: bool,
-    current_domain_record_versions: BTreeMap<DomainRecordRef, super::CurrentDomainRecordVersion>,
+    current_domain_record_versions: im::OrdMap<
+        std::sync::Arc<DomainRecordRef>,
+        std::sync::Arc<super::CurrentDomainRecordVersion>,
+    >,
     checkpoint_hash: String,
     commitment_roots: Option<CommitmentRoots>,
     commitment_cache: Option<RuntimeCommitmentCache>,

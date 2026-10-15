@@ -175,14 +175,16 @@ fn current_record_version_is_rebuilt_and_fails_closed_on_cache_corruption() {
         Some(exact.clone())
     );
 
-    simulation
-        .state
-        .metadata
-        .current_domain_record_versions
-        .get_mut(&same_boundary_record_ref())
-        .expect("cached provenance")
-        .version
-        .version = 1;
+    std::sync::Arc::make_mut(
+        simulation
+            .state
+            .metadata
+            .current_domain_record_versions
+            .get_mut(&same_boundary_record_ref())
+            .expect("cached provenance"),
+    )
+    .version
+    .version = 1;
     let error = simulation
         .current_domain_record_version(&same_boundary_record_ref())
         .expect_err("a corrupted provenance index must fail closed");
@@ -1371,5 +1373,115 @@ fn insert_query_fixture(
             payload: Value::Null,
             references: Vec::new(),
         },
+    );
+}
+
+/// The boundary hash commits to every byte of both versions each record
+/// change names, through their encoding digests, and the store's encodings
+/// give the hash that load validation recomputes from the journal.
+#[test]
+fn boundary_hash_commits_to_both_versions_of_each_record_change() {
+    let (mut simulation, _) = Simulation::demo(73).expect("demo should initialize");
+    simulation
+        .settle_boundary(BoundaryRequest::at(SimTime::from_minutes(60)))
+        .expect("boundary should settle");
+    let mut boundary = simulation
+        .boundaries()
+        .last()
+        .expect("a settled boundary")
+        .clone();
+    let reference = DomainRecordRef::new("fixture.boundary-hash", "ledger", "one");
+    let version = |version: u64, balance: u64| {
+        std::sync::Arc::new(DomainRecord {
+            reference: reference.clone(),
+            owner: "fixture".to_owned(),
+            class: DomainRecordClass::Record,
+            version,
+            lifecycle: DomainRecordLifecycle::Active,
+            payload: serde_json::json!({ "balance": balance }),
+            references: Vec::new(),
+        })
+    };
+    boundary.record_changes = vec![DomainRecordChange {
+        plugin: "fixture".to_owned(),
+        system: "ledger".to_owned(),
+        operation: DomainRecordOperation::Updated,
+        previous: Some(version(1, 10)),
+        current: version(2, 20),
+        visibility: StateVisibility::SameBoundary,
+        summary: "Posted".to_owned(),
+    }];
+    let hash = |boundary: &BoundaryRecord| {
+        compute_boundary_hash(boundary, None).expect("boundary evidence should hash")
+    };
+    let committed = hash(&boundary);
+    let encodings = boundary
+        .record_changes
+        .iter()
+        .map(crate::runtime::records::RecordChangeEncodings::of)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("encode both versions");
+    assert_eq!(
+        compute_boundary_hash(&boundary, Some(&encodings)).expect("hash with encodings"),
+        committed
+    );
+
+    let mut altered = boundary.clone();
+    std::sync::Arc::make_mut(
+        altered.record_changes[0]
+            .previous
+            .as_mut()
+            .expect("previous"),
+    )
+    .payload = serde_json::json!({ "balance": 11 });
+    assert_ne!(
+        hash(&altered),
+        committed,
+        "the previous version is committed"
+    );
+
+    let mut altered = boundary.clone();
+    std::sync::Arc::make_mut(&mut altered.record_changes[0].current).payload =
+        serde_json::json!({ "balance": 21 });
+    assert_ne!(
+        hash(&altered),
+        committed,
+        "the current version is committed"
+    );
+
+    let mut altered = boundary.clone();
+    altered.record_changes[0].previous = None;
+    assert_ne!(
+        hash(&altered),
+        committed,
+        "the absence of a previous version is committed"
+    );
+
+    // A deletion keeps the retired version as its previous one; it is
+    // committed as well.
+    let mut deleted = boundary.clone();
+    let change = &mut deleted.record_changes[0];
+    change.operation = DomainRecordOperation::Deleted;
+    std::sync::Arc::make_mut(change.previous.as_mut().expect("previous")).lifecycle =
+        DomainRecordLifecycle::Retired {
+            at: SimTime::EPOCH,
+            successor: None,
+        };
+    std::sync::Arc::make_mut(&mut change.current).lifecycle = DomainRecordLifecycle::Deleted {
+        at: SimTime::from_minutes(60),
+    };
+    let deleted_hash = hash(&deleted);
+    assert_ne!(deleted_hash, committed);
+    std::sync::Arc::make_mut(
+        deleted.record_changes[0]
+            .previous
+            .as_mut()
+            .expect("previous"),
+    )
+    .payload = serde_json::json!({ "balance": 12 });
+    assert_ne!(
+        hash(&deleted),
+        deleted_hash,
+        "a deleted record's last version is committed"
     );
 }

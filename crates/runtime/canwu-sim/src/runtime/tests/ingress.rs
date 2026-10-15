@@ -129,8 +129,9 @@ fn canonical_ingress_orders_commands_packets_and_calendar_work() {
     let mut altered_boundary = boundary.clone();
     altered_boundary.admitted_ingress.pop();
     assert_ne!(
-        compute_boundary_hash(boundary).expect("boundary evidence should hash"),
-        compute_boundary_hash(&altered_boundary).expect("altered boundary evidence should hash"),
+        compute_boundary_hash(boundary, None).expect("boundary evidence should hash"),
+        compute_boundary_hash(&altered_boundary, None)
+            .expect("altered boundary evidence should hash"),
         "canonical admission evidence must be committed by the boundary chain",
     );
     assert_eq!(boundary.cadences, vec![SystemCadence::Daily]);
@@ -484,9 +485,10 @@ fn boundary_generated_zero_delay_ingress_waits_for_the_next_same_time_boundary()
     let mut altered_boundary = simulation.boundaries()[0].clone();
     altered_boundary.generated_ingress.clear();
     assert_ne!(
-        compute_boundary_hash(&simulation.boundaries()[0])
+        compute_boundary_hash(&simulation.boundaries()[0], None)
             .expect("generated ingress evidence should hash"),
-        compute_boundary_hash(&altered_boundary).expect("altered generation evidence should hash"),
+        compute_boundary_hash(&altered_boundary, None)
+            .expect("altered generation evidence should hash"),
         "generated ingress evidence must be committed by the boundary chain",
     );
     assert!(

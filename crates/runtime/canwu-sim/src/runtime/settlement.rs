@@ -10,23 +10,24 @@ use super::{
     BoundaryRequest, BoundaryStateHashFormat, BoundarySystemContract,
     BoundaryTransactionCheckpoint, CanwuError, CauseRef, Command, CommandEnvelope, CommandIngress,
     CommandRequest, CommitmentDomains, DecisionAction, DecisionIngressRequest, DecisionMutation,
-    DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage, DomainRecord,
-    DomainRecordChange, DomainRecordRef, DomainRecordVersionSource, EntityRef, ErrorCode,
-    EventKind, EvidenceRef, GENESIS_BOUNDARY_HASH, HashSet, IngressCancellationAuthority,
-    IngressPayload, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, PluginComponentKey,
+    DecisionOutcome, DecisionPolicyKind, DecisionRandomEvidence, DecisionStage, DomainRecordChange,
+    DomainRecordMutation, DomainRecordVersionSource, EntityRef, ErrorCode, EventKind, EvidenceRef,
+    GENESIS_BOUNDARY_HASH, HashSet, IngressCancellationAuthority, IngressPayload,
+    KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId, PluginComponentKey,
     PluginComponentRecord, PluginRegistry, PolicyDecision, RandomDrawAddress, RandomDrawOutcome,
     RandomOperationTarget, RefCell, ReservationAllocation, ReservationDisposition,
     ReservationOffer, ReservationOfferRecord, ReservationPoolKey, ReservationRef,
     ReservationRequest, ReservationRequestRecord, RunConfigurationSnapshot, RuntimeCurrentState,
     RuntimeState, ScheduleKey, ScheduledAction, SimTime, Simulation, SimulationView,
-    SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective, canonical_hash,
-    canonical_text, catch_unwind, claim_counter, component_key, compute_boundary_hash,
-    invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
+    SimulationViewState, StateKey, StateVisibility, SystemCadence, SystemDirective, Value,
+    canonical_hash, canonical_text, catch_unwind, claim_counter, component_key,
+    compute_boundary_hash, invalid_snapshot_error, is_domain_record_state, proposal_entity_exists,
     proposal_entity_identity_exists, random, record_change_affected_entities, records,
     runtime_current_entity_exists, runtime_entity_exists,
     runtime_entity_exists_with_record_overlay, runtime_entity_identity_exists,
     validate_domain_dependents_with_records, validate_runtime_domain_dependents,
 };
+use std::sync::Arc;
 
 impl Simulation {
     pub fn settle_boundary(
@@ -300,6 +301,9 @@ impl Simulation {
         let mut candidate_overlay = BTreeMap::new();
         let mut visible_record_overlay = BTreeMap::new();
         let mut candidate_record_overlay = BTreeMap::new();
+        // The record stages phase 7 and phase 10 prepared for their commits.
+        let mut prepared_ordinary_records = None;
+        let mut prepared_transition_records = None;
         let mut visible_knowledge_overlay = BTreeMap::new();
         let mut pending_knowledge_changes = Vec::new();
         let mut knowledge_correlations = BTreeSet::new();
@@ -340,6 +344,9 @@ impl Simulation {
                 event: event.id,
                 kind: BoundaryEmissionKind::RecordChange { change_index },
             });
+            evidence
+                .record_change_encodings
+                .push(records::RecordChangeEncodings::of(&change)?);
             evidence.record_changes.push(change);
         }
         for phase in BoundaryPhase::ALL {
@@ -351,6 +358,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
+                        prepared_ordinary_records.take(),
                         &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
@@ -369,6 +377,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
+                        prepared_transition_records.take(),
                         &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
@@ -581,7 +590,7 @@ impl Simulation {
             }
             transition_ledger.close_phase();
 
-            let (knowledge_directives, phase_directives) =
+            let (knowledge_directives, mut phase_directives) =
                 partition_knowledge_directives(phase_directives);
             if !knowledge_directives.is_empty()
                 && !matches!(
@@ -630,22 +639,51 @@ impl Simulation {
                         run_configuration: &self.state.metadata.run_configuration,
                         schemas: &record_schemas,
                     };
-                    extend_boundary_record_candidate_overlay(
-                        &record_context,
-                        &mut candidate_record_overlay,
-                        &phase_directives,
-                    )?;
-                    extend_boundary_candidate_overlay(
-                        &boundary_snapshot,
-                        &candidate_record_overlay,
-                        &mut candidate_overlay,
-                        &phase_directives,
-                    )?;
-                    extend_boundary_record_overlay(
-                        &record_context,
-                        &mut visible_record_overlay,
-                        &phase_directives,
-                    )?;
+                    let prepared = if record_writes_are_same_boundary(&phase_directives)
+                        && candidate_record_overlay.is_empty()
+                        && visible_record_overlay.is_empty()
+                    {
+                        // Every record write is visible in this boundary, so
+                        // the candidate overlay would apply the same requests
+                        // to the same store as the visible overlay.
+                        let prepared = extend_boundary_record_overlay_taking_payloads(
+                            &record_context,
+                            &mut visible_record_overlay,
+                            &mut phase_directives,
+                        )?;
+                        candidate_record_overlay.clone_from(&visible_record_overlay);
+                        extend_boundary_candidate_overlay(
+                            &boundary_snapshot,
+                            &candidate_record_overlay,
+                            &mut candidate_overlay,
+                            &phase_directives,
+                        )?;
+                        prepared
+                    } else {
+                        extend_boundary_record_candidate_overlay(
+                            &record_context,
+                            &mut candidate_record_overlay,
+                            &phase_directives,
+                        )?;
+                        extend_boundary_candidate_overlay(
+                            &boundary_snapshot,
+                            &candidate_record_overlay,
+                            &mut candidate_overlay,
+                            &phase_directives,
+                        )?;
+                        extend_boundary_record_overlay(
+                            &record_context,
+                            &mut visible_record_overlay,
+                            &phase_directives,
+                        )?
+                    };
+                    // The phase-9 commit reuses this stage, and the payloads of
+                    // its drafts have moved into it. No step between here and
+                    // that commit may change record or entity state or read
+                    // the payloads of these phase-7 record directives.
+                    if prepared.is_some() {
+                        prepared_ordinary_records = prepared;
+                    }
                     extend_boundary_overlay(
                         &boundary_snapshot,
                         &visible_record_overlay,
@@ -662,11 +700,16 @@ impl Simulation {
                         run_configuration: &self.state.metadata.run_configuration,
                         schemas: &record_schemas,
                     };
-                    extend_boundary_record_overlay(
+                    let prepared = extend_boundary_record_overlay(
                         &record_context,
                         &mut visible_record_overlay,
                         &phase_directives,
                     )?;
+                    // The phase-11 commit reuses this stage while the store keeps
+                    // the roots it started from; payloads were not moved.
+                    if prepared.is_some() {
+                        prepared_transition_records = prepared;
+                    }
                     extend_boundary_overlay(
                         &self.state.current,
                         &visible_record_overlay,
@@ -692,6 +735,7 @@ impl Simulation {
                         boundary_id,
                         correlation_id,
                         same_boundary,
+                        None,
                         &mut evidence,
                     )?;
                     deferred.extend(next_boundary);
@@ -706,7 +750,7 @@ impl Simulation {
             }
         }
 
-        self.apply_boundary_stage(boundary_id, correlation_id, deferred, &mut evidence)?;
+        self.apply_boundary_stage(boundary_id, correlation_id, deferred, None, &mut evidence)?;
         self.commit_knowledge_publications(
             boundary_id,
             correlation_id,
@@ -716,6 +760,7 @@ impl Simulation {
         let PendingBoundaryEvidence {
             changes,
             record_changes,
+            record_change_encodings,
             emissions,
             mut generated_ingress,
             random_decisions,
@@ -804,6 +849,10 @@ impl Simulation {
             } else {
                 None
             };
+        // The receipt counts the changes; the boundary record owns them, so
+        // no record or component value is copied to journal it.
+        let change_count = changes.len();
+        let record_change_count = record_changes.len();
         let mut record = BoundaryRecord {
             id: boundary_id,
             at: request.at,
@@ -818,8 +867,8 @@ impl Simulation {
             reservation_requests: reservation_request_records,
             allocations: allocation_records.clone(),
             random_draws: random_draws.clone(),
-            changes: changes.clone(),
-            record_changes: record_changes.clone(),
+            changes,
+            record_changes,
             knowledge_changes: pending_knowledge_changes.clone(),
             maintenance_changes,
             maintenance_terminal_root,
@@ -833,7 +882,7 @@ impl Simulation {
             previous_hash,
             hash: String::new(),
         };
-        record.hash = compute_boundary_hash(&record)?;
+        record.hash = compute_boundary_hash(&record, Some(&record_change_encodings))?;
         let boundary_hash = record.hash.clone();
         self.state.evidence.boundaries.push(record);
         super::boundary_window::record_settled_boundary(
@@ -859,8 +908,8 @@ impl Simulation {
                 .collect(),
             random_draws,
             boundary_hash,
-            change_count: changes.len(),
-            record_change_count: record_changes.len(),
+            change_count,
+            record_change_count,
             knowledge_batch_count: pending_knowledge_changes.len(),
             knowledge_record_count: pending_knowledge_changes
                 .iter()
@@ -902,6 +951,7 @@ impl Simulation {
         ledger.check_expected_post(&|record| {
             candidate
                 .get(record)
+                .map(std::sync::Arc::as_ref)
                 .or_else(|| self.state.current.domain_records.get(record))
                 .map(|record| record.version)
         })
@@ -912,6 +962,7 @@ impl Simulation {
         boundary_id: BoundaryId,
         correlation_id: u64,
         directives: Vec<StagedBoundaryDirective>,
+        prepared: Option<PreparedRecordStage>,
         evidence: &mut PendingBoundaryEvidence,
     ) -> Result<(), CanwuError> {
         let random_decision_count = directives
@@ -936,6 +987,7 @@ impl Simulation {
         }
         let changes = &mut evidence.changes;
         let record_changes = &mut evidence.record_changes;
+        let record_change_encodings = &mut evidence.record_change_encodings;
         let emissions = &mut evidence.emissions;
         let generated_ingress = &mut evidence.generated_ingress;
         let mutation_requests: Vec<_> = directives
@@ -943,6 +995,7 @@ impl Simulation {
             .filter_map(|staged| match &staged.directive {
                 BoundaryDirective::MutateRecord { mutation, summary } => {
                     Some(records::DomainMutationRequest {
+                        payload: None,
                         plugin: &staged.plugin,
                         system: &staged.system,
                         visibility: staged.visibility,
@@ -966,15 +1019,62 @@ impl Simulation {
             .collect();
         let mut stage_record_changes = BTreeMap::new();
         if !mutation_requests.is_empty() {
-            let (next_records, applied) = records::apply_mutation_bundle_cow(
-                &self.state.current.domain_records,
-                &self.plugins.record_schemas,
-                self.state.scheduler.now,
-                &|entity| runtime_entity_exists(&self.state, entity),
-                mutation_requests,
-            )?;
+            let prepared = match prepared {
+                Some(prepared)
+                    if prepared
+                        .prepared_for(&self.state.current.domain_records, &mutation_requests) =>
+                {
+                    Some(prepared)
+                }
+                // The drafts no longer hold their payloads, so the stage
+                // cannot be applied again; an engine invariant failed.
+                Some(prepared) if prepared.payloads_taken => {
+                    return Err(CanwuError::new(
+                        ErrorCode::InvalidBoundary,
+                        "a prepared domain-record stage no longer matches its commit",
+                    ));
+                }
+                Some(_) | None => None,
+            };
+            let applied = if let Some(prepared) = prepared {
+                #[cfg(debug_assertions)]
+                {
+                    let mut requests = mutation_requests;
+                    for request in &mut requests {
+                        request.payload = prepared
+                            .taken_payloads
+                            .get(request.mutation.target())
+                            .cloned();
+                    }
+                    let expected = records::apply_mutation_bundle_cow(
+                        &self.state.current.domain_records,
+                        &self.plugins.record_schemas,
+                        self.state.scheduler.now,
+                        &|entity| runtime_entity_exists(&self.state, entity),
+                        requests,
+                    )?;
+                    assert_eq!(
+                        expected.records.roots(),
+                        prepared.applied.records.roots(),
+                        "a prepared record stage must equal its commit"
+                    );
+                    assert!(
+                        expected.changes == prepared.applied.changes,
+                        "a prepared record stage must equal its commit"
+                    );
+                }
+                prepared.applied
+            } else {
+                records::apply_mutation_bundle_cow(
+                    &self.state.current.domain_records,
+                    &self.plugins.record_schemas,
+                    self.state.scheduler.now,
+                    &|entity| runtime_entity_exists(&self.state, entity),
+                    mutation_requests,
+                )?
+            };
             let first_index = record_changes.len();
-            for (offset, change) in applied.iter().enumerate() {
+            for (offset, change) in applied.changes.iter().enumerate() {
                 let index = first_index.checked_add(offset).ok_or_else(|| {
                     CanwuError::new(
                         ErrorCode::IdentifierExhausted,
@@ -988,12 +1088,16 @@ impl Simulation {
                     )
                 })?;
                 index_current_domain_record_version(&mut self.state, boundary_id, index, change);
-                stage_record_changes
-                    .insert(change.current.reference.clone(), (index, change.clone()));
+                // The change itself is read back from the evidence below.
+                stage_record_changes.insert(
+                    change.current.reference.clone(),
+                    (index, first_index + offset),
+                );
             }
             self.invalidate_commitments(CommitmentDomains::DOMAIN_RECORDS);
-            self.state.current.domain_records = next_records;
-            record_changes.extend(applied);
+            self.state.current.domain_records = applied.records;
+            record_changes.extend(applied.changes);
+            record_change_encodings.extend(applied.encodings);
         }
 
         for staged in &directives {
@@ -1091,13 +1195,15 @@ impl Simulation {
                     });
                 }
                 BoundaryDirective::MutateRecord { mutation, .. } => {
-                    let Some((change_index, change)) = stage_record_changes.get(mutation.target())
+                    let Some((change_index, position)) =
+                        stage_record_changes.get(mutation.target())
                     else {
                         return Err(CanwuError::new(
                             ErrorCode::InvalidBoundary,
                             "record mutation is missing its committed change evidence",
                         ));
                     };
+                    let change = &record_changes[*position];
                     let event = self.append_event(
                         EventKind::plugin(staged.plugin.clone(), change.operation.event_type()),
                         record_change_affected_entities(change),
@@ -1817,9 +1923,18 @@ fn index_current_domain_record_version(
     // Records change only while their boundary settles, when `now` is that
     // boundary's committed time.
     let established_at = state.scheduler.now;
-    state.metadata.current_domain_record_versions.insert(
-        change.current.reference.clone(),
-        super::CurrentDomainRecordVersion {
+    let versions = &mut state.metadata.current_domain_record_versions;
+    // An updated record keeps its shared key, so the persistent map copies no
+    // key text along the path it changes.
+    let key = versions
+        .get_key_value(&change.current.reference)
+        .map_or_else(
+            || Arc::new(change.current.reference.clone()),
+            |(key, _)| Arc::clone(key),
+        );
+    versions.insert(
+        key,
+        Arc::new(super::CurrentDomainRecordVersion {
             version: super::DomainRecordVersionRef {
                 record: change.current.reference.clone(),
                 version: change.current.version,
@@ -1829,7 +1944,7 @@ fn index_current_domain_record_version(
                 },
             },
             established_at,
-        },
+        }),
     );
 }
 
@@ -1863,6 +1978,9 @@ struct StagedBoundaryDirective {
 struct PendingBoundaryEvidence {
     changes: Vec<BoundaryChange>,
     record_changes: Vec<DomainRecordChange>,
+    /// Aligned with `record_changes`: the encodings the boundary hash commits
+    /// to, as the record store computed them.
+    record_change_encodings: Vec<records::RecordChangeEncodings>,
     emissions: Vec<BoundaryEmission>,
     generated_ingress: Vec<BoundaryIngressGeneration>,
     random_decisions: Vec<PendingRandomDecisionResolution>,
@@ -1944,7 +2062,7 @@ fn validate_boundary_proposal(
     boundary_id: BoundaryId,
     pending_evidence: &PendingBoundaryEvidence,
     plugins: &PluginRegistry,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     knowledge_overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
     proposal: &BoundaryProposal,
     pending_random_draws: &[random::PendingRandomDraw],
@@ -2784,7 +2902,7 @@ fn validate_reservation_pool(
 
 fn extend_boundary_overlay(
     current: &RuntimeCurrentState,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
@@ -2793,7 +2911,7 @@ fn extend_boundary_overlay(
 
 fn extend_boundary_candidate_overlay(
     current: &RuntimeCurrentState,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
@@ -2802,7 +2920,7 @@ fn extend_boundary_candidate_overlay(
 
 fn extend_boundary_component_overlay(
     current: &RuntimeCurrentState,
-    record_overlay: &BTreeMap<DomainRecordRef, DomainRecord>,
+    record_overlay: &records::DomainRecordOverlay,
     overlay: &mut BTreeMap<PluginComponentKey, PluginComponentRecord>,
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
@@ -2848,18 +2966,28 @@ fn extend_boundary_component_overlay(
 
 fn extend_boundary_record_overlay(
     context: &BoundaryRecordOverlayContext<'_>,
-    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    overlay: &mut records::DomainRecordOverlay,
     directives: &[StagedBoundaryDirective],
-) -> Result<(), CanwuError> {
+) -> Result<Option<PreparedRecordStage>, CanwuError> {
     extend_boundary_domain_record_overlay(context, overlay, directives, false)
 }
 
 fn extend_boundary_record_candidate_overlay(
     context: &BoundaryRecordOverlayContext<'_>,
-    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    overlay: &mut records::DomainRecordOverlay,
     directives: &[StagedBoundaryDirective],
 ) -> Result<(), CanwuError> {
-    extend_boundary_domain_record_overlay(context, overlay, directives, true)
+    extend_boundary_domain_record_overlay(context, overlay, directives, true).map(|_| ())
+}
+
+/// Whether a phase's record writes are all same-boundary writes, so its
+/// candidate overlay (every write) and visible overlay (same-boundary writes)
+/// apply the same requests.
+fn record_writes_are_same_boundary(directives: &[StagedBoundaryDirective]) -> bool {
+    directives.iter().all(|staged| {
+        staged.visibility == StateVisibility::SameBoundary
+            || !matches!(staged.directive, BoundaryDirective::MutateRecord { .. })
+    })
 }
 
 struct BoundaryRecordOverlayContext<'a> {
@@ -2870,45 +2998,152 @@ struct BoundaryRecordOverlayContext<'a> {
     schemas: &'a records::DomainRecordSchemas,
 }
 
+/// One stage's record mutations applied to the committed store while the
+/// stage's visible overlay was built.
+///
+/// The commit of the same stage applies the same requests to the store, so
+/// when the store still has the roots the preparation started from, the
+/// commit takes this result instead of applying, validating, and hashing
+/// every write a second time. Applying a bundle is a pure function of the
+/// store and the requests, so the reuse cannot change the outcome; a debug
+/// build recomputes the commit and asserts that it does not.
+pub(super) struct PreparedRecordStage {
+    base_roots: records::DomainRecordCommitmentRoots,
+    applied: records::AppliedRecordBundle,
+    /// Whether the preparation moved the drafts' payloads out of their
+    /// directives, so that the commit cannot apply them again.
+    payloads_taken: bool,
+    /// Copies of the moved payloads, which a debug build uses to recompute
+    /// the commit.
+    #[cfg(debug_assertions)]
+    taken_payloads: BTreeMap<super::DomainRecordRef, Value>,
+}
+
+impl PreparedRecordStage {
+    /// Whether this preparation applied exactly `requests` to a store with
+    /// `current`'s roots.
+    fn prepared_for(
+        &self,
+        current: &records::PersistentDomainRecordStore,
+        requests: &[records::DomainMutationRequest<'_>],
+    ) -> bool {
+        if current.roots() != &self.base_roots || requests.len() != self.applied.changes.len() {
+            return false;
+        }
+        let mut requests = requests.iter().collect::<Vec<_>>();
+        requests.sort_by(|left, right| left.mutation.target().cmp(right.mutation.target()));
+        requests
+            .iter()
+            .zip(&self.applied.changes)
+            .all(|(request, change)| {
+                request.mutation.target() == &change.current.reference
+                    && request.plugin == change.plugin
+                    && request.system == change.system
+                    && request.summary == change.summary
+                    && request.visibility == change.visibility
+            })
+    }
+}
+
+fn record_mutation_request(
+    staged: &StagedBoundaryDirective,
+    payload: Option<Value>,
+) -> Option<records::DomainMutationRequest<'_>> {
+    match &staged.directive {
+        BoundaryDirective::MutateRecord { mutation, summary } => {
+            Some(records::DomainMutationRequest {
+                payload,
+                plugin: &staged.plugin,
+                system: &staged.system,
+                visibility: staged.visibility,
+                mutation,
+                summary,
+            })
+        }
+        BoundaryDirective::SetComponent { .. }
+        | BoundaryDirective::Emit { .. }
+        | BoundaryDirective::ScheduleIngress { .. }
+        | BoundaryDirective::SchedulePluginIngress { .. }
+        | BoundaryDirective::ResolveDecisionRandomly { .. }
+        | BoundaryDirective::PublishKnowledge { .. }
+        | BoundaryDirective::SetPersonAvailability { .. }
+        | BoundaryDirective::CreatePerson { .. }
+        | BoundaryDirective::CancelPluginIngress { .. }
+        | BoundaryDirective::RecordEvaluationTrace { .. }
+        | BoundaryDirective::RegisterTransitionManifest { .. }
+        | BoundaryDirective::StageTransitionWrite { .. } => None,
+    }
+}
+
 fn extend_boundary_domain_record_overlay(
     context: &BoundaryRecordOverlayContext<'_>,
-    overlay: &mut BTreeMap<DomainRecordRef, DomainRecord>,
+    overlay: &mut records::DomainRecordOverlay,
     directives: &[StagedBoundaryDirective],
     include_next_boundary: bool,
-) -> Result<(), CanwuError> {
-    let requests: Vec<_> = directives
+) -> Result<Option<PreparedRecordStage>, CanwuError> {
+    let requests = directives
         .iter()
         .filter(|staged| {
             include_next_boundary || staged.visibility == StateVisibility::SameBoundary
         })
-        .filter_map(|staged| match &staged.directive {
-            BoundaryDirective::MutateRecord { mutation, summary } => {
-                Some(records::DomainMutationRequest {
-                    plugin: &staged.plugin,
-                    system: &staged.system,
-                    visibility: staged.visibility,
-                    mutation,
-                    summary,
-                })
-            }
-            BoundaryDirective::SetComponent { .. }
-            | BoundaryDirective::Emit { .. }
-            | BoundaryDirective::ScheduleIngress { .. }
-            | BoundaryDirective::SchedulePluginIngress { .. }
-            | BoundaryDirective::ResolveDecisionRandomly { .. }
-            | BoundaryDirective::PublishKnowledge { .. }
-            | BoundaryDirective::SetPersonAvailability { .. }
-            | BoundaryDirective::CreatePerson { .. }
-            | BoundaryDirective::CancelPluginIngress { .. }
-            | BoundaryDirective::RecordEvaluationTrace { .. }
-            | BoundaryDirective::RegisterTransitionManifest { .. }
-            | BoundaryDirective::StageTransitionWrite { .. } => None,
+        .filter_map(|staged| record_mutation_request(staged, None))
+        .collect();
+    apply_boundary_record_overlay(context, overlay, requests, false)
+}
+
+/// Builds the visible overlay of a phase whose record writes are all
+/// same-boundary writes and prepares the phase's commit, moving each draft's
+/// payload into its record instead of copying it. Only the prepared commit
+/// may apply these directives afterwards. A debug build also keeps a copy of
+/// each payload, so that it can recompute the commit and compare.
+fn extend_boundary_record_overlay_taking_payloads(
+    context: &BoundaryRecordOverlayContext<'_>,
+    overlay: &mut records::DomainRecordOverlay,
+    directives: &mut [StagedBoundaryDirective],
+) -> Result<Option<PreparedRecordStage>, CanwuError> {
+    let take = overlay.is_empty();
+    #[cfg(debug_assertions)]
+    let mut taken_payloads = BTreeMap::new();
+    let requests = directives
+        .iter_mut()
+        .filter(|staged| staged.visibility == StateVisibility::SameBoundary)
+        .filter_map(|staged| {
+            let payload = match &mut staged.directive {
+                BoundaryDirective::MutateRecord {
+                    mutation:
+                        DomainRecordMutation::Create { record }
+                        | DomainRecordMutation::Update { record, .. },
+                    ..
+                } if take => {
+                    #[cfg(debug_assertions)]
+                    taken_payloads.insert(record.reference.clone(), record.payload.clone());
+                    Some(std::mem::take(&mut record.payload))
+                }
+                _ => None,
+            };
+            record_mutation_request(staged, payload)
         })
         .collect();
-    if requests.is_empty() {
-        return Ok(());
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut prepared = apply_boundary_record_overlay(context, overlay, requests, take)?;
+    #[cfg(debug_assertions)]
+    if let Some(prepared) = &mut prepared {
+        prepared.taken_payloads = taken_payloads;
     }
-    let (next, changes) = records::apply_mutation_bundle_cow_with_overlay(
+    Ok(prepared)
+}
+
+fn apply_boundary_record_overlay(
+    context: &BoundaryRecordOverlayContext<'_>,
+    overlay: &mut records::DomainRecordOverlay,
+    requests: Vec<records::DomainMutationRequest<'_>>,
+    payloads_taken: bool,
+) -> Result<Option<PreparedRecordStage>, CanwuError> {
+    if requests.is_empty() {
+        return Ok(None);
+    }
+    let prepares_commit = overlay.is_empty();
+    let applied = records::apply_mutation_bundle_cow_with_overlay(
         &context.current.domain_records,
         overlay,
         context.schemas,
@@ -2920,12 +3155,21 @@ fn extend_boundary_domain_record_overlay(
         &context.current.plugin_components,
         context.scheduled_actions,
         context.run_configuration,
-        &next,
+        &applied.records,
     )?;
-    for change in changes {
-        overlay.insert(change.current.reference.clone(), change.current);
+    for change in &applied.changes {
+        overlay.insert(
+            change.current.reference.clone(),
+            Arc::clone(&change.current),
+        );
     }
-    Ok(())
+    Ok(prepares_commit.then(|| PreparedRecordStage {
+        base_roots: context.current.domain_records.roots().clone(),
+        applied,
+        payloads_taken,
+        #[cfg(debug_assertions)]
+        taken_payloads: BTreeMap::new(),
+    }))
 }
 
 fn partition_boundary_visibility(

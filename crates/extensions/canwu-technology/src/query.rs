@@ -1515,9 +1515,10 @@ fn validate_operation_provenance(
             .iter()
             .filter(|change| change.plugin == crate::PLUGIN_NAME)
         {
-            state
-                .records
-                .insert(change.current.reference.clone(), change.current.clone());
+            state.records.insert(
+                change.current.reference.clone(),
+                change.current.as_ref().clone(),
+            );
         }
     }
     Ok(())
@@ -1600,7 +1601,7 @@ fn initial_technology_state(
             if let Some(previous) = &change.previous {
                 state
                     .records
-                    .insert(previous.reference.clone(), previous.clone());
+                    .insert(previous.reference.clone(), previous.as_ref().clone());
             } else {
                 state.records.remove(&change.current.reference);
             }
@@ -1751,8 +1752,8 @@ fn validate_reduced_changes(
                 DomainRecordOperation::Created
             };
             if change.operation != expected_operation
-                || change.previous != operation.previous
-                || change.current != *candidate
+                || change.previous.as_deref() != operation.previous.as_ref()
+                || *change.current != *candidate
                 || change.visibility != StateVisibility::SameBoundary
                 || change.summary != "Apply authority-checked technology record change"
             {
@@ -1781,7 +1782,7 @@ fn validate_reduced_changes(
             .ok_or_else(|| invalid("replayed technology operation mutation is unavailable"))?;
         if change.operation != DomainRecordOperation::Created
             || change.previous.is_some()
-            || change.current != expected
+            || *change.current != expected
             || change.visibility != StateVisibility::SameBoundary
             || change.summary != "Record terminal technology operation outcome"
         {
@@ -1961,7 +1962,7 @@ fn validate_finalizer_change(
         || change.operation != DomainRecordOperation::Updated
         || change.current.reference != consumed.record
         || change.current.version != consumed.version
-        || change.previous.as_ref() != Some(pending_record)
+        || change.previous.as_deref() != Some(pending_record)
         || pending.record != consumed.record
         || pending.version.checked_add(1) != Some(consumed.version)
     {
@@ -2538,7 +2539,7 @@ mod tests {
             system: APPLY_SYSTEM.to_owned(),
             operation: DomainRecordOperation::Created,
             previous: None,
-            current: record_from_draft(operation_draft(outcome).expect("operation draft")),
+            current: record_from_draft(operation_draft(outcome).expect("operation draft")).into(),
             visibility: StateVisibility::SameBoundary,
             summary: "Record terminal technology operation outcome".to_owned(),
         }
@@ -2608,7 +2609,7 @@ mod tests {
             system: APPLY_SYSTEM.to_owned(),
             operation: DomainRecordOperation::Created,
             previous: None,
-            current: candidate,
+            current: candidate.into(),
             visibility: StateVisibility::SameBoundary,
             summary: "Apply authority-checked technology record change".to_owned(),
         };
@@ -2618,17 +2619,19 @@ mod tests {
         );
 
         let mut status = operation_record_change.clone();
-        status.current.payload["status"] = serde_json::json!("rejected");
-        status.current.payload["result"] = serde_json::Value::Null;
-        status.current.payload["rejection_code"] = serde_json::json!("invalid_domain_record");
+        std::sync::Arc::make_mut(&mut status.current).payload["status"] =
+            serde_json::json!("rejected");
+        std::sync::Arc::make_mut(&mut status.current).payload["result"] = serde_json::Value::Null;
+        std::sync::Arc::make_mut(&mut status.current).payload["rejection_code"] =
+            serde_json::json!("invalid_domain_record");
         assert!(validate_reduced_changes(&[&result_change, &status], &reduced).is_err());
 
         let mut target = result_change.clone();
-        target.current.reference.id = "other-result".to_owned();
+        std::sync::Arc::make_mut(&mut target.current).reference.id = "other-result".to_owned();
         assert!(validate_reduced_changes(&[&target, &operation_record_change], &reduced).is_err());
 
         let mut cause = operation_record_change;
-        cause.current.payload["causes"] = serde_json::json!([{
+        std::sync::Arc::make_mut(&mut cause.current).payload["causes"] = serde_json::json!([{
             "type": "ingress",
             "value": 2
         }]);
@@ -2645,7 +2648,8 @@ mod tests {
             previous: None,
         }];
         let mut wrong_code = operation_change(&rejected);
-        wrong_code.current.payload["rejection_code"] = serde_json::json!("domain_record_not_found");
+        std::sync::Arc::make_mut(&mut wrong_code.current).payload["rejection_code"] =
+            serde_json::json!("domain_record_not_found");
         assert!(validate_reduced_changes(&[&wrong_code], &rejected_reduced).is_err());
     }
 

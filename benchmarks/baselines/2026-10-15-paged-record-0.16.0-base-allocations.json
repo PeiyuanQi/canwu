@@ -1,0 +1,282 @@
+{
+  "benchmark": "canwu-paged-records",
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [
+      "allocation-counting"
+    ],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "thread-local allocator calls and requested bytes during the operation; setup and post-measurement drops are excluded",
+    "elapsed_scope": "not collected in the allocation-instrumented build",
+    "idle_boundary": "one Daily boundary whose system proposes nothing, measured as the writes are",
+    "paged_prepare": "Canwu::prepare_paged_checkpoint into an empty page store, of a run whose store holds exactly the listed records",
+    "paged_restore": "Canwu::from_paged_checkpoint_and_journal_with_plugins from a store that holds the prepared pages",
+    "paged_samples": 1,
+    "records_per_filling_boundary": 4096,
+    "warmup_iterations": 1,
+    "write": "one Daily boundary that replaces one small record with a record whose payload text has the stated bytes, on a fork of the filled run, after one unmeasured boundary on that fork",
+    "write_payload_bytes": [
+      1024,
+      8192,
+      65536,
+      1048576
+    ],
+    "write_samples": 3,
+    "write_store_records": 65536
+  },
+  "metric_mode": "allocations",
+  "paged": [
+    {
+      "cases": [
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 208,
+              "allocated_bytes": 12049004,
+              "allocation_operations": 238,
+              "dealloc_calls": 190,
+              "deallocated_bytes": 9338656,
+              "net_retained_bytes_delta": 2710348,
+              "realloc_calls": 30
+            }
+          ],
+          "name": "paged_prepare",
+          "summary": {
+            "allocated_bytes_median": 12049004,
+            "allocation_operations_median": 238
+          }
+        },
+        {
+          "allocation_samples": [
+            {
+              "alloc_calls": 2659,
+              "allocated_bytes": 206901789,
+              "allocation_operations": 3066,
+              "dealloc_calls": 2417,
+              "deallocated_bytes": 204114672,
+              "net_retained_bytes_delta": 2787117,
+              "realloc_calls": 407
+            }
+          ],
+          "name": "paged_restore",
+          "summary": {
+            "allocated_bytes_median": 206901789,
+            "allocation_operations_median": 3066
+          }
+        }
+      ],
+      "delta_page_bytes": 2709356,
+      "delta_pages": 4,
+      "largest_page_bytes": 2701454,
+      "payload_bytes": [
+        900000
+      ]
+    },
+    {
+      "payload_bytes": [
+        1200000,
+        32000000
+      ],
+      "refused": {
+        "code": "InvalidArchive",
+        "message": "state page bytes exceed the bounded page limit"
+      }
+    }
+  ],
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "source": {
+    "content_hash": "fefc2f46bb79c7907a9bd3b97114933184c6516e84fc6ecedb8b743e18a133c2",
+    "label": "export of 12d4775 (integration base before the record-store change)"
+  },
+  "writes": [
+    {
+      "allocation_samples": [
+        {
+          "alloc_calls": 404330,
+          "allocated_bytes": 27705611,
+          "allocation_operations": 404355,
+          "dealloc_calls": 404324,
+          "deallocated_bytes": 27705336,
+          "net_retained_bytes_delta": 275,
+          "realloc_calls": 25
+        },
+        {
+          "alloc_calls": 404330,
+          "allocated_bytes": 27705611,
+          "allocation_operations": 404355,
+          "dealloc_calls": 404324,
+          "deallocated_bytes": 27705336,
+          "net_retained_bytes_delta": 275,
+          "realloc_calls": 25
+        },
+        {
+          "alloc_calls": 404330,
+          "allocated_bytes": 27705611,
+          "allocation_operations": 404355,
+          "dealloc_calls": 404324,
+          "deallocated_bytes": 27705336,
+          "net_retained_bytes_delta": 275,
+          "realloc_calls": 25
+        }
+      ],
+      "name": "idle_boundary",
+      "summary": {
+        "allocated_bytes_median": 27705611,
+        "allocation_operations_median": 404355
+      }
+    },
+    {
+      "allocation_samples": [
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 27947262,
+          "allocation_operations": 405220,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 27933461,
+          "net_retained_bytes_delta": 13801,
+          "realloc_calls": 181
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 27947262,
+          "allocation_operations": 405220,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 27933461,
+          "net_retained_bytes_delta": 13801,
+          "realloc_calls": 181
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 27947262,
+          "allocation_operations": 405220,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 27933461,
+          "net_retained_bytes_delta": 13801,
+          "realloc_calls": 181
+        }
+      ],
+      "name": "write_1024",
+      "summary": {
+        "allocated_bytes_median": 27947262,
+        "allocation_operations_median": 405220
+      }
+    },
+    {
+      "allocation_samples": [
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 28280321,
+          "allocation_operations": 405226,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 28252184,
+          "net_retained_bytes_delta": 28137,
+          "realloc_calls": 187
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 28280321,
+          "allocation_operations": 405226,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 28252184,
+          "net_retained_bytes_delta": 28137,
+          "realloc_calls": 187
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 28280321,
+          "allocation_operations": 405226,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 28252184,
+          "net_retained_bytes_delta": 28137,
+          "realloc_calls": 187
+        }
+      ],
+      "name": "write_8192",
+      "summary": {
+        "allocated_bytes_median": 28280321,
+        "allocation_operations_median": 405226
+      }
+    },
+    {
+      "allocation_samples": [
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 31147521,
+          "allocation_operations": 405235,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 31004696,
+          "net_retained_bytes_delta": 142825,
+          "realloc_calls": 196
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 31147521,
+          "allocation_operations": 405235,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 31004696,
+          "net_retained_bytes_delta": 142825,
+          "realloc_calls": 196
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 31147521,
+          "allocation_operations": 405235,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 31004696,
+          "net_retained_bytes_delta": 142825,
+          "realloc_calls": 196
+        }
+      ],
+      "name": "write_65536",
+      "summary": {
+        "allocated_bytes_median": 31147521,
+        "allocation_operations_median": 405235
+      }
+    },
+    {
+      "allocation_samples": [
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 80299521,
+          "allocation_operations": 405247,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 78190616,
+          "net_retained_bytes_delta": 2108905,
+          "realloc_calls": 208
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 80299521,
+          "allocation_operations": 405247,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 78190616,
+          "net_retained_bytes_delta": 2108905,
+          "realloc_calls": 208
+        },
+        {
+          "alloc_calls": 405039,
+          "allocated_bytes": 80299521,
+          "allocation_operations": 405247,
+          "dealloc_calls": 404955,
+          "deallocated_bytes": 78190616,
+          "net_retained_bytes_delta": 2108905,
+          "realloc_calls": 208
+        }
+      ],
+      "name": "write_1048576",
+      "summary": {
+        "allocated_bytes_median": 80299521,
+        "allocation_operations_median": 405247
+      }
+    }
+  ]
+}

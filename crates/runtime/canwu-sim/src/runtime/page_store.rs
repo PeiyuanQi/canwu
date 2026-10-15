@@ -4,14 +4,65 @@
 //! bytes and a host decides where (and whether) to physically store them. A
 //! page ID is the hash of the canonical uncompressed bytes, so compression or
 //! blob placement cannot change semantic identity.
+//!
+//! Two page families share one store. The checkpoint envelope and the
+//! decision pages are canonical JSON objects. The domain-record Patricia
+//! nodes and the record-value chunks they name are binary pages: they start
+//! with [`BINARY_PAGE_MAGIC`], whose leading NUL byte no JSON text can start
+//! with, followed by one kind byte. Every integer in a binary page is
+//! little-endian.
+//!
+//! ```text
+//! leaf   = magic 0x01 domain key_hash[32] entry_count:u64 structural_bytes:u64
+//!          entry*                       (entry_count entries, keys strictly ascending)
+//! entry  = key_len:u64 key value_len:u64 value
+//! value  = value_len bytes              when value_len <= STATE_PAGE_VALUE_CHUNK_BYTES
+//!        | chunk_id[32] * ceil(value_len / STATE_PAGE_VALUE_CHUNK_BYTES)   otherwise
+//! branch = magic 0x02 domain bit:u16 left_page[32] right_page[32]
+//!          entry_count:u64 structural_bytes:u64
+//! chunk  = magic 0x03 payload           (1..=STATE_PAGE_VALUE_CHUNK_BYTES bytes)
+//! domain = domain_len:u16 UTF-8 bytes
+//! ```
+//!
+//! A chunked value is cut at every `STATE_PAGE_VALUE_CHUNK_BYTES` bytes, so
+//! every chunk but the last is full and one value has exactly one encoding.
+//! Each chunk is its own page, named by its page ID in the leaf that holds
+//! the value, so the leaf's page ID commits to every chunk byte.
 
 use super::{ArchiveStoreOutcome, CanwuError, ErrorCode, canonical_byte_hash};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Version of the [`StatePageBlob`] and [`PreparedStateDelta`] envelopes.
 pub const STATE_PAGE_FORMAT_VERSION: u32 = 1;
-pub const STATE_PAGE_CODEC: &str = "raw-canonical-v1";
+/// The canonical encoding of every state page's bytes. Version 2 stores
+/// domain-record Patricia nodes and record-value chunks as binary pages (see
+/// the module documentation); version 1 stored them as JSON objects whose
+/// byte strings were arrays of numbers.
+pub const STATE_PAGE_CODEC: &str = "raw-canonical-v2";
+/// Largest canonical byte length of one state page.
 pub const MAX_STATE_PAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Largest record value a Patricia leaf page holds inline, and the length of
+/// every record-value chunk but a value's last. A domain record whose
+/// canonical encoding is longer is split into chunk pages of this length.
+pub const STATE_PAGE_VALUE_CHUNK_BYTES: usize = 1024 * 1024;
+/// Largest canonical encoding of one domain record that a paged checkpoint
+/// holds: 512 MiB, twice the largest authoritative-state byte cap a
+/// first-party plugin allows (256 MiB). Preparing a paged checkpoint of a run
+/// with a longer record fails with `value_out_of_range`, which a host can tell
+/// apart from a corrupt page (`invalid_snapshot`); writing the record, a
+/// boundary, and the flat checkpoint and snapshot paths do not check it. A
+/// restore allocates up to this much per record whatever the provider holds,
+/// since a leaf may name one chunk page many times; restore pages from an
+/// untrusted source only after authenticating the checkpoint.
+pub const MAX_PAGED_RECORD_BYTES: usize = 512 * 1024 * 1024;
+/// Leading bytes of every binary state page.
+pub(super) const BINARY_PAGE_MAGIC: [u8; 4] = *b"\0cwp";
+const PAGE_KIND_PATRICIA_LEAF: u8 = 1;
+const PAGE_KIND_PATRICIA_BRANCH: u8 = 2;
+const PAGE_KIND_VALUE_CHUNK: u8 = 3;
+/// Hash domain of [`state_page_id`].
+const STATE_PAGE_ID_DOMAIN: &str = "canwu.state-page.v1";
 /// Hard predecode cap for one initial or incremental Format-8 page graph.
 /// A one-million-entry non-collision Patricia map can contain `2N - 1`
 /// logical node pages; this leaves bounded room for its manifest and compact
@@ -75,7 +126,322 @@ impl StatePageBlob {
 
 #[must_use]
 pub fn state_page_id(bytes: &[u8]) -> String {
-    canonical_byte_hash("canwu.state-page.v1", bytes)
+    canonical_byte_hash(STATE_PAGE_ID_DOMAIN, bytes)
+}
+
+/// Destination of one canonical binary page encoding. Writing a page into a
+/// `Vec<u8>` materializes it; writing it into a [`PageIdHasher`] computes its
+/// page ID without materializing it. One encoder serves both, so a node's
+/// commitment and its emitted page cannot disagree.
+pub(super) trait PageSink {
+    fn put(&mut self, bytes: &[u8]);
+}
+
+impl PageSink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Streams page bytes into [`state_page_id`]'s hash.
+pub(super) struct PageIdHasher(blake3::Hasher);
+
+impl PageIdHasher {
+    pub(super) fn new() -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(STATE_PAGE_ID_DOMAIN.as_bytes());
+        hasher.update(&[0]);
+        Self(hasher)
+    }
+
+    pub(super) fn finish(&self) -> [u8; 32] {
+        *self.0.finalize().as_bytes()
+    }
+}
+
+impl PageSink for PageIdHasher {
+    fn put(&mut self, bytes: &[u8]) {
+        self.0.update(bytes);
+    }
+}
+
+/// Number of chunk pages a record value of `len` bytes spans: zero when the
+/// leaf holds it inline.
+pub(super) const fn record_value_chunk_count(len: usize) -> usize {
+    if len <= STATE_PAGE_VALUE_CHUNK_BYTES {
+        0
+    } else {
+        len.div_ceil(STATE_PAGE_VALUE_CHUNK_BYTES)
+    }
+}
+
+/// One leaf entry to encode. `chunk_ids` names `value`'s chunk pages in
+/// order and is empty when the value is inline.
+pub(super) struct LeafEntryEncoding<'a> {
+    pub(super) key: &'a [u8],
+    pub(super) value: &'a [u8],
+    pub(super) chunk_ids: &'a [[u8; 32]],
+}
+
+fn put_domain<S: PageSink>(sink: &mut S, domain: &str) {
+    let len = u16::try_from(domain.len()).expect("Patricia domains are short static names");
+    sink.put(&len.to_le_bytes());
+    sink.put(domain.as_bytes());
+}
+
+fn put_len<S: PageSink>(sink: &mut S, len: usize) {
+    sink.put(&(len as u64).to_le_bytes());
+}
+
+/// Writes one Patricia leaf page.
+pub(super) fn encode_patricia_leaf<'a, S: PageSink>(
+    sink: &mut S,
+    domain: &str,
+    key_hash: &[u8; 32],
+    entry_count: u64,
+    structural_bytes: u64,
+    entries: impl IntoIterator<Item = LeafEntryEncoding<'a>>,
+) {
+    sink.put(&BINARY_PAGE_MAGIC);
+    sink.put(&[PAGE_KIND_PATRICIA_LEAF]);
+    put_domain(sink, domain);
+    sink.put(key_hash);
+    sink.put(&entry_count.to_le_bytes());
+    sink.put(&structural_bytes.to_le_bytes());
+    for entry in entries {
+        put_len(sink, entry.key.len());
+        sink.put(entry.key);
+        put_len(sink, entry.value.len());
+        if record_value_chunk_count(entry.value.len()) == 0 {
+            sink.put(entry.value);
+        } else {
+            debug_assert_eq!(
+                entry.chunk_ids.len(),
+                record_value_chunk_count(entry.value.len())
+            );
+            for chunk_id in entry.chunk_ids {
+                sink.put(chunk_id);
+            }
+        }
+    }
+}
+
+/// Writes one Patricia branch page.
+pub(super) fn encode_patricia_branch<S: PageSink>(
+    sink: &mut S,
+    domain: &str,
+    bit: u16,
+    left_page: &[u8; 32],
+    right_page: &[u8; 32],
+    entry_count: u64,
+    structural_bytes: u64,
+) {
+    sink.put(&BINARY_PAGE_MAGIC);
+    sink.put(&[PAGE_KIND_PATRICIA_BRANCH]);
+    put_domain(sink, domain);
+    sink.put(&bit.to_le_bytes());
+    sink.put(left_page);
+    sink.put(right_page);
+    sink.put(&entry_count.to_le_bytes());
+    sink.put(&structural_bytes.to_le_bytes());
+}
+
+fn encode_value_chunk<S: PageSink>(sink: &mut S, payload: &[u8]) {
+    sink.put(&BINARY_PAGE_MAGIC);
+    sink.put(&[PAGE_KIND_VALUE_CHUNK]);
+    sink.put(payload);
+}
+
+/// Page ID of the chunk page that holds `payload`.
+pub(super) fn value_chunk_page_id(payload: &[u8]) -> [u8; 32] {
+    let mut hasher = PageIdHasher::new();
+    encode_value_chunk(&mut hasher, payload);
+    hasher.finish()
+}
+
+/// Canonical bytes of the chunk page that holds `payload`.
+pub(super) fn value_chunk_page_bytes(payload: &[u8]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(BINARY_PAGE_MAGIC.len() + 1 + payload.len());
+    encode_value_chunk(&mut bytes, payload);
+    bytes
+}
+
+/// A leaf entry's value as its page names it.
+pub(super) enum DecodedLeafValue<'a> {
+    Inline(&'a [u8]),
+    /// `chunk_ids` holds `ceil(len / STATE_PAGE_VALUE_CHUNK_BYTES)` 32-byte
+    /// page IDs in value order.
+    Chunked {
+        len: usize,
+        chunk_ids: &'a [[u8; 32]],
+    },
+}
+
+pub(super) struct DecodedLeafEntry<'a> {
+    pub(super) key: &'a [u8],
+    pub(super) value: DecodedLeafValue<'a>,
+}
+
+pub(super) struct DecodedLeaf<'a> {
+    pub(super) domain: &'a str,
+    pub(super) key_hash: [u8; 32],
+    pub(super) entry_count: u64,
+    pub(super) structural_bytes: u64,
+    pub(super) entries: Vec<DecodedLeafEntry<'a>>,
+}
+
+pub(super) struct DecodedBranch<'a> {
+    pub(super) domain: &'a str,
+    pub(super) bit: u16,
+    pub(super) left_page: [u8; 32],
+    pub(super) right_page: [u8; 32],
+    pub(super) entry_count: u64,
+    pub(super) structural_bytes: u64,
+}
+
+pub(super) enum DecodedBinaryPage<'a> {
+    Leaf(DecodedLeaf<'a>),
+    Branch(DecodedBranch<'a>),
+    Chunk(&'a [u8]),
+}
+
+/// Bounds-checked reader over one page's bytes. Every read either consumes
+/// bytes the page holds or fails, so a decode never allocates more than the
+/// page's own length.
+struct PageReader<'a> {
+    bytes: &'a [u8],
+}
+
+impl<'a> PageReader<'a> {
+    fn take(&mut self, len: usize) -> Result<&'a [u8], &'static str> {
+        if len > self.bytes.len() {
+            return Err("binary state page is truncated");
+        }
+        let (head, tail) = self.bytes.split_at(len);
+        self.bytes = tail;
+        Ok(head)
+    }
+
+    fn array<const N: usize>(&mut self) -> Result<[u8; N], &'static str> {
+        let mut array = [0; N];
+        array.copy_from_slice(self.take(N)?);
+        Ok(array)
+    }
+
+    fn u64(&mut self) -> Result<u64, &'static str> {
+        self.array().map(u64::from_le_bytes)
+    }
+
+    fn len(&mut self) -> Result<usize, &'static str> {
+        usize::try_from(self.u64()?).map_err(|_| "binary state page length is not addressable")
+    }
+
+    fn domain(&mut self) -> Result<&'a str, &'static str> {
+        let len = usize::from(u16::from_le_bytes(self.array()?));
+        std::str::from_utf8(self.take(len)?).map_err(|_| "binary state page domain is not UTF-8")
+    }
+
+    fn finish(&self) -> Result<(), &'static str> {
+        if self.bytes.is_empty() {
+            Ok(())
+        } else {
+            Err("binary state page has trailing bytes")
+        }
+    }
+}
+
+/// Decodes one binary state page's layout. It checks the bounds the layout
+/// itself carries (lengths, the chunk-count bound, the record ceiling, no
+/// trailing bytes) and nothing about Patricia semantics, which the record
+/// store checks when it rebuilds the node.
+pub(super) fn decode_binary_page(bytes: &[u8]) -> Result<DecodedBinaryPage<'_>, &'static str> {
+    let mut reader = PageReader { bytes };
+    if reader.array::<4>()? != BINARY_PAGE_MAGIC {
+        return Err("state page is not a binary page");
+    }
+    let [kind] = reader.array::<1>()?;
+    match kind {
+        PAGE_KIND_PATRICIA_LEAF => {
+            let domain = reader.domain()?;
+            let key_hash = reader.array()?;
+            let entry_count = reader.u64()?;
+            let structural_bytes = reader.u64()?;
+            // An entry takes at least its two length words.
+            let capacity = usize::try_from(entry_count)
+                .unwrap_or(usize::MAX)
+                .min(reader.bytes.len() / 16);
+            let mut entries = Vec::with_capacity(capacity);
+            for _ in 0..entry_count {
+                let key_len = reader.len()?;
+                let key = reader.take(key_len)?;
+                let len = reader.len()?;
+                let chunks = record_value_chunk_count(len);
+                let value = if chunks == 0 {
+                    DecodedLeafValue::Inline(reader.take(len)?)
+                } else if len > MAX_PAGED_RECORD_BYTES {
+                    return Err("record value exceeds the paged record ceiling");
+                } else {
+                    DecodedLeafValue::Chunked {
+                        len,
+                        chunk_ids: reader.take(chunks * 32)?.as_chunks::<32>().0,
+                    }
+                };
+                entries.push(DecodedLeafEntry { key, value });
+            }
+            reader.finish()?;
+            Ok(DecodedBinaryPage::Leaf(DecodedLeaf {
+                domain,
+                key_hash,
+                entry_count,
+                structural_bytes,
+                entries,
+            }))
+        }
+        PAGE_KIND_PATRICIA_BRANCH => {
+            let branch = DecodedBranch {
+                domain: reader.domain()?,
+                bit: u16::from_le_bytes(reader.array()?),
+                left_page: reader.array()?,
+                right_page: reader.array()?,
+                entry_count: reader.u64()?,
+                structural_bytes: reader.u64()?,
+            };
+            reader.finish()?;
+            Ok(DecodedBinaryPage::Branch(branch))
+        }
+        PAGE_KIND_VALUE_CHUNK => {
+            if reader.bytes.is_empty() || reader.bytes.len() > STATE_PAGE_VALUE_CHUNK_BYTES {
+                return Err("record-value chunk length is out of bounds");
+            }
+            Ok(DecodedBinaryPage::Chunk(reader.bytes))
+        }
+        _ => Err("binary state page kind is unknown"),
+    }
+}
+
+/// Lower-case hexadecimal form of a raw page ID.
+pub(super) fn page_id_hex(page_id: &[u8; 32]) -> String {
+    blake3::Hash::from_bytes(*page_id).to_hex().to_string()
+}
+
+fn binary_page_children(bytes: &[u8]) -> Result<Vec<String>, CanwuError> {
+    match decode_binary_page(bytes).map_err(page_error)? {
+        DecodedBinaryPage::Leaf(leaf) => Ok(leaf
+            .entries
+            .iter()
+            .filter_map(|entry| match entry.value {
+                DecodedLeafValue::Inline(_) => None,
+                DecodedLeafValue::Chunked { chunk_ids, .. } => Some(chunk_ids),
+            })
+            .flatten()
+            .map(page_id_hex)
+            .collect()),
+        DecodedBinaryPage::Branch(branch) => Ok(vec![
+            page_id_hex(&branch.left_page),
+            page_id_hex(&branch.right_page),
+        ]),
+        DecodedBinaryPage::Chunk(_) => Ok(Vec::new()),
+    }
 }
 
 pub trait StatePageProvider {
@@ -432,17 +798,21 @@ fn state_page_closure_for_root(
                 "state-page closure provider changed page identity",
             ));
         }
+        if page.bytes.starts_with(&BINARY_PAGE_MAGIC) {
+            pending.extend(binary_page_children(&page.bytes)?);
+            continue;
+        }
         let value = serde_json::from_slice::<serde_json::Value>(&page.bytes).map_err(|error| {
             page_error(format!(
                 "state page cannot be decoded for reachability: {error}"
             ))
         })?;
-        pending.extend(state_page_children(&value)?);
+        pending.extend(json_page_children(&value)?);
     }
     Ok(reachable)
 }
 
-fn state_page_children(value: &serde_json::Value) -> Result<Vec<String>, CanwuError> {
+fn json_page_children(value: &serde_json::Value) -> Result<Vec<String>, CanwuError> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
@@ -497,14 +867,6 @@ fn state_page_children(value: &serde_json::Value) -> Result<Vec<String>, CanwuEr
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         }));
-    } else if object.get("node").and_then(serde_json::Value::as_str) == Some("branch") {
-        for field in ["left_page", "right_page"] {
-            let page_id = object
-                .get(field)
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| page_error("Patricia branch page is missing a child"))?;
-            children.push(page_id.to_owned());
-        }
     }
     for page_id in &children {
         validate_hash(page_id, "reachable state page ID")?;

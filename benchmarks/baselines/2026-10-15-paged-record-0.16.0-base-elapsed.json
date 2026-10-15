@@ -1,0 +1,306 @@
+{
+  "benchmark": "canwu-paged-records",
+  "engine_version": "0.15.0",
+  "environment": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cargo_features": [],
+    "logical_cpus": 16,
+    "os": "windows",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-pc-windows-msvc\nrelease: 1.99.0\nLLVM version: 23.1.1"
+  },
+  "machine": "local-windows-x86_64",
+  "method": {
+    "allocation_scope": "not collected in this uninstrumented build",
+    "elapsed_scope": "wall-clock nanoseconds in a build with the default system allocator; setup and post-measurement drops are excluded",
+    "idle_boundary": "one Daily boundary whose system proposes nothing, measured as the writes are",
+    "paged_prepare": "Canwu::prepare_paged_checkpoint into an empty page store, of a run whose store holds exactly the listed records",
+    "paged_restore": "Canwu::from_paged_checkpoint_and_journal_with_plugins from a store that holds the prepared pages",
+    "paged_samples": 5,
+    "records_per_filling_boundary": 4096,
+    "warmup_iterations": 3,
+    "write": "one Daily boundary that replaces one small record with a record whose payload text has the stated bytes, on a fork of the filled run, after one unmeasured boundary on that fork",
+    "write_payload_bytes": [
+      1024,
+      8192,
+      65536,
+      1048576
+    ],
+    "write_samples": 31,
+    "write_store_records": 65536
+  },
+  "metric_mode": "elapsed",
+  "paged": [
+    {
+      "cases": [
+        {
+          "elapsed_samples_ns": [
+            7131700,
+            7037600,
+            7172000,
+            7087000,
+            7168700
+          ],
+          "name": "paged_prepare",
+          "summary": {
+            "elapsed_ns_max": 7172000,
+            "elapsed_ns_median": 7131700,
+            "elapsed_ns_min": 7037600,
+            "elapsed_ns_p95": 7172000
+          }
+        },
+        {
+          "elapsed_samples_ns": [
+            99043400,
+            99253300,
+            99751000,
+            99717400,
+            85594600
+          ],
+          "name": "paged_restore",
+          "summary": {
+            "elapsed_ns_max": 99751000,
+            "elapsed_ns_median": 99253300,
+            "elapsed_ns_min": 85594600,
+            "elapsed_ns_p95": 99751000
+          }
+        }
+      ],
+      "delta_page_bytes": 2709356,
+      "delta_pages": 4,
+      "largest_page_bytes": 2701454,
+      "payload_bytes": [
+        900000
+      ]
+    },
+    {
+      "payload_bytes": [
+        1200000,
+        32000000
+      ],
+      "refused": {
+        "code": "InvalidArchive",
+        "message": "state page bytes exceed the bounded page limit"
+      }
+    }
+  ],
+  "recorded_on": "2026-10-15",
+  "schema_version": 1,
+  "source": {
+    "content_hash": "fefc2f46bb79c7907a9bd3b97114933184c6516e84fc6ecedb8b743e18a133c2",
+    "label": "export of 12d4775 (integration base before the record-store change)"
+  },
+  "writes": [
+    {
+      "elapsed_samples_ns": [
+        60470000,
+        39122700,
+        72599700,
+        58468800,
+        55026500,
+        59879300,
+        53256800,
+        67601200,
+        50260500,
+        50883900,
+        51043600,
+        56763700,
+        57080200,
+        54190800,
+        75519700,
+        61550600,
+        47752200,
+        51214400,
+        54407500,
+        57182500,
+        37359900,
+        53459800,
+        54336100,
+        76544400,
+        45003100,
+        51002800,
+        48408500,
+        45270400,
+        38001800,
+        44179700,
+        58055000
+      ],
+      "name": "idle_boundary",
+      "summary": {
+        "elapsed_ns_max": 76544400,
+        "elapsed_ns_median": 54190800,
+        "elapsed_ns_min": 37359900,
+        "elapsed_ns_p95": 75519700
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        37583800,
+        34526600,
+        50854800,
+        69210500,
+        50493200,
+        74414200,
+        59350200,
+        82401800,
+        55638800,
+        51170500,
+        37149000,
+        27191700,
+        41148400,
+        24148600,
+        24786700,
+        25008200,
+        21067200,
+        20975100,
+        38274800,
+        30424400,
+        27153500,
+        38623800,
+        34633400,
+        29291800,
+        37992000,
+        32992700,
+        39054400,
+        32662100,
+        37567900,
+        38646000,
+        42091800
+      ],
+      "name": "write_1024",
+      "summary": {
+        "elapsed_ns_max": 82401800,
+        "elapsed_ns_median": 37583800,
+        "elapsed_ns_min": 20975100,
+        "elapsed_ns_p95": 74414200
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        43086700,
+        37278800,
+        42094400,
+        42197500,
+        43243300,
+        40631100,
+        45139300,
+        42118400,
+        39651700,
+        43791200,
+        43289300,
+        29963900,
+        39116900,
+        41334100,
+        43997000,
+        35674400,
+        44383700,
+        43225500,
+        45024900,
+        48378600,
+        51294100,
+        49578600,
+        46325800,
+        44130600,
+        51555900,
+        43576100,
+        48966000,
+        49371100,
+        44704400,
+        47459800,
+        45276000
+      ],
+      "name": "write_8192",
+      "summary": {
+        "elapsed_ns_max": 51555900,
+        "elapsed_ns_median": 43791200,
+        "elapsed_ns_min": 29963900,
+        "elapsed_ns_p95": 51294100
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        40821800,
+        42122100,
+        29965200,
+        39229000,
+        39806700,
+        42229500,
+        40682500,
+        42019100,
+        45827300,
+        33987000,
+        32802000,
+        39957100,
+        40021400,
+        41820700,
+        40067700,
+        28605700,
+        32422700,
+        40445600,
+        40540900,
+        40523600,
+        46836300,
+        34884700,
+        33731400,
+        40606600,
+        32240000,
+        35689800,
+        41099200,
+        40777900,
+        38994800,
+        35516700,
+        40704600
+      ],
+      "name": "write_65536",
+      "summary": {
+        "elapsed_ns_max": 46836300,
+        "elapsed_ns_median": 40067700,
+        "elapsed_ns_min": 28605700,
+        "elapsed_ns_p95": 45827300
+      }
+    },
+    {
+      "elapsed_samples_ns": [
+        66115100,
+        65551600,
+        69626400,
+        69999800,
+        68580900,
+        62281800,
+        68779200,
+        53598500,
+        68383900,
+        66616600,
+        72784500,
+        68616600,
+        70729000,
+        72232100,
+        66923600,
+        68240800,
+        69018100,
+        51598700,
+        63756600,
+        70642000,
+        65151600,
+        61018600,
+        60363900,
+        64121800,
+        62671700,
+        70993000,
+        67200500,
+        69428100,
+        72911300,
+        73561300,
+        70180400
+      ],
+      "name": "write_1048576",
+      "summary": {
+        "elapsed_ns_max": 73561300,
+        "elapsed_ns_median": 68383900,
+        "elapsed_ns_min": 51598700,
+        "elapsed_ns_p95": 72911300
+      }
+    }
+  ]
+}

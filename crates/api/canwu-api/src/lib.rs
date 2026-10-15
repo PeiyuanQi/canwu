@@ -71,9 +71,9 @@ pub use canwu_sim::{
     LlmModelIdentity, LlmPolicy, MAX_DECISION_ARCHIVE_BATCH_ENTRIES,
     MAX_DECISION_HISTORY_PAGE_BYTES, MAX_DECISION_HISTORY_PAGE_SIZE,
     MAX_INGRESS_CANCELLATION_REASON_BYTES, MAX_OWNER_AUTHORIZED_MUTATIONS,
-    MAX_OWNER_AUTHORIZED_PARTICIPANTS, MAX_STATE_DELTA_PAGES, MAX_STATE_PAGE_BYTES,
-    MaintenanceChangeRecord, MaintenanceDependencyResolverDescriptor, MaintenanceDisposition,
-    MaintenanceIngressRequest, MaintenanceRejectionReceipt, MapPoint,
+    MAX_OWNER_AUTHORIZED_PARTICIPANTS, MAX_PAGED_RECORD_BYTES, MAX_STATE_DELTA_PAGES,
+    MAX_STATE_PAGE_BYTES, MaintenanceChangeRecord, MaintenanceDependencyResolverDescriptor,
+    MaintenanceDisposition, MaintenanceIngressRequest, MaintenanceRejectionReceipt, MapPoint,
     OWNER_AUTHORIZED_MAINTENANCE_FORMAT_VERSION, ObservationPolicy, OrderedRulePolicy, OutboxEntry,
     OwnerAuthorizedMaintenanceDraft, OwnerAuthorizedMaintenanceParticipant,
     OwnerAuthorizedMaintenanceRequest, OwnerAuthorizedMutation, OwnerAuthorizedParticipantDraft,
@@ -98,16 +98,17 @@ pub use canwu_sim::{
     ReservationPoolKey, ReservationRef, ReservationRequest, ReservationRequestRecord, Route,
     RuleChoice, RulePolicy, RunConfiguration, RunConfigurationSnapshot, RunManifest, RunPurpose,
     SNAPSHOT_FORMAT_VERSION, STATE_PAGE_CODEC, STATE_PAGE_FORMAT_VERSION,
-    STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy, SimulationCheckpoint,
-    SimulationPlugin, SimulationSnapshot, SimulationSystemHandler, SimulationView, StateKey,
-    StatePageBlob, StatePageProvider, StatePageRetentionHandle, StatePageRetentionLedger,
-    StatePageRetentionPhase, StatePageStore, StateVisibility, SystemCadence, SystemContract,
-    SystemDirective, Territory, TracePolicy, TransitState, UtilityEvaluator, UtilityPolicy,
-    UtilityProfile, VerifiedDecisionArchiveCommit, VerifiedOwnerAuthorizedMaintenanceCommit,
-    WeightedUtilityEvaluator, WeightedUtilityPolicy, WorldSnapshot, canonical_byte_hash,
-    canonical_hash, format8_decision_locator_scale_probe, format8_patricia_scale_probe,
-    identity_evidence_dependencies_property_v1, payload_required_evidence_continuation_property_v1,
-    prepare_state_delta, state_page_id, verify_state_delta,
+    STATE_PAGE_VALUE_CHUNK_BYTES, STATE_REVISION_FORMAT_VERSION, Scenario, SeatBinding, SeatPolicy,
+    SimulationCheckpoint, SimulationPlugin, SimulationSnapshot, SimulationSystemHandler,
+    SimulationView, StateKey, StatePageBlob, StatePageProvider, StatePageRetentionHandle,
+    StatePageRetentionLedger, StatePageRetentionPhase, StatePageStore, StateVisibility,
+    SystemCadence, SystemContract, SystemDirective, Territory, TracePolicy, TransitState,
+    UtilityEvaluator, UtilityPolicy, UtilityProfile, VerifiedDecisionArchiveCommit,
+    VerifiedOwnerAuthorizedMaintenanceCommit, WeightedUtilityEvaluator, WeightedUtilityPolicy,
+    WorldSnapshot, canonical_byte_hash, canonical_hash, format8_decision_locator_scale_probe,
+    format8_patricia_scale_probe, identity_evidence_dependencies_property_v1,
+    payload_required_evidence_continuation_property_v1, prepare_state_delta, state_page_id,
+    verify_state_delta,
 };
 // The boundaries of a window of simulated time (gap G-60).
 pub use canwu_sim::{
@@ -603,6 +604,11 @@ impl Canwu {
     /// but checks only its new pages and the root; check the checkpoint's
     /// complete page set with [`StatePageRetentionLedger::prepare`] and
     /// [`StatePageRetentionLedger::verify`] before relying on it.
+    ///
+    /// A domain record longer than [`STATE_PAGE_VALUE_CHUNK_BYTES`] is stored
+    /// as record-value chunk pages that its leaf names, so a record of any
+    /// length up to [`MAX_PAGED_RECORD_BYTES`] can be paged; a longer one
+    /// fails the preparation with `value_out_of_range` and nothing else.
     pub fn prepare_paged_checkpoint(
         &self,
         source: Option<&PagedSimulationCheckpoint>,

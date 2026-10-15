@@ -10,6 +10,7 @@ use super::{
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub(super) struct RuntimeEvidence {
@@ -593,9 +594,10 @@ pub(super) struct RuntimeMetadata {
     /// Exact provenance and establishment time for each current domain-record
     /// version. This is maintained incrementally at boundary commit time and
     /// rebuilt from the retained journal during restore, keeping hot-path
-    /// lookups O(log n).
+    /// lookups O(log n). It is a persistent map, so the boundary transaction
+    /// checkpoint and a fork share it instead of copying one entry per record.
     pub(super) current_domain_record_versions:
-        BTreeMap<DomainRecordRef, CurrentDomainRecordVersion>,
+        im::OrdMap<Arc<DomainRecordRef>, Arc<CurrentDomainRecordVersion>>,
     pub(super) run_manifest: RunManifest,
     pub(super) run_manifest_hash: String,
     pub(super) run_configuration: RunConfigurationSnapshot,
