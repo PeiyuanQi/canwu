@@ -92,7 +92,7 @@ pub(super) struct CommandTransactionCheckpoint {
     people: BTreeMap<PersonId, Person>,
     letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
-    knowledge: KnowledgeSnapshot,
+    knowledge: std::sync::Arc<KnowledgeSnapshot>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     scheduled_actions: BTreeMap<ScheduleKey, ScheduledAction>,
     counters: RuntimeCounters,
@@ -153,7 +153,7 @@ pub(super) struct BoundaryTransactionCheckpoint {
     created_persons: Vec<super::CreatedPerson>,
     letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
-    knowledge: KnowledgeSnapshot,
+    knowledge: std::sync::Arc<KnowledgeSnapshot>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     domain_records: PersistentDomainRecordStore,
     decisions: DecisionState,
@@ -242,7 +242,7 @@ pub(super) struct ScheduledBatchTransactionCheckpoint {
     people: BTreeMap<PersonId, Person>,
     letters: BTreeMap<LetterId, LetterCargo>,
     armies: BTreeMap<ArmyId, Army>,
-    knowledge: KnowledgeSnapshot,
+    knowledge: std::sync::Arc<KnowledgeSnapshot>,
     plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     random_streams: BTreeMap<RandomStreamKey, RandomStreamState>,
     now: SimTime,
@@ -339,5 +339,25 @@ mod tests {
                 .domain_records
                 .shares_root_with(&simulation.state.current.domain_records)
         );
+    }
+
+    /// Every rollback capture shares the knowledge state instead of copying
+    /// it, so a transaction costs nothing in proportion to held knowledge.
+    #[test]
+    fn transaction_checkpoints_share_knowledge() {
+        let simulation = Simulation::new(7, Scenario::new(SimTime::EPOCH, Vec::new())).unwrap();
+        let knowledge = &simulation.state.current.knowledge;
+        assert!(std::sync::Arc::ptr_eq(
+            &BoundaryTransactionCheckpoint::capture(&simulation.state).knowledge,
+            knowledge
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &CommandTransactionCheckpoint::capture(&simulation.state).knowledge,
+            knowledge
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &ScheduledBatchTransactionCheckpoint::capture(&simulation.state).knowledge,
+            knowledge
+        ));
     }
 }

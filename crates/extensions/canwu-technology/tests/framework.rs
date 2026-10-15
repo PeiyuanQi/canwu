@@ -3,10 +3,10 @@ use canwu_api::{
     Command, CommandEnvelope, CommandRequest, CommandRequestId, CompactedCanwu, DomainRecord,
     DomainRecordClass, DomainRecordLifecycle, DomainRecordRef, DomainRecordVersionRef,
     DomainRecordVersionSource, EntityRef, ErrorCode, EvidenceJournalSegment, EvidenceRef,
-    Government, GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeQuery, KnowledgeSnapshot,
-    MapPoint, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD, PayloadRequiredEvidenceContinuationV1,
-    Person, PersonId, PluginIngressRequest, Scenario, SimTime, SimulationPlugin, Territory,
-    TerritoryId, WorldSnapshot,
+    Government, GovernmentId, HolderLedger, Issuer, KnowledgeHolderRef, KnowledgeQuery,
+    KnowledgeSnapshot, MapPoint, PAYLOAD_REQUIRED_EVIDENCE_CONTINUATION_FIELD,
+    PayloadRequiredEvidenceContinuationV1, Person, PersonId, PluginIngressRequest, Scenario,
+    SimTime, SimulationPlugin, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_technology::{
     AdoptionPayload, AdoptionStatus, ApplicationSpec, ApplicationSpecPayload, AssetBinding,
@@ -793,7 +793,7 @@ fn playable_flow_is_authoritative_private_and_exactly_restorable() {
     let knowledge_before_rejection = canwu
         .knowledge()
         .for_holder(&KnowledgeHolderRef::Person(ids.0))
-        .map_or(0, BTreeMap::len);
+        .map_or(0, HolderLedger::len);
     apply_command(
         &mut canwu,
         ids.0,
@@ -834,7 +834,7 @@ fn playable_flow_is_authoritative_private_and_exactly_restorable() {
         canwu
             .knowledge()
             .for_holder(&KnowledgeHolderRef::Person(ids.0))
-            .map_or(0, BTreeMap::len),
+            .map_or(0, HolderLedger::len),
         knowledge_before_rejection,
         "a rejected phase-7 operation must not publish phase-13 knowledge",
     );
@@ -1516,7 +1516,7 @@ fn playable_flow_is_authoritative_private_and_exactly_restorable() {
     let operator_knowledge = canwu
         .knowledge()
         .for_holder(&KnowledgeHolderRef::Person(ids.0))
-        .map_or(0, BTreeMap::len);
+        .map_or(0, HolderLedger::len);
     assert!(
         operator_knowledge >= 3,
         "operator should receive at least three technology records, got {operator_knowledge}"
@@ -1533,7 +1533,7 @@ fn playable_flow_is_authoritative_private_and_exactly_restorable() {
         canwu
             .knowledge()
             .for_holder(&KnowledgeHolderRef::Person(ids.1))
-            .map_or(0, BTreeMap::len),
+            .map_or(0, HolderLedger::len),
         0,
         "a teaching opportunity must not grant destination capability or knowledge"
     );
@@ -1651,7 +1651,7 @@ fn investigation_can_produce_a_new_runtime_revision() {
         canwu
             .knowledge()
             .for_holder(&KnowledgeHolderRef::Person(ids.0))
-            .map_or(0, BTreeMap::len),
+            .map_or(0, HolderLedger::len),
         0,
         "inventing a revision must not automatically publish it as holder knowledge"
     );
@@ -1691,7 +1691,7 @@ fn investigation_can_produce_a_new_runtime_revision() {
         canwu
             .knowledge()
             .for_holder(&KnowledgeHolderRef::Person(ids.0))
-            .map_or(0, BTreeMap::len),
+            .map_or(0, HolderLedger::len),
         1,
         "a later explicit claim should establish holder-relative knowledge"
     );

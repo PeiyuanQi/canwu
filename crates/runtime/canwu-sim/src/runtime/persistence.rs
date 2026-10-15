@@ -3068,7 +3068,7 @@ impl Simulation {
             world: self.world(),
             person_availability: self.state.current.person_availability.clone(),
             created_persons: self.state.current.created_persons.clone(),
-            knowledge: self.state.current.knowledge.clone(),
+            knowledge: KnowledgeSnapshot::clone(&self.state.current.knowledge),
             events: Vec::new(),
             commands: Vec::new(),
             command_attempts: Vec::new(),

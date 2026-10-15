@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod ledger;
+
+pub use ledger::{
+    CurrentRecords, HolderLedger, HolderLedgers, HolderLedgersIter, HolderRecordsIter, RecordsById,
+};
+
 pub const DEFAULT_KNOWLEDGE_PAGE_SIZE: u32 = 100;
 pub const MAX_KNOWLEDGE_PAGE_SIZE: u32 = 1_000;
 
@@ -172,7 +178,8 @@ pub struct KnowledgeQueryResult {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 /// Holder-relative generic knowledge ledger used by the current snapshot.
 pub struct GenericKnowledgeLedger {
-    pub records: BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    /// Every holder's records; see [`HolderLedgers`].
+    pub records: HolderLedgers,
 }
 
 /// Atomic append validation failures for the standalone generic ledger.
@@ -183,11 +190,9 @@ pub enum KnowledgeLedgerError {
 }
 
 impl GenericKnowledgeLedger {
+    /// One holder's records, or `None` when it holds none.
     #[must_use]
-    pub fn for_holder(
-        &self,
-        holder: &KnowledgeHolderRef,
-    ) -> Option<&BTreeMap<KnowledgeRecordId, KnowledgeRecord>> {
+    pub fn for_holder(&self, holder: &KnowledgeHolderRef) -> Option<&HolderLedger> {
         self.records.get(holder)
     }
 
@@ -198,6 +203,7 @@ impl GenericKnowledgeLedger {
     /// Returns [`KnowledgeLedgerError::HolderMismatch`] when any record names a
     /// different holder, or [`KnowledgeLedgerError::DuplicateRecordId`] when an
     /// ID already exists anywhere in the ledger or repeats within the batch.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn insert_records(
         &mut self,
         holder: KnowledgeHolderRef,
@@ -209,19 +215,11 @@ impl GenericKnowledgeLedger {
             if record.holder != holder {
                 return Err(KnowledgeLedgerError::HolderMismatch);
             }
-            if !incoming_ids.insert(record.id)
-                || self
-                    .records
-                    .values()
-                    .any(|existing| existing.contains_key(&record.id))
-            {
+            if !incoming_ids.insert(record.id) || self.records.record(record.id).is_some() {
                 return Err(KnowledgeLedgerError::DuplicateRecordId);
             }
         }
-        let entry = self.records.entry(holder).or_default();
-        for record in records {
-            entry.insert(record.id, record);
-        }
+        self.records.extend(records);
         Ok(())
     }
 
@@ -247,7 +245,7 @@ impl GenericKnowledgeLedger {
 }
 
 fn query_records(
-    ledger: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    ledger: &HolderLedgers,
     holder: KnowledgeHolderRef,
     query: &KnowledgeQuery,
     read_cut: KnowledgeReadCut,
@@ -292,15 +290,11 @@ fn query_records(
     {
         return Err(KnowledgeQueryError::InvalidCursor);
     }
-    let current = if query.view == KnowledgeHistoryView::CurrentHeads {
-        current_heads(records)
-    } else {
-        records.keys().copied().collect()
-    };
+    let current_only = query.view == KnowledgeHistoryView::CurrentHeads;
     let mut candidates = records
         .iter()
         .filter(|(id, record)| {
-            current.contains(id)
+            (!current_only || records.is_current(id))
                 && (query.schemas.is_empty() || query.schemas.contains(&record.schema))
                 && query
                     .subjects
@@ -353,92 +347,18 @@ fn query_records(
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KnowledgeSnapshot {
     pub actors: BTreeMap<PersonId, ActorKnowledge>,
-    #[serde(
-        default,
-        skip_serializing_if = "BTreeMap::is_empty",
-        with = "holder_records_wire"
-    )]
-    pub records: BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
-}
-
-mod holder_records_wire {
-    use super::{BTreeMap, BTreeSet, KnowledgeHolderRef, KnowledgeRecord, KnowledgeRecordId};
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Deserialize, Serialize)]
-    struct HolderLedgerEntry {
-        holder: KnowledgeHolderRef,
-        records: Vec<KnowledgeRecord>,
-    }
-
-    pub fn serialize<S>(
-        value: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        let mut global_ids = BTreeSet::new();
-        let mut entries = Vec::with_capacity(value.len());
-        for (holder, records) in value {
-            let mut ordered = Vec::with_capacity(records.len());
-            for (id, record) in records {
-                if id != &record.id || &record.holder != holder || !global_ids.insert(*id) {
-                    return Err(serde::ser::Error::custom(
-                        "knowledge snapshot contains inconsistent holders or record IDs",
-                    ));
-                }
-                ordered.push(record.clone());
-            }
-            entries.push(HolderLedgerEntry {
-                holder: holder.clone(),
-                records: ordered,
-            });
-        }
-        entries.serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(
-        deserializer: D,
-    ) -> Result<BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let entries = Vec::<HolderLedgerEntry>::deserialize(deserializer)?;
-        let mut ledger = BTreeMap::new();
-        let mut global_ids = BTreeSet::new();
-        for entry in entries {
-            let holder = entry.holder;
-            let mut records = BTreeMap::new();
-            for record in entry.records {
-                if record.holder != holder
-                    || !global_ids.insert(record.id)
-                    || records.insert(record.id, record).is_some()
-                {
-                    return Err(serde::de::Error::custom(
-                        "holder ledger contains a mismatched holder or duplicate record ID",
-                    ));
-                }
-            }
-            if ledger.insert(holder, records).is_some() {
-                return Err(serde::de::Error::custom(
-                    "knowledge snapshot contains a duplicate holder ledger",
-                ));
-            }
-        }
-        Ok(ledger)
-    }
+    /// Every holder's generic knowledge records. A clone shares them with the
+    /// original; see [`HolderLedgers`].
+    #[serde(default, skip_serializing_if = "HolderLedgers::is_empty")]
+    pub records: HolderLedgers,
 }
 
 impl KnowledgeSnapshot {
     /// Counts all retained holder-relative records in one schema namespace.
+    /// The ledgers keep the count, so this does not scan them.
     #[must_use]
     pub fn record_count_in_namespace(&self, namespace: &str) -> usize {
-        self.records
-            .values()
-            .flat_map(BTreeMap::values)
-            .filter(|record| record.schema.kind.namespace == namespace)
-            .count()
+        self.records.record_count_in_namespace(namespace)
     }
 
     #[must_use]
@@ -446,11 +366,9 @@ impl KnowledgeSnapshot {
         self.actors.get(&actor)
     }
 
+    /// One holder's generic records, or `None` when it holds none.
     #[must_use]
-    pub fn for_holder(
-        &self,
-        holder: &KnowledgeHolderRef,
-    ) -> Option<&BTreeMap<KnowledgeRecordId, KnowledgeRecord>> {
+    pub fn for_holder(&self, holder: &KnowledgeHolderRef) -> Option<&HolderLedger> {
         self.records.get(holder)
     }
 
@@ -491,12 +409,15 @@ impl KnowledgeSnapshot {
 
     /// Queries an omniscient system view with a same-boundary holder overlay.
     /// The returned values are owned so no mutable runtime ledger is exposed.
+    /// The settled ledgers are not copied: the overlay is applied to a clone
+    /// that shares their structure.
     ///
     /// # Errors
     ///
-    /// Returns an error when the overlay collides with a settled record ID,
-    /// when either ledger is inconsistent, or when the query or cursor does not
-    /// match the derived read cut.
+    /// Returns an error when the overlay collides with a settled record ID or
+    /// files a record under another holder, when either ledger is
+    /// inconsistent, or when the query or cursor does not match the derived
+    /// read cut.
     pub fn query_with_overlay(
         &self,
         holder: KnowledgeHolderRef,
@@ -506,11 +427,11 @@ impl KnowledgeSnapshot {
     ) -> Result<KnowledgeQueryResult, KnowledgeQueryError> {
         let mut merged = self.records.clone();
         if let Some(records) = overlay.get(&holder) {
-            let entry = merged.entry(holder.clone()).or_default();
             for (id, record) in records {
-                if entry.insert(*id, record.clone()).is_some() {
+                if *id != record.id || record.holder != holder || merged.record(*id).is_some() {
                     return Err(KnowledgeQueryError::InvalidLedger);
                 }
+                merged.insert(record.clone());
             }
         }
         let read_cut = KnowledgeReadCut {
@@ -536,7 +457,7 @@ struct HolderOverlayCutMaterial<'a> {
 
 fn holder_projection_root(
     holder: &KnowledgeHolderRef,
-    ledger: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    ledger: &HolderLedgers,
 ) -> Result<String, KnowledgeQueryError> {
     let records = ledger.get(holder).cloned().unwrap_or_default();
     let local_ids = holder_local_ids(&records);
@@ -555,7 +476,7 @@ fn holder_projection_root(
 
 fn holder_overlay_root(
     holder: &KnowledgeHolderRef,
-    merged: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    merged: &HolderLedgers,
     overlay: &BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
 ) -> Result<String, KnowledgeQueryError> {
     let merged_records = merged.get(holder).cloned().unwrap_or_default();
@@ -670,7 +591,7 @@ fn validate_cursor(
 }
 
 fn holder_local_ids(
-    records: &BTreeMap<KnowledgeRecordId, KnowledgeRecord>,
+    records: &HolderLedger,
 ) -> BTreeMap<KnowledgeRecordId, HolderKnowledgeRecordId> {
     records
         .keys()
@@ -681,20 +602,6 @@ fn holder_local_ids(
                 HolderKnowledgeRecordId::new(u64::try_from(index + 1).unwrap_or(u64::MAX)),
             )
         })
-        .collect()
-}
-
-fn current_heads(
-    records: &BTreeMap<KnowledgeRecordId, KnowledgeRecord>,
-) -> std::collections::BTreeSet<KnowledgeRecordId> {
-    let mut superseded = std::collections::BTreeSet::new();
-    for record in records.values() {
-        superseded.extend(record.supersedes.iter().copied());
-    }
-    records
-        .keys()
-        .filter(|id| !superseded.contains(id))
-        .copied()
         .collect()
 }
 
@@ -1008,23 +915,24 @@ mod tests {
             snapshot
         );
 
-        let mut duplicate_global_id = encoded;
+        let mut duplicate_global_id = encoded.clone();
         duplicate_global_id["records"][1]["records"][0]["id"] = json!(1);
         assert!(serde_json::from_value::<KnowledgeSnapshot>(duplicate_global_id).is_err());
 
-        let mut inconsistent = snapshot;
-        let record = inconsistent
-            .records
-            .get_mut(&first_holder)
-            .expect("first holder exists")
-            .remove(&KnowledgeRecordId::new(1))
-            .expect("record exists");
-        inconsistent
-            .records
-            .get_mut(&first_holder)
-            .expect("first holder exists")
-            .insert(KnowledgeRecordId::new(9), record);
-        assert!(serde_json::to_value(inconsistent).is_err());
+        // A record is filed under its own holder and ID, so a key can never
+        // disagree with its record; a wire that would need one is refused.
+        let mut foreign_record = encoded.clone();
+        foreign_record["records"][0]["records"][0]["holder"] =
+            json!({ "type": "person", "value": 2 });
+        assert!(serde_json::from_value::<KnowledgeSnapshot>(foreign_record).is_err());
+        let mut empty_holder = encoded.clone();
+        empty_holder["records"][1]["records"] = json!([]);
+        assert!(serde_json::from_value::<KnowledgeSnapshot>(empty_holder).is_err());
+        let mut duplicate_holder = encoded;
+        duplicate_holder["records"][1]["holder"] = json!({ "type": "person", "value": 1 });
+        duplicate_holder["records"][1]["records"][0]["holder"] =
+            json!({ "type": "person", "value": 1 });
+        assert!(serde_json::from_value::<KnowledgeSnapshot>(duplicate_holder).is_err());
     }
 
     #[test]

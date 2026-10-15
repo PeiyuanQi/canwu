@@ -298,10 +298,53 @@ pub(super) fn world_commitment_root(
     )
 }
 
+/// Domain of the records sub-root of the knowledge root: one JSON array of
+/// every generic knowledge record in global ID order, hashed as it grows.
+pub(super) const KNOWLEDGE_RECORD_COMMITMENT_DOMAIN: &str = "canwu.commitment.knowledge.records.v1";
+
+#[derive(Serialize)]
+struct KnowledgeCommitmentMaterial<'a> {
+    actors: &'a str,
+    records: &'a str,
+}
+
+/// The knowledge root of commitment format 5 from its two sub-roots.
+///
+/// Format 4 hashed the whole knowledge snapshot as one value, so every
+/// publication hashed every record again. Format 5 commits to the
+/// compatibility actor projection and to the generic records separately; the
+/// records sub-root is an ordered hash in global ID order, the order the
+/// runtime allocates IDs in, so a boundary extends it with the records it
+/// published and never hashes earlier ones again.
+pub(super) fn knowledge_commitment_root_from_parts(
+    actors: &str,
+    records: &str,
+) -> Result<String, CanwuError> {
+    canonical_hash(
+        "canwu.commitment.knowledge.v2",
+        &KnowledgeCommitmentMaterial { actors, records },
+    )
+}
+
+/// The actor sub-root of the knowledge root.
+pub(super) fn knowledge_actor_commitment_root(
+    actors: &BTreeMap<super::PersonId, super::ActorKnowledge>,
+) -> Result<String, CanwuError> {
+    canonical_hash("canwu.commitment.knowledge.actors.v1", actors)
+}
+
+/// The knowledge root of a whole snapshot, computed from scratch as one
+/// canonical array. Load validation uses it; the runtime keeps the records
+/// sub-root as a running hash of the same bytes and must reach the same
+/// value.
 pub(super) fn knowledge_commitment_root(
     knowledge: &KnowledgeSnapshot,
 ) -> Result<String, CanwuError> {
-    canonical_hash("canwu.commitment.knowledge.v1", knowledge)
+    let records: Vec<_> = knowledge.records.records().collect();
+    knowledge_commitment_root_from_parts(
+        &knowledge_actor_commitment_root(&knowledge.actors)?,
+        &canonical_hash(KNOWLEDGE_RECORD_COMMITMENT_DOMAIN, &records)?,
+    )
 }
 
 pub(super) fn plugin_component_commitment_root(
@@ -984,6 +1027,12 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
         changes: &'a [BoundaryChange],
         #[serde(skip_serializing_if = "domain_record_change_slice_is_empty")]
         record_changes: &'a [DomainRecordChange],
+        // Commitment format 5: every field of every knowledge change,
+        // including the visibility and producer correlation that load
+        // validation and the holder views read. Omitted while empty, so the
+        // material of a boundary without knowledge changes is unchanged.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        knowledge_changes: Option<&'a [super::BoundaryKnowledgeChange]>,
         #[serde(skip_serializing_if = "maintenance_change_slice_is_empty")]
         maintenance_changes: &'a [super::MaintenanceChangeRecord],
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1023,6 +1072,8 @@ pub(super) fn compute_boundary_hash(record: &BoundaryRecord) -> Result<String, C
             random_draws: &record.random_draws,
             changes: &record.changes,
             record_changes: &record.record_changes,
+            knowledge_changes: (!record.knowledge_changes.is_empty())
+                .then_some(record.knowledge_changes.as_slice()),
             maintenance_changes: &record.maintenance_changes,
             maintenance_terminal_root: &record.maintenance_terminal_root,
             person_availability_changes: (!record.person_availability_changes.is_empty())

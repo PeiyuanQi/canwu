@@ -132,11 +132,14 @@ one of `subjects` are returned, and an empty list selects the whole kind.
   the publisher supersedes what was returned, and the older current records
   drain over its later publications. A subject filter longer than the bound
   is refused.
-- **Cost.** One call walks the holder's records twice, in place: once to
-  collect the IDs that records of the requested kind supersede (a relation
-  never crosses kinds), and once, newest first, to select, stopping after
-  one match more than the bound. There is no index to persist, roll back, or
-  rebuild.
+- **Cost.** In 0.15.0 one call walks the holder's records twice, in place:
+  once to collect the IDs that records of the requested kind supersede (a
+  relation never crosses kinds), and once, newest first, to select, stopping
+  after one match more than the bound. Since 0.16.0 each holder ledger keeps
+  an index of its current records by kind and subject, derived from the
+  records and never persisted, and the call reads it instead; the answer is
+  the same (see
+  [knowledge ledger cost and authentication](knowledge-ledger-cost-and-authentication.md)).
 - **Authority.** It needs the declared `canwu.core.knowledge` read, as the
   other knowledge reads do. The IDs are global ledger IDs for systems that
   declared the read; actor-facing reads keep holder-local IDs.

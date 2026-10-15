@@ -613,6 +613,11 @@ impl DecisionHotHistoryAccumulator {
 /// Cloning this value shares its immutable tree root and its entry payloads.
 /// Appending copies only the affected tree path, so boundary rollback and
 /// simulation forks do not clone all retained decision attempts or traces.
+///
+/// Iteration is forward only. `im` 15.1's ordered maps drop entries when
+/// iterated in reverse once the tree is three levels deep (from about 2,177
+/// entries), so no iterator of this log implements `DoubleEndedIterator`;
+/// [`Self::last`] reads the newest entry directly.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: Deserialize<'de>"))]
 pub struct PersistentDecisionLog<T: Clone> {
@@ -655,8 +660,10 @@ impl<T: Clone> PersistentDecisionLog<T> {
         self.entries.get_max().map(|(_, value)| value.as_ref())
     }
 
+    /// The entries in ordinal order. Forward only; see the type's
+    /// documentation.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &T> {
         self.entries.values().map(Arc::as_ref)
     }
 
@@ -684,8 +691,10 @@ impl<T: Clone> PersistentDecisionLog<T> {
         self.entries.remove(&ordinal).map(Arc::unwrap_or_clone)
     }
 
+    /// The ordinals of the entries, ascending. Forward only; see the type's
+    /// documentation.
     #[must_use = "iterators are lazy and do nothing unless consumed"]
-    pub fn ordinals(&self) -> impl DoubleEndedIterator<Item = u64> + ExactSizeIterator + '_ {
+    pub fn ordinals(&self) -> impl ExactSizeIterator<Item = u64> + '_ {
         self.entries.keys().copied()
     }
 
@@ -704,6 +713,9 @@ impl<T: Clone> Index<usize> for PersistentDecisionLog<T> {
     }
 }
 
+/// Forward iterator over a [`PersistentDecisionLog`]'s entries in ordinal
+/// order. It does not implement `DoubleEndedIterator`; see the log's
+/// documentation.
 pub struct PersistentDecisionLogIter<'a, T: Clone> {
     inner: im::ordmap::Values<'a, u64, Arc<T>>,
 }
@@ -717,12 +729,6 @@ impl<'a, T: Clone> Iterator for PersistentDecisionLogIter<'a, T> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
-    }
-}
-
-impl<T: Clone> DoubleEndedIterator for PersistentDecisionLogIter<'_, T> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        self.inner.next_back().map(Arc::as_ref)
     }
 }
 
@@ -3539,5 +3545,56 @@ impl DecisionController {
             | DecisionOutcome::PendingRandom { .. } => None,
         };
         Ok(ControllerDecision::Authoritative { action, decision })
+    }
+}
+
+#[cfg(test)]
+mod persistent_log_tests {
+    use super::{PersistentDecisionLog, PersistentDecisionLogIter};
+
+    /// Fails to compile when the type implements `DoubleEndedIterator`, in
+    /// the way `static_assertions::assert_not_impl_any!` does: both blanket
+    /// implementations then apply and the item path is ambiguous.
+    macro_rules! assert_forward_only {
+        ($type:ty) => {
+            const _: fn() = || {
+                trait AmbiguousIfDoubleEnded<A> {
+                    fn some_item() {}
+                }
+                impl<T: ?Sized> AmbiguousIfDoubleEnded<()> for T {}
+                struct DoubleEnded;
+                impl<T: ?Sized + DoubleEndedIterator> AmbiguousIfDoubleEnded<DoubleEnded> for T {}
+                let _ = <$type as AmbiguousIfDoubleEnded<_>>::some_item;
+            };
+        };
+    }
+
+    // `im` 15.1 drops entries when an ordered map is walked backwards past
+    // three tree levels, so the log offers no backward walk at all.
+    assert_forward_only!(PersistentDecisionLogIter<'static, u64>);
+
+    #[test]
+    fn decision_log_reads_every_entry_past_three_tree_levels() {
+        let mut log = PersistentDecisionLog::default();
+        let mut model = Vec::new();
+        for value in 0..6_000_u64 {
+            model.push((log.push(value), value));
+        }
+        for ordinal in (1..=6_000).step_by(7) {
+            assert!(log.remove_ordinal(ordinal).is_some());
+        }
+        model.retain(|(ordinal, _)| (ordinal - 1) % 7 != 0);
+        assert_eq!(log.len(), model.len());
+        assert!(
+            log.iter()
+                .copied()
+                .eq(model.iter().map(|(_, value)| *value))
+        );
+        assert_eq!((&log).into_iter().count(), model.len());
+        assert!(log.ordinals().eq(model.iter().map(|(ordinal, _)| *ordinal)));
+        assert_eq!(log.last(), model.last().map(|(_, value)| value));
+        for index in [0, 1, 2_175, 2_176, 2_177, 4_000, model.len() - 1] {
+            assert_eq!(log.get(index), model.get(index).map(|(_, value)| value));
+        }
     }
 }

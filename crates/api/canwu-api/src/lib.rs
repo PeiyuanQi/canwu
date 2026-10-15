@@ -15,10 +15,11 @@ pub use canwu_core::{
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, EventKindError, SimEvent};
 pub use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
-    KnowledgeOrigin, KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut,
-    KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
-    KnowledgeSubject, KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE,
+    ActorKnowledge, ArmyKnowledge, CurrentRecords, EstimateRange, HolderLedger, HolderLedgers,
+    HolderLedgersIter, HolderRecordsIter, KnowledgeCursor, KnowledgeHistoryView, KnowledgeOrigin,
+    KnowledgeQuery, KnowledgeQueryError, KnowledgeQueryResult, KnowledgeReadCut, KnowledgeRecord,
+    KnowledgeRecordDraft, KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource,
+    KnowledgeSubject, KnowledgeSubjectTarget, MAX_KNOWLEDGE_PAGE_SIZE, RecordsById,
 };
 pub use canwu_routing::{
     DepartureSlot, DurationSample, PlanningSnapshot, ROUTING_ALGORITHM_VERSION, RouteCost,

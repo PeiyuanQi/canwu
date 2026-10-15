@@ -6,7 +6,6 @@ use canwu_knowledge::{KnowledgeOrigin, KnowledgeRecord};
 use canwu_sim::{ErrorCode, Scenario, Simulation, demo_scenario};
 use canwu_time::SimTime;
 use serde_json::json;
-use std::collections::BTreeMap;
 
 fn empty_scenario() -> Scenario {
     Scenario::new(SimTime::EPOCH, Vec::new())
@@ -28,7 +27,7 @@ fn scenario_generic_ledger_is_kernel_issued_only() {
     let holder = KnowledgeHolderRef::Person(PersonId::new(1));
     let record = KnowledgeRecord {
         id: KnowledgeRecordId::new(1),
-        holder: holder.clone(),
+        holder,
         schema: KnowledgeSchemaId::new(
             KnowledgeRecordKind::new("fixture.knowledge", "preselected"),
             1,
@@ -46,10 +45,7 @@ fn scenario_generic_ledger_is_kernel_issued_only() {
         contradicts: vec![],
     };
     let mut scenario = empty_scenario();
-    scenario.knowledge.records = BTreeMap::from([(
-        holder,
-        BTreeMap::from([(KnowledgeRecordId::new(1), record)]),
-    )]);
+    scenario.knowledge.records.insert(record);
 
     let error = Simulation::new(7, scenario)
         .err()

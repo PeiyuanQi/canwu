@@ -619,10 +619,7 @@ impl Simulation {
             || (0, None),
             |value| (value.strength, Some(value.name.clone())),
         );
-        let actor = self
-            .state
-            .current
-            .knowledge
+        let actor = std::sync::Arc::make_mut(&mut self.state.current.knowledge)
             .actors
             .entry(recipient)
             .or_insert_with(|| ActorKnowledge {

@@ -7,7 +7,7 @@ use canwu_api::{
     DecisionOrigin, DomainEntityKindClass, DomainRecordDraft, DomainRecordLifecycle,
     DomainRecordSchema, DomainRecordType, DomainReference, DomainReferenceSchema,
     DomainReferenceTargetKind, DomainValueKindClass, EntityRef, ErrorCode, EstimateRange,
-    Government, GovernmentId, Issuer, KnowledgeSnapshot, KnowledgeSource, MapPoint,
+    Government, GovernmentId, HolderLedgers, Issuer, KnowledgeSnapshot, KnowledgeSource, MapPoint,
     PayloadProperty, PayloadSchema, PayloadValueType, Person, PersonId, PluginActionDescriptor,
     PluginRegistrar, RandomDrawProducer, RandomStreamKey, ReservationDisposition, ReservationOffer,
     ReservationPoolKey, ReservationRef, ReservationRequest, Route, RouteId, Scenario, SimDuration,
@@ -175,7 +175,7 @@ fn fixture_scenario() -> Scenario {
                 },
             ),
         ]),
-        records: BTreeMap::new(),
+        records: HolderLedgers::new(),
     };
     Scenario {
         start_time: initial_time,

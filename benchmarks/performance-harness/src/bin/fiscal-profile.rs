@@ -5,6 +5,11 @@
 //! batch of fiscal actions. The fiscal state is built in the scenario with a
 //! history of settled assessments and execution requests, so every decode and
 //! validation pays for a mid-campaign record rather than an empty one.
+//!
+//! `--mode allocations`, in a build with the `allocation-counting` feature,
+//! counts the allocator calls each measured operation makes instead of timing
+//! it, and reports `*_allocation_operations` where the elapsed build reports
+//! `*_ms`.
 
 use canwu_api::{
     BoundaryRequest, Canwu, CanwuError, CommandEnvelope, CommandId, CommandRequest,
@@ -26,11 +31,16 @@ use canwu_fiscal::{
     recompute_derived,
 };
 use serde_json::{Value, json};
+#[cfg(feature = "allocation-counting")]
+use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(feature = "allocation-counting")]
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 const TICK_PLUGIN: &str = "fiscal-profile-tick";
@@ -66,7 +76,105 @@ impl SimulationPlugin for TickPlugin {
     }
 }
 
+#[cfg(feature = "allocation-counting")]
+struct CountingAllocator;
+
+#[cfg(feature = "allocation-counting")]
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+#[cfg(feature = "allocation-counting")]
+thread_local! {
+    /// Whether this thread counts, and the allocator calls counted so far.
+    static ALLOCATIONS: Cell<(bool, u64)> = const { Cell::new((false, 0)) };
+}
+
+#[cfg(feature = "allocation-counting")]
+fn count_allocation() {
+    let _ = ALLOCATIONS.try_with(|state| {
+        let (counting, calls) = state.get();
+        if counting {
+            state.set((true, calls.saturating_add(1)));
+        }
+    });
+}
+
+// SAFETY: every operation delegates to `System` with the original pointer and
+// layout; the thread-local counter only observes allocator calls.
+#[cfg(feature = "allocation-counting")]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
+        // SAFETY: the caller supplies the layout required by `GlobalAlloc`.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        count_allocation();
+        // SAFETY: the caller supplies the layout required by `GlobalAlloc`.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: the caller returns the pointer with its original layout.
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        count_allocation();
+        // SAFETY: the caller supplies the pointer, original layout, and size.
+        unsafe { System.realloc(pointer, layout, new_size) }
+    }
+}
+
+/// Set once from `--mode`: count allocator calls instead of timing.
+static COUNT_ALLOCATIONS: AtomicBool = AtomicBool::new(false);
+
+/// One measurement in progress: wall time in milliseconds, or allocator
+/// calls (allocations and reallocations) in allocation mode.
+struct Meter(Instant);
+
+impl Meter {
+    fn start() -> Self {
+        #[cfg(feature = "allocation-counting")]
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            ALLOCATIONS.with(|state| state.set((true, 0)));
+        }
+        Self(Instant::now())
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn finish(self) -> f64 {
+        #[cfg(feature = "allocation-counting")]
+        if COUNT_ALLOCATIONS.load(Ordering::Relaxed) {
+            let (_, calls) = ALLOCATIONS.with(|state| state.replace((false, 0)));
+            return calls as f64;
+        }
+        self.0.elapsed().as_secs_f64() * 1_000.0
+    }
+}
+
+/// In allocation mode, renames every `*_ms` key to `*_allocation_operations`.
+fn relabel(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let entries = std::mem::take(map);
+            for (key, mut entry) in entries {
+                relabel(&mut entry);
+                let key = match key.strip_suffix("_ms") {
+                    Some(stem) => format!("{stem}_allocation_operations"),
+                    None => key,
+                };
+                map.insert(key, entry);
+            }
+        }
+        Value::Array(entries) => entries.iter_mut().for_each(relabel),
+        _ => {}
+    }
+}
+
 struct Options {
+    count_allocations: bool,
     institutions: usize,
     cycles: usize,
     batch: usize,
@@ -81,6 +189,13 @@ struct Options {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let options = options()?;
+    if options.count_allocations && !cfg!(feature = "allocation-counting") {
+        return Err("allocation mode requires --features allocation-counting".into());
+    }
+    if !options.count_allocations && cfg!(feature = "allocation-counting") {
+        return Err("elapsed mode must be built without the allocation-counting feature".into());
+    }
+    COUNT_ALLOCATIONS.store(options.count_allocations, Ordering::Relaxed);
     let tick = TickPlugin;
     let fiscal = FiscalPlugin::default();
     let plugins: [&dyn SimulationPlugin; 2] = [&tick, &fiscal];
@@ -127,8 +242,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             .count();
     }
 
-    let report = json!({
+    let mut report = json!({
         "profile": "fiscal-boundary",
+        "metric": if options.count_allocations { "allocation_operations" } else { "elapsed_ms" },
         "machine": options.machine,
         "recorded_on": options.recorded_on,
         "dimensions": {
@@ -159,6 +275,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             "settlement_boundary_ms": summary(&settlement_ms),
         },
     });
+    if options.count_allocations {
+        relabel(&mut report);
+    }
     let rendered = serde_json::to_string_pretty(&report)?;
     if let Some(path) = &options.output {
         fs::write(path, format!("{rendered}\n"))?;
@@ -180,18 +299,18 @@ fn state_component_costs(canwu: &Canwu, options: &Options) -> Result<Value, Box<
     let mut validate = Vec::with_capacity(options.samples);
     let mut encode = Vec::with_capacity(options.samples);
     for _ in 0..options.samples {
-        let started = Instant::now();
+        let started = Meter::start();
         let decoded = record.decode_payload::<FiscalStateRecord>()?;
-        decode.push(milliseconds(started));
-        let started = Instant::now();
+        decode.push(started.finish());
+        let started = Meter::start();
         let copy = decoded.clone();
-        clone.push(milliseconds(started));
-        let started = Instant::now();
+        clone.push(started.finish());
+        let started = Meter::start();
         copy.validate(&catalog)?;
-        validate.push(milliseconds(started));
-        let started = Instant::now();
+        validate.push(started.finish());
+        let started = Meter::start();
         let encoded = serde_json::to_value(&state)?;
-        encode.push(milliseconds(started));
+        encode.push(started.finish());
         drop((decoded, copy, encoded));
     }
     Ok(json!({
@@ -212,9 +331,9 @@ fn measure_idle(canwu: &mut Canwu, options: &Options) -> Result<Vec<f64>, Box<dy
             canwu.time(),
             json!({}),
         ))?;
-        let started = Instant::now();
+        let started = Meter::start();
         canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
-        let elapsed = milliseconds(started);
+        let elapsed = started.finish();
         if sample >= options.warmup {
             samples.push(elapsed);
         }
@@ -264,12 +383,12 @@ fn settle_actions(
             ),
         )?;
     }
-    let started = Instant::now();
+    let started = Meter::start();
     canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
-    let admission = milliseconds(started);
-    let started = Instant::now();
+    let admission = started.finish();
+    let started = Meter::start();
     canwu.settle_boundary(BoundaryRequest::at(canwu.time()))?;
-    Ok((admission, milliseconds(started)))
+    Ok((admission, started.finish()))
 }
 
 /// The knowledge records the first `observers` observers hold, and the bytes
@@ -552,10 +671,6 @@ fn catalog() -> Result<CompiledFiscalCatalog, Box<dyn Error>> {
     )?)
 }
 
-fn milliseconds(started: Instant) -> f64 {
-    started.elapsed().as_secs_f64() * 1_000.0
-}
-
 fn summary(samples: &[f64]) -> Value {
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -578,6 +693,7 @@ fn round(value: f64) -> f64 {
 
 fn options() -> Result<Options, Box<dyn Error>> {
     let mut options = Options {
+        count_allocations: false,
         institutions: 48,
         cycles: 40,
         batch: 40,
@@ -597,6 +713,13 @@ fn options() -> Result<Options, Box<dyn Error>> {
                 .ok_or_else(|| format!("{flag} requires a value"))
         };
         match flag.as_str() {
+            "--mode" => {
+                options.count_allocations = match value()?.as_str() {
+                    "elapsed" => false,
+                    "allocations" => true,
+                    other => return Err(format!("unsupported mode {other}").into()),
+                };
+            }
             "--institutions" => options.institutions = value()?.parse()?,
             "--cycles" => options.cycles = value()?.parse()?,
             "--batch" => options.batch = value()?.parse()?,
@@ -609,7 +732,8 @@ fn options() -> Result<Options, Box<dyn Error>> {
             "--output" => options.output = Some(PathBuf::from(value()?)),
             "--help" | "-h" => {
                 println!(
-                    "fiscal-profile [--institutions N] [--cycles N] [--batch N] [--observers N] \
+                    "fiscal-profile [--mode elapsed|allocations] [--institutions N] [--cycles N] \
+                     [--batch N] [--observers N] \
                      [--observed-institutions N] [--samples N] [--warmup N] \
                      [--machine LABEL] [--recorded-on DATE] [--output PATH]"
                 );

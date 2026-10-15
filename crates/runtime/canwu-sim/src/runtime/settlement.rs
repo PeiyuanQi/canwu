@@ -1622,20 +1622,24 @@ impl Simulation {
         if changes.is_empty() {
             return Ok(());
         }
+        // The ledgers are persistent: this clone shares them, and each
+        // insertion copies only the paths it changes and updates the holder's
+        // index of current records. The boundary's transaction checkpoint
+        // keeps the previous ledgers, so a later failure restores them.
         let mut ledger = self.state.current.knowledge.records.clone();
         for change in changes {
-            let holder = ledger.entry(change.holder.clone()).or_default();
             for record in &change.records {
-                if holder.insert(record.id, record.clone()).is_some() {
+                if record.holder != change.holder || ledger.record(record.id).is_some() {
                     return Err(CanwuError::new(
                         ErrorCode::InvalidKnowledgeRecord,
-                        "knowledge publication attempted to reuse a global record ID",
+                        "knowledge publication names another holder or reuses a global record ID",
                     ));
                 }
+                ledger.insert(record.clone());
             }
         }
-        self.state.current.knowledge.records = ledger;
-        self.invalidate_commitments(CommitmentDomains::KNOWLEDGE);
+        std::sync::Arc::make_mut(&mut self.state.current.knowledge).records = ledger;
+        self.invalidate_commitments(CommitmentDomains::KNOWLEDGE_RECORDS);
         for (index, change) in changes.iter().enumerate() {
             let record_count = u32::try_from(change.records.len()).map_err(|_| {
                 CanwuError::new(
@@ -2233,7 +2237,7 @@ fn validate_boundary_proposal(
                         holder,
                         &draft.schema.kind,
                         draft.supersedes.iter().chain(&draft.contradicts),
-                        &current.knowledge.records,
+                        |id| current.knowledge.records.record(id),
                         knowledge_overlay,
                     )
                     .map_err(|error| match error {

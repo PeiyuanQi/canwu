@@ -322,6 +322,96 @@ and do not have them. The tables in
 are computed from these files: each figure is the median of the three rounds'
 `median` values, with the lowest and highest of them beside it.
 
+`--mode allocations`, in a build with `--features allocation-counting`,
+counts the allocator calls (allocations and reallocations) of each measured
+operation instead of timing it, and the report names its figures
+`*_allocation_operations` where the elapsed build has `*_ms`. Allocation
+counts do not depend on machine load.
+
+The 2026-10-14 and 2026-10-15 runs compare 0.15.0 with the change that stops a boundary from
+carrying held knowledge (see
+[`docs/proposals/knowledge-ledger-cost-and-authentication.md`](../docs/proposals/knowledge-ledger-cost-and-authentication.md)).
+Both columns were built from the same profile source, 0.15.0 in an export of
+the `v0.15.0` tag with the binary's source copied in, and were run
+alternately on the same machine; the change was recorded before the version
+bump:
+
+| Run | 0.15.0 | the change |
+| --- | --- | --- |
+| Four observers of two institutions, rounds 1 to 3 | [`1`](baselines/2026-10-14-fiscal-boundary-0.15.0-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.15.0-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.15.0-round3-elapsed.json) | [`1`](baselines/2026-10-14-fiscal-boundary-0.16.0-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.16.0-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.16.0-round3-elapsed.json) |
+| One observer of 48 institutions, rounds 1 to 3 | [`1`](baselines/2026-10-14-fiscal-boundary-0.15.0-wide-observer-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.15.0-wide-observer-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.15.0-wide-observer-round3-elapsed.json) | [`1`](baselines/2026-10-14-fiscal-boundary-0.16.0-wide-observer-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.16.0-wide-observer-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.16.0-wide-observer-round3-elapsed.json) |
+| No observer, rounds 1 to 3 | [`1`](baselines/2026-10-14-fiscal-boundary-0.15.0-no-observers-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.15.0-no-observers-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.15.0-no-observers-round3-elapsed.json) | [`1`](baselines/2026-10-14-fiscal-boundary-0.16.0-no-observers-round1-elapsed.json), [`2`](baselines/2026-10-14-fiscal-boundary-0.16.0-no-observers-round2-elapsed.json), [`3`](baselines/2026-10-14-fiscal-boundary-0.16.0-no-observers-round3-elapsed.json) |
+| Allocations: four observers, one wide observer, no observer | [`four`](baselines/2026-10-14-fiscal-boundary-0.15.0-allocations.json), [`wide`](baselines/2026-10-14-fiscal-boundary-0.15.0-wide-observer-allocations.json), [`none`](baselines/2026-10-14-fiscal-boundary-0.15.0-no-observers-allocations.json) | [`four`](baselines/2026-10-15-fiscal-boundary-0.16.0-allocations.json), [`wide`](baselines/2026-10-15-fiscal-boundary-0.16.0-wide-observer-allocations.json), [`none`](baselines/2026-10-15-fiscal-boundary-0.16.0-no-observers-allocations.json) |
+
+The allocation runs use 5 samples after one warm-up. The elapsed rounds of
+the change were recorded from an earlier state of it, which differed in the
+order of its current-record sets and in load validation; its allocation runs
+were recorded again on 2026-10-15 from the final state and give the same
+counts.
+
+## Knowledge-ledger profile
+
+The standalone `knowledge-ledger-profile` binary measures what a boundary
+pays for the generic knowledge a run holds. It fills a run the way a
+reporting plugin does: `--holders` holders (4), each with `--lines` lines
+(16) told apart by a subject; every fill boundary publishes `--per-line`
+records (32) on every line, each superseding the line's current records,
+which it finds through `SimulationView::knowledge_heads`. Most held records
+are therefore superseded history, and `--payload-bytes` (256) pads each
+payload. For each `--held` count it measures, on forks of the built run, each
+after one unmeasured boundary of the same kind:
+
+- `idle_boundary`: a boundary in which no system is due;
+- `publish_boundary`: one system publishes one record superseding its line;
+- `heads_boundary`: one system calls `knowledge_heads` `--queries` times (64)
+  and publishes nothing;
+- `snapshot_restore`: loading the run from its snapshot JSON.
+
+It follows the conventions of the keyed-draw profile: separate elapsed and
+allocation builds, positive odd sample counts, `run_heap_bytes` in the
+allocation build, and a `source.content_hash` over the engine sources it
+measures. It uses only public API that 0.15.0 also has.
+
+```console
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --bin knowledge-ledger-profile -- \
+  --mode elapsed \
+  --held 0,2048,16384,65536 \
+  --samples 31 \
+  --warmup 3 \
+  --restore-samples 3 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-knowledge-ledger-VERSION-elapsed.json
+
+cargo run --release \
+  --manifest-path benchmarks/performance-harness/Cargo.toml \
+  --features allocation-counting \
+  --bin knowledge-ledger-profile -- \
+  --mode allocations \
+  --held 0,2048,16384,65536 \
+  --samples 3 \
+  --warmup 1 \
+  --restore-samples 1 \
+  --machine YOUR-STABLE-MACHINE-LABEL \
+  --recorded-on YYYY-MM-DD \
+  --source-label "WHAT-WAS-BUILT" \
+  --output benchmarks/baselines/YYYY-MM-DD-knowledge-ledger-VERSION-allocations.json
+```
+
+The reports compare 0.15.0, built in an export of the `v0.15.0` tag with this
+binary's source copied in, with the change, recorded before the version bump,
+so their `engine_version` reads `0.15.0`. The two elapsed reports were
+recorded back to back on 2026-10-15; allocation counts do not depend on the
+day:
+[`0.15.0 elapsed`](baselines/2026-10-15-knowledge-ledger-0.15.0-elapsed.json),
+[`0.16.0 elapsed`](baselines/2026-10-15-knowledge-ledger-0.16.0-elapsed.json),
+[`0.15.0 allocations`](baselines/2026-10-14-knowledge-ledger-0.15.0-allocations.json), and
+[`0.16.0 allocations`](baselines/2026-10-15-knowledge-ledger-0.16.0-allocations.json).
+They are interpreted in the proposal linked above.
+
 ## Recorded information-flow smoke baseline
 
 The 2026-08-21 smoke evidence consists of separate

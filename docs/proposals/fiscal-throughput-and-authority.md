@@ -811,7 +811,10 @@ the first column repeats the 0.15.0 rounds of the other tables.
   3.0 KiB a settling boundary publishes here, 10,000 fiscal boundaries add
   about 250 ms to each boundary. Both are costs of the engine that predate
   this change, which publishes about 35 times less than 0.14.0 did. They are
-  left to a gap of their own.
+  left to a gap of their own. 0.16.0 removes both from the engine: settling
+  a boundary no longer does engine work in proportion to held knowledge, and
+  `knowledge_heads` reads an index of current records (see
+  [knowledge ledger cost and authentication](knowledge-ledger-cost-and-authentication.md#measurements)).
 
 ### Persistence, replay, and format
 

@@ -163,10 +163,10 @@ use canwu_core::{
 };
 pub use canwu_event::{CauseRef, EventAudience, EventKind, SimEvent};
 pub use canwu_knowledge::{
-    ActorKnowledge, ArmyKnowledge, EstimateRange, KnowledgeCursor, KnowledgeHistoryView,
-    KnowledgeOrigin, KnowledgeQuery, KnowledgeReadCut, KnowledgeRecord, KnowledgeRecordDraft,
-    KnowledgeRecordView, KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject,
-    KnowledgeSubjectTarget,
+    ActorKnowledge, ArmyKnowledge, CurrentRecords, EstimateRange, HolderLedger, HolderLedgers,
+    HolderLedgersIter, HolderRecordsIter, KnowledgeCursor, KnowledgeHistoryView, KnowledgeOrigin,
+    KnowledgeQuery, KnowledgeReadCut, KnowledgeRecord, KnowledgeRecordDraft, KnowledgeRecordView,
+    KnowledgeSnapshot, KnowledgeSource, KnowledgeSubject, KnowledgeSubjectTarget, RecordsById,
 };
 use canwu_time::{SimDuration, SimTime};
 pub use legacy_world::{
@@ -189,10 +189,10 @@ use hashing::{
     boundary_state_hash_for_commitments, checkpoint_hash_for_commitments,
     checkpoint_hash_for_configuration, commitment_roots_are_canonical, compute_boundary_hash,
     decision_commitment_root, identity_commitment_root, is_canonical_hash,
-    knowledge_commitment_root, plugin_component_commitment_root, random_stream_commitment_root,
-    runtime_commitment_roots, scheduler_commitment_root, snapshot_boundary_head_state_hash,
-    snapshot_checkpoint_hash, snapshot_commitment_roots, snapshot_is_at_boundary_head, state_hash,
-    world_commitment_root,
+    knowledge_actor_commitment_root, knowledge_commitment_root_from_parts,
+    plugin_component_commitment_root, random_stream_commitment_root, runtime_commitment_roots,
+    scheduler_commitment_root, snapshot_boundary_head_state_hash, snapshot_checkpoint_hash,
+    snapshot_commitment_roots, snapshot_is_at_boundary_head, state_hash, world_commitment_root,
 };
 use ingress::IngressQueueKey;
 use revision::{
@@ -231,7 +231,15 @@ pub const STATE_REVISION_FORMAT_VERSION: u32 = 3;
 /// Version of persisted monotonic boundary-admission cursors.
 pub const ADMISSION_CURSOR_FORMAT_VERSION: u32 = 3;
 /// Version of the domain-separated checkpoint commitment contract.
-pub const COMMITMENT_FORMAT_VERSION: u32 = 4;
+///
+/// Format 5 changes two commitments of format 4. A boundary record's hash
+/// covers its knowledge changes, every field of each, so an edit to one is
+/// refused at load unless the boundary chain is rehashed. The knowledge
+/// root commits to the compatibility actor projection and to the generic
+/// records in global ID order as two sub-roots, so the runtime extends it
+/// with each publication instead of hashing the whole ledger again. Snapshot,
+/// journal, and checkpoint shapes are unchanged; format 4 is refused.
+pub const COMMITMENT_FORMAT_VERSION: u32 = 5;
 /// Maximum nested depth of the compatibility synchronous event-reactor path.
 ///
 /// New plugin mechanics should use phased boundary systems instead of relying
@@ -1550,7 +1558,7 @@ impl Simulation {
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
-                    knowledge: scenario.knowledge,
+                    knowledge: std::sync::Arc::new(scenario.knowledge),
                     plugin_components: BTreeMap::new(),
                     domain_records: PersistentDomainRecordStore::from_records(
                         scenario
@@ -2175,7 +2183,7 @@ impl Simulation {
             .transpose()?;
         let knowledge = needs
             .contains(CommitmentDomains::KNOWLEDGE)
-            .then(|| knowledge_commitment_root(&self.state.current.knowledge))
+            .then(|| self.knowledge_commitment_update())
             .transpose()?;
         let plugin_components = needs
             .contains(CommitmentDomains::PLUGIN_COMPONENTS)
@@ -2256,9 +2264,15 @@ impl Simulation {
         } else {
             None
         };
+        let (knowledge, knowledge_actors, knowledge_records) = match knowledge {
+            Some((root, actors, records)) => (Some(root), Some(actors), Some(records)),
+            None => (None, None, None),
+        };
         Ok(RuntimeCommitmentRootUpdates {
             world,
             knowledge,
+            knowledge_actors,
+            knowledge_records,
             plugin_components,
             domain_records,
             decisions,
@@ -2266,6 +2280,31 @@ impl Simulation {
             random_streams,
             identity,
         })
+    }
+
+    /// Recombines the knowledge root from its cached sub-roots. The actor
+    /// sub-root is hashed again only when the actor projection changed; the
+    /// records accumulator is fed the records published since it last ran,
+    /// so its cost follows what was published, not what is held. It starts
+    /// again from empty only when the cache has none, which happens once
+    /// after a restore, or the ledger does not extend it.
+    fn knowledge_commitment_update(
+        &self,
+    ) -> Result<(String, String, state::KnowledgeRecordAccumulator), CanwuError> {
+        let cache = self.state.metadata.commitment_cache.as_ref();
+        let knowledge = &self.state.current.knowledge;
+        let actors = match cache.and_then(|cache| cache.knowledge_actors.clone()) {
+            Some(actors) => actors,
+            None => knowledge_actor_commitment_root(&knowledge.actors)?,
+        };
+        let mut records = cache
+            .and_then(|cache| cache.knowledge_records.clone())
+            .unwrap_or_else(state::KnowledgeRecordAccumulator::new);
+        if !records.sync(&knowledge.records)? {
+            records = state::KnowledgeRecordAccumulator::of(&knowledge.records)?;
+        }
+        let root = knowledge_commitment_root_from_parts(&actors, &records.root())?;
+        Ok((root, actors, records))
     }
 
     fn invalidate_commitments(&mut self, domains: CommitmentDomains) {
@@ -2532,7 +2571,7 @@ impl Simulation {
                         .into_iter()
                         .map(|value| (value.id, value))
                         .collect(),
-                    knowledge: snapshot.knowledge,
+                    knowledge: std::sync::Arc::new(snapshot.knowledge),
                     plugin_components: snapshot
                         .plugin_components
                         .into_iter()

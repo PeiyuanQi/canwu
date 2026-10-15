@@ -129,7 +129,7 @@ pub(super) struct OrderedCommitmentAccumulator {
 }
 
 impl OrderedCommitmentAccumulator {
-    fn new(domain: &str) -> Self {
+    pub(super) fn new(domain: &str) -> Self {
         let mut hasher = blake3::Hasher::new();
         hasher.update(domain.as_bytes());
         hasher.update(&[0]);
@@ -152,7 +152,7 @@ impl OrderedCommitmentAccumulator {
         Ok(accumulator)
     }
 
-    fn append<T: Serialize>(&mut self, value: &T) -> Result<(), CanwuError> {
+    pub(super) fn append<T: Serialize>(&mut self, value: &T) -> Result<(), CanwuError> {
         let encoded = serde_json::to_vec(value).map_err(|error| {
             CanwuError::new(
                 ErrorCode::InvalidSnapshot,
@@ -205,6 +205,72 @@ impl OrderedCommitmentAccumulator {
     }
 }
 
+/// Running commitment over every generic knowledge record in global ID
+/// order: the records sub-root of the knowledge root.
+///
+/// The runtime gives a published record an ID above every ID it holds and
+/// never changes or removes a committed record, so the ledger only grows at
+/// the end of this order, and a boundary feeds only the records it published.
+/// It lives in the commitment cache: a failed boundary restores it with the
+/// cache, and a restore, which builds a new cache, rebuilds it from the
+/// ledger. Load validation never reads it; it recomputes the root from the
+/// snapshot.
+///
+/// The accumulator trusts that invariant. It notices a ledger that lost
+/// records or gained records below the last one fed, because the counts no
+/// longer add up, but not a committed record changed in place: every path
+/// that replaces the knowledge state must restore or drop the cache with it.
+#[derive(Clone)]
+pub(super) struct KnowledgeRecordAccumulator {
+    records: OrderedCommitmentAccumulator,
+    last: Option<super::KnowledgeRecordId>,
+}
+
+impl KnowledgeRecordAccumulator {
+    pub(super) fn new() -> Self {
+        Self {
+            records: OrderedCommitmentAccumulator::new(
+                super::hashing::KNOWLEDGE_RECORD_COMMITMENT_DOMAIN,
+            ),
+            last: None,
+        }
+    }
+
+    /// Feeds the records the ledgers gained after the last record fed.
+    /// Returns `false`, having fed nothing, when the record counts show that
+    /// the ledgers do not extend what was fed (they hold fewer records, or
+    /// records below the last one fed that it has not seen); the caller then
+    /// starts again from empty.
+    pub(super) fn sync(&mut self, ledgers: &super::HolderLedgers) -> Result<bool, CanwuError> {
+        let tail: Vec<_> = ledgers.records_after(self.last).collect();
+        if self.records.len.checked_add(tail.len()) != Some(ledgers.record_count()) {
+            return Ok(false);
+        }
+        for record in tail {
+            self.records.append(record)?;
+            self.last = Some(record.id);
+        }
+        Ok(true)
+    }
+
+    /// Builds the accumulator of a whole ledger.
+    pub(super) fn of(ledgers: &super::HolderLedgers) -> Result<Self, CanwuError> {
+        let mut accumulator = Self::new();
+        accumulator.sync(ledgers)?;
+        Ok(accumulator)
+    }
+
+    pub(super) fn root(&self) -> String {
+        self.records.root()
+    }
+
+    /// The ID of the last record fed.
+    #[cfg(test)]
+    pub(super) const fn last(&self) -> Option<super::KnowledgeRecordId> {
+        self.last
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct RuntimeCommitmentCache {
     pub(super) commands: OrderedCommitmentAccumulator,
@@ -214,6 +280,12 @@ pub(super) struct RuntimeCommitmentCache {
     pub(super) random_draws: OrderedCommitmentAccumulator,
     pub(super) world: Option<String>,
     pub(super) knowledge: Option<String>,
+    /// Sub-root of the knowledge root over the compatibility actor
+    /// projection; cleared with [`CommitmentDomains::KNOWLEDGE`] and kept by
+    /// [`CommitmentDomains::KNOWLEDGE_RECORDS`].
+    pub(super) knowledge_actors: Option<String>,
+    /// Records sub-root of the knowledge root, extended rather than cleared.
+    pub(super) knowledge_records: Option<KnowledgeRecordAccumulator>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
     pub(super) decisions: Option<String>,
@@ -252,6 +324,8 @@ impl RuntimeCommitmentCache {
             )?,
             world: None,
             knowledge: None,
+            knowledge_actors: None,
+            knowledge_records: None,
             plugin_components: None,
             domain_records: None,
             decisions: None,
@@ -321,6 +395,10 @@ impl RuntimeCommitmentCache {
         }
         if domains.contains(CommitmentDomains::KNOWLEDGE) {
             self.knowledge = None;
+            self.knowledge_actors = None;
+        }
+        if domains.contains(CommitmentDomains::KNOWLEDGE_RECORDS) {
+            self.knowledge = None;
         }
         if domains.contains(CommitmentDomains::PLUGIN_COMPONENTS) {
             self.plugin_components = None;
@@ -348,6 +426,12 @@ impl RuntimeCommitmentCache {
         }
         if let Some(root) = updates.knowledge {
             self.knowledge = Some(root);
+        }
+        if let Some(root) = updates.knowledge_actors {
+            self.knowledge_actors = Some(root);
+        }
+        if let Some(records) = updates.knowledge_records {
+            self.knowledge_records = Some(records);
         }
         if let Some(root) = updates.plugin_components {
             self.plugin_components = Some(root);
@@ -412,6 +496,10 @@ impl CommitmentDomains {
     pub(super) const RANDOM_STREAMS: Self = Self(1 << 5);
     pub(super) const IDENTITY: Self = Self(1 << 6);
     pub(super) const DECISIONS: Self = Self(1 << 7);
+    /// Generic knowledge records were appended. The knowledge root is
+    /// recombined from the cached actor sub-root and the extended records
+    /// accumulator, so the ledger is not hashed again.
+    pub(super) const KNOWLEDGE_RECORDS: Self = Self(1 << 8);
 
     pub(super) const fn contains(self, domain: Self) -> bool {
         self.0 & domain.0 == domain.0
@@ -434,6 +522,8 @@ impl std::ops::BitOr for CommitmentDomains {
 pub(super) struct RuntimeCommitmentRootUpdates {
     pub(super) world: Option<String>,
     pub(super) knowledge: Option<String>,
+    pub(super) knowledge_actors: Option<String>,
+    pub(super) knowledge_records: Option<KnowledgeRecordAccumulator>,
     pub(super) plugin_components: Option<String>,
     pub(super) domain_records: Option<String>,
     pub(super) decisions: Option<String>,
@@ -541,7 +631,11 @@ pub(super) struct RuntimeCurrentState {
     pub(super) territories: BTreeMap<TerritoryId, Territory>,
     pub(super) routes: BTreeMap<RouteId, Route>,
     pub(super) armies: BTreeMap<ArmyId, Army>,
-    pub(super) knowledge: KnowledgeSnapshot,
+    /// Shared, so boundary and transaction captures, early-phase views, and
+    /// forks copy nothing. A change goes through `Arc::make_mut`: it copies
+    /// the compatibility actor projection and shares the persistent holder
+    /// ledgers, of which it copies only the paths it changes.
+    pub(super) knowledge: std::sync::Arc<KnowledgeSnapshot>,
     pub(super) plugin_components: BTreeMap<PluginComponentKey, PluginComponentRecord>,
     /// Persistent current-state root. Boundary checkpoints and forks clone the
     /// handle in O(1), while writes copy only paths in the persistent map.

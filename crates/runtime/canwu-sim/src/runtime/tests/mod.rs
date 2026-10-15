@@ -2552,6 +2552,8 @@ mod core;
 mod ingress;
 mod keyed_draw_index;
 mod knowledge;
+mod knowledge_change_commitment;
+mod knowledge_ledger;
 mod persistence_contracts;
 mod plugins;
 mod random_decisions;

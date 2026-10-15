@@ -2769,11 +2769,7 @@ mod tests {
             contradicts: Vec::new(),
         };
         let mut knowledge = canwu_api::KnowledgeSnapshot::default();
-        knowledge
-            .records
-            .entry(holder)
-            .or_default()
-            .insert(knowledge_id, knowledge_record);
+        knowledge.records.insert(knowledge_record.clone());
         assert!(
             validate_technology_knowledge_records(&knowledge, |reference| {
                 (reference == &version).then(|| exact.clone())
@@ -2781,15 +2777,9 @@ mod tests {
             .is_ok()
         );
 
-        knowledge
-            .records
-            .values_mut()
-            .next()
-            .expect("holder")
-            .values_mut()
-            .next()
-            .expect("record")
-            .payload["record_version"] = serde_json::json!(2);
+        let mut rebound = knowledge_record;
+        rebound.payload["record_version"] = serde_json::json!(2);
+        knowledge.records.insert(rebound);
         assert!(
             validate_technology_knowledge_records(&knowledge, |reference| {
                 (reference == &version).then(|| exact.clone())

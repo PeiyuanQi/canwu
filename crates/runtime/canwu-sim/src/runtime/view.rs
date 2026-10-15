@@ -166,6 +166,9 @@ impl SimulationView<'_> {
     }
 
     /// Counts records in a knowledge namespace at the current proposal-visible cut.
+    ///
+    /// The committed ledgers keep a count per namespace, so the read costs
+    /// the records the settling boundary has staged, not the records held.
     pub fn knowledge_record_count_in_namespace(
         &self,
         namespace: &str,
@@ -266,8 +269,16 @@ impl SimulationView<'_> {
     /// match, the newest are returned, so a publisher always sees its own
     /// latest record, and [`crate::KnowledgeHeads::truncated`] is set. That is
     /// not an error: the publisher supersedes what was returned, and the
-    /// older current records drain over its later publications. The cost is
-    /// two passes over the holder's records.
+    /// older current records drain over its later publications.
+    ///
+    /// The read never walks the holder's ledger. Each holder ledger keeps an
+    /// index of its current records by kind and by subject (see
+    /// [`crate::HolderLedger::current_records`]); the read walks, newest
+    /// first, the current records of `kind` that carry the listed subject the
+    /// fewest of them carry, and stops after one match more than the bound.
+    /// With no subjects or one subject it visits only matches; superseded
+    /// records are never visited, however many the holder keeps. The records
+    /// the settling boundary published to the holder are read as well.
     ///
     /// The IDs are global ledger IDs for boundary systems. Actor-facing reads
     /// keep using holder-local IDs.

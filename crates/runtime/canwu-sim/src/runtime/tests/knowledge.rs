@@ -20,7 +20,7 @@ fn knowledge_publication_is_phase_scoped_atomic_persisted_and_replayable() {
         simulation
             .knowledge()
             .for_holder(&holder)
-            .map_or(0, BTreeMap::len),
+            .map_or(0, HolderLedger::len),
         3
     );
     assert_eq!(simulation.boundaries()[0].knowledge_changes.len(), 3);
@@ -42,9 +42,8 @@ fn knowledge_publication_is_phase_scoped_atomic_persisted_and_replayable() {
     missing_record
         .knowledge
         .records
-        .get_mut(&holder)
-        .expect("holder ledger exists")
-        .remove(&KnowledgeRecordId::new(2));
+        .remove(KnowledgeRecordId::new(2))
+        .expect("the record exists");
     rehash_tampered_snapshot(&mut missing_record);
     let error = Simulation::from_snapshot_with_plugins(missing_record, &[&plugin])
         .err()
@@ -71,11 +70,11 @@ fn phase13_publication_resolves_exact_current_boundary_record_evidence() {
 
     let mut wrong_index = snapshot;
     let holder = KnowledgeHolderRef::Person(PersonId::new(1));
-    let record = wrong_index
+    let mut record = wrong_index
         .knowledge
-        .records
-        .get_mut(&holder)
-        .and_then(|records| records.values_mut().next())
+        .for_holder(&holder)
+        .and_then(|records| records.values().next())
+        .cloned()
         .expect("published record exists");
     let EvidenceRef::DomainRecordVersion(version) = &mut record.origin.evidence[0] else {
         panic!("fixture origin should contain a record version");
@@ -84,7 +83,8 @@ fn phase13_publication_resolves_exact_current_boundary_record_evidence() {
         boundary: BoundaryId::new(1),
         change_index: 1,
     };
-    wrong_index.boundaries[0].knowledge_changes[0].records[0] = record.clone();
+    wrong_index.knowledge.records.insert(record.clone());
+    wrong_index.boundaries[0].knowledge_changes[0].records[0] = record;
     rehash_tampered_snapshot(&mut wrong_index);
     let error = Simulation::from_snapshot_with_plugins(wrong_index, &[&plugin])
         .err()
@@ -119,13 +119,14 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
 
     let mutate_first_record =
         |snapshot: &mut SimulationSnapshot, mutate: &dyn Fn(&mut KnowledgeRecord)| {
-            let record = snapshot
+            let mut record = snapshot
                 .knowledge
-                .records
-                .get_mut(&holder)
-                .and_then(|records| records.values_mut().next())
+                .for_holder(&holder)
+                .and_then(|records| records.values().next())
+                .cloned()
                 .expect("fixture holder record should exist");
-            mutate(record);
+            mutate(&mut record);
+            snapshot.knowledge.records.insert(record);
         };
 
     let mut record_holder = snapshot.clone();
@@ -187,14 +188,14 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
         let mut tampered = snapshot.clone();
         let record = KnowledgeRecordId::new(record);
         let target = vec![KnowledgeRecordId::new(target)];
-        tampered
+        let mut stored = tampered
             .knowledge
             .records
-            .get_mut(&holder)
-            .and_then(|records| records.get_mut(&record))
-            .expect("fixture ledger record should exist")
-            .supersedes
-            .clone_from(&target);
+            .record(record)
+            .cloned()
+            .expect("fixture ledger record should exist");
+        stored.supersedes.clone_from(&target);
+        tampered.knowledge.records.insert(stored);
         tampered.boundaries[0]
             .knowledge_changes
             .iter_mut()
@@ -286,6 +287,151 @@ fn knowledge_snapshot_tamper_matrix_covers_ledger_evidence_and_batch_metadata() 
     let mut counter_forward = snapshot;
     counter_forward.next_knowledge_record_id = 99;
     reject("next record counter forward", counter_forward);
+}
+
+fn cross_holder_kind() -> KnowledgeRecordKind {
+    KnowledgeRecordKind::new("fixture.cross_holder", "notice")
+}
+
+fn cross_holder_schema() -> KnowledgeSchemaId {
+    KnowledgeSchemaId::new(cross_holder_kind(), 1)
+}
+
+/// Boundary 1 publishes to person 1 and boundary 2 to person 2. Every later
+/// boundary publishes to person 2 a record that supersedes person 1's current
+/// record, a target in another holder's committed ledger.
+fn publish_across_holders(
+    view: &SimulationView<'_>,
+    context: &BoundaryContext,
+) -> Result<BoundaryProposal, CanwuError> {
+    let first = KnowledgeHolderRef::Person(PersonId::new(1));
+    let second = KnowledgeHolderRef::Person(PersonId::new(2));
+    let (holder, supersedes) = match context.boundary_id.get() {
+        1 => (first, Vec::new()),
+        2 => (second, Vec::new()),
+        _ => (
+            second,
+            view.knowledge_heads(&first, &cross_holder_kind(), &[])?
+                .records,
+        ),
+    };
+    Ok(BoundaryProposal {
+        directives: vec![BoundaryDirective::PublishKnowledge {
+            holder,
+            visibility: StateVisibility::SameBoundary,
+            producer_correlation: None,
+            records: vec![KnowledgeRecordDraft {
+                schema: cross_holder_schema(),
+                subjects: Vec::new(),
+                payload: serde_json::json!({ "boundary": context.boundary_id.get() }),
+                as_of: None,
+                confidence_per_mille: 1_000,
+                origin: KnowledgeOrigin {
+                    method: "fixture".to_owned(),
+                    evidence: Vec::new(),
+                },
+                supersedes,
+                contradicts: Vec::new(),
+            }],
+            summary: "Publish across holders".to_owned(),
+        }],
+        ..BoundaryProposal::default()
+    })
+}
+
+struct CrossHolderPlugin;
+
+impl SimulationPlugin for CrossHolderPlugin {
+    fn name(&self) -> &'static str {
+        "fixture-knowledge-cross-holder"
+    }
+
+    test_plugin_identity!("0000000000000000000000000000000000000000000000000000000000000c18");
+
+    fn register(&self, registrar: &mut PluginRegistrar<'_>) -> Result<(), CanwuError> {
+        registrar.register_knowledge_schema(PluginKnowledgeSchema {
+            id: cross_holder_schema(),
+            schema_hash: "0000000000000000000000000000000000000000000000000000000000000c19"
+                .to_owned(),
+            writable: true,
+            payload_schema: PayloadSchema::Any,
+            subjects: Vec::new(),
+        })?;
+        let mut contract = BoundarySystemContract::new(
+            "publish-across-holders",
+            BoundaryPhase::PerceptionAndAttentionRefresh,
+            SystemCadence::Daily,
+        );
+        contract.reads = vec![StateKey::core_knowledge()];
+        contract.knowledge_writes = vec![KnowledgeWriteGrant {
+            schema: cross_holder_schema(),
+            visibilities: vec![StateVisibility::SameBoundary],
+        }];
+        registrar.register_boundary_system(contract, publish_across_holders)
+    }
+}
+
+/// A record may relate only to records of its own holder: a target in
+/// another holder's committed ledger is refused by settlement and by a load,
+/// even though the target exists, is committed, and has the same kind.
+#[test]
+fn a_relation_cannot_name_another_holders_record() {
+    let (scenario, _) = demo_scenario();
+    let plugin = CrossHolderPlugin;
+    let mut simulation =
+        Simulation::new(73, scenario).expect("the cross-holder fixture should initialize");
+    simulation
+        .register_plugin(&plugin)
+        .expect("the cross-holder plugin should register");
+    let daily = |day: i64| {
+        BoundaryRequest::at(SimTime::EPOCH + SimDuration::days(day))
+            .with_cadence(SystemCadence::Daily)
+    };
+    for day in 0..2 {
+        simulation
+            .settle_boundary(daily(day))
+            .expect("each holder's own publication should settle");
+    }
+    let snapshot = simulation.snapshot();
+
+    let error = simulation
+        .settle_boundary(daily(2))
+        .expect_err("a record must not supersede another holder's record");
+    assert_eq!(error.code, ErrorCode::KnowledgeRecordNotFound);
+    assert_eq!(simulation.snapshot(), snapshot);
+
+    // The same relation written into the snapshot, with every commitment
+    // over it recomputed, is refused by a load.
+    let first = KnowledgeRecordId::new(1);
+    let mut tampered = snapshot;
+    let mut stored = tampered
+        .knowledge
+        .records
+        .record(KnowledgeRecordId::new(2))
+        .cloned()
+        .expect("person 2 holds the second record");
+    assert_eq!(stored.holder, KnowledgeHolderRef::Person(PersonId::new(2)));
+    assert_eq!(
+        tampered
+            .knowledge
+            .records
+            .record(first)
+            .map(|record| &record.holder),
+        Some(&KnowledgeHolderRef::Person(PersonId::new(1)))
+    );
+    stored.supersedes = vec![first];
+    tampered.knowledge.records.insert(stored);
+    tampered.boundaries[1].knowledge_changes[0].records[0].supersedes = vec![first];
+    refresh_snapshot_commitments_and_checkpoint(&mut tampered);
+    tampered.boundaries[1].state_hash = Some(
+        snapshot_boundary_head_state_hash(&tampered)
+            .expect("the tampered boundary head should have a state commitment"),
+    );
+    rehash_tampered_snapshot(&mut tampered);
+    let error = Simulation::from_snapshot_with_plugins(tampered, &[&plugin])
+        .err()
+        .expect("a load must not accept a relation to another holder's record");
+    assert_eq!(error.code, ErrorCode::InvalidSnapshot);
 }
 
 #[test]

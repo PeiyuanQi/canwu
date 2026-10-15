@@ -568,38 +568,30 @@ fn a_scenario_with_a_version_one_report_record_is_refused() {
     version_one.version = 1;
     let mut scenario = scenario(|_| {});
     let id = KnowledgeRecordId::new(1);
-    scenario.knowledge.records.insert(
-        holder.clone(),
-        BTreeMap::from([(
-            id,
-            KnowledgeRecord {
-                id,
-                holder,
-                schema: version_one,
-                subjects: vec![KnowledgeSubject {
-                    role: "fiscal_state".to_owned(),
-                    target: KnowledgeSubjectTarget::DomainRecord(
-                        fiscal_state_reference().into_untyped(),
-                    ),
-                }],
-                payload: serde_json::json!({
-                    "actor": PRINCIPAL,
-                    "as_of": SimTime::EPOCH,
-                    "confidence_per_mille": 1_000,
-                    "facts": {},
-                }),
-                as_of: Some(SimTime::EPOCH),
-                learned_at: SimTime::EPOCH,
-                confidence_per_mille: 1_000,
-                origin: KnowledgeOrigin {
-                    method: "fiscal_authority_report_v1".to_owned(),
-                    evidence: Vec::new(),
-                },
-                supersedes: Vec::new(),
-                contradicts: Vec::new(),
-            },
-        )]),
-    );
+    scenario.knowledge.records.insert(KnowledgeRecord {
+        id,
+        holder,
+        schema: version_one,
+        subjects: vec![KnowledgeSubject {
+            role: "fiscal_state".to_owned(),
+            target: KnowledgeSubjectTarget::DomainRecord(fiscal_state_reference().into_untyped()),
+        }],
+        payload: serde_json::json!({
+            "actor": PRINCIPAL,
+            "as_of": SimTime::EPOCH,
+            "confidence_per_mille": 1_000,
+            "facts": {},
+        }),
+        as_of: Some(SimTime::EPOCH),
+        learned_at: SimTime::EPOCH,
+        confidence_per_mille: 1_000,
+        origin: KnowledgeOrigin {
+            method: "fiscal_authority_report_v1".to_owned(),
+            evidence: Vec::new(),
+        },
+        supersedes: Vec::new(),
+        contradicts: Vec::new(),
+    });
     let error = fixture
         .try_runtime(scenario)
         .err()

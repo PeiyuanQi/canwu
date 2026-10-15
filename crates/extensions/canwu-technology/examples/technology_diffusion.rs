@@ -1,8 +1,8 @@
 use canwu_api::{
     BoundaryRequest, Canwu, Command, CommandEnvelope, CommandRequest, CommandRequestId,
     DomainRecordVersionRef, DomainRecordVersionSource, EntityRef, EvidenceRef, Government,
-    GovernmentId, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person, PersonId,
-    PluginIngressRequest, Scenario, SimTime, Territory, TerritoryId, WorldSnapshot,
+    GovernmentId, HolderLedger, Issuer, KnowledgeHolderRef, KnowledgeSnapshot, MapPoint, Person,
+    PersonId, PluginIngressRequest, Scenario, SimTime, Territory, TerritoryId, WorldSnapshot,
 };
 use canwu_technology::{
     AdoptionPayload, AdoptionRecord, AdoptionStatus, ApplicationSpec, ApplicationSpecPayload,
@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let learner_knowledge = canwu
         .knowledge()
         .for_holder(&KnowledgeHolderRef::Person(learner))
-        .map_or(0, BTreeMap::len);
+        .map_or(0, HolderLedger::len);
     println!(
         "adoption={:?}, scale={}, learner_knowledge={} (opportunity is not automatic learning)",
         adoption.status, adoption.scale, learner_knowledge

@@ -496,12 +496,13 @@ fn gap_g58_sim_same_instant_supersession() {
     // first report did not have the second in its ledger.
     let mut wrong_way = snapshot;
     wrong_way.boundaries[0].knowledge_changes[0].records[0].supersedes = vec![second.id];
-    wrong_way
+    let mut first_report = wrong_way
         .knowledge
         .records
-        .get_mut(&holder())
-        .and_then(|records| records.get_mut(&first.id))
-        .expect("first report")
-        .supersedes = vec![second.id];
+        .record(first.id)
+        .cloned()
+        .expect("first report");
+    first_report.supersedes = vec![second.id];
+    wrong_way.knowledge.records.insert(first_report);
     refused(&wrong_way);
 }

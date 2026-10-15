@@ -1,0 +1,74 @@
+{
+  "action_batch": {
+    "actions": 40,
+    "admission_boundary_ms": {
+      "median": 239.449,
+      "min": 175.984,
+      "p95": 276.188
+    },
+    "applied": 40,
+    "report_json_bytes_published": 0,
+    "report_records_published": 0,
+    "settlement_boundary_ms": {
+      "median": 814.433,
+      "min": 746.088,
+      "p95": 874.046
+    }
+  },
+  "dimensions": {
+    "assessments": 1920,
+    "execution_requests": 1920,
+    "fiscal_state_json_bytes": 2154591,
+    "institutions": 48,
+    "observed_institutions": 2,
+    "observers": 0,
+    "report_facts_per_observer": 80,
+    "report_json_bytes_per_observer": 0,
+    "report_records_per_observer": 0,
+    "settled_cycles": 40
+  },
+  "fiscal_state_component_ms": {
+    "clone": {
+      "median": 2.901,
+      "min": 2.007,
+      "p95": 3.288
+    },
+    "decode": {
+      "median": 11.38,
+      "min": 8.082,
+      "p95": 13.263
+    },
+    "encode": {
+      "median": 19.312,
+      "min": 14.58,
+      "p95": 20.935
+    },
+    "validate": {
+      "median": 2.766,
+      "min": 1.954,
+      "p95": 3.135
+    }
+  },
+  "idle_boundary_ms": {
+    "initial_fiscal_state": {
+      "median": 23.174,
+      "min": 18.232,
+      "p95": 27.118
+    },
+    "settled_fiscal_state": {
+      "median": 0.038,
+      "min": 0.036,
+      "p95": 0.051
+    },
+    "without_fiscal_records": {
+      "median": 0.037,
+      "min": 0.036,
+      "p95": 0.043
+    }
+  },
+  "machine": "local-windows-x86_64",
+  "metric": "elapsed_ms",
+  "profile": "fiscal-boundary",
+  "recorded_on": "2026-10-14",
+  "samples": 31
+}

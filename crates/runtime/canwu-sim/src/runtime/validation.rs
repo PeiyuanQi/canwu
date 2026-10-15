@@ -2823,7 +2823,9 @@ fn validate_boundary_records(
     let mut emitted_events = BTreeSet::new();
     let mut boundary_correlations = BTreeSet::new();
     let mut boundary_values = BTreeMap::new();
-    let mut knowledge_values = BTreeMap::new();
+    // Records rebuilt from boundary evidence, by global ID. A plain map: the
+    // persisted ledgers already built their index when they were decoded.
+    let mut knowledge_values: BTreeMap<KnowledgeRecordId, &KnowledgeRecord> = BTreeMap::new();
     let mut next_knowledge_id = 1_u64;
     let mut domain_record_values = final_domain_records.clone();
     for boundary in snapshot.boundaries.iter().rev() {
@@ -3052,7 +3054,11 @@ fn validate_boundary_records(
             "boundary domain-record changes do not materialize the persisted record state",
         );
     }
-    if knowledge_values != snapshot.knowledge.records {
+    if knowledge_values.len() != snapshot.knowledge.records.record_count()
+        || knowledge_values
+            .iter()
+            .any(|(id, record)| snapshot.knowledge.records.record(*id) != Some(*record))
+    {
         return invalid_snapshot(
             "boundary knowledge changes do not reconstruct the persisted generic ledger",
         );
@@ -3785,13 +3791,13 @@ fn expected_owner_authorized_record_changes(
     Ok(expected_changes)
 }
 
-fn validate_boundary_knowledge_changes(
-    record: &BoundaryRecord,
+fn validate_boundary_knowledge_changes<'a>(
+    record: &'a BoundaryRecord,
     snapshot: &SimulationSnapshot,
     plugins: &PluginRegistry,
     final_records: &BTreeMap<DomainRecordRef, DomainRecord>,
     cuts: &BoundaryDomainEntityCuts,
-    values: &mut BTreeMap<KnowledgeHolderRef, BTreeMap<KnowledgeRecordId, KnowledgeRecord>>,
+    values: &mut BTreeMap<KnowledgeRecordId, &'a KnowledgeRecord>,
     next_id: &mut u64,
 ) -> Result<(), CanwuError> {
     let mut previous_order = None;
@@ -3894,7 +3900,7 @@ fn validate_boundary_knowledge_changes(
                 &change.holder,
                 &stored.schema.kind,
                 stored.supersedes.iter().chain(&stored.contradicts),
-                values,
+                |id| values.get(&id).copied(),
                 &visible,
             )
             .map_err(|error| {
@@ -3918,9 +3924,8 @@ fn validate_boundary_knowledge_changes(
     // Commit, as settlement does at the end of the boundary: later boundaries
     // resolve relations against these records, whatever their learned time.
     for change in &record.knowledge_changes {
-        let holder_records = values.entry(change.holder.clone()).or_default();
         for stored in &change.records {
-            if holder_records.insert(stored.id, stored.clone()).is_some() {
+            if values.insert(stored.id, stored).is_some() {
                 return invalid_snapshot("boundary knowledge record ID is duplicated");
             }
         }

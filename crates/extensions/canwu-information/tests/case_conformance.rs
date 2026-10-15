@@ -127,7 +127,7 @@ fn fixture_information_institutional_holder() -> Result<(), String> {
     );
     let snapshot = KnowledgeSnapshot {
         actors: BTreeMap::new(),
-        records: BTreeMap::from([(holder.clone(), BTreeMap::from([(record.id, record)]))]),
+        records: [record].into_iter().collect(),
     };
 
     let before = snapshot
@@ -513,10 +513,7 @@ fn fixture_information_multi_hop_relay() -> Result<(), String> {
     );
     let snapshot = KnowledgeSnapshot {
         actors: BTreeMap::new(),
-        records: BTreeMap::from([(
-            history_holder.clone(),
-            BTreeMap::from([(first_fact.id, first_fact), (second_fact.id, second_fact)]),
-        )]),
+        records: [first_fact, second_fact].into_iter().collect(),
     };
     let current = snapshot
         .query_current(history_holder.clone(), &KnowledgeQuery::default(), None)
@@ -620,16 +617,7 @@ fn fixture_information_claimed_source_divergence_separates_claim_from_audit_orig
     );
     let snapshot = KnowledgeSnapshot {
         actors: BTreeMap::new(),
-        records: BTreeMap::from([
-            (
-                accepting_holder.clone(),
-                BTreeMap::from([(accepted.id, accepted)]),
-            ),
-            (
-                disputing_holder.clone(),
-                BTreeMap::from([(disputed.id, disputed)]),
-            ),
-        ]),
+        records: [accepted, disputed].into_iter().collect(),
     };
     let accepted_view = snapshot
         .query_current(accepting_holder, &KnowledgeQuery::default(), None)
@@ -815,14 +803,7 @@ fn fixture_information_contradictory_multi_source_history_views() -> Result<(), 
     let synthesis_id = synthesis.id;
     let snapshot = KnowledgeSnapshot {
         actors: BTreeMap::new(),
-        records: BTreeMap::from([(
-            holder.clone(),
-            BTreeMap::from([
-                (first.id, first),
-                (second.id, second),
-                (synthesis.id, synthesis),
-            ]),
-        )]),
+        records: [first, second, synthesis].into_iter().collect(),
     };
 
     let current = snapshot

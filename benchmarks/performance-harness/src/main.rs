@@ -6,10 +6,10 @@ use canwu_api::{
     BoundaryDirective, BoundaryPhase, BoundaryProposal, BoundaryRequest, BoundarySystemContract,
     Canwu, CanwuError, Command, CommandEnvelope, CommandOutcome, CommandRequest, CommandRequestId,
     CompactedCanwu, ENGINE_VERSION, EntityRef, ErrorCode, EvidenceCursor, EvidenceJournalSegment,
-    Government, GovernmentId, Issuer, KnowledgeHistoryView, KnowledgeHolderRef, KnowledgeLimitsV1,
-    KnowledgeOrigin, KnowledgeQuery, KnowledgeRecordDraft, KnowledgeRecordKind, KnowledgeSchemaId,
-    KnowledgeSnapshot, KnowledgeWriteGrant, MapPoint, PayloadSchema, Person, PersonId,
-    PluginKnowledgeSchema, PluginRegistrar, RandomStreamKey, ReplayJournal,
+    Government, GovernmentId, HolderLedger, Issuer, KnowledgeHistoryView, KnowledgeHolderRef,
+    KnowledgeLimitsV1, KnowledgeOrigin, KnowledgeQuery, KnowledgeRecordDraft, KnowledgeRecordKind,
+    KnowledgeSchemaId, KnowledgeSnapshot, KnowledgeWriteGrant, MapPoint, PayloadSchema, Person,
+    PersonId, PluginKnowledgeSchema, PluginRegistrar, RandomStreamKey, ReplayJournal,
     SNAPSHOT_FORMAT_VERSION, Scenario, SimDuration, SimulationCheckpoint, SimulationPlugin,
     SimulationView, StateKey, StateVisibility, SystemCadence, Territory, TerritoryId,
     WorldSnapshot,
@@ -1534,7 +1534,7 @@ fn validate_information_counts(
 }
 
 fn knowledge_record_count(knowledge: &KnowledgeSnapshot) -> usize {
-    knowledge.records.values().map(BTreeMap::len).sum()
+    knowledge.records.record_count()
 }
 
 fn query_holder_pages(
@@ -1585,7 +1585,7 @@ fn information_history_json(
         .knowledge
         .records
         .get(&KnowledgeHolderRef::Person(PersonId::new(1)))
-        .map_or(0, BTreeMap::len);
+        .map_or(0, HolderLedger::len);
     json!({
         "world_entities": snapshot.world.people.len()
             + snapshot.world.governments.len()

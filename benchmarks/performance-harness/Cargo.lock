@@ -118,6 +118,7 @@ dependencies = [
  "blake3",
  "canwu-core",
  "canwu-time",
+ "im",
  "serde",
  "serde_json",
 ]
